@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+sqlmodel
+discord.py
+openai
+httpx
+pydantic-settings
+python-dotenv

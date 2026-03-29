@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>{{ title }}</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+        h1 {
+            margin-bottom: 16px;
+        }
+        .banner {
+            padding: 12px 14px;
+            border-radius: 8px;
+            margin-bottom: 16px;
+            font-weight: 600;
+        }
+        .banner-success {
+            background: #ecfdf3;
+            border: 1px solid #a6f4c5;
+            color: #067647;
+        }
+        .banner-error {
+            background: #fef3f2;
+            border: 1px solid #fecdca;
+            color: #b42318;
+        }
+        .toolbar {
+            display: flex;
+            gap: 24px;
+            align-items: flex-start;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        .panel {
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 12px;
+            background: #fafafa;
+            min-width: 320px;
+        }
+        .panel h2 {
+            margin-top: 0;
+            font-size: 18px;
+        }
+        .form-row {
+            margin-bottom: 10px;
+        }
+        label {
+            display: block;
+            font-size: 13px;
+            margin-bottom: 4px;
+        }
+        input, select, button {
+            padding: 8px;
+            font-size: 14px;
+        }
+        button {
+            cursor: pointer;
+        }
+        .danger-button {
+            background: #b42318;
+            color: white;
+            border: none;
+            border-radius: 6px;
+        }
+        .secondary-button {
+            background: #f2f4f7;
+            border: 1px solid #d0d5dd;
+            border-radius: 6px;
+        }
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(7, minmax(120px, 1fr));
+            gap: 12px;
+            margin-bottom: 18px;
+        }
+        .financial-grid {
+            display: grid;
+            grid-template-columns: repeat(6, minmax(120px, 1fr));
+            gap: 12px;
+            margin-bottom: 18px;
+        }
+        .summary-card {
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 12px;
+            background: white;
+        }
+        .summary-label {
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 6px;
+        }
+        .summary-value {
+            font-size: 24px;
+            font-weight: bold;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            table-layout: fixed;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            vertical-align: top;
+            text-align: left;
+            word-wrap: break-word;
+        }
+        th {
+            background: #f5f5f5;
+        }
+        tr:nth-child(even) {
+            background: #fafafa;
+        }
+        .status-parsed {
+            color: green;
+            font-weight: bold;
+        }
+        .status-processing {
+            color: orange;
+            font-weight: bold;
+        }
+        .status-failed,
+        .status-needs_review {
+            color: red;
+            font-weight: bold;
+        }
+        .message-cell {
+            max-width: 320px;
+            white-space: pre-wrap;
+        }
+        .notes-cell {
+            max-width: 260px;
+            white-space: pre-wrap;
+        }
+        .image-cell {
+            width: 130px;
+        }
+        .thumb {
+            max-width: 110px;
+            max-height: 110px;
+            display: block;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+        }
+        .image-links {
+            margin-top: 6px;
+            font-size: 12px;
+        }
+        .image-links a {
+            display: block;
+            margin-bottom: 4px;
+        }
+        .small {
+            font-size: 12px;
+            color: #555;
+        }
+        .row-actions form {
+            margin-top: 8px;
+        }
+    </style>
+</head>
+<body>
+    <h1>{{ title }}</h1>
+
+    {% if success %}
+        <div class="banner banner-success">{{ success }}</div>
+    {% endif %}
+    {% if error %}
+        <div class="banner banner-error">{{ error }}</div>
+    {% endif %}
+
+    <div class="summary-grid">
+        <div class="summary-card"><div class="summary-label">Total</div><div class="summary-value">{{ summary["total"] }}</div></div>
+        <div class="summary-card"><div class="summary-label">Parsed</div><div class="summary-value">{{ summary["parsed"] }}</div></div>
+        <div class="summary-card"><div class="summary-label">Queued</div><div class="summary-value">{{ summary["queued"] }}</div></div>
+        <div class="summary-card"><div class="summary-label">Processing</div><div class="summary-value">{{ summary["processing"] }}</div></div>
+        <div class="summary-card"><div class="summary-label">Needs Review</div><div class="summary-value">{{ summary["needs_review"] }}</div></div>
+        <div class="summary-card"><div class="summary-label">Failed</div><div class="summary-value">{{ summary["failed"] }}</div></div>
+        <div class="summary-card"><div class="summary-label">With Images</div><div class="summary-value">{{ summary["with_images"] }}</div></div>
+    </div>
+
+    <div class="financial-grid">
+        <div class="summary-card"><div class="summary-label">Sales</div><div class="summary-value">{{ financial_summary["totals"].get("sales", 0) }}</div></div>
+        <div class="summary-card"><div class="summary-label">Buys</div><div class="summary-value">{{ financial_summary["totals"].get("buys", 0) }}</div></div>
+        <div class="summary-card"><div class="summary-label">Expenses</div><div class="summary-value">{{ financial_summary["totals"].get("expenses", 0) }}</div></div>
+        <div class="summary-card"><div class="summary-label">Money In</div><div class="summary-value">{{ financial_summary["totals"].get("money_in", 0) }}</div></div>
+        <div class="summary-card"><div class="summary-label">Money Out</div><div class="summary-value">{{ financial_summary["totals"].get("money_out", 0) }}</div></div>
+        <div class="summary-card"><div class="summary-label">Net</div><div class="summary-value">{{ financial_summary["totals"].get("net", 0) }}</div></div>
+    </div>
+
+    <div class="toolbar">
+        <div class="panel">
+            <h2>Watched Channels</h2>
+
+            <form method="post" action="/admin/channels/add" style="margin-bottom: 16px;">
+                <div class="form-row">
+                    <label for="new_channel_id">Available Discord Channel</label>
+                    <select name="channel_id" id="new_channel_id" required>
+                        <option value="">Select a Discord channel</option>
+                        {% for ch in available_discord_channels %}
+                            <option value="{{ ch['channel_id'] }}">
+                                {{ ch["label"] }}
+                            </option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <div class="form-row">
+                    <label for="new_channel_name">Saved Name (optional)</label>
+                    <input type="text" name="channel_name" id="new_channel_name" placeholder="Optional custom label">
+                </div>
+
+                <div class="form-row">
+                    <label>
+                        <input type="checkbox" name="backfill_enabled" value="true" checked>
+                        Include this channel in batch backfill runs
+                    </label>
+                </div>
+
+                <button type="submit">Add Channel</button>
+            </form>
+
+            <div class="small" style="margin-bottom: 8px;">Live watched channels</div>
+
+            {% for group in watched_channel_groups %}
+                <div style="margin-bottom: 12px;">
+                    <div class="small" style="font-weight: bold; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px;">
+                        {{ group["category_name"] }}
+                    </div>
+
+                    {% for ch in group["channels"] %}
+                        <div style="margin-bottom: 10px; padding: 8px; border: 1px solid #ddd; border-radius: 6px; background: white;">
+                            <div><strong>{{ ch.channel_name or ch.channel_id }}</strong></div>
+                            <div class="small">{{ ch.channel_id }}</div>
+                            <div class="small">Enabled: {{ "Yes" if ch.is_enabled else "No" }}</div>
+                            <div class="small">Backfill: {{ "Yes" if ch.backfill_enabled else "No" }}</div>
+
+                            <form method="post" action="/admin/channels/toggle" style="display:inline-block; margin-top:6px;">
+                                <input type="hidden" name="channel_id" value="{{ ch.channel_id }}">
+                                <button type="submit" class="secondary-button">
+                                    {{ "Disable" if ch.is_enabled else "Enable" }}
+                                </button>
+                            </form>
+
+                            <form method="post" action="/admin/channels/toggle-backfill" style="display:inline-block; margin-top:6px;">
+                                <input type="hidden" name="channel_id" value="{{ ch.channel_id }}">
+                                <button type="submit" class="secondary-button">
+                                    {{ "Disable Backfill" if ch.backfill_enabled else "Enable Backfill" }}
+                                </button>
+                            </form>
+
+                            <form method="post" action="/admin/channels/remove" style="display:inline-block; margin-top:6px;" onsubmit="return confirm('Remove this watched channel?');">
+                                <input type="hidden" name="channel_id" value="{{ ch.channel_id }}">
+                                <button type="submit" class="danger-button">Remove</button>
+                            </form>
+                        </div>
+                    {% endfor %}
+                </div>
+            {% endfor %}
+        </div>
+
+        <div class="panel">
+            <h2>Filters</h2>
+            <form method="get" action="/table">
+                <div class="form-row">
+                    <label for="channel_id">Channel</label>
+                    <select name="channel_id" id="channel_id">
+                        <option value="">All channels</option>
+                        {% for ch in channels %}
+                            <option value="{{ ch['channel_id'] }}" {% if selected_channel_id == ch['channel_id'] %}selected{% endif %}>
+                                {{ ch["channel_name"] }}
+                            </option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <div class="form-row">
+                    <label for="status">Status</label>
+                    <select name="status" id="status">
+                        <option value="" {% if selected_status == "" %}selected{% endif %}>All statuses</option>
+                        <option value="queued" {% if selected_status == "queued" %}selected{% endif %}>queued</option>
+                        <option value="processing" {% if selected_status == "processing" %}selected{% endif %}>processing</option>
+                        <option value="parsed" {% if selected_status == "parsed" %}selected{% endif %}>parsed</option>
+                        <option value="needs_review" {% if selected_status == "needs_review" %}selected{% endif %}>needs_review</option>
+                        <option value="failed" {% if selected_status == "failed" %}selected{% endif %}>failed</option>
+                    </select>
+                </div>
+
+                <div class="form-row">
+                    <label for="limit">Limit</label>
+                    <input type="number" name="limit" id="limit" value="{{ selected_limit }}">
+                </div>
+
+                <button type="submit">Apply Filters</button>
+                <a href="/table"><button type="button" class="secondary-button">Reset Filters</button></a>
+            </form>
+            {% if selected_channel_id %}
+            <form method="post" action="/admin/clear/channel" onsubmit="return confirm('Clear all stored messages for this selected channel?');" style="margin-top: 10px;">
+                <input type="hidden" name="channel_id" value="{{ selected_channel_id }}">
+                <button type="submit" class="danger-button">Clear Selected Channel</button>
+            </form>
+            {% endif %}
+        </div>
+
+        <div class="panel">
+            <h2>Manual Backfill</h2>
+            <form method="post" action="/admin/backfill/form">
+                <div class="form-row">
+                    <label for="backfill_channel_id">Channel</label>
+                    <select name="channel_id" id="backfill_channel_id">
+                        <option value="">All backfill-enabled watched channels</option>
+                        {% for ch in available_discord_channels %}
+                            <option value="{{ ch['channel_id'] }}">
+                                {{ ch["label"] }}
+                            </option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <div class="form-row">
+                    <label for="after">After</label>
+                    <input type="text" name="after" id="after" placeholder="2026-03-01">
+                </div>
+
+                <div class="form-row">
+                    <label for="before">Before</label>
+                    <input type="text" name="before" id="before" placeholder="2026-03-31">
+                </div>
+
+                <div class="form-row">
+                    <label for="backfill_limit">Limit per run</label>
+                    <input type="number" name="limit" id="backfill_limit" placeholder="500">
+                </div>
+
+                <div class="form-row">
+                    <label for="oldest_first">Order</label>
+                    <select name="oldest_first" id="oldest_first">
+                        <option value="true">Oldest first</option>
+                        <option value="false">Newest first</option>
+                    </select>
+                </div>
+
+                <button type="submit">Run Backfill</button>
+            </form>
+        </div>
+
+    </div>
+
+    <div class="panel" style="margin-bottom: 20px;">
+        <h2>Danger Zone</h2>
+        <form method="post" action="/admin/clear/form" onsubmit="return confirm('Are you sure you want to clear all stored messages?');">
+            <button type="submit" class="danger-button">Clear Everything</button>
+        </form>
+    </div>
+
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Time</th>
+                <th>Channel</th>
+                <th>Author</th>
+                <th>Image</th>
+                <th>Message</th>
+                <th>Status</th>
+                <th>Entry Kind</th>
+                <th>Type</th>
+                <th>Amount</th>
+                <th>Money In</th>
+                <th>Money Out</th>
+                <th>Payment</th>
+                <th>Cash Dir</th>
+                <th>Category</th>
+                <th>Expense Category</th>
+                <th>Items In</th>
+                <th>Items Out</th>
+                <th>Trade Summary</th>
+                <th>Confidence</th>
+                <th>Review</th>
+                <th>Attempts</th>
+                <th>Notes / Actions</th>
+                <th>Grouped</th>
+                <th>Group Size</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in rows %}
+            <tr>
+                <td>{{ row["id"] }}</td>
+                <td>{{ row["time"] or "" }}</td>
+                <td>{{ row["channel"] or "" }}<br><span class="small">{{ row["channel_id"] }}</span></td>
+                <td>{{ row["author"] or "" }}</td>
+                <td class="image-cell">
+                    {% if row["first_image_url"] %}
+                        <a href="{{ row['first_image_url'] }}" target="_blank" rel="noopener noreferrer">
+                            <img class="thumb" src="{{ row['first_image_url'] }}" alt="attachment image">
+                        </a>
+                        {% if row["image_urls"]|length > 1 %}
+                        <div class="image-links">
+                            {% for url in row["image_urls"][1:] %}
+                                <a href="{{ url }}" target="_blank" rel="noopener noreferrer">extra image {{ loop.index }}</a>
+                            {% endfor %}
+                        </div>
+                        {% endif %}
+                    {% else %}
+                        -
+                    {% endif %}
+                </td>
+                <td class="message-cell">
+                    {{ row["message"] or "" }}
+                    {% if row["is_deleted"] %}
+                        <div class="small" style="color: #b42318; font-weight: bold;">Deleted in Discord</div>
+                    {% endif %}
+                    {% if row["edited_at"] %}
+                        <div class="small">Edited: {{ row["edited_at"] }}</div>
+                    {% endif %}
+                </td>
+                <td class="status-{{ row['status'] }}">{{ row["status"] or "" }}</td>
+                <td>{{ row["entry_kind"] or "" }}</td>
+                <td>{{ row["type"] or "" }}</td>
+                <td>{{ row["amount"] if row["amount"] is not none else "" }}</td>
+                <td>{{ row["money_in"] if row["money_in"] is not none else "" }}</td>
+                <td>{{ row["money_out"] if row["money_out"] is not none else "" }}</td>
+                <td>{{ row["payment"] or "" }}</td>
+                <td>{{ row["cash_direction"] or "" }}</td>
+                <td>{{ row["category"] or "" }}</td>
+                <td>{{ row["expense_category"] or "" }}</td>
+                <td>{{ ", ".join(row["items_in"]) if row["items_in"] else "" }}</td>
+                <td>{{ ", ".join(row["items_out"]) if row["items_out"] else "" }}</td>
+                <td>{{ row["trade_summary"] or "" }}</td>
+                <td>{{ row["confidence"] if row["confidence"] is not none else "" }}</td>
+                <td>{{ "Yes" if row["needs_review"] else "No" }}</td>
+                <td>{{ row["parse_attempts"] }}</td>
+                <td class="notes-cell">
+                    {{ row["notes"] or "" }}
+                    <div class="row-actions">
+                        <form method="post" action="/messages/{{ row['id'] }}/retry-form">
+                            <input type="hidden" name="status" value="{{ selected_status }}">
+                            <input type="hidden" name="channel_id" value="{{ selected_channel_id }}">
+                            <input type="hidden" name="limit" value="{{ selected_limit }}">
+                            <button type="submit" class="secondary-button">Retry</button>
+                        </form>
+                    </div>
+                </td>
+                <td>
+                    {% if row["stitched_group_id"] %}
+                        {% if row["stitched_primary"] %}
+                            Primary
+                        {% else %}
+                            Child
+                        {% endif %}
+                    {% else %}
+                        -
+                    {% endif %}
+                </td>
+                <td>{{ row["stitched_count"] if row["stitched_count"] else "" }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</body>
+</html>
