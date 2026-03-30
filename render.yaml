@@ -24,9 +24,9 @@ services:
       - key: SESSION_DOMAIN
         value: ops.degencollectibles.com
       - key: DISCORD_INGEST_ENABLED
-        value: "true"
+        value: "false"
       - key: PARSER_WORKER_ENABLED
-        value: "true"
+        value: "false"
       - key: SESSION_SECRET
         sync: false
       - key: DISCORD_BOT_TOKEN

@@ -6,7 +6,17 @@ from sqlmodel import SQLModel, Session, create_engine
 from .config import get_settings
 
 settings = get_settings()
-database_url = settings.database_url
+
+
+def normalize_database_url(raw_database_url: str) -> str:
+    if raw_database_url.startswith("postgres://"):
+        return raw_database_url.replace("postgres://", "postgresql+psycopg://", 1)
+    if raw_database_url.startswith("postgresql://") and "+psycopg" not in raw_database_url:
+        return raw_database_url.replace("postgresql://", "postgresql+psycopg://", 1)
+    return raw_database_url
+
+
+database_url = normalize_database_url(settings.database_url)
 
 if database_url.startswith("sqlite:///"):
     db_path = database_url.replace("sqlite:///", "", 1)

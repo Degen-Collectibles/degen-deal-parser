@@ -93,6 +93,34 @@ If you use SQLite initially:
 Better long-term option:
 - move to Postgres before broader partner/employee use
 
+### Shared Postgres setup
+
+If you want:
+- Discord ingestion running on your local machine
+- the employee/partner web UI running on Render
+- both sharing the same data
+
+then use one shared Postgres database for both.
+
+This app now supports either of these `DATABASE_URL` forms:
+
+```text
+postgresql+psycopg://USER:PASSWORD@HOST:5432/DBNAME
+postgres://USER:PASSWORD@HOST:5432/DBNAME
+```
+
+The app normalizes `postgres://...` to the SQLAlchemy `psycopg` driver automatically.
+
+Recommended architecture:
+- local machine:
+  - `DISCORD_INGEST_ENABLED=true`
+  - `PARSER_WORKER_ENABLED=true`
+- Render web service:
+  - `DISCORD_INGEST_ENABLED=false`
+  - `PARSER_WORKER_ENABLED=false`
+
+That keeps Discord/API rate-limit-sensitive work local while your hosted site stays available for employees and partners.
+
 ### Discord bot and parser worker
 
 This app starts:
@@ -116,3 +144,4 @@ Do not use Shopify app proxy for this full internal tool unless you specifically
 - Change default admin credentials before sharing the app.
 - SQLite is okay for light internal use, but Postgres is the better next step.
 - The app stores uploaded/imported bookkeeping state in the database, so persistent storage matters.
+- If you split local ingestion from hosted UI, do not use two separate SQLite databases.
