@@ -1425,11 +1425,11 @@ def get_parser_progress(
     pending = queued + processing
     percent_complete = round((completed / total) * 100, 1) if total else 100.0
     processing_ids = [
-        row[0]
-        for row in session.exec(
+        row_id
+        for row_id in session.exec(
             select(summary_subquery.c.id).where(summary_subquery.c.parse_status == "processing")
         ).all()
-        if row[0] is not None
+        if row_id is not None
     ]
     processing_with_images = int(
         session.exec(
