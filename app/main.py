@@ -30,7 +30,9 @@ from .bookkeeping import (
     list_detected_bookkeeping_posts,
     reconcile_bookkeeping_import,
 )
+from .backfill_requests import enqueue_backfill_request
 from .channels import (
+    get_available_channel_choices,
     get_channel_filter_choices,
     get_watched_channels,
     normalize_channel_ids,
@@ -974,7 +976,9 @@ def require_role_response(request: Request, minimum_role: str) -> Optional[Respo
     return None
 
 
-def current_user_label(request: Request) -> str:
+def current_user_label(request: Optional[Request]) -> str:
+    if request is None:
+        return "system"
     user = getattr(request.state, "current_user", None)
     if not user:
         return "system"
@@ -1333,6 +1337,32 @@ def validate_backfill_range(
         raise HTTPException(status_code=400, detail="Backfill 'after' must be before 'before'")
 
     return after, before, after_dt, before_dt
+
+
+def queue_backfill_request(
+    session: Session,
+    request: Request,
+    *,
+    channel_id: Optional[str],
+    after_dt: Optional[datetime],
+    before_dt: Optional[datetime],
+    limit: Optional[int],
+    oldest_first: bool,
+) -> str:
+    queued = enqueue_backfill_request(
+        session,
+        channel_id=channel_id,
+        after=after_dt,
+        before=before_dt,
+        limit_per_channel=limit,
+        oldest_first=oldest_first,
+        requested_by=current_user_label(request),
+    )
+    target = f"channel+{channel_id}" if channel_id else "all+backfill-enabled+watched+channels"
+    return (
+        f"Queued+backfill+request+{queued.id}+for+{target}."
+        "+The+worker+will+run+it+when+Discord+is+ready."
+    )
 
 
 def recompute_financial_fields(session: Session) -> int:
@@ -2711,17 +2741,27 @@ def clear_channel_messages_form(
 
 @app.post("/admin/backfill")
 async def admin_backfill(
+    request: Request,
     channel_id: Optional[str] = Form(default=None),
     after: Optional[str] = Form(default=None),
     before: Optional[str] = Form(default=None),
     limit: Optional[int] = Form(default=None),
     oldest_first: bool = Form(default=True),
+    session: Session = Depends(get_session),
 ):
+    _, _, after_dt, before_dt = validate_backfill_range(after, before)
     client = get_discord_client()
     if client is None or not client.is_ready():
-        raise HTTPException(status_code=503, detail="Discord client is not ready yet")
-
-    _, _, after_dt, before_dt = validate_backfill_range(after, before)
+        queued_message = queue_backfill_request(
+            session,
+            request,
+            channel_id=channel_id,
+            after_dt=after_dt,
+            before_dt=before_dt,
+            limit=limit,
+            oldest_first=oldest_first,
+        )
+        return {"ok": True, "queued": True, "message": queued_message.replace("+", " ")}
 
     if channel_id:
         return await client.backfill_channel(
@@ -2742,21 +2782,28 @@ async def admin_backfill(
 
 @app.post("/admin/backfill/form")
 async def admin_backfill_form(
+    request: Request,
     channel_id: Optional[str] = Form(default=None),
     after: Optional[str] = Form(default=None),
     before: Optional[str] = Form(default=None),
     limit: Optional[int] = Form(default=None),
     oldest_first: bool = Form(default=True),
+    session: Session = Depends(get_session),
 ):
-    client = get_discord_client()
-    if client is None or not client.is_ready():
-        return RedirectResponse(
-            url="/table?error=Discord+client+is+not+ready+yet",
-            status_code=303,
-        )
-
     try:
         _, _, after_dt, before_dt = validate_backfill_range(after, before)
+        client = get_discord_client()
+        if client is None or not client.is_ready():
+            queued_message = queue_backfill_request(
+                session,
+                request,
+                channel_id=channel_id,
+                after_dt=after_dt,
+                before_dt=before_dt,
+                limit=limit,
+                oldest_first=oldest_first,
+            )
+            return RedirectResponse(url=f"/table?success={queued_message}", status_code=303)
         if channel_id:
             result = await client.backfill_channel(
                 channel_id=int(channel_id),
@@ -2845,7 +2892,7 @@ def messages_table(
         before=before,
     )
     watched_channels = get_watched_channels(session)
-    available_discord_channels = list_available_discord_channels()
+    available_discord_channels, has_live_available_discord_channels = get_available_channel_choices(session)
     watched_channel_groups = build_watched_channel_groups(watched_channels, available_discord_channels)
     financial_rows = get_financial_rows(
         session,
@@ -2889,6 +2936,7 @@ def messages_table(
             "watched_channels": watched_channels,
             "watched_channel_groups": watched_channel_groups,
             "available_discord_channels": available_discord_channels,
+            "has_live_available_discord_channels": has_live_available_discord_channels,
             "next_sort_direction": next_sort_direction,
             "sort_indicator": sort_indicator,
             "deal_type_options": DEAL_TYPE_OPTIONS,
@@ -2938,7 +2986,7 @@ def review_table(
     )
     financial_summary = build_financial_summary(get_financial_rows(session))
     watched_channels = get_watched_channels(session)
-    available_discord_channels = list_available_discord_channels()
+    available_discord_channels, has_live_available_discord_channels = get_available_channel_choices(session)
     watched_channel_groups = build_watched_channel_groups(watched_channels, available_discord_channels)
     parser_progress = get_parser_progress(
         session,
@@ -2975,6 +3023,7 @@ def review_table(
             "watched_channels": watched_channels,
             "watched_channel_groups": watched_channel_groups,
             "available_discord_channels": available_discord_channels,
+            "has_live_available_discord_channels": has_live_available_discord_channels,
             "next_sort_direction": next_sort_direction,
             "sort_indicator": sort_indicator,
             "deal_type_options": DEAL_TYPE_OPTIONS,
@@ -3187,14 +3236,22 @@ def admin_list_channels(session: Session = Depends(get_session)):
 
 @app.post("/admin/channels/add")
 async def admin_add_channel(
-    channel_ids: list[str] = Form(...),
+    request: Request,
+    channel_ids: Optional[list[str]] = Form(default=None),
+    manual_channel_ids: Optional[str] = Form(default=None),
     channel_name: Optional[str] = Form(default=None),
     backfill_after: Optional[str] = Form(default=None),
     backfill_before: Optional[str] = Form(default=None),
     backfill_enabled: Optional[str] = Form(default=None),
     session: Session = Depends(get_session),
 ):
-    cleaned_channel_ids = normalize_channel_ids(channel_ids)
+    manual_ids = []
+    if manual_channel_ids:
+        manual_ids = [
+            piece.strip()
+            for piece in manual_channel_ids.replace("\r", ",").replace("\n", ",").split(",")
+        ]
+    cleaned_channel_ids = normalize_channel_ids([*(channel_ids or []), *manual_ids])
     if not cleaned_channel_ids:
         return RedirectResponse(
             url="/table?error=Select+at+least+one+valid+channel",
@@ -3224,8 +3281,20 @@ async def admin_add_channel(
     if after_dt or before_dt:
         client = get_discord_client()
         if client is None or not client.is_ready():
+            queued_count = 0
+            for channel in saved_channels:
+                queue_backfill_request(
+                    session,
+                    request,
+                    channel_id=channel.channel_id,
+                    after_dt=after_dt,
+                    before_dt=before_dt,
+                    limit=None,
+                    oldest_first=True,
+                )
+                queued_count += 1
             return RedirectResponse(
-                url="/table?error=Discord+client+is+not+ready+yet.+Channels+were+saved+without+running+the+requested+backfill",
+                url=f"/table?success=Saved+{len(saved_channels)}+channels+and+queued+{queued_count}+backfill+request(s)+for+the+worker",
                 status_code=303,
             )
 

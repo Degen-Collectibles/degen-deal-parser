@@ -240,3 +240,21 @@ class RuntimeHeartbeat(SQLModel, table=True):
     status: str = Field(default="unknown", index=True)
     details_json: str = "{}"
     updated_at: datetime = Field(default_factory=utcnow, index=True)
+
+
+class BackfillRequest(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    channel_id: Optional[str] = Field(default=None, index=True)
+    after: Optional[datetime] = Field(default=None, index=True)
+    before: Optional[datetime] = Field(default=None, index=True)
+    limit_per_channel: Optional[int] = None
+    oldest_first: bool = Field(default=True, index=True)
+    status: str = Field(default="queued", index=True)
+    requested_by: Optional[str] = Field(default=None, index=True)
+    result_json: str = "{}"
+    error_message: Optional[str] = None
+    inserted_count: int = Field(default=0)
+    skipped_count: int = Field(default=0)
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+    started_at: Optional[datetime] = Field(default=None, index=True)
+    finished_at: Optional[datetime] = Field(default=None, index=True)

@@ -3,9 +3,10 @@ import signal
 import socket
 import threading
 
+from .backfill_requests import backfill_request_loop
 from .config import get_settings
 from .db import init_db
-from .discord_ingest import discord_runtime_state, run_discord_bot, seed_channels_from_env
+from .discord_ingest import discord_runtime_state, get_discord_client, run_discord_bot, seed_channels_from_env
 from .runtime_monitor import runtime_heartbeat_loop
 from .worker import parser_loop
 
@@ -47,6 +48,12 @@ async def run_worker_service() -> None:
     background_tasks: list[asyncio.Task] = []
     if settings.discord_ingest_enabled:
         background_tasks.append(asyncio.create_task(run_discord_bot(stop_event), name="discord-ingest"))
+        background_tasks.append(
+            asyncio.create_task(
+                backfill_request_loop(stop_event, get_discord_client),
+                name="backfill-queue",
+            )
+        )
     if settings.parser_worker_enabled:
         background_tasks.append(asyncio.create_task(parser_loop(stop_event), name="parser-worker"))
 

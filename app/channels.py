@@ -137,3 +137,22 @@ def get_channel_filter_choices(session: Session) -> list[dict]:
         )
 
     return sorted(choices.values(), key=lambda row: row["channel_name"].lower())
+
+
+def get_available_channel_choices(session: Session) -> tuple[list[dict], bool]:
+    available = list_available_discord_channels()
+    if available:
+        return available, True
+
+    fallback = [
+        {
+            "channel_id": row["channel_id"],
+            "channel_name": row["channel_name"],
+            "label": row["channel_name"],
+            "category_name": "Known Channels",
+            "created_at": None,
+            "last_message_at": None,
+        }
+        for row in get_channel_filter_choices(session)
+    ]
+    return fallback, False
