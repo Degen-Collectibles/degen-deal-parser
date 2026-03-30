@@ -9,6 +9,9 @@
         body { margin:0; font-family:"Trebuchet MS","Segoe UI",sans-serif; color:var(--text); background:radial-gradient(circle at top left, rgba(240,196,107,.24), transparent 28%), linear-gradient(180deg,#fcf8f2 0%, var(--bg) 100%); }
         a { color:inherit; text-decoration:none; }
         .page { max-width:1440px; margin:0 auto; padding:20px; }
+        .workspace-nav, .nav-links, .action-card-footer, .section-header { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+        .workspace-nav { justify-content:space-between; margin-bottom:14px; padding:12px 16px; border:1px solid var(--line); border-radius:20px; background:rgba(255,250,243,.88); box-shadow:0 14px 28px rgba(77,46,20,.08); position:sticky; top:12px; z-index:5; backdrop-filter:blur(10px); }
+        .nav-links { justify-content:flex-end; }
         .hero, .card, .action-card { background:var(--card); border:1px solid var(--line); border-radius:24px; box-shadow:var(--shadow); }
         .hero { display:grid; grid-template-columns:minmax(180px,250px) 1fr; gap:24px; align-items:center; padding:24px; margin-bottom:18px; background:radial-gradient(circle at 15% 20%, rgba(255,216,139,.5), transparent 24%), linear-gradient(135deg, rgba(255,248,236,.96), rgba(255,240,228,.92)); }
         .logo { width:100%; max-width:220px; display:block; margin:0 auto; }
@@ -27,14 +30,32 @@
         .action-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
         .action-card { padding:18px; }
         .action-card h3 { margin:0 0 8px; font-size:20px; letter-spacing:-.03em; }
+        .action-card p { margin:0 0 12px; }
+        .action-card-footer { justify-content:space-between; }
+        .section-header { justify-content:space-between; margin-bottom:12px; }
+        .section-title { margin:0; font-size:24px; letter-spacing:-.04em; }
+        .section-subtitle { margin:4px 0 0; color:var(--muted); }
         .list { display:grid; gap:10px; }
         .list-item { padding:10px 0; border-top:1px solid #eee3d3; }
         .list-item:first-child { border-top:none; padding-top:0; }
-        @media (max-width:1000px){ .hero, .layout, .summary-grid, .action-grid { grid-template-columns:1fr; } .page { padding:16px 14px 28px; } .eyebrow { margin:0 auto; } .hero { text-align:center; } }
+        @media (max-width:1000px){ .hero, .layout, .summary-grid, .action-grid { grid-template-columns:1fr; } .page { padding:16px 14px 28px; } .eyebrow { margin:0 auto; } .hero { text-align:center; } .workspace-nav { position:static; } }
     </style>
 </head>
 <body>
     <div class="page">
+        <div class="workspace-nav">
+            <div>
+                <strong>Admin workspace</strong>
+                <div class="small">Keep powerful tools available without leaking admin complexity into every other page.</div>
+            </div>
+            <div class="nav-links">
+                <a class="button" href="/dashboard">Dashboard</a>
+                <a class="button" href="/review">Review</a>
+                <a class="button" href="/deals">Deals</a>
+                <a class="button" href="/reports">Reports</a>
+                <a class="button" href="/status">Status</a>
+            </div>
+        </div>
         <section class="hero">
             <img class="logo" src="/static/degen-logo.png" alt="Degen Collectibles logo">
             <div>
@@ -62,23 +83,32 @@
 
         <div class="layout">
             <div class="card">
-                <h2 style="margin-top:0;">Admin Workflows</h2>
+                <div class="section-header">
+                    <div>
+                        <h2 class="section-title">Admin Workflows</h2>
+                        <div class="section-subtitle">Use the cleanest tool for the job instead of dropping into the power table by default.</div>
+                    </div>
+                </div>
                 <div class="action-grid">
                     <a class="action-card" href="/table">
                         <h3>Admin Table</h3>
-                        <div class="small">Open the full power table with backfill, watched-channel management, parser health, and manual admin actions.</div>
+                        <p class="small">Open the full power table with backfill, watched-channel management, parser health, and manual admin actions.</p>
+                        <div class="action-card-footer"><span class="small">Deep cleanup and system intervention</span><span class="pill">power view</span></div>
                     </a>
                     <a class="action-card" href="/bookkeeping">
                         <h3>Bookkeeping</h3>
-                        <div class="small">Import or refresh bookkeeping sheets, inspect reconciliation, and verify grounded totals.</div>
+                        <p class="small">Import or refresh bookkeeping sheets, inspect reconciliation, and verify grounded totals.</p>
+                        <div class="action-card-footer"><span class="small">Ground-truth reconciliation</span><span class="pill">finance</span></div>
                     </a>
                     <a class="action-card" href="/review-table">
                         <h3>Legacy Review Table</h3>
-                        <div class="small">Open the wide review table when you need bulk actions or the denser admin-level review view.</div>
+                        <p class="small">Open the wide review table when you need bulk actions or the denser admin-level review view.</p>
+                        <div class="action-card-footer"><span class="small">Bulk edits and dense triage</span><span class="pill">advanced</span></div>
                     </a>
                     <a class="action-card" href="/reports">
                         <h3>Reports</h3>
-                        <div class="small">Check financial summaries, exports, and normalized transaction rollups without opening the parser queue.</div>
+                        <p class="small">Check financial summaries, exports, and normalized transaction rollups without opening the parser queue.</p>
+                        <div class="action-card-footer"><span class="small">Read-only financial view</span><span class="pill">safe</span></div>
                     </a>
                 </div>
             </div>

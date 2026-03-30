@@ -4,33 +4,42 @@
     <meta charset="utf-8">
     <title>{{ title }}</title>
     <style>
-        :root { --bg:#f7f1e8; --card:#fffaf3; --line:#e4d5c3; --text:#241b15; --muted:#6b5b4f; --accent:#d55338; --shadow:0 18px 36px rgba(77,46,20,.12); }
+        :root { --bg:#f4ebdf; --bg-deep:#ead8c0; --card:#fff9f2; --card-strong:#fffdf8; --line:#deccb6; --text:#24170f; --muted:#6b5849; --accent:#d55338; --accent-strong:#9f311d; --shadow:0 20px 44px rgba(77,46,20,.13); }
         * { box-sizing:border-box; }
-        body { margin:0; font-family:"Trebuchet MS","Segoe UI",sans-serif; color:var(--text); background:radial-gradient(circle at top left, rgba(240,196,107,.24), transparent 28%), linear-gradient(180deg,#fcf8f2 0%, var(--bg) 100%); }
+        body { margin:0; font-family:"Aptos","Trebuchet MS","Segoe UI",sans-serif; color:var(--text); background:radial-gradient(circle at top left, rgba(240,196,107,.26), transparent 24%), radial-gradient(circle at 84% 10%, rgba(213,83,56,.10), transparent 18%), linear-gradient(180deg,#fcf7f0 0%, var(--bg) 46%, var(--bg-deep) 100%); }
         a { color:inherit; text-decoration:none; }
         .page { max-width:1500px; margin:0 auto; padding:22px; }
-        .hero, .card { background:var(--card); border:1px solid var(--line); border-radius:24px; box-shadow:var(--shadow); }
-        .hero { display:grid; grid-template-columns:minmax(220px,300px) 1fr; gap:24px; align-items:center; padding:24px; margin-bottom:18px; background:radial-gradient(circle at 15% 20%, rgba(255,216,139,.5), transparent 24%), linear-gradient(135deg, rgba(255,248,236,.96), rgba(255,240,228,.92)); }
+        .workspace-nav, .nav-links, .section-header, .scope-strip { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+        .workspace-nav { justify-content:space-between; margin-bottom:14px; padding:12px 16px; border:1px solid rgba(159,49,29,.12); border-radius:20px; background:linear-gradient(180deg, rgba(255,253,248,.94), rgba(255,247,238,.82)); box-shadow:0 14px 28px rgba(77,46,20,.08); position:sticky; top:12px; z-index:5; backdrop-filter:blur(10px); }
+        .nav-links { justify-content:flex-end; }
+        .hero, .card { background:linear-gradient(180deg, var(--card-strong), var(--card)); border:1px solid var(--line); border-radius:24px; box-shadow:var(--shadow); }
+        .hero { display:grid; grid-template-columns:minmax(220px,300px) 1fr; gap:24px; align-items:center; padding:28px; margin-bottom:18px; background:radial-gradient(circle at 15% 20%, rgba(255,216,139,.55), transparent 24%), radial-gradient(circle at 78% 22%, rgba(213,83,56,.11), transparent 20%), linear-gradient(135deg, rgba(255,249,239,.98), rgba(255,238,223,.95)); }
         .logo-wrap img { width:100%; max-width:260px; display:block; margin:0 auto; filter:drop-shadow(0 18px 28px rgba(60,24,8,.2)); }
         .eyebrow, .chip { display:inline-flex; align-items:center; padding:6px 10px; border-radius:999px; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; }
-        .eyebrow { background:rgba(37,28,22,.06); color:var(--muted); width:fit-content; }
+        .eyebrow { background:rgba(37,28,22,.06); color:var(--accent-strong); width:fit-content; }
         .chip { background:#f5eadc; color:var(--muted); }
-        h1 { margin:10px 0 8px; font-size:clamp(30px,4vw,50px); line-height:.95; letter-spacing:-.04em; }
+        h1, .section-title { font-family:"Georgia","Cambria","Times New Roman",serif; }
+        h1 { margin:10px 0 8px; font-size:clamp(34px,4vw,52px); line-height:.93; letter-spacing:-.045em; }
         p, .small { color:var(--muted); }
         p { margin:0 0 16px; line-height:1.6; font-size:15px; max-width:860px; }
         .actions, .filters, .summary-strip { display:flex; gap:10px; flex-wrap:wrap; align-items:end; }
         .actions { align-items:center; }
         .summary-strip { justify-content:space-between; margin-top:12px; }
-        .button, button { appearance:none; border:none; border-radius:14px; padding:10px 14px; font:inherit; font-weight:800; cursor:pointer; }
-        .primary-button { background:linear-gradient(135deg,var(--accent),#ef6e48); color:#fff; box-shadow:0 10px 18px rgba(212,83,56,.22); }
-        .secondary-button { background:#fff; color:var(--text); border:1px solid var(--line); }
+        .button, button { appearance:none; border:none; border-radius:16px; padding:11px 15px; font:inherit; font-weight:800; cursor:pointer; }
+        .primary-button { background:linear-gradient(135deg,var(--accent-strong),#df623f 55%, #f0875e); color:#fff; box-shadow:0 14px 24px rgba(159,49,29,.24); }
+        .secondary-button { background:linear-gradient(180deg,#fffdfa,#fff4e8); color:var(--text); border:1px solid var(--line); }
         .card { padding:18px; margin-bottom:18px; }
         .sticky-card { position:sticky; top:16px; z-index:4; }
         label { display:flex; flex-direction:column; gap:6px; font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); min-width:140px; }
         input, select { padding:10px 12px; border-radius:12px; border:1px solid var(--line); background:#fff; color:var(--text); font:inherit; }
-        .helper-card { padding:12px 14px; border-radius:16px; border:1px solid #eadfce; background:#fffdf9; color:var(--muted); font-size:13px; }
+        .helper-card { padding:12px 14px; border-radius:16px; border:1px solid #eadfce; background:linear-gradient(180deg,#fffdfa,#fff5ea); color:var(--muted); font-size:13px; }
+        .scope-strip { justify-content:space-between; margin-top:14px; padding:12px 14px; border:1px solid #eadfce; border-radius:18px; background:#fffdf9; }
+        .section-header { justify-content:space-between; margin-bottom:12px; }
+        .section-title { margin:0; font-size:24px; letter-spacing:-.04em; }
+        .section-subtitle { margin:4px 0 0; color:var(--muted); }
+        .scope-chip { display:inline-flex; align-items:center; padding:6px 10px; border-radius:999px; background:#fff; border:1px solid var(--line); color:var(--muted); font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; }
         .summary-grid { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:12px; }
-        .metric { background:rgba(255,255,255,.72); border:1px solid var(--line); border-radius:18px; padding:14px; min-height:92px; }
+        .metric { background:linear-gradient(180deg, rgba(255,255,255,.86), rgba(255,248,238,.75)); border:1px solid var(--line); border-radius:18px; padding:14px; min-height:92px; }
         .metric-label { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.08em; margin-bottom:8px; font-weight:800; }
         .metric-value { font-size:28px; font-weight:800; letter-spacing:-.04em; }
         .chart-grid { display:grid; grid-template-columns:1.3fr 1fr; gap:18px; }
@@ -47,12 +56,24 @@
         thead th { background:#fff6ea; color:var(--muted); font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; position:sticky; top:0; z-index:1; }
         .table-shell { overflow:auto; border:1px solid #eadfce; border-radius:20px; background:#fff; max-height:58vh; }
         @media (max-width:1200px){.chart-grid{grid-template-columns:1fr}.summary-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.sticky-card{position:static}}
-        @media (max-width:900px){.page{padding:16px 14px 28px}.hero{grid-template-columns:1fr;text-align:center}.eyebrow{margin:0 auto}.actions{justify-content:center}.summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+        @media (max-width:900px){.page{padding:16px 14px 28px}.hero{grid-template-columns:1fr;text-align:center}.eyebrow{margin:0 auto}.actions{justify-content:center}.summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.workspace-nav{position:static}}
         @media (max-width:640px){.summary-grid,.bar-row{grid-template-columns:1fr}}
     </style>
 </head>
 <body>
     <div class="page">
+        <div class="workspace-nav">
+            <div>
+                <strong>Reporting</strong>
+                <div class="small">Financial summaries and trend views for normalized transactions.</div>
+            </div>
+            <div class="nav-links">
+                <a href="/dashboard" class="button secondary-button" style="width:auto;">Dashboard</a>
+                <a href="/deals" class="button secondary-button" style="width:auto;">Deals</a>
+                <a href="/bookkeeping" class="button secondary-button" style="width:auto;">Bookkeeping</a>
+                {% if current_user and current_user.role in ["admin","reviewer"] %}<a href="/review" class="button secondary-button" style="width:auto;">Review</a>{% endif %}
+            </div>
+        </div>
         <section class="hero">
             <div class="logo-wrap"><img src="/static/degen-logo.png" alt="Degen Collectibles logo"></div>
             <div>
@@ -72,6 +93,12 @@
         </section>
 
         <div class="card sticky-card">
+            <div class="section-header">
+                <div>
+                    <h2 class="section-title">Report Scope</h2>
+                    <div class="section-subtitle">Choose the date window, channel, and financial kind before reading the totals.</div>
+                </div>
+            </div>
             <form method="get" action="/reports" class="filters">
                 <label>Start<input type="date" name="start" value="{{ selected_start }}"></label>
                 <label>End<input type="date" name="end" value="{{ selected_end }}"></label>
@@ -79,6 +106,13 @@
                 <label>Financial Kind<select name="entry_kind"><option value="">All</option><option value="sale" {% if selected_entry_kind == "sale" %}selected{% endif %}>sale</option><option value="buy" {% if selected_entry_kind == "buy" %}selected{% endif %}>buy</option><option value="trade" {% if selected_entry_kind == "trade" %}selected{% endif %}>trade</option><option value="expense" {% if selected_entry_kind == "expense" %}selected{% endif %}>expense</option><option value="unknown" {% if selected_entry_kind == "unknown" %}selected{% endif %}>unknown</option></select></label>
                 <button type="submit" class="secondary-button">Apply</button>
             </form>
+            <div class="scope-strip">
+                <div class="small">Current scope: {{ selected_entry_kind if selected_entry_kind else "all kinds" }}{% if selected_channel_id %} in one channel{% else %} across all channels{% endif %}.</div>
+                <div class="actions">
+                    <span class="scope-chip">{{ summary["rows"] }} transactions</span>
+                    <span class="scope-chip">{{ selected_start or "start" }} to {{ selected_end or "today" }}</span>
+                </div>
+            </div>
         </div>
 
         <div class="summary-grid" style="margin-bottom:18px;">
@@ -88,6 +122,13 @@
             <div class="metric"><div class="metric-label">Expenses</div><div class="metric-value">${{ "%.2f"|format(summary["totals"].get("expenses", 0)) }}</div></div>
             <div class="metric"><div class="metric-label">Money In</div><div class="metric-value">${{ "%.2f"|format(summary["totals"].get("money_in", 0)) }}</div></div>
             <div class="metric"><div class="metric-label">Net</div><div class="metric-value">${{ "%.2f"|format(summary["totals"].get("net", 0)) }}</div></div>
+        </div>
+
+        <div class="section-header">
+            <div>
+                <h2 class="section-title">Mix And Distribution</h2>
+                <div class="section-subtitle">Use these charts to spot category drift and which channels are driving net results.</div>
+            </div>
         </div>
 
         <div class="chart-grid">

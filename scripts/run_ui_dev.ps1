@@ -15,11 +15,12 @@ $env:STARTUP_BACKFILL_ENABLED = "false"
 $env:PUBLIC_BASE_URL = "http://127.0.0.1:8000"
 $env:SESSION_HTTPS_ONLY = "false"
 $env:SESSION_DOMAIN = ""
-$env:AUTH_RESEED_PASSWORDS = "false"
+$env:AUTH_RESEED_PASSWORDS = "true"
 $env:RUNTIME_NAME = "local_ui_dev"
 $env:RUNTIME_LABEL = "UI Dev"
 
 Write-Host "Starting fast local UI mode using $devDbPath"
 Write-Host "Discord ingest and parser worker are disabled for this session."
+Write-Host "Local UI auth will be reseeded from your current .env credentials."
 
 & "$repoRoot\.venv\Scripts\python.exe" -m uvicorn app.main:app --reload

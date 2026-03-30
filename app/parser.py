@@ -267,8 +267,8 @@ def extract_payment_amount_method(text: str) -> tuple[float | None, str | None]:
         return None, None
 
     patterns = [
-        r"^(?:plus|\+)?\s*\$?\s*(\d+(?:\.\d{1,2})?)\s*(zelle|venmo|paypal|cash|card|tap)$",
-        r"^(zelle|venmo|paypal|cash|card|tap)\s*\$?\s*(\d+(?:\.\d{1,2})?)$",
+        r"^(?:plus|\+)?\s*\$?\s*(\d+(?:\.\d{1,2})?)\s*(zelle|venmo|paypal|cash|card|tap|cc|dc)$",
+        r"^(zelle|venmo|paypal|cash|card|tap|cc|dc)\s*\$?\s*(\d+(?:\.\d{1,2})?)$",
     ]
 
     for pattern in patterns:
@@ -315,7 +315,12 @@ GRADE_WORDS = ("psa", "bgs", "sgc", "cgc", "grade")
 
 
 def normalize_payment_method(payment_method: str) -> str:
-    return "card" if payment_method == "tap" else payment_method
+    return "card" if payment_method in {"tap", "cc", "dc"} else payment_method
+
+
+def is_payment_method_only_message_text(text: str) -> bool:
+    lower = normalize_message_part(text).lower()
+    return bool(re.fullmatch(r"(zelle|venmo|paypal|cash|card|tap|cc|dc)", lower, re.I))
 
 
 def extract_payment_segments(text: str) -> list[tuple[float, str]]:
@@ -324,8 +329,8 @@ def extract_payment_segments(text: str) -> list[tuple[float, str]]:
         return []
 
     patterns = [
-        r"(?<![#\w])(?:plus|\+)?\s*\$?\s*(\d+(?:\.\d{1,2})?)\s*(cash|zelle|venmo|paypal|card|tap)\b",
-        r"\b(cash|zelle|venmo|paypal|card|tap)\s*\$?\s*(\d+(?:\.\d{1,2})?)\b",
+        r"(?<![#\w])(?:plus|\+)?\s*\$?\s*(\d+(?:\.\d{1,2})?)\s*(cash|zelle|venmo|paypal|card|tap|cc|dc)\b",
+        r"\b(cash|zelle|venmo|paypal|card|tap|cc|dc)\s*\$?\s*(\d+(?:\.\d{1,2})?)\b",
     ]
 
     segments: list[tuple[float, str]] = []
@@ -442,6 +447,7 @@ def parse_stitched_rule_hint(message_text: str) -> Dict[str, Any] | None:
     payment_amount: float | None = None
     payment_method: str | None = None
     payment_breakdown: list[tuple[float, str]] = []
+    payment_method_only: str | None = None
     saw_image_only_lead = bool(message_parts and has_no_text_placeholder(message_parts[0]))
 
     for original_part, normalized_part in zip(message_parts, normalized_parts):
@@ -462,6 +468,8 @@ def parse_stitched_rule_hint(message_text: str) -> Dict[str, Any] | None:
             payment_amount = payment_summary["amount"]
             payment_method = payment_summary["payment_method"]
             payment_breakdown = payment_summary["payment_breakdown"]
+        elif is_payment_method_only_message_text(normalized_part) and payment_method_only is None:
+            payment_method_only = normalize_payment_method(normalized_part.lower())
 
     if explicit_type and explicit_part and not any(has_explicit_trade_signal(part) for part in nonempty_parts):
         notes = "stitched explicit buy/sell override"
@@ -470,7 +478,7 @@ def parse_stitched_rule_hint(message_text: str) -> Dict[str, Any] | None:
         return {
             "parsed_type": explicit_type,
             "parsed_amount": payment_amount,
-            "parsed_payment_method": payment_method or "unknown",
+            "parsed_payment_method": payment_method or payment_method_only or "unknown",
             "parsed_cash_direction": "to_store" if explicit_type == "sell" else "from_store",
             "parsed_category": "unknown",
             "parsed_items": [],
@@ -515,7 +523,7 @@ def parse_stitched_rule_hint(message_text: str) -> Dict[str, Any] | None:
                 return {
                     "parsed_type": inferred_type,
                     "parsed_amount": payment_amount,
-                    "parsed_payment_method": payment_method or "unknown",
+                    "parsed_payment_method": payment_method or payment_method_only or "unknown",
                     "parsed_cash_direction": "to_store" if inferred_type == "sell" else "from_store",
                     "parsed_category": "unknown",
                     "parsed_items": [],
@@ -527,6 +535,30 @@ def parse_stitched_rule_hint(message_text: str) -> Dict[str, Any] | None:
                     "confidence": 0.93 if saw_image_only_lead else 0.9,
                     "needs_review": False,
                 }
+
+    if payment_method_only and descriptive_parts:
+        for part in descriptive_parts:
+            if has_explicit_trade_signal(part):
+                continue
+            inferred_amount = extract_unlabeled_amount(part)
+            if inferred_amount is None:
+                continue
+            inferred_category = infer_category_from_text(part) or "unknown"
+            return {
+                "parsed_type": infer_explicit_buy_sell_type(part) or "unknown",
+                "parsed_amount": inferred_amount,
+                "parsed_payment_method": payment_method_only,
+                "parsed_cash_direction": "unknown",
+                "parsed_category": inferred_category,
+                "parsed_items": [],
+                "parsed_items_in": [],
+                "parsed_items_out": [],
+                "parsed_trade_summary": "",
+                "parsed_notes": "stitched payment method followup",
+                "image_summary": "no image used",
+                "confidence": 0.87,
+                "needs_review": True,
+            }
 
     return None
 
@@ -611,13 +643,13 @@ def parse_by_rules(message_text: str) -> Dict[str, Any] | None:
             }
 
     amount_first_match = re.fullmatch(
-        r"\$?\s*(\d+(?:\.\d{1,2})?)\s*(zelle|venmo|paypal|cash|card|tap)",
+        r"\$?\s*(\d+(?:\.\d{1,2})?)\s*(zelle|venmo|paypal|cash|card|tap|cc|dc)",
         lower,
         re.I,
     )
 
     payment_first_match = re.fullmatch(
-        r"(zelle|venmo|paypal|cash|card|tap)\s*\$?\s*(\d+(?:\.\d{1,2})?)",
+        r"(zelle|venmo|paypal|cash|card|tap|cc|dc)\s*\$?\s*(\d+(?:\.\d{1,2})?)",
         lower,
         re.I,
     )
@@ -630,8 +662,7 @@ def parse_by_rules(message_text: str) -> Dict[str, Any] | None:
             payment = payment_first_match.group(1).lower()
             amount = float(payment_first_match.group(2))
 
-        if payment == "tap":
-            payment = "card"
+        payment = normalize_payment_method(payment)
 
         return {
             "parsed_type": "sell",
@@ -649,8 +680,8 @@ def parse_by_rules(message_text: str) -> Dict[str, Any] | None:
             "needs_review": False,
         }
     patterns = [
-        re.compile(r"\b(sold|sell)\b\s*\$?(\d+(?:\.\d{1,2})?)\s*(zelle|venmo|paypal|cash|card|tap)?", re.I),
-        re.compile(r"\b(bought|buy|paid)\b\s*\$?(\d+(?:\.\d{1,2})?)\s*(zelle|venmo|paypal|cash|card|tap)?", re.I),
+        re.compile(r"\b(sold|sell)\b\s*\$?(\d+(?:\.\d{1,2})?)\s*(zelle|venmo|paypal|cash|card|tap|cc|dc)?", re.I),
+        re.compile(r"\b(bought|buy|paid)\b\s*\$?(\d+(?:\.\d{1,2})?)\s*(zelle|venmo|paypal|cash|card|tap|cc|dc)?", re.I),
         re.compile(r"\btrade\b", re.I),
     ]
 
@@ -673,8 +704,8 @@ def parse_by_rules(message_text: str) -> Dict[str, Any] | None:
 
         if m.lastindex and m.lastindex >= 3:
             payment = (m.group(3) or "").lower() or None
-            if payment == "tap":
-                payment = "card"
+            if payment:
+                payment = normalize_payment_method(payment)
 
         if "sold" in verb or "sell" in verb:
             parsed_type = "sell"
@@ -715,8 +746,8 @@ def has_transaction_signal(message_text: str) -> bool:
 
     transaction_patterns = [
         r"\b(sold|sell|bought|buy|paid|trade|traded)\b",
-        r"\b(zelle|venmo|paypal|cash|tap|card)\b\s*\$?\d",
-        r"\$?\d+(?:\.\d{1,2})?\s*\b(zelle|venmo|paypal|cash|tap|card)\b",
+        r"\b(zelle|venmo|paypal|cash|tap|card|cc|dc)\b\s*\$?\d",
+        r"\$?\d+(?:\.\d{1,2})?\s*\b(zelle|venmo|paypal|cash|tap|card|cc|dc)\b",
         r"\b(top|bottom|left|right)\b.*\b(in|out)\b",
         r"\b(in)\b.*\b(out)\b",
         r"\b(out)\b.*\b(in)\b",
@@ -736,6 +767,24 @@ def looks_like_date_marker(message_text: str) -> bool:
         r"^\d{1,2}/\d{1,2}(?:/\d{2,4})?$",
     ]
     return any(re.fullmatch(pattern, lower, re.I) for pattern in patterns)
+
+
+def looks_like_internal_cash_transfer(message_text: str) -> bool:
+    lower = normalize_detector_text(message_text).lower()
+    if not lower:
+        return False
+
+    company_terms = r"(company|shop|store|business)"
+    loan_terms = r"(owe me|loan(?:ed|ing)?|front(?:ed|ing)?|spot me|pay me back|reimburse(?:d|ment)?|floating?)"
+    transfer_terms = r"(give|gave|hand(?:ed)?|brought|put|loan(?:ed|ing)?)"
+
+    patterns = [
+        rf"\b{transfer_terms}\b.*\b{company_terms}\b.*\b\d[\dk,\.]*\s*(cash|zelle|venmo|paypal|cc|dc|card)?\b.*\b{loan_terms}\b",
+        rf"\b{company_terms}\b.*\b\d[\dk,\.]*\s*(cash|zelle|venmo|paypal|cc|dc|card)?\b.*\b{loan_terms}\b",
+        rf"\b{transfer_terms}\b.*\b{company_terms}\b.*\b\d[\dk,\.]*\s*(cash|zelle|venmo|paypal|cc|dc|card)?\b",
+        rf"\b{loan_terms}\b.*\b{company_terms}\b",
+    ]
+    return any(re.search(pattern, lower, re.I) for pattern in patterns)
 
 
 def detect_non_transaction_message(message_text: str, image_urls: List[str] | None = None) -> Dict[str, Any] | None:
@@ -776,9 +825,6 @@ def detect_non_transaction_message(message_text: str, image_urls: List[str] | No
         "totals",
     ]
 
-    if has_transaction_signal(lower):
-        return None
-
     if looks_like_date_marker(lower):
         return {
             "parsed_type": None,
@@ -796,6 +842,27 @@ def detect_non_transaction_message(message_text: str, image_urls: List[str] | No
             "needs_review": False,
             "ignore_message": True,
         }
+
+    if looks_like_internal_cash_transfer(lower):
+        return {
+            "parsed_type": None,
+            "parsed_amount": None,
+            "parsed_payment_method": None,
+            "parsed_cash_direction": None,
+            "parsed_category": None,
+            "parsed_items": [],
+            "parsed_items_in": [],
+            "parsed_items_out": [],
+            "parsed_trade_summary": "",
+            "parsed_notes": "ignored internal cash transfer or partner loan",
+            "image_summary": "no image used" if not image_urls else "internal transfer image ignored",
+            "confidence": 0.99,
+            "needs_review": False,
+            "ignore_message": True,
+        }
+
+    if has_transaction_signal(lower):
+        return None
 
     if any(keyword in lower for keyword in non_transaction_keywords):
         return {
@@ -1100,6 +1167,8 @@ Store-specific trade conventions:
 - "top out bottom in" means a trade where top case items go out and bottom case items come in
 - "plus 195 zelle" or "+ 195 zelle" in a trade usually means the store is receiving $195 unless wording clearly says otherwise
 - "tap" usually means card payment
+- "cc" means credit card and should map to card payment
+- "dc" means debit card and should map to card payment
 
 Interpret shorthand intelligently:
 - "bought 40 cash"

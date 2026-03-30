@@ -23,6 +23,10 @@ def utcnow():
     return datetime.now(timezone.utc)
 
 
+def schedule_next_reprocess_run() -> datetime:
+    return utcnow() + timedelta(hours=max(settings.parser_reprocess_interval_hours, 0.25))
+
+
 def close_or_recover_unfinished_attempts(session: Session) -> None:
     recovery_now = utcnow()
     cutoff = recovery_now - STALE_PROCESSING_AFTER
@@ -147,9 +151,13 @@ def clear_stale_group_members(
 
 
 async def parser_loop(stop_event: asyncio.Event):
+    next_reprocess_at = schedule_next_reprocess_run()
     while not stop_event.is_set():
         try:
             await process_once()
+            if settings.parser_reprocess_enabled and utcnow() >= next_reprocess_at:
+                await auto_reprocess_once()
+                next_reprocess_at = schedule_next_reprocess_run()
         except OperationalError as e:
             print(f"[worker] database connection error: {e}")
             dispose_engine()
@@ -190,6 +198,89 @@ async def process_once():
 
     for row_id in row_ids:
         await process_row(row_id)
+
+
+def row_may_benefit_from_auto_reprocess(row: DiscordMessage) -> bool:
+    if row.is_deleted or row.reviewed_at is not None:
+        return False
+
+    text = normalize_text(row.content)
+
+    if row.parse_status == "needs_review":
+        return True
+    if row.confidence is None or float(row.confidence) < 0.9:
+        return True
+    if not row.stitched_group_id and (looks_like_fragment(row) or is_payment_method_only_text(text)):
+        return True
+    if not row.stitched_group_id and has_images(row) and len(text) <= 30:
+        return True
+
+    return False
+
+
+def row_recently_attempted(session: Session, row_id: int, cutoff: datetime) -> bool:
+    latest_attempt = session.exec(
+        select(ParseAttempt)
+        .where(ParseAttempt.message_id == row_id)
+        .order_by(ParseAttempt.started_at.desc())
+    ).first()
+    if not latest_attempt or latest_attempt.started_at is None:
+        return False
+
+    started_at = latest_attempt.started_at
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=timezone.utc)
+    return started_at >= cutoff
+
+
+def queue_auto_reprocess_candidates(
+    session: Session,
+    *,
+    batch_size: int | None = None,
+    force: bool = False,
+) -> int:
+    queued_count = 0
+    effective_batch_size = batch_size or settings.parser_reprocess_batch_size
+    review_cutoff = utcnow() - timedelta(hours=max(settings.parser_reprocess_interval_hours, 0.25))
+    min_age_cutoff = utcnow() - timedelta(minutes=max(settings.parser_reprocess_min_age_minutes, 1))
+    lookback_cutoff = utcnow() - timedelta(days=max(settings.parser_reprocess_lookback_days, 1))
+
+    candidate_rows = session.exec(
+        select(DiscordMessage)
+        .where(DiscordMessage.is_deleted == False)
+        .where(DiscordMessage.parse_status.in_(["parsed", "needs_review"]))
+        .where(DiscordMessage.reviewed_at == None)  # noqa: E711
+        .where(DiscordMessage.created_at >= lookback_cutoff)
+        .where(DiscordMessage.created_at <= min_age_cutoff)
+        .order_by(DiscordMessage.needs_review.desc(), DiscordMessage.created_at.asc())
+        .limit(max(effective_batch_size * 5, effective_batch_size))
+    ).all()
+
+    for row in candidate_rows:
+        if queued_count >= effective_batch_size:
+            break
+        if row.id is None:
+            continue
+        if not force and not row_may_benefit_from_auto_reprocess(row):
+            continue
+        if not force and row_recently_attempted(session, row.id, review_cutoff):
+            continue
+
+        row.parse_status = "queued"
+        row.last_error = "manual reprocess" if force else "auto reprocess"
+        row.parse_attempts = max((row.parse_attempts or 0) - 1, 0)
+        session.add(row)
+        queued_count += 1
+
+    if queued_count:
+        session.commit()
+
+    return queued_count
+
+
+async def auto_reprocess_once():
+    with managed_session() as session:
+        queue_auto_reprocess_candidates(session, force=False)
 
 
 async def process_row(row_id: int):
@@ -442,12 +533,17 @@ def same_author(left: DiscordMessage, right: DiscordMessage) -> bool:
 def is_payment_only_text(text: str) -> bool:
     text = normalize_text(text)
     patterns = [
-        r"^(zelle|venmo|paypal|cash|tap|card)\s*\$?\d+(?:\.\d{1,2})?$",
-        r"^\$?\d+(?:\.\d{1,2})?\s*(zelle|venmo|paypal|cash|tap|card)$",
-        r"^\+\s*\$?\d+(?:\.\d{1,2})?\s*(zelle|venmo|paypal|cash|tap|card)?$",
-        r"^(plus|\+)\s*\$?\d+(?:\.\d{1,2})?\s*(zelle|venmo|paypal|cash|tap|card)?$",
+        r"^(zelle|venmo|paypal|cash|tap|card|cc|dc)\s*\$?\d+(?:\.\d{1,2})?$",
+        r"^\$?\d+(?:\.\d{1,2})?\s*(zelle|venmo|paypal|cash|tap|card|cc|dc)$",
+        r"^\+\s*\$?\d+(?:\.\d{1,2})?\s*(zelle|venmo|paypal|cash|tap|card|cc|dc)?$",
+        r"^(plus|\+)\s*\$?\d+(?:\.\d{1,2})?\s*(zelle|venmo|paypal|cash|tap|card|cc|dc)?$",
     ]
     return any(re.fullmatch(p, text, re.I) for p in patterns)
+
+
+def is_payment_method_only_text(text: str) -> bool:
+    text = normalize_text(text)
+    return bool(re.fullmatch(r"(zelle|venmo|paypal|cash|tap|card|cc|dc)", text, re.I))
 
 
 def is_trade_fragment_text(text: str) -> bool:
@@ -464,8 +560,8 @@ def is_explicit_buy_sell_text(text: str) -> bool:
     text = normalize_text(text)
     has_explicit_verb = bool(re.search(r"\b(sold|sell|bought|buy|paid)\b", text, re.I))
     has_payment_amount = bool(
-        re.search(r"\b(zelle|venmo|paypal|cash|tap|card)\s*\$?\d+(?:\.\d{1,2})?\b", text, re.I)
-        or re.search(r"\$?\d+(?:\.\d{1,2})?\s*(zelle|venmo|paypal|cash|tap|card)\b", text, re.I)
+        re.search(r"\b(zelle|venmo|paypal|cash|tap|card|cc|dc)\s*\$?\d+(?:\.\d{1,2})?\b", text, re.I)
+        or re.search(r"\$?\d+(?:\.\d{1,2})?\s*(zelle|venmo|paypal|cash|tap|card|cc|dc)\b", text, re.I)
     )
     has_non_quantity_number = bool(
         re.search(r"\b(sold|sell|bought|buy|paid)\b.*\b\d+(?:\.\d{1,2})?\b(?!\s*(box|boxes|pack|packs|slab|slabs|case|cases|card|cards|binder|binders|lot|lots)\b)", text, re.I)
@@ -478,6 +574,8 @@ def is_short_fragment(row: DiscordMessage) -> bool:
     if has_images(row) and len(text) <= 20:
         return True
     if is_payment_only_text(text):
+        return True
+    if is_payment_method_only_text(text):
         return True
     if is_trade_fragment_text(text) and len(text) <= 50:
         return True
@@ -518,7 +616,7 @@ def stitch_profile(rows: list[DiscordMessage]) -> dict[str, int]:
         text = normalize_text(row.content)
         if has_images(row):
             profile["images"] += 1
-        if is_payment_only_text(text):
+        if is_payment_only_text(text) or is_payment_method_only_text(text):
             profile["payment_fragments"] += 1
         if has_descriptive_text(row):
             profile["descriptions"] += 1

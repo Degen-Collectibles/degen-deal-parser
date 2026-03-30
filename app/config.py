@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     parser_poll_seconds: float = Field(default=2.0, alias="PARSER_POLL_SECONDS")
     parser_batch_size: int = Field(default=10, alias="PARSER_BATCH_SIZE")
     parser_max_attempts: int = Field(default=3, alias="PARSER_MAX_ATTEMPTS")
+    parser_reprocess_enabled: bool = Field(default=True, alias="PARSER_REPROCESS_ENABLED")
+    parser_reprocess_interval_hours: float = Field(default=4.0, alias="PARSER_REPROCESS_INTERVAL_HOURS")
+    parser_reprocess_batch_size: int = Field(default=20, alias="PARSER_REPROCESS_BATCH_SIZE")
+    parser_reprocess_min_age_minutes: int = Field(default=15, alias="PARSER_REPROCESS_MIN_AGE_MINUTES")
+    parser_reprocess_lookback_days: int = Field(default=14, alias="PARSER_REPROCESS_LOOKBACK_DAYS")
 
     startup_backfill_enabled: bool = Field(default=True, alias="STARTUP_BACKFILL_ENABLED")
     startup_backfill_limit_per_channel: int = Field(default=500, alias="STARTUP_BACKFILL_LIMIT_PER_CHANNEL")

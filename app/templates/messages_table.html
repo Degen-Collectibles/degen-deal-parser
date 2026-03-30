@@ -4,31 +4,36 @@
     <meta charset="utf-8">
     <title>{{ title }}</title>
     <style>
-        :root { --bg:#f7f1e8; --card:#fffaf3; --line:#e4d5c3; --text:#241b15; --muted:#6b5b4f; --accent:#d55338; --shadow:0 18px 36px rgba(77,46,20,.12); }
+        :root { --bg:#f4ebdf; --bg-deep:#ead8c0; --card:#fff9f2; --card-strong:#fffdf8; --line:#deccb6; --text:#24170f; --muted:#6b5849; --accent:#d55338; --accent-strong:#9f311d; --shadow:0 20px 44px rgba(77,46,20,.13); }
         * { box-sizing:border-box; }
-        body { margin:0; font-family:"Trebuchet MS","Segoe UI",sans-serif; color:var(--text); background:radial-gradient(circle at top left, rgba(240,196,107,.24), transparent 28%), linear-gradient(180deg,#fcf8f2 0%, var(--bg) 100%); }
+        body { margin:0; font-family:"Aptos","Trebuchet MS","Segoe UI",sans-serif; color:var(--text); background:radial-gradient(circle at top left, rgba(240,196,107,.26), transparent 24%), radial-gradient(circle at 84% 10%, rgba(213,83,56,.10), transparent 18%), linear-gradient(180deg,#fcf7f0 0%, var(--bg) 46%, var(--bg-deep) 100%); }
         a { color:inherit; text-decoration:none; }
         .page { max-width:1660px; margin:0 auto; padding:22px; }
         .page.compact-review { max-width:1520px; }
+        .workspace-nav, .nav-links, .hero-meta, .section-header, .scope-strip { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+        .workspace-nav { justify-content:space-between; margin-bottom:14px; padding:12px 16px; border:1px solid rgba(159,49,29,.12); border-radius:20px; background:linear-gradient(180deg, rgba(255,253,248,.94), rgba(255,247,238,.82)); box-shadow:0 14px 28px rgba(77,46,20,.08); position:sticky; top:12px; z-index:7; backdrop-filter:blur(10px); }
+        .nav-links { justify-content:flex-end; }
         .banner { padding:12px 16px; border-radius:14px; margin-bottom:16px; font-weight:700; border:1px solid; box-shadow:var(--shadow); }
         .banner-success { background:#edf9f2; border-color:#a6e2bf; color:#166647; }
         .banner-error { background:#fff0ef; border-color:#efb8b4; color:#9d2f2b; }
         .banner-warning { background:#fff5df; border-color:#efc28f; color:#8a580d; }
-        .hero, .card, details.panel { background:var(--card); border:1px solid var(--line); border-radius:24px; box-shadow:var(--shadow); }
-        .hero { display:grid; grid-template-columns:minmax(220px,300px) 1fr; gap:24px; align-items:center; padding:24px; margin-bottom:18px; background:radial-gradient(circle at 15% 20%, rgba(255,216,139,.5), transparent 24%), linear-gradient(135deg, rgba(255,248,236,.96), rgba(255,240,228,.92)); }
+        .hero, .card, details.panel { background:linear-gradient(180deg, var(--card-strong), var(--card)); border:1px solid var(--line); border-radius:24px; box-shadow:var(--shadow); }
+        .hero { display:grid; grid-template-columns:minmax(220px,300px) 1fr; gap:24px; align-items:center; padding:28px; margin-bottom:18px; background:radial-gradient(circle at 15% 20%, rgba(255,216,139,.55), transparent 24%), radial-gradient(circle at 78% 22%, rgba(213,83,56,.11), transparent 20%), linear-gradient(135deg, rgba(255,249,239,.98), rgba(255,238,223,.95)); }
         .logo-wrap img { width:100%; max-width:280px; display:block; margin:0 auto; filter:drop-shadow(0 18px 28px rgba(60,24,8,.2)); }
         .eyebrow, .pill, .status-pill { display:inline-flex; align-items:center; padding:6px 10px; border-radius:999px; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; }
-        .eyebrow { background:rgba(37,28,22,.06); color:var(--muted); width:fit-content; }
+        .eyebrow { background:rgba(37,28,22,.06); color:var(--accent-strong); width:fit-content; }
         .pill { background:#f5eadc; color:var(--muted); }
         .pill.active { background:#e7f5ee; color:#11543d; }
-        h1 { margin:10px 0 8px; font-size:clamp(30px,4vw,52px); line-height:.95; letter-spacing:-.04em; }
+        h1, .section-title, .scope-title { font-family:"Georgia","Cambria","Times New Roman",serif; }
+        h1 { margin:10px 0 8px; font-size:clamp(34px,4vw,56px); line-height:.93; letter-spacing:-.045em; }
         p, .helper, .muted, .subtle { color:var(--muted); }
         p { margin:0 0 16px; max-width:900px; line-height:1.6; font-size:15px; }
         .hero-actions, .inline-actions, .toolbar-actions, .pagination-controls, .row-actions, .progress-meta, .bulk-bar, .table-toolbar, .pagination-bar, .queue-strip, .queue-strip-actions, .table-meta, .row-flags, .message-meta, .bulk-status { display:flex; gap:8px; flex-wrap:wrap; align-items:center; justify-content:space-between; }
-        .button, button { appearance:none; border:none; border-radius:14px; padding:10px 14px; font:inherit; font-weight:800; cursor:pointer; transition:transform .15s ease; }
+        .hero-meta { margin-top:12px; }
+        .button, button { appearance:none; border:none; border-radius:16px; padding:11px 15px; font:inherit; font-weight:800; cursor:pointer; transition:transform .15s ease; }
         .button:hover, button:hover { transform:translateY(-1px); }
-        .primary-button { background:linear-gradient(135deg,var(--accent),#ef6e48); color:#fff; box-shadow:0 10px 18px rgba(212,83,56,.22); }
-        .secondary-button { background:#fff; color:var(--text); border:1px solid var(--line); }
+        .primary-button { background:linear-gradient(135deg,var(--accent-strong),#df623f 55%, #f0875e); color:#fff; box-shadow:0 14px 24px rgba(159,49,29,.24); }
+        .secondary-button { background:linear-gradient(180deg,#fffdfa,#fff4e8); color:var(--text); border:1px solid var(--line); }
         .danger-button { background:linear-gradient(135deg,#942d23,#c03e33); color:#fff; box-shadow:0 10px 18px rgba(148,45,35,.2); }
         .tiny-button { width:auto; min-width:0; padding:6px 10px; border-radius:10px; font-size:12px; }
         .top-grid { display:grid; grid-template-columns:1.35fr .95fr; gap:18px; margin-bottom:18px; }
@@ -37,9 +42,14 @@
         .sidebar { display:flex; flex-direction:column; gap:16px; position:sticky; top:18px; }
         .page.sidebar-collapsed .sidebar { display:none; }
         .card { padding:18px; }
+        .section-header { justify-content:space-between; margin-bottom:12px; }
+        .section-title { margin:0; font-size:24px; letter-spacing:-.04em; }
+        .section-subtitle { margin:4px 0 0; color:var(--muted); font-size:13px; line-height:1.5; }
+        .mode-chip { display:inline-flex; align-items:center; padding:6px 10px; border-radius:999px; background:#fff; border:1px solid var(--line); color:var(--muted); font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; }
+        .scope-strip { justify-content:space-between; margin-top:14px; padding:12px 14px; border:1px solid #eadfce; border-radius:18px; background:#fffdf9; }
         .summary-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin-bottom:12px; }
         .financial-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }
-        .metric { background:rgba(255,255,255,.72); border:1px solid var(--line); border-radius:18px; padding:14px; min-height:92px; }
+        .metric { background:linear-gradient(180deg, rgba(255,255,255,.86), rgba(255,248,238,.75)); border:1px solid var(--line); border-radius:18px; padding:14px; min-height:92px; }
         .metric-label { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.08em; margin-bottom:8px; font-weight:800; }
         .metric-value { font-size:28px; font-weight:800; letter-spacing:-.04em; }
         .metric-sub, .helper, .muted, .subtle { font-size:12px; line-height:1.5; }
@@ -49,7 +59,7 @@
         .progress-fill { background:linear-gradient(90deg,#d44b34,#f0c46b); transition:width .25s ease; }
         .progress-text { margin-top:8px; font-size:12px; color:var(--muted); line-height:1.5; }
         .health-strip { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-top:12px; }
-        .health-chip { padding:10px 12px; border-radius:14px; border:1px solid #eadfce; background:#fffdf9; }
+        .health-chip { padding:10px 12px; border-radius:14px; border:1px solid #eadfce; background:linear-gradient(180deg,#fffdfa,#fff5ea); }
         .health-chip strong { display:block; font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin-bottom:4px; }
         .health-chip span { display:block; font-size:18px; font-weight:800; letter-spacing:-.03em; }
         .chart-fill { min-width:2px; background:linear-gradient(90deg,#c96d16,#d44b34); }
@@ -79,7 +89,7 @@
         .scope-title { font-size:24px; margin:0; letter-spacing:-.03em; }
         .table-scroll-top { overflow-x:auto; overflow-y:hidden; border:1px solid #eadfce; border-bottom:none; border-radius:20px 20px 0 0; background:rgba(255,255,255,.88); height:18px; }
         .table-scroll-top-inner { height:1px; }
-        .table-shell { overflow:auto; border:1px solid #eadfce; border-radius:0 0 20px 20px; background:#fff; max-height:72vh; }
+        .table-shell { overflow:auto; border:1px solid #eadfce; border-radius:0 0 20px 20px; background:linear-gradient(180deg,#fffdfa,#fff9f2); max-height:72vh; }
         table { width:100%; border-collapse:separate; border-spacing:0; min-width:1520px; }
         th, td { padding:10px 12px; border-bottom:1px solid #efe4d6; vertical-align:top; text-align:left; font-size:13px; line-height:1.35; }
         thead th { position:sticky; top:0; z-index:2; background:#fff6ea; color:var(--muted); font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; border-bottom:1px solid #e2d1bb; }
@@ -159,12 +169,29 @@
         .section-subtle { font-size:12px; color:var(--muted); }
         @keyframes panelFade { from { opacity:0; transform:translateY(-4px); } to { opacity:1; transform:translateY(0); } }
         @media (max-width:1200px){.top-grid,.dashboard{grid-template-columns:1fr}.sidebar{position:static}}
-        @media (max-width:900px){.page{padding:16px 14px 28px}.hero{grid-template-columns:1fr;text-align:center}.eyebrow{margin:0 auto}.hero-actions{justify-content:center}.summary-grid,.financial-grid,.detail-grid,.chart-row,.review-rail{grid-template-columns:1fr}.inline-review-grid{grid-template-columns:1fr}.queue-strip{position:static}}
+        @media (max-width:900px){.page{padding:16px 14px 28px}.hero{grid-template-columns:1fr;text-align:center}.eyebrow{margin:0 auto}.hero-actions{justify-content:center}.summary-grid,.financial-grid,.detail-grid,.chart-row,.review-rail{grid-template-columns:1fr}.inline-review-grid{grid-template-columns:1fr}.queue-strip{position:static}.workspace-nav{position:static}}
         @media (max-width:640px){.summary-grid,.financial-grid,.detail-grid,.chart-row{grid-template-columns:1fr}}
     </style>
 </head>
 <body>
     <div class="page{% if is_review_page %} review-page{% endif %}" id="messages-page">
+        <div class="workspace-nav">
+            <div>
+                <strong>{% if is_review_page %}Advanced review table{% else %}Admin power table{% endif %}</strong>
+                <div class="subtle">{% if is_review_page %}Dense triage mode for fast inline correction when the standard review queue is not enough.{% else %}High-control operations view for ingest, parsing, backfill, and ledger cleanup.{% endif %}</div>
+            </div>
+            <div class="nav-links">
+                <a href="/dashboard" class="button secondary-button" style="width:auto;">Dashboard</a>
+                {% if is_review_page %}
+                <a href="/review" class="button secondary-button" style="width:auto;">Review Queue</a>
+                <a href="/review/history" class="button secondary-button" style="width:auto;">History</a>
+                {% else %}
+                <a href="/admin" class="button secondary-button" style="width:auto;">Admin</a>
+                <a href="/status" class="button secondary-button" style="width:auto;">Status</a>
+                {% endif %}
+                <a href="/reports" class="button secondary-button" style="width:auto;">Reports</a>
+            </div>
+        </div>
         {% if success %}<div class="banner banner-success">{{ success }}</div>{% endif %}
         {% if error %}<div class="banner banner-error">{{ error }}</div>{% endif %}
         <div class="banner banner-warning" id="local-runtime-warning" {% if not parser_progress["local_runtime"]["needs_attention"] %}style="display:none;"{% endif %}>
@@ -182,11 +209,21 @@
                     <a href="/admin" class="button primary-button" style="width:auto;">Back to Admin Hub</a>
                     <a href="/bookkeeping" class="button secondary-button" style="width:auto;">Bookkeeping</a>
                     <a href="/messages/export.csv?status={{ selected_status }}&channel_id={{ selected_channel_id }}&after={{ selected_after }}&before={{ selected_before }}&sort_by={{ selected_sort_by }}&sort_dir={{ selected_sort_dir }}" class="button secondary-button" style="width:auto;">Export Table CSV</a>
+                    <form method="post" action="/admin/parser/reprocess-form" style="display:inline-flex; gap:8px; flex-wrap:wrap;">
+                        <input type="hidden" name="return_path" value="{{ return_path }}">
+                        <button type="submit" class="button secondary-button" style="width:auto;">Run Parser Recheck</button>
+                        <button type="submit" name="force" value="true" class="button secondary-button" style="width:auto;">Force Recheck</button>
+                    </form>
                     {% else %}
                     <a href="/review" class="button primary-button" style="width:auto;">Open Reviewer Queue</a>
                     <a href="/table" class="button secondary-button" style="width:auto;">Back to Main Table</a>
                     <a href="/review/history" class="button secondary-button" style="width:auto;">Review History</a>
                     {% endif %}
+                </div>
+                <div class="hero-meta">
+                    <span class="mode-chip">{% if is_review_page %}dense review mode{% else %}admin controls visible{% endif %}</span>
+                    <span class="mode-chip">{{ selected_status if selected_status else "all visible statuses" }}</span>
+                    <span class="mode-chip">{{ selected_limit }} rows per page</span>
                 </div>
             </div>
         </section>
@@ -315,9 +352,22 @@
 
             <main>
                 <div class="card">
+                    <div class="section-header">
+                        <div>
+                            <h2 class="section-title">{% if is_review_page %}Work Queue{% else %}Operational Feed{% endif %}</h2>
+                            <div class="section-subtitle">{% if is_review_page %}Use this denser table when you want more rows on screen, bulk actions, and inline edits without leaving the page.{% else %}Keep an eye on parser state, scan raw message flow, and drop into deeper actions only when you need them.{% endif %}</div>
+                        </div>
+                    </div>
                     <div class="table-toolbar">
                         <div class="scope-stack"><h2 class="scope-title">{% if is_review_page %}Review Queue{% else %}Transaction Feed{% endif %}</h2><div class="muted">Showing {{ pagination["start_row"] }}-{{ pagination["end_row"] }} of {{ pagination["total_rows"] }}{% if selected_after or selected_before %} for the selected date range{% endif %}</div></div>
                         <div class="toolbar-actions"><span class="pill">{{ selected_status if selected_status else "all visible statuses" }}</span><span class="pill">{{ selected_limit }} rows/page</span><button type="button" id="auto-refresh-toggle" class="pill active" style="border:none; cursor:pointer;">Auto Refresh On</button>{% if is_review_page %}<span class="hotkey-pill">Ctrl/Cmd+S saves focused row</span>{% endif %}</div>
+                    </div>
+                    <div class="scope-strip">
+                        <div class="subtle">{% if selected_channel_id %}Scoped to one channel.{% else %}Across all visible channels.{% endif %}{% if selected_after or selected_before %} Date filters are active.{% else %} No date range filters applied.{% endif %}</div>
+                        <div class="inline-actions">
+                            <span class="mode-chip">page {{ pagination["page"] }} of {{ pagination["total_pages"] }}</span>
+                            <span class="mode-chip">{{ pagination["total_rows"] }} visible rows</span>
+                        </div>
                     </div>
 
                     <div class="pagination-bar">
