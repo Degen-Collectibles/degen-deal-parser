@@ -6,7 +6,7 @@ from typing import Optional
 
 from sqlmodel import Session, select
 
-from .db import engine
+from .db import engine, managed_session
 from .models import DiscordMessage, ReviewCorrection, utcnow
 
 
@@ -86,7 +86,7 @@ def get_exact_correction_match(message_text: str) -> dict | None:
     if not normalized_text:
         return None
 
-    with Session(engine) as session:
+    with managed_session() as session:
         correction = session.exec(
             select(ReviewCorrection)
             .where(ReviewCorrection.normalized_text == normalized_text)
@@ -111,7 +111,7 @@ def get_relevant_correction_hints(message_text: str, limit: int = 3) -> list[dic
     if not message_tokens:
         return []
 
-    with Session(engine) as session:
+    with managed_session() as session:
         corrections = session.exec(
             select(ReviewCorrection).order_by(ReviewCorrection.updated_at.desc())
         ).all()
@@ -160,7 +160,7 @@ def get_relevant_correction_hints(message_text: str, limit: int = 3) -> list[dic
 
 
 def get_correction_pattern_counts(limit: int = 10) -> list[dict]:
-    with Session(engine) as session:
+    with managed_session() as session:
         corrections = session.exec(select(ReviewCorrection)).all()
 
     grouped: dict[str, dict] = {}
@@ -222,6 +222,54 @@ def get_learning_signal(session: Session, message_text: str) -> dict:
         "promoted_rule": promoted_rule,
         "similar_count": similar_count,
     }
+
+
+def get_learning_signals(session: Session, message_texts: list[str]) -> dict[str, dict]:
+    normalized_texts = {
+        message_text: normalize_correction_text(message_text)
+        for message_text in message_texts
+    }
+    non_empty_normalized = {value for value in normalized_texts.values() if value}
+    if not non_empty_normalized:
+        return {
+            message_text: {
+                "exact_match": False,
+                "promoted_rule": False,
+                "similar_count": 0,
+            }
+            for message_text in message_texts
+        }
+
+    exact_matches = session.exec(
+        select(ReviewCorrection).where(ReviewCorrection.normalized_text.in_(non_empty_normalized))
+    ).all()
+
+    exact_matches_by_text: dict[str, list[ReviewCorrection]] = {}
+    for correction in exact_matches:
+        exact_matches_by_text.setdefault(correction.normalized_text, []).append(correction)
+
+    results: dict[str, dict] = {}
+    for message_text in message_texts:
+        normalized_text = normalized_texts[message_text]
+        if not normalized_text:
+            results[message_text] = {
+                "exact_match": False,
+                "promoted_rule": False,
+                "similar_count": 0,
+            }
+            continue
+
+        exact_matches = exact_matches_by_text.get(normalized_text, [])
+        exact_match = bool(exact_matches)
+        promoted_rule = any(match.correction_source == "promoted_rule" for match in exact_matches)
+
+        results[message_text] = {
+            "exact_match": exact_match,
+            "promoted_rule": promoted_rule,
+            "similar_count": 0,
+        }
+
+    return results
 
 
 def promote_correction_pattern(session: Session, normalized_text: str) -> int:

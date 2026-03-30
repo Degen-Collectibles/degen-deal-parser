@@ -4,10 +4,11 @@ import uuid
 import re
 from datetime import datetime, timezone, timedelta
 
+from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, select
 
 from .config import get_settings
-from .db import engine
+from .db import dispose_engine, engine, managed_session
 from .financials import compute_financials
 from .models import DiscordMessage, ParseAttempt
 from .parser import parse_message, TimedOutRowError
@@ -136,6 +137,9 @@ async def parser_loop(stop_event: asyncio.Event):
     while not stop_event.is_set():
         try:
             await process_once()
+        except OperationalError as e:
+            print(f"[worker] database connection error: {e}")
+            dispose_engine()
         except Exception as e:
             print(f"[worker] loop error: {e}")
         await asyncio.sleep(settings.parser_poll_seconds)
@@ -144,7 +148,7 @@ async def parser_loop(stop_event: asyncio.Event):
 async def process_once():
     row_ids: list[int] = []
 
-    with Session(engine) as session:
+    with managed_session() as session:
         close_or_recover_unfinished_attempts(session)
 
         rows = session.exec(
@@ -176,7 +180,7 @@ async def process_once():
 
 
 async def process_row(row_id: int):
-    with Session(engine) as session:
+    with managed_session() as session:
         row = session.get(DiscordMessage, row_id)
         if not row:
             return
