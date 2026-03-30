@@ -47,7 +47,7 @@ from .corrections import (
     promote_correction_pattern,
     save_review_correction,
 )
-from .db import engine, get_session, init_db, managed_session, recent_db_failure
+from .db import dispose_engine, engine, get_session, init_db, managed_session, recent_db_failure
 from .discord_ingest import (
     discord_runtime_state,
     get_discord_client,
@@ -63,7 +63,7 @@ from .reporting import build_financial_summary, get_financial_rows, parse_report
 from .runtime_monitor import get_runtime_heartbeat_status, runtime_heartbeat_loop
 from .schemas import HealthOut
 from .transactions import build_transaction_summary, get_transactions, rebuild_transactions, sync_transaction_from_message
-from .worker import STALE_PROCESSING_AFTER, parser_loop
+from .worker import STALE_PROCESSING_AFTER, parser_loop, queue_auto_reprocess_candidates
 
 
 settings = get_settings()
@@ -2774,6 +2774,28 @@ def admin_rebuild_transactions_form(session: Session = Depends(get_session)):
     rebuilt = rebuild_transactions(session)
     return RedirectResponse(
         url=f"/table?success=Rebuilt+{rebuilt}+normalized+transactions",
+        status_code=303,
+    )
+
+
+@app.post("/admin/parser/reprocess-form")
+def admin_parser_reprocess_form(
+    request: Request,
+    return_path: str = Form(default="/table"),
+    force: Optional[str] = Form(default=None),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "admin"):
+        return denial
+
+    queued = queue_auto_reprocess_candidates(
+        session,
+        force=bool(force),
+    )
+    separator = "&" if "?" in return_path else "?"
+    mode_label = "manual+full" if force else "manual"
+    return RedirectResponse(
+        url=f"{return_path}{separator}success=Queued+{queued}+rows+for+{mode_label}+parser+reprocess",
         status_code=303,
     )
 
