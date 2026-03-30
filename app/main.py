@@ -1038,6 +1038,8 @@ def dashboard_page(
     user = getattr(request.state, "current_user", None)
     review_summary = get_summary(session, status="review_queue")
     overall_summary = get_summary(session)
+    dashboard_snapshot = build_dashboard_snapshot(session)
+    parser_progress = get_parser_progress(session)
     recent_reviewed = build_message_list_items(
         session,
         session.exec(
@@ -1057,8 +1059,9 @@ def dashboard_page(
             "current_user": user,
             "review_summary": review_summary,
             "overall_summary": overall_summary,
+            "dashboard_snapshot": dashboard_snapshot,
             "recent_reviewed": recent_reviewed,
-            "parser_progress": get_parser_progress(session),
+            "parser_progress": parser_progress,
         },
     )
 
@@ -1575,6 +1578,113 @@ def build_status_snapshot(session: Session) -> dict:
             "discord_ingest_enabled": settings.discord_ingest_enabled,
             "parser_worker_enabled": settings.parser_worker_enabled,
         },
+    }
+
+
+def format_dashboard_money(value: float) -> str:
+    amount = round(float(value or 0.0), 2)
+    if abs(amount) >= 1000:
+        return f"${amount:,.0f}"
+    if amount == int(amount):
+        return f"${amount:,.0f}"
+    return f"${amount:,.2f}"
+
+
+def build_dashboard_snapshot(session: Session) -> dict:
+    now_pacific = datetime.now(PACIFIC_TZ)
+    today_start = now_pacific.replace(hour=0, minute=0, second=0, microsecond=0)
+    tomorrow_start = today_start + timedelta(days=1)
+    today_start_utc = today_start.astimezone(timezone.utc)
+    tomorrow_start_utc = tomorrow_start.astimezone(timezone.utc)
+
+    today_rows = get_financial_rows(
+        session,
+        start=today_start_utc,
+        end=tomorrow_start_utc,
+    )
+    today_summary = build_financial_summary(today_rows)
+    today_counts = today_summary["counts"]
+    today_totals = today_summary["totals"]
+
+    recent_ingested_count = int(
+        session.exec(
+            select(func.count())
+            .select_from(DiscordMessage)
+            .where(DiscordMessage.ingested_at >= today_start_utc)
+        ).one()
+    )
+    reviewed_today_count = int(
+        session.exec(
+            select(func.count())
+            .select_from(DiscordMessage)
+            .where(DiscordMessage.reviewed_at != None)  # noqa: E711
+            .where(DiscordMessage.reviewed_at >= today_start_utc)
+        ).one()
+    )
+
+    top_channel_rows = session.exec(
+        select(
+            DiscordMessage.channel_id,
+            func.coalesce(func.max(DiscordMessage.channel_name), DiscordMessage.channel_id),
+            func.count(),
+            func.coalesce(func.sum(DiscordMessage.money_in), 0.0),
+            func.coalesce(func.sum(DiscordMessage.money_out), 0.0),
+        )
+        .where(DiscordMessage.is_deleted == False)  # noqa: E712
+        .where(DiscordMessage.parse_status.in_(["parsed", "needs_review"]))
+        .where(
+            (DiscordMessage.stitched_group_id == None) | (DiscordMessage.stitched_primary == True)
+        )
+        .where(DiscordMessage.created_at >= today_start_utc)
+        .where(DiscordMessage.created_at < tomorrow_start_utc)
+        .group_by(DiscordMessage.channel_id)
+        .order_by(func.count().desc(), func.max(DiscordMessage.created_at).desc())
+        .limit(5)
+    ).all()
+
+    top_channels = [
+        {
+            "channel_id": channel_id,
+            "channel_name": channel_name or channel_id,
+            "deal_count": int(deal_count or 0),
+            "money_in": float(money_in or 0.0),
+            "money_out": float(money_out or 0.0),
+            "money_in_display": format_dashboard_money(float(money_in or 0.0)),
+            "money_out_display": format_dashboard_money(float(money_out or 0.0)),
+            "net_display": format_dashboard_money(float(money_in or 0.0) - float(money_out or 0.0)),
+        }
+        for channel_id, channel_name, deal_count, money_in, money_out in top_channel_rows
+    ]
+
+    payment_mix = [
+        {"label": label.replace("_", " ").title(), "value": format_dashboard_money(amount)}
+        for label, amount in list(today_summary["payment_methods"].items())[:4]
+    ]
+    category_mix = [
+        {"label": label.replace("_", " ").title(), "value": format_dashboard_money(amount)}
+        for label, amount in list(today_summary["deal_categories"].items())[:4]
+    ]
+
+    return {
+        "today_label": today_start.strftime("%A, %b %d"),
+        "today": {
+            "rows": today_summary["rows"],
+            "sales_count": int(today_counts.get("sale", 0)),
+            "buy_count": int(today_counts.get("buy", 0)),
+            "trade_count": int(today_counts.get("trade", 0)),
+            "expense_count": int(today_counts.get("expense", 0)),
+            "needs_review_count": int(today_counts.get("needs_review", 0)),
+            "reviewed_today_count": reviewed_today_count,
+            "recent_ingested_count": recent_ingested_count,
+            "sales_display": format_dashboard_money(today_totals.get("sales", 0.0)),
+            "buys_display": format_dashboard_money(today_totals.get("buys", 0.0)),
+            "net_display": format_dashboard_money(today_totals.get("net", 0.0)),
+            "trade_in_display": format_dashboard_money(today_totals.get("trade_cash_in", 0.0)),
+            "trade_out_display": format_dashboard_money(today_totals.get("trade_cash_out", 0.0)),
+        },
+        "top_channels": top_channels,
+        "payment_mix": payment_mix,
+        "category_mix": category_mix,
     }
 
 

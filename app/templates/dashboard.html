@@ -17,21 +17,30 @@
         .pill { background:#f5eadc; color:var(--muted); }
         h1 { margin:10px 0 8px; font-size:clamp(32px,4vw,50px); line-height:.95; letter-spacing:-.04em; }
         p, .small { color:var(--muted); line-height:1.5; }
-        .top-actions, .quick-links { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+        .top-actions, .quick-links, .stack, .mix-list { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
         .button, button { appearance:none; border:none; border-radius:14px; padding:10px 14px; font:inherit; font-weight:800; cursor:pointer; }
         .primary-button { background:linear-gradient(135deg,var(--accent),#ef6e48); color:#fff; box-shadow:0 10px 18px rgba(212,83,56,.22); }
         .secondary-button { background:#fff; color:var(--text); border:1px solid var(--line); }
         .card { padding:18px; margin-bottom:18px; }
-        .summary-grid { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:12px; margin-bottom:18px; }
+        .summary-grid { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:12px; margin-bottom:18px; }
         .metric { background:rgba(255,255,255,.72); border:1px solid var(--line); border-radius:18px; padding:14px; }
         .metric-label { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.08em; margin-bottom:8px; font-weight:800; }
         .metric-value { font-size:28px; font-weight:800; letter-spacing:-.04em; }
-        .layout { display:grid; grid-template-columns:1.2fr .8fr; gap:18px; }
+        .metric-footnote { color:var(--muted); font-size:12px; margin-top:6px; }
+        .layout { display:grid; grid-template-columns:1.15fr .85fr; gap:18px; }
+        .double-grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
         .review-item { padding:12px 0; border-top:1px solid #eee3d3; }
         .review-item:first-child { border-top:none; padding-top:0; }
         .meta-row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
         .alert { margin-bottom:18px; padding:14px 16px; border-radius:18px; border:1px solid #efc28f; background:#fff5df; color:#8a580d; font-weight:700; }
-        @media (max-width:1000px){ .hero, .layout, .summary-grid { grid-template-columns:1fr; } .page { padding:16px 14px 28px; } .eyebrow { margin:0 auto; } }
+        .section-title { margin:0 0 10px; font-size:24px; letter-spacing:-.04em; }
+        .section-subtitle { margin:0 0 16px; color:var(--muted); }
+        .action-list { display:grid; gap:12px; }
+        .action-row, .channel-row { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; padding:12px 0; border-top:1px solid #eee3d3; }
+        .action-row:first-child, .channel-row:first-child { border-top:none; padding-top:0; }
+        .channel-metrics { text-align:right; color:var(--muted); font-size:13px; }
+        .mix-pill { display:inline-flex; align-items:center; padding:7px 10px; border-radius:999px; background:#fff; border:1px solid var(--line); color:var(--muted); font-size:12px; font-weight:700; }
+        @media (max-width:1000px){ .hero, .layout, .summary-grid, .double-grid { grid-template-columns:1fr; } .page { padding:16px 14px 28px; } .eyebrow { margin:0 auto; } }
     </style>
 </head>
 <body>
@@ -41,7 +50,7 @@
             <div>
                 <div class="eyebrow">Internal Operations</div>
                 <h1>{{ title }}</h1>
-                <p>Welcome back{% if current_user %}, {{ current_user.display_name or current_user.username }}{% endif %}. This is the quickest place to jump into reviewing, reporting, or admin tasks without dropping into the power table first.</p>
+                <p>Welcome back{% if current_user %}, {{ current_user.display_name or current_user.username }}{% endif %}. This is your daily briefing for deal flow, review pressure, and worker health so you can decide what needs attention first.</p>
                 <div class="quick-links">
                     {% if current_user and current_user.role in ["admin","reviewer"] %}<a class="button primary-button" href="/review">Open Review Queue</a>{% endif %}
                     <a class="button secondary-button" href="/deals">Deals</a>
@@ -61,16 +70,141 @@
         {% endif %}
 
         <div class="summary-grid">
-            <div class="metric"><div class="metric-label">Needs Review</div><div class="metric-value">{{ review_summary["needs_review"] }}</div></div>
-            <div class="metric"><div class="metric-label">Failed</div><div class="metric-value">{{ review_summary["failed"] }}</div></div>
-            <div class="metric"><div class="metric-label">Queued</div><div class="metric-value">{{ parser_progress["queued"] }}</div></div>
-            <div class="metric"><div class="metric-label">Processing</div><div class="metric-value">{{ parser_progress["processing"] }}</div></div>
-            <div class="metric"><div class="metric-label">Parsed</div><div class="metric-value">{{ overall_summary["parsed"] }}</div></div>
+            <div class="metric">
+                <div class="metric-label">Today’s Deals</div>
+                <div class="metric-value">{{ dashboard_snapshot["today"]["rows"] }}</div>
+                <div class="metric-footnote">{{ dashboard_snapshot["today_label"] }}</div>
+            </div>
+            <div class="metric">
+                <div class="metric-label">Money In Today</div>
+                <div class="metric-value">{{ dashboard_snapshot["today"]["sales_display"] }}</div>
+                <div class="metric-footnote">{{ dashboard_snapshot["today"]["sales_count"] }} sale{{ "" if dashboard_snapshot["today"]["sales_count"] == 1 else "s" }}</div>
+            </div>
+            <div class="metric">
+                <div class="metric-label">Money Out Today</div>
+                <div class="metric-value">{{ dashboard_snapshot["today"]["buys_display"] }}</div>
+                <div class="metric-footnote">{{ dashboard_snapshot["today"]["buy_count"] }} buy{{ "" if dashboard_snapshot["today"]["buy_count"] == 1 else "s" }}</div>
+            </div>
+            <div class="metric">
+                <div class="metric-label">Net Cash Today</div>
+                <div class="metric-value">{{ dashboard_snapshot["today"]["net_display"] }}</div>
+                <div class="metric-footnote">{{ dashboard_snapshot["today"]["trade_count"] }} trade{{ "" if dashboard_snapshot["today"]["trade_count"] == 1 else "s" }}</div>
+            </div>
+            <div class="metric">
+                <div class="metric-label">Needs Review</div>
+                <div class="metric-value">{{ review_summary["needs_review"] }}</div>
+                <div class="metric-footnote">{{ dashboard_snapshot["today"]["reviewed_today_count"] }} reviewed today</div>
+            </div>
+            <div class="metric">
+                <div class="metric-label">Worker Queue</div>
+                <div class="metric-value">{{ parser_progress["queued"] + parser_progress["processing"] }}</div>
+                <div class="metric-footnote">{{ parser_progress["processing"] }} processing now</div>
+            </div>
         </div>
 
         <div class="layout">
             <div class="card">
-                <h2 style="margin-top:0;">Recent Reviewed Deals</h2>
+                <h2 class="section-title">What Needs Attention</h2>
+                <p class="section-subtitle">Start here before you drop into the big tables.</p>
+                <div class="action-list">
+                    <div class="action-row">
+                        <div>
+                            <strong>Review queue</strong>
+                            <div class="small">{{ review_summary["needs_review"] }} rows still need human review.</div>
+                        </div>
+                        {% if current_user and current_user.role in ["admin","reviewer"] %}
+                        <a class="button primary-button" href="/review">Review Now</a>
+                        {% endif %}
+                    </div>
+                    <div class="action-row">
+                        <div>
+                            <strong>Worker health</strong>
+                            <div class="small">{{ parser_progress["local_runtime"]["label"] }}{% if parser_progress["local_runtime"]["host_name"] %} on {{ parser_progress["local_runtime"]["host_name"] }}{% endif %} with Discord {{ parser_progress["local_runtime"]["details"].get("discord_status", "unknown") }}.</div>
+                        </div>
+                        <a class="button secondary-button" href="/status">Open Status</a>
+                    </div>
+                    <div class="action-row">
+                        <div>
+                            <strong>Today’s intake</strong>
+                            <div class="small">{{ dashboard_snapshot["today"]["recent_ingested_count"] }} raw messages ingested today and {{ dashboard_snapshot["today"]["rows"] }} normalized deal rows.</div>
+                        </div>
+                        <a class="button secondary-button" href="/table">Open Table</a>
+                    </div>
+                    <div class="action-row">
+                        <div>
+                            <strong>Reports and bookkeeping</strong>
+                            <div class="small">Check cash movement, reconciliation, and partner-facing rollups.</div>
+                        </div>
+                        <div class="stack">
+                            <a class="button secondary-button" href="/reports">Reports</a>
+                            {% if current_user and current_user.role == "admin" %}<a class="button secondary-button" href="/bookkeeping">Bookkeeping</a>{% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2 class="section-title">Today at a Glance</h2>
+                <p class="section-subtitle">A quick read on today’s deal mix.</p>
+                <div class="review-item">
+                    <div class="metric-label">Deal Breakdown</div>
+                    <div class="mix-list">
+                        <span class="mix-pill">{{ dashboard_snapshot["today"]["sales_count"] }} sales</span>
+                        <span class="mix-pill">{{ dashboard_snapshot["today"]["buy_count"] }} buys</span>
+                        <span class="mix-pill">{{ dashboard_snapshot["today"]["trade_count"] }} trades</span>
+                        <span class="mix-pill">{{ dashboard_snapshot["today"]["expense_count"] }} expenses</span>
+                    </div>
+                </div>
+                <div class="review-item">
+                    <div class="metric-label">Trade Cash</div>
+                    <div>{{ dashboard_snapshot["today"]["trade_in_display"] }} in / {{ dashboard_snapshot["today"]["trade_out_display"] }} out</div>
+                </div>
+                <div class="review-item">
+                    <div class="metric-label">Payment Mix</div>
+                    <div class="mix-list">
+                        {% for row in dashboard_snapshot["payment_mix"] %}
+                        <span class="mix-pill">{{ row["label"] }} {{ row["value"] }}</span>
+                        {% else %}
+                        <span class="small">No payment mix yet today.</span>
+                        {% endfor %}
+                    </div>
+                </div>
+                <div class="review-item">
+                    <div class="metric-label">Category Mix</div>
+                    <div class="mix-list">
+                        {% for row in dashboard_snapshot["category_mix"] %}
+                        <span class="mix-pill">{{ row["label"] }} {{ row["value"] }}</span>
+                        {% else %}
+                        <span class="small">No category signal yet today.</span>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="double-grid">
+            <div class="card">
+                <h2 class="section-title">Top Active Channels</h2>
+                <p class="section-subtitle">Where today’s deal volume is coming from.</p>
+                {% for row in dashboard_snapshot["top_channels"] %}
+                <div class="channel-row">
+                    <div>
+                        <strong>{{ row["channel_name"] }}</strong>
+                        <div class="small">{{ row["deal_count"] }} normalized deal{{ "" if row["deal_count"] == 1 else "s" }}</div>
+                    </div>
+                    <div class="channel-metrics">
+                        <div>{{ row["net_display"] }}</div>
+                        <div>{{ row["money_in_display"] }} in / {{ row["money_out_display"] }} out</div>
+                    </div>
+                </div>
+                {% else %}
+                <div class="small">No channel activity yet today.</div>
+                {% endfor %}
+            </div>
+
+            <div class="card">
+                <h2 class="section-title">Recent Reviewed Deals</h2>
+                <p class="section-subtitle">The most recently confirmed rows.</p>
                 {% for row in recent_reviewed %}
                 <div class="review-item">
                     <div class="meta-row">
@@ -85,23 +219,6 @@
                 {% else %}
                 <div class="small">No reviewed deals yet.</div>
                 {% endfor %}
-            </div>
-
-            <div class="card">
-                <h2 style="margin-top:0;">Parser Health</h2>
-              <div class="review-item"><div class="metric-label">Ingest Worker</div><div>{{ parser_progress["local_runtime"]["label"] }}{% if parser_progress["local_runtime"]["host_name"] %} on {{ parser_progress["local_runtime"]["host_name"] }}{% endif %}</div><div class="small">Last heartbeat: {{ parser_progress["local_runtime"]["updated_at_label"] }}</div></div>
-                <div class="review-item"><div class="metric-label">Discord Runtime</div><div>{{ parser_progress["local_runtime"]["details"].get("discord_status", "unknown") }}</div>{% if parser_progress["local_runtime"]["details"].get("discord_error") %}<div class="small">{{ parser_progress["local_runtime"]["details"]["discord_error"] }}</div>{% endif %}</div>
-                <div class="review-item"><div class="metric-label">Completion</div><div>{{ parser_progress["completed"] }} / {{ parser_progress["total"] }} ({{ parser_progress["percent_complete"] }}%)</div></div>
-                <div class="review-item"><div class="metric-label">Images In Flight</div><div>{{ parser_progress["processing_with_images"] }}</div></div>
-                <div class="review-item"><div class="metric-label">Oldest In Flight</div><div>{{ parser_progress["oldest_processing_age_label"] }}</div></div>
-                <div class="review-item"><div class="metric-label">Recovered Stale</div><div>{{ parser_progress["recovered_stale"] }}</div></div>
-                <div class="review-item"><div class="metric-label">OpenAI Spend</div><div>${{ "%.4f"|format(parser_progress["usage"]["estimated_cost_usd"]) }}</div></div>
-                {% if current_user and current_user.role in ["admin","reviewer"] %}
-                <div class="top-actions" style="margin-top:14px;">
-                    <a class="button primary-button" href="/review">Continue Reviewing</a>
-                    <a class="button secondary-button" href="/review/history">Review History</a>
-                </div>
-                {% endif %}
             </div>
         </div>
     </div>
