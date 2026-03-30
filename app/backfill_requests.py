@@ -108,7 +108,7 @@ def recover_stale_backfill_requests(session: Session) -> int:
     return recovered
 
 
-def claim_next_backfill_request(session: Session) -> Optional[BackfillRequest]:
+def claim_next_backfill_request(session: Session) -> Optional[dict]:
     request = session.exec(
         select(BackfillRequest)
         .where(BackfillRequest.status == "queued")
@@ -139,7 +139,17 @@ def claim_next_backfill_request(session: Session) -> Optional[BackfillRequest]:
             "requested_by": request.requested_by,
         },
     )
-    return request
+    session.refresh(request)
+    payload = {
+        "id": request.id,
+        "channel_id": request.channel_id,
+        "after": request.after,
+        "before": request.before,
+        "limit_per_channel": request.limit_per_channel,
+        "oldest_first": request.oldest_first,
+    }
+    session.expunge(request)
+    return payload
 
 
 def mark_backfill_request_complete(
@@ -194,28 +204,28 @@ async def process_backfill_request_once(client) -> bool:
     with managed_session() as session:
         request = claim_next_backfill_request(session)
 
-    if not request or request.id is None:
+    if not request or request.get("id") is None:
         return False
 
     try:
-        if request.channel_id:
+        if request["channel_id"]:
             result = await asyncio.wait_for(
                 client.backfill_channel(
-                    channel_id=int(request.channel_id),
-                    after=request.after,
-                    before=request.before,
-                    limit=request.limit_per_channel,
-                    oldest_first=request.oldest_first,
+                    channel_id=int(request["channel_id"]),
+                    after=request["after"],
+                    before=request["before"],
+                    limit=request["limit_per_channel"],
+                    oldest_first=request["oldest_first"],
                 ),
                 timeout=BACKFILL_REQUEST_TIMEOUT_SECONDS,
             )
         else:
             result = await asyncio.wait_for(
                 client.backfill_enabled_channels(
-                    after=request.after,
-                    before=request.before,
-                    limit_per_channel=request.limit_per_channel,
-                    oldest_first=request.oldest_first,
+                    after=request["after"],
+                    before=request["before"],
+                    limit_per_channel=request["limit_per_channel"],
+                    oldest_first=request["oldest_first"],
                 ),
                 timeout=BACKFILL_REQUEST_TIMEOUT_SECONDS,
             )
@@ -230,7 +240,7 @@ async def process_backfill_request_once(client) -> bool:
     with managed_session() as session:
         mark_backfill_request_complete(
             session,
-            request.id,
+            request["id"],
             ok=bool(result.get("ok")),
             result=result,
         )
