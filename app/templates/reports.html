@@ -33,11 +33,15 @@
         label { display:flex; flex-direction:column; gap:6px; font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); min-width:140px; }
         input, select { padding:10px 12px; border-radius:12px; border:1px solid var(--line); background:#fff; color:var(--text); font:inherit; }
         .helper-card { padding:12px 14px; border-radius:16px; border:1px solid #eadfce; background:linear-gradient(180deg,#fffdfa,#fff5ea); color:var(--muted); font-size:13px; }
+        .warning-card { padding:12px 14px; border-radius:16px; border:1px solid #efc28f; background:linear-gradient(180deg,#fff9ef,#fff1d8); color:#8a580d; font-size:13px; }
         .scope-strip { justify-content:space-between; margin-top:14px; padding:12px 14px; border:1px solid #eadfce; border-radius:18px; background:#fffdf9; }
         .section-header { justify-content:space-between; margin-bottom:12px; }
         .section-title { margin:0; font-size:24px; letter-spacing:-.04em; }
         .section-subtitle { margin:4px 0 0; color:var(--muted); }
         .scope-chip { display:inline-flex; align-items:center; padding:6px 10px; border-radius:999px; background:#fff; border:1px solid var(--line); color:var(--muted); font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; }
+        .toggle-row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:12px; }
+        .toggle-link { display:inline-flex; align-items:center; padding:8px 12px; border-radius:999px; border:1px solid var(--line); background:#fff; color:var(--muted); font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; }
+        .toggle-link.active { background:#251c16; color:#fff8ee; border-color:#251c16; }
         .summary-grid { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:12px; }
         .metric { background:linear-gradient(180deg, rgba(255,255,255,.86), rgba(255,248,238,.75)); border:1px solid var(--line); border-radius:18px; padding:14px; min-height:92px; }
         .metric-label { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.08em; margin-bottom:8px; font-weight:800; }
@@ -62,18 +66,7 @@
 </head>
 <body>
     <div class="page">
-        <div class="workspace-nav">
-            <div>
-                <strong>Reporting</strong>
-                <div class="small">Financial summaries and trend views for normalized transactions.</div>
-            </div>
-            <div class="nav-links">
-                <a href="/dashboard" class="button secondary-button" style="width:auto;">Dashboard</a>
-                <a href="/deals" class="button secondary-button" style="width:auto;">Deals</a>
-                <a href="/bookkeeping" class="button secondary-button" style="width:auto;">Bookkeeping</a>
-                {% if current_user and current_user.role in ["admin","reviewer"] %}<a href="/review" class="button secondary-button" style="width:auto;">Review</a>{% endif %}
-            </div>
-        </div>
+        {% include "_workspace_nav.html" %}
         <section class="hero">
             <div class="logo-wrap"><img src="/static/degen-logo.png" alt="Degen Collectibles logo"></div>
             <div>
@@ -83,11 +76,16 @@
                 <div class="actions">
                     <a href="/table" class="button secondary-button" style="width:auto;">Back to Table</a>
                     <a href="/bookkeeping" class="button secondary-button" style="width:auto;">Bookkeeping Reconciliation</a>
-                    <a href="/reports/export.csv?start={{ selected_start }}&end={{ selected_end }}&channel_id={{ selected_channel_id }}&entry_kind={{ selected_entry_kind }}" class="button primary-button" style="width:auto;">Export CSV</a>
+                    <a href="/reports/export.csv?start={{ selected_start }}&end={{ selected_end }}&channel_id={{ selected_channel_id }}&entry_kind={{ selected_entry_kind }}" class="button primary-button" style="width:auto;">Export Discord CSV</a>
+                </div>
+                <div class="toggle-row">
+                    <a href="{{ reports_url(source='all', start=selected_start, end=selected_end, channel_id=selected_channel_id, entry_kind=selected_entry_kind) }}" class="toggle-link{% if selected_source == 'all' %} active{% endif %}">All</a>
+                    <a href="{{ reports_url(source='discord', start=selected_start, end=selected_end, channel_id=selected_channel_id, entry_kind=selected_entry_kind) }}" class="toggle-link{% if selected_source == 'discord' %} active{% endif %}">Discord</a>
+                    <a href="{{ reports_url(source='shopify', start=selected_start, end=selected_end, channel_id=selected_channel_id, entry_kind=selected_entry_kind) }}" class="toggle-link{% if selected_source == 'shopify' %} active{% endif %}">Shopify</a>
                 </div>
                 <div class="summary-strip">
                     <div class="helper-card">Use this page to spot channel or category drift before jumping back into the review queue.</div>
-                    <div class="helper-card">Current scope: {{ selected_entry_kind if selected_entry_kind else "all kinds" }}{% if selected_channel_id %} | one channel{% else %} | all channels{% endif %}</div>
+                    <div class="helper-card">Current source: {{ selected_source }} | {{ selected_entry_kind if selected_entry_kind else "all Discord kinds" }}{% if selected_channel_id %} | one Discord channel{% else %} | all Discord channels{% endif %}</div>
                 </div>
             </div>
         </section>
@@ -100,6 +98,7 @@
                 </div>
             </div>
             <form method="get" action="/reports" class="filters">
+                <input type="hidden" name="source" value="{{ selected_source }}">
                 <label>Start<input type="date" name="start" value="{{ selected_start }}"></label>
                 <label>End<input type="date" name="end" value="{{ selected_end }}"></label>
                 <label>Channel<select name="channel_id"><option value="">All channels</option>{% for ch in channels %}<option value="{{ ch['channel_id'] }}" {% if selected_channel_id == ch['channel_id'] %}selected{% endif %}>{{ ch["channel_name"] }}</option>{% endfor %}</select></label>
@@ -107,27 +106,123 @@
                 <button type="submit" class="secondary-button">Apply</button>
             </form>
             <div class="scope-strip">
-                <div class="small">Current scope: {{ selected_entry_kind if selected_entry_kind else "all kinds" }}{% if selected_channel_id %} in one channel{% else %} across all channels{% endif %}.</div>
+                <div class="small">Current scope: {{ selected_source }} source view. Channel and financial kind filters apply to Discord data only.</div>
                 <div class="actions">
-                    <span class="scope-chip">{{ summary["rows"] }} transactions</span>
+                    <span class="scope-chip">{{ discord_summary["rows"] }} Discord transactions</span>
+                    <span class="scope-chip">{{ shopify_summary["orders"] }} Shopify orders</span>
                     <span class="scope-chip">{{ selected_start or "start" }} to {{ selected_end or "today" }}</span>
                 </div>
             </div>
         </div>
 
-        <div class="summary-grid" style="margin-bottom:18px;">
-            <div class="metric"><div class="metric-label">Transactions</div><div class="metric-value">{{ summary["rows"] }}</div></div>
-            <div class="metric"><div class="metric-label">Sales</div><div class="metric-value">${{ "%.2f"|format(summary["totals"].get("sales", 0)) }}</div></div>
-            <div class="metric"><div class="metric-label">Buys</div><div class="metric-value">${{ "%.2f"|format(summary["totals"].get("buys", 0)) }}</div></div>
-            <div class="metric"><div class="metric-label">Expenses</div><div class="metric-value">${{ "%.2f"|format(summary["totals"].get("expenses", 0)) }}</div></div>
-            <div class="metric"><div class="metric-label">Money In</div><div class="metric-value">${{ "%.2f"|format(summary["totals"].get("money_in", 0)) }}</div></div>
-            <div class="metric"><div class="metric-label">Net</div><div class="metric-value">${{ "%.2f"|format(summary["totals"].get("net", 0)) }}</div></div>
+        {% if show_shopify_reports and shopify_summary["has_missing_tax_data"] %}
+        <div class="warning-card" style="margin-bottom:18px;">{{ shopify_summary["warning"] }}</div>
+        {% endif %}
+
+        <div class="card">
+            <div class="section-header">
+                <div>
+                    <h2 class="section-title">Period Comparison</h2>
+                    <div class="section-subtitle">Discord net stays intact, Shopify paid-order revenue is split into gross, tax, and ex-tax net, and combined totals join Discord net with Shopify net.</div>
+                </div>
+            </div>
+            <div class="table-shell">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Period</th>
+                            {% if show_discord_reports %}<th>Discord</th>{% endif %}
+                            {% if show_shopify_reports %}<th>Shopify Gross</th><th>Shopify Tax</th><th>Shopify Net</th>{% endif %}
+                            {% if selected_source == 'all' %}<th>Combined</th>{% endif %}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in period_rows %}
+                        <tr>
+                            <td>{{ row["label"] }}{% if row["shopify_tax_unknown_orders"] %}<div class="small">{{ row["shopify_tax_unknown_orders"] }} tax unknown</div>{% endif %}</td>
+                            {% if show_discord_reports %}<td>${{ "%.2f"|format(row["discord_net"]) }}</td>{% endif %}
+                            {% if show_shopify_reports %}<td>${{ "%.2f"|format(row["shopify_gross"]) }}</td><td>${{ "%.2f"|format(row["shopify_tax"]) }}</td><td>${{ "%.2f"|format(row["shopify_net"]) }}</td>{% endif %}
+                            {% if selected_source == 'all' %}<td>${{ "%.2f"|format(row["combined_net"]) }}</td>{% endif %}
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
         </div>
 
+        <div class="summary-grid" style="margin-bottom:18px;">
+            {% if selected_source == 'discord' %}
+            <div class="metric"><div class="metric-label">Transactions</div><div class="metric-value">{{ discord_summary["rows"] }}</div></div>
+            <div class="metric"><div class="metric-label">Sales</div><div class="metric-value">${{ "%.2f"|format(discord_summary["totals"].get("sales", 0)) }}</div></div>
+            <div class="metric"><div class="metric-label">Buys</div><div class="metric-value">${{ "%.2f"|format(discord_summary["totals"].get("buys", 0)) }}</div></div>
+            <div class="metric"><div class="metric-label">Expenses</div><div class="metric-value">${{ "%.2f"|format(discord_summary["totals"].get("expenses", 0)) }}</div></div>
+            <div class="metric"><div class="metric-label">Money In</div><div class="metric-value">${{ "%.2f"|format(discord_summary["totals"].get("money_in", 0)) }}</div></div>
+            <div class="metric"><div class="metric-label">Net</div><div class="metric-value">${{ "%.2f"|format(discord_summary["totals"].get("net", 0)) }}</div></div>
+            {% elif selected_source == 'shopify' %}
+            <div class="metric"><div class="metric-label">Orders</div><div class="metric-value">{{ shopify_summary["orders"] }}</div></div>
+            <div class="metric"><div class="metric-label">Paid Orders</div><div class="metric-value">{{ shopify_summary["paid_orders"] }}</div></div>
+            <div class="metric"><div class="metric-label">Gross</div><div class="metric-value">${{ "%.2f"|format(shopify_summary["gross_revenue"]) }}</div></div>
+            <div class="metric"><div class="metric-label">Tax</div><div class="metric-value">${{ "%.2f"|format(shopify_summary["total_tax"]) }}</div></div>
+            <div class="metric"><div class="metric-label">Net</div><div class="metric-value">${{ "%.2f"|format(shopify_summary["net_revenue"]) }}</div></div>
+            <div class="metric"><div class="metric-label">Avg Net Order</div><div class="metric-value">${{ "%.2f"|format(shopify_summary["avg_order_value_net"]) }}</div></div>
+            {% else %}
+            <div class="metric"><div class="metric-label">Discord Net</div><div class="metric-value">${{ "%.2f"|format(report_totals["discord_net"]) }}</div></div>
+            <div class="metric"><div class="metric-label">Shopify Gross</div><div class="metric-value">${{ "%.2f"|format(report_totals["shopify_gross"]) }}</div></div>
+            <div class="metric"><div class="metric-label">Shopify Tax</div><div class="metric-value">${{ "%.2f"|format(report_totals["shopify_tax"]) }}</div></div>
+            <div class="metric"><div class="metric-label">Shopify Net</div><div class="metric-value">${{ "%.2f"|format(report_totals["shopify_net"]) }}</div></div>
+            <div class="metric"><div class="metric-label">Combined</div><div class="metric-value">${{ "%.2f"|format(report_totals["combined_net"]) }}</div></div>
+            <div class="metric"><div class="metric-label">Tax Unknown</div><div class="metric-value">{{ shopify_summary["tax_unknown_orders"] }}</div></div>
+            {% endif %}
+        </div>
+
+        {% if show_shopify_reports %}
+        <div class="card">
+            <div class="section-header">
+                <div>
+                    <h2 class="section-title">Shopify Breakdown</h2>
+                    <div class="section-subtitle">Counts by financial status plus paid-order revenue using only rows with known tax for ex-tax math.</div>
+                </div>
+            </div>
+            <div class="summary-grid" style="grid-template-columns:repeat(7,minmax(0,1fr));">
+                <div class="metric"><div class="metric-label">Paid</div><div class="metric-value">{{ shopify_summary["status_counts"]["paid"] }}</div></div>
+                <div class="metric"><div class="metric-label">Pending</div><div class="metric-value">{{ shopify_summary["status_counts"]["pending"] }}</div></div>
+                <div class="metric"><div class="metric-label">Refunded</div><div class="metric-value">{{ shopify_summary["status_counts"]["refunded"] }}</div></div>
+                <div class="metric"><div class="metric-label">Other</div><div class="metric-value">{{ shopify_summary["status_counts"]["other"] }}</div></div>
+                <div class="metric"><div class="metric-label">Paid Gross</div><div class="metric-value">${{ "%.2f"|format(shopify_summary["gross_revenue"]) }}</div></div>
+                <div class="metric"><div class="metric-label">Paid Net</div><div class="metric-value">${{ "%.2f"|format(shopify_summary["net_revenue"]) }}</div></div>
+                <div class="metric"><div class="metric-label">Avg Net Order</div><div class="metric-value">${{ "%.2f"|format(shopify_summary["avg_order_value_net"]) }}</div></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2 style="margin-top:0;">Shopify Daily Totals</h2>
+            <div class="table-shell">
+                <table>
+                    <thead><tr><th>Date</th><th>Paid Orders</th><th>Gross</th><th>Tax</th><th>Net</th><th>Tax Unknown</th></tr></thead>
+                    <tbody>
+                        {% for row in shopify_daily_totals %}
+                        <tr>
+                            <td>{{ row["date"] }}</td>
+                            <td>{{ row["orders"] }}</td>
+                            <td>${{ "%.2f"|format(row["gross"]) }}</td>
+                            <td>${{ "%.2f"|format(row["tax"]) }}</td>
+                            <td>${{ "%.2f"|format(row["net"]) }}</td>
+                            <td>{{ row["tax_unknown_orders"] }}</td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan="6" class="small">No Shopify paid orders in this view.</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        {% endif %}
+
+        {% if show_discord_reports %}
         <div class="section-header">
             <div>
-                <h2 class="section-title">Mix And Distribution</h2>
-                <div class="section-subtitle">Use these charts to spot category drift and which channels are driving net results.</div>
+                <h2 class="section-title">Discord Mix And Distribution</h2>
+                <div class="section-subtitle">These charts remain Discord-only because channel and expense category tracking comes from the normalized transaction layer.</div>
             </div>
         </div>
 
@@ -152,7 +247,7 @@
         </div>
 
         <div class="card">
-            <h2 style="margin-top:0;">Daily Totals</h2>
+            <h2 style="margin-top:0;">Discord Daily Totals</h2>
             <div class="table-shell">
                 <table>
                     <thead><tr><th>Date</th><th>Sales</th><th>Buys</th><th>Expenses</th><th>Trade In</th><th>Trade Out</th><th>Net</th></tr></thead>
@@ -168,7 +263,7 @@
         </div>
 
         <div class="card">
-            <h2 style="margin-top:0;">Recent Transactions</h2>
+            <h2 style="margin-top:0;">Recent Discord Transactions</h2>
             <div class="table-shell">
                 <table>
                     <thead><tr><th>When</th><th>Channel</th><th>Author</th><th>Kind</th><th>Type</th><th>Amount</th><th>Money In</th><th>Money Out</th><th>Category</th></tr></thead>
@@ -182,6 +277,7 @@
                 </table>
             </div>
         </div>
+        {% endif %}
     </div>
 </body>
 </html>

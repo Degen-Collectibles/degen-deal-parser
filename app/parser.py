@@ -6,7 +6,7 @@ from typing import Any, Dict, List
 from openai import OpenAI
 
 from .config import get_settings
-from .corrections import get_exact_correction_match, get_relevant_correction_hints
+from .corrections import get_exact_correction_match, get_learned_rule_match, get_relevant_correction_hints
 
 settings = get_settings()
 
@@ -479,7 +479,7 @@ def parse_stitched_rule_hint(message_text: str) -> Dict[str, Any] | None:
             "parsed_type": explicit_type,
             "parsed_amount": payment_amount,
             "parsed_payment_method": payment_method or payment_method_only or "unknown",
-            "parsed_cash_direction": "to_store" if explicit_type == "sell" else "from_store",
+            "parsed_cash_direction": None,
             "parsed_category": "unknown",
             "parsed_items": [],
             "parsed_items_in": [],
@@ -524,7 +524,7 @@ def parse_stitched_rule_hint(message_text: str) -> Dict[str, Any] | None:
                     "parsed_type": inferred_type,
                     "parsed_amount": payment_amount,
                     "parsed_payment_method": payment_method or payment_method_only or "unknown",
-                    "parsed_cash_direction": "to_store" if inferred_type == "sell" else "from_store",
+                    "parsed_cash_direction": None,
                     "parsed_category": "unknown",
                     "parsed_items": [],
                     "parsed_items_in": [],
@@ -568,7 +568,28 @@ def is_payment_only_message_text(text: str) -> bool:
     return amount is not None and method is not None
 
 
-def parse_by_rules(message_text: str) -> Dict[str, Any] | None:
+def channel_defaults_to_buy(channel_name: str | None) -> bool:
+    lower = (channel_name or "").strip().lower()
+    if not lower:
+        return False
+    return "store-buys" in lower or lower.endswith("purchases")
+
+
+def has_reimbursement_buy_signal(message_text: str) -> bool:
+    lower = normalize_detector_text(message_text).lower()
+    if not lower:
+        return False
+    reimbursement_patterns = [
+        r"\bowe me\b",
+        r"\bpay me back\b",
+        r"\breimburse(?: me)?\b",
+        r"\bfront(?:ed|ing)?(?: me)?\b",
+        r"\bspot me\b",
+    ]
+    return any(re.search(pattern, lower, re.I) for pattern in reimbursement_patterns)
+
+
+def parse_by_rules(message_text: str, channel_name: str | None = None) -> Dict[str, Any] | None:
     text = (message_text or "").strip()
 
     stitched_hint = parse_stitched_rule_hint(text)
@@ -594,7 +615,7 @@ def parse_by_rules(message_text: str) -> Dict[str, Any] | None:
             "parsed_type": explicit_type,
             "parsed_amount": payment_summary["amount"],
             "parsed_payment_method": payment_summary["payment_method"],
-            "parsed_cash_direction": "to_store" if explicit_type == "sell" else "from_store",
+            "parsed_cash_direction": None,
             "parsed_category": inferred_category,
             "parsed_items": [],
             "parsed_items_in": [],
@@ -611,7 +632,7 @@ def parse_by_rules(message_text: str) -> Dict[str, Any] | None:
             "parsed_type": explicit_type,
             "parsed_amount": multi_payment["amount"],
             "parsed_payment_method": multi_payment["payment_method"],
-            "parsed_cash_direction": "to_store" if explicit_type == "sell" else "from_store",
+            "parsed_cash_direction": None,
             "parsed_category": inferred_category,
             "parsed_items": [],
             "parsed_items_in": [],
@@ -630,7 +651,7 @@ def parse_by_rules(message_text: str) -> Dict[str, Any] | None:
                 "parsed_type": explicit_type,
                 "parsed_amount": unlabeled_amount,
                 "parsed_payment_method": "unknown",
-                "parsed_cash_direction": "to_store" if explicit_type == "sell" else "from_store",
+                "parsed_cash_direction": None,
                 "parsed_category": inferred_category,
                 "parsed_items": [],
                 "parsed_items_in": [],
@@ -664,17 +685,18 @@ def parse_by_rules(message_text: str) -> Dict[str, Any] | None:
 
         payment = normalize_payment_method(payment)
 
+        default_type = "buy" if channel_defaults_to_buy(channel_name) else "sell"
         return {
-            "parsed_type": "sell",
+            "parsed_type": default_type,
             "parsed_amount": amount,
             "parsed_payment_method": payment,
-            "parsed_cash_direction": "to_store",
+            "parsed_cash_direction": None,
             "parsed_category": "unknown",
             "parsed_items": [],
             "parsed_items_in": [],
             "parsed_items_out": [],
             "parsed_trade_summary": "",
-            "parsed_notes": "rule-based payment-only sell default",
+            "parsed_notes": f"rule-based payment-only {default_type} default",
             "image_summary": "no image used",
             "confidence": 0.85,
             "needs_review": False,
@@ -709,16 +731,16 @@ def parse_by_rules(message_text: str) -> Dict[str, Any] | None:
 
         if "sold" in verb or "sell" in verb:
             parsed_type = "sell"
-            cash_direction = "to_store"
         elif "buy" in verb or "bought" in verb or "paid" in verb:
             parsed_type = "buy"
-            cash_direction = "from_store"
         elif "trade" in text.lower():
             parsed_type = "trade"
             cash_direction = "none"
         else:
             parsed_type = "unknown"
             cash_direction = "unknown"
+        if parsed_type in {"buy", "sell"}:
+            cash_direction = None
 
         return {
             "parsed_type": parsed_type,
@@ -752,6 +774,7 @@ def has_transaction_signal(message_text: str) -> bool:
         r"\b(in)\b.*\b(out)\b",
         r"\b(out)\b.*\b(in)\b",
         r"\b(psa|bgs|slab|slabs|single|singles|packs|sealed|binder|collection)\b.*\b\d",
+        r"\b(owe me|pay me back|reimburse(?: me)?|front(?:ed|ing)?(?: me)?|spot me)\b",
     ]
     return any(re.search(pattern, lower, re.I) for pattern in transaction_patterns)
 
@@ -770,12 +793,15 @@ def looks_like_date_marker(message_text: str) -> bool:
 
 
 def looks_like_internal_cash_transfer(message_text: str) -> bool:
+    if has_reimbursement_buy_signal(message_text):
+        return False
+
     lower = normalize_detector_text(message_text).lower()
     if not lower:
         return False
 
     company_terms = r"(company|shop|store|business)"
-    loan_terms = r"(owe me|loan(?:ed|ing)?|front(?:ed|ing)?|spot me|pay me back|reimburse(?:d|ment)?|floating?)"
+    loan_terms = r"(loan(?:ed|ing)?|floating?)"
     transfer_terms = r"(give|gave|hand(?:ed)?|brought|put|loan(?:ed|ing)?)"
 
     patterns = [
@@ -908,7 +934,7 @@ def has_explicit_buy_signal(message_text: str) -> bool:
     lower = (message_text or "").lower()
     if not lower:
         return False
-    return bool(re.search(r"\b(bought|buy|paid|sold us|bought from)\b", lower, re.I))
+    return bool(re.search(r"\b(bought|buy|paid|sold us|bought from)\b", lower, re.I)) or has_reimbursement_buy_signal(lower)
 
 
 def infer_explicit_buy_sell_type(message_text: str) -> str | None:
@@ -925,6 +951,8 @@ def infer_explicit_buy_sell_type(message_text: str) -> str | None:
 
     if any(re.search(pattern, lower, re.I) for pattern in sell_patterns):
         return "sell"
+    if has_reimbursement_buy_signal(lower):
+        return "buy"
     if any(re.search(pattern, lower, re.I) for pattern in buy_patterns):
         return "buy"
     return None
@@ -941,6 +969,7 @@ def enforce_store_conventions(
     message_text: str,
     parsed: Dict[str, Any],
     rule_hint: Dict[str, Any] | None,
+    channel_name: str | None = None,
 ) -> Dict[str, Any]:
     if not rule_hint:
         return parsed
@@ -956,7 +985,7 @@ def enforce_store_conventions(
         return {
             **parsed,
             "parsed_type": explicit_buy_sell,
-            "parsed_cash_direction": "to_store" if explicit_buy_sell == "sell" else "from_store",
+            "parsed_cash_direction": None,
             "parsed_notes": "explicit buy/sell wording overrode trade guess",
             "confidence": max(float(parsed.get("confidence", 0.0)), 0.9),
         }
@@ -964,19 +993,20 @@ def enforce_store_conventions(
     # Hard store rule:
     # payment-only shorthand defaults to a sale unless there is clear contrary context.
     if (
-        rule_hint.get("parsed_type") == "sell"
-        and rule_hint.get("parsed_notes") == "rule-based payment-only sell default"
+        rule_hint.get("parsed_type") in {"buy", "sell"}
+        and str(rule_hint.get("parsed_notes") or "").startswith("rule-based payment-only")
         and not has_explicit_trade_signal(message_text)
         and not explicit_buy_sell
     ):
+        default_type = "buy" if channel_defaults_to_buy(channel_name) else "sell"
         return {
             **parsed,
-            "parsed_type": "sell",
+            "parsed_type": default_type,
             "parsed_amount": rule_hint.get("parsed_amount"),
             "parsed_payment_method": rule_hint.get("parsed_payment_method"),
-            "parsed_cash_direction": "to_store",
+            "parsed_cash_direction": None,
             "parsed_category": parsed.get("parsed_category") or "unknown",
-            "parsed_notes": "payment-only sell default (store rule)",
+            "parsed_notes": f"payment-only {default_type} default (store rule)",
             "needs_review": bool(parsed.get("needs_review", False)),
             "confidence": max(float(parsed.get("confidence", 0.0)), 0.9),
         }
@@ -999,7 +1029,7 @@ def enforce_store_conventions(
                 "parsed_type": rule_type,
                 "parsed_amount": first_nonempty_value(rule_hint.get("parsed_amount"), parsed.get("parsed_amount")),
                 "parsed_payment_method": first_nonempty_value(rule_hint.get("parsed_payment_method"), parsed.get("parsed_payment_method")) or "unknown",
-                "parsed_cash_direction": first_nonempty_value(rule_hint.get("parsed_cash_direction"), parsed.get("parsed_cash_direction")) or ("to_store" if rule_type == "sell" else "from_store"),
+                "parsed_cash_direction": None,
                 "parsed_category": first_nonempty_value(parsed.get("parsed_category"), rule_hint.get("parsed_category"), infer_category_from_text(message_text)) or "unknown",
                 "parsed_notes": f"explicit {rule_type} text override (store rule)",
                 "confidence": max(float(parsed.get("confidence", 0.0)), 0.9),
@@ -1013,7 +1043,7 @@ def enforce_store_conventions(
             "parsed_type": explicit_buy_sell,
             "parsed_amount": multi_payment["amount"],
             "parsed_payment_method": "mixed",
-            "parsed_cash_direction": "to_store" if explicit_buy_sell == "sell" else "from_store",
+            "parsed_cash_direction": None,
             "parsed_category": first_nonempty_value(parsed.get("parsed_category"), infer_category_from_text(message_text)) or "unknown",
             "parsed_notes": "explicit buy/sell multi-payment override",
             "confidence": max(float(parsed.get("confidence", 0.0)), 0.93),
@@ -1024,7 +1054,7 @@ def enforce_store_conventions(
         return {
             **parsed,
             "parsed_type": explicit_buy_sell,
-            "parsed_cash_direction": "to_store" if explicit_buy_sell == "sell" else "from_store",
+            "parsed_cash_direction": None,
             "parsed_notes": "explicit buy/sell wording",
             "confidence": max(float(parsed.get("confidence", 0.0)), 0.9),
             "needs_review": False,
@@ -1108,6 +1138,7 @@ def build_prompt(
     message_text: str,
     rule_hint: Dict[str, Any] | None,
     has_images: bool,
+    channel_name: str = "",
     correction_hints: List[Dict[str, Any]] | None = None,
 ) -> str:
     hint_block = ""
@@ -1209,9 +1240,12 @@ Rules:
   - If the text contains explicit buy/sell wording, prefer "buy" or "sell" over a trade guess from images alone.
   - If the text contains both "in" and "out" describing store item flow, classify it as "trade", not "buy" or "sell".
 - If a message is only an amount plus payment method, default it to a sell unless other context indicates otherwise.
+- If the channel is a store-buys or *purchases style channel, default payment-only messages to a buy instead.
+- Phrases like "owe me", "pay me back", or "reimburse me" mean the store still bought the inventory and owes reimbursement.
 {image_block}
 
 Author: {author_name}
+Channel: {channel_name or "unknown"}
 Stitched transaction text:
 {message_text}
 
@@ -1224,17 +1258,19 @@ Stitched transaction text:
 def parse_deal_with_ai(
     author_name: str,
     message_text: str,
-    image_urls: List[str] | None = None
+    image_urls: List[str] | None = None,
+    channel_name: str = "",
 ) -> Dict[str, Any]:
     image_urls = image_urls or []
     correction_hints = get_relevant_correction_hints(message_text)
-    rule_hint = parse_by_rules(message_text)
+    rule_hint = parse_by_rules(message_text, channel_name=channel_name)
     schema = build_schema()
     prompt = build_prompt(
         author_name=author_name,
         message_text=message_text,
         rule_hint=rule_hint,
         has_images=bool(image_urls),
+        channel_name=channel_name,
         correction_hints=correction_hints,
     )
 
@@ -1269,13 +1305,15 @@ def parse_deal_with_ai(
         message_text=message_text,
         parsed=parsed,
         rule_hint=rule_hint,
+        channel_name=channel_name,
     ) | {"_openai_usage": usage_metrics, "_openai_model": MODEL}
 
 
 async def parse_deal_with_ai_async(
     author_name: str,
     message_text: str,
-    image_urls: List[str] | None = None
+    image_urls: List[str] | None = None,
+    channel_name: str = "",
 ) -> Dict[str, Any]:
     async with api_semaphore:
         try:
@@ -1283,7 +1321,8 @@ async def parse_deal_with_ai_async(
                 parse_deal_with_ai,
                 author_name,
                 message_text,
-                image_urls
+                image_urls,
+                channel_name,
             )
         except Exception as e:
             error_text = str(e).lower()
@@ -1292,7 +1331,7 @@ async def parse_deal_with_ai_async(
             raise
 
 
-async def parse_message(content: str, attachment_urls: list[str], author_name: str = "") -> Dict[str, Any]:
+async def parse_message(content: str, attachment_urls: list[str], author_name: str = "", channel_name: str = "") -> Dict[str, Any]:
     image_urls = choose_image_urls(
         attachment_urls,
         use_first_image_only=True,
@@ -1307,16 +1346,26 @@ async def parse_message(content: str, attachment_urls: list[str], author_name: s
     if exact_correction:
         return exact_correction
 
+    learned_rule_match, learned_rule_event = get_learned_rule_match(content or "")
+    if learned_rule_match:
+        return learned_rule_match
+
     try:
-        return await parse_deal_with_ai_async(
+        parsed = await parse_deal_with_ai_async(
             author_name=author_name,
             message_text=content or "",
             image_urls=image_urls,
+            channel_name=channel_name,
         )
+        if learned_rule_event:
+            parsed["_learned_rule_event"] = learned_rule_event
+        return parsed
     except TimedOutRowError:
         raise
     except Exception:
-        fallback = parse_by_rules(content or "")
+        fallback = parse_by_rules(content or "", channel_name=channel_name)
         if fallback:
+            if learned_rule_event:
+                fallback["_learned_rule_event"] = learned_rule_event
             return fallback
         raise

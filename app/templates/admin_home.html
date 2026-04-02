@@ -43,28 +43,22 @@
 </head>
 <body>
     <div class="page">
-        <div class="workspace-nav">
-            <div>
-                <strong>Admin workspace</strong>
-                <div class="small">Keep powerful tools available without leaking admin complexity into every other page.</div>
-            </div>
-            <div class="nav-links">
-                <a class="button" href="/dashboard">Dashboard</a>
-                <a class="button" href="/review">Review</a>
-                <a class="button" href="/deals">Deals</a>
-                <a class="button" href="/reports">Reports</a>
-                <a class="button" href="/status">Status</a>
-            </div>
+        {% include "_workspace_nav.html" %}
+        <div style="margin-bottom:14px;">
+            <a class="button" href="/dashboard">&larr; Dashboard</a>
         </div>
         <section class="hero">
             <img class="logo" src="/static/degen-logo.png" alt="Degen Collectibles logo">
             <div>
                 <div class="eyebrow">Admin Controls</div>
                 <h1>{{ title }}</h1>
+                <div style="margin-bottom:10px;"><span class="pill">Operator View</span></div>
                 <p>Use this page as the control room for the parser, backfills, watched channels, and bookkeeping workflows. Partners and reviewers can stay on the cleaner deal and review pages while admin tasks live here.</p>
                 <div class="actions">
                     <a class="button" href="/dashboard">Dashboard</a>
                     <a class="button" href="/status">Status</a>
+                    <a class="button" href="/status#queue-summary">Queue Summary</a>
+                    <a class="button" href="/status#debug-detail">Debug Detail</a>
                     <a class="button" href="/ops-log">Ops Log</a>
                     <a class="button" href="/review">Review Queue</a>
                     <a class="button" href="/deals">Deals</a>
@@ -77,8 +71,8 @@
             <div class="metric"><div class="metric-label">Watched Channels</div><div class="metric-value">{{ watched_channels|length }}</div></div>
             <div class="metric"><div class="metric-label">Enabled</div><div class="metric-value">{{ enabled_channel_count }}</div></div>
             <div class="metric"><div class="metric-label">Backfill Enabled</div><div class="metric-value">{{ backfill_channel_count }}</div></div>
-            <div class="metric"><div class="metric-label">Needs Review</div><div class="metric-value">{{ review_summary["needs_review"] }}</div></div>
-            <div class="metric"><div class="metric-label">Queued</div><div class="metric-value">{{ parser_progress["queued"] }}</div></div>
+            <div class="metric"><div class="metric-label">Review Required</div><div class="metric-value">{{ review_summary["needs_review"] }}</div></div>
+            <div class="metric"><div class="metric-label">Pending</div><div class="metric-value">{{ parser_progress["queued"] }}</div></div>
         </div>
 
         <div class="layout">
@@ -109,6 +103,16 @@
                         <h3>Reports</h3>
                         <p class="small">Check financial summaries, exports, and normalized transaction rollups without opening the parser queue.</p>
                         <div class="action-card-footer"><span class="small">Read-only financial view</span><span class="pill">safe</span></div>
+                    </a>
+                    <a class="action-card" href="/status#debug-detail">
+                        <h3>Debug Detail</h3>
+                        <p class="small">Open the collapsed debug section for queue counts, stuck processing rows, recent worker failures, and raw debug payloads.</p>
+                        <div class="action-card-footer"><span class="small">Operational diagnosis</span><span class="pill">debug</span></div>
+                    </a>
+                    <a class="action-card" href="/status#queue-summary">
+                        <h3>System Status</h3>
+                        <p class="small">Open the consolidated status page for queue state, recent failed rows, stuck processing, and the latest reparse summary.</p>
+                        <div class="action-card-footer"><span class="small">Fast routine debugging</span><span class="pill">ops</span></div>
                     </a>
                 </div>
             </div>

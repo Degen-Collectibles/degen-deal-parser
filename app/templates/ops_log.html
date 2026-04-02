@@ -29,16 +29,19 @@
         .log-item { padding:14px 0; border-top:1px solid #eee3d3; }
         .log-item:first-child { border-top:none; padding-top:0; }
         .meta { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:6px; }
+        .action-row { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
         @media (max-width:1000px){ .hero, .grid { grid-template-columns:1fr; } .page { padding:16px 14px 28px; } .eyebrow { margin:0 auto; } .hero { text-align:center; } }
     </style>
 </head>
 <body>
     <div class="page">
+        {% include "_workspace_nav.html" %}
         <section class="hero">
             <img class="logo" src="/static/degen-logo.png" alt="Degen Collectibles logo">
             <div>
                 <div class="eyebrow">Operations Trace</div>
-                <h1>{{ title }}</h1>
+                <h1>Operations Log</h1>
+                <div style="margin-bottom:10px;"><span class="pill">Operator View</span></div>
                 <p>Use this page to see what the app and worker actually did: backfill queue requests, worker pickup, completion, and failures.</p>
                 <div class="actions">
                     <a class="button" href="/dashboard">Dashboard</a>
@@ -55,7 +58,7 @@
                 <div class="metric-value">{{ snapshot["local_runtime"]["label"] }}</div>
             </div>
             <div class="metric">
-                <div class="metric-label">Queued Parser Rows</div>
+                <div class="metric-label">Pending Parser Rows</div>
                 <div class="metric-value">{{ snapshot["parser_progress"]["queued"] }}</div>
             </div>
             <div class="metric">
@@ -78,6 +81,13 @@
                     {% endif %}
                 </div>
                 <div>{{ row["message"] }}</div>
+                {% if row["action_links"] %}
+                <div class="action-row">
+                    {% if row["action_links"]["open_row"] %}<a class="button" href="{{ row['action_links']['open_row'] }}">Open Row</a>{% endif %}
+                    {% if row["action_links"]["open_table"] %}<a class="button" href="{{ row['action_links']['open_table'] }}">Open Filtered Table</a>{% endif %}
+                    {% if row["action_links"]["open_review_queue"] %}<a class="button" href="{{ row['action_links']['open_review_queue'] }}">Open Review Queue</a>{% endif %}
+                </div>
+                {% endif %}
             </div>
             {% else %}
             <div class="small">No operations logged yet.</div>

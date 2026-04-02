@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>{{ title }}</title>
+    <style>
+        :root { --bg:#f6efe6; --card:#fffaf4; --line:#ddd0c0; --text:#241b15; --muted:#6a5c50; --shadow:0 14px 28px rgba(77,46,20,.08); }
+        * { box-sizing:border-box; }
+        body { margin:0; font-family:"Trebuchet MS","Segoe UI",sans-serif; color:var(--text); background:#f8f3ec; }
+        a { color:inherit; text-decoration:none; }
+        .page { max-width:1280px; margin:0 auto; padding:18px; }
+        .nav, .nav-links { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+        .nav { justify-content:space-between; margin-bottom:14px; padding:12px 16px; border:1px solid var(--line); border-radius:18px; background:#fffdf9; box-shadow:var(--shadow); }
+        .nav-links { justify-content:flex-end; }
+        .button { display:inline-flex; align-items:center; border-radius:12px; padding:9px 12px; background:#fff; border:1px solid var(--line); font-weight:700; }
+        .card { background:var(--card); border:1px solid var(--line); border-radius:18px; box-shadow:var(--shadow); padding:16px; margin-bottom:14px; }
+        h1, h2 { margin:0 0 10px; }
+        h1 { font-size:32px; letter-spacing:-.03em; }
+        p, .small { color:var(--muted); line-height:1.45; }
+        table { width:100%; border-collapse:collapse; }
+        th, td { padding:10px 8px; border-top:1px solid #eadfce; text-align:left; vertical-align:top; }
+        th { border-top:none; font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); }
+        .empty { color:var(--muted); }
+        @media (max-width:1000px){ table, thead, tbody, th, td, tr { display:block; } thead { display:none; } td { border-top:none; padding:6px 0; } tr { border-top:1px solid #eadfce; padding:8px 0; } }
+    </style>
+</head>
+<body>
+    <div class="page">
+        {% include "_workspace_nav.html" %}
+
+        <div class="card">
+            <h1>{{ title }}</h1>
+            <p>Showing the last {{ runs|length }} reparse runs.</p>
+        </div>
+
+        <div class="card">
+            {% if runs %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Timestamp</th>
+                        <th>Range</th>
+                        <th>Force Used</th>
+                        <th>Selected</th>
+                        <th>Reparsed</th>
+                        <th>Skipped</th>
+                        <th>Failed</th>
+                        <th>Duration</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in runs %}
+                    <tr>
+                        <td>{{ row["requested_at"] }}</td>
+                        <td>{{ row["range_label"] }}</td>
+                        <td>{{ "Yes" if row["force_used"] else "No" }}</td>
+                        <td>{{ row["selected_count"] }}</td>
+                        <td>{{ row["reparsed_count"] }}</td>
+                        <td>{{ row["skipped_count"] }}</td>
+                        <td>{{ row["failed_count"] }}</td>
+                        <td>{{ row["duration_label"] or "running" }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <div class="empty">No reparse runs recorded yet.</div>
+            {% endif %}
+        </div>
+    </div>
+</body>
+</html>

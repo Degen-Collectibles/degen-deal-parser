@@ -32,6 +32,20 @@ That mode:
 Then open:
 - `http://127.0.0.1:8000/login`
 
+## Attachment Cache Warmup
+
+If older Discord rows have `attachment_urls_json` but no `AttachmentAsset` rows, run the one-time repair script:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\warmup_attachment_cache.py
+```
+
+Helpful options:
+- `--dry-run` to preview what would be repaired
+- `--limit N` to process only the first `N` uncached rows
+
+The script repairs from stored attachment URLs first and only falls back to Discord message fetches when the direct URL path still leaves gaps.
+
 ## Important Env Vars
 
 Core:
@@ -169,6 +183,31 @@ The included [render.yaml](/C:/Users/jeffr/discord-deal-parser/live-deal-parser/
 - `degen-deal-parser-worker` worker service for Discord ingest + parser processing
 
 Both services should use the same Postgres `DATABASE_URL`.
+
+## Debugging Workflow
+
+Start with `/admin/debug` before reading code.
+
+1. Check the separate web app and worker heartbeat indicators.
+2. Check queue state counts.
+3. Check the `Stuck Processing` section for rows that have been in `processing` too long.
+4. Check `Recent Worker Failures`.
+5. If you need raw runtime output, open:
+   - `logs/app.log` for web app issues
+   - `logs/worker.log` for ingest/parser/backfill issues
+
+Local run commands:
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
+.\.venv\Scripts\python.exe -m app.worker_service
+```
+
+Quick diagnosis rules:
+- app heartbeat healthy + worker heartbeat stale: the UI is up, but background processing is down
+- worker heartbeat healthy + backlog growing + stuck rows present: the worker is alive, but specific rows are hanging or repeatedly failing
+- recent worker failure events show `parse_failed` or `transaction_sync_failed`: start with that row on `/admin/debug`, then confirm details in `logs/worker.log`
+- app heartbeat unhealthy: start with `logs/app.log`
 
 ### Discord bot and parser worker
 

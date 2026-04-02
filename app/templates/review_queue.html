@@ -59,24 +59,15 @@
         .flash { margin-bottom:12px; padding:12px 14px; border-radius:14px; border:1px solid; font-weight:700; }
         .flash.success { background:#edf9f2; border-color:#a6e2bf; color:#166647; }
         .flash.error { background:#fff0ef; border-color:#efb8b4; color:#9d2f2b; }
+        .muted-link { color:var(--muted); font-size:12px; font-weight:700; }
+        .muted-link:hover { color:var(--accent-strong); }
         @media (max-width:1250px){ .review-card { grid-template-columns:140px 1fr; } .review-card .form-panel { grid-column:1 / -1; } }
         @media (max-width:960px){ .hero { grid-template-columns:1fr; text-align:center; } .eyebrow { margin:0 auto; } .filters, .summary-grid, .edit-grid, .review-card { grid-template-columns:1fr; } .page { padding:16px 14px 28px; } .workflow-strip { position:static; } }
     </style>
 </head>
 <body>
     <div class="page">
-        <div class="workflow-strip">
-            <div>
-                <strong>Reviewer workflow</strong>
-                <div class="small">Scan context, correct the financial fields, then approve and move forward.</div>
-            </div>
-            <div class="workflow-actions">
-                <a class="button secondary-button" href="/dashboard">Dashboard</a>
-                {% if current_user and current_user.role == "admin" %}<a class="button secondary-button" href="/table">Admin Table</a>{% endif %}
-                <a class="button secondary-button" href="/review/history">History</a>
-                <a class="button secondary-button" href="/reports">Reports</a>
-            </div>
-        </div>
+        {% include "_workspace_nav.html" %}
         <div class="topbar">
             <div class="meta-row">
                 <span class="pill">{{ current_user.display_name if current_user else "Team member" }}</span>
@@ -101,9 +92,12 @@
                 <h1>{{ title }}</h1>
                 <p>Review one deal at a time, fix the core financial fields quickly, and approve rows without digging through the admin tools.</p>
                 <div class="queue-meta">
-                    <span class="pill">Needs review {{ summary["needs_review"] }}</span>
+                    <span class="pill">Review required {{ summary["needs_review"] }}</span>
                     <span class="pill">Failed {{ summary["failed"] }}</span>
                     <span class="pill">With images {{ summary["with_images"] }}</span>
+                </div>
+                <div style="margin-top:10px;">
+                    <a class="muted-link" href="/review-table">Need to review in bulk? &rarr; Open Bulk Review</a>
                 </div>
             </div>
         </section>
@@ -111,11 +105,28 @@
         <div class="card">
             <form method="get" action="/review" class="filters">
                 <label>Channel<select name="channel_id"><option value="">All review channels</option>{% for ch in channels %}<option value="{{ ch['channel_id'] }}" {% if selected_channel_id == ch['channel_id'] %}selected{% endif %}>{{ ch["channel_name"] }}</option>{% endfor %}</select></label>
+                <label>Expense Category<select name="expense_category"><option value="">All expense categories</option>{% for option in expense_category_options %}<option value="{{ option }}" {% if selected_expense_category == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></label>
                 <label>After<input type="date" name="after" value="{{ selected_after }}"></label>
                 <label>Before<input type="date" name="before" value="{{ selected_before }}"></label>
                 <label>Rows<select name="limit">{% for option in [10,25,50,100] %}<option value="{{ option }}" {% if selected_limit == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></label>
                 <label style="justify-content:end;"><span>&nbsp;</span><button type="submit" class="secondary-button">Apply Filters</button></label>
             </form>
+            <div class="action-row" style="margin-top:12px; justify-content:space-between;">
+                <div class="small">Requeue the currently filtered review rows so the worker reparses them with the latest deterministic rules, learned corrections, and stitch heuristics.</div>
+                <form method="post" action="/messages/bulk/requeue-filtered-form" onsubmit="return confirm('Requeue all currently filtered review rows for reparsing?');">
+                    <input type="hidden" name="return_path" value="/review">
+                    <input type="hidden" name="status" value="review_queue">
+                    <input type="hidden" name="channel_id" value="{{ selected_channel_id }}">
+                    <input type="hidden" name="expense_category" value="{{ selected_expense_category }}">
+                    <input type="hidden" name="after" value="{{ selected_after }}">
+                    <input type="hidden" name="before" value="{{ selected_before }}">
+                    <input type="hidden" name="sort_by" value="{{ selected_sort_by }}">
+                    <input type="hidden" name="sort_dir" value="{{ selected_sort_dir }}">
+                    <input type="hidden" name="page" value="{{ pagination['page'] }}">
+                    <input type="hidden" name="limit" value="{{ selected_limit }}">
+                    <button type="submit" class="secondary-button">Requeue Filtered Review Rows</button>
+                </form>
+            </div>
         </div>
 
         <div class="summary-grid" style="margin-bottom:18px;">
@@ -142,7 +153,7 @@
                     <div class="thumb-placeholder">No image</div>
                     {% endif %}
                     <div class="meta-row" style="margin-top:10px;">
-                        <span class="pill {% if row['status'] == 'failed' %}pill-danger{% elif row['status'] == 'needs_review' %}pill-warn{% else %}pill-success{% endif %}">{{ row["status"] }}</span>
+                        <span class="pill {% if row['status'] == 'failed' %}pill-danger{% elif row['status'] == 'review_required' %}pill-warn{% else %}pill-success{% endif %}">{{ row["status"]|replace("_", " ") }}</span>
                         {% if row["learning"]["promoted_rule"] %}<span class="pill pill-success">promoted rule</span>{% elif row["learning"]["exact_match"] %}<span class="pill pill-success">learned exact</span>{% elif row["learning"]["similar_count"] %}<span class="pill">memory {{ row["learning"]["similar_count"] }}</span>{% endif %}
                     </div>
                 </div>
@@ -175,6 +186,7 @@
                         <input type="hidden" name="return_path" value="/review">
                         <input type="hidden" name="status" value="review_queue">
                         <input type="hidden" name="channel_id" value="{{ selected_channel_id }}">
+                        <input type="hidden" name="filter_expense_category" value="{{ selected_expense_category }}">
                         <input type="hidden" name="after" value="{{ selected_after }}">
                         <input type="hidden" name="before" value="{{ selected_before }}">
                         <input type="hidden" name="sort_by" value="{{ selected_sort_by }}">
@@ -188,16 +200,18 @@
                             <label>Parsed Type<select name="deal_type">{% for option in deal_type_options %}<option value="{{ option }}" {% if (row["type"] or "") == option %}selected{% endif %}>{{ option or "blank" }}</option>{% endfor %}</select></label>
                             <label>Cash<input type="text" name="amount" value="{{ row['amount'] if row['amount'] is not none else '' }}"></label>
                             <label>Payment<select name="payment_method">{% for option in payment_method_options %}<option value="{{ option }}" {% if (row["payment"] or "") == option %}selected{% endif %}>{{ option or "blank" }}</option>{% endfor %}</select></label>
-                            <label>Cash Direction<select name="cash_direction">{% for option in cash_direction_options %}<option value="{{ option }}" {% if (row["cash_direction"] or "") == option %}selected{% endif %}>{{ option or "blank" }}</option>{% endfor %}</select></label>
+                            <label>Cash Direction (trade only)<select name="cash_direction">{% for option in cash_direction_options %}<option value="{{ option }}" {% if (row["cash_direction"] or "") == option %}selected{% endif %}>{{ option or "blank" }}</option>{% endfor %}</select></label>
                             <label>Category<select name="category">{% for option in category_options %}<option value="{{ option }}" {% if (row["category"] or "") == option %}selected{% endif %}>{{ option or "blank" }}</option>{% endfor %}</select></label>
+                            <label>Expense Category<input type="text" name="expense_category" value="{{ row['expense_category'] or '' }}" placeholder="leave blank for auto"></label>
                             <label class="field-wide">Notes<textarea name="notes">{{ row["notes"] or "" }}</textarea></label>
                         </div>
                         <div class="action-row">
                             <button type="submit" class="ghost-button" formaction="/messages/{{ row['id'] }}/approve-form" formmethod="post">Approve</button>
                             <button type="submit" class="secondary-button">Save</button>
                             <button type="submit" name="approve_after_save" value="true" class="primary-button">Save & Approve</button>
-                            <a class="button ghost-button" href="/review/focus/{{ row['id'] }}?channel_id={{ selected_channel_id }}&after={{ selected_after }}&before={{ selected_before }}&sort_by={{ selected_sort_by }}&sort_dir={{ selected_sort_dir }}&page={{ pagination['page'] }}&limit={{ selected_limit }}">Focus</a>
-                            {% if pagination["has_next"] or pagination["page"] > 0 %}<a class="button ghost-button" href="/review?channel_id={{ selected_channel_id }}&after={{ selected_after }}&before={{ selected_before }}&sort_by={{ selected_sort_by }}&sort_dir={{ selected_sort_dir }}&page={{ pagination['page'] }}&limit={{ selected_limit }}">Skip</a>{% endif %}
+                            <button type="submit" class="ghost-button" formaction="/messages/{{ row['id'] }}/disregard-form" formmethod="post">Disregard</button>
+                            <a class="button ghost-button" href="/review/focus/{{ row['id'] }}?channel_id={{ selected_channel_id }}&expense_category={{ selected_expense_category }}&after={{ selected_after }}&before={{ selected_before }}&sort_by={{ selected_sort_by }}&sort_dir={{ selected_sort_dir }}&page={{ pagination['page'] }}&limit={{ selected_limit }}">Focus</a>
+                            {% if pagination["has_next"] or pagination["page"] > 0 %}<a class="button ghost-button" href="/review?channel_id={{ selected_channel_id }}&expense_category={{ selected_expense_category }}&after={{ selected_after }}&before={{ selected_before }}&sort_by={{ selected_sort_by }}&sort_dir={{ selected_sort_dir }}&page={{ pagination['page'] }}&limit={{ selected_limit }}">Skip</a>{% endif %}
                         </div>
                     </form>
                 </div>
@@ -210,11 +224,11 @@
         <div class="card">
             <div class="pagination">
                 {% if pagination["has_previous"] %}
-                <a class="button secondary-button" href="/review?channel_id={{ selected_channel_id }}&after={{ selected_after }}&before={{ selected_before }}&sort_by={{ selected_sort_by }}&sort_dir={{ selected_sort_dir }}&page={{ pagination['previous_page'] }}&limit={{ selected_limit }}">Previous</a>
+                <a class="button secondary-button" href="/review?channel_id={{ selected_channel_id }}&expense_category={{ selected_expense_category }}&after={{ selected_after }}&before={{ selected_before }}&sort_by={{ selected_sort_by }}&sort_dir={{ selected_sort_dir }}&page={{ pagination['previous_page'] }}&limit={{ selected_limit }}">Previous</a>
                 {% endif %}
                 <span class="small">Page {{ pagination["page"] }} of {{ pagination["total_pages"] }}</span>
                 {% if pagination["has_next"] %}
-                <a class="button secondary-button" href="/review?channel_id={{ selected_channel_id }}&after={{ selected_after }}&before={{ selected_before }}&sort_by={{ selected_sort_by }}&sort_dir={{ selected_sort_dir }}&page={{ pagination['next_page'] }}&limit={{ selected_limit }}">Next</a>
+                <a class="button secondary-button" href="/review?channel_id={{ selected_channel_id }}&expense_category={{ selected_expense_category }}&after={{ selected_after }}&before={{ selected_before }}&sort_by={{ selected_sort_by }}&sort_dir={{ selected_sort_dir }}&page={{ pagination['next_page'] }}&limit={{ selected_limit }}">Next</a>
                 {% endif %}
             </div>
         </div>

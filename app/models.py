@@ -1,13 +1,75 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from collections.abc import Iterable
 from typing import Optional
 from sqlalchemy import Column, LargeBinary
 from sqlmodel import SQLModel, Field
 
+PARSE_PENDING = "pending"
+PARSE_PROCESSING = "processing"
+PARSE_PARSED = "parsed"
+PARSE_FAILED = "failed"
+PARSE_REVIEW_REQUIRED = "review_required"
+PARSE_IGNORED = "ignored"
+
+LEGACY_PARSE_STATUS_ALIASES = {
+    "queued": PARSE_PENDING,
+    "needs_review": PARSE_REVIEW_REQUIRED,
+    "deleted": PARSE_IGNORED,
+}
+
+ACTIVE_PARSE_STATUSES = {PARSE_PENDING, PARSE_PROCESSING}
+TERMINAL_PARSE_STATUSES = {PARSE_PARSED, PARSE_FAILED, PARSE_REVIEW_REQUIRED, PARSE_IGNORED}
+ALL_PARSE_STATUSES = ACTIVE_PARSE_STATUSES | TERMINAL_PARSE_STATUSES
+
+BACKFILL_QUEUED = "queued"
+BACKFILL_PROCESSING = "processing"
+BACKFILL_COMPLETED = "completed"
+BACKFILL_CANCELLED = "cancelled"
+BACKFILL_FAILED = "failed"
+BACKFILL_TERMINAL_STATUSES = {BACKFILL_COMPLETED, BACKFILL_CANCELLED, BACKFILL_FAILED}
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def normalize_parse_status(
+    value: Optional[str],
+    *,
+    is_deleted: bool = False,
+    needs_review: bool = False,
+) -> str:
+    if is_deleted:
+        return PARSE_IGNORED
+    if needs_review:
+        return PARSE_REVIEW_REQUIRED
+
+    normalized = (value or "").strip().lower()
+    if not normalized:
+        return PARSE_PENDING
+    return LEGACY_PARSE_STATUS_ALIASES.get(normalized, normalized)
+
+
+def is_pending_parse_status(value: Optional[str]) -> bool:
+    return normalize_parse_status(value) == PARSE_PENDING
+
+
+def is_review_required_status(value: Optional[str], *, needs_review: bool = False) -> bool:
+    return normalize_parse_status(value, needs_review=needs_review) == PARSE_REVIEW_REQUIRED
+
+
+def expand_parse_status_filter_values(values: Iterable[str]) -> set[str]:
+    expanded: set[str] = set()
+    requested = {normalize_parse_status(value) for value in values if value}
+
+    for raw_value, canonical_value in LEGACY_PARSE_STATUS_ALIASES.items():
+        if canonical_value in requested:
+            expanded.add(raw_value)
+
+    expanded.update(requested)
+    return expanded
 
 
 def normalize_money_value(value: Optional[float]) -> float:
@@ -64,16 +126,20 @@ class DiscordMessage(SQLModel, table=True):
 
     created_at: datetime = Field(index=True)
     ingested_at: datetime = Field(default_factory=utcnow, index=True)
+    last_seen_at: Optional[datetime] = Field(default=None, index=True)
     edited_at: Optional[datetime] = None
+    deleted_at: Optional[datetime] = Field(default=None, index=True)
     is_deleted: bool = Field(default=False, index=True)
 
     stitched_group_id: Optional[str] = Field(default=None, index=True)
     stitched_primary: bool = Field(default=False, index=True)
     stitched_message_ids_json: str = "[]"
+    last_stitched_at: Optional[datetime] = Field(default=None, index=True)
 
-    parse_status: str = Field(default="queued", index=True)
+    parse_status: str = Field(default=PARSE_PENDING, index=True)
     parse_attempts: int = Field(default=0)
     last_error: Optional[str] = None
+    active_reparse_run_id: Optional[str] = Field(default=None, index=True)
 
     deal_type: Optional[str] = None
     amount: Optional[float] = None
@@ -126,6 +192,40 @@ class ParseAttempt(SQLModel, table=True):
     estimated_cost_usd: Optional[float] = None
 
 
+class ReparseRun(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    run_id: str = Field(index=True, unique=True)
+    source: str = Field(default="unknown", index=True)
+    reason: Optional[str] = Field(default=None)
+
+    requested_at: datetime = Field(default_factory=utcnow, index=True)
+    finished_at: Optional[datetime] = Field(default=None, index=True)
+    duration_ms: Optional[int] = None
+
+    range_after: Optional[datetime] = Field(default=None, index=True)
+    range_before: Optional[datetime] = Field(default=None, index=True)
+    channel_id: Optional[str] = Field(default=None, index=True)
+    requested_statuses_json: str = "[]"
+
+    include_reviewed: bool = Field(default=False)
+    force_reviewed: bool = Field(default=False)
+
+    selected_count: int = Field(default=0)
+    queued_count: int = Field(default=0)
+    already_queued_count: int = Field(default=0)
+    skipped_reviewed_count: int = Field(default=0)
+    succeeded_count: int = Field(default=0)
+    failed_count: int = Field(default=0)
+
+    first_message_id: Optional[int] = None
+    last_message_id: Optional[int] = None
+    first_message_created_at: Optional[datetime] = Field(default=None, index=True)
+    last_message_created_at: Optional[datetime] = Field(default=None, index=True)
+
+    status: str = Field(default="queued", index=True)
+    error_message: Optional[str] = None
+
+
 class Transaction(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     source_message_id: int = Field(index=True, unique=True, foreign_key="discordmessage.id")
@@ -171,6 +271,7 @@ class ReviewCorrection(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     source_message_id: int = Field(index=True, unique=True, foreign_key="discordmessage.id")
     normalized_text: str = Field(index=True)
+    pattern_type: Optional[str] = Field(default=None, index=True)
 
     deal_type: Optional[str] = Field(default=None, index=True)
     amount: Optional[float] = None
@@ -187,6 +288,10 @@ class ReviewCorrection(SQLModel, table=True):
     item_names_json: str = "[]"
     confidence: Optional[float] = None
     correction_source: str = Field(default="manual_edit", index=True)
+    parsed_before_json: str = "{}"
+    corrected_after_json: str = "{}"
+    field_diffs_json: str = "{}"
+    features_json: str = "{}"
 
     created_at: datetime = Field(default_factory=utcnow, index=True)
     updated_at: datetime = Field(default_factory=utcnow, index=True)
@@ -222,6 +327,28 @@ class BookkeepingEntry(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow, index=True)
 
 
+class ShopifyOrder(SQLModel, table=True):
+    __tablename__ = "shopify_orders"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    shopify_order_id: str = Field(index=True, unique=True)
+    order_number: str = Field(index=True)
+    created_at: datetime = Field(index=True)
+    updated_at: datetime = Field(index=True)
+    customer_name: Optional[str] = Field(default=None, index=True)
+    customer_email: Optional[str] = Field(default=None, index=True)
+    total_price: float = 0.0
+    subtotal_price: float = 0.0
+    total_tax: Optional[float] = None
+    subtotal_ex_tax: Optional[float] = None
+    financial_status: str = Field(default="", index=True)
+    fulfillment_status: Optional[str] = Field(default=None, index=True)
+    line_items_json: str = "[]"
+    raw_payload: str = "{}"
+    source: str = Field(default="webhook", index=True)
+    received_at: datetime = Field(default_factory=utcnow, index=True)
+
+
 class User(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     username: str = Field(index=True, unique=True)
@@ -249,7 +376,7 @@ class BackfillRequest(SQLModel, table=True):
     before: Optional[datetime] = Field(default=None, index=True)
     limit_per_channel: Optional[int] = None
     oldest_first: bool = Field(default=True, index=True)
-    status: str = Field(default="queued", index=True)
+    status: str = Field(default=BACKFILL_QUEUED, index=True)
     requested_by: Optional[str] = Field(default=None, index=True)
     result_json: str = "{}"
     error_message: Optional[str] = None

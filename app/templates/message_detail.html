@@ -66,9 +66,9 @@
             <div class="small">{{ message["channel_name"] or message["channel_id"] }} | {{ message["author_name"] or "" }}</div>
             <div class="small">Created {{ message["time"] or message["created_at"] or "" }}{% if message["edited_at"] %} | Edited {{ message["edited_at"] }}{% endif %}</div>
             <div class="hero-meta" style="margin-top:12px;">
-                <span class="pill">{{ message["parse_status"] or "unknown" }}</span>
-                <span class="pill {% if message['needs_review'] %}pill-danger{% else %}pill-success{% endif %}">{{ "needs review" if message["needs_review"] else "approved flow" }}</span>
-                {% if message["is_deleted"] %}<span class="pill pill-danger">deleted in Discord</span>{% endif %}
+                <span class="pill">{{ (message["parse_status"] or "unknown")|replace("_", " ") }}</span>
+                <span class="pill {% if message['needs_review'] %}pill-danger{% else %}pill-success{% endif %}">{{ "review required" if message["needs_review"] else "approved flow" }}</span>
+                {% if message["is_deleted"] %}<span class="pill pill-danger">ignored because deleted in Discord</span>{% endif %}
                 {% if message["confidence"] is not none %}<span class="meta-pill">confidence {{ message["confidence"] }}</span>{% endif %}
                 <span class="meta-pill">attempts {{ message["parse_attempts"] }}</span>
                 {% if learning_signal["promoted_rule"] %}<span class="pill pill-success">promoted rule available</span>{% elif learning_signal["exact_match"] %}<span class="pill pill-success">exact correction memory</span>{% elif learning_signal["similar_count"] %}<span class="meta-pill">{{ learning_signal["similar_count"] }} similar correction patterns</span>{% endif %}
@@ -170,6 +170,7 @@
                         <input type="hidden" name="stay_on_detail" value="true">
                         <input type="hidden" name="status" value="{{ selected_status }}">
                         <input type="hidden" name="channel_id" value="{{ selected_channel_id }}">
+                        <input type="hidden" name="filter_expense_category" value="{{ selected_expense_category }}">
                         <input type="hidden" name="after" value="{{ selected_after }}">
                         <input type="hidden" name="before" value="{{ selected_before }}">
                         <input type="hidden" name="sort_by" value="{{ selected_sort_by }}">
@@ -178,8 +179,8 @@
                         <input type="hidden" name="limit" value="{{ selected_limit }}">
 
                         <div class="edit-grid">
-                            <label class="field"><span class="label">Status</span><select name="parse_status">{% for option in parse_status_options %}<option value="{{ option }}" {% if message["parse_status"] == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></label>
-                            <label class="field"><span class="label">Needs Review</span><span class="checkbox-row"><input type="checkbox" name="needs_review" value="true" {% if message["needs_review"] %}checked{% endif %}><span>Keep this row in the review flow</span></span></label>
+                            <label class="field"><span class="label">Status</span><select name="parse_status">{% for option in parse_status_options %}<option value="{{ option }}" {% if message["parse_status"] == option %}selected{% endif %}>{{ option|replace("_", " ") }}</option>{% endfor %}</select></label>
+                            <label class="field"><span class="label">Review Required</span><span class="checkbox-row"><input type="checkbox" name="needs_review" value="true" {% if message["needs_review"] %}checked{% endif %}><span>Keep this row in the review flow</span></span></label>
                             <label class="field"><span class="label">Parsed Type</span><select name="deal_type">{% for option in deal_type_options %}<option value="{{ option }}" {% if (message["deal_type"] or "") == option %}selected{% endif %}>{{ option or "blank" }}</option>{% endfor %}</select></label>
                             <label class="field"><span class="label">Financial Kind</span><select name="entry_kind">{% for option in entry_kind_options %}<option value="{{ option }}" {% if (message["entry_kind"] or "") == option %}selected{% endif %}>{{ option or "auto" }}</option>{% endfor %}</select></label>
                             <label class="field"><span class="label">Amount</span><input type="text" name="amount" value="{{ message['amount'] if message['amount'] is not none else '' }}"></label>

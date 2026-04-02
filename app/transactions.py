@@ -10,8 +10,16 @@ from sqlmodel import Session, select
 from .models import (
     BookkeepingEntry,
     DiscordMessage,
+    expand_parse_status_filter_values,
+    PARSE_FAILED,
+    PARSE_IGNORED,
+    PARSE_PARSED,
+    PARSE_PENDING,
+    PARSE_PROCESSING,
+    PARSE_REVIEW_REQUIRED,
     Transaction,
     TransactionItem,
+    normalize_parse_status,
     normalize_money_value,
     signed_money_delta,
     utcnow,
@@ -21,7 +29,12 @@ from .models import (
 def is_transaction_message(row: DiscordMessage) -> bool:
     if row.is_deleted:
         return False
-    if row.parse_status in {"ignored", "queued", "processing", "failed"}:
+    if normalize_parse_status(row.parse_status, is_deleted=row.is_deleted, needs_review=row.needs_review) in {
+        PARSE_IGNORED,
+        PARSE_PENDING,
+        PARSE_PROCESSING,
+        PARSE_FAILED,
+    }:
         return False
     if row.stitched_group_id and not row.stitched_primary:
         return False
@@ -161,7 +174,11 @@ def transaction_base_query(
     entry_kind: Optional[str] = None,
 ):
     stmt = select(Transaction).where(Transaction.is_deleted == False)
-    stmt = stmt.where(Transaction.parse_status.in_(["parsed", "needs_review"]))
+    stmt = stmt.where(
+        Transaction.parse_status.in_(
+            sorted(expand_parse_status_filter_values([PARSE_PARSED, PARSE_REVIEW_REQUIRED]))
+        )
+    )
 
     if start:
         stmt = stmt.where(Transaction.occurred_at >= start)

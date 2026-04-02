@@ -7,6 +7,23 @@ from typing import Optional
 
 ENTRY_KINDS = {"sale", "buy", "trade", "expense", "unknown"}
 
+INVENTORY_HINTS: tuple[str, ...] = (
+    "single",
+    "singles",
+    "card",
+    "cards",
+    "slab",
+    "slabs",
+    "pack",
+    "packs",
+    "box",
+    "boxes",
+    "sealed",
+    "collection",
+    "binder",
+    "bulk",
+)
+
 EXPENSE_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
     ("rent", ("rent", "lease")),
     ("utilities", ("electric", "electricity", "water bill", "internet", "wifi", "utility", "utilities")),
@@ -21,31 +38,6 @@ EXPENSE_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
     ("maintenance", ("repair", "maintenance", "cleaning", "printer ink")),
     ("supplies", ("supplies", "paper", "tape", "bubble mailer", "mailer", "shipping supplies")),
 ]
-
-INVENTORY_HINTS = (
-    "slab",
-    "slabs",
-    "single",
-    "singles",
-    "pack",
-    "packs",
-    "booster",
-    "box",
-    "boxes",
-    "binder",
-    "collection",
-    "card",
-    "cards",
-    "pokemon",
-    "mtg",
-    "yugioh",
-    "one piece",
-    "sealed",
-    "trade",
-    "psa",
-    "bgs",
-)
-
 
 @dataclass
 class FinancialSummary:
@@ -79,16 +71,6 @@ def detect_expense_category(message_text: str) -> Optional[str]:
     return None
 
 
-def is_inventory_transaction(parsed_type: Optional[str], parsed_category: Optional[str], message_text: str) -> bool:
-    if parsed_type in {"buy", "sell", "trade"}:
-        if parsed_category in {"slabs", "singles", "sealed", "packs", "mixed"}:
-            return True
-        lower = (message_text or "").lower()
-        if any(token in lower for token in INVENTORY_HINTS):
-            return True
-    return False
-
-
 def derive_entry_kind(
     parsed_type: Optional[str],
     parsed_category: Optional[str],
@@ -96,25 +78,17 @@ def derive_entry_kind(
     message_text: str,
 ) -> tuple[str, Optional[str]]:
     expense_category = detect_expense_category(message_text)
-    if is_inventory_transaction(parsed_type, parsed_category, message_text):
-        inventory_category = "inventory"
-    else:
-        inventory_category = None
-
     if expense_category and parsed_type in {None, "unknown", "buy"}:
         return "expense", expense_category
 
     if parsed_type == "sell":
-        return "sale", inventory_category
+        return "sale", None
     if parsed_type == "buy":
-        return "buy", inventory_category
+        return "buy", None
     if parsed_type == "trade":
-        return "trade", inventory_category
+        return "trade", None
 
-    if expense_category and cash_direction == "from_store":
-        return "expense", expense_category
-
-    return "unknown", expense_category or inventory_category
+    return "unknown", expense_category
 
 
 def compute_financials(
@@ -141,11 +115,6 @@ def compute_financials(
     elif entry_kind in {"buy", "expense"}:
         money_out = normalized_amount
     elif entry_kind == "trade":
-        if cash_direction == "to_store":
-            money_in = normalized_amount
-        elif cash_direction == "from_store":
-            money_out = normalized_amount
-    else:
         if cash_direction == "to_store":
             money_in = normalized_amount
         elif cash_direction == "from_store":

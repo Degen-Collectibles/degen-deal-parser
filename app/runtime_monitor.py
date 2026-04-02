@@ -1,15 +1,20 @@
 import json
 import threading
+import time
 from datetime import timezone
 from typing import Callable
 
+from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, select
 
-from .db import managed_session
+from .db import database_url, managed_session
 from .models import RuntimeHeartbeat, utcnow
 
 RUNTIME_HEARTBEAT_INTERVAL_SECONDS = 30
 RUNTIME_HEARTBEAT_STALE_AFTER_SECONDS = 120
+SQLITE_HEARTBEAT_RETRY_DELAYS = (0.2, 0.5, 1.0)
+HEARTBEAT_BUSY_LOG_AFTER_CONSECUTIVE_SKIPS = 4
+HEARTBEAT_BUSY_LOG_REPEAT_EVERY = 10
 
 
 def upsert_runtime_heartbeat(
@@ -31,6 +36,10 @@ def upsert_runtime_heartbeat(
     heartbeat.updated_at = utcnow()
     session.add(heartbeat)
     session.commit()
+
+
+def is_sqlite_lock_error(exc: Exception) -> bool:
+    return database_url.startswith("sqlite") and "database is locked" in str(exc).lower()
 
 
 def get_runtime_heartbeat_status(
@@ -111,20 +120,52 @@ def runtime_heartbeat_loop(
     host_name: str,
     details_provider: Callable[[], dict],
 ) -> None:
+    consecutive_busy_skips = 0
     while not stop_event.is_set():
         details = details_provider()
         status = "running"
         if details.get("discord_status") in {"rate_limited", "degraded", "error"}:
             status = details["discord_status"]
-        try:
-            with managed_session() as session:
-                upsert_runtime_heartbeat(
-                    session,
-                    runtime_name=runtime_name,
-                    host_name=host_name,
-                    status=status,
-                    details=details,
-                )
-        except Exception as exc:
-            print(f"[heartbeat] failed to update runtime heartbeat: {exc}")
+        updated = False
+        for attempt_index, delay in enumerate((0.0, *SQLITE_HEARTBEAT_RETRY_DELAYS), start=1):
+            if delay:
+                time.sleep(delay)
+            try:
+                with managed_session() as session:
+                    upsert_runtime_heartbeat(
+                        session,
+                        runtime_name=runtime_name,
+                        host_name=host_name,
+                        status=status,
+                        details=details,
+                    )
+                updated = True
+                if consecutive_busy_skips >= HEARTBEAT_BUSY_LOG_AFTER_CONSECUTIVE_SKIPS:
+                    print(
+                        f"[heartbeat] runtime heartbeat resumed after {consecutive_busy_skips} skipped update(s)"
+                    )
+                consecutive_busy_skips = 0
+                break
+            except OperationalError as exc:
+                if not is_sqlite_lock_error(exc):
+                    print(f"[heartbeat] failed to update runtime heartbeat: {exc}")
+                    break
+                if attempt_index >= len(SQLITE_HEARTBEAT_RETRY_DELAYS) + 1:
+                    consecutive_busy_skips += 1
+                    if (
+                        consecutive_busy_skips == HEARTBEAT_BUSY_LOG_AFTER_CONSECUTIVE_SKIPS
+                        or (
+                            consecutive_busy_skips > HEARTBEAT_BUSY_LOG_AFTER_CONSECUTIVE_SKIPS
+                            and consecutive_busy_skips % HEARTBEAT_BUSY_LOG_REPEAT_EVERY == 0
+                        )
+                    ):
+                        print(
+                            "[heartbeat] SQLite stayed busy long enough to skip "
+                            f"{consecutive_busy_skips} consecutive heartbeat update(s)"
+                        )
+            except Exception as exc:
+                print(f"[heartbeat] failed to update runtime heartbeat: {exc}")
+                break
+        if not updated and not stop_event.is_set():
+            pass
         stop_event.wait(timeout=RUNTIME_HEARTBEAT_INTERVAL_SECONDS)

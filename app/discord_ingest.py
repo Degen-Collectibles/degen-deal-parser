@@ -2,18 +2,34 @@ import asyncio
 import json
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable, Optional
 
 import discord
 import httpx
 from sqlalchemy.exc import ProgrammingError
-from sqlmodel import select
+from sqlmodel import Session, select
 
+from .attachment_repair import (
+    attachment_repair_candidate_query,
+    restore_missing_assets_from_urls,
+    row_status_snapshot,
+)
+from .attachment_storage import delete_attachment_cache_file, write_attachment_cache_file
 from .bookkeeping import auto_import_public_google_sheet, extract_google_sheet_url
 from .config import get_settings
 from .db import engine, managed_session
-from .models import AttachmentAsset, AvailableDiscordChannel, DiscordMessage, WatchedChannel
+from .models import (
+    AttachmentAsset,
+    AvailableDiscordChannel,
+    DiscordMessage,
+    PARSE_IGNORED,
+    PARSE_PENDING,
+    WatchedChannel,
+)
+from .ops_log import write_operations_log
+from .runtime_logging import structured_log_line
+from .transactions import sync_transaction_from_message
 
 settings = get_settings()
 
@@ -21,6 +37,10 @@ discord_client_instance = None
 discord_runtime_state = {
     "status": "stopped",
     "error": None,
+    "last_recent_audit_at": None,
+    "last_recent_audit_summary": None,
+    "last_attachment_repair_at": None,
+    "last_attachment_repair_summary": None,
 }
 _available_channels_cache_lock = threading.Lock()
 _available_channels_cache = {
@@ -35,7 +55,11 @@ ALLOWED_CHANNEL_CATEGORIES = {
     "Past Shows",
     "Offline Deals",
 }
-BACKFILL_PROGRESS_EVERY_MESSAGES = 25
+# Backfill cancellation is enforced from progress callbacks, so keep this
+# cadence small enough to react promptly without adding a database check for
+# every single message fetched from Discord history.
+BACKFILL_PROGRESS_EVERY_MESSAGES = 5
+RECENT_AUDIT_PROGRESS_EVERY_MESSAGES = 5
 TRANSACTION_CHANNEL_NAME_HINTS = (
     "deal",
     "deals",
@@ -55,6 +79,42 @@ IMAGE_ATTACHMENT_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def ingest_log(
+    *,
+    action: str,
+    level: str = "info",
+    success: bool | None = None,
+    error: str | None = None,
+    session: Session | None = None,
+    **details,
+) -> None:
+    print(
+        structured_log_line(
+            runtime="worker",
+            action=action,
+            success=success,
+            error=error,
+            **details,
+        )
+    )
+    if session is None:
+        return
+    write_operations_log(
+        session,
+        event_type=f"ingest.{action}",
+        level="error" if level == "error" else level,
+        source="worker",
+        message=action,
+        details={
+            "runtime": "worker",
+            "action": action,
+            "success": success,
+            "error": error,
+            **details,
+        },
+    )
 
 
 def parse_iso_datetime(value: Optional[str], *, end_of_day: bool = False) -> Optional[datetime]:
@@ -227,6 +287,12 @@ def sync_attachment_assets(message_id: int, attachment_payloads: list[dict]) -> 
 
         for asset in existing_assets:
             if asset.source_url not in keep_urls:
+                if asset.id is not None:
+                    delete_attachment_cache_file(
+                        asset.id,
+                        filename=asset.filename,
+                        content_type=asset.content_type,
+                    )
                 session.delete(asset)
 
         missing_payloads = [
@@ -234,6 +300,7 @@ def sync_attachment_assets(message_id: int, attachment_payloads: list[dict]) -> 
             for payload in attachment_payloads
             if payload["url"] not in existing_by_url
         ]
+        new_assets: list[AttachmentAsset] = []
 
         if missing_payloads:
             with httpx.Client(follow_redirects=True, timeout=20.0) as client:
@@ -242,21 +309,37 @@ def sync_attachment_assets(message_id: int, attachment_payloads: list[dict]) -> 
                         response = client.get(payload["url"])
                         response.raise_for_status()
                     except Exception as exc:
-                        print(f"[attachments] failed to cache {payload['url']}: {exc}")
+                        ingest_log(
+                            action="attachment_cache_failed",
+                            level="error",
+                            success=False,
+                            error=str(exc),
+                            message_id=message_id,
+                            attachment_url=payload["url"],
+                        )
                         continue
 
-                    session.add(
-                        AttachmentAsset(
-                            message_id=message_id,
-                            source_url=payload["url"],
-                            filename=payload.get("filename"),
-                            content_type=payload.get("content_type") or response.headers.get("content-type"),
-                            is_image=bool(payload.get("is_image")),
-                            data=response.content,
-                        )
+                    asset = AttachmentAsset(
+                        message_id=message_id,
+                        source_url=payload["url"],
+                        filename=payload.get("filename"),
+                        content_type=payload.get("content_type") or response.headers.get("content-type"),
+                        is_image=bool(payload.get("is_image")),
+                        data=response.content,
                     )
+                    session.add(asset)
+                    new_assets.append(asset)
 
         session.commit()
+        for asset in new_assets:
+            session.refresh(asset)
+            if asset.id is not None:
+                write_attachment_cache_file(
+                    asset.id,
+                    filename=asset.filename,
+                    content_type=asset.content_type,
+                    data=asset.data,
+                )
 
 
 def get_message_row(session: Session, discord_message_id: str) -> Optional[DiscordMessage]:
@@ -265,6 +348,93 @@ def get_message_row(session: Session, discord_message_id: str) -> Optional[Disco
             DiscordMessage.discord_message_id == discord_message_id
         )
     ).first()
+
+
+def coerce_aware_datetime(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def recent_message_needs_refresh(existing: DiscordMessage, message: discord.Message) -> bool:
+    existing_edited_at = coerce_aware_datetime(existing.edited_at)
+    incoming_edited_at = coerce_aware_datetime(getattr(message, "edited_at", None))
+    if incoming_edited_at and (existing_edited_at is None or incoming_edited_at > existing_edited_at):
+        return True
+
+    incoming_content = message.content or ""
+    incoming_attachment_urls = json.dumps([payload["url"] for payload in get_attachment_payloads(message)])
+    if existing.content != incoming_content:
+        return True
+    if existing.attachment_urls_json != incoming_attachment_urls:
+        return True
+
+    return False
+
+
+def mark_message_deleted_row(
+    session: Session,
+    row: DiscordMessage,
+    *,
+    channel_name: Optional[str] = None,
+    reason: str = "message deleted",
+) -> bool:
+    if row.is_deleted:
+        return False
+
+    row.is_deleted = True
+    row.edited_at = utcnow()
+    row.deleted_at = utcnow()
+    row.parse_status = PARSE_IGNORED
+    row.last_error = reason
+    session.add(row)
+    sync_transaction_from_message(session, row)
+    session.commit()
+    ingest_log(
+        action="message_deleted",
+        level="warning",
+        success=True,
+        session=session,
+        message_id=row.id,
+        discord_message_id=row.discord_message_id,
+        channel_id=row.channel_id,
+        channel=channel_name or row.channel_name,
+        current_state=row.parse_status,
+    )
+    return True
+
+
+async def recover_attachment_assets_for_message(
+    *,
+    channel_id: str,
+    discord_message_id: str,
+    message_row_id: int,
+) -> bool:
+    client = get_discord_client()
+    if client is None or client.is_closed() or not client.is_ready():
+        return False
+
+    try:
+        channel = client.get_channel(int(channel_id))
+        if channel is None:
+            channel = await client.fetch_channel(int(channel_id))
+        message = await channel.fetch_message(int(discord_message_id))
+    except Exception as exc:
+        ingest_log(
+            action="attachment_recovery_failed",
+            level="error",
+            success=False,
+            error=str(exc),
+            discord_message_id=discord_message_id,
+            channel_id=channel_id,
+            message_id=message_row_id,
+        )
+        return False
+
+    sync_attachment_assets(message_row_id, get_attachment_payloads(message))
+    return True
 
 
 def is_watched_channel(channel_id: int, watched_channel_ids: Optional[set[int]] = None) -> bool:
@@ -312,17 +482,34 @@ def insert_or_update_message(
             existing.author_name = str(message.author)
             existing.content = message.content or ""
             existing.attachment_urls_json = json.dumps(attachment_urls)
+            existing.last_seen_at = utcnow()
             existing.is_deleted = False
+            existing.deleted_at = None
 
+            discord_edited_at = getattr(message, "edited_at", None)
             if is_edit:
-                existing.edited_at = utcnow()
-                existing.parse_status = "queued"
+                existing.edited_at = discord_edited_at or utcnow()
+                existing.parse_status = PARSE_PENDING
+                existing.parse_attempts = 0
                 existing.last_error = None
+            elif discord_edited_at is not None:
+                existing.edited_at = discord_edited_at
 
             session.add(existing)
             session.commit()
             if existing.id is not None:
                 sync_attachment_assets(existing.id, attachment_payloads)
+            ingest_log(
+                action="message_updated",
+                success=True,
+                session=session,
+                message_id=existing.id,
+                discord_message_id=str(message.id),
+                channel_id=str(message.channel.id),
+                channel=getattr(message.channel, "name", None),
+                current_state=existing.parse_status,
+                is_edit=is_edit,
+            )
             return True, "updated"
 
         row = DiscordMessage(
@@ -335,7 +522,9 @@ def insert_or_update_message(
             content=message.content or "",
             attachment_urls_json=json.dumps(attachment_urls),
             created_at=message.created_at,
-            parse_status="queued",
+            last_seen_at=utcnow(),
+            edited_at=getattr(message, "edited_at", None),
+            parse_status=PARSE_PENDING,
             is_deleted=False,
         )
         session.add(row)
@@ -343,6 +532,17 @@ def insert_or_update_message(
         session.refresh(row)
         if row.id is not None:
             sync_attachment_assets(row.id, attachment_payloads)
+        ingest_log(
+            action="message_queued",
+            success=True,
+            session=session,
+            message_id=row.id,
+            discord_message_id=str(message.id),
+            channel_id=str(message.channel.id),
+            channel=getattr(message.channel, "name", None),
+            current_state=row.parse_status,
+            is_edit=is_edit,
+        )
         return True, "inserted"
 
 
@@ -358,9 +558,22 @@ async def maybe_auto_import_bookkeeping_message(message: discord.Message) -> Non
             sheet_url=sheet_url,
         )
         if imported_id:
-            print(f"[bookkeeping] auto-imported Google Sheet from message {message.id} -> import {imported_id}")
+            ingest_log(
+                action="bookkeeping_auto_imported",
+                success=True,
+                discord_message_id=str(message.id),
+                channel_id=str(message.channel.id),
+                import_id=imported_id,
+            )
     except Exception as exc:
-        print(f"[bookkeeping] auto-import failed for message {message.id}: {exc}")
+        ingest_log(
+            action="bookkeeping_auto_import_failed",
+            level="error",
+            success=False,
+            error=str(exc),
+            discord_message_id=str(message.id),
+            channel_id=str(message.channel.id),
+        )
 
 
 def mark_message_deleted(message: discord.Message) -> bool:
@@ -368,13 +581,435 @@ def mark_message_deleted(message: discord.Message) -> bool:
         existing = get_message_row(session, str(message.id))
         if not existing:
             return False
+        return mark_message_deleted_row(
+            session,
+            existing,
+            channel_name=getattr(message.channel, "name", None),
+        )
 
-        existing.is_deleted = True
-        existing.edited_at = utcnow()
-        existing.parse_status = "deleted"
-        session.add(existing)
-        session.commit()
-        return True
+
+async def audit_recent_channel_history(
+    client: discord.Client,
+    *,
+    channel_id: int,
+    limit: int,
+    oldest_first: bool,
+    after: Optional[datetime],
+) -> dict:
+    watched_channel_ids = get_enabled_channel_ids()
+    if channel_id not in watched_channel_ids:
+        return {
+            "ok": False,
+            "channel_id": channel_id,
+            "error": "Channel is not currently enabled for ingestion",
+        }
+
+    channel = client.get_channel(channel_id)
+    if channel is None:
+        try:
+            channel = await client.fetch_channel(channel_id)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "channel_id": channel_id,
+                "error": f"Unable to fetch channel: {exc}",
+            }
+
+    if not hasattr(channel, "history"):
+        return {
+            "ok": False,
+            "channel_id": channel_id,
+            "error": "Channel does not support message history auditing",
+        }
+
+    inserted_count = 0
+    updated_count = 0
+    skipped_count = 0
+    deleted_count = 0
+    processed_count = 0
+    seen_message_ids: set[str] = set()
+
+    if after is not None and after.tzinfo is None:
+        after = after.replace(tzinfo=timezone.utc)
+
+    ingest_log(
+        action="recent_audit_channel_started",
+        success=True,
+        channel_id=channel_id,
+        channel_name=getattr(channel, "name", None),
+        after=after.isoformat() if after else None,
+        limit=limit,
+        oldest_first=oldest_first,
+    )
+
+    try:
+        async for message in channel.history(
+            limit=limit,
+            oldest_first=oldest_first,
+            after=after,
+        ):
+            processed_count += 1
+            seen_message_ids.add(str(message.id))
+
+            with managed_session() as session:
+                existing = get_message_row(session, str(message.id))
+
+            should_refresh = bool(existing and recent_message_needs_refresh(existing, message))
+            if existing is not None and not should_refresh:
+                skipped_count += 1
+            else:
+                ok, action = insert_or_update_message(
+                    message,
+                    is_edit=should_refresh,
+                    watched_channel_ids=watched_channel_ids,
+                )
+                if not ok:
+                    skipped_count += 1
+                elif action == "inserted":
+                    inserted_count += 1
+                else:
+                    updated_count += 1
+
+        with managed_session() as session:
+            stmt = (
+                select(DiscordMessage)
+                .where(DiscordMessage.channel_id == str(channel_id))
+                .where(DiscordMessage.is_deleted == False)  # noqa: E712
+                .order_by(DiscordMessage.created_at.asc(), DiscordMessage.id.asc())
+            )
+            if after is not None:
+                stmt = stmt.where(DiscordMessage.created_at >= after)
+            recent_rows = session.exec(stmt.limit(limit)).all()
+
+        for row in recent_rows:
+            if row.discord_message_id in seen_message_ids:
+                continue
+
+            try:
+                fetched_message = await channel.fetch_message(int(row.discord_message_id))
+            except discord.NotFound:
+                with managed_session() as session:
+                    db_row = session.get(DiscordMessage, row.id) if row.id is not None else None
+                    if db_row is not None and mark_message_deleted_row(
+                        session,
+                        db_row,
+                        channel_name=getattr(channel, "name", None),
+                        reason="message deleted during recent offline audit",
+                    ):
+                        deleted_count += 1
+                continue
+            except discord.Forbidden as exc:
+                ingest_log(
+                    action="recent_audit_message_fetch_forbidden",
+                    level="warning",
+                    success=False,
+                    error=str(exc),
+                    message_id=row.id,
+                    discord_message_id=row.discord_message_id,
+                    channel_id=row.channel_id,
+                    channel_name=getattr(channel, "name", None),
+                )
+                skipped_count += 1
+                continue
+            except Exception as exc:
+                ingest_log(
+                    action="recent_audit_message_fetch_failed",
+                    level="warning",
+                    success=False,
+                    error=str(exc),
+                    message_id=row.id,
+                    discord_message_id=row.discord_message_id,
+                    channel_id=row.channel_id,
+                    channel_name=getattr(channel, "name", None),
+                )
+                skipped_count += 1
+                continue
+
+            with managed_session() as session:
+                existing = session.get(DiscordMessage, row.id) if row.id is not None else None
+
+            if existing is None:
+                continue
+
+            should_refresh = recent_message_needs_refresh(existing, fetched_message)
+            if should_refresh:
+                ok, action = insert_or_update_message(
+                    fetched_message,
+                    is_edit=True,
+                    watched_channel_ids=watched_channel_ids,
+                )
+                if not ok:
+                    skipped_count += 1
+                elif action == "inserted":
+                    inserted_count += 1
+                else:
+                    updated_count += 1
+            else:
+                skipped_count += 1
+
+    except Exception as exc:
+        ingest_log(
+            action="recent_audit_channel_failed",
+            level="error",
+            success=False,
+            error=str(exc),
+            channel_id=channel_id,
+            channel_name=getattr(channel, "name", None),
+            after=after.isoformat() if after else None,
+            limit=limit,
+            oldest_first=oldest_first,
+        )
+        return {
+            "ok": False,
+            "channel_id": channel_id,
+            "channel_name": getattr(channel, "name", None),
+            "error": f"Recent audit failed while reading channel history: {exc}",
+        }
+
+    ingest_log(
+        action="recent_audit_channel_completed",
+        success=True,
+        channel_id=channel_id,
+        channel_name=getattr(channel, "name", None),
+        after=after.isoformat() if after else None,
+        limit=limit,
+        oldest_first=oldest_first,
+        processed_count=processed_count,
+        inserted_count=inserted_count,
+        updated_count=updated_count,
+        skipped_count=skipped_count,
+        deleted_count=deleted_count,
+    )
+    return {
+        "ok": True,
+        "channel_id": channel_id,
+        "channel_name": getattr(channel, "name", None),
+        "inserted": inserted_count,
+        "updated": updated_count,
+        "skipped": skipped_count,
+        "deleted": deleted_count,
+        "processed": processed_count,
+        "limit": limit,
+        "after": after.isoformat() if after else None,
+    }
+
+
+async def audit_recent_enabled_channels(
+    client: discord.Client,
+    *,
+    limit_per_channel: int,
+    oldest_first: bool,
+    after: Optional[datetime],
+) -> dict:
+    total_inserted = 0
+    total_updated = 0
+    total_skipped = 0
+    total_deleted = 0
+    results = []
+    all_ok = True
+
+    for channel_id in sorted(get_enabled_channel_ids()):
+        result = await audit_recent_channel_history(
+            client,
+            channel_id=channel_id,
+            limit=limit_per_channel,
+            oldest_first=oldest_first,
+            after=after,
+        )
+        results.append(result)
+        if result.get("ok"):
+            total_inserted += result.get("inserted", 0)
+            total_updated += result.get("updated", 0)
+            total_skipped += result.get("skipped", 0)
+            total_deleted += result.get("deleted", 0)
+        else:
+            all_ok = False
+
+    return {
+        "ok": all_ok,
+        "results": results,
+        "total_inserted": total_inserted,
+        "total_updated": total_updated,
+        "total_skipped": total_skipped,
+        "total_deleted": total_deleted,
+        "after": after.isoformat() if after else None,
+    }
+
+
+async def run_periodic_recent_audit_once(client: discord.Client) -> Optional[dict]:
+    if client is None or client.is_closed() or not client.is_ready():
+        return None
+
+    recent_after = None
+    if settings.periodic_offline_audit_lookback_hours > 0:
+        recent_after = utcnow() - timedelta(hours=settings.periodic_offline_audit_lookback_hours)
+
+    result = await audit_recent_enabled_channels(
+        client,
+        limit_per_channel=settings.periodic_offline_audit_limit_per_channel,
+        oldest_first=True,
+        after=recent_after,
+    )
+    discord_runtime_state["last_recent_audit_at"] = utcnow().isoformat()
+    discord_runtime_state["last_recent_audit_summary"] = result
+    ingest_log(
+        action="periodic_recent_audit_completed",
+        success=bool(result.get("ok")),
+        after=result.get("after"),
+        total_inserted=result.get("total_inserted", 0),
+        total_updated=result.get("total_updated", 0),
+        total_skipped=result.get("total_skipped", 0),
+        total_deleted=result.get("total_deleted", 0),
+    )
+    return result
+
+
+async def run_periodic_attachment_repair_once(client: discord.Client) -> Optional[dict]:
+    if client is None or client.is_closed() or not client.is_ready():
+        return None
+
+    repair_since = None
+    if settings.periodic_attachment_repair_lookback_hours > 0:
+        repair_since = utcnow() - timedelta(hours=settings.periodic_attachment_repair_lookback_hours)
+
+    repair_before = None
+    if settings.periodic_attachment_repair_min_age_minutes > 0:
+        repair_before = utcnow() - timedelta(minutes=settings.periodic_attachment_repair_min_age_minutes)
+
+    watched_channel_ids = {str(channel_id) for channel_id in get_enabled_channel_ids()}
+    with managed_session() as session:
+        candidates = [
+            candidate
+            for candidate in attachment_repair_candidate_query(
+                session,
+                since=repair_since,
+                before=repair_before,
+                limit=settings.periodic_attachment_repair_limit,
+            )
+            if candidate.missing_attachment_count > 0
+            and (not watched_channel_ids or candidate.channel_id in watched_channel_ids)
+        ]
+
+    restored_url_assets = 0
+    repaired_rows = 0
+    failed_rows = 0
+    discord_fallback_rows = 0
+
+    for candidate in candidates:
+        restored_count, failed_count = restore_missing_assets_from_urls(
+            candidate.message_id,
+            candidate.missing_attachment_urls,
+        )
+        restored_url_assets += restored_count
+
+        recovered_via_discord = False
+        if failed_count > 0:
+            recovered_via_discord = await recover_attachment_assets_for_message(
+                channel_id=candidate.channel_id,
+                discord_message_id=candidate.discord_message_id,
+                message_row_id=candidate.message_id,
+            )
+            if recovered_via_discord:
+                discord_fallback_rows += 1
+
+        asset_count, _cached_count = row_status_snapshot(candidate.message_id)
+        if asset_count >= len(candidate.attachment_urls):
+            repaired_rows += 1
+        else:
+            failed_rows += 1
+            ingest_log(
+                action="periodic_attachment_repair_incomplete",
+                level="warning",
+                success=False,
+                message_id=candidate.message_id,
+                channel_id=candidate.channel_id,
+                discord_message_id=candidate.discord_message_id,
+                expected_assets=len(candidate.attachment_urls),
+                actual_assets=asset_count,
+                restored_url_assets=restored_count,
+                used_discord_fallback=recovered_via_discord,
+            )
+
+    result = {
+        "processed_candidates": len(candidates),
+        "repaired_rows": repaired_rows,
+        "failed_rows": failed_rows,
+        "discord_fallback_rows": discord_fallback_rows,
+        "restored_url_assets": restored_url_assets,
+        "lookback_hours": settings.periodic_attachment_repair_lookback_hours,
+        "min_age_minutes": settings.periodic_attachment_repair_min_age_minutes,
+        "limit": settings.periodic_attachment_repair_limit,
+        "since": repair_since.isoformat() if repair_since else None,
+        "before": repair_before.isoformat() if repair_before else None,
+    }
+    discord_runtime_state["last_attachment_repair_at"] = utcnow().isoformat()
+    discord_runtime_state["last_attachment_repair_summary"] = result
+    ingest_log(
+        action="periodic_attachment_repair_completed",
+        success=failed_rows == 0,
+        processed_candidates=result["processed_candidates"],
+        repaired_rows=repaired_rows,
+        failed_rows=failed_rows,
+        discord_fallback_rows=discord_fallback_rows,
+        restored_url_assets=restored_url_assets,
+        since=result["since"],
+        before=result["before"],
+        limit=result["limit"],
+    )
+    return result
+
+
+async def recent_message_audit_loop(stop_event: asyncio.Event, get_client) -> None:
+    if not settings.periodic_offline_audit_enabled:
+        return
+
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(
+                stop_event.wait(),
+                timeout=max(settings.periodic_offline_audit_interval_minutes, 1) * 60,
+            )
+            break
+        except asyncio.TimeoutError:
+            pass
+
+        client = get_client()
+        try:
+            await run_periodic_recent_audit_once(client)
+        except Exception as exc:
+            ingest_log(
+                action="periodic_recent_audit_failed",
+                level="error",
+                success=False,
+                error=str(exc),
+            )
+
+
+async def periodic_attachment_repair_loop(stop_event: asyncio.Event, get_client) -> None:
+    if not settings.periodic_attachment_repair_enabled:
+        return
+
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(
+                stop_event.wait(),
+                timeout=max(settings.periodic_attachment_repair_interval_minutes, 1) * 60,
+            )
+            break
+        except asyncio.TimeoutError:
+            pass
+
+        client = get_client()
+        try:
+            await run_periodic_attachment_repair_once(client)
+        except Exception as exc:
+            ingest_log(
+                action="periodic_attachment_repair_failed",
+                level="error",
+                success=False,
+                error=str(exc),
+            )
+
 
 
 class DealIngestBot(discord.Client):
@@ -382,6 +1017,43 @@ class DealIngestBot(discord.Client):
         super().__init__(**kwargs)
         self.ready_event = asyncio.Event()
         self.startup_backfill_done = False
+        self.startup_recent_audit_done = False
+        self.startup_recent_audit_task: Optional[asyncio.Task] = None
+
+    async def run_startup_recent_audit(self) -> None:
+        try:
+            recent_after = None
+            if settings.startup_offline_audit_lookback_hours > 0:
+                recent_after = utcnow() - timedelta(hours=settings.startup_offline_audit_lookback_hours)
+                print(
+                    "[discord] running startup offline audit "
+                    f"for the last {settings.startup_offline_audit_lookback_hours:g}h"
+                )
+
+            result = await audit_recent_enabled_channels(
+                self,
+                limit_per_channel=settings.startup_offline_audit_limit_per_channel,
+                oldest_first=settings.startup_offline_audit_oldest_first,
+                after=recent_after,
+            )
+            discord_runtime_state["last_recent_audit_at"] = utcnow().isoformat()
+            discord_runtime_state["last_recent_audit_summary"] = result
+            ingest_log(
+                action="startup_recent_audit_completed",
+                success=bool(result.get("ok")),
+                after=result.get("after"),
+                total_inserted=result.get("total_inserted", 0),
+                total_updated=result.get("total_updated", 0),
+                total_skipped=result.get("total_skipped", 0),
+                total_deleted=result.get("total_deleted", 0),
+            )
+        except Exception as exc:
+            ingest_log(
+                action="startup_recent_audit_failed",
+                level="error",
+                success=False,
+                error=str(exc),
+            )
 
     async def on_ready(self):
         print(f"[discord] logged in as {self.user}")
@@ -395,14 +1067,34 @@ class DealIngestBot(discord.Client):
         if not self.startup_backfill_done and settings.startup_backfill_enabled:
             self.startup_backfill_done = True
             try:
+                startup_after = None
+                if settings.startup_backfill_lookback_hours > 0:
+                    startup_after = utcnow() - timedelta(hours=settings.startup_backfill_lookback_hours)
+                    print(
+                        "[discord] running startup catch-up backfill "
+                        f"for the last {settings.startup_backfill_lookback_hours:g}h"
+                    )
                 await self.backfill_enabled_channels(
                     limit_per_channel=settings.startup_backfill_limit_per_channel,
                     oldest_first=settings.startup_backfill_oldest_first,
+                    after=startup_after,
                 )
             except Exception as exc:
                 discord_runtime_state["status"] = "degraded"
                 discord_runtime_state["error"] = f"startup backfill failed: {exc}"
-                print(f"[discord] startup backfill failed: {exc}")
+                ingest_log(
+                    action="startup_backfill_failed",
+                    level="error",
+                    success=False,
+                    error=str(exc),
+                )
+
+        if not self.startup_recent_audit_done and settings.startup_offline_audit_enabled:
+            self.startup_recent_audit_done = True
+            self.startup_recent_audit_task = asyncio.create_task(
+                self.run_startup_recent_audit(),
+                name="discord-recent-audit",
+            )
 
         self.ready_event.set()
 
@@ -493,9 +1185,12 @@ class DealIngestBot(discord.Client):
                 if not should_track_message(message, watched_channel_ids):
                     skipped_count += 1
                 else:
+                    with managed_session() as session:
+                        existing = get_message_row(session, str(message.id))
+                    should_refresh = bool(existing and recent_message_needs_refresh(existing, message))
                     ok, action = insert_or_update_message(
                         message,
-                        is_edit=False,
+                        is_edit=should_refresh,
                         watched_channel_ids=watched_channel_ids,
                     )
                     if not ok:
@@ -505,6 +1200,9 @@ class DealIngestBot(discord.Client):
                     else:
                         updated_count += 1
 
+                # Cancellation is checked inside the progress callback. We emit
+                # progress on the first message and then every few messages so
+                # smaller backfills and long-running imports can stop promptly.
                 if progress_callback and (
                     processed_count == 1
                     or processed_count % BACKFILL_PROGRESS_EVERY_MESSAGES == 0
@@ -721,15 +1419,35 @@ async def run_discord_bot(stop_event: asyncio.Event):
                 if status_code == 429:
                     discord_runtime_state["status"] = "rate_limited"
                     discord_runtime_state["error"] = f"Discord rate limited startup/connect; retrying in {retry_delay}s"
-                    print(f"[discord] rate limited ({exc}); retrying in {retry_delay}s")
+                    ingest_log(
+                        action="discord_rate_limited",
+                        level="warning",
+                        success=False,
+                        error=str(exc),
+                        status_code=status_code,
+                        retry_delay_seconds=retry_delay,
+                    )
                 else:
                     discord_runtime_state["status"] = "degraded"
                     discord_runtime_state["error"] = f"Discord HTTP error ({status_code}): {exc}; retrying in {retry_delay}s"
-                    print(f"[discord] HTTP error ({status_code}): {exc}; retrying in {retry_delay}s")
+                    ingest_log(
+                        action="discord_http_error",
+                        level="error",
+                        success=False,
+                        error=str(exc),
+                        status_code=status_code,
+                        retry_delay_seconds=retry_delay,
+                    )
             except Exception as exc:
                 discord_runtime_state["status"] = "degraded"
                 discord_runtime_state["error"] = f"Discord connection failed: {exc}; retrying in {retry_delay}s"
-                print(f"[discord] bot stopped with error: {exc}; retrying in {retry_delay}s")
+                ingest_log(
+                    action="discord_connection_failed",
+                    level="error",
+                    success=False,
+                    error=str(exc),
+                    retry_delay_seconds=retry_delay,
+                )
             finally:
                 discord_client_instance = None
 
@@ -747,7 +1465,12 @@ async def run_discord_bot(stop_event: asyncio.Event):
     except Exception as exc:
         discord_runtime_state["status"] = "error"
         discord_runtime_state["error"] = str(exc)
-        print(f"[discord] bot task crashed: {exc}")
+        ingest_log(
+            action="discord_task_crashed",
+            level="error",
+            success=False,
+            error=str(exc),
+        )
     finally:
         if discord_runtime_state["status"] not in {"disabled", "error", "rate_limited", "degraded"}:
             discord_runtime_state["status"] = "stopped"

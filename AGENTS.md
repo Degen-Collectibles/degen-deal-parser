@@ -13,6 +13,23 @@ Current stack:
 - SQLite
 - OpenAI API
 - HTML/Jinja templates
+## Core Principles (VERY IMPORTANT)
+
+### 1. Source of truth
+- `DiscordMessage` is immutable audit log
+- All parsing must be reproducible from raw messages
+
+### 2. Determinism first
+- Prefer rule-based parsing over AI
+- AI is fallback, not primary logic
+
+### 3. No silent failures
+- Every failure must be visible via logs or UI
+
+### 4. Do not guess
+- If behavior is unclear, inspect and explain before coding
+
+### 5. No broad refactors unless explicitly requested
 
 ## Run
 
@@ -163,3 +180,80 @@ When touching bookkeeping:
   - stale child grouped row data
   - transaction sync not being removed
 - if debugging parser results, prefer fixing deterministic rules before making the AI prompt more complex
+
+## Queue / Processing State Model (CRITICAL)
+
+Each DiscordMessage MUST have a clear processing state.
+
+Valid states:
+- `pending` → waiting to be processed
+- `processing` → currently being worked on
+- `parsed` → successfully parsed
+- `failed` → parsing or transaction failed
+- `review_required` → needs human review
+- `ignored` → intentionally skipped
+
+Rules:
+- no message should remain indefinitely in `processing`
+- failures must move to `failed` with error reason
+- parser changes should allow reprocessing of `parsed` rows
+- worker must not silently skip rows without logging why
+
+Definition of "stuck":
+- message remains in `pending` or `processing` without progress
+- message repeatedly fails without visibility
+
+## Reparse / Replay Rules (CRITICAL)
+
+The system MUST support reprocessing old messages.
+
+Important distinction:
+- "seen before" != "correct under latest parser logic"
+
+Requirements:
+- allow reprocessing of previously parsed messages
+- reparsing must NOT create duplicate transactions
+- parser output must be replaceable or refreshable
+- reparsing should be possible:
+  - by date range
+  - by channel
+  - by explicit selection
+
+Preferred approach:
+- raw DiscordMessage remains source of truth
+- normalized Transaction layer is derived and replaceable
+
+Never assume parsed data is final.
+
+## Observability / Logging (CRITICAL)
+
+Logging must make debugging possible without reading code.
+
+Every processing step MUST log:
+
+- message_id
+- channel
+- current state
+- action being performed
+- success/failure
+- error message (if any)
+- timestamp
+
+Required log events:
+- message queued
+- message picked up by worker
+- parsing started
+- parsing success
+- parsing failure
+- transaction sync started
+- transaction sync success
+- transaction sync failure
+- message marked for review
+
+No silent skips:
+- if a message is skipped, log WHY
+
+System must support:
+- viewing recent failures
+- counting messages by state
+- identifying stuck messages

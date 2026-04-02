@@ -58,16 +58,35 @@
                 <div class="metric-value">{{ backfill_request["status"] }}</div>
             </div>
             <div class="metric">
-                <div class="metric-label">Inserted</div>
-                <div class="metric-value">{{ backfill_request["inserted_count"] }}</div>
+                <div class="metric-label">Discovered</div>
+                <div class="metric-value">{{ backfill_request["progress"].get("total_messages_discovered", 0) }}</div>
             </div>
             <div class="metric">
-                <div class="metric-label">Skipped</div>
-                <div class="metric-value">{{ backfill_request["skipped_count"] }}</div>
+                <div class="metric-label">Pending For Parsing</div>
+                <div class="metric-value">{{ backfill_request["progress"].get("queued_for_parsing", backfill_request["inserted_count"]) }}</div>
             </div>
             <div class="metric">
                 <div class="metric-label">Target</div>
                 <div class="metric-value" style="font-size:18px; line-height:1.2;">{{ backfill_request["target_label"] }}</div>
+            </div>
+        </div>
+
+        <div class="grid">
+            <div class="metric">
+                <div class="metric-label">Inserted</div>
+                <div class="metric-value">{{ backfill_request["progress"].get("inserted", backfill_request["inserted_count"]) }}</div>
+            </div>
+            <div class="metric">
+                <div class="metric-label">Skipped</div>
+                <div class="metric-value">{{ backfill_request["progress"].get("skipped", backfill_request["skipped_count"]) }}</div>
+            </div>
+            <div class="metric">
+                <div class="metric-label">Completed Channels</div>
+                <div class="metric-value">{{ backfill_request["progress"].get("completed", 0) }}</div>
+            </div>
+            <div class="metric">
+                <div class="metric-label">Failed Channels</div>
+                <div class="metric-value">{{ backfill_request["progress"].get("failed", 0) }}</div>
             </div>
         </div>
 
@@ -77,9 +96,27 @@
                 <div class="detail-card"><strong>Requested By</strong>{{ backfill_request["requested_by"] }}</div>
                 <div class="detail-card"><strong>Created</strong>{{ backfill_request["created_at"] }}</div>
                 <div class="detail-card"><strong>Started</strong>{{ backfill_request["started_at"] or "not started" }}</div>
-                <div class="detail-card"><strong>Finished</strong>{{ backfill_request["finished_at"] or "still running" }}</div>
+                <div class="detail-card"><strong>Finished</strong>{{ backfill_request["finished_label"] }}</div>
+                <div class="detail-card"><strong>Progress</strong>{{ backfill_request["progress_label"] }}</div>
                 <div class="detail-card"><strong>After</strong>{{ backfill_request["after"] }}</div>
                 <div class="detail-card"><strong>Before</strong>{{ backfill_request["before"] }}</div>
+                <div class="detail-card"><strong>Last Progress</strong>{{ backfill_request["last_progress_label"] }}</div>
+                <div class="detail-card">
+                    <strong>Worker Claim</strong>
+                    <span class="pill {{ backfill_request['worker_status_tone'] }}">{{ backfill_request["worker_status_label"] }}</span>
+                </div>
+                <div class="detail-card">
+                    <strong>Waiting For Discord</strong>
+                    <span class="pill {% if backfill_request['discord_wait_label'] == 'Yes' %}warning{% else %}success{% endif %}">{{ backfill_request["discord_wait_label"] }}</span>
+                    {% if backfill_request["discord_wait_reason"] %}
+                    <div class="small" style="margin-top:6px;">{{ backfill_request["discord_wait_reason"] }}</div>
+                    {% endif %}
+                </div>
+                <div class="detail-card">
+                    <strong>Backfill Queue Health</strong>
+                    <div>{{ snapshot["queue_health_label"] }}</div>
+                    <div class="small" style="margin-top:6px;">{{ snapshot["worker_claim_label"] }} | backlog {{ snapshot["queue_backlog"] }}</div>
+                </div>
             </div>
             {% if backfill_request["error_message"] %}
             <div class="preview" style="margin-top:12px; border-color:#efb8b4; background:#fff6f5;"><strong style="display:block; margin-bottom:6px;">Latest Error / Note</strong>{{ backfill_request["error_message"] }}</div>

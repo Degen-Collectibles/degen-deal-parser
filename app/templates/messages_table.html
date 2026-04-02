@@ -117,7 +117,7 @@
         .count-pill { background:#fff; border:1px solid #ead7c1; }
         .hotkey-pill { background:#251c16; color:#fff8ee; }
         .thumb { width:52px; height:68px; object-fit:cover; border-radius:10px; border:1px solid var(--line); display:block; background:#f9f2e9; }
-        .status-parsed{color:#11543d;background:#e7f5ee}.status-processing{color:#8a580d;background:#fff1d7}.status-needs_review,.status-failed{color:#8e2722;background:#fde8e6}.status-ignored{color:#5d6a77;background:#edf1f5}.status-queued{color:#30548c;background:#e7f0ff}
+        .status-parsed{color:#11543d;background:#e7f5ee}.status-processing{color:#8a580d;background:#fff1d7}.status-review_required,.status-failed{color:#8e2722;background:#fde8e6}.status-ignored{color:#5d6a77;background:#edf1f5}.status-pending{color:#30548c;background:#e7f0ff}
         .notes-cell { display:flex; flex-direction:column; gap:10px; }
         .quick-actions { display:flex; flex-direction:column; gap:6px; }
         .quick-actions .tiny-button { width:100%; }
@@ -151,6 +151,9 @@
         .grouped-item { font-size:12px; color:var(--muted); border-top:1px dashed #ead7c1; padding-top:6px; }
         .grouped-item:first-child { border-top:none; padding-top:0; }
         .grouped-item strong { color:var(--text); }
+        .attention-box { margin-top:8px; padding:8px 10px; border-radius:12px; border:1px solid #ecd9bd; background:#fffaf2; }
+        .attention-box.danger { border-color:#efb8b4; background:#fff1ef; }
+        .attention-title { font-size:11px; font-weight:800; color:var(--accent-strong); text-transform:uppercase; letter-spacing:.08em; margin-bottom:6px; }
         .page.compact-review .channel-col,
         .page.compact-review .author-col,
         .page.compact-review .bookkeeping-col { display:none; }
@@ -166,6 +169,7 @@
         .review-rail { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:12px; margin-bottom:14px; }
         .review-note { padding:12px 14px; border:1px solid #eadfce; border-radius:16px; background:#fffdf9; }
         .review-note strong { display:block; margin-bottom:4px; }
+        .review-note a { color:var(--accent-strong); font-weight:800; }
         .section-subtle { font-size:12px; color:var(--muted); }
         @keyframes panelFade { from { opacity:0; transform:translateY(-4px); } to { opacity:1; transform:translateY(0); } }
         @media (max-width:1200px){.top-grid,.dashboard{grid-template-columns:1fr}.sidebar{position:static}}
@@ -175,23 +179,7 @@
 </head>
 <body>
     <div class="page{% if is_review_page %} review-page{% endif %}" id="messages-page">
-        <div class="workspace-nav">
-            <div>
-                <strong>{% if is_review_page %}Advanced review table{% else %}Admin power table{% endif %}</strong>
-                <div class="subtle">{% if is_review_page %}Dense triage mode for fast inline correction when the standard review queue is not enough.{% else %}High-control operations view for ingest, parsing, backfill, and ledger cleanup.{% endif %}</div>
-            </div>
-            <div class="nav-links">
-                <a href="/dashboard" class="button secondary-button" style="width:auto;">Dashboard</a>
-                {% if is_review_page %}
-                <a href="/review" class="button secondary-button" style="width:auto;">Review Queue</a>
-                <a href="/review/history" class="button secondary-button" style="width:auto;">History</a>
-                {% else %}
-                <a href="/admin" class="button secondary-button" style="width:auto;">Admin</a>
-                <a href="/status" class="button secondary-button" style="width:auto;">Status</a>
-                {% endif %}
-                <a href="/reports" class="button secondary-button" style="width:auto;">Reports</a>
-            </div>
-        </div>
+        {% include "_workspace_nav.html" %}
         {% if success %}<div class="banner banner-success">{{ success }}</div>{% endif %}
         {% if error %}<div class="banner banner-error">{{ error }}</div>{% endif %}
         <div class="banner banner-warning" id="local-runtime-warning" {% if not parser_progress["local_runtime"]["needs_attention"] %}style="display:none;"{% endif %}>
@@ -202,18 +190,22 @@
             <div class="logo-wrap"><img src="/static/degen-logo.png" alt="Degen Collectibles logo"></div>
             <div>
                 <div class="eyebrow">Degen Collectibles Ledger Ops</div>
-                <h1>{{ title }}</h1>
-                <p>{% if is_review_page %}Move through the review queue with less clicking: scan the message, correct the parse inline, and approve without opening each row unless you need the full audit trail.{% else %}Use this as the admin-only power table for parser operations, watched channels, backfill, and deep ledger cleanup. Partner browsing and employee review now live on their own pages.{% endif %}</p>
+                <h1>{% if is_review_page %}Bulk Review (Operator){% else %}Message Queue{% endif %}</h1>
+                <div style="margin-bottom:10px;"><span class="pill">Operator View</span></div>
+                <p>{% if is_review_page %}Move through bulk review with less clicking: scan the message, correct the parse inline, and approve without opening each row unless you need the full audit trail.{% else %}Use this operator-only queue for ingest, parsing, backfills, and deep ledger cleanup. Partner browsing and employee review now live on their own pages.{% endif %}</p>
                 <div class="hero-actions">
                     {% if not is_review_page %}
                     <a href="/admin" class="button primary-button" style="width:auto;">Back to Admin Hub</a>
                     <a href="/bookkeeping" class="button secondary-button" style="width:auto;">Bookkeeping</a>
-                    <a href="/messages/export.csv?status={{ selected_status }}&channel_id={{ selected_channel_id }}&after={{ selected_after }}&before={{ selected_before }}&sort_by={{ selected_sort_by }}&sort_dir={{ selected_sort_dir }}" class="button secondary-button" style="width:auto;">Export Table CSV</a>
+                    <a href="/messages/export.csv?status={{ selected_status }}&channel_id={{ selected_channel_id }}&expense_category={{ selected_expense_category }}&source={{ selected_source }}&after={{ selected_after }}&before={{ selected_before }}&sort_by={{ selected_sort_by }}&sort_dir={{ selected_sort_dir }}" class="button secondary-button" style="width:auto;">Export Table CSV</a>
                     <form method="post" action="/admin/parser/reprocess-form" style="display:inline-flex; gap:8px; flex-wrap:wrap;">
                         <input type="hidden" name="return_path" value="{{ return_path }}">
                         <button type="submit" class="button secondary-button" style="width:auto;">Run Parser Recheck</button>
                         <button type="submit" name="force" value="true" class="button secondary-button" style="width:auto;">Force Recheck</button>
                     </form>
+                    <div class="subtle" style="flex-basis:100%; margin-top:2px;">
+                        Reparse checks messages that are already in the system again with today's parser rules. Use the normal button for a safe pass; use force only if you also want to include rows that were already reviewed by a person.
+                    </div>
                     {% else %}
                     <a href="/review" class="button primary-button" style="width:auto;">Open Reviewer Queue</a>
                     <a href="/table" class="button secondary-button" style="width:auto;">Back to Main Table</a>
@@ -223,28 +215,39 @@
                 <div class="hero-meta">
                     <span class="mode-chip">{% if is_review_page %}dense review mode{% else %}admin controls visible{% endif %}</span>
                     <span class="mode-chip">{{ selected_status if selected_status else "all visible statuses" }}</span>
+                    {% if not is_review_page %}<span class="mode-chip">{{ selected_source }}</span>{% endif %}
                     <span class="mode-chip">{{ selected_limit }} rows per page</span>
                 </div>
             </div>
         </section>
 
+        {% if is_review_page %}
+        <div class="review-rail" style="margin-top:-4px;">
+            <div class="review-note">
+                <strong>This is the bulk review view for operators.</strong>
+                <div class="section-subtle">For standard review, go to <a href="/review">Review Queue &rarr;</a></div>
+            </div>
+        </div>
+        {% endif %}
+
+        {% if not shopify_source_notice %}
         <section class="top-grid">
             <div class="card">
                 <h2>Queue Snapshot</h2>
                 <div class="summary-grid">
                     <div class="metric"><div class="metric-label">Total</div><div class="metric-value">{{ summary["total"] }}</div><div class="metric-sub">Visible rows in this view</div></div>
                     <div class="metric"><div class="metric-label">Parsed</div><div class="metric-value">{{ summary["parsed"] }}</div><div class="metric-sub">Ready ledger rows</div></div>
-                    <div class="metric"><div class="metric-label">Review</div><div class="metric-value">{{ summary["needs_review"] }}</div><div class="metric-sub">Needs eyes on it</div></div>
+                    <div class="metric"><div class="metric-label">Review Required</div><div class="metric-value">{{ summary["needs_review"] }}</div><div class="metric-sub">Needs eyes on it</div></div>
                     <div class="metric"><div class="metric-label">Failed</div><div class="metric-value">{{ summary["failed"] }}</div><div class="metric-sub">Needs retry</div></div>
-                    <div class="metric"><div class="metric-label">Queued</div><div class="metric-value">{{ summary["queued"] }}</div><div class="metric-sub">Waiting to parse</div></div>
+                    <div class="metric"><div class="metric-label">Pending</div><div class="metric-value">{{ summary["queued"] }}</div><div class="metric-sub">Waiting to parse</div></div>
                     <div class="metric"><div class="metric-label">Processing</div><div class="metric-value">{{ summary["processing"] }}</div><div class="metric-sub">Running now</div></div>
                     <div class="metric"><div class="metric-label">Ignored</div><div class="metric-value">{{ summary["ignored"] }}</div><div class="metric-sub">Non-transactions</div></div>
                     <div class="metric"><div class="metric-label">Images</div><div class="metric-value">{{ summary["with_images"] }}</div><div class="metric-sub">Rows with attachments</div></div>
                 </div>
                 <div class="progress-meta"><strong>Parser Progress</strong><span id="parser-progress-status">{{ "Active" if parser_progress["is_active"] else "Idle" }}</span></div>
                 <div class="progress-track"><div class="progress-fill" id="parser-progress-fill" style="width: {{ parser_progress['percent_complete'] }}%;"></div></div>
-                <div class="progress-text" id="parser-progress-text">{{ parser_progress["completed"] }} / {{ parser_progress["total"] }} complete | queued: {{ parser_progress["queued"] }} | processing: {{ parser_progress["processing"] }} | review: {{ parser_progress["needs_review"] }} | failed: {{ parser_progress["failed"] }} | ignored: {{ parser_progress["ignored"] }}</div>
-                <div class="progress-text" id="parser-progress-scope">{% if selected_channel_id or selected_after or selected_before %}Scope: filtered view{% else %}Scope: all visible non-ignored messages{% endif %}</div>
+                <div class="progress-text" id="parser-progress-text">{{ parser_progress["completed"] }} / {{ parser_progress["total"] }} complete | pending: {{ parser_progress["queued"] }} | processing: {{ parser_progress["processing"] }} | review required: {{ parser_progress["needs_review"] }} | failed: {{ parser_progress["failed"] }} | ignored: {{ parser_progress["ignored"] }}</div>
+                <div class="progress-text" id="parser-progress-scope">{% if selected_channel_id or selected_expense_category or selected_after or selected_before %}Scope: filtered view{% else %}Scope: all visible non-ignored messages{% endif %}</div>
                 <div class="health-strip">
       <div class="health-chip"><strong>Ingest Worker</strong><span id="parser-health-local">{{ parser_progress["local_runtime"]["label"] }}</span><div class="section-subtle" id="parser-health-local-detail">{% if parser_progress["local_runtime"]["host_name"] %}{{ parser_progress["local_runtime"]["host_name"] }} | {% endif %}{{ parser_progress["local_runtime"]["updated_at_label"] }}</div></div>
                     <div class="health-chip"><strong>Oldest In Flight</strong><span id="parser-health-oldest">{{ parser_progress["oldest_processing_age_label"] }}</span></div>
@@ -285,6 +288,7 @@
                 </div>
             </div>
         </section>
+        {% endif %}
         <section class="dashboard">
             <aside class="sidebar">
                 <details class="panel" open>
@@ -293,10 +297,12 @@
                         <form method="get" action="{{ return_path }}">
                             <div class="form-row"><label for="channel_id">Channel</label><select name="channel_id" id="channel_id"><option value="">All channels</option>{% for ch in channels %}<option value="{{ ch['channel_id'] }}" {% if selected_channel_id == ch['channel_id'] %}selected{% endif %}>{{ ch["channel_name"] }}</option>{% endfor %}</select></div>
                             {% if is_review_page %}
-                            <input type="hidden" name="status" value="review_queue"><div class="form-row"><label>Scope</label><div class="helper">Needs review + failed</div></div>
+                            <input type="hidden" name="status" value="review_queue"><div class="form-row"><label>Scope</label><div class="helper">Review required + failed</div></div>
                             {% else %}
-                            <div class="form-row"><label for="status">Status</label><select name="status" id="status"><option value="" {% if selected_status == "" %}selected{% endif %}>All statuses</option><option value="queued" {% if selected_status == "queued" %}selected{% endif %}>queued</option><option value="processing" {% if selected_status == "processing" %}selected{% endif %}>processing</option><option value="parsed" {% if selected_status == "parsed" %}selected{% endif %}>parsed</option><option value="needs_review" {% if selected_status == "needs_review" %}selected{% endif %}>needs_review</option><option value="failed" {% if selected_status == "failed" %}selected{% endif %}>failed</option><option value="ignored" {% if selected_status == "ignored" %}selected{% endif %}>ignored</option></select></div>
+                            <div class="form-row"><label for="source">Source</label><select name="source" id="source"><option value="all" {% if selected_source == "all" %}selected{% endif %}>All sources</option><option value="discord" {% if selected_source == "discord" %}selected{% endif %}>Discord only</option><option value="shopify" {% if selected_source == "shopify" %}selected{% endif %}>Shopify only</option></select></div>
+                            <div class="form-row"><label for="status">Status</label><select name="status" id="status"><option value="" {% if selected_status == "" %}selected{% endif %}>All statuses</option><option value="queued" {% if selected_status == "queued" %}selected{% endif %}>pending</option><option value="processing" {% if selected_status == "processing" %}selected{% endif %}>processing</option><option value="parsed" {% if selected_status == "parsed" %}selected{% endif %}>parsed</option><option value="needs_review" {% if selected_status == "needs_review" %}selected{% endif %}>review required</option><option value="failed" {% if selected_status == "failed" %}selected{% endif %}>failed</option><option value="ignored" {% if selected_status == "ignored" %}selected{% endif %}>ignored</option></select></div>
                             {% endif %}
+                            <div class="form-row"><label for="expense_category">Expense Category</label><select name="expense_category" id="expense_category"><option value="" {% if selected_expense_category == "" %}selected{% endif %}>All expense categories</option>{% for option in expense_category_options %}<option value="{{ option }}" {% if selected_expense_category == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></div>
                             <div class="form-row"><label for="after_filter">After</label><input type="date" name="after" id="after_filter" value="{{ selected_after }}"></div>
                             <div class="form-row"><label for="before_filter">Before</label><input type="date" name="before" id="before_filter" value="{{ selected_before }}"></div>
                             <div class="form-row"><label for="sort_dir">Time Sort</label><select name="sort_dir" id="sort_dir"><option value="desc" {% if selected_sort_dir == "desc" %}selected{% endif %}>Newest first</option><option value="asc" {% if selected_sort_dir == "asc" %}selected{% endif %}>Oldest first</option></select></div>
@@ -360,10 +366,10 @@
                     </div>
                     <div class="table-toolbar">
                         <div class="scope-stack"><h2 class="scope-title">{% if is_review_page %}Review Queue{% else %}Transaction Feed{% endif %}</h2><div class="muted">Showing {{ pagination["start_row"] }}-{{ pagination["end_row"] }} of {{ pagination["total_rows"] }}{% if selected_after or selected_before %} for the selected date range{% endif %}</div></div>
-                        <div class="toolbar-actions"><span class="pill">{{ selected_status if selected_status else "all visible statuses" }}</span><span class="pill">{{ selected_limit }} rows/page</span><button type="button" id="auto-refresh-toggle" class="pill active" style="border:none; cursor:pointer;">Auto Refresh On</button>{% if is_review_page %}<span class="hotkey-pill">Ctrl/Cmd+S saves focused row</span>{% endif %}</div>
+                        <div class="toolbar-actions"><span class="pill">{{ selected_status if selected_status else "all visible statuses" }}</span><span class="pill">{{ selected_expense_category if selected_expense_category else "all expense categories" }}</span>{% if not is_review_page %}<span class="pill">{{ selected_source }}</span>{% endif %}<span class="pill">{{ selected_limit }} rows/page</span><button type="button" id="auto-refresh-toggle" class="pill active" style="border:none; cursor:pointer;">Auto Refresh On</button>{% if is_review_page %}<span class="hotkey-pill">Ctrl/Cmd+S saves focused row</span>{% endif %}</div>
                     </div>
                     <div class="scope-strip">
-                        <div class="subtle">{% if selected_channel_id %}Scoped to one channel.{% else %}Across all visible channels.{% endif %}{% if selected_after or selected_before %} Date filters are active.{% else %} No date range filters applied.{% endif %}</div>
+                        <div class="subtle">{% if selected_channel_id %}Scoped to one channel.{% else %}Across all visible channels.{% endif %}{% if selected_expense_category %} Expense category filter is active.{% endif %}{% if selected_after or selected_before %} Date filters are active.{% else %} No date range filters applied.{% endif %}{% if not is_review_page %} Source: {{ selected_source }}.{% endif %}</div>
                         <div class="inline-actions">
                             <span class="mode-chip">page {{ pagination["page"] }} of {{ pagination["total_pages"] }}</span>
                             <span class="mode-chip">{{ pagination["total_rows"] }} visible rows</span>
@@ -372,7 +378,7 @@
 
                     <div class="pagination-bar">
                         <div>{% if is_review_page %}Review flagged rows and failures without the admin clutter taking over the page.{% else %}The main table stays lean; deeper parse and money details live behind each row.{% endif %}</div>
-                        <div class="pagination-controls">{% if pagination["has_previous"] %}<a href="{{ return_path }}?status={{ selected_status }}&channel_id={{ selected_channel_id }}&after={{ selected_after }}&before={{ selected_before }}&sort_by={{ selected_sort_by }}&sort_dir={{ selected_sort_dir }}&limit={{ selected_limit }}&page={{ pagination['previous_page'] }}" class="button secondary-button" style="width:auto;">Previous</a>{% endif %}<span>Page {{ pagination["page"] }} of {{ pagination["total_pages"] }}</span>{% if pagination["has_next"] %}<a href="{{ return_path }}?status={{ selected_status }}&channel_id={{ selected_channel_id }}&after={{ selected_after }}&before={{ selected_before }}&sort_by={{ selected_sort_by }}&sort_dir={{ selected_sort_dir }}&limit={{ selected_limit }}&page={{ pagination['next_page'] }}" class="button secondary-button" style="width:auto;">Next</a>{% endif %}</div>
+                        <div class="pagination-controls">{% if pagination["has_previous"] %}<a href="{{ return_path }}?status={{ selected_status }}&channel_id={{ selected_channel_id }}&expense_category={{ selected_expense_category }}&source={{ selected_source }}&after={{ selected_after }}&before={{ selected_before }}&sort_by={{ selected_sort_by }}&sort_dir={{ selected_sort_dir }}&limit={{ selected_limit }}&page={{ pagination['previous_page'] }}" class="button secondary-button" style="width:auto;">Previous</a>{% endif %}<span>Page {{ pagination["page"] }} of {{ pagination["total_pages"] }}</span>{% if pagination["has_next"] %}<a href="{{ return_path }}?status={{ selected_status }}&channel_id={{ selected_channel_id }}&expense_category={{ selected_expense_category }}&source={{ selected_source }}&after={{ selected_after }}&before={{ selected_before }}&sort_by={{ selected_sort_by }}&sort_dir={{ selected_sort_dir }}&limit={{ selected_limit }}&page={{ pagination['next_page'] }}" class="button secondary-button" style="width:auto;">Next</a>{% endif %}</div>
                     </div>
 
                     <div class="queue-strip">
@@ -382,15 +388,52 @@
                         </div>
                         <div class="queue-strip-actions">
                             <span class="count-pill">Visible {{ pagination["total_rows"] }}</span>
-                            {% if is_review_page %}<span class="count-pill">Needs review {{ summary["needs_review"] }}</span><span class="count-pill">Failed {{ summary["failed"] }}</span><span class="count-pill" id="dirty-count">Changed 0</span>{% endif %}
+                            {% if is_review_page %}<span class="count-pill">Review required {{ summary["needs_review"] }}</span><span class="count-pill">Failed {{ summary["failed"] }}</span><span class="count-pill" id="dirty-count">Changed 0</span>{% endif %}
                             {% if is_review_page %}<button type="button" class="toggle-pill" id="compact-review-toggle">Compact Columns</button><button type="button" class="toggle-pill" id="sidebar-toggle">Hide Sidebar</button>{% endif %}
                         </div>
                     </div>
+                    {% if shopify_source_notice %}
+                    <div class="card" style="margin-bottom:14px; padding:16px 18px;">
+                        <strong>Shopify orders are on the Shopify Orders page.</strong>
+                        <div class="helper" style="margin-top:6px;">The main table only lists DiscordMessage-backed rows. Switch back to Discord or open the dedicated Shopify queue view for order data.</div>
+                        <div class="inline-actions" style="margin-top:12px;">
+                            <a href="{{ shopify_source_notice['link'] }}" class="button primary-button" style="width:auto;">Open Shopify Orders</a>
+                            <a href="{{ return_path }}" class="button secondary-button" style="width:auto;">Back To Discord Table</a>
+                        </div>
+                    </div>
+                    {% endif %}
+                    {% if is_review_page and review_shortcuts %}
+                    <div class="review-rail">
+                        <div class="review-note">
+                            <strong>Jump To The Next Problem Row</strong>
+                            <div class="section-subtle">Use these shortcuts to move through failed, image-linked, grouped, and bookkeeping-mismatch rows on this page.</div>
+                        </div>
+                        <div class="inline-actions">
+                            {% for shortcut in review_shortcuts %}
+                            <button type="button" class="toggle-pill shortcut-focus-button{% if shortcut.enabled %} is-active{% endif %}" data-shortcut-key="{{ shortcut['key'] }}" {% if not shortcut.enabled %}disabled{% endif %}>{{ shortcut["label"] }} ({{ shortcut["count"] }})</button>
+                            {% endfor %}
+                            <form method="post" action="/messages/bulk/requeue-filtered-form" onsubmit="return confirm('Requeue all currently filtered review rows for reparsing?');" style="display:inline-flex;">
+                                <input type="hidden" name="return_path" value="{{ return_path }}">
+                                <input type="hidden" name="status" value="{{ selected_status }}">
+                                <input type="hidden" name="channel_id" value="{{ selected_channel_id }}">
+                                <input type="hidden" name="expense_category" value="{{ selected_expense_category }}">
+                                <input type="hidden" name="after" value="{{ selected_after }}">
+                                <input type="hidden" name="before" value="{{ selected_before }}">
+                                <input type="hidden" name="sort_by" value="{{ selected_sort_by }}">
+                                <input type="hidden" name="sort_dir" value="{{ selected_sort_dir }}">
+                                <input type="hidden" name="page" value="{{ pagination['page'] }}">
+                                <input type="hidden" name="limit" value="{{ selected_limit }}">
+                                <button type="submit" class="secondary-button" style="width:auto;">Requeue Filtered Review Rows</button>
+                            </form>
+                        </div>
+                    </div>
+                    {% endif %}
 
                     <details class="panel" style="margin-bottom:14px; box-shadow:none; background:rgba(255,255,255,.68);">
                         <summary>Backfill & Admin<span>+</span></summary>
                         <div class="panel-body">
                             <form method="post" action="/admin/backfill/form" style="margin-bottom:14px;">
+                                <div class="helper" style="margin-bottom:10px;">Backfill pulls older Discord messages into the system for the channel and date range you choose. Use it when messages are missing, not when the messages are already here but parsed wrong.</div>
                                 <div class="form-row"><label for="backfill_channel_id">Channel</label><select name="channel_id" id="backfill_channel_id"><option value="">All backfill-enabled watched channels</option>{% for ch in available_discord_channels %}<option value="{{ ch['channel_id'] }}">{{ ch["label"] }}</option>{% endfor %}</select></div>
                                 <div class="form-row"><label for="after">After</label><input type="text" name="after" id="after" placeholder="2026-03-01"></div>
                                 <div class="form-row"><label for="before">Before</label><input type="text" name="before" id="before" placeholder="2026-03-31"></div>
@@ -408,8 +451,24 @@
                                     <div class="small-line">Requested by {{ job["requested_by"] }} at {{ job["created_at"] }}</div>
                                     {% if job["started_at"] %}<div class="small-line">Started: {{ job["started_at"] }}</div>{% endif %}
                                     {% if job["finished_at"] %}<div class="small-line">Finished: {{ job["finished_at"] }}</div>{% endif %}
-                                    {% if job["status"] == "completed" %}<div class="small-line">Inserted: {{ job["inserted_count"] }} | Skipped: {{ job["skipped_count"] }}</div>{% endif %}
+                                    {% set progress = job["progress"] %}
+                                    {% if progress %}
+                                    <div class="small-line">Discovered: {{ progress.get("total_messages_discovered", 0) }} | Inserted: {{ progress.get("inserted", job["inserted_count"]) }} | Skipped: {{ progress.get("skipped", job["skipped_count"]) }}</div>
+                                    <div class="small-line">Pending for parsing: {{ progress.get("queued_for_parsing", job["inserted_count"]) }} | Completed channels: {{ progress.get("completed", 0) }} | Failed channels: {{ progress.get("failed", 0) }}</div>
+                                    {% if progress.get("last_progress_at") %}<div class="small-line">Last progress: {{ progress.get("last_progress_at")|pacific_datetime }}</div>{% endif %}
+                                    {% elif job["status"] == "completed" %}
+                                    <div class="small-line">Inserted: {{ job["inserted_count"] }} | Skipped: {{ job["skipped_count"] }}</div>
+                                    {% endif %}
                                     {% if job["error_message"] %}<div class="small-line" style="color:#a23f28;">Error: {{ job["error_message"] }}</div>{% endif %}
+                                    {% if job["can_cancel"] %}
+                                    <div class="inline-actions" style="margin-top:10px;">
+                                        <form method="post" action="/admin/backfill/cancel" onsubmit="return confirm('Cancel this backfill request? Cancellation is checked periodically and may take a moment to take effect.');">
+                                            <input type="hidden" name="request_id" value="{{ job['id'] }}">
+                                            <button type="submit" class="danger-button tiny-button">Cancel</button>
+                                        </form>
+                                    </div>
+                                    <div class="small-line">Cancellation is checked periodically and may take a moment to take effect.</div>
+                                    {% endif %}
                                 </div>
                                 {% else %}
                                 <div class="helper">No backfill requests yet.</div>
@@ -423,8 +482,9 @@
                         </div>
                     </details>
 
-                    <form id="bulk-retry-form" method="post" action="/messages/bulk/retry-form"><input type="hidden" name="return_path" value="{{ return_path }}"><input type="hidden" name="status" value="{{ selected_status }}"><input type="hidden" name="channel_id" value="{{ selected_channel_id }}"><input type="hidden" name="after" value="{{ selected_after }}"><input type="hidden" name="before" value="{{ selected_before }}"><input type="hidden" name="sort_by" value="{{ selected_sort_by }}"><input type="hidden" name="sort_dir" value="{{ selected_sort_dir }}"><input type="hidden" name="page" value="{{ pagination['page'] }}"><input type="hidden" name="limit" value="{{ selected_limit }}"></form>
-                    <form id="bulk-approve-form" method="post" action="/messages/bulk/approve-form"><input type="hidden" name="return_path" value="{{ return_path }}"><input type="hidden" name="status" value="{{ selected_status }}"><input type="hidden" name="channel_id" value="{{ selected_channel_id }}"><input type="hidden" name="after" value="{{ selected_after }}"><input type="hidden" name="before" value="{{ selected_before }}"><input type="hidden" name="sort_by" value="{{ selected_sort_by }}"><input type="hidden" name="sort_dir" value="{{ selected_sort_dir }}"><input type="hidden" name="page" value="{{ pagination['page'] }}"><input type="hidden" name="limit" value="{{ selected_limit }}"></form>
+                    {% if not shopify_source_notice %}
+                    <form id="bulk-retry-form" method="post" action="/messages/bulk/retry-form"><input type="hidden" name="return_path" value="{{ return_path }}"><input type="hidden" name="status" value="{{ selected_status }}"><input type="hidden" name="channel_id" value="{{ selected_channel_id }}"><input type="hidden" name="expense_category" value="{{ selected_expense_category }}"><input type="hidden" name="source" value="{{ selected_source }}"><input type="hidden" name="after" value="{{ selected_after }}"><input type="hidden" name="before" value="{{ selected_before }}"><input type="hidden" name="sort_by" value="{{ selected_sort_by }}"><input type="hidden" name="sort_dir" value="{{ selected_sort_dir }}"><input type="hidden" name="page" value="{{ pagination['page'] }}"><input type="hidden" name="limit" value="{{ selected_limit }}"></form>
+                    <form id="bulk-approve-form" method="post" action="/messages/bulk/approve-form"><input type="hidden" name="return_path" value="{{ return_path }}"><input type="hidden" name="status" value="{{ selected_status }}"><input type="hidden" name="channel_id" value="{{ selected_channel_id }}"><input type="hidden" name="expense_category" value="{{ selected_expense_category }}"><input type="hidden" name="source" value="{{ selected_source }}"><input type="hidden" name="after" value="{{ selected_after }}"><input type="hidden" name="before" value="{{ selected_before }}"><input type="hidden" name="sort_by" value="{{ selected_sort_by }}"><input type="hidden" name="sort_dir" value="{{ selected_sort_dir }}"><input type="hidden" name="page" value="{{ pagination['page'] }}"><input type="hidden" name="limit" value="{{ selected_limit }}"></form>
                     <div class="bulk-bar">
                         <div class="bulk-status">
                             <span class="selection-count" id="selected-count">0 selected</span>
@@ -432,7 +492,7 @@
                         </div>
                         <div class="inline-actions">{% if is_review_page %}<button type="submit" form="bulk-approve-form" class="secondary-button tiny-button">Approve Selected</button>{% endif %}<button type="submit" form="bulk-retry-form" class="secondary-button tiny-button">Retry Selected</button></div>
                     </div>
-
+                    
                     <div class="table-scroll-top" id="table-scroll-top" aria-label="Horizontal table scrollbar">
                         <div class="table-scroll-top-inner" id="table-scroll-top-inner"></div>
                     </div>
@@ -442,23 +502,23 @@
                                 <tr>
                                     <th class="check-col"><input type="checkbox" id="select-all-rows" style="width:auto;"></th>
                                     <th class="quick-col">Quick Actions</th>
-                                    <th class="time-col"><a href="{{ return_path }}?status={{ selected_status }}&channel_id={{ selected_channel_id }}&after={{ selected_after }}&before={{ selected_before }}&sort_by=time&sort_dir={{ next_sort_direction(selected_sort_by, selected_sort_dir, 'time') }}&limit={{ selected_limit }}&page=1">Time {{ sort_indicator(selected_sort_by, selected_sort_dir, 'time') }}</a></th>
-                                    <th class="channel-col"><a href="{{ return_path }}?status={{ selected_status }}&channel_id={{ selected_channel_id }}&after={{ selected_after }}&before={{ selected_before }}&sort_by=channel&sort_dir={{ next_sort_direction(selected_sort_by, selected_sort_dir, 'channel') }}&limit={{ selected_limit }}&page=1">Channel {{ sort_indicator(selected_sort_by, selected_sort_dir, 'channel') }}</a></th>
-                                    <th class="author-col"><a href="{{ return_path }}?status={{ selected_status }}&channel_id={{ selected_channel_id }}&after={{ selected_after }}&before={{ selected_before }}&sort_by=author&sort_dir={{ next_sort_direction(selected_sort_by, selected_sort_dir, 'author') }}&limit={{ selected_limit }}&page=1">Author {{ sort_indicator(selected_sort_by, selected_sort_dir, 'author') }}</a></th>
+                                    <th class="time-col"><a href="{{ return_path }}?status={{ selected_status }}&channel_id={{ selected_channel_id }}&expense_category={{ selected_expense_category }}&source={{ selected_source }}&after={{ selected_after }}&before={{ selected_before }}&sort_by=time&sort_dir={{ next_sort_direction(selected_sort_by, selected_sort_dir, 'time') }}&limit={{ selected_limit }}&page=1">Time {{ sort_indicator(selected_sort_by, selected_sort_dir, 'time') }}</a></th>
+                                    <th class="channel-col"><a href="{{ return_path }}?status={{ selected_status }}&channel_id={{ selected_channel_id }}&expense_category={{ selected_expense_category }}&source={{ selected_source }}&after={{ selected_after }}&before={{ selected_before }}&sort_by=channel&sort_dir={{ next_sort_direction(selected_sort_by, selected_sort_dir, 'channel') }}&limit={{ selected_limit }}&page=1">Channel {{ sort_indicator(selected_sort_by, selected_sort_dir, 'channel') }}</a></th>
+                                    <th class="author-col"><a href="{{ return_path }}?status={{ selected_status }}&channel_id={{ selected_channel_id }}&expense_category={{ selected_expense_category }}&source={{ selected_source }}&after={{ selected_after }}&before={{ selected_before }}&sort_by=author&sort_dir={{ next_sort_direction(selected_sort_by, selected_sort_dir, 'author') }}&limit={{ selected_limit }}&page=1">Author {{ sort_indicator(selected_sort_by, selected_sort_dir, 'author') }}</a></th>
                                     <th class="image-col">Image</th><th>Message</th>
-                                    <th class="status-col"><a href="{{ return_path }}?status={{ selected_status }}&channel_id={{ selected_channel_id }}&after={{ selected_after }}&before={{ selected_before }}&sort_by=status&sort_dir={{ next_sort_direction(selected_sort_by, selected_sort_dir, 'status') }}&limit={{ selected_limit }}&page=1">Status {{ sort_indicator(selected_sort_by, selected_sort_dir, 'status') }}</a></th>
-                                    <th class="kind-col"><a href="{{ return_path }}?status={{ selected_status }}&channel_id={{ selected_channel_id }}&after={{ selected_after }}&before={{ selected_before }}&sort_by=entry_kind&sort_dir={{ next_sort_direction(selected_sort_by, selected_sort_dir, 'entry_kind') }}&limit={{ selected_limit }}&page=1">Financial Kind {{ sort_indicator(selected_sort_by, selected_sort_dir, 'entry_kind') }}</a></th>
-                                    <th class="amount-col"><a href="{{ return_path }}?status={{ selected_status }}&channel_id={{ selected_channel_id }}&after={{ selected_after }}&before={{ selected_before }}&sort_by=amount&sort_dir={{ next_sort_direction(selected_sort_by, selected_sort_dir, 'amount') }}&limit={{ selected_limit }}&page=1">Cash {{ sort_indicator(selected_sort_by, selected_sort_dir, 'amount') }}</a></th>
-                                      <th class="payment-col"><a href="{{ return_path }}?status={{ selected_status }}&channel_id={{ selected_channel_id }}&after={{ selected_after }}&before={{ selected_before }}&sort_by=payment&sort_dir={{ next_sort_direction(selected_sort_by, selected_sort_dir, 'payment') }}&limit={{ selected_limit }}&page=1">Payment {{ sort_indicator(selected_sort_by, selected_sort_dir, 'payment') }}</a></th>
-                                      <th class="category-col"><a href="{{ return_path }}?status={{ selected_status }}&channel_id={{ selected_channel_id }}&after={{ selected_after }}&before={{ selected_before }}&sort_by=category&sort_dir={{ next_sort_direction(selected_sort_by, selected_sort_dir, 'category') }}&limit={{ selected_limit }}&page=1">Category {{ sort_indicator(selected_sort_by, selected_sort_dir, 'category') }}</a></th>
+                                    <th class="status-col"><a href="{{ return_path }}?status={{ selected_status }}&channel_id={{ selected_channel_id }}&expense_category={{ selected_expense_category }}&source={{ selected_source }}&after={{ selected_after }}&before={{ selected_before }}&sort_by=status&sort_dir={{ next_sort_direction(selected_sort_by, selected_sort_dir, 'status') }}&limit={{ selected_limit }}&page=1">Status {{ sort_indicator(selected_sort_by, selected_sort_dir, 'status') }}</a></th>
+                                    <th class="kind-col"><a href="{{ return_path }}?status={{ selected_status }}&channel_id={{ selected_channel_id }}&expense_category={{ selected_expense_category }}&source={{ selected_source }}&after={{ selected_after }}&before={{ selected_before }}&sort_by=entry_kind&sort_dir={{ next_sort_direction(selected_sort_by, selected_sort_dir, 'entry_kind') }}&limit={{ selected_limit }}&page=1">Financial Kind {{ sort_indicator(selected_sort_by, selected_sort_dir, 'entry_kind') }}</a></th>
+                                    <th class="amount-col"><a href="{{ return_path }}?status={{ selected_status }}&channel_id={{ selected_channel_id }}&expense_category={{ selected_expense_category }}&source={{ selected_source }}&after={{ selected_after }}&before={{ selected_before }}&sort_by=amount&sort_dir={{ next_sort_direction(selected_sort_by, selected_sort_dir, 'amount') }}&limit={{ selected_limit }}&page=1">Cash {{ sort_indicator(selected_sort_by, selected_sort_dir, 'amount') }}</a></th>
+                                      <th class="payment-col"><a href="{{ return_path }}?status={{ selected_status }}&channel_id={{ selected_channel_id }}&expense_category={{ selected_expense_category }}&source={{ selected_source }}&after={{ selected_after }}&before={{ selected_before }}&sort_by=payment&sort_dir={{ next_sort_direction(selected_sort_by, selected_sort_dir, 'payment') }}&limit={{ selected_limit }}&page=1">Payment {{ sort_indicator(selected_sort_by, selected_sort_dir, 'payment') }}</a></th>
+                                      <th class="category-col"><a href="{{ return_path }}?status={{ selected_status }}&channel_id={{ selected_channel_id }}&expense_category={{ selected_expense_category }}&source={{ selected_source }}&after={{ selected_after }}&before={{ selected_before }}&sort_by=category&sort_dir={{ next_sort_direction(selected_sort_by, selected_sort_dir, 'category') }}&limit={{ selected_limit }}&page=1">Category {{ sort_indicator(selected_sort_by, selected_sort_dir, 'category') }}</a></th>
                                       <th class="bookkeeping-col">Bookkeeping</th>
-                                      <th class="review-col"><a href="{{ return_path }}?status={{ selected_status }}&channel_id={{ selected_channel_id }}&after={{ selected_after }}&before={{ selected_before }}&sort_by=review&sort_dir={{ next_sort_direction(selected_sort_by, selected_sort_dir, 'review') }}&limit={{ selected_limit }}&page=1">Review {{ sort_indicator(selected_sort_by, selected_sort_dir, 'review') }}</a></th>
+                                      <th class="review-col"><a href="{{ return_path }}?status={{ selected_status }}&channel_id={{ selected_channel_id }}&expense_category={{ selected_expense_category }}&source={{ selected_source }}&after={{ selected_after }}&before={{ selected_before }}&sort_by=review&sort_dir={{ next_sort_direction(selected_sort_by, selected_sort_dir, 'review') }}&limit={{ selected_limit }}&page=1">Review {{ sort_indicator(selected_sort_by, selected_sort_dir, 'review') }}</a></th>
                                       <th class="actions-col">Notes & Actions</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 {% for row in rows %}
-                                <tr class="{% if row['needs_review'] %}row-needs-review {% endif %}{% if row['status'] == 'failed' %}row-failed {% endif %}{% if row['stitched_count'] and row['stitched_count'] > 1 %}row-grouped{% endif %}" data-row-id="{{ row['id'] }}">
+                                <tr class="{% if row['needs_review'] %}row-needs-review {% endif %}{% if row['status'] == 'failed' %}row-failed {% endif %}{% if row['stitched_count'] and row['stitched_count'] > 1 %}row-grouped{% endif %}" data-row-id="{{ row['id'] }}" data-shortcut-failed="{{ 'true' if row['attention']['is_failed'] else 'false' }}" data-shortcut-image="{{ 'true' if row['attention']['has_image_clue'] else 'false' }}" data-shortcut-grouped="{{ 'true' if row['attention']['is_grouped'] else 'false' }}" data-shortcut-bookkeeping="{{ 'true' if row['attention']['has_bookkeeping_mismatch'] else 'false' }}">
                                     <td class="check-col"><input type="checkbox" name="message_ids" value="{{ row['id'] }}" class="row-selector" form="bulk-retry-form" style="width:auto;"></td>
                                     <td class="quick-col">
                                         {% if is_review_page %}
@@ -466,6 +526,7 @@
                                             <input type="hidden" name="return_path" value="{{ return_path }}">
                                             <input type="hidden" name="status" value="{{ selected_status }}">
                                             <input type="hidden" name="channel_id" value="{{ selected_channel_id }}">
+                                            <input type="hidden" name="filter_expense_category" value="{{ selected_expense_category }}">
                                             <input type="hidden" name="after" value="{{ selected_after }}">
                                             <input type="hidden" name="before" value="{{ selected_before }}">
                                             <input type="hidden" name="sort_by" value="{{ selected_sort_by }}">
@@ -477,12 +538,13 @@
                                         </form>
                                         {% endif %}
                                         <div class="quick-actions">
-                                            <form method="get" action="/table/messages/{{ row['id'] }}"><input type="hidden" name="return_path" value="{{ return_path }}"><input type="hidden" name="status" value="{{ selected_status }}"><input type="hidden" name="channel_id" value="{{ selected_channel_id }}"><input type="hidden" name="after" value="{{ selected_after }}"><input type="hidden" name="before" value="{{ selected_before }}"><input type="hidden" name="sort_by" value="{{ selected_sort_by }}"><input type="hidden" name="sort_dir" value="{{ selected_sort_dir }}"><input type="hidden" name="page" value="{{ pagination['page'] }}"><input type="hidden" name="limit" value="{{ selected_limit }}"><button type="submit" class="secondary-button tiny-button">Open</button></form>
-                                            {% if not is_review_page %}<form method="get" action="/table/messages/{{ row['id'] }}"><input type="hidden" name="return_path" value="{{ return_path }}"><input type="hidden" name="status" value="{{ selected_status }}"><input type="hidden" name="channel_id" value="{{ selected_channel_id }}"><input type="hidden" name="after" value="{{ selected_after }}"><input type="hidden" name="before" value="{{ selected_before }}"><input type="hidden" name="sort_by" value="{{ selected_sort_by }}"><input type="hidden" name="sort_dir" value="{{ selected_sort_dir }}"><input type="hidden" name="page" value="{{ pagination['page'] }}"><input type="hidden" name="limit" value="{{ selected_limit }}"><input type="hidden" name="success" value=""><button type="submit" class="secondary-button tiny-button">Correct</button></form>{% endif %}
-                                            {% if not is_review_page %}<form method="post" action="/messages/{{ row['id'] }}/mark-incorrect-form"><input type="hidden" name="return_path" value="{{ return_path }}"><input type="hidden" name="status" value="{{ selected_status }}"><input type="hidden" name="channel_id" value="{{ selected_channel_id }}"><input type="hidden" name="after" value="{{ selected_after }}"><input type="hidden" name="before" value="{{ selected_before }}"><input type="hidden" name="sort_by" value="{{ selected_sort_by }}"><input type="hidden" name="sort_dir" value="{{ selected_sort_dir }}"><input type="hidden" name="page" value="{{ pagination['page'] }}"><input type="hidden" name="limit" value="{{ selected_limit }}"><button type="submit" class="secondary-button tiny-button">Mark Incorrect</button></form>{% endif %}
-                                            {% if is_review_page %}<form method="post" action="/messages/{{ row['id'] }}/approve-form"><input type="hidden" name="return_path" value="{{ return_path }}"><input type="hidden" name="status" value="{{ selected_status }}"><input type="hidden" name="channel_id" value="{{ selected_channel_id }}"><input type="hidden" name="after" value="{{ selected_after }}"><input type="hidden" name="before" value="{{ selected_before }}"><input type="hidden" name="sort_by" value="{{ selected_sort_by }}"><input type="hidden" name="sort_dir" value="{{ selected_sort_dir }}"><input type="hidden" name="page" value="{{ pagination['page'] }}"><input type="hidden" name="limit" value="{{ selected_limit }}"><button type="submit" class="secondary-button tiny-button">Approve</button></form>{% endif %}
+                                            <form method="get" action="/deals/{{ row['id'] }}"><input type="hidden" name="return_path" value="{{ return_path }}"><input type="hidden" name="status" value="{{ selected_status }}"><input type="hidden" name="channel_id" value="{{ selected_channel_id }}"><input type="hidden" name="expense_category" value="{{ selected_expense_category }}"><input type="hidden" name="after" value="{{ selected_after }}"><input type="hidden" name="before" value="{{ selected_before }}"><input type="hidden" name="sort_by" value="{{ selected_sort_by }}"><input type="hidden" name="sort_dir" value="{{ selected_sort_dir }}"><input type="hidden" name="page" value="{{ pagination['page'] }}"><input type="hidden" name="limit" value="{{ selected_limit }}"><button type="submit" class="secondary-button tiny-button">Open</button></form>
+                                            {% if not is_review_page %}<form method="get" action="/deals/{{ row['id'] }}"><input type="hidden" name="return_path" value="{{ return_path }}"><input type="hidden" name="status" value="{{ selected_status }}"><input type="hidden" name="channel_id" value="{{ selected_channel_id }}"><input type="hidden" name="expense_category" value="{{ selected_expense_category }}"><input type="hidden" name="after" value="{{ selected_after }}"><input type="hidden" name="before" value="{{ selected_before }}"><input type="hidden" name="sort_by" value="{{ selected_sort_by }}"><input type="hidden" name="sort_dir" value="{{ selected_sort_dir }}"><input type="hidden" name="page" value="{{ pagination['page'] }}"><input type="hidden" name="limit" value="{{ selected_limit }}"><input type="hidden" name="success" value=""><button type="submit" class="secondary-button tiny-button">Correct</button></form>{% endif %}
+                                            {% if not is_review_page %}<form method="post" action="/messages/{{ row['id'] }}/mark-incorrect-form"><input type="hidden" name="return_path" value="{{ return_path }}"><input type="hidden" name="status" value="{{ selected_status }}"><input type="hidden" name="channel_id" value="{{ selected_channel_id }}"><input type="hidden" name="expense_category" value="{{ selected_expense_category }}"><input type="hidden" name="after" value="{{ selected_after }}"><input type="hidden" name="before" value="{{ selected_before }}"><input type="hidden" name="sort_by" value="{{ selected_sort_by }}"><input type="hidden" name="sort_dir" value="{{ selected_sort_dir }}"><input type="hidden" name="page" value="{{ pagination['page'] }}"><input type="hidden" name="limit" value="{{ selected_limit }}"><button type="submit" class="secondary-button tiny-button">Mark Incorrect</button></form>{% endif %}
+                                            {% if is_review_page %}<form method="post" action="/messages/{{ row['id'] }}/approve-form"><input type="hidden" name="return_path" value="{{ return_path }}"><input type="hidden" name="status" value="{{ selected_status }}"><input type="hidden" name="channel_id" value="{{ selected_channel_id }}"><input type="hidden" name="expense_category" value="{{ selected_expense_category }}"><input type="hidden" name="after" value="{{ selected_after }}"><input type="hidden" name="before" value="{{ selected_before }}"><input type="hidden" name="sort_by" value="{{ selected_sort_by }}"><input type="hidden" name="sort_dir" value="{{ selected_sort_dir }}"><input type="hidden" name="page" value="{{ pagination['page'] }}"><input type="hidden" name="limit" value="{{ selected_limit }}"><button type="submit" class="secondary-button tiny-button">Approve</button></form>{% endif %}
                                             {% if is_review_page %}<button type="submit" form="inline-edit-{{ row['id'] }}" class="secondary-button tiny-button">Save</button><button type="submit" form="inline-edit-{{ row['id'] }}" name="approve_after_save" value="true" class="primary-button tiny-button">Save & Approve</button>{% endif %}
-                                            <form method="post" action="/messages/{{ row['id'] }}/retry-form"><input type="hidden" name="return_path" value="{{ return_path }}"><input type="hidden" name="status" value="{{ selected_status }}"><input type="hidden" name="channel_id" value="{{ selected_channel_id }}"><input type="hidden" name="after" value="{{ selected_after }}"><input type="hidden" name="before" value="{{ selected_before }}"><input type="hidden" name="sort_by" value="{{ selected_sort_by }}"><input type="hidden" name="sort_dir" value="{{ selected_sort_dir }}"><input type="hidden" name="page" value="{{ pagination['page'] }}"><input type="hidden" name="limit" value="{{ selected_limit }}"><button type="submit" class="secondary-button tiny-button">Retry</button></form>
+                                            {% if is_review_page %}<form method="post" action="/messages/{{ row['id'] }}/disregard-form"><input type="hidden" name="return_path" value="{{ return_path }}"><input type="hidden" name="status" value="{{ selected_status }}"><input type="hidden" name="channel_id" value="{{ selected_channel_id }}"><input type="hidden" name="expense_category" value="{{ selected_expense_category }}"><input type="hidden" name="after" value="{{ selected_after }}"><input type="hidden" name="before" value="{{ selected_before }}"><input type="hidden" name="sort_by" value="{{ selected_sort_by }}"><input type="hidden" name="sort_dir" value="{{ selected_sort_dir }}"><input type="hidden" name="page" value="{{ pagination['page'] }}"><input type="hidden" name="limit" value="{{ selected_limit }}"><button type="submit" class="secondary-button tiny-button">Disregard</button></form>{% endif %}
+                                            <form method="post" action="/messages/{{ row['id'] }}/retry-form"><input type="hidden" name="return_path" value="{{ return_path }}"><input type="hidden" name="status" value="{{ selected_status }}"><input type="hidden" name="channel_id" value="{{ selected_channel_id }}"><input type="hidden" name="expense_category" value="{{ selected_expense_category }}"><input type="hidden" name="after" value="{{ selected_after }}"><input type="hidden" name="before" value="{{ selected_before }}"><input type="hidden" name="sort_by" value="{{ selected_sort_by }}"><input type="hidden" name="sort_dir" value="{{ selected_sort_dir }}"><input type="hidden" name="page" value="{{ pagination['page'] }}"><input type="hidden" name="limit" value="{{ selected_limit }}"><button type="submit" class="secondary-button tiny-button">Retry</button></form>
                                             {% if is_review_page %}<button type="button" class="secondary-button tiny-button focus-row-button" data-focus-row="{{ row['id'] }}">Focus</button>{% endif %}
                                         </div>
                                     </td>
@@ -507,7 +569,7 @@
                                             {% if row["confidence"] is not none %}<span class="meta-pill">confidence {{ row["confidence"] }}</span>{% endif %}
                                             {% if row["parse_attempts"] %}<span class="meta-pill">attempts {{ row["parse_attempts"] }}</span>{% endif %}
                                             {% if row["learning"]["promoted_rule"] %}<span class="meta-pill success">promoted rule</span>{% elif row["learning"]["exact_match"] %}<span class="meta-pill success">learned exact</span>{% elif row["learning"]["similar_count"] %}<span class="meta-pill">memory {{ row["learning"]["similar_count"] }}</span>{% endif %}
-                                            {% if row["is_deleted"] %}<span class="meta-pill danger">deleted</span>{% endif %}
+                                            {% if row["is_deleted"] %}<span class="meta-pill danger">ignored</span>{% endif %}
                                         </div>
                                         <div class="message-preview">{{ row["message"] or "" }}</div>
                                         {% if row["grouped_messages"] and row["stitched_count"] > 1 %}
@@ -536,9 +598,16 @@
                                             </div>
                                         </div>
                                         {% endif %}
-                                        {% if row["is_deleted"] %}<div class="subtle" style="color:#b6312f; font-weight:700;">Deleted in Discord</div>{% endif %}
+                                        {% if row["attention"]["has_attention"] %}
+                                        <div class="attention-box{% if row['attention']['level'] == 'danger' %} danger{% endif %}">
+                                            <div class="attention-title">Needs attention</div>
+                                            {% if row["attention"]["summary"] %}<div>{{ row["attention"]["summary"] }}</div>{% endif %}
+                                            {% if row["attention"]["error_snippet"] %}<div class="subtle" style="margin-top:4px;">{{ row["attention"]["error_snippet"] }}</div>{% endif %}
+                                        </div>
+                                        {% endif %}
+                                        {% if row["is_deleted"] %}<div class="subtle" style="color:#b6312f; font-weight:700;">Ignored because deleted in Discord</div>{% endif %}
                                     </td>
-                                    <td class="status-col"><span class="status-pill status-{{ row['status'] }}">{{ row["status"] or "" }}</span></td>
+                                    <td class="status-col"><span class="status-pill status-{{ row['status'] }}">{{ (row["status"] or "")|replace("_", " ") }}</span></td>
                                     <td class="kind-col review-cell">
                                         {% if is_review_page %}
                                         <select name="entry_kind" form="inline-edit-{{ row['id'] }}" class="review-select">
@@ -581,8 +650,18 @@
                                             <option value="{{ option }}" {% if (row["category"] or "") == option %}selected{% endif %}>{{ option or "blank" }}</option>
                                             {% endfor %}
                                         </select>
+                                        <input
+                                            type="text"
+                                            name="expense_category"
+                                            form="inline-edit-{{ row['id'] }}"
+                                            value="{{ row['expense_category'] or '' }}"
+                                            class="review-input"
+                                            style="margin-top:6px;"
+                                            placeholder="expense category"
+                                        >
                                         {% else %}
                                         {{ row["category"] or "" }}
+                                        {% if row["expense_category"] %}<div class="subtle" style="margin-top:4px;">expense {{ row["expense_category"] }}</div>{% endif %}
                                         {% endif %}
                                     </td>
                                     <td class="bookkeeping-col">
@@ -616,6 +695,7 @@
                             </tbody>
                         </table>
                     </div>
+                    {% endif %}
                 </div>
             </main>
         </section>
@@ -623,7 +703,7 @@
     <script>
         async function refreshParserProgress() {
             try {
-                const params = new URLSearchParams({ status: "{{ selected_status }}", channel_id: "{{ selected_channel_id }}", after: "{{ selected_after }}", before: "{{ selected_before }}" });
+                const params = new URLSearchParams({ status: "{{ selected_status }}", channel_id: "{{ selected_channel_id }}", expense_category: "{{ selected_expense_category }}", after: "{{ selected_after }}", before: "{{ selected_before }}" });
                 const response = await fetch(`/admin/parser-progress?${params.toString()}`, { cache: "no-store" });
                 if (!response.ok) return null;
                 const data = await response.json();
@@ -642,7 +722,7 @@
                 const usageInput = document.getElementById("parser-usage-input");
                 const usageOutput = document.getElementById("parser-usage-output");
                 if (fill) fill.style.width = `${data.percent_complete}%`;
-                if (text) text.textContent = `${data.completed} / ${data.total} complete | queued: ${data.queued} | processing: ${data.processing} | review: ${data.needs_review} | failed: ${data.failed} | ignored: ${data.ignored}`;
+                if (text) text.textContent = `${data.completed} / ${data.total} complete | pending: ${data.queued} | processing: ${data.processing} | review required: ${data.needs_review} | failed: ${data.failed} | ignored: ${data.ignored}`;
                 if (status) status.textContent = data.is_active ? "Active" : "Idle";
                 if (oldest) oldest.textContent = data.oldest_processing_age_label;
                 if (images) images.textContent = data.processing_with_images;
@@ -691,6 +771,12 @@
         let sidebarCollapsed = false;
         let syncingTopScroll = false;
         let syncingMainScroll = false;
+        const shortcutSelectors = {
+            failed: 'tr[data-shortcut-failed="true"]',
+            image: 'tr[data-shortcut-image="true"]',
+            grouped: 'tr[data-shortcut-grouped="true"]',
+            bookkeeping: 'tr[data-shortcut-bookkeeping="true"]',
+        };
         let lastProgressSnapshot = {
             total: {{ parser_progress["total"] }},
             completed: {{ parser_progress["completed"] }},
@@ -880,6 +966,22 @@
             if (firstInput) firstInput.focus();
         }
 
+        function focusNextShortcut(key) {
+            const selector = shortcutSelectors[key];
+            if (!selector) return;
+            const rows = Array.from(document.querySelectorAll(selector));
+            if (!rows.length) return;
+
+            let nextIndex = 0;
+            if (focusedRowId) {
+                const currentIndex = rows.findIndex((row) => row.dataset.rowId === String(focusedRowId));
+                if (currentIndex >= 0) {
+                    nextIndex = (currentIndex + 1) % rows.length;
+                }
+            }
+            focusRow(rows[nextIndex].dataset.rowId);
+        }
+
         document.querySelectorAll(".review-input, .review-select, .review-textarea").forEach((field) => {
             field.dataset.initialValue = field.type === "checkbox" ? String(field.checked) : field.value;
             field.addEventListener("input", () => markFieldDirty(field));
@@ -892,6 +994,9 @@
 
         document.querySelectorAll(".focus-row-button").forEach((button) => {
             button.addEventListener("click", () => focusRow(button.dataset.focusRow));
+        });
+        document.querySelectorAll(".shortcut-focus-button").forEach((button) => {
+            button.addEventListener("click", () => focusNextShortcut(button.dataset.shortcutKey));
         });
 
         document.addEventListener("keydown", (event) => {

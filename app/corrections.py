@@ -2,12 +2,53 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Optional
+from typing import Any, Optional
 
 from sqlmodel import Session, select
 
 from .db import engine, managed_session
-from .models import DiscordMessage, ReviewCorrection, utcnow
+from .financials import EXPENSE_PATTERNS
+from .models import DiscordMessage, PARSE_PARSED, PARSE_REVIEW_REQUIRED, ReviewCorrection, normalize_parse_status, utcnow
+
+CORRECTION_SNAPSHOT_FIELDS = (
+    "deal_type",
+    "amount",
+    "payment_method",
+    "cash_direction",
+    "category",
+    "entry_kind",
+    "expense_category",
+    "notes",
+    "trade_summary",
+    "item_names",
+    "items_in",
+    "items_out",
+    "confidence",
+    "parse_status",
+    "needs_review",
+)
+
+PAYMENT_ONLY_PATTERNS = (
+    r"^(?:plus|\+)?\s*\$?\s*(\d+(?:\.\d{1,2})?)\s*(cash|zelle|venmo|paypal|card|tap|cc|dc)$",
+    r"^(cash|zelle|venmo|paypal|card|tap|cc|dc)\s*\$?\s*(\d+(?:\.\d{1,2})?)$",
+)
+
+TRADE_DIRECTION_PATTERNS = (
+    "top in",
+    "top out",
+    "bottom in",
+    "bottom out",
+    "left in",
+    "left out",
+    "right in",
+    "right out",
+    "left side in",
+    "left side out",
+    "right side in",
+    "right side out",
+)
+
+MIN_LEARNED_RULE_CORRECTION_COUNT = 2
 
 
 def normalize_correction_text(text: str) -> str:
@@ -25,8 +66,200 @@ def tokenize_normalized_text(text: str) -> set[str]:
     }
 
 
-def save_review_correction(session: Session, row: DiscordMessage) -> ReviewCorrection | None:
-    if row.parse_status not in {"parsed", "needs_review"}:
+def _safe_json_load(value: str, fallback: Any) -> Any:
+    try:
+        return json.loads(value or "")
+    except json.JSONDecodeError:
+        return fallback
+
+
+def _safe_json_list(value: str) -> list[str]:
+    loaded = _safe_json_load(value, [])
+    if not isinstance(loaded, list):
+        return []
+    return [str(item).strip() for item in loaded if str(item).strip()]
+
+
+def snapshot_message_parse(row: DiscordMessage) -> dict[str, Any]:
+    return {
+        "deal_type": row.deal_type,
+        "amount": row.amount,
+        "payment_method": row.payment_method,
+        "cash_direction": row.cash_direction,
+        "category": row.category,
+        "entry_kind": row.entry_kind,
+        "expense_category": row.expense_category,
+        "notes": row.notes,
+        "trade_summary": row.trade_summary,
+        "item_names": _safe_json_list(row.item_names_json or "[]"),
+        "items_in": _safe_json_list(row.items_in_json or "[]"),
+        "items_out": _safe_json_list(row.items_out_json or "[]"),
+        "confidence": row.confidence,
+        "parse_status": normalize_parse_status(
+            row.parse_status,
+            is_deleted=row.is_deleted,
+            needs_review=row.needs_review,
+        ),
+        "needs_review": bool(row.needs_review),
+    }
+
+
+def snapshot_correction_parse(correction: ReviewCorrection) -> dict[str, Any]:
+    stored = _safe_json_load(correction.corrected_after_json or "{}", {})
+    if isinstance(stored, dict) and stored:
+        return stored
+    return {
+        "deal_type": correction.deal_type,
+        "amount": correction.amount,
+        "payment_method": correction.payment_method,
+        "cash_direction": correction.cash_direction,
+        "category": correction.category,
+        "entry_kind": correction.entry_kind,
+        "expense_category": correction.expense_category,
+        "notes": correction.notes,
+        "trade_summary": correction.trade_summary,
+        "item_names": _safe_json_list(correction.item_names_json or "[]"),
+        "items_in": _safe_json_list(correction.items_in_json or "[]"),
+        "items_out": _safe_json_list(correction.items_out_json or "[]"),
+        "confidence": correction.confidence,
+        "parse_status": PARSE_PARSED,
+        "needs_review": False,
+    }
+
+
+def build_field_diffs(parsed_before: dict[str, Any], corrected_after: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    diffs: dict[str, dict[str, Any]] = {}
+    for field in CORRECTION_SNAPSHOT_FIELDS:
+        before_value = parsed_before.get(field)
+        after_value = corrected_after.get(field)
+        if before_value != after_value:
+            diffs[field] = {
+                "before": before_value,
+                "after": after_value,
+            }
+    return diffs
+
+
+def extract_payment_phrase(message_text: str) -> tuple[float | None, str | None]:
+    normalized = normalize_correction_text(message_text)
+    if not normalized:
+        return None, None
+
+    for pattern in PAYMENT_ONLY_PATTERNS:
+        match = re.fullmatch(pattern, normalized, re.I)
+        if not match:
+            continue
+        if match.group(1).replace(".", "", 1).isdigit():
+            amount = float(match.group(1))
+            payment_method = match.group(2).lower()
+        else:
+            payment_method = match.group(1).lower()
+            amount = float(match.group(2))
+        if payment_method in {"tap", "cc", "dc"}:
+            payment_method = "card"
+        return amount, payment_method
+
+    return None, None
+
+
+def extract_trade_cash_phrase(message_text: str) -> tuple[float | None, str | None]:
+    normalized = normalize_correction_text(message_text)
+    if not normalized:
+        return None, None
+
+    match = re.search(
+        r"(?:plus|\+)\s*\$?\s*(\d+(?:\.\d{1,2})?)(?:\s*(cash|zelle|venmo|paypal|card|tap|cc|dc))?",
+        normalized,
+        re.I,
+    )
+    if not match:
+        return None, None
+
+    amount = float(match.group(1))
+    payment_method = (match.group(2) or "").lower() or None
+    if payment_method in {"tap", "cc", "dc"}:
+        payment_method = "card"
+    return amount, payment_method
+
+
+def has_trade_in_out_shorthand(message_text: str) -> bool:
+    lower = normalize_correction_text(message_text)
+    if not lower:
+        return False
+    if " out " in f" {lower} " and " in " in f" {lower} ":
+        return True
+    return any(pattern in lower for pattern in TRADE_DIRECTION_PATTERNS)
+
+
+def extract_directional_tokens(message_text: str) -> list[str]:
+    lower = normalize_correction_text(message_text)
+    tokens = [pattern for pattern in TRADE_DIRECTION_PATTERNS if pattern in lower]
+    if " in " in f" {lower} ":
+        tokens.append("in")
+    if " out " in f" {lower} ":
+        tokens.append("out")
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for token in tokens:
+        if token in seen:
+            continue
+        seen.add(token)
+        ordered.append(token)
+    return ordered
+
+
+def extract_expense_keywords(message_text: str) -> list[str]:
+    lower = normalize_correction_text(message_text)
+    found: list[str] = []
+    for _category, keywords in EXPENSE_PATTERNS:
+        for keyword in keywords:
+            if keyword in lower and keyword not in found:
+                found.append(keyword)
+    return found
+
+
+def extract_learning_features(message_text: str) -> dict[str, Any]:
+    amount, payment_method = extract_payment_phrase(message_text)
+    normalized = normalize_correction_text(message_text)
+    return {
+        "normalized_text": normalized,
+        "tokens": sorted(tokenize_normalized_text(message_text)),
+        "payment_only_text": amount is not None and payment_method is not None,
+        "payment_amount": amount,
+        "payment_method": payment_method,
+        "trade_in_out_text": has_trade_in_out_shorthand(message_text),
+        "directional_tokens": extract_directional_tokens(message_text),
+        "expense_keywords": extract_expense_keywords(message_text),
+    }
+
+
+def infer_pattern_type(
+    message_text: str,
+    corrected_after: dict[str, Any],
+    field_diffs: dict[str, dict[str, Any]],
+    features: dict[str, Any],
+) -> str | None:
+    del message_text, field_diffs
+    if corrected_after.get("deal_type") == "sell" and features.get("payment_only_text"):
+        return "payment_only_sell"
+    if corrected_after.get("deal_type") == "trade" and features.get("trade_in_out_text"):
+        return "trade_in_out"
+    expense_category = corrected_after.get("expense_category")
+    if expense_category and expense_category != "inventory" and features.get("expense_keywords"):
+        return "expense_keyword_override"
+    return None
+
+
+def save_review_correction(
+    session: Session,
+    row: DiscordMessage,
+    *,
+    parsed_before: Optional[dict[str, Any]] = None,
+) -> ReviewCorrection | None:
+    if normalize_parse_status(row.parse_status, is_deleted=row.is_deleted, needs_review=row.needs_review) not in {
+        PARSE_PARSED,
+        PARSE_REVIEW_REQUIRED,
+    }:
         return None
     if row.is_deleted:
         return None
@@ -54,6 +287,15 @@ def save_review_correction(session: Session, row: DiscordMessage) -> ReviewCorre
     correction.items_out_json = row.items_out_json or "[]"
     correction.item_names_json = row.item_names_json or "[]"
     correction.confidence = row.confidence
+    corrected_after = snapshot_message_parse(row)
+    baseline_before = parsed_before or {}
+    field_diffs = build_field_diffs(baseline_before, corrected_after)
+    features = extract_learning_features(row.content or "")
+    correction.pattern_type = infer_pattern_type(row.content or "", corrected_after, field_diffs, features)
+    correction.parsed_before_json = json.dumps(baseline_before, sort_keys=True)
+    correction.corrected_after_json = json.dumps(corrected_after, sort_keys=True)
+    correction.field_diffs_json = json.dumps(field_diffs, sort_keys=True)
+    correction.features_json = json.dumps(features, sort_keys=True)
     correction.updated_at = utcnow()
 
     session.add(correction)
@@ -68,9 +310,9 @@ def build_correction_parse(correction: ReviewCorrection) -> dict:
         "parsed_payment_method": correction.payment_method,
         "parsed_cash_direction": correction.cash_direction,
         "parsed_category": correction.category,
-        "parsed_items": json.loads(correction.item_names_json or "[]"),
-        "parsed_items_in": json.loads(correction.items_in_json or "[]"),
-        "parsed_items_out": json.loads(correction.items_out_json or "[]"),
+        "parsed_items": _safe_json_list(correction.item_names_json or "[]"),
+        "parsed_items_in": _safe_json_list(correction.items_in_json or "[]"),
+        "parsed_items_out": _safe_json_list(correction.items_out_json or "[]"),
         "parsed_trade_summary": correction.trade_summary or "",
         "parsed_notes": f"{note_prefix}: {correction.notes or 'store correction memory'}",
         "image_summary": "matched prior correction memory",
@@ -79,6 +321,177 @@ def build_correction_parse(correction: ReviewCorrection) -> dict:
         "matched_correction_id": correction.id,
         "matched_correction_source": correction.correction_source,
     }
+
+
+def build_learning_event(
+    *,
+    status: str,
+    correction: ReviewCorrection | None,
+    pattern_type: str | None,
+    reason: str,
+    details: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    event = {
+        "status": status,
+        "pattern_type": pattern_type,
+        "reason": reason,
+    }
+    if correction is not None:
+        event["correction_id"] = correction.id
+        event["correction_source"] = correction.correction_source
+        event["normalized_text"] = correction.normalized_text
+    if details:
+        event.update(details)
+    return event
+
+
+def build_learned_rule_parse(
+    correction: ReviewCorrection,
+    *,
+    message_text: str,
+    incoming_features: dict[str, Any],
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    corrected_after = snapshot_correction_parse(correction)
+    stored_features = _safe_json_load(correction.features_json or "{}", {})
+    pattern_type = correction.pattern_type
+
+    if pattern_type == "payment_only_sell":
+        amount = incoming_features.get("payment_amount")
+        payment_method = incoming_features.get("payment_method")
+        if amount is None or payment_method is None:
+            return None, build_learning_event(
+                status="skipped",
+                correction=correction,
+                pattern_type=pattern_type,
+                reason="incoming text is not a payment-only phrase",
+            )
+        return {
+            "parsed_type": "sell",
+            "parsed_amount": amount,
+            "parsed_payment_method": payment_method,
+            "parsed_cash_direction": "to_store",
+            "parsed_category": corrected_after.get("category") or "unknown",
+            "parsed_items": corrected_after.get("item_names") or [],
+            "parsed_items_in": [],
+            "parsed_items_out": corrected_after.get("items_out") or [],
+            "parsed_trade_summary": "",
+            "parsed_notes": "learned correction rule: payment-only sell",
+            "image_summary": "learned deterministic correction rule",
+            "confidence": max(float(corrected_after.get("confidence") or 0.0), 0.94),
+            "needs_review": False,
+            "matched_correction_id": correction.id,
+            "matched_correction_source": "learned_rule",
+        }, build_learning_event(
+            status="applied",
+            correction=correction,
+            pattern_type=pattern_type,
+            reason="matched payment-only sell phrase",
+            details={"payment_method": payment_method, "amount": amount},
+        )
+
+    if pattern_type == "trade_in_out":
+        if not incoming_features.get("trade_in_out_text"):
+            return None, build_learning_event(
+                status="skipped",
+                correction=correction,
+                pattern_type=pattern_type,
+                reason="incoming text does not contain trade in/out shorthand",
+            )
+        expected_tokens = set(stored_features.get("directional_tokens") or [])
+        incoming_tokens = set(incoming_features.get("directional_tokens") or [])
+        if expected_tokens and incoming_tokens != expected_tokens:
+            return None, build_learning_event(
+                status="rejected",
+                correction=correction,
+                pattern_type=pattern_type,
+                reason="directional tokens do not match stored shorthand pattern",
+                details={
+                    "expected_directional_tokens": sorted(expected_tokens),
+                    "incoming_directional_tokens": sorted(incoming_tokens),
+                },
+            )
+        amount, payment_method = extract_trade_cash_phrase(message_text)
+        if amount is None:
+            amount = incoming_features.get("payment_amount")
+        payment_method = payment_method or incoming_features.get("payment_method") or corrected_after.get("payment_method")
+        cash_direction = corrected_after.get("cash_direction")
+        if amount is None and payment_method:
+            payment_method = None
+        if amount is None and not corrected_after.get("items_in") and not corrected_after.get("items_out"):
+            return None, build_learning_event(
+                status="rejected",
+                correction=correction,
+                pattern_type=pattern_type,
+                reason="stored trade correction lacks reusable trade flow fields",
+            )
+        return {
+            "parsed_type": "trade",
+            "parsed_amount": amount,
+            "parsed_payment_method": payment_method,
+            "parsed_cash_direction": cash_direction or ("to_store" if amount is not None else "none"),
+            "parsed_category": corrected_after.get("category") or "mixed",
+            "parsed_items": corrected_after.get("item_names") or [],
+            "parsed_items_in": corrected_after.get("items_in") or [],
+            "parsed_items_out": corrected_after.get("items_out") or [],
+            "parsed_trade_summary": corrected_after.get("trade_summary") or "learned trade shorthand",
+            "parsed_notes": "learned correction rule: trade in/out shorthand",
+            "image_summary": "learned deterministic correction rule",
+            "confidence": max(float(corrected_after.get("confidence") or 0.0), 0.93),
+            "needs_review": False,
+            "matched_correction_id": correction.id,
+            "matched_correction_source": "learned_rule",
+        }, build_learning_event(
+            status="applied",
+            correction=correction,
+            pattern_type=pattern_type,
+            reason="matched learned trade shorthand",
+            details={"directional_tokens": sorted(incoming_tokens)},
+        )
+
+    if pattern_type == "expense_keyword_override":
+        expense_keywords = set(incoming_features.get("expense_keywords") or [])
+        stored_expense_keywords = set(stored_features.get("expense_keywords") or [])
+        overlap = sorted(expense_keywords & stored_expense_keywords)
+        if not overlap:
+            return None, build_learning_event(
+                status="skipped",
+                correction=correction,
+                pattern_type=pattern_type,
+                reason="incoming text does not share learned expense keywords",
+            )
+        amount = incoming_features.get("payment_amount")
+        payment_method = incoming_features.get("payment_method") or corrected_after.get("payment_method")
+        items_out = corrected_after.get("items_out") or overlap
+        return {
+            "parsed_type": corrected_after.get("deal_type") or "buy",
+            "parsed_amount": amount,
+            "parsed_payment_method": payment_method,
+            "parsed_cash_direction": corrected_after.get("cash_direction") or "from_store",
+            "parsed_category": corrected_after.get("category") or "mixed",
+            "parsed_items": corrected_after.get("item_names") or [],
+            "parsed_items_in": [],
+            "parsed_items_out": items_out,
+            "parsed_trade_summary": "",
+            "parsed_notes": "learned correction rule: expense keyword override",
+            "image_summary": "learned deterministic correction rule",
+            "confidence": max(float(corrected_after.get("confidence") or 0.0), 0.92),
+            "needs_review": False,
+            "matched_correction_id": correction.id,
+            "matched_correction_source": "learned_rule",
+        }, build_learning_event(
+            status="applied",
+            correction=correction,
+            pattern_type=pattern_type,
+            reason="matched learned expense keyword override",
+            details={"expense_keywords": overlap},
+        )
+
+    return None, build_learning_event(
+        status="rejected",
+        correction=correction,
+        pattern_type=pattern_type,
+        reason="unsupported learned pattern type",
+    )
 
 
 def get_exact_correction_match(message_text: str) -> dict | None:
@@ -104,6 +517,82 @@ def get_exact_correction_match(message_text: str) -> dict | None:
         )
         correction = all_matches[0]
         return build_correction_parse(correction)
+
+
+def get_learned_rule_match(message_text: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    incoming_features = extract_learning_features(message_text)
+    with managed_session() as session:
+        corrections = session.exec(
+            select(ReviewCorrection)
+            .where(ReviewCorrection.pattern_type != None)  # noqa: E711
+            .order_by(ReviewCorrection.updated_at.desc())
+        ).all()
+
+    if not corrections:
+        return None, None
+
+    correction_counts: dict[str, int] = {}
+    for correction in corrections:
+        normalized_text = correction.normalized_text or ""
+        if not normalized_text:
+            continue
+        correction_counts[normalized_text] = correction_counts.get(normalized_text, 0) + 1
+
+    ranked: list[tuple[int, ReviewCorrection]] = []
+    incoming_tokens = set(incoming_features.get("tokens") or [])
+    for correction in corrections:
+        stored_features = _safe_json_load(correction.features_json or "{}", {})
+        stored_tokens = set(stored_features.get("tokens") or [])
+        overlap = len(incoming_tokens & stored_tokens)
+        pattern_bonus = 0
+        if correction.pattern_type == "payment_only_sell" and incoming_features.get("payment_only_text"):
+            pattern_bonus = 10
+        elif correction.pattern_type == "trade_in_out" and incoming_features.get("trade_in_out_text"):
+            pattern_bonus = 10
+        elif correction.pattern_type == "expense_keyword_override":
+            overlap += len(set(incoming_features.get("expense_keywords") or []) & set(stored_features.get("expense_keywords") or [])) * 2
+            if incoming_features.get("expense_keywords"):
+                pattern_bonus = 6
+        if overlap + pattern_bonus <= 0:
+            continue
+        ranked.append((overlap + pattern_bonus, correction))
+
+    ranked.sort(
+        key=lambda item: (
+            -item[0],
+            -(item[1].updated_at.timestamp() if item[1].updated_at else 0),
+        )
+    )
+
+    fallback_event: dict[str, Any] | None = None
+    for _score, correction in ranked[:5]:
+        correction_count = correction_counts.get(correction.normalized_text or "", 0)
+        if correction_count < MIN_LEARNED_RULE_CORRECTION_COUNT:
+            event = build_learning_event(
+                status="skipped",
+                correction=correction,
+                pattern_type=correction.pattern_type,
+                reason="learned rule requires more matching corrections before auto-apply",
+                details={
+                    "correction_count": correction_count,
+                    "required_correction_count": MIN_LEARNED_RULE_CORRECTION_COUNT,
+                },
+            )
+            if fallback_event is None:
+                fallback_event = event
+            continue
+        learned_parse, event = build_learned_rule_parse(
+            correction,
+            message_text=message_text,
+            incoming_features=incoming_features,
+        )
+        if learned_parse is not None:
+            learned_parse["_learned_rule_event"] = event
+            return learned_parse, event
+        if fallback_event is None:
+            fallback_event = event
+
+    return None, fallback_event
 
 
 def get_relevant_correction_hints(message_text: str, limit: int = 3) -> list[dict]:
@@ -150,6 +639,7 @@ def get_relevant_correction_hints(message_text: str, limit: int = 3) -> list[dic
                 "entry_kind": correction.entry_kind,
                 "expense_category": correction.expense_category,
                 "notes": correction.notes,
+                "pattern_type": correction.pattern_type,
                 "correction_source": correction.correction_source,
             }
         )
@@ -159,8 +649,11 @@ def get_relevant_correction_hints(message_text: str, limit: int = 3) -> list[dic
     return hints
 
 
-def get_correction_pattern_counts(limit: int = 10) -> list[dict]:
-    with managed_session() as session:
+def get_correction_pattern_counts(limit: int = 10, session: Session | None = None) -> list[dict]:
+    if session is None:
+        with managed_session() as managed:
+            corrections = managed.exec(select(ReviewCorrection)).all()
+    else:
         corrections = session.exec(select(ReviewCorrection)).all()
 
     grouped: dict[str, dict] = {}
@@ -259,9 +752,9 @@ def get_learning_signals(session: Session, message_texts: list[str]) -> dict[str
             }
             continue
 
-        exact_matches = exact_matches_by_text.get(normalized_text, [])
-        exact_match = bool(exact_matches)
-        promoted_rule = any(match.correction_source == "promoted_rule" for match in exact_matches)
+        matching_rows = exact_matches_by_text.get(normalized_text, [])
+        exact_match = bool(matching_rows)
+        promoted_rule = any(match.correction_source == "promoted_rule" for match in matching_rows)
 
         results[message_text] = {
             "exact_match": exact_match,

@@ -1,5 +1,6 @@
 import asyncio
 import csv
+import hashlib
 import json
 import os
 import socket
@@ -15,13 +16,14 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func
 from sqlalchemy.exc import OperationalError
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 from sqlmodel import Session, select
 
 from .auth import authenticate_user, has_role, seed_default_users
+from .attachment_storage import attachment_cache_path, write_attachment_cache_file
 from .bookkeeping import (
     refresh_bookkeeping_import_from_source,
     import_bookkeeping_file,
@@ -30,10 +32,17 @@ from .bookkeeping import (
     list_detected_bookkeeping_posts,
     reconcile_bookkeeping_import,
 )
-from .backfill_requests import enqueue_backfill_request, list_recent_backfill_requests
+from .backfill_requests import (
+    backfill_request_loop,
+    cancel_backfill_request,
+    enqueue_backfill_request,
+    list_recent_backfill_requests,
+    trigger_backfill_claim_attempt,
+)
 from .channels import (
     get_available_channel_choices,
     get_channel_filter_choices,
+    get_expense_category_filter_choices,
     get_watched_channels,
     normalize_channel_ids,
     update_backfill_window,
@@ -46,32 +55,131 @@ from .corrections import (
     get_learning_signals,
     promote_correction_pattern,
     save_review_correction,
+    snapshot_message_parse,
 )
-from .db import dispose_engine, engine, get_session, init_db, managed_session, recent_db_failure
+from .db import (
+    dispose_engine,
+    engine,
+    get_session,
+    init_db,
+    managed_session,
+    recent_db_failure,
+    run_write_with_retry,
+)
 from .discord_ingest import (
     discord_runtime_state,
     get_discord_client,
     list_available_discord_channels,
+    periodic_attachment_repair_loop,
+    recent_message_audit_loop,
     parse_iso_datetime,
+    recover_attachment_assets_for_message,
     run_discord_bot,
     seed_channels_from_env,
 )
 from .financials import compute_financials
-from .models import AttachmentAsset, BackfillRequest, BookkeepingImport, DiscordMessage, ParseAttempt, User, WatchedChannel, utcnow
+from .models import (
+    AttachmentAsset,
+    BackfillRequest,
+    BookkeepingImport,
+    DiscordMessage,
+    expand_parse_status_filter_values,
+    OperationsLog,
+    ParseAttempt,
+    PARSE_FAILED,
+    PARSE_IGNORED,
+    PARSE_PARSED,
+    PARSE_PENDING,
+    PARSE_PROCESSING,
+    PARSE_REVIEW_REQUIRED,
+    ReparseRun,
+    ShopifyOrder,
+    User,
+    WatchedChannel,
+    normalize_parse_status,
+    utcnow,
+)
 from .ops_log import list_operations_logs, list_operations_logs_for_backfill_request, parse_operations_log_details
-from .reporting import build_financial_summary, get_financial_rows, parse_report_datetime
+from .reparse_runs import list_recent_reparse_runs, safe_create_reparse_run, safe_finalize_reparse_run_queue
+from .reporting import (
+    build_financial_summary,
+    build_reporting_periods,
+    build_shopify_reporting_summary,
+    get_financial_rows,
+    get_shopify_reporting_rows,
+    parse_report_datetime,
+)
+from .runtime_logging import resolve_runtime_log_path, setup_runtime_file_logging, structured_log_line
 from .runtime_monitor import get_runtime_heartbeat_status, runtime_heartbeat_loop
 from .schemas import HealthOut
+from .shopify_ingest import (
+    backfill_shopify_orders,
+    read_shopify_backfill_state,
+    update_shopify_backfill_state,
+    upsert_shopify_order,
+    validate_shopify_webhook,
+)
+from .display_media import (
+    extract_image_urls,
+    get_cached_attachment_map,
+    merge_display_attachment_urls,
+    normalize_attachment_urls_for_row,
+    row_has_images,
+)
 from .transactions import build_transaction_summary, get_transactions, rebuild_transactions, sync_transaction_from_message
-from .worker import STALE_PROCESSING_AFTER, parser_loop, queue_auto_reprocess_candidates
+from .worker import (
+    STALE_PROCESSING_AFTER,
+    clear_parsed_fields,
+    parser_loop,
+    periodic_stitch_audit_loop,
+    queue_auto_reprocess_candidates,
+    queue_reparse_range,
+)
 
 
 settings = get_settings()
+setup_runtime_file_logging("app.log")
+
+REPORT_SOURCE_ALL = "all"
+REPORT_SOURCE_DISCORD = "discord"
+REPORT_SOURCE_SHOPIFY = "shopify"
+REPORT_SOURCE_OPTIONS = {REPORT_SOURCE_ALL, REPORT_SOURCE_DISCORD, REPORT_SOURCE_SHOPIFY}
 
 
 def count_rows(session: Session, stmt) -> int:
     count_stmt = select(func.count()).select_from(stmt.order_by(None).subquery())
     return int(session.exec(count_stmt).one())
+
+
+def normalize_report_source(value: Optional[str]) -> str:
+    if value is not None and not isinstance(value, str):
+        value = getattr(value, "default", None)
+    normalized = (value or "").strip().lower()
+    return normalized if normalized in REPORT_SOURCE_OPTIONS else REPORT_SOURCE_ALL
+
+
+def build_reports_url(
+    *,
+    source: str = REPORT_SOURCE_ALL,
+    start: str = "",
+    end: str = "",
+    channel_id: str = "",
+    entry_kind: str = "",
+) -> str:
+    params: dict[str, str] = {}
+    if source and source != REPORT_SOURCE_ALL:
+        params["source"] = source
+    if start:
+        params["start"] = start
+    if end:
+        params["end"] = end
+    if channel_id:
+        params["channel_id"] = channel_id
+    if entry_kind:
+        params["entry_kind"] = entry_kind
+    if not params:
+        return "/reports"
+    return f"/reports?{urlencode(params)}"
 
 
 def normalize_filesystem_path(path: Path) -> str:
@@ -85,7 +193,14 @@ BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=normalize_filesystem_path(BASE_DIR / "templates"))
 PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
 
-PARSE_STATUS_OPTIONS = ["parsed", "needs_review", "failed", "queued", "ignored"]
+PARSE_STATUS_OPTIONS = [
+    PARSE_PENDING,
+    PARSE_PROCESSING,
+    PARSE_PARSED,
+    PARSE_REVIEW_REQUIRED,
+    PARSE_FAILED,
+    PARSE_IGNORED,
+]
 DEAL_TYPE_OPTIONS = ["", "sell", "buy", "trade", "unknown"]
 ENTRY_KIND_OPTIONS = ["", "sale", "buy", "trade", "expense", "unknown"]
 PAYMENT_METHOD_OPTIONS = ["", "cash", "zelle", "venmo", "paypal", "card", "mixed", "trade", "unknown"]
@@ -93,7 +208,34 @@ CASH_DIRECTION_OPTIONS = ["", "to_store", "from_store", "none", "unknown"]
 CATEGORY_OPTIONS = ["", "slabs", "singles", "sealed", "packs", "mixed", "accessories", "unknown"]
 IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"]
 NEARBY_IMAGE_AUDIT_WINDOW_SECONDS = 30
-LOCAL_HEARTBEAT_RUNTIME_NAME = settings.runtime_name
+WORKER_RUNTIME_NAME = (settings.worker_runtime_name or "").strip()
+if not WORKER_RUNTIME_NAME:
+    if settings.runtime_name.endswith("_web"):
+        WORKER_RUNTIME_NAME = f"{settings.runtime_name[:-4]}_worker"
+    elif settings.runtime_name.endswith("_app"):
+        WORKER_RUNTIME_NAME = f"{settings.runtime_name[:-4]}_worker"
+    else:
+        WORKER_RUNTIME_NAME = settings.runtime_name
+APP_HEARTBEAT_RUNTIME_NAME = f"{settings.runtime_name}_app"
+APP_RUNTIME_LABEL = "Web App"
+WORKER_RUNTIME_LABEL = (settings.worker_runtime_label or "").strip() or "Ingest Worker"
+LEARNED_RULE_EVENT_TYPES = (
+    "queue.learned_rule_applied",
+    "queue.learned_rule_skipped",
+    "queue.learned_rule_rejected",
+)
+
+
+def normalize_status_filter(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    if value == "review_queue":
+        return value
+    return normalize_parse_status(value)
+
+
+def status_filter_values(value: str) -> list[str]:
+    return sorted(expand_parse_status_filter_values([value]))
 
 
 def format_pacific_datetime(value: object, include_zone: bool = True) -> str:
@@ -125,38 +267,394 @@ def format_pacific_datetime(value: object, include_zone: bool = True) -> str:
 templates.env.filters["pacific_datetime"] = format_pacific_datetime
 
 
-def extract_image_urls(attachment_urls: list[str]) -> list[str]:
-    return [
-        url for url in attachment_urls
-        if any(ext in url.lower() for ext in IMAGE_EXTENSIONS)
-    ]
+def format_pacific_date(value: object) -> str:
+    if value in (None, ""):
+        return ""
+
+    parsed: Optional[datetime] = None
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return ""
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return ""
+    else:
+        return ""
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(PACIFIC_TZ).strftime("%Y-%m-%d")
 
 
-def get_cached_attachment_map(session: Session, message_ids: list[int]) -> dict[int, dict]:
-    valid_ids = [message_id for message_id in message_ids if message_id is not None]
-    if not valid_ids:
-        return {}
+def summarize_message_snippet(text: Optional[str], max_length: int = 120) -> str:
+    normalized = " ".join((text or "").split())
+    if not normalized:
+        return ""
+    if len(normalized) <= max_length:
+        return normalized
+    return f"{normalized[:max_length - 3].rstrip()}..."
 
-    assets = session.exec(
-        select(AttachmentAsset)
-        .where(AttachmentAsset.message_id.in_(valid_ids))
-        .order_by(AttachmentAsset.message_id.asc(), AttachmentAsset.id.asc())
+
+def build_learned_rule_label(details: dict) -> str:
+    pattern_type = str(details.get("pattern_type") or "unknown").replace("_", " ")
+    correction_source = details.get("correction_source")
+    if correction_source:
+        return f"{pattern_type} ({correction_source})"
+    return pattern_type
+
+
+def build_learned_rule_log_rows(session: Session, *, limit: int = 50) -> list[dict]:
+    logs = session.exec(
+        select(OperationsLog)
+        .where(OperationsLog.event_type.in_(LEARNED_RULE_EVENT_TYPES))
+        .order_by(OperationsLog.created_at.desc(), OperationsLog.id.desc())
+        .limit(limit)
     ).all()
 
-    results: dict[int, dict] = {}
-    for asset in assets:
-        if asset.id is None:
-            continue
-        bucket = results.setdefault(
-            asset.message_id,
-            {"all_urls": [], "image_urls": []},
-        )
-        asset_url = f"/attachments/{asset.id}"
-        bucket["all_urls"].append(asset_url)
-        if asset.is_image:
-            bucket["image_urls"].append(asset_url)
+    details_by_log_id: dict[int, dict] = {}
+    message_ids: list[int] = []
+    for row in logs:
+        details = parse_operations_log_details(row)
+        details_by_log_id[row.id or 0] = details
+        message_id = details.get("message_id")
+        if isinstance(message_id, int):
+            message_ids.append(message_id)
 
-    return results
+    message_map: dict[int, DiscordMessage] = {}
+    if message_ids:
+        message_rows = session.exec(
+            select(DiscordMessage).where(DiscordMessage.id.in_(sorted(set(message_ids))))
+        ).all()
+        message_map = {
+            row.id: row
+            for row in message_rows
+            if row.id is not None
+        }
+
+    items: list[dict] = []
+    for row in logs:
+        details = details_by_log_id.get(row.id or 0, {})
+        message_id = details.get("message_id")
+        source_row = message_map.get(message_id) if isinstance(message_id, int) else None
+        outcome = str(details.get("status") or row.event_type.removeprefix("queue.learned_rule_"))
+        snippet_source = source_row.content if source_row is not None else details.get("normalized_text")
+        items.append(
+            {
+                "created_at": format_pacific_datetime(row.created_at),
+                "outcome": outcome,
+                "rule_matched": build_learned_rule_label(details),
+                "message_snippet": summarize_message_snippet(snippet_source),
+                "reason": details.get("reason") or "",
+            }
+        )
+
+    return items
+
+
+def get_shopify_order_rows(
+    session: Session,
+    *,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    financial_status: Optional[str] = None,
+    source: Optional[str] = None,
+    search: Optional[str] = None,
+    sort_by: str = "date",
+    sort_dir: str = "desc",
+    page: int = 1,
+    limit: Optional[int] = None,
+) -> list[ShopifyOrder]:
+    stmt = select(ShopifyOrder)
+    if start:
+        stmt = stmt.where(ShopifyOrder.created_at >= start)
+    if end:
+        stmt = stmt.where(ShopifyOrder.created_at <= end)
+    if financial_status:
+        stmt = stmt.where(ShopifyOrder.financial_status == financial_status)
+    if source:
+        stmt = stmt.where(ShopifyOrder.source == source)
+    if search:
+        pattern = f"%{search.strip().lower()}%"
+        stmt = stmt.where(
+            func.lower(ShopifyOrder.order_number).like(pattern)
+            | func.lower(func.coalesce(ShopifyOrder.customer_name, "")).like(pattern)
+        )
+    safe_sort_by = sort_by if sort_by in {"date", "gross", "tax", "net"} else "date"
+    safe_sort_dir = sort_dir if sort_dir in {"asc", "desc"} else "desc"
+    net_expr = func.coalesce(ShopifyOrder.subtotal_ex_tax, ShopifyOrder.total_price - func.coalesce(ShopifyOrder.total_tax, 0.0))
+    sort_column = {
+        "date": ShopifyOrder.created_at,
+        "gross": ShopifyOrder.total_price,
+        "tax": func.coalesce(ShopifyOrder.total_tax, -1.0 if safe_sort_dir == "asc" else 0.0),
+        "net": net_expr,
+    }[safe_sort_by]
+    if safe_sort_dir == "asc":
+        stmt = stmt.order_by(sort_column.asc(), ShopifyOrder.id.asc())
+    else:
+        stmt = stmt.order_by(sort_column.desc(), ShopifyOrder.id.desc())
+    if limit:
+        offset = (max(page, 1) - 1) * limit
+        stmt = stmt.offset(offset).limit(limit)
+    return session.exec(stmt).all()
+
+
+def count_shopify_order_rows(
+    session: Session,
+    *,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    financial_status: Optional[str] = None,
+    source: Optional[str] = None,
+    search: Optional[str] = None,
+) -> int:
+    stmt = select(ShopifyOrder)
+    if start:
+        stmt = stmt.where(ShopifyOrder.created_at >= start)
+    if end:
+        stmt = stmt.where(ShopifyOrder.created_at <= end)
+    if financial_status:
+        stmt = stmt.where(ShopifyOrder.financial_status == financial_status)
+    if source:
+        stmt = stmt.where(ShopifyOrder.source == source)
+    if search:
+        pattern = f"%{search.strip().lower()}%"
+        stmt = stmt.where(
+            func.lower(ShopifyOrder.order_number).like(pattern)
+            | func.lower(func.coalesce(ShopifyOrder.customer_name, "")).like(pattern)
+        )
+    return count_rows(session, stmt)
+
+
+def build_shopify_item_summary(line_items_json: str) -> str:
+    try:
+        items = json.loads(line_items_json or "[]")
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(items, list):
+        return ""
+    parts: list[str] = []
+    for item in items[:4]:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("title") or "").strip()
+        quantity = int(item.get("quantity") or 0)
+        if not name:
+            continue
+        parts.append(f"{name} x{quantity or 1}")
+    summary = ", ".join(parts)
+    if len(items) > 4:
+        summary = f"{summary}, +{len(items) - 4} more"
+    return summary
+
+
+def build_shopify_orders_url(
+    *,
+    financial_status: str = "",
+    source: str = "",
+    start: str = "",
+    end: str = "",
+    search: str = "",
+    sort_by: str = "",
+    sort_dir: str = "",
+    page: int = 1,
+) -> str:
+    params: dict[str, str] = {}
+    if financial_status:
+        params["financial_status"] = financial_status
+    if source:
+        params["source"] = source
+    if start:
+        params["start"] = start
+    if end:
+        params["end"] = end
+    if search:
+        params["search"] = search
+    if sort_by:
+        params["sort_by"] = sort_by
+    if sort_dir:
+        params["sort_dir"] = sort_dir
+    if page > 1:
+        params["page"] = str(page)
+    if not params:
+        return "/shopify/orders"
+    return f"/shopify/orders?{urlencode(params)}"
+
+
+def build_shopify_sort_url(
+    *,
+    current_sort_by: str,
+    current_sort_dir: str,
+    target_sort_by: str,
+    financial_status: str = "",
+    source: str = "",
+    start: str = "",
+    end: str = "",
+    search: str = "",
+) -> str:
+    next_dir = "asc"
+    if current_sort_by == target_sort_by and current_sort_dir == "asc":
+        next_dir = "desc"
+    return build_shopify_orders_url(
+        financial_status=financial_status,
+        source=source,
+        start=start,
+        end=end,
+        search=search,
+        sort_by=target_sort_by,
+        sort_dir=next_dir,
+    )
+
+
+def build_shopify_order_summary(
+    orders: list[ShopifyOrder],
+) -> dict[str, object]:
+    totals = {
+        "orders": len(orders),
+        "gross_revenue": 0.0,
+        "total_tax": 0.0,
+        "net_revenue": 0.0,
+        "paid_orders": 0,
+        "refunded_orders": 0,
+        "avg_order_value": 0.0,
+    }
+    status_breakdown: dict[str, int] = {}
+    source_breakdown: dict[str, int] = {}
+
+    for order in orders:
+        gross_value = float(order.total_price or 0.0)
+        tax_value = float(order.total_tax or 0.0)
+        net_value = float(order.subtotal_ex_tax if order.subtotal_ex_tax is not None else gross_value - tax_value)
+        totals["gross_revenue"] += gross_value
+        totals["total_tax"] += tax_value
+        totals["net_revenue"] += net_value
+        status = (order.financial_status or "unknown").strip() or "unknown"
+        source_name = (order.source or "unknown").strip() or "unknown"
+        status_breakdown[status] = status_breakdown.get(status, 0) + 1
+        source_breakdown[source_name] = source_breakdown.get(source_name, 0) + 1
+        if status == "paid":
+            totals["paid_orders"] += 1
+        if status == "refunded":
+            totals["refunded_orders"] += 1
+
+    if totals["orders"]:
+        totals["avg_order_value"] = round(totals["gross_revenue"] / totals["orders"], 2)
+    totals["gross_revenue"] = round(totals["gross_revenue"], 2)
+    totals["total_tax"] = round(totals["total_tax"], 2)
+    totals["net_revenue"] = round(totals["net_revenue"], 2)
+
+    return {
+        "totals": totals,
+        "status_breakdown": dict(sorted(status_breakdown.items(), key=lambda item: (-item[1], item[0]))),
+        "source_breakdown": dict(sorted(source_breakdown.items(), key=lambda item: (-item[1], item[0]))),
+    }
+
+
+def empty_transaction_summary() -> dict[str, object]:
+    return build_transaction_summary([])
+
+
+def empty_shopify_reporting_summary() -> dict[str, object]:
+    return build_shopify_reporting_summary([])
+
+
+def build_report_period_comparison_rows(
+    session: Session,
+    *,
+    periods: list[dict[str, object]],
+    channel_id: Optional[str] = None,
+    entry_kind: Optional[str] = None,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for period in periods:
+        start = period.get("start")
+        end = period.get("end")
+        discord_rows = get_transactions(
+            session,
+            start=start if isinstance(start, datetime) else None,
+            end=end if isinstance(end, datetime) else None,
+            channel_id=channel_id,
+            entry_kind=entry_kind,
+        )
+        discord_summary = build_transaction_summary(discord_rows)
+        shopify_rows = get_shopify_reporting_rows(
+            session,
+            start=start if isinstance(start, datetime) else None,
+            end=end if isinstance(end, datetime) else None,
+        )
+        shopify_summary = build_shopify_reporting_summary(shopify_rows)
+        discord_net = round(float(discord_summary["totals"].get("net", 0.0) or 0.0), 2)
+        shopify_gross = round(float(shopify_summary["gross_revenue"] or 0.0), 2)
+        shopify_tax = round(float(shopify_summary["total_tax"] or 0.0), 2)
+        shopify_net = round(float(shopify_summary["net_revenue"] or 0.0), 2)
+        rows.append(
+            {
+                "key": period.get("key") or "",
+                "label": period.get("label") or "Period",
+                "discord_net": discord_net,
+                "shopify_gross": shopify_gross,
+                "shopify_tax": shopify_tax,
+                "shopify_net": shopify_net,
+                "combined_net": round(discord_net + shopify_net, 2),
+                "shopify_tax_unknown_orders": int(shopify_summary["tax_unknown_orders"] or 0),
+            }
+        )
+    return rows
+
+
+def run_shopify_backfill_in_background(*, since: Optional[str], limit: Optional[int]) -> None:
+    runtime_name = f"{settings.runtime_name}_shopify_backfill"
+    started_at = utcnow()
+    update_shopify_backfill_state(
+        is_running=True,
+        last_started_at=started_at,
+        last_finished_at=None,
+        last_since=since,
+        last_limit=limit,
+        last_summary=None,
+        last_error=None,
+    )
+    try:
+        with managed_session() as session:
+            summary = backfill_shopify_orders(
+                session,
+                store_domain=settings.shopify_store_domain,
+                api_key=settings.shopify_api_key,
+                since=since,
+                limit=limit,
+                dry_run=False,
+                runtime_name=runtime_name,
+            )
+        update_shopify_backfill_state(
+            is_running=False,
+            last_finished_at=utcnow(),
+            last_summary={
+                "fetched": summary.fetched,
+                "inserted": summary.inserted,
+                "updated": summary.updated,
+                "failed": summary.failed,
+            },
+            last_error=None,
+        )
+    except Exception as exc:
+        print(
+            structured_log_line(
+                runtime=runtime_name,
+                action="shopify.backfill.failed",
+                success=False,
+                error=str(exc),
+                since=since,
+                limit=limit,
+            )
+        )
+        update_shopify_backfill_state(
+            is_running=False,
+            last_finished_at=utcnow(),
+            last_error=str(exc),
+        )
 
 
 def local_runtime_details() -> dict:
@@ -165,6 +663,27 @@ def local_runtime_details() -> dict:
         "discord_error": discord_runtime_state.get("error"),
         "parser_worker_enabled": settings.parser_worker_enabled,
         "discord_ingest_enabled": settings.discord_ingest_enabled,
+        "periodic_attachment_repair_enabled": settings.periodic_attachment_repair_enabled,
+        "periodic_attachment_repair_interval_minutes": settings.periodic_attachment_repair_interval_minutes,
+        "periodic_attachment_repair_lookback_hours": settings.periodic_attachment_repair_lookback_hours,
+        "periodic_attachment_repair_limit": settings.periodic_attachment_repair_limit,
+        "periodic_attachment_repair_min_age_minutes": settings.periodic_attachment_repair_min_age_minutes,
+        "periodic_stitch_audit_enabled": settings.periodic_stitch_audit_enabled,
+        "periodic_stitch_audit_interval_minutes": settings.periodic_stitch_audit_interval_minutes,
+        "backfill_queue_expected": settings.discord_ingest_enabled,
+        "last_recent_audit_at": discord_runtime_state.get("last_recent_audit_at"),
+        "last_recent_audit_summary": discord_runtime_state.get("last_recent_audit_summary"),
+        "last_attachment_repair_at": discord_runtime_state.get("last_attachment_repair_at"),
+        "last_attachment_repair_summary": discord_runtime_state.get("last_attachment_repair_summary"),
+    }
+
+
+def app_runtime_details() -> dict:
+    return {
+        "service_mode": "web-app",
+        "parser_worker_enabled": settings.parser_worker_enabled,
+        "discord_ingest_enabled": settings.discord_ingest_enabled,
+        "periodic_stitch_audit_enabled": settings.periodic_stitch_audit_enabled,
     }
 
 
@@ -178,6 +697,10 @@ def row_looks_transactional(row: DiscordMessage) -> bool:
 
 
 def find_nearby_image_candidates(session: Session, rows: list[DiscordMessage]) -> dict[int, dict]:
+    target_cached_assets_by_message_id = get_cached_attachment_map(
+        session,
+        [row.id for row in rows if row.id is not None],
+    )
     targets = [
         row for row in rows
         if row.id is not None
@@ -185,7 +708,10 @@ def find_nearby_image_candidates(session: Session, rows: list[DiscordMessage]) -
         and not row.stitched_group_id
         and row.channel_id
         and row.author_name
-        and not extract_image_urls(json.loads(row.attachment_urls_json or "[]"))
+        and not row_has_images(
+            row,
+            cached_assets=target_cached_assets_by_message_id.get(row.id) if row.id is not None else None,
+        )
         and row_looks_transactional(row)
     ]
     if not targets:
@@ -219,11 +745,7 @@ def find_nearby_image_candidates(session: Session, rows: list[DiscordMessage]) -
             if candidate.stitched_group_id:
                 continue
             cached_assets = cached_assets_by_message_id.get(candidate.id)
-            candidate_images = (
-                cached_assets["image_urls"]
-                if cached_assets and cached_assets["image_urls"]
-                else extract_image_urls(json.loads(candidate.attachment_urls_json or "[]"))
-            )
+            _, candidate_images = normalize_attachment_urls_for_row(candidate, cached_assets)
             if not candidate_images:
                 continue
             delta_seconds = abs((candidate.created_at - row.created_at).total_seconds())
@@ -249,26 +771,35 @@ def build_message_stmt(
     status: Optional[str] = None,
     channel_id: Optional[str] = None,
     entry_kind: Optional[str] = None,
+    expense_category: Optional[str] = None,
     after: Optional[str] = None,
     before: Optional[str] = None,
 ):
+    normalized_status = normalize_status_filter(status)
     after_dt = parse_report_datetime(after)
     before_dt = parse_report_datetime(before, end_of_day=True)
     stmt = select(DiscordMessage)
 
-    if status:
-        if status == "review_queue":
-            stmt = stmt.where(DiscordMessage.parse_status.in_(["needs_review", "failed"]))
+    if normalized_status:
+        if normalized_status == "review_queue":
+            stmt = stmt.where(
+                DiscordMessage.parse_status.in_(
+                    [*status_filter_values(PARSE_REVIEW_REQUIRED), PARSE_FAILED]
+                )
+            )
         else:
-            stmt = stmt.where(DiscordMessage.parse_status == status)
+            stmt = stmt.where(DiscordMessage.parse_status.in_(status_filter_values(normalized_status)))
     else:
-        stmt = stmt.where(DiscordMessage.parse_status != "ignored")
+        stmt = stmt.where(DiscordMessage.parse_status.not_in(status_filter_values(PARSE_IGNORED)))
 
     if channel_id:
         stmt = stmt.where(DiscordMessage.channel_id == channel_id)
 
     if entry_kind:
         stmt = stmt.where(DiscordMessage.entry_kind == entry_kind)
+
+    if expense_category:
+        stmt = stmt.where(DiscordMessage.expense_category == expense_category)
 
     if after_dt:
         stmt = stmt.where(DiscordMessage.created_at >= after_dt)
@@ -311,13 +842,17 @@ def message_list_item(row: DiscordMessage) -> dict:
     return {
         "id": row.id,
         "time": format_pacific_datetime(row.created_at),
+        "date": format_pacific_date(row.created_at),
         "edited_at": format_pacific_datetime(row.edited_at),
+        "last_seen_at": format_pacific_datetime(row.last_seen_at),
+        "last_stitched_at": format_pacific_datetime(row.last_stitched_at),
+        "deleted_at": format_pacific_datetime(row.deleted_at),
         "is_deleted": row.is_deleted,
         "channel": row.channel_name,
         "channel_id": row.channel_id,
         "author": row.author_name,
         "message": row.content,
-        "status": row.parse_status,
+        "status": normalize_parse_status(row.parse_status, is_deleted=row.is_deleted, needs_review=row.needs_review),
         "type": row.deal_type,
         "amount": row.amount,
         "amount_display": amount_display,
@@ -338,6 +873,7 @@ def message_list_item(row: DiscordMessage) -> dict:
         "expense_category": row.expense_category,
         "reviewed_by": row.reviewed_by,
         "reviewed_at": format_pacific_datetime(row.reviewed_at),
+        "last_error": row.last_error,
         "has_images": len(image_urls) > 0,
         "image_urls": image_urls,
         "first_image_url": image_urls[0] if image_urls else None,
@@ -349,12 +885,14 @@ def message_list_item(row: DiscordMessage) -> dict:
     }
 
 
-def build_message_list_items(session: Session, rows: list[DiscordMessage]) -> list[dict]:
+def build_message_list_items(
+    session: Session,
+    rows: list[DiscordMessage],
+    *,
+    expense_category: Optional[str] = None,
+) -> list[dict]:
     items = [message_list_item(row) for row in rows]
-    cached_assets_by_message_id = get_cached_attachment_map(
-        session,
-        [row.id for row in rows if row.id is not None],
-    )
+    row_by_id = {row.id: row for row in rows if row.id is not None}
     nearby_image_candidates = find_nearby_image_candidates(session, rows)
     bookkeeping_status_by_message_id = get_bookkeeping_status_by_message_ids(
         session,
@@ -376,12 +914,42 @@ def build_message_list_items(session: Session, rows: list[DiscordMessage]) -> li
         ).all()
         grouped_rows_by_id = {row.id: row for row in grouped_rows}
 
+    attachment_message_ids = [row.id for row in rows if row.id is not None]
+    attachment_message_ids.extend(grouped_id for grouped_id in grouped_ids if grouped_id is not None)
+    cached_assets_by_message_id = get_cached_attachment_map(session, attachment_message_ids)
+
+    stale_processing_ids: set[int] = set()
+    processing_ids = [row.id for row in rows if row.id is not None and row.parse_status == PARSE_PROCESSING]
+    if processing_ids:
+        unfinished_attempts = session.exec(
+            select(ParseAttempt).where(
+                ParseAttempt.message_id.in_(processing_ids),
+                ParseAttempt.finished_at == None,  # noqa: E711
+            )
+        ).all()
+        now = utcnow()
+        for attempt in unfinished_attempts:
+            if attempt.message_id is None or attempt.started_at is None:
+                continue
+            started_at = attempt.started_at
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=timezone.utc)
+            if started_at <= now - STALE_PROCESSING_AFTER:
+                stale_processing_ids.add(attempt.message_id)
+
     for item in items:
         grouped_messages = []
+        grouped_attachment_urls: list[str] = []
+        grouped_image_urls: list[str] = []
         for grouped_id in item["stitched_message_ids"]:
             grouped_row = grouped_rows_by_id.get(grouped_id)
             if not grouped_row:
                 continue
+            grouped_assets = cached_assets_by_message_id.get(grouped_row.id)
+            normalized_grouped_attachment_urls, normalized_grouped_image_urls = normalize_attachment_urls_for_row(
+                grouped_row,
+                grouped_assets,
+            )
             grouped_messages.append(
                 {
                     "id": grouped_row.id,
@@ -389,9 +957,18 @@ def build_message_list_items(session: Session, rows: list[DiscordMessage]) -> li
                     "author": grouped_row.author_name or "",
                     "message": (grouped_row.content or "").strip(),
                     "is_self": grouped_row.id == item["id"],
-                    "has_image": bool(json.loads(grouped_row.attachment_urls_json or "[]")),
+                    "has_image": bool(normalized_grouped_image_urls),
+                    "attachment_urls": normalized_grouped_attachment_urls,
+                    "image_urls": normalized_grouped_image_urls,
+                    "first_image_url": normalized_grouped_image_urls[0] if normalized_grouped_image_urls else None,
                 }
             )
+            for url in normalized_grouped_attachment_urls:
+                if url not in grouped_attachment_urls:
+                    grouped_attachment_urls.append(url)
+            for url in normalized_grouped_image_urls:
+                if url not in grouped_image_urls:
+                    grouped_image_urls.append(url)
         item["grouped_messages"] = grouped_messages
         cached_assets = cached_assets_by_message_id.get(item["id"])
         if cached_assets:
@@ -399,6 +976,27 @@ def build_message_list_items(session: Session, rows: list[DiscordMessage]) -> li
             item["image_urls"] = cached_assets["image_urls"]
             item["first_image_url"] = cached_assets["image_urls"][0] if cached_assets["image_urls"] else None
             item["has_images"] = bool(cached_assets["image_urls"])
+        elif item["id"] is not None:
+            original_urls = list(item.get("attachment_urls") or [])
+            proxy_urls = [
+                f"/messages/{item['id']}/attachments/{index}"
+                for index, _url in enumerate(original_urls)
+            ]
+            image_proxy_urls = [
+                proxy_urls[index]
+                for index, url in enumerate(original_urls)
+                if any(ext in url.lower() for ext in IMAGE_EXTENSIONS)
+            ]
+            item["attachment_urls"] = proxy_urls
+            item["image_urls"] = image_proxy_urls
+            item["first_image_url"] = image_proxy_urls[0] if image_proxy_urls else None
+            item["has_images"] = bool(image_proxy_urls)
+        item = apply_cached_or_proxy_attachment_urls(
+            session,
+            item,
+            extra_attachment_groups=[grouped_attachment_urls] if grouped_attachment_urls else None,
+            extra_image_groups=[grouped_image_urls] if grouped_image_urls else None,
+        )
         item["bookkeeping"] = bookkeeping_status_by_message_id.get(
             item["id"],
             {"status": "unmatched", "label": "Unmatched", "sheet_name": ""},
@@ -409,6 +1007,29 @@ def build_message_list_items(session: Session, rows: list[DiscordMessage]) -> li
         )
         item["nearby_image"] = nearby_image_candidates.get(item["id"])
         item["possible_missing_image"] = item["nearby_image"] is not None
+        item["is_stale_processing"] = item["id"] in stale_processing_ids
+        item["detail_url"] = build_message_detail_url(
+            item["id"],
+            return_path="/review-table" if item["needs_review"] or item["status"] in {"needs_review", "failed"} else "/table",
+            status="review_queue" if item["needs_review"] or item["status"] in {"needs_review", "failed"} else item["status"],
+            channel_id=item["channel_id"],
+            expense_category=expense_category,
+            after=item["date"],
+            before=item["date"],
+            sort_by="time",
+            sort_dir="desc",
+            limit=100,
+        ) if item.get("id") is not None else ""
+
+        source_row = row_by_id.get(item["id"])
+        item["action_links"] = build_row_action_links(
+            item["id"],
+            channel_id=item["channel_id"],
+            created_at=source_row.created_at if source_row else None,
+            status=item["status"],
+            expense_category=expense_category,
+        ) if item.get("id") is not None else {}
+        item["attention"] = build_row_attention(item)
 
     return items
 
@@ -428,7 +1049,8 @@ def message_detail_item(row: DiscordMessage) -> dict:
         "image_urls": extract_image_urls(attachment_urls),
         "created_at": format_pacific_datetime(row.created_at),
         "ingested_at": format_pacific_datetime(row.ingested_at),
-        "parse_status": row.parse_status,
+        "last_seen_at": format_pacific_datetime(row.last_seen_at),
+        "parse_status": normalize_parse_status(row.parse_status, is_deleted=row.is_deleted, needs_review=row.needs_review),
         "parse_attempts": row.parse_attempts,
         "last_error": row.last_error,
         "deal_type": row.deal_type,
@@ -446,17 +1068,71 @@ def message_detail_item(row: DiscordMessage) -> dict:
         "image_summary": row.image_summary,
         "reviewed_by": row.reviewed_by,
         "reviewed_at": format_pacific_datetime(row.reviewed_at),
+        "edited_at": format_pacific_datetime(row.edited_at),
+        "deleted_at": format_pacific_datetime(row.deleted_at),
+        "last_stitched_at": format_pacific_datetime(row.last_stitched_at),
         "entry_kind": row.entry_kind,
         "money_in": row.money_in,
         "money_out": row.money_out,
         "expense_category": row.expense_category,
     }
 
+
+def apply_cached_or_proxy_attachment_urls(
+    session: Session,
+    item: dict,
+    *,
+    extra_attachment_groups: list[list[str]] | None = None,
+    extra_image_groups: list[list[str]] | None = None,
+) -> dict:
+    message_id = item.get("id")
+    if message_id is None:
+        return item
+
+    cached_assets = get_cached_attachment_map(
+        session,
+        [message_id],
+    ).get(message_id)
+    if cached_assets:
+        base_attachment_urls = list(cached_assets["all_urls"])
+        base_image_urls = list(cached_assets["image_urls"])
+    else:
+        original_urls = list(item.get("attachment_urls") or [])
+        base_attachment_urls = [
+            f"/messages/{message_id}/attachments/{index}"
+            for index, _url in enumerate(original_urls)
+        ]
+        base_image_urls = [
+            base_attachment_urls[index]
+            for index, url in enumerate(original_urls)
+            if any(ext in url.lower() for ext in IMAGE_EXTENSIONS)
+        ]
+
+    merged_attachment_urls, merged_image_urls = merge_display_attachment_urls(
+        base_attachment_urls,
+        *(extra_attachment_groups or []),
+        image_groups=[base_image_urls, *(extra_image_groups or [])],
+    )
+    if cached_assets or extra_attachment_groups:
+        item["attachment_urls"] = merged_attachment_urls
+        item["image_urls"] = merged_image_urls
+        item["first_image_url"] = merged_image_urls[0] if merged_image_urls else None
+        item["has_images"] = bool(merged_image_urls)
+        return item
+
+    item["attachment_urls"] = base_attachment_urls
+    item["image_urls"] = base_image_urls
+    item["first_image_url"] = base_image_urls[0] if base_image_urls else None
+    item["has_images"] = bool(base_image_urls)
+    return item
+
+
 def build_return_url(
     return_path: str,
     *,
     status: Optional[str] = None,
     channel_id: Optional[str] = None,
+    expense_category: Optional[str] = None,
     after: Optional[str] = None,
     before: Optional[str] = None,
     sort_by: Optional[str] = None,
@@ -470,6 +1146,8 @@ def build_return_url(
         params["status"] = status
     if channel_id:
         params["channel_id"] = channel_id
+    if expense_category:
+        params["expense_category"] = expense_category
     if after:
         params["after"] = after
     if before:
@@ -486,6 +1164,176 @@ def build_return_url(
     if not params:
         return return_path
     return f"{return_path}?{urlencode(params)}"
+
+
+def coerce_int(value: object) -> Optional[int]:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def build_message_detail_url(
+    message_id: Optional[int],
+    *,
+    return_path: str = "/table",
+    status: Optional[str] = None,
+    channel_id: Optional[str] = None,
+    expense_category: Optional[str] = None,
+    after: Optional[str] = None,
+    before: Optional[str] = None,
+    sort_by: Optional[str] = None,
+    sort_dir: Optional[str] = None,
+    page: Optional[int] = None,
+    limit: Optional[int] = None,
+) -> str:
+    if message_id is None:
+        return ""
+    params: dict[str, str] = {"return_path": return_path}
+    if status:
+        params["status"] = status
+    if channel_id:
+        params["channel_id"] = channel_id
+    if expense_category:
+        params["expense_category"] = expense_category
+    if after:
+        params["after"] = after
+    if before:
+        params["before"] = before
+    if sort_by:
+        params["sort_by"] = sort_by
+    if sort_dir:
+        params["sort_dir"] = sort_dir
+    if page and page > 1:
+        params["page"] = str(page)
+    if limit:
+        params["limit"] = str(limit)
+    return f"/deals/{message_id}?{urlencode(params)}"
+
+
+def build_row_action_links(
+    message_id: Optional[int],
+    *,
+    channel_id: Optional[str] = None,
+    created_at: Optional[datetime | str] = None,
+    status: Optional[str] = None,
+    expense_category: Optional[str] = None,
+) -> dict[str, str]:
+    day = format_pacific_date(created_at)
+    detail_status = "review_queue" if status in {PARSE_FAILED, PARSE_REVIEW_REQUIRED, "failed", "needs_review"} else status
+    return {
+        "open_row": build_message_detail_url(
+            message_id,
+            return_path="/review-table" if detail_status == "review_queue" else "/table",
+            status=detail_status,
+            channel_id=channel_id,
+            expense_category=expense_category,
+            after=day,
+            before=day,
+            sort_by="time",
+            sort_dir="desc",
+            limit=100,
+        ),
+        "open_table": build_return_url(
+            "/table",
+            status=status if status not in {"review_queue"} else None,
+            channel_id=channel_id,
+            expense_category=expense_category,
+            after=day,
+            before=day,
+            sort_by="time",
+            sort_dir="desc",
+            limit=100,
+        ),
+        "open_review_queue": build_return_url(
+            "/review-table",
+            channel_id=channel_id,
+            expense_category=expense_category,
+            after=day,
+            before=day,
+            sort_by="time",
+            sort_dir="desc",
+            limit=100,
+        ),
+    }
+
+
+def build_queue_action_links() -> dict[str, str]:
+    return {
+        "open_processing": build_return_url("/table", status="processing", sort_by="time", sort_dir="desc", limit=100),
+        "open_failed": build_return_url("/table", status="failed", sort_by="time", sort_dir="desc", limit=100),
+        "open_review_queue": build_return_url("/review-table", sort_by="time", sort_dir="desc", limit=100),
+    }
+
+
+def build_row_attention(item: dict) -> dict:
+    reasons: list[dict[str, str]] = []
+    if item.get("status") == "failed":
+        reasons.append({"label": "Parse failed", "tone": "danger"})
+    elif item.get("is_stale_processing"):
+        reasons.append({"label": "Stuck in processing", "tone": "danger"})
+    elif item.get("needs_review"):
+        reasons.append({"label": "Needs review", "tone": "warn"})
+
+    if item.get("stitched_group_id") and not item.get("stitched_primary"):
+        reasons.append({"label": "Grouped child row", "tone": "warn"})
+    elif item.get("stitched_count", 0) > 1:
+        reasons.append({"label": "Grouped deal", "tone": "warn"})
+
+    if item.get("possible_missing_image"):
+        reasons.append({"label": "Nearby image clue", "tone": "warn"})
+
+    bookkeeping_status = (item.get("bookkeeping") or {}).get("status")
+    if bookkeeping_status == "matched_amount_only":
+        reasons.append({"label": "Bookkeeping partial match", "tone": "warn"})
+    elif bookkeeping_status == "unmatched" and item.get("status") == "parsed":
+        reasons.append({"label": "Bookkeeping unmatched", "tone": "warn"})
+
+    parse_attempts = int(item.get("parse_attempts") or 0)
+    if parse_attempts >= 2:
+        reasons.append({"label": f"Repeated attempts ({parse_attempts})", "tone": "warn"})
+
+    error_snippet = summarize_message_snippet(item.get("last_error"), limit=90) if item.get("last_error") else ""
+    level = ""
+    if any(reason["tone"] == "danger" for reason in reasons):
+        level = "danger"
+    elif reasons:
+        level = "warn"
+
+    return {
+        "level": level,
+        "summary": " | ".join(reason["label"] for reason in reasons),
+        "reasons": reasons,
+        "error_snippet": error_snippet,
+        "has_attention": bool(reasons or error_snippet),
+        "is_failed": item.get("status") == "failed",
+        "has_image_clue": bool(item.get("first_image_url") or item.get("possible_missing_image")),
+        "is_grouped": bool(item.get("stitched_count", 0) > 1),
+        "has_bookkeeping_mismatch": bookkeeping_status in {"matched_amount_only", "unmatched"},
+    }
+
+
+def build_review_shortcuts(items: list[dict]) -> list[dict[str, object]]:
+    shortcut_specs = [
+        ("failed", "Next Failed", lambda item: item.get("attention", {}).get("is_failed")),
+        ("image", "Next Image Clue", lambda item: item.get("attention", {}).get("has_image_clue")),
+        ("grouped", "Next Grouped", lambda item: item.get("attention", {}).get("is_grouped")),
+        ("bookkeeping", "Next Bookkeeping Mismatch", lambda item: item.get("attention", {}).get("has_bookkeeping_mismatch")),
+    ]
+    shortcuts: list[dict[str, object]] = []
+    for key, label, predicate in shortcut_specs:
+        count = sum(1 for item in items if predicate(item))
+        shortcuts.append(
+            {
+                "key": key,
+                "label": label,
+                "count": count,
+                "enabled": count > 0,
+            }
+        )
+    return shortcuts
 
 
 def parse_optional_float(value: Optional[str]) -> Optional[float]:
@@ -543,11 +1391,6 @@ def compute_manual_financials(
             money_in = normalized_amount
         elif cash_direction == "from_store":
             money_out = normalized_amount
-    else:
-        if cash_direction == "to_store":
-            money_in = normalized_amount
-        elif cash_direction == "from_store":
-            money_out = normalized_amount
 
     return entry_kind, money_in, money_out, expense_category
 
@@ -557,6 +1400,7 @@ def get_message_rows(
     status: Optional[str] = None,
     channel_id: Optional[str] = None,
     entry_kind: Optional[str] = None,
+    expense_category: Optional[str] = None,
     after: Optional[str] = None,
     before: Optional[str] = None,
     sort_by: str = "time",
@@ -568,6 +1412,7 @@ def get_message_rows(
         status=status,
         channel_id=channel_id,
         entry_kind=entry_kind,
+        expense_category=expense_category,
         after=after,
         before=before,
     )
@@ -604,6 +1449,7 @@ def get_ordered_message_ids(
     *,
     status: Optional[str] = None,
     channel_id: Optional[str] = None,
+    expense_category: Optional[str] = None,
     after: Optional[str] = None,
     before: Optional[str] = None,
     sort_by: str = "time",
@@ -613,6 +1459,7 @@ def get_ordered_message_ids(
         session,
         status=status,
         channel_id=channel_id,
+        expense_category=expense_category,
         after=after,
         before=before,
         sort_by=sort_by,
@@ -627,6 +1474,7 @@ def get_summary(
     status: Optional[str] = None,
     channel_id: Optional[str] = None,
     entry_kind: Optional[str] = None,
+    expense_category: Optional[str] = None,
     after: Optional[str] = None,
     before: Optional[str] = None,
 ) -> dict:
@@ -634,18 +1482,20 @@ def get_summary(
         status=status,
         channel_id=channel_id,
         entry_kind=entry_kind,
+        expense_category=expense_category,
         after=after,
         before=before,
     )
     summary_subquery = stmt.order_by(None).subquery()
 
-    status_counts = {
-        row[0]: int(row[1])
-        for row in session.exec(
-            select(summary_subquery.c.parse_status, func.count())
-            .group_by(summary_subquery.c.parse_status)
-        ).all()
-    }
+    raw_status_counts = session.exec(
+        select(summary_subquery.c.parse_status, func.count())
+        .group_by(summary_subquery.c.parse_status)
+    ).all()
+    status_counts: dict[str, int] = {}
+    for raw_status, count in raw_status_counts:
+        normalized_status = normalize_parse_status(raw_status)
+        status_counts[normalized_status] = status_counts.get(normalized_status, 0) + int(count)
     total = sum(status_counts.values())
     with_images = int(
         session.exec(
@@ -664,12 +1514,12 @@ def get_summary(
 
     return {
         "total": total,
-        "parsed": status_counts.get("parsed", 0),
-        "processing": status_counts.get("processing", 0),
-        "queued": status_counts.get("queued", 0),
-        "failed": status_counts.get("failed", 0),
-        "needs_review": status_counts.get("needs_review", 0),
-        "ignored": status_counts.get("ignored", 0),
+        "parsed": status_counts.get(PARSE_PARSED, 0),
+        "processing": status_counts.get(PARSE_PROCESSING, 0),
+        "queued": status_counts.get(PARSE_PENDING, 0),
+        "failed": status_counts.get(PARSE_FAILED, 0),
+        "needs_review": status_counts.get(PARSE_REVIEW_REQUIRED, 0),
+        "ignored": status_counts.get(PARSE_IGNORED, 0),
         "with_images": with_images,
         "deleted": deleted,
     }
@@ -745,7 +1595,7 @@ def get_partner_deal_rows(
     stmt = (
         select(DiscordMessage)
         .where(DiscordMessage.channel_id.in_(watched_channel_ids))
-        .where(DiscordMessage.parse_status == "parsed")
+        .where(DiscordMessage.parse_status == PARSE_PARSED)
         .where(DiscordMessage.is_deleted == False)  # noqa: E712
     )
 
@@ -818,6 +1668,19 @@ async def lifespan(app: FastAPI):
     app.state.stop_event = stop_event
     heartbeat_stop_event = threading.Event()
     app.state.heartbeat_stop_event = heartbeat_stop_event
+    app_heartbeat_thread = threading.Thread(
+        target=runtime_heartbeat_loop,
+        kwargs={
+            "stop_event": heartbeat_stop_event,
+            "runtime_name": APP_HEARTBEAT_RUNTIME_NAME,
+            "host_name": socket.gethostname(),
+            "details_provider": app_runtime_details,
+        },
+        name="app-heartbeat",
+        daemon=True,
+    )
+    app_heartbeat_thread.start()
+    app.state.app_heartbeat_thread = app_heartbeat_thread
 
     background_tasks: list[asyncio.Task] = []
 
@@ -826,7 +1689,7 @@ async def lifespan(app: FastAPI):
             target=runtime_heartbeat_loop,
             kwargs={
                 "stop_event": heartbeat_stop_event,
-                "runtime_name": LOCAL_HEARTBEAT_RUNTIME_NAME,
+                "runtime_name": WORKER_RUNTIME_NAME,
                 "host_name": socket.gethostname(),
                 "details_provider": local_runtime_details,
             },
@@ -841,6 +1704,43 @@ async def lifespan(app: FastAPI):
     discord_task = asyncio.create_task(run_discord_bot(stop_event), name="discord-ingest")
     background_tasks.append(discord_task)
     app.state.discord_task = discord_task
+
+    if settings.discord_ingest_enabled:
+        backfill_task = asyncio.create_task(
+            backfill_request_loop(stop_event, get_discord_client),
+            name="backfill-queue",
+        )
+        background_tasks.append(backfill_task)
+        app.state.backfill_task = backfill_task
+        recent_audit_task = asyncio.create_task(
+            recent_message_audit_loop(stop_event, get_discord_client),
+            name="recent-message-audit",
+        )
+        background_tasks.append(recent_audit_task)
+        app.state.recent_audit_task = recent_audit_task
+        if settings.periodic_attachment_repair_enabled:
+            attachment_repair_task = asyncio.create_task(
+                periodic_attachment_repair_loop(stop_event, get_discord_client),
+                name="attachment-repair-audit",
+            )
+            background_tasks.append(attachment_repair_task)
+            app.state.attachment_repair_task = attachment_repair_task
+        else:
+            app.state.attachment_repair_task = None
+    else:
+        app.state.backfill_task = None
+        app.state.recent_audit_task = None
+        app.state.attachment_repair_task = None
+
+    if settings.discord_ingest_enabled and settings.parser_worker_enabled:
+        stitch_audit_task = asyncio.create_task(
+            periodic_stitch_audit_loop(stop_event),
+            name="stitch-audit",
+        )
+        background_tasks.append(stitch_audit_task)
+        app.state.stitch_audit_task = stitch_audit_task
+    else:
+        app.state.stitch_audit_task = None
 
     if settings.parser_worker_enabled:
         worker_task = asyncio.create_task(parser_loop(stop_event), name="parser-worker")
@@ -866,6 +1766,9 @@ async def lifespan(app: FastAPI):
     heartbeat_thread = getattr(app.state, "heartbeat_thread", None)
     if heartbeat_thread:
         heartbeat_thread.join(timeout=5)
+    app_heartbeat_thread = getattr(app.state, "app_heartbeat_thread", None)
+    if app_heartbeat_thread:
+        app_heartbeat_thread.join(timeout=5)
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
@@ -883,11 +1786,28 @@ app.mount("/static", StaticFiles(directory=normalize_filesystem_path(BASE_DIR / 
 @app.exception_handler(OperationalError)
 async def handle_operational_error(request: Request, exc: OperationalError):
     dispose_engine()
-    payload = {
-        "ok": False,
-        "error": "Database connection is temporarily unavailable.",
-        "detail": "The shared database did not accept the connection cleanly. Please retry in a few seconds.",
-    }
+    error_text = str(exc).lower()
+    is_sqlite_busy = "database is locked" in error_text or "sqlite_busy" in error_text
+    if is_sqlite_busy:
+        payload = {
+            "ok": False,
+            "error": "SQLite is temporarily busy.",
+            "detail": "The local database is handling another write right now. Please retry in a few seconds.",
+        }
+        html_message = (
+            "<h1>SQLite temporarily busy</h1>"
+            "<p>The local database is handling another write right now. Please retry in a few seconds.</p>"
+        )
+    else:
+        payload = {
+            "ok": False,
+            "error": "Database connection is temporarily unavailable.",
+            "detail": "The shared database did not accept the connection cleanly. Please retry in a few seconds.",
+        }
+        html_message = (
+            "<h1>Database temporarily unavailable</h1>"
+            "<p>The shared database connection dropped unexpectedly. Please retry in a few seconds.</p>"
+        )
     headers = {"Retry-After": "5"}
     wants_json = (
         request.url.path.startswith("/admin/parser-progress")
@@ -896,31 +1816,90 @@ async def handle_operational_error(request: Request, exc: OperationalError):
     )
     if wants_json:
         return JSONResponse(status_code=503, content=payload, headers=headers)
-    return HTMLResponse(
-        "<h1>Database temporarily unavailable</h1>"
-        "<p>The shared database connection dropped unexpectedly. Please retry in a few seconds.</p>",
-        status_code=503,
-        headers=headers,
-    )
+    return HTMLResponse(html_message, status_code=503, headers=headers)
 
 
 @app.get("/attachments/{asset_id}")
 def attachment_asset(asset_id: int, session: Session = Depends(get_session)):
-    asset = session.get(AttachmentAsset, asset_id)
-    if not asset:
+    asset_meta = session.exec(
+        select(AttachmentAsset.id, AttachmentAsset.filename, AttachmentAsset.content_type)
+        .where(AttachmentAsset.id == asset_id)
+    ).first()
+    if not asset_meta:
         raise HTTPException(status_code=404, detail="Attachment not found")
 
-    media_type = asset.content_type or "application/octet-stream"
-    headers = {}
-    if asset.filename:
-        headers["Content-Disposition"] = f'inline; filename="{asset.filename}"'
-    return Response(content=asset.data, media_type=media_type, headers=headers)
+    _, filename, content_type = asset_meta
+    file_path = attachment_cache_path(
+        asset_id,
+        filename=filename,
+        content_type=content_type,
+    )
+    if not file_path.exists():
+        asset = session.get(AttachmentAsset, asset_id)
+        if not asset:
+            raise HTTPException(status_code=404, detail="Attachment not found")
+        file_path = write_attachment_cache_file(
+            asset_id,
+            filename=asset.filename,
+            content_type=asset.content_type,
+            data=asset.data,
+        )
+
+    media_type = content_type or "application/octet-stream"
+    headers = {
+        "Cache-Control": "public, max-age=31536000, immutable",
+    }
+    if filename:
+        headers["Content-Disposition"] = f'inline; filename="{filename}"'
+    return FileResponse(path=file_path, media_type=media_type, headers=headers)
+
+
+@app.get("/messages/{message_id}/attachments/{attachment_index}")
+async def message_attachment_fallback(
+    message_id: int,
+    attachment_index: int,
+    session: Session = Depends(get_session),
+):
+    row = session.get(DiscordMessage, message_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    attachment_urls = json.loads(row.attachment_urls_json or "[]")
+    if attachment_index < 0 or attachment_index >= len(attachment_urls):
+        raise HTTPException(status_code=404, detail="Attachment not found")
+
+    cached_assets = session.exec(
+        select(AttachmentAsset.id)
+        .where(AttachmentAsset.message_id == message_id)
+        .order_by(AttachmentAsset.id.asc())
+    ).all()
+    if attachment_index < len(cached_assets):
+        asset_id = cached_assets[attachment_index][0]
+        return RedirectResponse(url=f"/attachments/{asset_id}", status_code=307)
+
+    recovered = await recover_attachment_assets_for_message(
+        channel_id=row.channel_id,
+        discord_message_id=row.discord_message_id,
+        message_row_id=message_id,
+    )
+    if recovered:
+        refreshed_assets = session.exec(
+            select(AttachmentAsset.id)
+            .where(AttachmentAsset.message_id == message_id)
+            .order_by(AttachmentAsset.id.asc())
+        ).all()
+        if attachment_index < len(refreshed_assets):
+            asset_id = refreshed_assets[attachment_index][0]
+            return RedirectResponse(url=f"/attachments/{asset_id}", status_code=307)
+
+    return RedirectResponse(url=attachment_urls[attachment_index], status_code=307)
 
 
 PUBLIC_PATH_PREFIXES = (
     "/static",
     "/health",
     "/login",
+    "/webhooks/shopify",
 )
 
 
@@ -931,7 +1910,7 @@ def user_role_for_path(path: str) -> Optional[str]:
         return "reviewer"
     if path.startswith("/review") or path.startswith("/messages") or path.startswith("/channels"):
         return "reviewer"
-    if path.startswith("/reports"):
+    if path.startswith("/reports") or path.startswith("/shopify-orders") or path.startswith("/shopify/orders"):
         return "viewer"
     if path == "/":
         return "viewer"
@@ -1001,8 +1980,8 @@ def health():
         with managed_session() as session:
             local_runtime = get_runtime_heartbeat_status(
                 session,
-                LOCAL_HEARTBEAT_RUNTIME_NAME,
-                runtime_label=settings.runtime_label,
+                APP_HEARTBEAT_RUNTIME_NAME,
+                runtime_label=APP_RUNTIME_LABEL,
                 updated_at_formatter=format_pacific_datetime,
             )
         return HealthOut(
@@ -1044,6 +2023,54 @@ def dashboard_page(
     review_summary = get_summary(session, status="review_queue")
     overall_summary = get_summary(session)
     dashboard_snapshot = build_dashboard_snapshot(session)
+    dashboard_snapshot.setdefault("today", {})
+    dashboard_snapshot["today"].setdefault(
+        "shopify",
+        {
+            "order_count": 0,
+            "gross": 0.0,
+            "tax": 0.0,
+            "net": 0.0,
+            "refunds": 0.0,
+            "tax_missing_count": 0,
+            "includes_tax_count": 0,
+            "gross_display": format_dashboard_money(0.0),
+            "tax_display": format_dashboard_money(0.0),
+            "net_display": format_dashboard_money(0.0),
+            "refunds_display": format_dashboard_money(0.0),
+        },
+    )
+    dashboard_snapshot["today"].setdefault(
+        "revenue",
+        {
+            "discord_sales": 0.0,
+            "discord_trade_in": 0.0,
+            "discord_total": 0.0,
+            "shopify_total": 0.0,
+            "total": 0.0,
+            "total_display": format_dashboard_money(0.0),
+            "discord_total_display": format_dashboard_money(0.0),
+            "discord_sales_display": format_dashboard_money(0.0),
+            "discord_trade_in_display": format_dashboard_money(0.0),
+            "shopify_total_display": format_dashboard_money(0.0),
+        },
+    )
+    dashboard_snapshot["today"].setdefault(
+        "purchases",
+        {
+            "buys": 0.0,
+            "trade_out": 0.0,
+            "expenses": 0.0,
+            "shopify_refunds": 0.0,
+            "total": 0.0,
+            "total_display": format_dashboard_money(0.0),
+            "buys_display": format_dashboard_money(0.0),
+            "trade_out_display": format_dashboard_money(0.0),
+            "expenses_display": format_dashboard_money(0.0),
+            "shopify_refunds_display": format_dashboard_money(0.0),
+            "has_shopify_refunds": False,
+        },
+    )
     parser_progress = get_parser_progress(session)
     recent_reviewed = build_message_list_items(
         session,
@@ -1051,9 +2078,50 @@ def dashboard_page(
             select(DiscordMessage)
             .where(DiscordMessage.reviewed_at != None)  # noqa: E711
             .order_by(DiscordMessage.reviewed_at.desc())
-            .limit(8)
+            .limit(5)
         ).all(),
     )
+    recent_deals = build_message_list_items(
+        session,
+        session.exec(
+            select(DiscordMessage)
+            .where(DiscordMessage.is_deleted == False)  # noqa: E712
+            .where(DiscordMessage.parse_status.in_(status_filter_values(PARSE_PARSED)))
+            .order_by(DiscordMessage.created_at.desc(), DiscordMessage.id.desc())
+            .limit(10)
+        ).all(),
+    )
+    shopify_connected = True
+    shopify_message = ""
+    shopify_orders: list[dict] = []
+    try:
+        recent_shopify_rows = session.exec(
+            select(ShopifyOrder)
+            .where(ShopifyOrder.financial_status == "paid")
+            .order_by(ShopifyOrder.created_at.desc(), ShopifyOrder.id.desc())
+            .limit(10)
+        ).all()
+        for order in recent_shopify_rows:
+            fulfillment_status = (order.fulfillment_status or "").strip().lower()
+            if fulfillment_status == "fulfilled":
+                fulfillment_label = "Shipped"
+            elif fulfillment_status == "partial":
+                fulfillment_label = "Partial"
+            else:
+                fulfillment_label = "Pending"
+            shopify_orders.append(
+                {
+                    "id": order.id,
+                    "order_number": order.order_number,
+                    "created_at": format_pacific_datetime(order.created_at, include_zone=False),
+                    "customer_name": (order.customer_name or "").strip() or "Customer",
+                    "total_price": round(float(order.total_price or 0.0), 2),
+                    "fulfillment_label": fulfillment_label,
+                }
+            )
+    except OperationalError:
+        shopify_connected = False
+        shopify_message = "Shopify not connected yet"
 
     return templates.TemplateResponse(
         request,
@@ -1066,9 +2134,21 @@ def dashboard_page(
             "overall_summary": overall_summary,
             "dashboard_snapshot": dashboard_snapshot,
             "recent_reviewed": recent_reviewed,
+            "recent_deals": recent_deals,
+            "shopify_connected": shopify_connected,
+            "shopify_message": shopify_message,
+            "shopify_orders": shopify_orders,
             "parser_progress": parser_progress,
         },
     )
+
+
+@app.get("/partner", response_class=HTMLResponse)
+def partner_page(
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    return RedirectResponse(url="/dashboard", status_code=301)
 
 
 @app.get("/status", response_class=HTMLResponse)
@@ -1079,6 +2159,10 @@ def status_page(
     if denial := require_role_response(request, "viewer"):
         return denial
 
+    status_snapshot = build_status_snapshot(session)
+    health_snapshot = build_health_snapshot(session)
+    debug_snapshot = build_debug_snapshot(session)
+
     return templates.TemplateResponse(
         request,
         "status.html",
@@ -1086,7 +2170,9 @@ def status_page(
             "request": request,
             "title": "System Status",
             "current_user": getattr(request.state, "current_user", None),
-            "snapshot": build_status_snapshot(session),
+            "snapshot": status_snapshot,
+            "health": health_snapshot,
+            "debug": debug_snapshot,
         },
     )
 
@@ -1146,6 +2232,7 @@ def backfill_request_detail_page(
             "logs": serialize_operations_logs(
                 list_operations_logs_for_backfill_request(session, request_id=request_id)
             ),
+            "snapshot": build_backfill_queue_snapshot(session),
         },
     )
 
@@ -1181,6 +2268,22 @@ def admin_home_page(
     )
 
 
+@app.get("/admin/debug", response_class=HTMLResponse)
+def admin_debug_page(
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    return RedirectResponse(url="/status", status_code=301)
+
+
+@app.get("/admin/health", response_class=HTMLResponse)
+def admin_health_page(
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    return RedirectResponse(url="/status", status_code=301)
+
+
 @app.get("/deals", response_class=HTMLResponse)
 def deals_page(
     request: Request,
@@ -1214,7 +2317,7 @@ def deals_page(
             end=parse_report_datetime(before, end_of_day=True),
             channel_id=channel_id if channel_id else None,
         )
-        if row.channel_id in watched_channel_ids and row.parse_status == "parsed" and not row.is_deleted
+        if row.channel_id in watched_channel_ids and normalize_parse_status(row.parse_status, is_deleted=row.is_deleted, needs_review=row.needs_review) == PARSE_PARSED and not row.is_deleted
     ]
     summary = build_financial_summary(summary_rows)
     return templates.TemplateResponse(
@@ -1241,12 +2344,19 @@ def deals_page(
 def deal_detail_page(
     message_id: int,
     request: Request,
+    return_path: str = Query(default="/deals"),
+    status: Optional[str] = Query(default=None),
     channel_id: Optional[str] = Query(default=None),
     entry_kind: Optional[str] = Query(default=None),
+    expense_category: Optional[str] = Query(default=None),
     after: Optional[str] = Query(default=None),
     before: Optional[str] = Query(default=None),
+    sort_by: Optional[str] = Query(default=None),
+    sort_dir: Optional[str] = Query(default=None),
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=25, ge=1, le=100),
+    success: Optional[str] = Query(default=None),
+    error: Optional[str] = Query(default=None),
     session: Session = Depends(get_session),
 ):
     if denial := require_role_response(request, "viewer"):
@@ -1258,59 +2368,42 @@ def deal_detail_page(
         if row.is_enabled
     }
     row = session.get(DiscordMessage, message_id)
-    if not row or row.channel_id not in watched_channel_ids or row.parse_status != "parsed":
+    if not row or row.channel_id not in watched_channel_ids or normalize_parse_status(row.parse_status, is_deleted=row.is_deleted, needs_review=row.needs_review) != PARSE_PARSED:
         raise HTTPException(status_code=404, detail="Deal not found")
 
     item = build_message_list_items(session, [row])[0]
-    attachment_urls = list(item.get("attachment_urls") or [])
-    image_urls = list(item.get("image_urls") or [])
-    if row.stitched_group_id:
-        grouped_rows = session.exec(
-            select(DiscordMessage)
-            .where(DiscordMessage.stitched_group_id == row.stitched_group_id)
-            .order_by(DiscordMessage.created_at.asc(), DiscordMessage.id.asc())
-        ).all()
-        cached_assets_by_message_id = get_cached_attachment_map(
-            session,
-            [grouped_row.id for grouped_row in grouped_rows if grouped_row.id is not None],
-        )
-        for grouped_row in grouped_rows:
-            cached_assets = cached_assets_by_message_id.get(grouped_row.id)
-            grouped_attachment_urls = (
-                cached_assets["all_urls"]
-                if cached_assets
-                else json.loads(grouped_row.attachment_urls_json or "[]")
-            )
-            grouped_image_urls = (
-                cached_assets["image_urls"]
-                if cached_assets
-                else extract_image_urls(grouped_attachment_urls)
-            )
-            for url in grouped_attachment_urls:
-                if url not in attachment_urls:
-                    attachment_urls.append(url)
-            for url in grouped_image_urls:
-                if url not in image_urls:
-                    image_urls.append(url)
-    item["attachment_urls"] = attachment_urls
-    item["image_urls"] = image_urls
-    item["first_image_url"] = image_urls[0] if image_urls else None
     item["trade_summary"] = row.trade_summary
     item["notes"] = row.notes
     item["image_summary"] = row.image_summary
     item["reviewed_by"] = row.reviewed_by
     item["reviewed_at"] = format_pacific_datetime(row.reviewed_at)
+    item["parse_status"] = normalize_parse_status(row.parse_status, is_deleted=row.is_deleted, needs_review=row.needs_review)
+    item["needs_review"] = row.needs_review
+    item["is_deleted"] = row.is_deleted
+    item["confidence"] = row.confidence
+    item["parse_attempts"] = row.parse_attempts
+    item["discord_message_id"] = row.discord_message_id
+    item["channel_name"] = row.channel_name
+    item["item_names"] = json.loads(row.item_names_json or "[]")
+    item["items_in"] = json.loads(row.items_in_json or "[]")
+    item["items_out"] = json.loads(row.items_out_json or "[]")
+    item["last_error"] = row.last_error
     back_url = build_return_url(
-        "/deals",
+        return_path,
+        status=status,
         channel_id=channel_id,
+        expense_category=expense_category,
         after=after,
         before=before,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
         page=page,
         limit=limit,
     )
     if entry_kind:
         separator = "&" if "?" in back_url else "?"
         back_url = f"{back_url}{separator}entry_kind={entry_kind}"
+    learning_signal = get_learning_signal(session, row.content or "")
 
     return templates.TemplateResponse(
         request,
@@ -1320,7 +2413,27 @@ def deal_detail_page(
             "title": f"Deal {message_id}",
             "deal": item,
             "back_url": back_url,
+            "success": success,
+            "error": error,
             "current_user": getattr(request.state, "current_user", None),
+            "parse_status_options": PARSE_STATUS_OPTIONS,
+            "deal_type_options": DEAL_TYPE_OPTIONS,
+            "entry_kind_options": ENTRY_KIND_OPTIONS,
+            "payment_method_options": PAYMENT_METHOD_OPTIONS,
+            "cash_direction_options": CASH_DIRECTION_OPTIONS,
+            "category_options": CATEGORY_OPTIONS,
+            "correction_patterns": get_correction_pattern_counts(session=session),
+            "learning_signal": learning_signal,
+            "return_path": return_path,
+            "selected_status": status or "",
+            "selected_channel_id": channel_id or "",
+            "selected_expense_category": expense_category or "",
+            "selected_after": after or "",
+            "selected_before": before or "",
+            "selected_sort_by": sort_by or "",
+            "selected_sort_dir": sort_dir or "",
+            "selected_page": page or 1,
+            "selected_limit": limit or 25,
         },
     )
 
@@ -1411,7 +2524,7 @@ def queue_backfill_request(
     target = f"channel+{channel_id}" if channel_id else "all+backfill-enabled+watched+channels"
     return (
         f"Queued+backfill+request+{queued.id}+for+{target}."
-        "+The+worker+will+run+it+when+Discord+is+ready+and+will+requeue+it+if+a+deploy+restart+interrupts+the+run."
+        "+A+runtime+with+Discord+enabled+and+ready+will+claim+it,+and+the+request+will+be+requeued+if+a+deploy+restart+interrupts+the+run."
     )
 
 
@@ -1451,6 +2564,12 @@ def persist_backfill_window_for_targets(
 
 
 def serialize_backfill_requests(rows: list) -> list[dict]:
+    def parse_result(row) -> dict:
+        try:
+            return json.loads(row.result_json or "{}")
+        except json.JSONDecodeError:
+            return {}
+
     return [
         {
             "id": row.id,
@@ -1462,29 +2581,152 @@ def serialize_backfill_requests(rows: list) -> list[dict]:
             "before": format_pacific_datetime(row.before) if row.before else "no end",
             "inserted_count": row.inserted_count,
             "skipped_count": row.skipped_count,
+            "progress": (parse_result(row).get("progress") or {}),
             "created_at": format_pacific_datetime(row.created_at),
             "started_at": format_pacific_datetime(row.started_at) if row.started_at else "",
             "finished_at": format_pacific_datetime(row.finished_at) if row.finished_at else "",
             "error_message": row.error_message or "",
             "detail_url": f"/ops-log/backfill/{row.id}" if row.id is not None else "",
+            "can_cancel": row.status in {"queued", "processing"},
         }
         for row in rows
     ]
 
 
 def serialize_operations_logs(rows: list) -> list[dict]:
+    serialized: list[dict] = []
+    for row in rows:
+        details = parse_operations_log_details(row)
+        message_id = coerce_int(details.get("message_id") or details.get("row_id") or details.get("source_message_id"))
+        raw_channel_id = details.get("channel_id")
+        if raw_channel_id is None:
+            channel_id = None
+        else:
+            channel_id = str(raw_channel_id).strip() or None
+        created_at = (
+            details.get("message_created_at")
+            or details.get("row_created_at")
+            or details.get("created_at")
+            or row.created_at
+        )
+        serialized.append(
+            {
+                "id": row.id,
+                "event_type": row.event_type,
+                "level": row.level,
+                "source": row.source,
+                "message": row.message,
+                "created_at": format_pacific_datetime(row.created_at),
+                "details": details,
+                "action_links": build_row_action_links(
+                    message_id,
+                    channel_id=channel_id,
+                    created_at=created_at,
+                    status=details.get("current_state") or details.get("parse_status"),
+                ) if message_id or channel_id else {},
+            }
+        )
+    return serialized
+
+
+def summarize_message_snippet(message: Optional[str], *, limit: int = 120) -> str:
+    text = (message or "").replace("\r", " ").replace("\n", " ").strip()
+    if not text:
+        return "(no message content)"
+    if len(text) <= limit:
+        return text
+    return f"{text[: limit - 3]}..."
+
+
+def serialize_reparse_run_summary(row: ReparseRun | None) -> dict | None:
+    if row is None:
+        return None
+    return {
+        "run_id": row.run_id,
+        "status": row.status,
+        "source": row.source,
+        "reason": row.reason or "",
+        "requested_at": format_pacific_datetime(row.requested_at),
+        "finished_at": format_pacific_datetime(row.finished_at) if row.finished_at else "",
+        "duration_ms": row.duration_ms,
+        "channel_id": row.channel_id or "",
+        "range_after": format_pacific_datetime(row.range_after) if row.range_after else "",
+        "range_before": format_pacific_datetime(row.range_before) if row.range_before else "",
+        "selected_count": row.selected_count,
+        "queued_count": row.queued_count,
+        "already_queued_count": row.already_queued_count,
+        "skipped_reviewed_count": row.skipped_reviewed_count,
+        "succeeded_count": row.succeeded_count,
+        "failed_count": row.failed_count,
+        "error_message": row.error_message or "",
+    }
+
+
+def serialize_reparse_runs(rows: list[ReparseRun]) -> list[dict]:
     return [
         {
-            "id": row.id,
-            "event_type": row.event_type,
-            "level": row.level,
+            "run_id": row.run_id,
             "source": row.source,
-            "message": row.message,
-            "created_at": format_pacific_datetime(row.created_at),
-            "details": parse_operations_log_details(row),
+            "reason": row.reason,
+            "requested_at": format_pacific_datetime(row.requested_at),
+            "finished_at": format_pacific_datetime(row.finished_at),
+            "duration_ms": row.duration_ms,
+            "range_after": format_pacific_datetime(row.range_after),
+            "range_before": format_pacific_datetime(row.range_before),
+            "channel_id": row.channel_id,
+            "requested_statuses": json.loads(row.requested_statuses_json or "[]"),
+            "include_reviewed": row.include_reviewed,
+            "force_reviewed": row.force_reviewed,
+            "selected_count": row.selected_count,
+            "queued_count": row.queued_count,
+            "already_queued_count": row.already_queued_count,
+            "skipped_reviewed_count": row.skipped_reviewed_count,
+            "succeeded_count": row.succeeded_count,
+            "failed_count": row.failed_count,
+            "first_message_id": row.first_message_id,
+            "last_message_id": row.last_message_id,
+            "first_message_created_at": format_pacific_datetime(row.first_message_created_at),
+            "last_message_created_at": format_pacific_datetime(row.last_message_created_at),
+            "status": row.status,
+            "error_message": row.error_message,
         }
         for row in rows
     ]
+
+
+def build_reparse_run_table_rows(rows: list[ReparseRun]) -> list[dict]:
+    items = serialize_reparse_runs(rows)
+    for item in items:
+        range_after = item.get("range_after") or "none"
+        range_before = item.get("range_before") or "none"
+        item["range_label"] = f"{range_after} to {range_before}"
+        item["force_used"] = bool(item.get("force_reviewed"))
+        item["reparsed_count"] = int(item.get("succeeded_count") or 0)
+        item["skipped_count"] = int(item.get("already_queued_count") or 0) + int(item.get("skipped_reviewed_count") or 0)
+        duration_ms = item.get("duration_ms")
+        if duration_ms is None:
+            item["duration_label"] = ""
+        elif duration_ms >= 1000:
+            item["duration_label"] = f"{duration_ms / 1000:.1f}s"
+        else:
+            item["duration_label"] = f"{duration_ms}ms"
+    return items
+
+
+def get_runtime_status_pair(session: Session) -> tuple[dict, dict]:
+    app_runtime = get_runtime_heartbeat_status(
+        session,
+        APP_HEARTBEAT_RUNTIME_NAME,
+        runtime_label=APP_RUNTIME_LABEL,
+        updated_at_formatter=format_pacific_datetime,
+    )
+    worker_runtime = get_runtime_heartbeat_status(
+        session,
+        WORKER_RUNTIME_NAME,
+        runtime_label=WORKER_RUNTIME_LABEL,
+        updated_at_formatter=format_pacific_datetime,
+    )
+    return app_runtime, worker_runtime
 
 
 def serialize_backfill_request_detail(row: BackfillRequest) -> dict:
@@ -1493,11 +2735,74 @@ def serialize_backfill_request_detail(row: BackfillRequest) -> dict:
         result = json.loads(row.result_json or "{}")
     except json.JSONDecodeError:
         result = {}
+    progress = result.get("progress") or {}
+    final_result = result.get("final_result") or result
+    status = str(row.status or "queued")
+    stage = str(progress.get("stage") or status)
+    waiting_reason = str(progress.get("waiting_reason") or "").strip()
+    terminal_statuses = {"completed", "failed", "cancelled"}
+    is_terminal = status in terminal_statuses
+
+    if status == "processing":
+        worker_status_label = "Claimed by worker"
+        worker_status_tone = "info"
+    elif is_terminal:
+        worker_status_label = "No longer claimed"
+        worker_status_tone = "success" if status == "completed" else "warning"
+    else:
+        worker_status_label = "Not claimed yet"
+        worker_status_tone = "warning" if stage == "waiting_for_discord" else "info"
+
+    if is_terminal:
+        discord_wait_label = "No"
+        discord_wait_reason = ""
+    elif stage == "waiting_for_discord":
+        discord_wait_label = "Yes"
+        discord_wait_reason = waiting_reason or "Discord client is not ready yet."
+    else:
+        discord_wait_label = "No"
+        discord_wait_reason = ""
+
+    if status == "queued":
+        progress_label = (
+            "Waiting for Discord"
+            if stage == "waiting_for_discord"
+            else "Waiting in backfill queue"
+        )
+    elif status == "processing":
+        progress_label = (
+            "Discovering messages"
+            if stage == "discovering_messages"
+            else "Preparing channel discovery"
+        )
+    elif status == "completed":
+        progress_label = "Completed"
+    elif status == "failed":
+        progress_label = "Failed"
+    elif status == "cancelled":
+        progress_label = "Cancelled"
+    else:
+        progress_label = stage.replace("_", " ")
+
+    if is_terminal:
+        finished_label = format_pacific_datetime(row.finished_at) if row.finished_at else status
+        last_progress_label = (
+            format_pacific_datetime(progress.get("last_progress_at"))
+            if progress.get("last_progress_at")
+            else "Finished with no additional progress updates"
+        )
+    else:
+        finished_label = "Not finished"
+        last_progress_label = (
+            format_pacific_datetime(progress.get("last_progress_at"))
+            if progress.get("last_progress_at")
+            else "No progress yet"
+        )
 
     return {
         "id": row.id,
         "target_label": row.channel_id or "all backfill-enabled watched channels",
-        "status": row.status,
+        "status": status,
         "requested_by": row.requested_by or "system",
         "after": format_pacific_datetime(row.after) if row.after else "no start",
         "before": format_pacific_datetime(row.before) if row.before else "no end",
@@ -1506,15 +2811,63 @@ def serialize_backfill_request_detail(row: BackfillRequest) -> dict:
         "created_at": format_pacific_datetime(row.created_at),
         "started_at": format_pacific_datetime(row.started_at) if row.started_at else "",
         "finished_at": format_pacific_datetime(row.finished_at) if row.finished_at else "",
+        "finished_label": finished_label,
         "error_message": row.error_message or "",
-        "result": result,
+        "progress": progress,
+        "progress_label": progress_label,
+        "last_progress_label": last_progress_label,
+        "worker_status_label": worker_status_label,
+        "worker_status_tone": worker_status_tone,
+        "discord_wait_label": discord_wait_label,
+        "discord_wait_reason": discord_wait_reason,
+        "result": final_result,
+        "can_cancel": row.status in {"queued", "processing"},
+    }
+
+
+def build_backfill_queue_snapshot(session: Session) -> dict:
+    rows = session.exec(select(BackfillRequest)).all()
+    queued = sum(1 for row in rows if row.status == "queued")
+    processing = sum(1 for row in rows if row.status == "processing")
+    completed = sum(1 for row in rows if row.status == "completed")
+    failed = sum(1 for row in rows if row.status == "failed")
+    cancelled = sum(1 for row in rows if row.status == "cancelled")
+    backlog = queued + processing
+    if processing > 0 and queued > 0:
+        queue_health_label = f"{processing} running, {queued} waiting"
+    elif processing > 0:
+        queue_health_label = f"{processing} running, no waiting backlog"
+    elif queued > 0:
+        queue_health_label = f"{queued} waiting, none claimed"
+    else:
+        queue_health_label = "No backfill requests queued or running"
+
+    if processing > 0:
+        worker_claim_label = f"{processing} request(s) claimed by a worker"
+    elif queued > 0:
+        worker_claim_label = "No queued request is claimed yet"
+    else:
+        worker_claim_label = "No backfill worker claim needed right now"
+
+    return {
+        "queued": queued,
+        "processing": processing,
+        "completed": completed,
+        "failed": failed,
+        "cancelled": cancelled,
+        "queue_backlog": backlog,
+        "queue_is_moving": processing > 0,
+        "queue_health_label": queue_health_label,
+        "worker_claim_label": worker_claim_label,
     }
 
 
 def recompute_financial_fields(session: Session) -> int:
     rows = session.exec(
         select(DiscordMessage).where(
-            DiscordMessage.parse_status.in_(["parsed", "needs_review"])
+            DiscordMessage.parse_status.in_(
+                sorted(expand_parse_status_filter_values([PARSE_PARSED, PARSE_REVIEW_REQUIRED]))
+            )
         )
     ).all()
 
@@ -1574,6 +2927,7 @@ def get_parser_progress(
     status: Optional[str] = None,
     channel_id: Optional[str] = None,
     entry_kind: Optional[str] = None,
+    expense_category: Optional[str] = None,
     after: Optional[str] = None,
     before: Optional[str] = None,
 ) -> dict:
@@ -1581,32 +2935,34 @@ def get_parser_progress(
         status=status,
         channel_id=channel_id,
         entry_kind=entry_kind,
+        expense_category=expense_category,
         after=after,
         before=before,
     )
     summary_subquery = stmt.order_by(None).subquery()
 
-    status_counts = {
-        row[0]: int(row[1])
-        for row in session.exec(
-            select(summary_subquery.c.parse_status, func.count())
-            .group_by(summary_subquery.c.parse_status)
-        ).all()
-    }
+    raw_status_counts = session.exec(
+        select(summary_subquery.c.parse_status, func.count())
+        .group_by(summary_subquery.c.parse_status)
+    ).all()
+    status_counts: dict[str, int] = {}
+    for raw_status, count in raw_status_counts:
+        normalized_status = normalize_parse_status(raw_status)
+        status_counts[normalized_status] = status_counts.get(normalized_status, 0) + int(count)
     total = sum(status_counts.values())
-    parsed = status_counts.get("parsed", 0)
-    processing = status_counts.get("processing", 0)
-    queued = status_counts.get("queued", 0)
-    failed = status_counts.get("failed", 0)
-    needs_review = status_counts.get("needs_review", 0)
-    ignored = status_counts.get("ignored", 0)
+    parsed = status_counts.get(PARSE_PARSED, 0)
+    processing = status_counts.get(PARSE_PROCESSING, 0)
+    queued = status_counts.get(PARSE_PENDING, 0)
+    failed = status_counts.get(PARSE_FAILED, 0)
+    needs_review = status_counts.get(PARSE_REVIEW_REQUIRED, 0)
+    ignored = status_counts.get(PARSE_IGNORED, 0)
     completed = parsed + needs_review + failed + ignored
     pending = queued + processing
     percent_complete = round((completed / total) * 100, 1) if total else 100.0
     processing_ids = [
         row_id
         for row_id in session.exec(
-            select(summary_subquery.c.id).where(summary_subquery.c.parse_status == "processing")
+            select(summary_subquery.c.id).where(summary_subquery.c.parse_status == PARSE_PROCESSING)
         ).all()
         if row_id is not None
     ]
@@ -1615,7 +2971,7 @@ def get_parser_progress(
             select(func.count())
             .select_from(summary_subquery)
             .where(
-                summary_subquery.c.parse_status == "processing",
+                summary_subquery.c.parse_status == PARSE_PROCESSING,
                 summary_subquery.c.attachment_urls_json != "[]",
             )
         ).one()
@@ -1706,54 +3062,318 @@ def get_parser_progress(
         "usage": usage_summary,
         "local_runtime": get_runtime_heartbeat_status(
             session,
-            LOCAL_HEARTBEAT_RUNTIME_NAME,
-            runtime_label=settings.runtime_label,
+            WORKER_RUNTIME_NAME,
+            runtime_label=WORKER_RUNTIME_LABEL,
             updated_at_formatter=format_pacific_datetime,
         ),
     }
 
 
 def build_status_snapshot(session: Session) -> dict:
-    local_runtime = get_runtime_heartbeat_status(
-        session,
-        LOCAL_HEARTBEAT_RUNTIME_NAME,
-        runtime_label=settings.runtime_label,
-        updated_at_formatter=format_pacific_datetime,
-    )
+    app_runtime, worker_runtime = get_runtime_status_pair(session)
     parser_progress = get_parser_progress(session)
-    latest_ingested_at = session.exec(
-        select(DiscordMessage.ingested_at)
+    latest_ingested_row = session.exec(
+        select(DiscordMessage)
         .order_by(DiscordMessage.ingested_at.desc())
         .limit(1)
     ).first()
-    latest_reviewed_at = session.exec(
-        select(DiscordMessage.reviewed_at)
+    latest_reviewed_row = session.exec(
+        select(DiscordMessage)
         .where(DiscordMessage.reviewed_at != None)  # noqa: E711
         .order_by(DiscordMessage.reviewed_at.desc())
         .limit(1)
     ).first()
-    latest_parse_finished_at = session.exec(
-        select(ParseAttempt.finished_at)
+    latest_parse_finished_attempt = session.exec(
+        select(ParseAttempt)
         .where(ParseAttempt.finished_at != None)  # noqa: E711
         .order_by(ParseAttempt.finished_at.desc())
         .limit(1)
     ).first()
+    latest_parse_finished_row = (
+        session.get(DiscordMessage, latest_parse_finished_attempt.message_id)
+        if latest_parse_finished_attempt and latest_parse_finished_attempt.message_id is not None
+        else None
+    )
+    queue_action_links = build_queue_action_links()
+
+    queue_backlog = parser_progress["queued"] + parser_progress["processing"]
+    if parser_progress["processing"] > 0:
+        queue_state_label = "Processing"
+        queue_state_detail = "Worker is actively handling queued rows."
+    elif parser_progress["queued"] > 0:
+        queue_state_label = "Waiting"
+        queue_state_detail = "Rows are queued but not yet in flight."
+    else:
+        queue_state_label = "Idle"
+        queue_state_detail = "No parser backlog is waiting right now."
+
+    split_runtime_notice = ""
+    if app_runtime["is_running"] and not worker_runtime["is_running"]:
+        split_runtime_notice = (
+            "Web UI is running, but the separate worker process has not reported a heartbeat yet. "
+            "If you are using the split local setup, start the worker terminal with scripts/run_local_worker.ps1."
+        )
+    elif worker_runtime["is_running"] and not app_runtime["is_running"]:
+        split_runtime_notice = (
+            "Worker is running, but the web UI has not reported a heartbeat yet. "
+            "Start the web terminal with scripts/run_local_web.ps1."
+        )
+    elif not app_runtime["is_running"] and not worker_runtime["is_running"]:
+        split_runtime_notice = "Neither local process has reported a heartbeat yet."
+
+    recovery_enabled = bool(settings.startup_backfill_enabled)
+    recovery_window_hours = float(settings.startup_backfill_lookback_hours or 0.0)
+    recovery_window_label = f"last {recovery_window_hours:g}h" if recovery_window_hours else "the recent window"
+    if recovery_enabled:
+        if worker_runtime["is_running"]:
+            recovery_status_label = "Ready"
+            recovery_status_detail = (
+                f"Recent-message recovery is enabled and ready to backfill the {recovery_window_label} "
+                "of watched channels on worker startup."
+            )
+            recovery_status_tone = "ok"
+        else:
+            recovery_status_label = "Waiting"
+            recovery_status_detail = (
+                f"Recent-message recovery is enabled, but the worker is offline. Start the worker "
+                f"to let it backfill the {recovery_window_label} of watched channels on startup."
+            )
+            recovery_status_tone = "warn"
+    else:
+        recovery_status_label = "Off"
+        recovery_status_detail = (
+            "Recent-message recovery is disabled, so downtime gaps will not be recovered automatically."
+        )
+        recovery_status_tone = "bad"
+
+    stitch_enabled = bool(settings.stitch_enabled)
+    stitch_window_seconds = int(settings.stitch_window_seconds or 0)
+    stitch_max_messages = int(settings.stitch_max_messages or 0)
+    stitch_window_label = f"last {stitch_window_seconds}s" if stitch_window_seconds else "recent nearby messages"
+    stitch_limit_label = f"up to {stitch_max_messages} messages" if stitch_max_messages else "the configured message limit"
+    if stitch_enabled:
+        if worker_runtime["is_running"]:
+            stitch_status_label = "Ready"
+            stitch_status_detail = (
+                f"Stitch recovery is enabled and active while the worker is running; it groups {stitch_limit_label} "
+                f"within {stitch_window_label}."
+            )
+            stitch_status_tone = "ok"
+        else:
+            stitch_status_label = "Waiting"
+            stitch_status_detail = (
+                f"Stitch recovery is enabled, but the worker is offline. Start the worker to let it stitch "
+                f"{stitch_limit_label} within {stitch_window_label}."
+            )
+            stitch_status_tone = "warn"
+    else:
+        stitch_status_label = "Off"
+        stitch_status_detail = "Stitch recovery is disabled, so nearby messages will stay separate."
+        stitch_status_tone = "bad"
 
     return {
         "db_ok": True,
-        "local_runtime": local_runtime,
+        "local_runtime": worker_runtime,
+        "app_runtime": app_runtime,
+        "worker_runtime": worker_runtime,
         "parser_progress": parser_progress,
-        "queue_backlog": parser_progress["queued"] + parser_progress["processing"],
+        "queue_backlog": queue_backlog,
         "queue_is_moving": parser_progress["processing"] > 0 or parser_progress["queued"] == 0,
+        "queue_state_label": queue_state_label,
+        "queue_state_detail": queue_state_detail,
+        "split_runtime_notice": split_runtime_notice,
+        "recent_message_recovery": {
+            "enabled": recovery_enabled,
+            "status_label": recovery_status_label,
+            "status_detail": recovery_status_detail,
+            "status_tone": recovery_status_tone,
+            "window_label": recovery_window_label,
+        },
+        "stitch_recovery": {
+            "enabled": stitch_enabled,
+            "status_label": stitch_status_label,
+            "status_detail": stitch_status_detail,
+            "status_tone": stitch_status_tone,
+            "window_label": stitch_window_label,
+            "limit_label": stitch_limit_label,
+        },
         "recent_activity": {
-            "latest_ingested_label": format_pacific_datetime(latest_ingested_at),
-            "latest_reviewed_label": format_pacific_datetime(latest_reviewed_at),
-            "latest_parse_finished_label": format_pacific_datetime(latest_parse_finished_at),
+            "latest_ingested_label": format_pacific_datetime(latest_ingested_row.ingested_at if latest_ingested_row else None),
+            "latest_ingested_links": build_row_action_links(
+                latest_ingested_row.id if latest_ingested_row else None,
+                channel_id=latest_ingested_row.channel_id if latest_ingested_row else None,
+                created_at=latest_ingested_row.created_at if latest_ingested_row else None,
+                status=normalize_parse_status(latest_ingested_row.parse_status, is_deleted=latest_ingested_row.is_deleted, needs_review=latest_ingested_row.needs_review) if latest_ingested_row else None,
+            ),
+            "latest_reviewed_label": format_pacific_datetime(latest_reviewed_row.reviewed_at if latest_reviewed_row else None),
+            "latest_reviewed_links": build_row_action_links(
+                latest_reviewed_row.id if latest_reviewed_row else None,
+                channel_id=latest_reviewed_row.channel_id if latest_reviewed_row else None,
+                created_at=latest_reviewed_row.created_at if latest_reviewed_row else None,
+                status=normalize_parse_status(latest_reviewed_row.parse_status, is_deleted=latest_reviewed_row.is_deleted, needs_review=latest_reviewed_row.needs_review) if latest_reviewed_row else None,
+            ),
+            "latest_parse_finished_label": format_pacific_datetime(latest_parse_finished_attempt.finished_at if latest_parse_finished_attempt else None),
+            "latest_parse_finished_links": build_row_action_links(
+                latest_parse_finished_attempt.message_id if latest_parse_finished_attempt else None,
+                channel_id=latest_parse_finished_row.channel_id if latest_parse_finished_row else None,
+                created_at=latest_parse_finished_row.created_at if latest_parse_finished_row else None,
+                status=normalize_parse_status(latest_parse_finished_row.parse_status, is_deleted=latest_parse_finished_row.is_deleted, needs_review=latest_parse_finished_row.needs_review) if latest_parse_finished_row else None,
+            ),
         },
         "runtime_flags": {
-            "discord_ingest_enabled": settings.discord_ingest_enabled,
-            "parser_worker_enabled": settings.parser_worker_enabled,
+            "discord_ingest_enabled": bool(worker_runtime["details"].get("discord_ingest_enabled", settings.discord_ingest_enabled)),
+            "parser_worker_enabled": bool(worker_runtime["details"].get("parser_worker_enabled", settings.parser_worker_enabled)),
         },
+        "action_links": queue_action_links,
+    }
+
+
+def build_debug_snapshot(session: Session) -> dict:
+    parser_progress = get_parser_progress(session)
+    app_runtime, worker_runtime = get_runtime_status_pair(session)
+
+    queue_counts = {
+        PARSE_PENDING: 0,
+        PARSE_PROCESSING: 0,
+        PARSE_PARSED: 0,
+        PARSE_REVIEW_REQUIRED: 0,
+        PARSE_FAILED: 0,
+        PARSE_IGNORED: 0,
+    }
+    for raw_status in session.exec(select(DiscordMessage.parse_status)).all():
+        normalized = normalize_parse_status(raw_status)
+        if normalized in queue_counts:
+            queue_counts[normalized] += 1
+
+    processing_rows = session.exec(
+        select(DiscordMessage)
+        .where(DiscordMessage.parse_status == PARSE_PROCESSING)
+        .order_by(DiscordMessage.created_at.asc(), DiscordMessage.id.asc())
+    ).all()
+    cutoff = utcnow() - STALE_PROCESSING_AFTER
+    stuck_processing: list[dict] = []
+    for row in processing_rows:
+        attempts = session.exec(
+            select(ParseAttempt)
+            .where(ParseAttempt.message_id == row.id)
+            .order_by(ParseAttempt.started_at.desc(), ParseAttempt.id.desc())
+        ).all()
+        latest_attempt = attempts[0] if attempts else None
+        last_attempted_at = latest_attempt.started_at if latest_attempt else None
+        comparison_time = last_attempted_at or row.edited_at or row.ingested_at or row.created_at
+        if comparison_time.tzinfo is None:
+            comparison_time = comparison_time.replace(tzinfo=timezone.utc)
+        if comparison_time > cutoff:
+            continue
+        stuck_processing.append(
+            {
+                "message_id": row.id,
+                "discord_message_id": row.discord_message_id,
+                "channel": row.channel_name,
+                "channel_id": row.channel_id,
+                "current_status": normalize_parse_status(row.parse_status),
+                "last_updated_label": format_pacific_datetime(row.edited_at or row.ingested_at or row.created_at),
+                "last_attempted_at_label": format_pacific_datetime(last_attempted_at),
+                "retry_count": row.parse_attempts or len(attempts),
+                "latest_error": row.last_error or (latest_attempt.error if latest_attempt else None),
+                "action_links": build_row_action_links(
+                    row.id,
+                    channel_id=row.channel_id,
+                    created_at=row.created_at,
+                    status=normalize_parse_status(row.parse_status, is_deleted=row.is_deleted, needs_review=row.needs_review),
+                ),
+            }
+        )
+
+    recent_worker_failures = serialize_operations_logs(
+        session.exec(
+            select(OperationsLog)
+            .where(OperationsLog.source == "worker")
+            .where(OperationsLog.level.in_(["warning", "error"]))
+            .order_by(OperationsLog.created_at.desc(), OperationsLog.id.desc())
+            .limit(20)
+        ).all()
+    )
+    recent_backfill_failures = serialize_operations_logs(
+        session.exec(
+            select(OperationsLog)
+            .where(OperationsLog.event_type.like("backfill%"))
+            .where(OperationsLog.level == "error")
+            .order_by(OperationsLog.created_at.desc(), OperationsLog.id.desc())
+            .limit(10)
+        ).all()
+    )
+
+    return {
+        "app_runtime": app_runtime,
+        "worker_runtime": worker_runtime,
+        "parser_progress": parser_progress,
+        "queue_counts": {
+            "pending": queue_counts[PARSE_PENDING],
+            "processing": queue_counts[PARSE_PROCESSING],
+            "parsed": queue_counts[PARSE_PARSED],
+            "review_required": queue_counts[PARSE_REVIEW_REQUIRED],
+            "failed": queue_counts[PARSE_FAILED],
+            "ignored": queue_counts[PARSE_IGNORED],
+        },
+        "stuck_processing": stuck_processing,
+        "recent_worker_failures": recent_worker_failures,
+        "recent_backfill_failures": recent_backfill_failures,
+        "worker_actively_draining_queue": parser_progress["processing"] > 0 or parser_progress["queued"] == 0,
+        "log_paths": {
+            "app": normalize_filesystem_path(resolve_runtime_log_path("app.log")),
+            "worker": normalize_filesystem_path(resolve_runtime_log_path("worker.log")),
+        },
+        "action_links": build_queue_action_links(),
+    }
+
+
+def build_health_snapshot(session: Session) -> dict:
+    debug = build_debug_snapshot(session)
+
+    recent_failed_rows_query = (
+        select(DiscordMessage, ParseAttempt)
+        .join(ParseAttempt, ParseAttempt.message_id == DiscordMessage.id, isouter=True)
+        .where(DiscordMessage.parse_status == PARSE_FAILED)
+        .order_by(ParseAttempt.finished_at.desc(), ParseAttempt.id.desc(), DiscordMessage.id.desc())
+        .limit(30)
+    )
+    recent_failed_rows_raw = session.exec(recent_failed_rows_query).all()
+    recent_failed_rows: list[dict] = []
+    seen_message_ids: set[int] = set()
+    for row, attempt in recent_failed_rows_raw:
+        if row.id is None or row.id in seen_message_ids:
+            continue
+        seen_message_ids.add(row.id)
+        recent_failed_rows.append(
+            {
+                "message_id": row.id,
+                "channel": row.channel_name or row.channel_id,
+                "author": row.author_name or "",
+                "status": normalize_parse_status(row.parse_status, is_deleted=row.is_deleted, needs_review=row.needs_review),
+                "snippet": summarize_message_snippet(row.content),
+                "error_reason": row.last_error or (attempt.error if attempt else "") or "unknown",
+                "last_attempted_at": format_pacific_datetime(
+                    attempt.finished_at or attempt.started_at if attempt else row.edited_at or row.ingested_at or row.created_at
+                ),
+            }
+        )
+        if len(recent_failed_rows) >= 15:
+            break
+
+    latest_reparse_run = serialize_reparse_run_summary(
+        session.exec(
+            select(ReparseRun)
+            .order_by(ReparseRun.requested_at.desc(), ReparseRun.id.desc())
+            .limit(1)
+        ).first()
+    )
+
+    return {
+        "queue_counts": debug["queue_counts"],
+        "stuck_processing": debug["stuck_processing"],
+        "recent_failed_rows": recent_failed_rows,
+        "last_reparse_run": latest_reparse_run,
     }
 
 
@@ -1807,7 +3427,11 @@ def build_dashboard_snapshot(session: Session) -> dict:
             func.coalesce(func.sum(DiscordMessage.money_out), 0.0),
         )
         .where(DiscordMessage.is_deleted == False)  # noqa: E712
-        .where(DiscordMessage.parse_status.in_(["parsed", "needs_review"]))
+        .where(
+            DiscordMessage.parse_status.in_(
+                sorted(expand_parse_status_filter_values([PARSE_PARSED, PARSE_REVIEW_REQUIRED]))
+            )
+        )
         .where(
             (DiscordMessage.stitched_group_id == None) | (DiscordMessage.stitched_primary == True)
         )
@@ -1840,6 +3464,72 @@ def build_dashboard_snapshot(session: Session) -> dict:
         {"label": label.replace("_", " ").title(), "value": format_dashboard_money(amount)}
         for label, amount in list(today_summary["deal_categories"].items())[:4]
     ]
+    discord_sales = round(float(today_totals.get("sales", 0.0) or 0.0), 2)
+    discord_trade_in = round(float(today_totals.get("trade_cash_in", 0.0) or 0.0), 2)
+    discord_buys = round(float(today_totals.get("buys", 0.0) or 0.0), 2)
+    discord_trade_out = round(float(today_totals.get("trade_cash_out", 0.0) or 0.0), 2)
+    discord_expenses = round(float(today_totals.get("expenses", 0.0) or 0.0), 2)
+    shopify_today = {
+        "order_count": 0,
+        "gross": 0.0,
+        "tax": 0.0,
+        "net": 0.0,
+        "refunds": 0.0,
+        "tax_missing_count": 0,
+        "includes_tax_count": 0,
+        "gross_display": format_dashboard_money(0.0),
+        "tax_display": format_dashboard_money(0.0),
+        "net_display": format_dashboard_money(0.0),
+        "refunds_display": format_dashboard_money(0.0),
+    }
+    try:
+        shopify_rows_today = session.exec(
+            select(ShopifyOrder)
+            .where(ShopifyOrder.created_at >= today_start_utc)
+            .where(ShopifyOrder.created_at < tomorrow_start_utc)
+        ).all()
+        for order in shopify_rows_today:
+            status = (order.financial_status or "").strip().lower()
+            if status == "paid":
+                shopify_today["order_count"] += 1
+                gross_value = float(order.total_price or 0.0)
+                shopify_today["gross"] += gross_value
+                if order.total_tax is None:
+                    shopify_today["tax_missing_count"] += 1
+                else:
+                    shopify_today["tax"] += float(order.total_tax or 0.0)
+                if order.subtotal_ex_tax is None:
+                    shopify_today["net"] += gross_value
+                    shopify_today["includes_tax_count"] += 1
+                else:
+                    shopify_today["net"] += float(order.subtotal_ex_tax or 0.0)
+            elif status == "refunded":
+                shopify_today["refunds"] += float(order.total_price or 0.0)
+        for key in ("gross", "tax", "net", "refunds"):
+            shopify_today[key] = round(float(shopify_today[key] or 0.0), 2)
+    except OperationalError:
+        pass
+    shopify_today["gross_display"] = format_dashboard_money(shopify_today["gross"])
+    shopify_today["tax_display"] = format_dashboard_money(shopify_today["tax"])
+    shopify_today["net_display"] = format_dashboard_money(shopify_today["net"])
+    shopify_today["refunds_display"] = format_dashboard_money(shopify_today["refunds"])
+    revenue = {
+        "discord_sales": discord_sales,
+        "discord_trade_in": discord_trade_in,
+        "discord_total": round(discord_sales + discord_trade_in, 2),
+        "shopify_total": round(float(shopify_today["net"] or 0.0), 2),
+    }
+    revenue["total"] = round(revenue["discord_total"] + revenue["shopify_total"], 2)
+    purchases = {
+        "buys": discord_buys,
+        "trade_out": discord_trade_out,
+        "expenses": discord_expenses,
+        "shopify_refunds": round(float(shopify_today["refunds"] or 0.0), 2),
+    }
+    purchases["total"] = round(
+        purchases["buys"] + purchases["trade_out"] + purchases["expenses"] + purchases["shopify_refunds"],
+        2,
+    )
 
     return {
         "today_label": today_start.strftime("%A, %b %d"),
@@ -1854,9 +3544,26 @@ def build_dashboard_snapshot(session: Session) -> dict:
             "recent_ingested_count": recent_ingested_count,
             "sales_display": format_dashboard_money(today_totals.get("sales", 0.0)),
             "buys_display": format_dashboard_money(today_totals.get("buys", 0.0)),
-            "net_display": format_dashboard_money(today_totals.get("net", 0.0)),
             "trade_in_display": format_dashboard_money(today_totals.get("trade_cash_in", 0.0)),
             "trade_out_display": format_dashboard_money(today_totals.get("trade_cash_out", 0.0)),
+            "revenue": {
+                **revenue,
+                "total_display": format_dashboard_money(revenue["total"]),
+                "discord_total_display": format_dashboard_money(revenue["discord_total"]),
+                "discord_sales_display": format_dashboard_money(revenue["discord_sales"]),
+                "discord_trade_in_display": format_dashboard_money(revenue["discord_trade_in"]),
+                "shopify_total_display": format_dashboard_money(revenue["shopify_total"]),
+            },
+            "purchases": {
+                **purchases,
+                "total_display": format_dashboard_money(purchases["total"]),
+                "buys_display": format_dashboard_money(purchases["buys"]),
+                "trade_out_display": format_dashboard_money(purchases["trade_out"]),
+                "expenses_display": format_dashboard_money(purchases["expenses"]),
+                "shopify_refunds_display": format_dashboard_money(purchases["shopify_refunds"]),
+                "has_shopify_refunds": purchases["shopify_refunds"] > 0,
+            },
+            "shopify": shopify_today,
         },
         "top_channels": top_channels,
         "payment_mix": payment_mix,
@@ -1887,6 +3594,7 @@ def list_messages(
         status=status,
         channel_id=channel_id,
         entry_kind=entry_kind,
+        expense_category=expense_category,
         after=after,
         before=before,
         sort_by=sort_by,
@@ -1932,10 +3640,8 @@ def review_queue_api(
 @app.get("/messages/{message_id}")
 def get_message(message_id: int, session: Session = Depends(get_session)):
     row = session.get(DiscordMessage, message_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="Message not found")
-
-    return message_detail_item(row)
+    target = f"/deals/{message_id}" if row else "/deals"
+    return RedirectResponse(url=target, status_code=301)
 
 
 @app.get("/admin/parser-progress")
@@ -1943,6 +3649,7 @@ def admin_parser_progress(
     status: Optional[str] = Query(default=None),
     channel_id: Optional[str] = Query(default=None),
     entry_kind: Optional[str] = Query(default=None),
+    expense_category: Optional[str] = Query(default=None),
     after: Optional[str] = Query(default=None),
     before: Optional[str] = Query(default=None),
     session: Session = Depends(get_session),
@@ -1952,9 +3659,42 @@ def admin_parser_progress(
         status=status,
         channel_id=channel_id,
         entry_kind=entry_kind,
+        expense_category=expense_category,
         after=after,
         before=before,
     )
+
+
+@app.get("/admin/queue-state-counts")
+def admin_queue_state_counts(
+    status: Optional[str] = None,
+    channel_id: Optional[str] = None,
+    entry_kind: Optional[str] = None,
+    expense_category: Optional[str] = None,
+    after: Optional[str] = None,
+    before: Optional[str] = None,
+    session: Session = Depends(get_session),
+):
+    return {
+        "counts": get_summary(
+            session,
+            status=status,
+            channel_id=channel_id,
+            entry_kind=entry_kind,
+            expense_category=expense_category,
+            after=after,
+            before=before,
+        ),
+        "progress": get_parser_progress(
+            session,
+            status=status,
+            channel_id=channel_id,
+            entry_kind=entry_kind,
+            expense_category=expense_category,
+            after=after,
+            before=before,
+        ),
+    }
 
 
 @app.get("/table/messages/{message_id}", response_class=HTMLResponse)
@@ -1964,6 +3704,7 @@ def message_detail_page(
     return_path: str = Query(default="/table"),
     status: Optional[str] = Query(default=None),
     channel_id: Optional[str] = Query(default=None),
+    expense_category: Optional[str] = Query(default=None),
     after: Optional[str] = Query(default=None),
     before: Optional[str] = Query(default=None),
     sort_by: Optional[str] = Query(default=None),
@@ -1974,66 +3715,28 @@ def message_detail_page(
     error: Optional[str] = Query(default=None),
     session: Session = Depends(get_session),
 ):
-    if denial := require_role_response(request, "reviewer"):
-        return denial
     row = session.get(DiscordMessage, message_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="Message not found")
-
-    item = message_detail_item(row)
-    cached_assets = get_cached_attachment_map(
-        session,
-        [row.id] if row.id is not None else [],
-    ).get(row.id)
-    if cached_assets:
-        item["attachment_urls"] = cached_assets["all_urls"]
-        item["image_urls"] = cached_assets["image_urls"]
-    item["time"] = format_pacific_datetime(row.created_at)
-    item["edited_at"] = format_pacific_datetime(row.edited_at)
-    item["is_deleted"] = row.is_deleted
-    item["nearby_image"] = find_nearby_image_candidates(session, [row]).get(row.id)
-    item["possible_missing_image"] = item["nearby_image"] is not None
-    learning_signal = get_learning_signal(session, row.content or "")
-
-    return templates.TemplateResponse(
-        request,
-        "message_detail.html",
-        {
-            "request": request,
-            "title": f"Message {message_id}",
-            "message": item,
-            "success": success,
-            "error": error,
-            "return_path": return_path,
-            "back_url": build_return_url(
-                return_path,
-                status=status,
-                channel_id=channel_id,
-                after=after,
-                before=before,
-                sort_by=sort_by,
-                sort_dir=sort_dir,
-                page=page,
-                limit=limit,
-            ),
-            "selected_status": status or "",
-            "selected_channel_id": channel_id or "",
-            "selected_after": after or "",
-            "selected_before": before or "",
-            "selected_sort_by": sort_by or "",
-            "selected_sort_dir": sort_dir or "",
-            "selected_page": page or 1,
-            "selected_limit": limit or 100,
-            "parse_status_options": PARSE_STATUS_OPTIONS,
-            "deal_type_options": DEAL_TYPE_OPTIONS,
-            "entry_kind_options": ENTRY_KIND_OPTIONS,
-            "payment_method_options": PAYMENT_METHOD_OPTIONS,
-            "cash_direction_options": CASH_DIRECTION_OPTIONS,
-            "category_options": CATEGORY_OPTIONS,
-            "correction_patterns": get_correction_pattern_counts(),
-            "learning_signal": learning_signal,
-        },
-    )
+    target = "/deals"
+    if row:
+        target = build_return_url(
+            f"/deals/{message_id}",
+            status=status,
+            channel_id=channel_id,
+            expense_category=expense_category,
+            after=after,
+            before=before,
+            sort_by=sort_by,
+            sort_dir=sort_dir,
+            page=page,
+            limit=limit,
+        )
+        separator = "&" if "?" in target else "?"
+        if success:
+            target = f"{target}{separator}success={success}"
+            separator = "&"
+        if error:
+            target = f"{target}{separator}error={error}"
+    return RedirectResponse(url=target, status_code=301)
 
 
 @app.post("/admin/corrections/promote-form")
@@ -2056,13 +3759,14 @@ def edit_message_form(
     return_path: str = Form(default="/table"),
     status: Optional[str] = Form(default=None),
     channel_id: Optional[str] = Form(default=None),
+    filter_expense_category: Optional[str] = Form(default=None),
     after: Optional[str] = Form(default=None),
     before: Optional[str] = Form(default=None),
     sort_by: Optional[str] = Form(default=None),
     sort_dir: Optional[str] = Form(default=None),
     page: int = Form(default=1),
     limit: int = Form(default=100),
-    parse_status: str = Form(default="parsed"),
+    parse_status: str = Form(default=PARSE_PARSED),
     needs_review: Optional[str] = Form(default=None),
     deal_type: Optional[str] = Form(default=None),
     amount: Optional[str] = Form(default=None),
@@ -2087,15 +3791,17 @@ def edit_message_form(
     row = session.get(DiscordMessage, message_id)
     if not row:
         raise HTTPException(status_code=404, detail="Message not found")
+    parsed_before = snapshot_message_parse(row)
 
     try:
         parsed_amount = parse_optional_float(amount)
         parsed_confidence = parse_optional_float(confidence)
     except ValueError:
         detail_url = build_return_url(
-            f"/table/messages/{message_id}",
+            f"/deals/{message_id}",
             status=status,
             channel_id=channel_id,
+            expense_category=filter_expense_category,
             after=after,
             before=before,
             sort_by=sort_by,
@@ -2109,20 +3815,22 @@ def edit_message_form(
             status_code=303,
         )
 
-    row.parse_status = parse_status or "parsed"
+    row.parse_status = normalize_parse_status(parse_status or PARSE_PARSED)
     row.needs_review = bool(needs_review)
-    if row.parse_status == "needs_review" or row.needs_review:
-        row.parse_status = "needs_review"
+    if row.parse_status == PARSE_REVIEW_REQUIRED or row.needs_review:
+        row.parse_status = PARSE_REVIEW_REQUIRED
         row.needs_review = True
-    elif row.parse_status == "parsed":
+    elif row.parse_status == PARSE_PARSED:
         row.needs_review = False
 
     normalized_deal_type = (deal_type or "").strip() or None
     normalized_payment_method = (payment_method or "").strip() or None
-    normalized_cash_direction = (cash_direction or "").strip() or None
+    normalized_cash_direction = row.cash_direction if cash_direction is None else ((cash_direction or "").strip() or None)
     normalized_category = (category or "").strip() or None
     normalized_entry_kind = (entry_kind or "").strip() or None
     normalized_expense_category = (expense_category or "").strip() or None
+    if normalized_deal_type != "trade":
+        normalized_cash_direction = None
 
     row.deal_type = normalized_deal_type
     row.amount = parsed_amount
@@ -2150,25 +3858,26 @@ def edit_message_form(
     row.money_out = money_out
     row.expense_category = expense_category_value
     if approve_after_save:
-        row.parse_status = "parsed"
+        row.parse_status = PARSE_PARSED
         row.needs_review = False
-    if row.parse_status == "parsed" and not row.needs_review:
+    if row.parse_status == PARSE_PARSED and not row.needs_review:
         row.reviewed_by = reviewer_label
         row.reviewed_at = utcnow()
-    elif row.parse_status != "parsed" or row.needs_review:
+    elif row.parse_status != PARSE_PARSED or row.needs_review:
         row.reviewed_by = None
         row.reviewed_at = None
-    row.last_error = None if row.parse_status in {"parsed", "needs_review"} else row.last_error
+    row.last_error = None if row.parse_status in {PARSE_PARSED, PARSE_REVIEW_REQUIRED} else row.last_error
 
     session.add(row)
-    save_review_correction(session, row)
+    save_review_correction(session, row, parsed_before=parsed_before)
     sync_transaction_from_message(session, row)
     session.commit()
 
     redirect_target = build_return_url(
-        f"/table/messages/{message_id}" if stay_on_detail else return_path,
+        f"/deals/{message_id}" if stay_on_detail else return_path,
         status=status,
         channel_id=channel_id,
+        expense_category=filter_expense_category,
         after=after,
         before=before,
         sort_by=sort_by,
@@ -2205,6 +3914,217 @@ def report_summary(
         "channel_id": channel_id,
     }
     return summary
+
+
+@app.post("/webhooks/shopify/orders")
+async def shopify_orders_webhook(request: Request):
+    raw_body = await request.body()
+    received_hmac = request.headers.get("X-Shopify-Hmac-Sha256")
+    topic = request.headers.get("X-Shopify-Topic") or "unknown"
+    webhook_runtime = f"{settings.runtime_name}_shopify"
+
+    if not validate_shopify_webhook(
+        raw_body=raw_body,
+        shared_secret=settings.shopify_webhook_secret,
+        received_hmac=received_hmac,
+    ):
+        body_hash = hashlib.sha256(raw_body).hexdigest()
+        print(
+            structured_log_line(
+                runtime=webhook_runtime,
+                action="shopify.webhook.rejected",
+                success=False,
+                error="Invalid Shopify webhook HMAC",
+                topic=topic,
+                request_path=str(request.url.path),
+                body_sha256=body_hash,
+            )
+        )
+        raise HTTPException(status_code=401, detail="Invalid Shopify webhook signature")
+
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+        received_at = utcnow()
+        def write_shopify_order(session: Session) -> str:
+            return upsert_shopify_order(
+                session,
+                payload,
+                source="webhook",
+                received_at=received_at,
+                runtime_name=webhook_runtime,
+            )
+
+        outcome = run_write_with_retry(write_shopify_order)
+    except Exception as exc:
+        print(
+            structured_log_line(
+                runtime=webhook_runtime,
+                action="shopify.webhook.failed",
+                success=False,
+                error=str(exc),
+                topic=topic,
+            )
+        )
+        raise HTTPException(status_code=400, detail="Invalid Shopify payload") from exc
+
+    print(
+        structured_log_line(
+            runtime=webhook_runtime,
+            action="shopify.webhook.received",
+            success=True,
+            topic=topic,
+            shopify_order_id=payload.get("id"),
+            order_number=payload.get("name") or payload.get("order_number"),
+            operation=outcome,
+        )
+    )
+    return Response(status_code=200)
+
+
+@app.post("/shopify/backfill")
+def shopify_backfill_start(
+    request: Request,
+    since: Optional[str] = Form(default=None),
+    limit: Optional[str] = Form(default="250"),
+):
+    if denial := require_role_response(request, "admin"):
+        return denial
+
+    state = read_shopify_backfill_state()
+    if state.get("is_running"):
+        return RedirectResponse(
+            url="/shopify/orders?success=Backfill+already+running+orders+will+appear+shortly",
+            status_code=303,
+        )
+
+    raw_limit = (limit or "").strip()
+    safe_limit: Optional[int]
+    if not raw_limit:
+        safe_limit = None
+    else:
+        try:
+            parsed_limit = int(raw_limit)
+        except ValueError:
+            return RedirectResponse(
+                url="/shopify/orders?error=Limit+must+be+a+whole+number+or+blank",
+                status_code=303,
+            )
+        safe_limit = max(1, parsed_limit)
+    worker = threading.Thread(
+        target=run_shopify_backfill_in_background,
+        kwargs={"since": (since or "").strip() or None, "limit": safe_limit},
+        daemon=True,
+        name="shopify-backfill",
+    )
+    worker.start()
+    return RedirectResponse(
+        url="/shopify/orders?success=Backfill+started+orders+will+appear+shortly",
+        status_code=303,
+    )
+
+
+@app.get("/shopify-orders")
+def shopify_orders_redirect():
+    return RedirectResponse(url="/shopify/orders", status_code=307)
+
+
+@app.get("/shopify/orders", response_class=HTMLResponse)
+def shopify_orders_page(
+    request: Request,
+    start: Optional[str] = Query(default=None),
+    end: Optional[str] = Query(default=None),
+    financial_status: Optional[str] = Query(default=None),
+    source: Optional[str] = Query(default=None),
+    search: Optional[str] = Query(default=None),
+    sort_by: str = Query(default="date"),
+    sort_dir: str = Query(default="desc"),
+    page: int = Query(default=1),
+    success: Optional[str] = Query(default=None),
+    error: Optional[str] = Query(default=None),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "viewer"):
+        return denial
+
+    start_dt = parse_report_datetime(start)
+    end_dt = parse_report_datetime(end, end_of_day=True)
+    total_rows = count_shopify_order_rows(
+        session,
+        start=start_dt,
+        end=end_dt,
+        financial_status=financial_status,
+        source=source,
+        search=search,
+    )
+    pagination = build_pagination(page=page, limit=50, total_rows=total_rows)
+    orders = get_shopify_order_rows(
+        session,
+        start=start_dt,
+        end=end_dt,
+        financial_status=financial_status,
+        source=source,
+        search=search,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        page=pagination["page"],
+        limit=pagination["limit"],
+    )
+    summary_rows = get_shopify_order_rows(
+        session,
+        start=start_dt,
+        end=end_dt,
+        financial_status=financial_status,
+        source=source,
+        search=search,
+    )
+    summary = build_shopify_order_summary(summary_rows)
+    status_rows = session.exec(select(ShopifyOrder.financial_status)).all()
+    financial_statuses = sorted(
+        {
+            str(value[0] if isinstance(value, tuple) else value).strip()
+            for value in status_rows
+            if str(value[0] if isinstance(value, tuple) else value).strip()
+        }
+    )
+    order_rows = [
+        {
+            "order": order,
+            "customer_label": order.customer_name or "Guest",
+            "items_summary": build_shopify_item_summary(order.line_items_json),
+            "net_amount": round(
+                float(order.subtotal_ex_tax if order.subtotal_ex_tax is not None else float(order.total_price or 0.0) - float(order.total_tax or 0.0)),
+                2,
+            ),
+        }
+        for order in orders
+    ]
+    backfill_state = read_shopify_backfill_state()
+
+    return templates.TemplateResponse(
+        request,
+        "shopify_orders.html",
+        {
+            "request": request,
+            "title": "Shopify Orders",
+            "current_user": getattr(request.state, "current_user", None),
+            "success": success,
+            "error": error,
+            "selected_start": start or "",
+            "selected_end": end or "",
+            "selected_financial_status": financial_status or "",
+            "selected_source": source or "",
+            "selected_search": search or "",
+            "selected_sort_by": sort_by,
+            "selected_sort_dir": sort_dir,
+            "financial_statuses": [value for value in financial_statuses if value],
+            "summary": summary,
+            "orders": order_rows,
+            "pagination": pagination,
+            "page_url": build_shopify_orders_url,
+            "sort_url": build_shopify_sort_url,
+            "backfill_state": backfill_state,
+        },
+    )
 
 
 @app.get("/reports/messages")
@@ -2272,6 +4192,7 @@ def messages_csv(
     status: Optional[str] = Query(default=None),
     channel_id: Optional[str] = Query(default=None),
     entry_kind: Optional[str] = Query(default=None),
+    expense_category: Optional[str] = Query(default=None),
     after: Optional[str] = Query(default=None),
     before: Optional[str] = Query(default=None),
     sort_by: str = Query(default="time"),
@@ -2283,6 +4204,7 @@ def messages_csv(
         status=status,
         channel_id=channel_id,
         entry_kind=entry_kind,
+        expense_category=expense_category,
         after=after,
         before=before,
         sort_by=sort_by,
@@ -2290,7 +4212,7 @@ def messages_csv(
         page=1,
         limit=50000,
     )
-    items = build_message_list_items(session, rows)
+    items = build_message_list_items(session, rows, expense_category=expense_category)
     export_rows = [
         {
             "message_id": item["id"],
@@ -2324,10 +4246,12 @@ def reports_page(
     end: Optional[str] = Query(default=None),
     channel_id: Optional[str] = Query(default=None),
     entry_kind: Optional[str] = Query(default=None),
+    source: Optional[str] = Query(default=REPORT_SOURCE_ALL),
     session: Session = Depends(get_session),
 ):
     if denial := require_role_response(request, "viewer"):
         return denial
+    selected_source = normalize_report_source(source)
     start_dt = parse_report_datetime(start)
     end_dt = parse_report_datetime(end, end_of_day=True)
     transactions = get_transactions(
@@ -2337,8 +4261,69 @@ def reports_page(
         channel_id=channel_id,
         entry_kind=entry_kind,
     )
-    summary = build_transaction_summary(transactions)
+    discord_summary = build_transaction_summary(transactions)
+    shopify_rows = get_shopify_reporting_rows(session, start=start_dt, end=end_dt)
+    shopify_summary = build_shopify_reporting_summary(shopify_rows)
+    shopify_timeline_map: dict[str, dict[str, float | int]] = {}
+    for row in shopify_rows:
+        status = (row.financial_status or "").strip().lower()
+        if status != "paid":
+            continue
+        created_at = row.created_at
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        day_key = created_at.astimezone(PACIFIC_TZ).date().isoformat()
+        bucket = shopify_timeline_map.setdefault(
+            day_key,
+            {
+                "date": day_key,
+                "orders": 0,
+                "gross": 0.0,
+                "tax": 0.0,
+                "net": 0.0,
+                "tax_unknown_orders": 0,
+            },
+        )
+        bucket["orders"] = int(bucket["orders"]) + 1
+        gross_value = float(row.total_price or 0.0)
+        bucket["gross"] = float(bucket["gross"]) + gross_value
+        if row.total_tax is None:
+            bucket["tax_unknown_orders"] = int(bucket["tax_unknown_orders"]) + 1
+            continue
+        tax_value = float(row.total_tax or 0.0)
+        net_value = float(row.subtotal_ex_tax) if row.subtotal_ex_tax is not None else gross_value - tax_value
+        bucket["tax"] = float(bucket["tax"]) + tax_value
+        bucket["net"] = float(bucket["net"]) + net_value
+    shopify_daily_totals = [
+        {
+            "date": day_key,
+            "orders": int(values["orders"]),
+            "gross": round(float(values["gross"]), 2),
+            "tax": round(float(values["tax"]), 2),
+            "net": round(float(values["net"]), 2),
+            "tax_unknown_orders": int(values["tax_unknown_orders"]),
+        }
+        for day_key, values in sorted(shopify_timeline_map.items())
+    ]
+    summary = discord_summary
     channels = get_channel_filter_choices(session)
+    period_rows = build_report_period_comparison_rows(
+        session,
+        periods=build_reporting_periods(selected_start=start_dt, selected_end=end_dt),
+        channel_id=channel_id,
+        entry_kind=entry_kind,
+    )
+    report_totals = {
+        "discord_net": round(float(discord_summary["totals"].get("net", 0.0) or 0.0), 2),
+        "shopify_gross": round(float(shopify_summary["gross_revenue"] or 0.0), 2),
+        "shopify_tax": round(float(shopify_summary["total_tax"] or 0.0), 2),
+        "shopify_net": round(float(shopify_summary["net_revenue"] or 0.0), 2),
+        "combined_net": round(
+            float(discord_summary["totals"].get("net", 0.0) or 0.0)
+            + float(shopify_summary["net_revenue"] or 0.0),
+            2,
+        ),
+    }
 
     return templates.TemplateResponse(
         request,
@@ -2351,10 +4336,19 @@ def reports_page(
             "selected_end": end or "",
             "selected_channel_id": channel_id or "",
             "selected_entry_kind": entry_kind or "",
+            "selected_source": selected_source,
             "summary": summary,
+            "discord_summary": discord_summary,
+            "shopify_summary": shopify_summary,
+            "report_totals": report_totals,
+            "period_rows": period_rows,
+            "show_discord_reports": selected_source in {REPORT_SOURCE_ALL, REPORT_SOURCE_DISCORD},
+            "show_shopify_reports": selected_source in {REPORT_SOURCE_ALL, REPORT_SOURCE_SHOPIFY},
+            "reports_url": build_reports_url,
             "expense_chart": build_bar_chart_rows(summary["expense_categories"]),
             "channel_chart": build_bar_chart_rows(summary["channel_net"]),
             "transactions": transactions,
+            "shopify_daily_totals": shopify_daily_totals,
         },
     )
 
@@ -2372,10 +4366,48 @@ def bookkeeping_page(
     imports = list_bookkeeping_imports(session)
     selected_import = None
     reconciliation = None
+    detected_posts = list_detected_bookkeeping_posts(session)
+    for post in detected_posts:
+        post["action_links"] = build_row_action_links(
+            post.get("message_id"),
+            channel_id=None,
+            created_at=post.get("created_at"),
+        )
     if import_id:
         selected_import = session.get(BookkeepingImport, import_id)
         if selected_import:
             reconciliation = reconcile_bookkeeping_import(session, import_id)
+            for entry in reconciliation["entries"]:
+                matched_transaction = entry.get("matched_transaction")
+                entry["action_links"] = build_row_action_links(
+                    matched_transaction.source_message_id if matched_transaction and matched_transaction.source_message_id is not None else None,
+                    channel_id=matched_transaction.channel_id if matched_transaction else None,
+                    created_at=matched_transaction.occurred_at if matched_transaction else entry.get("occurred_at"),
+                    status="parsed" if matched_transaction else None,
+                )
+            enriched_unmatched_transactions = []
+            for row in reconciliation["unmatched_transactions"]:
+                action_links = build_row_action_links(
+                    row.source_message_id if row.source_message_id is not None else None,
+                    channel_id=row.channel_id,
+                    created_at=row.occurred_at,
+                    status="parsed",
+                )
+                enriched_unmatched_transactions.append(
+                    {
+                        "occurred_at": row.occurred_at,
+                        "channel_name": row.channel_name,
+                        "channel_id": row.channel_id,
+                        "entry_kind": row.entry_kind,
+                        "amount": row.amount,
+                        "payment_method": row.payment_method,
+                        "category": row.category,
+                        "expense_category": row.expense_category,
+                        "notes": row.notes,
+                        "action_links": action_links,
+                    }
+                )
+            reconciliation["unmatched_transactions"] = enriched_unmatched_transactions
 
     return templates.TemplateResponse(
         request,
@@ -2386,7 +4418,7 @@ def bookkeeping_page(
             "imports": imports,
             "selected_import": selected_import,
             "reconciliation": reconciliation,
-            "detected_posts": list_detected_bookkeeping_posts(session),
+            "detected_posts": detected_posts,
             "success": success,
             "error": error,
         },
@@ -2506,7 +4538,8 @@ def retry_message(message_id: int, session: Session = Depends(get_session)):
     if not row:
         raise HTTPException(status_code=404, detail="Message not found")
 
-    row.parse_status = "queued"
+    row.parse_status = PARSE_PENDING
+    row.parse_attempts = 0
     row.last_error = None
     session.add(row)
     sync_transaction_from_message(session, row)
@@ -2522,7 +4555,7 @@ def approve_message(message_id: int, session: Session = Depends(get_session)):
         raise HTTPException(status_code=404, detail="Message not found")
 
     row.needs_review = False
-    row.parse_status = "parsed"
+    row.parse_status = PARSE_PARSED
     session.add(row)
     sync_transaction_from_message(session, row)
     session.commit()
@@ -2536,6 +4569,8 @@ def approve_message_form(
     return_path: str = Form(default="/table"),
     status: Optional[str] = Form(default=None),
     channel_id: Optional[str] = Form(default=None),
+    expense_category: Optional[str] = Form(default=None),
+    filter_expense_category: Optional[str] = Form(default=None),
     after: Optional[str] = Form(default=None),
     before: Optional[str] = Form(default=None),
     sort_by: Optional[str] = Form(default=None),
@@ -2550,30 +4585,27 @@ def approve_message_form(
     row = session.get(DiscordMessage, message_id)
     if row:
         row.needs_review = False
-        row.parse_status = "parsed"
+        row.parse_status = PARSE_PARSED
         row.reviewed_by = reviewer_label
         row.reviewed_at = utcnow()
         session.add(row)
         sync_transaction_from_message(session, row)
         session.commit()
-
-    redirect_url = f"{return_path}?success=Approved+message+{message_id}&limit={limit}"
-    if status:
-        redirect_url += f"&status={status}"
-    if channel_id:
-        redirect_url += f"&channel_id={channel_id}"
-    if after:
-        redirect_url += f"&after={after}"
-    if before:
-        redirect_url += f"&before={before}"
-    if sort_by:
-        redirect_url += f"&sort_by={sort_by}"
-    if sort_dir:
-        redirect_url += f"&sort_dir={sort_dir}"
-    if page > 1:
-        redirect_url += f"&page={page}"
-
-    return RedirectResponse(url=redirect_url, status_code=303)
+    selected_expense_category = filter_expense_category or expense_category
+    redirect_url = build_return_url(
+        return_path,
+        status=status,
+        channel_id=channel_id,
+        expense_category=selected_expense_category,
+        after=after,
+        before=before,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        page=page,
+        limit=limit,
+    )
+    separator = "&" if "?" in redirect_url else "?"
+    return RedirectResponse(url=f"{redirect_url}{separator}success=Approved+message+{message_id}", status_code=303)
 
 
 @app.post("/messages/bulk/approve-form")
@@ -2583,6 +4615,8 @@ def bulk_approve_messages_form(
     return_path: str = Form(default="/review-table"),
     status: Optional[str] = Form(default=None),
     channel_id: Optional[str] = Form(default=None),
+    expense_category: Optional[str] = Form(default=None),
+    filter_expense_category: Optional[str] = Form(default=None),
     after: Optional[str] = Form(default=None),
     before: Optional[str] = Form(default=None),
     sort_by: Optional[str] = Form(default=None),
@@ -2600,7 +4634,7 @@ def bulk_approve_messages_form(
         if not row:
             continue
         row.needs_review = False
-        row.parse_status = "parsed"
+        row.parse_status = PARSE_PARSED
         row.reviewed_by = reviewer_label
         row.reviewed_at = utcnow()
         session.add(row)
@@ -2608,23 +4642,21 @@ def bulk_approve_messages_form(
         updated += 1
     session.commit()
 
-    redirect_url = f"{return_path}?success=Approved+{updated}+messages&limit={limit}"
-    if status:
-        redirect_url += f"&status={status}"
-    if channel_id:
-        redirect_url += f"&channel_id={channel_id}"
-    if after:
-        redirect_url += f"&after={after}"
-    if before:
-        redirect_url += f"&before={before}"
-    if sort_by:
-        redirect_url += f"&sort_by={sort_by}"
-    if sort_dir:
-        redirect_url += f"&sort_dir={sort_dir}"
-    if page > 1:
-        redirect_url += f"&page={page}"
-
-    return RedirectResponse(url=redirect_url, status_code=303)
+    selected_expense_category = filter_expense_category or expense_category
+    redirect_url = build_return_url(
+        return_path,
+        status=status,
+        channel_id=channel_id,
+        expense_category=selected_expense_category,
+        after=after,
+        before=before,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        page=page,
+        limit=limit,
+    )
+    separator = "&" if "?" in redirect_url else "?"
+    return RedirectResponse(url=f"{redirect_url}{separator}success=Approved+{updated}+messages", status_code=303)
 
 
 @app.post("/messages/bulk/retry-form")
@@ -2634,6 +4666,8 @@ def bulk_retry_messages_form(
     return_path: str = Form(default="/table"),
     status: Optional[str] = Form(default=None),
     channel_id: Optional[str] = Form(default=None),
+    expense_category: Optional[str] = Form(default=None),
+    filter_expense_category: Optional[str] = Form(default=None),
     after: Optional[str] = Form(default=None),
     before: Optional[str] = Form(default=None),
     sort_by: Optional[str] = Form(default=None),
@@ -2649,7 +4683,8 @@ def bulk_retry_messages_form(
         row = session.get(DiscordMessage, message_id)
         if not row:
             continue
-        row.parse_status = "queued"
+        row.parse_status = PARSE_PENDING
+        row.parse_attempts = 0
         row.last_error = None
         row.reviewed_by = None
         row.reviewed_at = None
@@ -2658,23 +4693,95 @@ def bulk_retry_messages_form(
         updated += 1
     session.commit()
 
-    redirect_url = f"{return_path}?success=Re-queued+{updated}+messages&limit={limit}"
-    if status:
-        redirect_url += f"&status={status}"
-    if channel_id:
-        redirect_url += f"&channel_id={channel_id}"
-    if after:
-        redirect_url += f"&after={after}"
-    if before:
-        redirect_url += f"&before={before}"
-    if sort_by:
-        redirect_url += f"&sort_by={sort_by}"
-    if sort_dir:
-        redirect_url += f"&sort_dir={sort_dir}"
-    if page > 1:
-        redirect_url += f"&page={page}"
+    selected_expense_category = filter_expense_category or expense_category
+    redirect_url = build_return_url(
+        return_path,
+        status=status,
+        channel_id=channel_id,
+        expense_category=selected_expense_category,
+        after=after,
+        before=before,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        page=page,
+        limit=limit,
+    )
+    separator = "&" if "?" in redirect_url else "?"
+    return RedirectResponse(url=f"{redirect_url}{separator}success=Re-queued+{updated}+messages", status_code=303)
 
-    return RedirectResponse(url=redirect_url, status_code=303)
+
+@app.post("/messages/bulk/requeue-filtered-form")
+def bulk_requeue_filtered_messages_form(
+    request: Request,
+    return_path: str = Form(default="/review"),
+    status: Optional[str] = Form(default="review_queue"),
+    channel_id: Optional[str] = Form(default=None),
+    expense_category: Optional[str] = Form(default=None),
+    after: Optional[str] = Form(default=None),
+    before: Optional[str] = Form(default=None),
+    sort_by: Optional[str] = Form(default=None),
+    sort_dir: Optional[str] = Form(default=None),
+    page: int = Form(default=1),
+    limit: int = Form(default=100),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "reviewer"):
+        return denial
+
+    stmt = build_message_stmt(
+        status=status or "review_queue",
+        channel_id=channel_id,
+        expense_category=expense_category,
+        after=after,
+        before=before,
+    )
+    row_ids = [
+        row_id
+        for row_id in session.exec(stmt.with_only_columns(DiscordMessage.id)).all()
+        if row_id is not None
+    ]
+
+    def requeue_chunk(chunk_ids: list[int]) -> int:
+        rows = session.exec(
+            select(DiscordMessage).where(DiscordMessage.id.in_(chunk_ids))
+        ).all()
+        updated_rows = 0
+        for row in rows:
+            row.parse_status = PARSE_PENDING
+            row.parse_attempts = 0
+            row.last_error = None
+            row.needs_review = False
+            row.reviewed_by = None
+            row.reviewed_at = None
+            row.active_reparse_run_id = None
+            session.add(row)
+            sync_transaction_from_message(session, row)
+            updated_rows += 1
+        session.commit()
+        return updated_rows
+
+    updated = 0
+    chunk_size = 25
+    for start_index in range(0, len(row_ids), chunk_size):
+        updated += requeue_chunk(row_ids[start_index:start_index + chunk_size])
+
+    redirect_url = build_return_url(
+        return_path,
+        status=status if return_path not in {"/review", "/review-table"} else None,
+        channel_id=channel_id,
+        expense_category=expense_category,
+        after=after,
+        before=before,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        page=page,
+        limit=limit,
+    )
+    separator = "&" if "?" in redirect_url else "?"
+    return RedirectResponse(
+        url=f"{redirect_url}{separator}success=Re-queued+{updated}+filtered+review+rows+for+reparse",
+        status_code=303,
+    )
 
 
 @app.post("/messages/{message_id}/retry-form")
@@ -2684,6 +4791,8 @@ def retry_message_form(
     return_path: str = Form(default="/table"),
     status: Optional[str] = Form(default=None),
     channel_id: Optional[str] = Form(default=None),
+    expense_category: Optional[str] = Form(default=None),
+    filter_expense_category: Optional[str] = Form(default=None),
     after: Optional[str] = Form(default=None),
     before: Optional[str] = Form(default=None),
     sort_by: Optional[str] = Form(default=None),
@@ -2696,7 +4805,8 @@ def retry_message_form(
         return denial
     row = session.get(DiscordMessage, message_id)
     if row:
-        row.parse_status = "queued"
+        row.parse_status = PARSE_PENDING
+        row.parse_attempts = 0
         row.last_error = None
         row.reviewed_by = None
         row.reviewed_at = None
@@ -2704,23 +4814,21 @@ def retry_message_form(
         sync_transaction_from_message(session, row)
         session.commit()
 
-    redirect_url = f"{return_path}?success=Re-queued+message+{message_id}&limit={limit}"
-    if status:
-        redirect_url += f"&status={status}"
-    if channel_id:
-        redirect_url += f"&channel_id={channel_id}"
-    if after:
-        redirect_url += f"&after={after}"
-    if before:
-        redirect_url += f"&before={before}"
-    if sort_by:
-        redirect_url += f"&sort_by={sort_by}"
-    if sort_dir:
-        redirect_url += f"&sort_dir={sort_dir}"
-    if page > 1:
-        redirect_url += f"&page={page}"
-
-    return RedirectResponse(url=redirect_url, status_code=303)
+    selected_expense_category = filter_expense_category or expense_category
+    redirect_url = build_return_url(
+        return_path,
+        status=status,
+        channel_id=channel_id,
+        expense_category=selected_expense_category,
+        after=after,
+        before=before,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        page=page,
+        limit=limit,
+    )
+    separator = "&" if "?" in redirect_url else "?"
+    return RedirectResponse(url=f"{redirect_url}{separator}success=Re-queued+message+{message_id}", status_code=303)
 
 
 @app.post("/messages/{message_id}/mark-incorrect-form")
@@ -2730,6 +4838,8 @@ def mark_incorrect_message_form(
     return_path: str = Form(default="/table"),
     status: Optional[str] = Form(default=None),
     channel_id: Optional[str] = Form(default=None),
+    expense_category: Optional[str] = Form(default=None),
+    filter_expense_category: Optional[str] = Form(default=None),
     after: Optional[str] = Form(default=None),
     before: Optional[str] = Form(default=None),
     sort_by: Optional[str] = Form(default=None),
@@ -2745,7 +4855,7 @@ def mark_incorrect_message_form(
         raise HTTPException(status_code=404, detail="Message not found")
 
     row.needs_review = True
-    row.parse_status = "needs_review"
+    row.parse_status = PARSE_REVIEW_REQUIRED
     row.last_error = "Manually marked incorrect for review."
     row.reviewed_by = None
     row.reviewed_at = None
@@ -2753,10 +4863,12 @@ def mark_incorrect_message_form(
     sync_transaction_from_message(session, row)
     session.commit()
 
+    selected_expense_category = filter_expense_category or expense_category
     detail_url = build_return_url(
-        f"/table/messages/{message_id}",
+        f"/deals/{message_id}",
         status="review_queue" if return_path == "/review-table" else status,
         channel_id=channel_id,
+        expense_category=selected_expense_category,
         after=after,
         before=before,
         sort_by=sort_by,
@@ -2767,6 +4879,60 @@ def mark_incorrect_message_form(
     separator = "&" if "?" in detail_url else "?"
     return RedirectResponse(
         url=f"{detail_url}{separator}success=Marked+message+{message_id}+incorrect+and+sent+to+review",
+        status_code=303,
+    )
+
+
+@app.post("/messages/{message_id}/disregard-form")
+def disregard_message_form(
+    request: Request,
+    message_id: int,
+    return_path: str = Form(default="/table"),
+    status: Optional[str] = Form(default=None),
+    channel_id: Optional[str] = Form(default=None),
+    expense_category: Optional[str] = Form(default=None),
+    filter_expense_category: Optional[str] = Form(default=None),
+    after: Optional[str] = Form(default=None),
+    before: Optional[str] = Form(default=None),
+    sort_by: Optional[str] = Form(default=None),
+    sort_dir: Optional[str] = Form(default=None),
+    page: int = Form(default=1),
+    limit: int = Form(default=100),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "reviewer"):
+        return denial
+    row = session.get(DiscordMessage, message_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    clear_parsed_fields(row)
+    row.parse_status = PARSE_IGNORED
+    row.needs_review = False
+    row.last_error = None
+    row.reviewed_by = current_user_label(request)
+    row.reviewed_at = utcnow()
+    row.notes = "Manually disregarded in review."
+    session.add(row)
+    sync_transaction_from_message(session, row)
+    session.commit()
+
+    selected_expense_category = filter_expense_category or expense_category
+    redirect_url = build_return_url(
+        return_path,
+        status=status,
+        channel_id=channel_id,
+        expense_category=selected_expense_category,
+        after=after,
+        before=before,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        page=page,
+        limit=limit,
+    )
+    separator = "&" if "?" in redirect_url else "?"
+    return RedirectResponse(
+        url=f"{redirect_url}{separator}success=Disregarded+message+{message_id}",
         status_code=303,
     )
 
@@ -2853,6 +5019,220 @@ def admin_parser_reprocess_form(
         status_code=303,
     )
 
+
+@app.post("/admin/parser/reparse-range")
+def admin_parser_reparse_range(
+    request: Request,
+    after: Optional[str] = Form(default=None),
+    before: Optional[str] = Form(default=None),
+    channel_id: Optional[str] = Form(default=None),
+    include_failed: Optional[str] = Form(default=None),
+    include_ignored: Optional[str] = Form(default=None),
+    include_reviewed: Optional[str] = Form(default=None),
+    force_reviewed: Optional[str] = Form(default=None),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "admin"):
+        return denial
+
+    start = parse_report_datetime(after)
+    end = parse_report_datetime(before, end_of_day=True)
+    if start is None and end is None:
+        raise HTTPException(status_code=400, detail="Provide after and/or before to define a reparse range.")
+    if include_reviewed and not force_reviewed:
+        raise HTTPException(
+            status_code=400,
+            detail="Reviewed rows require force_reviewed to avoid overwriting manual review corrections.",
+        )
+
+    include_statuses = [PARSE_PARSED, PARSE_REVIEW_REQUIRED]
+    if include_failed:
+        include_statuses.append("failed")
+    if include_ignored:
+        include_statuses.append("ignored")
+
+    run_id = safe_create_reparse_run(
+        source="admin_api",
+        reason="manual range reparse",
+        range_after=start,
+        range_before=end,
+        channel_id=channel_id or None,
+        include_reviewed=bool(include_reviewed),
+        force_reviewed=bool(force_reviewed),
+        requested_statuses=include_statuses,
+    )
+
+    result = queue_reparse_range(
+        session,
+        start=start,
+        end=end,
+        channel_id=channel_id or None,
+        include_statuses=include_statuses,
+        include_reviewed=bool(include_reviewed),
+        reason="manual range reparse",
+        reparse_run_id=run_id,
+    )
+    safe_finalize_reparse_run_queue(
+        run_id=run_id,
+        selected_count=result["matched"],
+        queued_count=result["queued"],
+        already_queued_count=result["already_queued"],
+        skipped_reviewed_count=result["skipped_reviewed"],
+        first_message_id=result["first_message_id"],
+        last_message_id=result["last_message_id"],
+        first_message_created_at=result["first_message_created_at"],
+        last_message_created_at=result["last_message_created_at"],
+    )
+    return {
+        "ok": True,
+        "run_id": run_id,
+        "queued": result["queued"],
+        "matched": result["matched"],
+        "channel_id": channel_id or None,
+        "after": after or None,
+        "before": before or None,
+        "included_statuses": include_statuses,
+        "include_reviewed": bool(include_reviewed),
+    }
+
+
+@app.post("/admin/parser/reparse-range-form")
+def admin_parser_reparse_range_form(
+    request: Request,
+    return_path: str = Form(default="/table"),
+    after: Optional[str] = Form(default=None),
+    before: Optional[str] = Form(default=None),
+    channel_id: Optional[str] = Form(default=None),
+    include_failed: Optional[str] = Form(default=None),
+    include_ignored: Optional[str] = Form(default=None),
+    include_reviewed: Optional[str] = Form(default=None),
+    force_reviewed: Optional[str] = Form(default=None),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "admin"):
+        return denial
+
+    start = parse_report_datetime(after)
+    end = parse_report_datetime(before, end_of_day=True)
+    if start is None and end is None:
+        separator = "&" if "?" in return_path else "?"
+        return RedirectResponse(
+            url=f"{return_path}{separator}error=Provide+after+and/or+before+to+define+a+reparse+range",
+            status_code=303,
+        )
+    if include_reviewed and not force_reviewed:
+        separator = "&" if "?" in return_path else "?"
+        return RedirectResponse(
+            url=(
+                f"{return_path}{separator}"
+                "error=Reviewed+rows+require+force_reviewed+to+avoid+overwriting+manual+corrections"
+            ),
+            status_code=303,
+        )
+
+    include_statuses = [PARSE_PARSED, PARSE_REVIEW_REQUIRED]
+    if include_failed:
+        include_statuses.append("failed")
+    if include_ignored:
+        include_statuses.append("ignored")
+
+    run_id = safe_create_reparse_run(
+        source="admin_form",
+        reason="manual range reparse",
+        range_after=start,
+        range_before=end,
+        channel_id=channel_id or None,
+        include_reviewed=bool(include_reviewed),
+        force_reviewed=bool(force_reviewed),
+        requested_statuses=include_statuses,
+    )
+
+    result = queue_reparse_range(
+        session,
+        start=start,
+        end=end,
+        channel_id=channel_id or None,
+        include_statuses=include_statuses,
+        include_reviewed=bool(include_reviewed),
+        reason="manual range reparse",
+        reparse_run_id=run_id,
+    )
+    safe_finalize_reparse_run_queue(
+        run_id=run_id,
+        selected_count=result["matched"],
+        queued_count=result["queued"],
+        already_queued_count=result["already_queued"],
+        skipped_reviewed_count=result["skipped_reviewed"],
+        first_message_id=result["first_message_id"],
+        last_message_id=result["last_message_id"],
+        first_message_created_at=result["first_message_created_at"],
+        last_message_created_at=result["last_message_created_at"],
+    )
+    separator = "&" if "?" in return_path else "?"
+    return RedirectResponse(
+        url=(
+            f"{return_path}{separator}"
+            f"success=Queued+{result['queued']}+rows+for+parser+range+reparse"
+        ),
+        status_code=303,
+    )
+
+
+@app.get("/admin/parser/reparse-runs", response_class=HTMLResponse)
+def admin_parser_reparse_runs_page(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "admin"):
+        return denial
+    rows = list_recent_reparse_runs(session, limit=limit)
+    return templates.TemplateResponse(
+        request,
+        "reparse_runs.html",
+        {
+            "request": request,
+            "title": "Reparse Runs",
+            "current_user": getattr(request.state, "current_user", None),
+            "runs": build_reparse_run_table_rows(rows),
+            "limit": limit,
+        },
+    )
+
+
+@app.get("/admin/parser/reparse-runs.json")
+def admin_parser_reparse_runs_json(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "admin"):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    return {
+        "runs": serialize_reparse_runs(list_recent_reparse_runs(session, limit=limit)),
+    }
+
+
+@app.get("/admin/parser/learned-rule-log", response_class=HTMLResponse)
+def admin_parser_learned_rule_log_page(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=100),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "admin"):
+        return denial
+    return templates.TemplateResponse(
+        request,
+        "learned_rule_log.html",
+        {
+            "request": request,
+            "title": "Learned Rule Log",
+            "current_user": getattr(request.state, "current_user", None),
+            "events": build_learned_rule_log_rows(session, limit=limit),
+            "limit": limit,
+        },
+    )
+
 @app.post("/admin/clear/channel/{channel_id}")
 def clear_channel_messages(channel_id: str):
     with managed_session() as session:
@@ -2921,40 +5301,23 @@ async def admin_backfill(
     target_channel_ids = get_backfill_target_channel_ids(session, channel_id=channel_id)
     if not target_channel_ids:
         raise HTTPException(status_code=400, detail="No backfill-enabled watched channels are available for this request")
-    client = get_discord_client()
-    if client is None or not client.is_ready():
-        persist_backfill_window_for_targets(
-            session,
-            channel_ids=target_channel_ids,
-            after_dt=after_dt,
-            before_dt=before_dt,
-        )
-        queued_message = queue_backfill_request(
-            session,
-            request,
-            channel_id=channel_id,
-            after_dt=after_dt,
-            before_dt=before_dt,
-            limit=limit,
-            oldest_first=oldest_first,
-        )
-        return {"ok": True, "queued": True, "message": queued_message.replace("+", " ")}
-
-    if channel_id:
-        return await client.backfill_channel(
-            channel_id=int(channel_id),
-            limit=limit,
-            oldest_first=oldest_first,
-            after=after_dt,
-            before=before_dt,
-        )
-
-    return await client.backfill_enabled_channels(
-        limit_per_channel=limit,
-        oldest_first=oldest_first,
-        after=after_dt,
-        before=before_dt,
+    persist_backfill_window_for_targets(
+        session,
+        channel_ids=target_channel_ids,
+        after_dt=after_dt,
+        before_dt=before_dt,
     )
+    queued_message = queue_backfill_request(
+        session,
+        request,
+        channel_id=channel_id,
+        after_dt=after_dt,
+        before_dt=before_dt,
+        limit=limit,
+        oldest_first=oldest_first,
+    )
+    trigger_backfill_claim_attempt(get_discord_client())
+    return {"ok": True, "queued": True, "message": queued_message.replace("+", " ")}
 
 
 @app.post("/admin/backfill/form")
@@ -2975,64 +5338,45 @@ async def admin_backfill_form(
                 url="/table?error=No+backfill-enabled+watched+channels+are+available+for+this+request",
                 status_code=303,
             )
-        client = get_discord_client()
-        if client is None or not client.is_ready():
-            persist_backfill_window_for_targets(
-                session,
-                channel_ids=target_channel_ids,
-                after_dt=after_dt,
-                before_dt=before_dt,
-            )
-            queued_message = queue_backfill_request(
-                session,
-                request,
-                channel_id=channel_id,
-                after_dt=after_dt,
-                before_dt=before_dt,
-                limit=limit,
-                oldest_first=oldest_first,
-            )
-            return RedirectResponse(url=f"/table?success={queued_message}", status_code=303)
-        if channel_id:
-            result = await client.backfill_channel(
-                channel_id=int(channel_id),
-                limit=limit,
-                oldest_first=oldest_first,
-                after=after_dt,
-                before=before_dt,
-            )
-            if result.get("ok"):
-                persist_backfill_window_for_targets(
-                    session,
-                    channel_ids=target_channel_ids,
-                    after_dt=after_dt,
-                    before_dt=before_dt,
-                )
-                channel_name = result.get("channel_name") or result.get("channel_id")
-                msg = f"Backfill complete for {channel_name}: inserted={result.get('inserted', 0)}, skipped={result.get('skipped', 0)}"
-                return RedirectResponse(url=f"/table?success={msg}", status_code=303)
-
-            return RedirectResponse(url=f"/table?error={result.get('error', 'Backfill failed')}", status_code=303)
-
-        result = await client.backfill_enabled_channels(
-            limit_per_channel=limit,
-            oldest_first=oldest_first,
-            after=after_dt,
-            before=before_dt,
-        )
-        if not result.get("ok"):
-            return RedirectResponse(url="/table?error=Backfill+failed+for+one+or+more+channels", status_code=303)
         persist_backfill_window_for_targets(
             session,
             channel_ids=target_channel_ids,
             after_dt=after_dt,
             before_dt=before_dt,
         )
-        msg = f"Backfill complete: inserted={result.get('total_inserted', 0)}, skipped={result.get('total_skipped', 0)}"
-        return RedirectResponse(url=f"/table?success={msg}", status_code=303)
+        queued_message = queue_backfill_request(
+            session,
+            request,
+            channel_id=channel_id,
+            after_dt=after_dt,
+            before_dt=before_dt,
+            limit=limit,
+            oldest_first=oldest_first,
+        )
+        trigger_backfill_claim_attempt(get_discord_client())
+        return RedirectResponse(url=f"/table?success={queued_message}", status_code=303)
 
     except Exception as e:
         return RedirectResponse(url=f"/table?error={str(e)}", status_code=303)
+
+
+@app.post("/admin/backfill/cancel")
+def admin_cancel_backfill(
+    request: Request,
+    request_id: int = Form(...),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "admin"):
+        return denial
+
+    ok, message = cancel_backfill_request(
+        session,
+        request_id,
+        requested_by=current_user_label(request),
+    )
+    destination = "success" if ok else "error"
+    encoded_message = message.replace(" ", "+")
+    return RedirectResponse(url=f"/table?{destination}={encoded_message}", status_code=303)
 
 
 @app.get("/table", response_class=HTMLResponse)
@@ -3040,6 +5384,8 @@ def messages_table(
     request: Request,
     status: Optional[str] = Query(default=None),
     channel_id: Optional[str] = Query(default=None),
+    expense_category: Optional[str] = Query(default=None),
+    source: Optional[str] = Query(default=REPORT_SOURCE_ALL),
     after: Optional[str] = Query(default=None),
     before: Optional[str] = Query(default=None),
     sort_by: str = Query(default="time"),
@@ -3052,45 +5398,67 @@ def messages_table(
 ):
     if denial := require_role_response(request, "admin"):
         return denial
-    rows, total_rows = get_message_rows(
-        session,
-        status=status,
-        channel_id=channel_id,
-        after=after,
-        before=before,
-        sort_by=sort_by,
-        sort_dir=sort_dir,
-        page=page,
-        limit=limit,
-    )
-    items = build_message_list_items(session, rows)
+    selected_source = normalize_report_source(source)
+    shopify_table_only = selected_source == REPORT_SOURCE_SHOPIFY
+
+    if shopify_table_only:
+        rows = []
+        total_rows = 0
+        items = []
+    else:
+        rows, total_rows = get_message_rows(
+            session,
+            status=status,
+            channel_id=channel_id,
+            expense_category=expense_category,
+            after=after,
+            before=before,
+            sort_by=sort_by,
+            sort_dir=sort_dir,
+            page=page,
+            limit=limit,
+        )
+        items = build_message_list_items(session, rows, expense_category=expense_category)
     channels = get_channel_filter_choices(session)
-    summary = get_summary(
-        session,
-        status=status,
-        channel_id=channel_id,
-        after=after,
-        before=before,
+    expense_category_options = get_expense_category_filter_choices(session)
+    summary = (
+        get_summary(
+            session,
+            status=status,
+            channel_id=channel_id,
+            expense_category=expense_category,
+            after=after,
+            before=before,
+        )
+        if not shopify_table_only
+        else {"total": 0, "parsed": 0, "needs_review": 0, "failed": 0, "queued": 0, "processing": 0, "ignored": 0, "with_images": 0}
     )
     watched_channels = get_watched_channels(session)
     available_discord_channels, has_live_available_discord_channels = get_available_channel_choices(session)
     watched_channel_groups = build_watched_channel_groups(watched_channels, available_discord_channels)
-    financial_rows = get_financial_rows(
-        session,
-        start=parse_report_datetime(after),
-        end=parse_report_datetime(before, end_of_day=True),
-        channel_id=channel_id,
-    )
-    financial_summary = build_financial_summary(financial_rows)
+    if shopify_table_only:
+        financial_summary = build_financial_summary([])
+    else:
+        financial_rows = get_financial_rows(
+            session,
+            start=parse_report_datetime(after),
+            end=parse_report_datetime(before, end_of_day=True),
+            channel_id=channel_id,
+        )
+        if expense_category:
+            financial_rows = [row for row in financial_rows if row.expense_category == expense_category]
+        financial_summary = build_financial_summary(financial_rows)
     recent_backfill_requests = serialize_backfill_requests(list_recent_backfill_requests(session))
     pagination = build_pagination(page=page, limit=limit, total_rows=total_rows)
     parser_progress = get_parser_progress(
         session,
         status=status,
         channel_id=channel_id,
+        expense_category=expense_category,
         after=after,
         before=before,
     )
+    review_shortcuts = []
 
     return templates.TemplateResponse(
         request,
@@ -3102,8 +5470,11 @@ def messages_table(
             "is_review_page": False,
             "rows": items,
             "channels": channels,
+            "expense_category_options": expense_category_options,
             "selected_channel_id": channel_id or "",
+            "selected_expense_category": expense_category or "",
             "selected_status": status or "",
+            "selected_source": selected_source,
             "selected_after": after or "",
             "selected_before": before or "",
             "selected_sort_by": sort_by or "time",
@@ -3127,6 +5498,11 @@ def messages_table(
             "payment_method_options": PAYMENT_METHOD_OPTIONS,
             "cash_direction_options": CASH_DIRECTION_OPTIONS,
             "category_options": CATEGORY_OPTIONS,
+            "review_shortcuts": review_shortcuts,
+            "shopify_source_notice": {
+                "link": build_shopify_orders_url(start=after or "", end=before or ""),
+                "message": "Shopify orders are on the Shopify Orders page.",
+            } if shopify_table_only else None,
         },
     )
 
@@ -3135,6 +5511,7 @@ def messages_table(
 def review_table(
     request: Request,
     channel_id: Optional[str] = Query(default=None),
+    expense_category: Optional[str] = Query(default=None),
     after: Optional[str] = Query(default=None),
     before: Optional[str] = Query(default=None),
     sort_by: str = Query(default="time"),
@@ -3151,6 +5528,7 @@ def review_table(
         session,
         status="review_queue",
         channel_id=channel_id,
+        expense_category=expense_category,
         after=after,
         before=before,
         sort_by=sort_by,
@@ -3158,16 +5536,21 @@ def review_table(
         page=page,
         limit=limit,
     )
-    items = build_message_list_items(session, rows)
+    items = build_message_list_items(session, rows, expense_category=expense_category)
     channels = get_channel_filter_choices(session)
+    expense_category_options = get_expense_category_filter_choices(session)
     summary = get_summary(
         session,
         status="review_queue",
         channel_id=channel_id,
+        expense_category=expense_category,
         after=after,
         before=before,
     )
-    financial_summary = build_financial_summary(get_financial_rows(session))
+    financial_rows = get_financial_rows(session)
+    if expense_category:
+        financial_rows = [row for row in financial_rows if (row.expense_category or "") == expense_category]
+    financial_summary = build_financial_summary(financial_rows)
     watched_channels = get_watched_channels(session)
     available_discord_channels, has_live_available_discord_channels = get_available_channel_choices(session)
     watched_channel_groups = build_watched_channel_groups(watched_channels, available_discord_channels)
@@ -3176,10 +5559,12 @@ def review_table(
         session,
         status="review_queue",
         channel_id=channel_id,
+        expense_category=expense_category,
         after=after,
         before=before,
     )
     pagination = build_pagination(page=page, limit=limit, total_rows=total_rows)
+    review_shortcuts = build_review_shortcuts(items)
 
     return templates.TemplateResponse(
         request,
@@ -3191,8 +5576,11 @@ def review_table(
             "is_review_page": True,
             "rows": items,
             "channels": channels,
+            "expense_category_options": expense_category_options,
             "selected_channel_id": channel_id or "",
+            "selected_expense_category": expense_category or "",
             "selected_status": "review_queue",
+            "selected_source": REPORT_SOURCE_DISCORD,
             "selected_after": after or "",
             "selected_before": before or "",
             "selected_sort_by": sort_by,
@@ -3216,6 +5604,8 @@ def review_table(
             "payment_method_options": PAYMENT_METHOD_OPTIONS,
             "cash_direction_options": CASH_DIRECTION_OPTIONS,
             "category_options": CATEGORY_OPTIONS,
+            "review_shortcuts": review_shortcuts,
+            "shopify_source_notice": None,
         },
     )
 
@@ -3224,6 +5614,7 @@ def review_table(
 def reviewer_queue_page(
     request: Request,
     channel_id: Optional[str] = Query(default=None),
+    expense_category: Optional[str] = Query(default=None),
     after: Optional[str] = Query(default=None),
     before: Optional[str] = Query(default=None),
     sort_by: str = Query(default="time"),
@@ -3240,6 +5631,7 @@ def reviewer_queue_page(
         session,
         status="review_queue",
         channel_id=channel_id,
+        expense_category=expense_category,
         after=after,
         before=before,
         sort_by=sort_by,
@@ -3247,13 +5639,15 @@ def reviewer_queue_page(
         page=page,
         limit=limit,
     )
-    items = build_message_list_items(session, rows)
+    items = build_message_list_items(session, rows, expense_category=expense_category)
     pagination = build_pagination(page=page, limit=limit, total_rows=total_rows)
     channels = get_channel_filter_choices(session)
+    expense_category_options = get_expense_category_filter_choices(session)
     summary = get_summary(
         session,
         status="review_queue",
         channel_id=channel_id,
+        expense_category=expense_category,
         after=after,
         before=before,
     )
@@ -3266,9 +5660,11 @@ def reviewer_queue_page(
             "title": "Review Queue",
             "rows": items,
             "channels": channels,
+            "expense_category_options": expense_category_options,
             "summary": summary,
             "pagination": pagination,
             "selected_channel_id": channel_id or "",
+            "selected_expense_category": expense_category or "",
             "selected_after": after or "",
             "selected_before": before or "",
             "selected_sort_by": sort_by,
@@ -3288,9 +5684,10 @@ def reviewer_queue_page(
 
 @app.get("/review/focus/{message_id}", response_class=HTMLResponse)
 def reviewer_focus_page(
-    message_id: int,
+    message_id: int,  # build_message_list_items supplies cached/proxy attachment URLs
     request: Request,
     channel_id: Optional[str] = Query(default=None),
+    expense_category: Optional[str] = Query(default=None),
     after: Optional[str] = Query(default=None),
     before: Optional[str] = Query(default=None),
     sort_by: str = Query(default="time"),
@@ -3307,13 +5704,12 @@ def reviewer_focus_page(
     if not row:
         raise HTTPException(status_code=404, detail="Message not found")
 
-    item = message_list_item(row)
-    item["attachment_urls"] = json.loads(row.attachment_urls_json or "[]")
-    item["grouped_messages"] = build_message_list_items(session, [row])[0]["grouped_messages"]
+    item = build_message_list_items(session, [row], expense_category=expense_category)[0]
     ordered_ids = get_ordered_message_ids(
         session,
         status="review_queue",
         channel_id=channel_id,
+        expense_category=expense_category,
         after=after,
         before=before,
         sort_by=sort_by,
@@ -3333,6 +5729,7 @@ def reviewer_focus_page(
             "success": success,
             "error": error,
             "selected_channel_id": channel_id or "",
+            "selected_expense_category": expense_category or "",
             "selected_after": after or "",
             "selected_before": before or "",
             "selected_sort_by": sort_by,
@@ -3347,6 +5744,7 @@ def reviewer_focus_page(
             "back_url": build_return_url(
                 "/review",
                 channel_id=channel_id,
+                expense_category=expense_category,
                 after=after,
                 before=before,
                 sort_by=sort_by,
@@ -3357,6 +5755,7 @@ def reviewer_focus_page(
             "previous_url": build_return_url(
                 f"/review/focus/{previous_id}",
                 channel_id=channel_id,
+                expense_category=expense_category,
                 after=after,
                 before=before,
                 sort_by=sort_by,
@@ -3367,6 +5766,7 @@ def reviewer_focus_page(
             "next_url": build_return_url(
                 f"/review/focus/{next_id}",
                 channel_id=channel_id,
+                expense_category=expense_category,
                 after=after,
                 before=before,
                 sort_by=sort_by,

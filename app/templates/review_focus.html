@@ -127,6 +127,7 @@
                     <input type="hidden" name="return_path" value="/review/focus/{{ message['id'] }}">
                     <input type="hidden" name="status" value="review_queue">
                     <input type="hidden" name="channel_id" value="{{ selected_channel_id }}">
+                    <input type="hidden" name="filter_expense_category" value="{{ selected_expense_category }}">
                     <input type="hidden" name="after" value="{{ selected_after }}">
                     <input type="hidden" name="before" value="{{ selected_before }}">
                     <input type="hidden" name="sort_by" value="{{ selected_sort_by }}">
@@ -140,14 +141,16 @@
                         <label>Parsed Type<select name="deal_type">{% for option in deal_type_options %}<option value="{{ option }}" {% if (message["type"] or "") == option %}selected{% endif %}>{{ option or "blank" }}</option>{% endfor %}</select></label>
                         <label>Cash<input type="text" name="amount" value="{{ message['amount'] if message['amount'] is not none else '' }}"></label>
                         <label>Payment<select name="payment_method">{% for option in payment_method_options %}<option value="{{ option }}" {% if (message["payment"] or "") == option %}selected{% endif %}>{{ option or "blank" }}</option>{% endfor %}</select></label>
-                        <label>Cash Direction<select name="cash_direction">{% for option in cash_direction_options %}<option value="{{ option }}" {% if (message["cash_direction"] or "") == option %}selected{% endif %}>{{ option or "blank" }}</option>{% endfor %}</select></label>
+                        <label>Cash Direction (trade only)<select name="cash_direction">{% for option in cash_direction_options %}<option value="{{ option }}" {% if (message["cash_direction"] or "") == option %}selected{% endif %}>{{ option or "blank" }}</option>{% endfor %}</select></label>
                         <label>Category<select name="category">{% for option in category_options %}<option value="{{ option }}" {% if (message["category"] or "") == option %}selected{% endif %}>{{ option or "blank" }}</option>{% endfor %}</select></label>
+                        <label>Expense Category<input type="text" name="expense_category" value="{{ message['expense_category'] or '' }}" placeholder="leave blank for auto"></label>
                         <label class="field-wide">Notes<textarea name="notes">{{ message["notes"] or "" }}</textarea></label>
                     </div>
                     <div class="action-row" style="margin-top:14px;">
                         <button type="submit" class="secondary-button" formaction="/messages/{{ message['id'] }}/approve-form" formmethod="post">Approve</button>
                         <button type="submit" class="secondary-button">Save</button>
                         <button type="submit" name="approve_after_save" value="true" class="primary-button">Save & Approve</button>
+                        <button type="submit" class="secondary-button" formaction="/messages/{{ message['id'] }}/disregard-form" formmethod="post">Disregard</button>
                         {% if next_url %}<a class="button secondary-button" href="{{ next_url }}">Skip to Next</a>{% endif %}
                     </div>
                 </form>

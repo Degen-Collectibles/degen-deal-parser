@@ -52,18 +52,7 @@
 </head>
 <body>
     <div class="page">
-        <div class="workspace-nav">
-            <div>
-                <strong>Deal ledger</strong>
-                <div class="small">Read-only browsing for day-to-day store activity and deal lookup.</div>
-            </div>
-            <div class="nav-links">
-                <a class="button secondary-button" href="/dashboard">Dashboard</a>
-                <a class="button secondary-button" href="/reports">Reports</a>
-                {% if current_user and current_user.role in ["admin","reviewer"] %}<a class="button secondary-button" href="/review">Review</a>{% endif %}
-                {% if current_user and current_user.role == "admin" %}<a class="button secondary-button" href="/admin">Admin</a>{% endif %}
-            </div>
-        </div>
+        {% include "_workspace_nav.html" %}
         <section class="hero">
             <img class="logo" src="/static/degen-logo.png" alt="Degen Collectibles logo">
             <div>

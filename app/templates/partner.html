@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>{{ title }}</title>
+    <style>
+        :root { --bg:#f4ebdf; --card:#fff9f2; --card-strong:#fffdf8; --line:#deccb6; --text:#24170f; --muted:#6b5849; --accent:#d55338; --accent-strong:#9f311d; --shadow:0 20px 44px rgba(77,46,20,.13); }
+        * { box-sizing:border-box; }
+        body { margin:0; font-family:"Aptos","Trebuchet MS","Segoe UI",sans-serif; color:var(--text); background:radial-gradient(circle at top left, rgba(240,196,107,.24), transparent 24%), linear-gradient(180deg,#fcf7f0 0%, var(--bg) 100%); }
+        a { color:inherit; text-decoration:none; }
+        .page { max-width:880px; margin:0 auto; padding:16px; }
+        .hero, .card, .list-row, .total-row { background:linear-gradient(180deg, var(--card-strong), var(--card)); border:1px solid var(--line); box-shadow:var(--shadow); }
+        .hero, .card { border-radius:24px; }
+        .hero { padding:24px; margin-bottom:16px; }
+        .card { padding:18px; margin-bottom:16px; }
+        .eyebrow, .pill { display:inline-flex; align-items:center; padding:6px 10px; border-radius:999px; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; }
+        .eyebrow { background:rgba(37,28,22,.06); color:var(--accent-strong); }
+        .pill { background:#f5eadc; color:var(--muted); }
+        .pill.warn { background:#fff1d7; color:#8a580d; }
+        .pill.ok { background:#e7f5ee; color:#11543d; }
+        .pill.info { background:#e7f1fb; color:#184f88; }
+        h1, .section-title { font-family:"Georgia","Cambria","Times New Roman",serif; }
+        h1 { margin:10px 0 8px; font-size:clamp(32px,7vw,48px); line-height:.95; letter-spacing:-.04em; }
+        p, .small { color:var(--muted); line-height:1.5; }
+        .actions, .meta-row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+        .button { display:inline-flex; align-items:center; border-radius:16px; padding:11px 15px; font-weight:800; border:1px solid var(--line); background:linear-gradient(180deg,#fffdfa,#fff4e8); }
+        .primary-button { background:linear-gradient(135deg,var(--accent-strong),#df623f 55%, #f0875e); color:#fff; border:none; }
+        .section-title { margin:0 0 6px; font-size:24px; letter-spacing:-.04em; }
+        .section-subtitle { margin:0 0 14px; color:var(--muted); }
+        .list { display:grid; gap:12px; }
+        .list-row { display:block; border-radius:18px; padding:14px; }
+        .row-top, .row-bottom { display:flex; gap:10px; justify-content:space-between; align-items:flex-start; }
+        .row-bottom { margin-top:8px; flex-wrap:wrap; }
+        .amount { font-weight:800; white-space:nowrap; }
+        .message { margin-top:8px; color:var(--text); line-height:1.5; }
+        .totals { display:grid; gap:12px; }
+        .total-row { border-radius:18px; padding:14px; display:grid; grid-template-columns:1fr auto auto; gap:12px; align-items:center; }
+        .total-label { font-weight:800; }
+        .search-form { display:grid; gap:10px; }
+        .search-form input { width:100%; padding:12px 14px; border:1px solid var(--line); border-radius:14px; font:inherit; }
+        @media (max-width:640px){
+            .page { padding:14px; }
+            .row-top, .row-bottom, .total-row { grid-template-columns:1fr; display:grid; }
+            .amount { white-space:normal; }
+        }
+    </style>
+</head>
+<body>
+    <div class="page">
+        <section class="hero">
+            <div class="eyebrow">Partner View</div>
+            <h1>{{ title }}</h1>
+            <p>Daily store snapshot for recent deal activity, Shopify orders, and sales totals in one place.</p>
+            <div class="actions">
+                <a class="button primary-button" href="/deals">Open Deals</a>
+                <a class="button" href="/reports">Open Reports</a>
+            </div>
+        </section>
+
+        <section class="card">
+            <h2 class="section-title">Needs Attention</h2>
+            <p class="section-subtitle">Discord deals that still need a closer look.</p>
+            <div class="list-row">
+                <div class="row-top">
+                    <div>
+                        <strong>{{ needs_attention_count }}</strong> deal{{ "" if needs_attention_count == 1 else "s" }} need attention
+                    </div>
+                    <span class="pill warn">Review needed</span>
+                </div>
+            </div>
+        </section>
+
+        <section class="card">
+            <h2 class="section-title">Recent Deals</h2>
+            <p class="section-subtitle">The latest confirmed Discord deals.</p>
+            <div class="list">
+                {% for row in recent_deals %}
+                <a class="list-row" href="/deals/{{ row['id'] }}">
+                    <div class="row-top">
+                        <div>
+                            <strong>{{ row["channel"] or row["channel_id"] }}</strong>
+                            <div class="small">{{ row["time"] }}</div>
+                        </div>
+                        {% if row["amount_display"] %}<div class="amount">{{ row["amount_display"] }}</div>{% endif %}
+                    </div>
+                    <div class="row-bottom">
+                        <span class="pill">{{ row["entry_kind"] or "unknown" }}</span>
+                        {% if row["payment_display"] %}<span class="pill">{{ row["payment_display"] }}</span>{% endif %}
+                    </div>
+                    <div class="message">{{ row["message"] or "(image-only message)" }}</div>
+                </a>
+                {% else %}
+                <div class="list-row">
+                    <div class="small">No recent Discord deals yet.</div>
+                </div>
+                {% endfor %}
+            </div>
+        </section>
+
+        <section class="card">
+            <h2 class="section-title">Shopify Orders</h2>
+            <p class="section-subtitle">Recent paid online orders.</p>
+            {% if not shopify_connected %}
+            <div class="list-row">
+                <div class="small">{{ shopify_message }}</div>
+            </div>
+            {% elif shopify_orders %}
+            <div class="list">
+                {% for order in shopify_orders %}
+                <a class="list-row" href="#">
+                    <div class="row-top">
+                        <div>
+                            <strong>#{{ order["order_number"] }}</strong>
+                            <div class="small">{{ order["created_at"] }}</div>
+                        </div>
+                        <div class="amount">${{ "%.2f"|format(order["total_price"]) }}</div>
+                    </div>
+                    <div class="row-bottom">
+                        <div>{{ order["customer_name"] }}</div>
+                        <span class="pill {% if order['fulfillment_label'] == 'Shipped' %}ok{% elif order['fulfillment_label'] == 'Partial' %}info{% else %}warn{% endif %}">{{ order["fulfillment_label"] }}</span>
+                    </div>
+                </a>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="list-row">
+                <div class="small">No Shopify orders yet - orders will appear here automatically.</div>
+            </div>
+            {% endif %}
+        </section>
+
+        <section class="card">
+            <h2 class="section-title">Sales Totals</h2>
+            <p class="section-subtitle">Today and this week across Discord and Shopify.</p>
+            <div class="totals">
+                <div class="total-row">
+                    <div class="total-label">Discord</div>
+                    <div>${{ "%.2f"|format(sales_totals["discord_today"]) }} today</div>
+                    <div>${{ "%.2f"|format(sales_totals["discord_week"]) }} this week</div>
+                </div>
+                <div class="total-row">
+                    <div class="total-label">Shopify</div>
+                    <div>${{ "%.2f"|format(sales_totals["shopify_today"]) }} today</div>
+                    <div>${{ "%.2f"|format(sales_totals["shopify_week"]) }} this week</div>
+                </div>
+                <div class="total-row">
+                    <div class="total-label">Total</div>
+                    <div>${{ "%.2f"|format(sales_totals["total_today"]) }} today</div>
+                    <div>${{ "%.2f"|format(sales_totals["total_week"]) }} this week</div>
+                </div>
+            </div>
+        </section>
+
+        <section class="card">
+            <h2 class="section-title">Quick Search</h2>
+            <p class="section-subtitle">Jump straight into the deal list.</p>
+            <form class="search-form" method="get" action="/deals">
+                <input type="date" name="after" aria-label="After date">
+                <input type="date" name="before" aria-label="Before date">
+                <button class="button" type="submit">Search Deals</button>
+            </form>
+        </section>
+    </div>
+</body>
+</html>

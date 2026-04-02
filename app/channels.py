@@ -139,6 +139,26 @@ def get_channel_filter_choices(session: Session) -> list[dict]:
     return sorted(choices.values(), key=lambda row: row["channel_name"].lower())
 
 
+def get_expense_category_filter_choices(session: Session) -> list[str]:
+    rows = session.exec(
+        select(DiscordMessage.expense_category)
+        .where(DiscordMessage.expense_category != None)  # noqa: E711
+        .where(DiscordMessage.expense_category != "")
+        .distinct()
+        .order_by(DiscordMessage.expense_category.asc())
+    ).all()
+
+    choices = sorted(
+        {
+            str(value).strip()
+            for value in rows
+            if value and str(value).strip()
+        },
+        key=lambda value: value.lower(),
+    )
+    return choices
+
+
 def get_available_channel_choices(session: Session) -> tuple[list[dict], bool]:
     available = list_available_discord_channels()
     if available:

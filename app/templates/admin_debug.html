@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>{{ title }}</title>
+    <style>
+        :root { --bg:#f5eee4; --card:#fffaf4; --line:#dccdbb; --text:#241b15; --muted:#6c5d50; --good:#11543d; --warn:#8a580d; --bad:#8e2722; --shadow:0 18px 36px rgba(77,46,20,.12); }
+        * { box-sizing:border-box; }
+        body { margin:0; font-family:"Trebuchet MS","Segoe UI",sans-serif; color:var(--text); background:radial-gradient(circle at top left, rgba(240,196,107,.22), transparent 26%), linear-gradient(180deg,#fcf8f2 0%, var(--bg) 100%); }
+        a { color:inherit; text-decoration:none; }
+        .page { max-width:1440px; margin:0 auto; padding:20px; }
+        .workspace-nav, .nav-links, .hero-meta { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+        .workspace-nav { justify-content:space-between; margin-bottom:14px; padding:12px 16px; border:1px solid var(--line); border-radius:20px; background:rgba(255,250,244,.88); box-shadow:0 14px 28px rgba(77,46,20,.08); position:sticky; top:12px; z-index:5; backdrop-filter:blur(10px); }
+        .nav-links { justify-content:flex-end; }
+        .hero, .card { background:var(--card); border:1px solid var(--line); border-radius:24px; box-shadow:var(--shadow); }
+        .hero { display:grid; grid-template-columns:minmax(180px,250px) 1fr; gap:24px; align-items:center; padding:24px; margin-bottom:18px; background:radial-gradient(circle at 15% 20%, rgba(255,216,139,.5), transparent 24%), linear-gradient(135deg, rgba(255,248,236,.96), rgba(255,240,228,.92)); }
+        .logo { width:100%; max-width:220px; display:block; margin:0 auto; }
+        .eyebrow, .pill { display:inline-flex; align-items:center; padding:6px 10px; border-radius:999px; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; }
+        .eyebrow { background:rgba(37,28,22,.06); color:var(--muted); width:fit-content; }
+        .pill { background:#f5eadc; color:var(--muted); }
+        .pill.good { background:#e7f5ee; color:var(--good); }
+        .pill.warn { background:#fff1d7; color:var(--warn); }
+        .pill.bad { background:#fde8e6; color:var(--bad); }
+        h1 { margin:10px 0 8px; font-size:clamp(32px,4vw,50px); line-height:.95; letter-spacing:-.04em; }
+        h2 { margin:0; font-size:24px; letter-spacing:-.04em; }
+        p, .small, .muted { color:var(--muted); line-height:1.5; }
+        .button { display:inline-flex; align-items:center; border-radius:14px; padding:10px 14px; background:#fff; border:1px solid var(--line); font-weight:800; }
+        .metric-grid, .double-grid, .table-grid { display:grid; gap:12px; }
+        .metric-grid { grid-template-columns:repeat(6,minmax(0,1fr)); margin-bottom:18px; }
+        .double-grid { grid-template-columns:1fr 1fr; }
+        .metric, .card { padding:18px; }
+        .metric { background:rgba(255,255,255,.72); border:1px solid var(--line); border-radius:18px; }
+        .metric-label { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.08em; margin-bottom:8px; font-weight:800; }
+        .metric-value { font-size:28px; font-weight:800; letter-spacing:-.04em; }
+        .list { display:grid; gap:10px; }
+        .item, .row { padding:12px 0; border-top:1px solid #eee3d3; }
+        .item:first-child, .row:first-child { border-top:none; padding-top:0; }
+        .row-title { font-weight:800; }
+        .action-row { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+        .table-grid { grid-template-columns:1.1fr .9fr .7fr .9fr .6fr 1.3fr; }
+        .table-head { font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); font-weight:800; padding-bottom:10px; border-bottom:1px solid #e8ddcf; }
+        .path { word-break:break-all; }
+        @media (max-width:1100px){ .hero, .metric-grid, .double-grid, .table-grid { grid-template-columns:1fr; } .page { padding:16px 14px 28px; } .workspace-nav { position:static; } .hero { text-align:center; } .eyebrow { margin:0 auto; } }
+    </style>
+</head>
+<body>
+    <div class="page">
+        {% include "_workspace_nav.html" %}
+
+        <section class="hero">
+            <img class="logo" src="/static/degen-logo.png" alt="Degen Collectibles logo">
+            <div>
+                <div class="eyebrow">Debug Workflow</div>
+                <h1>Debug Console</h1>
+                <div style="margin-bottom:10px;"><span class="pill">Operator View</span></div>
+                <p>Start here when the queue looks stuck or the worker might be down. The goal is to make diagnosis obvious before you touch code.</p>
+                <div class="hero-meta">
+                    <span class="pill {% if debug['app_runtime']['needs_attention'] %}warn{% else %}good{% endif %}">App {{ debug["app_runtime"]["label"] }}</span>
+                    <span class="pill {% if debug['worker_runtime']['needs_attention'] %}warn{% else %}good{% endif %}">Worker {{ debug["worker_runtime"]["label"] }}</span>
+                    <span class="pill {% if debug['stuck_processing'] %}bad{% else %}good{% endif %}">{{ debug["stuck_processing"]|length }} stuck</span>
+                </div>
+            </div>
+        </section>
+
+        <div class="metric-grid">
+            <div class="metric"><div class="metric-label">Pending</div><div class="metric-value">{{ debug["queue_counts"]["pending"] }}</div></div>
+            <div class="metric"><div class="metric-label">Processing</div><div class="metric-value">{{ debug["queue_counts"]["processing"] }}</div></div>
+            <div class="metric"><div class="metric-label">Parsed</div><div class="metric-value">{{ debug["queue_counts"]["parsed"] }}</div></div>
+            <div class="metric"><div class="metric-label">Review Required</div><div class="metric-value">{{ debug["queue_counts"]["review_required"] }}</div></div>
+            <div class="metric"><div class="metric-label">Failed</div><div class="metric-value">{{ debug["queue_counts"]["failed"] }}</div></div>
+            <div class="metric"><div class="metric-label">Ignored</div><div class="metric-value">{{ debug["queue_counts"]["ignored"] }}</div></div>
+        </div>
+
+        <div class="double-grid">
+            <div class="card">
+                <h2>Runtime Split</h2>
+                <div class="list">
+                    <div class="item"><strong>App heartbeat:</strong> <span class="pill {% if debug['app_runtime']['needs_attention'] %}warn{% else %}good{% endif %}">{{ debug["app_runtime"]["label"] }}</span> <span class="small">{{ debug["app_runtime"]["updated_at_label"] }}</span></div>
+                    <div class="item"><strong>Worker heartbeat:</strong> <span class="pill {% if debug['worker_runtime']['needs_attention'] %}warn{% else %}good{% endif %}">{{ debug["worker_runtime"]["label"] }}</span> <span class="small">{{ debug["worker_runtime"]["updated_at_label"] }}</span></div>
+                    <div class="item"><strong>App host:</strong> {{ debug["app_runtime"]["host_name"] or "unknown" }}</div>
+                    <div class="item"><strong>Worker host:</strong> {{ debug["worker_runtime"]["host_name"] or "unknown" }}</div>
+                    <div class="item"><strong>App log:</strong> <span class="path">{{ debug["log_paths"]["app"] }}</span></div>
+                    <div class="item"><strong>Worker log:</strong> <span class="path">{{ debug["log_paths"]["worker"] }}</span></div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>Queue Notes</h2>
+                <div class="list">
+                    <div class="item"><strong>Backlog:</strong> {{ debug["queue_counts"]["pending"] + debug["queue_counts"]["processing"] }}</div>
+                    <div class="item"><strong>Stale threshold:</strong> {{ debug["parser_progress"]["stale_threshold_minutes"] }} minutes</div>
+                    <div class="item"><strong>Oldest processing age:</strong> {{ debug["parser_progress"]["oldest_processing_age_label"] }}</div>
+                    <div class="item"><strong>Stale processing count:</strong> {{ debug["parser_progress"]["stale_processing"] }}</div>
+                    <div class="item"><strong>Worker draining queue:</strong> <span class="pill {% if debug['worker_actively_draining_queue'] %}good{% else %}warn{% endif %}">{{ "Yes" if debug["worker_actively_draining_queue"] else "No" }}</span></div>
+                    <div class="item"><strong>Recent worker failures:</strong> {{ debug["recent_worker_failures"]|length }}</div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>Stuck Processing</h2>
+                {% if debug["stuck_processing"] %}
+                <div class="table-grid table-head">
+                    <div>Message</div>
+                    <div>Channel</div>
+                    <div>Status</div>
+                    <div>Last Attempt</div>
+                    <div>Retries</div>
+                    <div>Latest Error</div>
+                </div>
+                {% for row in debug["stuck_processing"] %}
+                <div class="row table-grid">
+                    <div><div class="row-title">{{ row["message_id"] }}</div><div class="small">discord {{ row["discord_message_id"] or "n/a" }}</div></div>
+                    <div>{{ row["channel"] or row["channel_id"] or "unknown" }}</div>
+                    <div>{{ row["current_status"] }}</div>
+                    <div><div>{{ row["last_attempted_at_label"] }}</div><div class="small">updated {{ row["last_updated_label"] }}</div></div>
+                    <div>{{ row["retry_count"] }}</div>
+                    <div class="muted">{{ row["latest_error"] or "none" }}</div>
+                </div>
+                <div class="action-row">
+                    {% if row["action_links"]["open_row"] %}<a class="button" href="{{ row['action_links']['open_row'] }}">Open Row</a>{% endif %}
+                    {% if row["action_links"]["open_table"] %}<a class="button" href="{{ row['action_links']['open_table'] }}">Open Filtered Table</a>{% endif %}
+                    {% if row["action_links"]["open_review_queue"] %}<a class="button" href="{{ row['action_links']['open_review_queue'] }}">Open Review Queue</a>{% endif %}
+                </div>
+                {% endfor %}
+                {% else %}
+                <div class="small">No rows are currently beyond the processing timeout.</div>
+                {% endif %}
+            </div>
+
+            <div class="card">
+                <h2>Recent Worker Failures</h2>
+                <div class="list">
+                    {% for row in debug["recent_worker_failures"] %}
+                    <div class="item">
+                        <div class="small"><strong>{{ row["created_at"] }}</strong> | {{ row["event_type"] }} | {{ row["level"] }}</div>
+                        <div class="row-title">{{ row["message"] }}</div>
+                        <div class="muted">{{ row["details"].get("error") or row["details"].get("current_state") or "" }}</div>
+                        {% if row["action_links"] %}
+                        <div class="action-row">
+                            {% if row["action_links"]["open_row"] %}<a class="button" href="{{ row['action_links']['open_row'] }}">Open Row</a>{% endif %}
+                            {% if row["action_links"]["open_table"] %}<a class="button" href="{{ row['action_links']['open_table'] }}">Open Filtered Table</a>{% endif %}
+                            {% if row["action_links"]["open_review_queue"] %}<a class="button" href="{{ row['action_links']['open_review_queue'] }}">Open Review Queue</a>{% endif %}
+                        </div>
+                        {% endif %}
+                    </div>
+                    {% else %}
+                    <div class="small">No recent worker failures in the operations log.</div>
+                    {% endfor %}
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>Recent Backfill Failures</h2>
+                <div class="list">
+                    {% for row in debug["recent_backfill_failures"] %}
+                    <div class="item">
+                        <div class="small"><strong>{{ row["created_at"] }}</strong> | {{ row["event_type"] }}</div>
+                        <div class="row-title">{{ row["message"] }}</div>
+                        <div class="muted">{{ row["details"].get("error") or row["details"].get("channel_id") or "" }}</div>
+                    </div>
+                    {% else %}
+                    <div class="small">No recent backfill failures recorded.</div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

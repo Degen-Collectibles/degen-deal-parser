@@ -9,7 +9,7 @@
         body { margin:0; font-family:"Aptos","Trebuchet MS","Segoe UI",sans-serif; color:var(--text); background:radial-gradient(circle at top left, rgba(240,196,107,.26), transparent 24%), radial-gradient(circle at 84% 10%, rgba(213,83,56,.10), transparent 18%), linear-gradient(180deg,#fcf7f0 0%, var(--bg) 46%, var(--bg-deep) 100%); }
         a { color:inherit; text-decoration:none; }
         .page { max-width:1360px; margin:0 auto; padding:20px; }
-        .workspace-nav, .nav-links, .hero-meta, .section-header { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+        .workspace-nav, .nav-links, .hero-meta, .section-header, .metric-grid, .details-summary, .table-actions { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
         .workspace-nav { justify-content:space-between; margin-bottom:14px; padding:12px 16px; border:1px solid rgba(159,49,29,.12); border-radius:20px; background:linear-gradient(180deg, rgba(255,253,248,.94), rgba(255,247,238,.82)); box-shadow:0 14px 28px rgba(77,46,20,.08); position:sticky; top:12px; z-index:5; backdrop-filter:blur(10px); }
         .nav-links { justify-content:flex-end; }
         .hero, .card { background:linear-gradient(180deg, var(--card-strong), var(--card)); border:1px solid var(--line); border-radius:24px; box-shadow:var(--shadow); }
@@ -41,45 +41,59 @@
         .list { display:grid; gap:10px; }
         .item { padding:12px 0; border-top:1px solid #eee3d3; }
         .item:first-child { border-top:none; padding-top:0; }
-        @media (max-width:1000px){ .hero, .grid, .layout { grid-template-columns:1fr; } .page { padding:16px 14px 28px; } .eyebrow { margin:0 auto; } .hero { text-align:center; } .workspace-nav { position:static; } }
+        .action-row { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+        .metrics { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:10px; margin-top:10px; }
+        table { width:100%; border-collapse:collapse; }
+        th, td { padding:10px 8px; border-top:1px solid #eadfce; text-align:left; vertical-align:top; }
+        th { border-top:none; font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); }
+        .error { color:#8e2722; }
+        .warn-text { color:#8a580d; }
+        .muted { color:var(--muted); }
+        details.card { padding:0; overflow:hidden; }
+        details.card[open] { padding-bottom:18px; }
+        summary { list-style:none; cursor:pointer; padding:18px; }
+        summary::-webkit-details-marker { display:none; }
+        .details-summary { justify-content:space-between; }
+        .details-body { padding:0 18px; }
+        pre { margin:0; padding:14px; border:1px solid var(--line); border-radius:18px; background:rgba(255,255,255,.72); overflow:auto; white-space:pre-wrap; word-break:break-word; }
+        .table-actions { margin-top:8px; }
+        @media (max-width:1000px){ .hero, .grid, .layout, .metrics { grid-template-columns:1fr; } .page { padding:16px 14px 28px; } .eyebrow { margin:0 auto; } .hero { text-align:center; } .workspace-nav { position:static; } table, thead, tbody, th, td, tr { display:block; } thead { display:none; } td { border-top:none; padding:6px 0; } tr { border-top:1px solid #eadfce; padding:8px 0; } }
     </style>
 </head>
 <body>
     <div class="page">
-        <div class="workspace-nav">
-            <div>
-                <strong>Operations status</strong>
-                <div class="small">Fast health check for the database, worker heartbeat, and parser queue movement.</div>
-            </div>
-            <div class="nav-links">
-                <a class="button" href="/dashboard">Dashboard</a>
-                <a class="button" href="/admin">Admin</a>
-                <a class="button" href="/table">Table</a>
-                <a class="button" href="/ops-log">Ops Log</a>
-            </div>
+        {% include "_workspace_nav.html" %}
+        <div style="margin-bottom:14px;">
+            <a class="button" href="/dashboard">&larr; Dashboard</a>
         </div>
         <section class="hero">
             <img class="logo" src="/static/degen-logo.png" alt="Degen Collectibles logo">
             <div>
                 <div class="eyebrow">Operations Health</div>
-                <h1>{{ title }}</h1>
-      <p>Use this page to quickly tell whether the shared database is reachable, whether the ingest worker is actually alive, and whether the parser queue is moving.</p>
+                <h1>Operations Status</h1>
+                <div style="margin-bottom:10px;"><span class="pill">Operator View</span></div>
+                <p>Use this page to quickly tell whether the database is reachable, whether the web UI is alive, and whether the separate worker process is running Discord ingest and parser work.</p>
                 <div class="actions">
                     <a class="button" href="/dashboard">Dashboard</a>
                     <a class="button" href="/admin">Admin Hub</a>
+                    <a class="button" href="#queue-summary">Queue Summary</a>
+                    <a class="button" href="#recent-reparse">Recent Reparse</a>
+                    <a class="button" href="#debug-detail">Debug Detail</a>
                     <a class="button" href="/table">Admin Table</a>
                     <a class="button" href="/review">Review Queue</a>
                     <a class="button" href="/ops-log">Ops Log</a>
                 </div>
                 <div class="hero-meta">
                     <span class="scope-chip">{{ "database ok" if snapshot["db_ok"] else "database issue" }}</span>
-                    <span class="scope-chip">{{ "queue moving" if snapshot["queue_is_moving"] else "queue stalled" }}</span>
+                    <span class="scope-chip">{{ snapshot["queue_state_label"].lower() }}</span>
+                    <span class="scope-chip">{{ snapshot["recent_message_recovery"]["status_label"].lower() }}</span>
+                    <span class="scope-chip">{{ snapshot["stitch_recovery"]["status_label"].lower() }}</span>
                 </div>
             </div>
         </section>
 
-        {% if snapshot["local_runtime"]["needs_attention"] %}
-        <div class="banner">{{ snapshot["local_runtime"]["alert_message"] }}</div>
+        {% if snapshot["split_runtime_notice"] %}
+        <div class="banner">{{ snapshot["split_runtime_notice"] }}</div>
         {% endif %}
 
         <div class="grid">
@@ -88,11 +102,15 @@
                 <div class="metric-value">{{ "Healthy" if snapshot["db_ok"] else "Down" }}</div>
             </div>
             <div class="metric">
-          <div class="metric-label">Ingest Worker</div>
-                <div class="metric-value">{{ snapshot["local_runtime"]["label"] }}</div>
+                <div class="metric-label">Web UI</div>
+                <div class="metric-value">{{ snapshot["app_runtime"]["label"] }}</div>
             </div>
             <div class="metric">
-                <div class="metric-label">Queued</div>
+                <div class="metric-label">Worker Process</div>
+                <div class="metric-value">{{ snapshot["worker_runtime"]["label"] }}</div>
+            </div>
+            <div class="metric">
+                <div class="metric-label">Pending</div>
                 <div class="metric-value">{{ snapshot["parser_progress"]["queued"] }}</div>
             </div>
             <div class="metric">
@@ -101,21 +119,25 @@
             </div>
         </div>
 
-        <div class="layout">
+        <div class="layout" id="runtime-health">
             <div class="card">
                 <div class="section-header">
                     <div>
-                        <h2 class="section-title">Runtime</h2>
-                        <div class="section-subtitle">Heartbeat, host, and feature flags for the local ingest/parser runtime.</div>
+                        <h2 class="section-title">Runtime Health</h2>
+                        <div class="section-subtitle">Heartbeat, host, feature flags, and recent-message recovery for the web UI and worker processes.</div>
                     </div>
                 </div>
                 <div class="list">
-                    <div class="item"><strong>Heartbeat:</strong> <span class="pill {% if snapshot['local_runtime']['needs_attention'] %}warn{% else %}ok{% endif %}">{{ snapshot["local_runtime"]["label"] }}</span></div>
-                    <div class="item"><strong>Host:</strong> {{ snapshot["local_runtime"]["host_name"] or "unknown" }}</div>
-                    <div class="item"><strong>Last heartbeat:</strong> {{ snapshot["local_runtime"]["updated_at_label"] }}</div>
-                    <div class="item"><strong>Discord ingest enabled:</strong> {{ "Yes" if snapshot["runtime_flags"]["discord_ingest_enabled"] else "No" }}</div>
-                    <div class="item"><strong>Parser worker enabled:</strong> {{ "Yes" if snapshot["runtime_flags"]["parser_worker_enabled"] else "No" }}</div>
-                    <div class="item"><strong>Discord runtime:</strong> {{ snapshot["local_runtime"]["details"].get("discord_status", "unknown") }}</div>
+                    <div class="item"><strong>Web UI:</strong> <span class="pill {% if snapshot['app_runtime']['needs_attention'] %}warn{% else %}ok{% endif %}">{{ snapshot["app_runtime"]["label"] }}</span> | {{ snapshot["app_runtime"]["updated_at_label"] }}</div>
+                    <div class="item"><strong>Worker process:</strong> <span class="pill {% if snapshot['worker_runtime']['needs_attention'] %}warn{% else %}ok{% endif %}">{{ snapshot["worker_runtime"]["label"] }}</span> | {{ snapshot["worker_runtime"]["updated_at_label"] }}</div>
+                    <div class="item"><strong>Web host:</strong> {{ snapshot["app_runtime"]["host_name"] or "unknown" }}</div>
+                    <div class="item"><strong>Worker host:</strong> {{ snapshot["worker_runtime"]["host_name"] or "unknown" }}</div>
+                    <div class="item"><strong>Web process flags:</strong> Discord ingest {{ "enabled" if snapshot["runtime_flags"]["discord_ingest_enabled"] else "disabled" }}, parser worker {{ "enabled" if snapshot["runtime_flags"]["parser_worker_enabled"] else "disabled" }}</div>
+                    <div class="item"><strong>Recent-message recovery:</strong> <span class="pill {% if snapshot['recent_message_recovery']['status_tone'] == 'ok' %}ok{% elif snapshot['recent_message_recovery']['status_tone'] == 'warn' %}warn{% else %}bad{% endif %}">{{ snapshot["recent_message_recovery"]["status_label"] }}</span> | {{ snapshot["recent_message_recovery"]["status_detail"] }}</div>
+                    <div class="item"><strong>Recovery window:</strong> {{ snapshot["recent_message_recovery"]["window_label"] }}</div>
+                    <div class="item"><strong>Stitch recovery:</strong> <span class="pill {% if snapshot['stitch_recovery']['status_tone'] == 'ok' %}ok{% elif snapshot['stitch_recovery']['status_tone'] == 'warn' %}warn{% else %}bad{% endif %}">{{ snapshot["stitch_recovery"]["status_label"] }}</span> | {{ snapshot["stitch_recovery"]["status_detail"] }}</div>
+                    <div class="item"><strong>Stitch window:</strong> {{ snapshot["stitch_recovery"]["window_label"] }} · {{ snapshot["stitch_recovery"]["limit_label"] }}</div>
+                    <div class="item"><strong>Discord runtime:</strong> {{ snapshot["worker_runtime"]["details"].get("discord_status", "unknown") }}</div>
                 </div>
             </div>
 
@@ -123,16 +145,21 @@
                 <div class="section-header">
                     <div>
                         <h2 class="section-title">Queue</h2>
-                        <div class="section-subtitle">Whether work is backing up, moving, or getting stuck in-flight.</div>
+                        <div class="section-subtitle">{{ snapshot["queue_state_detail"] }}</div>
                     </div>
                 </div>
                 <div class="list">
                     <div class="item"><strong>Backlog:</strong> {{ snapshot["queue_backlog"] }}</div>
-                    <div class="item"><strong>Queue moving:</strong> <span class="pill {% if snapshot['queue_is_moving'] %}ok{% else %}warn{% endif %}">{{ "Yes" if snapshot["queue_is_moving"] else "No" }}</span></div>
-                    <div class="item"><strong>Needs review:</strong> {{ snapshot["parser_progress"]["needs_review"] }}</div>
+                    <div class="item"><strong>Queue state:</strong> <span class="pill {% if snapshot['queue_state_label'] == 'Processing' %}ok{% elif snapshot['queue_state_label'] == 'Waiting' %}warn{% else %}ok{% endif %}">{{ snapshot["queue_state_label"] }}</span></div>
+                    <div class="item"><strong>Review required:</strong> {{ snapshot["parser_progress"]["needs_review"] }}</div>
                     <div class="item"><strong>Failed:</strong> {{ snapshot["parser_progress"]["failed"] }}</div>
                     <div class="item"><strong>Recovered stale:</strong> {{ snapshot["parser_progress"]["recovered_stale"] }}</div>
                     <div class="item"><strong>Oldest in flight:</strong> {{ snapshot["parser_progress"]["oldest_processing_age_label"] }}</div>
+                    <div class="action-row">
+                        <a class="button" href="{{ snapshot['action_links']['open_processing'] }}">Open Processing Rows</a>
+                        <a class="button" href="{{ snapshot['action_links']['open_failed'] }}">Open Failed Rows</a>
+                        <a class="button" href="{{ snapshot['action_links']['open_review_queue'] }}">Open Review Queue</a>
+                    </div>
                 </div>
             </div>
 
@@ -144,9 +171,28 @@
                     </div>
                 </div>
                 <div class="list">
-                    <div class="item"><strong>Latest ingest:</strong> {{ snapshot["recent_activity"]["latest_ingested_label"] }}</div>
-                    <div class="item"><strong>Latest parse finish:</strong> {{ snapshot["recent_activity"]["latest_parse_finished_label"] }}</div>
-                    <div class="item"><strong>Latest review:</strong> {{ snapshot["recent_activity"]["latest_reviewed_label"] }}</div>
+                    <div class="item">
+                        <strong>Latest ingest:</strong> {{ snapshot["recent_activity"]["latest_ingested_label"] }}
+                        <div class="action-row">
+                            {% if snapshot["recent_activity"]["latest_ingested_links"]["open_row"] %}<a class="button" href="{{ snapshot['recent_activity']['latest_ingested_links']['open_row'] }}">Open Row</a>{% endif %}
+                            {% if snapshot["recent_activity"]["latest_ingested_links"]["open_table"] %}<a class="button" href="{{ snapshot['recent_activity']['latest_ingested_links']['open_table'] }}">Open Filtered Table</a>{% endif %}
+                        </div>
+                    </div>
+                    <div class="item">
+                        <strong>Latest parse finish:</strong> {{ snapshot["recent_activity"]["latest_parse_finished_label"] }}
+                        <div class="action-row">
+                            {% if snapshot["recent_activity"]["latest_parse_finished_links"]["open_row"] %}<a class="button" href="{{ snapshot['recent_activity']['latest_parse_finished_links']['open_row'] }}">Open Row</a>{% endif %}
+                            {% if snapshot["recent_activity"]["latest_parse_finished_links"]["open_table"] %}<a class="button" href="{{ snapshot['recent_activity']['latest_parse_finished_links']['open_table'] }}">Open Filtered Table</a>{% endif %}
+                            {% if snapshot["recent_activity"]["latest_parse_finished_links"]["open_review_queue"] %}<a class="button" href="{{ snapshot['recent_activity']['latest_parse_finished_links']['open_review_queue'] }}">Open Review Queue</a>{% endif %}
+                        </div>
+                    </div>
+                    <div class="item">
+                        <strong>Latest review:</strong> {{ snapshot["recent_activity"]["latest_reviewed_label"] }}
+                        <div class="action-row">
+                            {% if snapshot["recent_activity"]["latest_reviewed_links"]["open_row"] %}<a class="button" href="{{ snapshot['recent_activity']['latest_reviewed_links']['open_row'] }}">Open Row</a>{% endif %}
+                            {% if snapshot["recent_activity"]["latest_reviewed_links"]["open_table"] %}<a class="button" href="{{ snapshot['recent_activity']['latest_reviewed_links']['open_table'] }}">Open Filtered Table</a>{% endif %}
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -165,6 +211,240 @@
                 </div>
             </div>
         </div>
+
+        <div class="card" id="queue-summary">
+            <div class="section-header">
+                <div>
+                    <h2 class="section-title">Queue Summary</h2>
+                    <div class="section-subtitle">Queue depth by status, rows that look stuck, and the most recent visible failures.</div>
+                </div>
+            </div>
+            <div class="metrics">
+                <div class="metric"><div class="metric-label">Pending</div><div class="metric-value">{{ health["queue_counts"]["pending"] }}</div></div>
+                <div class="metric"><div class="metric-label">Processing</div><div class="metric-value">{{ health["queue_counts"]["processing"] }}</div></div>
+                <div class="metric"><div class="metric-label">Parsed</div><div class="metric-value">{{ health["queue_counts"]["parsed"] }}</div></div>
+                <div class="metric"><div class="metric-label">Failed</div><div class="metric-value">{{ health["queue_counts"]["failed"] }}</div></div>
+                <div class="metric"><div class="metric-label">Review Required</div><div class="metric-value">{{ health["queue_counts"]["review_required"] }}</div></div>
+                <div class="metric"><div class="metric-label">Ignored</div><div class="metric-value">{{ health["queue_counts"]["ignored"] }}</div></div>
+            </div>
+            <div class="list" style="margin-top:12px;">
+                <div class="item"><strong>Worker draining queue:</strong> <span class="pill {% if debug['worker_actively_draining_queue'] %}ok{% else %}warn{% endif %}">{{ "Yes" if debug["worker_actively_draining_queue"] else "No" }}</span></div>
+                <div class="item"><strong>Stale threshold:</strong> {{ debug["parser_progress"]["stale_threshold_minutes"] }} minutes</div>
+                <div class="item"><strong>Stale processing count:</strong> {{ debug["parser_progress"]["stale_processing"] }}</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="section-header">
+                <div>
+                    <h2 class="section-title">Recent Failed Rows</h2>
+                    <div class="section-subtitle">Latest failed messages with the most useful visible reason.</div>
+                </div>
+            </div>
+            {% if health["recent_failed_rows"] %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Message</th>
+                        <th>Channel</th>
+                        <th>Last Attempt</th>
+                        <th>Error</th>
+                        <th>Snippet</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in health["recent_failed_rows"] %}
+                    <tr>
+                        <td>#{{ row["message_id"] }}</td>
+                        <td>{{ row["channel"] or "unknown" }}</td>
+                        <td>{{ row["last_attempted_at"] }}</td>
+                        <td class="error">{{ row["error_reason"] }}</td>
+                        <td>{{ row["snippet"] }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <div class="small">No recent failed rows.</div>
+            {% endif %}
+        </div>
+
+        <div class="card">
+            <div class="section-header">
+                <div>
+                    <h2 class="section-title">Stuck Rows</h2>
+                    <div class="section-subtitle">Rows that have been in processing too long and may need attention.</div>
+                </div>
+            </div>
+            {% if health["stuck_processing"] %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Message</th>
+                        <th>Channel</th>
+                        <th>Status</th>
+                        <th>Last Attempt</th>
+                        <th>Retries</th>
+                        <th>Latest Error</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in health["stuck_processing"] %}
+                    <tr>
+                        <td>#{{ row["message_id"] }}</td>
+                        <td>{{ row["channel"] or row["channel_id"] or "unknown" }}</td>
+                        <td class="warn-text">{{ row["current_status"] }}</td>
+                        <td>
+                            <div>{{ row["last_attempted_at_label"] }}</div>
+                            <div class="small">updated {{ row["last_updated_label"] }}</div>
+                        </td>
+                        <td>{{ row["retry_count"] }}</td>
+                        <td>{{ row["latest_error"] or "none" }}</td>
+                    </tr>
+                    {% if row["action_links"] %}
+                    <tr>
+                        <td colspan="6">
+                            <div class="table-actions">
+                                {% if row["action_links"]["open_row"] %}<a class="button" href="{{ row['action_links']['open_row'] }}">Open Row</a>{% endif %}
+                                {% if row["action_links"]["open_table"] %}<a class="button" href="{{ row['action_links']['open_table'] }}">Open Filtered Table</a>{% endif %}
+                                {% if row["action_links"]["open_review_queue"] %}<a class="button" href="{{ row['action_links']['open_review_queue'] }}">Open Review Queue</a>{% endif %}
+                            </div>
+                        </td>
+                    </tr>
+                    {% endif %}
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <div class="small">No rows are currently beyond the processing threshold.</div>
+            {% endif %}
+        </div>
+
+        <div class="card" id="recent-reparse">
+            <div class="section-header">
+                <div>
+                    <h2 class="section-title">Recent Reparse</h2>
+                    <div class="section-subtitle">The latest reparse run summary, including range, counts, and any final error.</div>
+                </div>
+            </div>
+            <div class="action-row" style="margin-bottom:10px;">
+                <a class="button" href="/admin/parser/reparse-runs">Open Reparse History</a>
+            </div>
+            {% if health["last_reparse_run"] %}
+            <table>
+                <tbody>
+                    <tr><th>Status</th><td>{{ health["last_reparse_run"]["status"] }}</td><th>Source</th><td>{{ health["last_reparse_run"]["source"] }}</td></tr>
+                    <tr><th>Requested</th><td>{{ health["last_reparse_run"]["requested_at"] }}</td><th>Finished</th><td>{{ health["last_reparse_run"]["finished_at"] or "still running" }}</td></tr>
+                    <tr><th>Selected</th><td>{{ health["last_reparse_run"]["selected_count"] }}</td><th>Pending</th><td>{{ health["last_reparse_run"]["queued_count"] }}</td></tr>
+                    <tr><th>Succeeded</th><td>{{ health["last_reparse_run"]["succeeded_count"] }}</td><th>Failed</th><td>{{ health["last_reparse_run"]["failed_count"] }}</td></tr>
+                    <tr><th>Range</th><td>{{ health["last_reparse_run"]["range_after"] or "none" }} to {{ health["last_reparse_run"]["range_before"] or "none" }}</td><th>Channel</th><td>{{ health["last_reparse_run"]["channel_id"] or "all" }}</td></tr>
+                    <tr><th>Error</th><td colspan="3">{{ health["last_reparse_run"]["error_message"] or "none" }}</td></tr>
+                </tbody>
+            </table>
+            {% else %}
+            <div class="small">No reparse run records found.</div>
+            {% endif %}
+        </div>
+
+        <details class="card" id="debug-detail">
+            <summary>
+                <div class="details-summary">
+                    <div>
+                        <h2 class="section-title">Debug Detail</h2>
+                        <div class="section-subtitle">Expanded runtime split, log paths, recent worker and backfill failures, plus the raw debug snapshot.</div>
+                    </div>
+                    <span class="pill">Collapsed by default</span>
+                </div>
+            </summary>
+            <div class="details-body">
+                <div class="layout">
+                    <div class="card">
+                        <div class="section-header">
+                            <div>
+                                <h2 class="section-title">Runtime Split</h2>
+                                <div class="section-subtitle">App and worker heartbeats, hosts, and local log paths.</div>
+                            </div>
+                        </div>
+                        <div class="list">
+                            <div class="item"><strong>App heartbeat:</strong> <span class="pill {% if debug['app_runtime']['needs_attention'] %}warn{% else %}ok{% endif %}">{{ debug["app_runtime"]["label"] }}</span> <span class="small">{{ debug["app_runtime"]["updated_at_label"] }}</span></div>
+                            <div class="item"><strong>Worker heartbeat:</strong> <span class="pill {% if debug['worker_runtime']['needs_attention'] %}warn{% else %}ok{% endif %}">{{ debug["worker_runtime"]["label"] }}</span> <span class="small">{{ debug["worker_runtime"]["updated_at_label"] }}</span></div>
+                            <div class="item"><strong>App host:</strong> {{ debug["app_runtime"]["host_name"] or "unknown" }}</div>
+                            <div class="item"><strong>Worker host:</strong> {{ debug["worker_runtime"]["host_name"] or "unknown" }}</div>
+                            <div class="item"><strong>App log:</strong> {{ debug["log_paths"]["app"] }}</div>
+                            <div class="item"><strong>Worker log:</strong> {{ debug["log_paths"]["worker"] }}</div>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="section-header">
+                            <div>
+                                <h2 class="section-title">Queue Notes</h2>
+                                <div class="section-subtitle">Low-level queue movement and stale-processing signals.</div>
+                            </div>
+                        </div>
+                        <div class="list">
+                            <div class="item"><strong>Backlog:</strong> {{ debug["queue_counts"]["pending"] + debug["queue_counts"]["processing"] }}</div>
+                            <div class="item"><strong>Oldest processing age:</strong> {{ debug["parser_progress"]["oldest_processing_age_label"] }}</div>
+                            <div class="item"><strong>Recent worker failures:</strong> {{ debug["recent_worker_failures"]|length }}</div>
+                            <div class="item"><strong>Recent backfill failures:</strong> {{ debug["recent_backfill_failures"]|length }}</div>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="section-header">
+                            <div>
+                                <h2 class="section-title">Recent Worker Failure Logs</h2>
+                                <div class="section-subtitle">Latest warning or error events emitted by the worker.</div>
+                            </div>
+                        </div>
+                        <div class="list">
+                            {% for row in debug["recent_worker_failures"] %}
+                            <div class="item">
+                                <div class="small"><strong>{{ row["created_at"] }}</strong> | {{ row["event_type"] }} | {{ row["level"] }}</div>
+                                <div><strong>{{ row["message"] }}</strong></div>
+                                <div class="muted">{{ row["details"].get("error") or row["details"].get("current_state") or "" }}</div>
+                                {% if row["action_links"] %}
+                                <div class="action-row">
+                                    {% if row["action_links"]["open_row"] %}<a class="button" href="{{ row['action_links']['open_row'] }}">Open Row</a>{% endif %}
+                                    {% if row["action_links"]["open_table"] %}<a class="button" href="{{ row['action_links']['open_table'] }}">Open Filtered Table</a>{% endif %}
+                                    {% if row["action_links"]["open_review_queue"] %}<a class="button" href="{{ row['action_links']['open_review_queue'] }}">Open Review Queue</a>{% endif %}
+                                </div>
+                                {% endif %}
+                            </div>
+                            {% else %}
+                            <div class="small">No recent worker failures in the operations log.</div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="section-header">
+                            <div>
+                                <h2 class="section-title">Recent Backfill Failures</h2>
+                                <div class="section-subtitle">Most recent backfill-specific errors visible in the operations log.</div>
+                            </div>
+                        </div>
+                        <div class="list">
+                            {% for row in debug["recent_backfill_failures"] %}
+                            <div class="item">
+                                <div class="small"><strong>{{ row["created_at"] }}</strong> | {{ row["event_type"] }}</div>
+                                <div><strong>{{ row["message"] }}</strong></div>
+                                <div class="muted">{{ row["details"].get("error") or row["details"].get("channel_id") or "" }}</div>
+                            </div>
+                            {% else %}
+                            <div class="small">No recent backfill failures recorded.</div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+                <div class="card" style="margin-top:18px;">
+                    <div class="section-header">
+                        <div>
+                            <h2 class="section-title">Raw Debug Snapshot</h2>
+                            <div class="section-subtitle">Unfiltered debug payload for deeper inspection without leaving this page.</div>
+                        </div>
+                    </div>
+                    <pre>{{ debug | tojson(indent=2) }}</pre>
+                </div>
+            </div>
+        </details>
     </div>
 </body>
 </html>

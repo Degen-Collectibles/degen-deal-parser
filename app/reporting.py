@@ -1,12 +1,24 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlmodel import Session, select
+from zoneinfo import ZoneInfo
 
-from .models import DiscordMessage, normalize_money_value, signed_money_delta
+from .models import (
+    DiscordMessage,
+    expand_parse_status_filter_values,
+    PARSE_PARSED,
+    PARSE_REVIEW_REQUIRED,
+    ShopifyOrder,
+    normalize_money_value,
+    signed_money_delta,
+)
+
+
+REPORTING_TZ = ZoneInfo("America/Los_Angeles")
 
 
 def parse_report_datetime(value: Optional[str], *, end_of_day: bool = False) -> Optional[datetime]:
@@ -36,7 +48,11 @@ def financial_base_query(
     channel_id: Optional[str] = None,
 ):
     stmt = select(DiscordMessage).where(DiscordMessage.is_deleted == False)
-    stmt = stmt.where(DiscordMessage.parse_status.in_(["parsed", "needs_review"]))
+    stmt = stmt.where(
+        DiscordMessage.parse_status.in_(
+            sorted(expand_parse_status_filter_values([PARSE_PARSED, PARSE_REVIEW_REQUIRED]))
+        )
+    )
     stmt = stmt.where(
         (DiscordMessage.stitched_group_id == None) | (DiscordMessage.stitched_primary == True)
     )
@@ -60,6 +76,124 @@ def get_financial_rows(
 ) -> list[DiscordMessage]:
     stmt = financial_base_query(start=start, end=end, channel_id=channel_id)
     return session.exec(stmt).all()
+
+
+def get_shopify_reporting_rows(
+    session: Session,
+    *,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+) -> list[ShopifyOrder]:
+    stmt = select(ShopifyOrder)
+    if start:
+        stmt = stmt.where(ShopifyOrder.created_at >= start)
+    if end:
+        stmt = stmt.where(ShopifyOrder.created_at <= end)
+    stmt = stmt.order_by(ShopifyOrder.created_at.asc(), ShopifyOrder.id.asc())
+    return session.exec(stmt).all()
+
+
+def build_shopify_reporting_summary(rows: list[ShopifyOrder]) -> dict:
+    status_counts = {"paid": 0, "pending": 0, "refunded": 0, "other": 0}
+    paid_order_count = 0
+    tax_unknown_count = 0
+    paid_gross = 0.0
+    paid_tax = 0.0
+    paid_net = 0.0
+    paid_known_tax_orders = 0
+
+    for row in rows:
+        status = (row.financial_status or "").strip().lower()
+        if status == "paid":
+            status_counts["paid"] += 1
+        elif status == "pending":
+            status_counts["pending"] += 1
+        elif status == "refunded":
+            status_counts["refunded"] += 1
+        else:
+            status_counts["other"] += 1
+
+        if status != "paid":
+            continue
+
+        paid_order_count += 1
+        gross_value = float(row.total_price or 0.0)
+        paid_gross += gross_value
+
+        if row.total_tax is None:
+            tax_unknown_count += 1
+            continue
+
+        tax_value = float(row.total_tax or 0.0)
+        net_value = float(row.subtotal_ex_tax) if row.subtotal_ex_tax is not None else gross_value - tax_value
+        paid_tax += tax_value
+        paid_net += net_value
+        paid_known_tax_orders += 1
+
+    avg_paid_net = round(paid_net / paid_known_tax_orders, 2) if paid_known_tax_orders else 0.0
+
+    return {
+        "orders": len(rows),
+        "status_counts": status_counts,
+        "paid_orders": paid_order_count,
+        "paid_orders_with_known_tax": paid_known_tax_orders,
+        "tax_unknown_orders": tax_unknown_count,
+        "gross_revenue": round(paid_gross, 2),
+        "total_tax": round(paid_tax, 2),
+        "net_revenue": round(paid_net, 2),
+        "avg_order_value_net": avg_paid_net,
+        "has_missing_tax_data": tax_unknown_count > 0,
+        "warning": (
+            f"{tax_unknown_count} orders missing tax data - totals may be incomplete"
+            if tax_unknown_count
+            else ""
+        ),
+    }
+
+
+def build_reporting_periods(
+    *,
+    selected_start: Optional[datetime] = None,
+    selected_end: Optional[datetime] = None,
+) -> list[dict[str, object]]:
+    now_local = datetime.now(REPORTING_TZ)
+    now_utc = now_local.astimezone(timezone.utc)
+    today_start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start_local = today_start_local - timedelta(days=today_start_local.weekday())
+    month_start_local = today_start_local.replace(day=1)
+
+    periods = [
+        {
+            "key": "today",
+            "label": "Today",
+            "start": today_start_local.astimezone(timezone.utc),
+            "end": now_utc,
+        },
+        {
+            "key": "this_week",
+            "label": "This Week",
+            "start": week_start_local.astimezone(timezone.utc),
+            "end": now_utc,
+        },
+        {
+            "key": "this_month",
+            "label": "This Month",
+            "start": month_start_local.astimezone(timezone.utc),
+            "end": now_utc,
+        },
+    ]
+
+    if selected_start or selected_end:
+        periods.append(
+            {
+                "key": "selected_range",
+                "label": "Selected Range",
+                "start": selected_start,
+                "end": selected_end,
+            }
+        )
+
+    return periods
 
 
 def build_financial_summary(rows: list[DiscordMessage]) -> dict:

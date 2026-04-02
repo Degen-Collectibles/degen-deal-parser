@@ -6,9 +6,9 @@
     <style>
         :root { --bg:#f4ebdf; --bg-deep:#ead8c0; --card:#fff9f2; --card-strong:#fffdf8; --line:#deccb6; --text:#24170f; --muted:#6b5849; --accent:#d55338; --accent-strong:#9f311d; --shadow:0 20px 44px rgba(77,46,20,.13); }
         * { box-sizing:border-box; }
-        body { margin:0; font-family:"Aptos","Trebuchet MS","Segoe UI",sans-serif; color:var(--text); background:radial-gradient(circle at top left, rgba(240,196,107,.26), transparent 24%), radial-gradient(circle at 85% 8%, rgba(213,83,56,.12), transparent 18%), linear-gradient(180deg,#fcf7f0 0%, var(--bg) 46%, var(--bg-deep) 100%); }
+        body { margin:0; font-family:"Aptos","Trebuchet MS","Segoe UI",sans-serif; color:var(--text); background:radial-gradient(circle at top left, rgba(240,196,107,.26), transparent 24%), radial-gradient(circle at 85% 8%, rgba(213,83,56,.12), transparent 18%), linear-gradient(180deg,#fcf7f0 0%, var(--bg) 46%, var(--bg-deep) 100%); overflow-x:hidden; }
         a { color:inherit; text-decoration:none; }
-        .page { max-width:1450px; margin:0 auto; padding:20px; }
+        .page { max-width:1450px; width:100%; margin:0 auto; padding:20px; }
         .workspace-nav, .nav-links, .hero-actions, .workspace-card-footer { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
         .workspace-nav { justify-content:space-between; margin-bottom:14px; padding:12px 16px; border:1px solid rgba(159,49,29,.12); border-radius:20px; background:linear-gradient(180deg, rgba(255,253,248,.94), rgba(255,247,238,.82)); box-shadow:0 14px 28px rgba(77,46,20,.08); position:sticky; top:12px; z-index:5; backdrop-filter:blur(10px); }
         .nav-links { justify-content:flex-end; }
@@ -23,7 +23,7 @@
         p, .small { color:var(--muted); line-height:1.5; }
         .top-actions, .quick-links, .stack, .mix-list { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
         .hero-actions { margin-top:12px; }
-        .button, button { appearance:none; border:none; border-radius:16px; padding:11px 15px; font:inherit; font-weight:800; cursor:pointer; }
+        .button, button { appearance:none; border:none; border-radius:16px; padding:11px 15px; min-height:44px; font:inherit; font-weight:800; cursor:pointer; }
         .primary-button { background:linear-gradient(135deg,var(--accent-strong),#df623f 55%, #f0875e); color:#fff; box-shadow:0 14px 24px rgba(159,49,29,.24); }
         .secondary-button { background:linear-gradient(180deg,#fffdfa,#fff4e8); color:var(--text); border:1px solid var(--line); box-shadow:inset 0 1px 0 rgba(255,255,255,.8); }
         .card { padding:18px; margin-bottom:18px; }
@@ -34,17 +34,24 @@
         .workspace-kicker { display:inline-flex; align-items:center; padding:6px 10px; border-radius:999px; background:#fff; border:1px solid rgba(159,49,29,.12); color:var(--accent-strong); font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; }
         .workspace-card-footer { justify-content:space-between; margin-top:auto; }
         .workspace-card-footer .small { max-width:160px; }
-        .summary-grid { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:12px; margin-bottom:18px; }
+        .summary-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:18px; align-items:start; }
         .metric { background:linear-gradient(180deg, rgba(255,255,255,.86), rgba(255,248,238,.75)); border:1px solid var(--line); border-radius:18px; padding:14px; }
         .metric-label { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.08em; margin-bottom:8px; font-weight:800; }
         .metric-value { font-size:28px; font-weight:800; letter-spacing:-.04em; }
         .metric-footnote { color:var(--muted); font-size:12px; margin-top:6px; }
+        .metrics-stack { display:grid; gap:12px; }
+        .metric-group { display:grid; gap:12px; }
+        .metric-group.supporting { grid-template-columns:repeat(3,minmax(0,1fr)); }
+        .metric-card-lead .metric-value { font-size:36px; }
         .layout { display:grid; grid-template-columns:1.15fr .85fr; gap:18px; }
         .double-grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
         .review-item { padding:12px 0; border-top:1px solid #eee3d3; }
         .review-item:first-child { border-top:none; padding-top:0; }
+        .review-item.compact { padding:8px 0; }
+        .review-item.compact .small { font-size:11px; }
         .meta-row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
-        .alert { margin-bottom:18px; padding:14px 16px; border-radius:18px; border:1px solid #efc28f; background:#fff5df; color:#8a580d; font-weight:700; }
+        .alert { margin-bottom:18px; padding:16px 18px; border-radius:20px; border:1px solid rgba(124,30,13,.28); background:linear-gradient(135deg, #a9361f, #d55338 60%, #ef8b59); color:#fff8f0; font-weight:800; display:flex; justify-content:space-between; gap:16px; align-items:center; box-shadow:0 18px 30px rgba(143,45,25,.24); }
+        .alert a { color:#fff; font-weight:800; white-space:nowrap; }
         .section-title { margin:0 0 10px; font-size:24px; letter-spacing:-.04em; }
         .section-subtitle { margin:0 0 16px; color:var(--muted); }
         .action-list { display:grid; gap:12px; }
@@ -52,36 +59,34 @@
         .action-row:first-child, .channel-row:first-child { border-top:none; padding-top:0; }
         .channel-metrics { text-align:right; color:var(--muted); font-size:13px; }
         .mix-pill { display:inline-flex; align-items:center; padding:7px 10px; border-radius:999px; background:#fff; border:1px solid var(--line); color:var(--muted); font-size:12px; font-weight:700; }
+        .section-footer { margin-top:12px; }
+        .section-link { color:var(--accent-strong); font-weight:800; }
+        .list { display:grid; gap:12px; }
+        .list-row, .search-form-card { background:linear-gradient(180deg, rgba(255,255,255,.92), rgba(255,246,234,.96)); border:1px solid rgba(159,49,29,.10); border-radius:18px; padding:14px; box-shadow:0 12px 24px rgba(77,46,20,.06); }
+        .row-top, .row-bottom { display:flex; gap:10px; justify-content:space-between; align-items:flex-start; }
+        .row-bottom { margin-top:8px; flex-wrap:wrap; }
+        .amount { font-weight:800; white-space:nowrap; }
+        .message { margin-top:8px; color:var(--text); line-height:1.5; }
+        .search-form { display:grid; gap:10px; grid-template-columns:repeat(3,minmax(0,1fr)); }
+        .search-form input { width:100%; min-width:0; padding:12px 14px; min-height:44px; border:1px solid var(--line); border-radius:14px; font:inherit; }
         @media (max-width:1180px){ .workspace-card-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
-        @media (max-width:1000px){ .hero, .layout, .summary-grid, .double-grid { grid-template-columns:1fr; } .page { padding:16px 14px 28px; } .eyebrow { margin:0 auto; } .workspace-nav { position:static; } }
-        @media (max-width:720px){ .workspace-card-grid { grid-template-columns:1fr; } }
+        @media (max-width:1000px){ .hero, .layout, .summary-grid, .double-grid, .metric-group.supporting, .search-form { grid-template-columns:1fr; } .page { padding:16px 14px 28px; } .eyebrow { margin:0 auto; } .workspace-nav { position:static; } .alert { align-items:flex-start; } }
+        @media (max-width:720px){ .workspace-card-grid { grid-template-columns:1fr; } .hero-actions, .stack, .top-actions, .quick-links { width:100%; } .hero-actions .button, .stack .button, .search-form .button { width:100%; justify-content:center; } .row-top, .row-bottom { display:grid; grid-template-columns:1fr; } .amount { white-space:normal; } }
     </style>
 </head>
 <body>
     <div class="page">
-        <div class="workspace-nav">
-            <div>
-                <strong>Degen Collectibles Ops</strong>
-                <div class="small">Home base for review, deal browsing, reporting, and admin tools.</div>
-            </div>
-            <div class="nav-links">
-                {% if current_user and current_user.role in ["admin","reviewer"] %}<a class="button secondary-button" href="/review">Review</a>{% endif %}
-                <a class="button secondary-button" href="/deals">Deals</a>
-                <a class="button secondary-button" href="/reports">Reports</a>
-                <a class="button secondary-button" href="/status">Status</a>
-                {% if current_user and current_user.role == "admin" %}<a class="button secondary-button" href="/admin">Admin</a>{% endif %}
-                <form method="post" action="/logout" style="display:inline;"><button type="submit" class="button secondary-button">Log Out</button></form>
-            </div>
-        </div>
+        {% include "_workspace_nav.html" %}
         <section class="hero">
             <img class="logo" src="/static/degen-logo.png" alt="Degen Collectibles logo">
             <div>
                 <div class="eyebrow">Internal Operations</div>
                 <h1>{{ title }}</h1>
-                <p>Welcome back{% if current_user %}, {{ current_user.display_name or current_user.username }}{% endif %}. This is your daily briefing for deal flow, review pressure, and worker health so you can decide what needs attention first.</p>
+                <p>Welcome back{% if current_user %}, {{ current_user.display_name or current_user.username }}{% endif %}. This is your daily briefing for deal flow, review pressure, and system activity so you can decide what needs attention first.</p>
                 <div class="hero-actions">
-                    {% if current_user and current_user.role in ["admin","reviewer"] %}<a class="button primary-button" href="/review">Open Review Queue</a>{% endif %}
+                    {% if current_user and current_user.role in ["admin","reviewer"] %}<a class="button primary-button" href="/review">Review Now</a>{% endif %}
                     <a class="button secondary-button" href="/deals">Browse Deals</a>
+                    <a class="button secondary-button" href="/shopify/orders">Shopify Orders</a>
                     <a class="button secondary-button" href="/reports">Open Reports</a>
                     {% if current_user and current_user.role == "admin" %}<a class="button secondary-button" href="/bookkeeping">Bookkeeping</a>{% endif %}
                 </div>
@@ -90,7 +95,8 @@
 
         {% if parser_progress["local_runtime"]["needs_attention"] %}
         <div class="alert">
-            {{ parser_progress["local_runtime"]["alert_message"] }}
+            <div><strong>&#9888; System updates look delayed &mdash; new Discord messages may not be arriving yet</strong></div>
+            <a href="/status">Check Status &rarr;</a>
         </div>
         {% endif %}
 
@@ -98,8 +104,8 @@
             {% if current_user and current_user.role in ["admin","reviewer"] %}
             <div class="workspace-card">
                 <span class="workspace-kicker">Primary workflow</span>
-                <h3>Review Queue</h3>
-                <p>Clear the rows that still need judgment, with the fastest path to approve good parses and correct weak ones.</p>
+                <h3>Needs Review</h3>
+                <p>Clear the rows that still need judgment, with the fastest path to approve good records and correct weak ones.</p>
                 <div class="workspace-card-footer">
                     <span class="small">{{ review_summary["needs_review"] }} waiting for review</span>
                     <a class="button primary-button" href="/review">Start Reviewing</a>
@@ -111,23 +117,23 @@
                 <h3>Deals</h3>
                 <p>Use the cleaner read-only ledger view when you want to inspect activity without stepping into admin controls.</p>
                 <div class="workspace-card-footer">
-                    <span class="small">{{ dashboard_snapshot["today"]["rows"] }} normalized rows today</span>
+                    <span class="small">{{ dashboard_snapshot["today"]["rows"] }} confirmed deals today</span>
                     <a class="button secondary-button" href="/deals">Open Deals</a>
                 </div>
             </div>
             <div class="workspace-card">
                 <span class="workspace-kicker">Financial view</span>
                 <h3>Reports</h3>
-                <p>See cash movement, categories, and channel mix before digging into the raw queue or reconciliation work.</p>
+                <p>See cash movement, categories, and channel mix before digging into detailed records or reconciliation work.</p>
                 <div class="workspace-card-footer">
-                    <span class="small">{{ dashboard_snapshot["today"]["net_display"] }} net today</span>
+                    <span class="small">{{ dashboard_snapshot["today"]["revenue"]["total_display"] }} revenue today</span>
                     <a class="button secondary-button" href="/reports">Open Reports</a>
                 </div>
             </div>
             <div class="workspace-card">
                 <span class="workspace-kicker">Operations</span>
                 <h3>{% if current_user and current_user.role == "admin" %}Admin + Status{% else %}System Status{% endif %}</h3>
-                <p>{% if current_user and current_user.role == "admin" %}Keep parser health, bookkeeping, and operational controls available without overwhelming the rest of the product.{% else %}Check worker health and recent operations without dropping into the full admin console.{% endif %}</p>
+                <p>{% if current_user and current_user.role == "admin" %}Keep system health, bookkeeping, and operational controls available without overwhelming the rest of the product.{% else %}Check system activity and recent operations without dropping into the full admin console.{% endif %}</p>
                 <div class="workspace-card-footer">
                     <span class="small">{{ parser_progress["queued"] + parser_progress["processing"] }} rows in flight</span>
                     <div class="stack">
@@ -139,35 +145,45 @@
         </div>
 
         <div class="summary-grid">
-            <div class="metric">
-                <div class="metric-label">Today’s Deals</div>
-                <div class="metric-value">{{ dashboard_snapshot["today"]["rows"] }}</div>
-                <div class="metric-footnote">{{ dashboard_snapshot["today_label"] }}</div>
+            <div class="metric metric-card-lead">
+                <div class="metric-label">Today's Revenue</div>
+                <div class="metric-value">{{ dashboard_snapshot["today"]["revenue"]["total_display"] }}</div>
+                <div class="metric-footnote">Discord: {{ dashboard_snapshot["today"]["revenue"]["discord_total_display"] }} (sales {{ dashboard_snapshot["today"]["revenue"]["discord_sales_display"] }} + trade in {{ dashboard_snapshot["today"]["revenue"]["discord_trade_in_display"] }})</div>
+                {% if dashboard_snapshot["today"]["shopify"]["order_count"] > 0 %}
+                <div class="metric-footnote">Shopify: {{ dashboard_snapshot["today"]["revenue"]["shopify_total_display"] }}{% if dashboard_snapshot["today"]["shopify"]["includes_tax_count"] > 0 %} (includes tax){% endif %}</div>
+                {% else %}
+                <div class="metric-footnote">Shopify: No Shopify orders today</div>
+                {% endif %}
             </div>
-            <div class="metric">
-                <div class="metric-label">Money In Today</div>
-                <div class="metric-value">{{ dashboard_snapshot["today"]["sales_display"] }}</div>
-                <div class="metric-footnote">{{ dashboard_snapshot["today"]["sales_count"] }} sale{{ "" if dashboard_snapshot["today"]["sales_count"] == 1 else "s" }}</div>
+            <div class="metric metric-card-lead">
+                <div class="metric-label">Today's Purchases</div>
+                <div class="metric-value">{{ dashboard_snapshot["today"]["purchases"]["total_display"] }}</div>
+                <div class="metric-footnote">Buys: {{ dashboard_snapshot["today"]["purchases"]["buys_display"] }}</div>
+                <div class="metric-footnote">Trade out: {{ dashboard_snapshot["today"]["purchases"]["trade_out_display"] }}</div>
+                <div class="metric-footnote">Expenses: {{ dashboard_snapshot["today"]["purchases"]["expenses_display"] }}</div>
+                {% if dashboard_snapshot["today"]["purchases"]["has_shopify_refunds"] %}
+                <div class="metric-footnote">Shopify refunds: {{ dashboard_snapshot["today"]["purchases"]["shopify_refunds_display"] }}</div>
+                {% endif %}
             </div>
-            <div class="metric">
-                <div class="metric-label">Money Out Today</div>
-                <div class="metric-value">{{ dashboard_snapshot["today"]["buys_display"] }}</div>
-                <div class="metric-footnote">{{ dashboard_snapshot["today"]["buy_count"] }} buy{{ "" if dashboard_snapshot["today"]["buy_count"] == 1 else "s" }}</div>
-            </div>
-            <div class="metric">
-                <div class="metric-label">Net Cash Today</div>
-                <div class="metric-value">{{ dashboard_snapshot["today"]["net_display"] }}</div>
-                <div class="metric-footnote">{{ dashboard_snapshot["today"]["trade_count"] }} trade{{ "" if dashboard_snapshot["today"]["trade_count"] == 1 else "s" }}</div>
-            </div>
-            <div class="metric">
-                <div class="metric-label">Needs Review</div>
-                <div class="metric-value">{{ review_summary["needs_review"] }}</div>
-                <div class="metric-footnote">{{ dashboard_snapshot["today"]["reviewed_today_count"] }} reviewed today</div>
-            </div>
-            <div class="metric">
-                <div class="metric-label">Worker Queue</div>
-                <div class="metric-value">{{ parser_progress["queued"] + parser_progress["processing"] }}</div>
-                <div class="metric-footnote">{{ parser_progress["processing"] }} processing now</div>
+            <div class="metrics-stack" style="grid-column:1 / -1;">
+                <div class="metric-group supporting">
+                    <div class="metric">
+                        <div class="metric-label">Review Required</div>
+                        <div class="metric-value">{{ review_summary["needs_review"] }}</div>
+                        <div class="metric-footnote">{{ dashboard_snapshot["today"]["reviewed_today_count"] }} reviewed today</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Open Items</div>
+                        <div class="metric-value">{{ parser_progress["queued"] + parser_progress["processing"] }}</div>
+                        <div class="metric-footnote">{{ parser_progress["processing"] }} in progress now</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">{{ dashboard_snapshot["today"]["shopify"]["order_count"] }} Shopify orders today</div>
+                        <div class="metric-value">{{ dashboard_snapshot["today"]["shopify"]["gross_display"] }}</div>
+                        <div class="metric-footnote">Gross</div>
+                        <div class="metric-footnote">Tax {{ dashboard_snapshot["today"]["shopify"]["tax_display"] }}</div>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -178,8 +194,8 @@
                 <div class="action-list">
                     <div class="action-row">
                         <div>
-                            <strong>Review queue</strong>
-                            <div class="small">{{ review_summary["needs_review"] }} rows still need human review.</div>
+                            <strong>Needs review</strong>
+                            <div class="small">{{ review_summary["needs_review"] }} rows still require human review.</div>
                         </div>
                         {% if current_user and current_user.role in ["admin","reviewer"] %}
                         <a class="button primary-button" href="/review">Review Now</a>
@@ -187,17 +203,17 @@
                     </div>
                     <div class="action-row">
                         <div>
-                            <strong>Worker health</strong>
+                            <strong>System activity</strong>
                             <div class="small">{{ parser_progress["local_runtime"]["label"] }}{% if parser_progress["local_runtime"]["host_name"] %} on {{ parser_progress["local_runtime"]["host_name"] }}{% endif %} with Discord {{ parser_progress["local_runtime"]["details"].get("discord_status", "unknown") }}.</div>
                         </div>
                         <a class="button secondary-button" href="/status">Open Status</a>
                     </div>
                     <div class="action-row">
                         <div>
-                            <strong>Today’s intake</strong>
-                            <div class="small">{{ dashboard_snapshot["today"]["recent_ingested_count"] }} raw messages ingested today and {{ dashboard_snapshot["today"]["rows"] }} normalized deal rows.</div>
+                            <strong>Today's intake</strong>
+                            <div class="small">{{ dashboard_snapshot["today"]["recent_ingested_count"] }} messages received today and {{ dashboard_snapshot["today"]["rows"] }} confirmed deal rows.</div>
                         </div>
-                        <a class="button secondary-button" href="/table">Open Table</a>
+                        <a class="button secondary-button" href="/table">Open Records</a>
                     </div>
                     <div class="action-row">
                         <div>
@@ -214,7 +230,7 @@
 
             <div class="card">
                 <h2 class="section-title">Today at a Glance</h2>
-                <p class="section-subtitle">A quick read on today’s deal mix.</p>
+                <p class="section-subtitle">A quick read on today's deal mix.</p>
                 <div class="review-item">
                     <div class="metric-label">Deal Breakdown</div>
                     <div class="mix-list">
@@ -251,43 +267,117 @@
             </div>
         </div>
 
+        {% if dashboard_snapshot["top_channels"]|length >= 2 %}
         <div class="double-grid">
             <div class="card">
                 <h2 class="section-title">Top Active Channels</h2>
-                <p class="section-subtitle">Where today’s deal volume is coming from.</p>
+                <p class="section-subtitle">Where today's deal volume is coming from.</p>
                 {% for row in dashboard_snapshot["top_channels"] %}
                 <div class="channel-row">
                     <div>
                         <strong>{{ row["channel_name"] }}</strong>
-                        <div class="small">{{ row["deal_count"] }} normalized deal{{ "" if row["deal_count"] == 1 else "s" }}</div>
+                        <div class="small">{{ row["deal_count"] }} confirmed deal{{ "" if row["deal_count"] == 1 else "s" }}</div>
                     </div>
                     <div class="channel-metrics">
                         <div>{{ row["net_display"] }}</div>
                         <div>{{ row["money_in_display"] }} in / {{ row["money_out_display"] }} out</div>
                     </div>
                 </div>
-                {% else %}
-                <div class="small">No channel activity yet today.</div>
                 {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+
+        <div class="double-grid">
+            <div class="card">
+                <h2 class="section-title">Recent Deals</h2>
+                <p class="section-subtitle">The latest confirmed Discord deals.</p>
+                <div class="list">
+                    {% for row in recent_deals %}
+                    <a class="list-row" href="/deals/{{ row['id'] }}">
+                        <div class="row-top">
+                            <div>
+                                <strong>{{ row["channel"] or row["channel_id"] }}</strong>
+                                <div class="small">{{ row["time"] }}</div>
+                            </div>
+                            {% if row["amount_display"] %}<div class="amount">{{ row["amount_display"] }}</div>{% endif %}
+                        </div>
+                        <div class="row-bottom">
+                            <span class="pill">{{ row["entry_kind"] or "unknown" }}</span>
+                            {% if row["payment_display"] %}<span class="pill">{{ row["payment_display"] }}</span>{% endif %}
+                        </div>
+                        <div class="message">{{ row["message"] or "(image-only message)" }}</div>
+                    </a>
+                    {% else %}
+                    <div class="list-row">
+                        <div class="small">No recent Discord deals yet.</div>
+                    </div>
+                    {% endfor %}
+                </div>
             </div>
 
             <div class="card">
-                <h2 class="section-title">Recent Reviewed Deals</h2>
-                <p class="section-subtitle">The most recently confirmed rows.</p>
-                {% for row in recent_reviewed %}
-                <div class="review-item">
-                    <div class="meta-row">
-                        <strong>{{ row["channel"] or row["channel_id"] }}</strong>
-                        <span class="small">{{ row["time"] }}</span>
-                        <span class="pill">{{ row["entry_kind"] or "unknown" }}</span>
-                        {% if row["amount_display"] %}<span class="pill">{{ row["amount_display"] }}</span>{% endif %}
-                    </div>
-                    <div class="small">{{ row["author"] or "" }}{% if row["reviewed_by"] %} | reviewed by {{ row["reviewed_by"] }}{% endif %}{% if row["reviewed_at"] %} on {{ row["reviewed_at"] }}{% endif %}</div>
-                    <div>{{ row["message"] or "(image-only message)" }}</div>
+                <h2 class="section-title">Shopify Orders</h2>
+                <p class="section-subtitle">Recent paid online orders.</p>
+                {% if not shopify_connected %}
+                <div class="list-row">
+                    <div class="small">{{ shopify_message }}</div>
+                </div>
+                {% elif shopify_orders %}
+                <div class="list">
+                    {% for order in shopify_orders %}
+                    <a class="list-row" href="#">
+                        <div class="row-top">
+                            <div>
+                                <strong>#{{ order["order_number"] }}</strong>
+                                <div class="small">{{ order["created_at"] }}</div>
+                            </div>
+                            <div class="amount">${{ "%.2f"|format(order["total_price"]) }}</div>
+                        </div>
+                        <div class="row-bottom">
+                            <div>{{ order["customer_name"] }}</div>
+                            <span class="pill">{{ order["fulfillment_label"] }}</span>
+                        </div>
+                    </a>
+                    {% endfor %}
                 </div>
                 {% else %}
-                <div class="small">No reviewed deals yet.</div>
-                {% endfor %}
+                <div class="list-row">
+                    <div class="small">No Shopify orders yet - orders will appear here automatically.</div>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+
+        <div class="card">
+            <h2 class="section-title">Quick Search</h2>
+            <p class="section-subtitle">Jump straight into the deal list by date.</p>
+            <form class="search-form" method="get" action="/deals">
+                <input type="date" name="after" aria-label="After date">
+                <input type="date" name="before" aria-label="Before date">
+                <button class="button secondary-button" type="submit">Search Deals</button>
+            </form>
+        </div>
+
+        <div class="card">
+            <h2 class="section-title">Recent Reviewed Deals</h2>
+            <p class="section-subtitle">The most recently confirmed rows.</p>
+            {% for row in recent_reviewed %}
+            <div class="review-item compact">
+                <div class="meta-row">
+                    <strong>{{ row["channel"] or row["channel_id"] }}</strong>
+                    <span class="small">{{ row["time"] }}</span>
+                    <span class="pill">{{ row["entry_kind"] or "unknown" }}</span>
+                    {% if row["amount_display"] %}<span class="pill">{{ row["amount_display"] }}</span>{% endif %}
+                </div>
+                <div class="small">{{ row["author"] or "" }}{% if row["reviewed_by"] %} | reviewed by {{ row["reviewed_by"] }}{% endif %}{% if row["reviewed_at"] %} on {{ row["reviewed_at"] }}{% endif %}</div>
+                <div class="small">{{ row["message"] or "(image-only message)" }}</div>
+            </div>
+            {% else %}
+            <div class="small">No reviewed deals yet.</div>
+            {% endfor %}
+            <div class="section-footer">
+                <a class="section-link" href="/review">View all &rarr;</a>
             </div>
         </div>
     </div>
