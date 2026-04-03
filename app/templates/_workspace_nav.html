@@ -5,6 +5,8 @@
 {% set active_reports = current_path.startswith("/reports") %}
 {% set active_bookkeeping = current_path.startswith("/bookkeeping") %}
 {% set active_shopify = current_path.startswith("/shopify/orders") %}
+{% set active_tiktok = current_path.startswith("/tiktok/orders") or current_path == "/tiktok" %}
+{% set active_streamer = current_path.startswith("/tiktok/streamer") %}
 {% set active_table = current_path.startswith("/table") or current_path.startswith("/review-table") %}
 {% set active_status = current_path == "/status" %}
 {% set active_admin = current_path.startswith("/admin") or current_path.startswith("/ops-log") or current_path.startswith("/learned-rule-log") %}
@@ -129,6 +131,8 @@
                 <a class="shared-nav-link{% if active_reports %} is-active{% endif %}" href="/reports">Reports</a>
                 <a class="shared-nav-link{% if active_bookkeeping %} is-active{% endif %}" href="/bookkeeping">Bookkeeping</a>
                 <a class="shared-nav-link{% if active_shopify %} is-active{% endif %}" href="/shopify/orders">Shopify Orders</a>
+                <a class="shared-nav-link{% if active_tiktok %} is-active{% endif %}" href="/tiktok/orders">TikTok Shop Orders</a>
+                <a class="shared-nav-link{% if active_streamer %} is-active{% endif %}" href="/tiktok/streamer">Streamer</a>
             </div>
         </div>
         <div class="shared-nav-group is-operators">

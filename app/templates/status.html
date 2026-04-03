@@ -180,6 +180,38 @@
             <div class="card">
                 <div class="section-header">
                     <div>
+                        <h2 class="section-title">TikTok Sync</h2>
+                        <div class="section-subtitle">Authorization, webhook, and pull freshness for TikTok Shop.</div>
+                    </div>
+                </div>
+                <div class="list">
+                    <div class="item">
+                        <strong>Connection:</strong>
+                        <span class="pill {% if snapshot['tiktok_sync']['status_tone'] == 'ok' %}ok{% elif snapshot['tiktok_sync']['status_tone'] == 'warn' %}warn{% else %}bad{% endif %}">{{ snapshot["tiktok_sync"]["status_label"] }}</span>
+                        <span class="pill {% if snapshot['tiktok_sync']['sync_status'] == 'success' %}ok{% elif snapshot['tiktok_sync']['sync_status'] == 'running' %}warn{% elif snapshot['tiktok_sync']['sync_status'] == 'idle' %}ok{% elif snapshot['tiktok_sync']['sync_status'] in ['waiting', 'skipped'] %}warn{% elif snapshot['tiktok_sync']['sync_status'] in ['failed', 'error'] %}bad{% else %}ok{% endif %}">{{ snapshot["tiktok_sync"]["sync_label"] }}</span>
+                    </div>
+                    <div class="item"><strong>Shop key:</strong> {{ snapshot["tiktok_sync"]["shop_key"] }}</div>
+                    <div class="item"><strong>Tokens:</strong> {{ "yes" if snapshot["tiktok_sync"]["has_tokens"] else "no" }}</div>
+                    <div class="item"><strong>Last auth:</strong> {{ snapshot["tiktok_sync"]["last_authorization_label"] }}</div>
+                    <div class="item"><strong>Last callback:</strong> {{ snapshot["tiktok_sync"]["last_callback_label"] }}</div>
+                    <div class="item"><strong>Last webhook:</strong> {{ snapshot["tiktok_sync"]["last_webhook_label"] }}</div>
+                    <div class="item"><strong>Last pull started:</strong> {{ snapshot["tiktok_sync"]["last_pull_started_label"] }}</div>
+                    <div class="item"><strong>Last pull finished:</strong> {{ snapshot["tiktok_sync"]["last_pull_finished_label"] }}</div>
+                    {% if snapshot["tiktok_sync"]["last_pull"] %}
+                    <div class="item"><strong>Last result:</strong> {{ snapshot["tiktok_sync"]["last_pull"].get("status", "idle") }}{% if snapshot["tiktok_sync"]["last_pull"].get("fetched") is not none %} | fetched {{ snapshot["tiktok_sync"]["last_pull"].get("fetched", 0) }}, inserted {{ snapshot["tiktok_sync"]["last_pull"].get("inserted", 0) }}, updated {{ snapshot["tiktok_sync"]["last_pull"].get("updated", 0) }}, failed {{ snapshot["tiktok_sync"]["last_pull"].get("failed", 0) }}{% endif %}</div>
+                    {% endif %}
+                    {% if snapshot["tiktok_sync"]["last_error"] %}
+                    <div class="item small warn-text">{{ snapshot["tiktok_sync"]["last_error"] }}</div>
+                    {% endif %}
+                    <div class="action-row">
+                        <a class="button" href="/tiktok/orders">Open TikTok Orders</a>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="section-header">
+                    <div>
                         <h2 class="section-title">Recent Activity</h2>
                         <div class="section-subtitle">Most recent ingest, parse completion, and human review checkpoints.</div>
                     </div>

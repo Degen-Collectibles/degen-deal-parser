@@ -1,6 +1,7 @@
 import asyncio
 import csv
 import hashlib
+from html import escape
 import json
 import os
 import socket
@@ -13,6 +14,7 @@ from typing import Optional
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
+import httpx
 from sqlalchemy import func
 from sqlalchemy.exc import OperationalError
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
@@ -94,6 +96,8 @@ from .models import (
     PARSE_REVIEW_REQUIRED,
     ReparseRun,
     ShopifyOrder,
+    TikTokAuth,
+    TikTokOrder,
     User,
     WatchedChannel,
     normalize_parse_status,
@@ -106,8 +110,12 @@ from .reporting import (
     build_financial_summary,
     build_reporting_periods,
     build_shopify_reporting_summary,
+    build_tiktok_orders_page_data as build_tiktok_orders_page_reporting_data,
+    build_tiktok_reporting_summary,
+    classify_tiktok_reporting_status,
     get_financial_rows,
     get_shopify_reporting_rows,
+    get_tiktok_reporting_rows,
     parse_report_datetime,
 )
 from .runtime_logging import resolve_runtime_log_path, setup_runtime_file_logging, structured_log_line
@@ -128,6 +136,13 @@ from .display_media import (
     row_has_images,
 )
 from .transactions import build_transaction_summary, get_transactions, rebuild_transactions, sync_transaction_from_message
+from .tiktok_ingest import (
+    TikTokIngestError,
+    exchange_tiktok_authorization_code,
+    parse_tiktok_webhook_payload,
+    upsert_tiktok_auth_from_callback,
+    upsert_tiktok_order_from_payload,
+)
 from .worker import (
     STALE_PROCESSING_AFTER,
     clear_parsed_fields,
@@ -136,6 +151,16 @@ from .worker import (
     queue_auto_reprocess_candidates,
     queue_reparse_range,
 )
+try:
+    from scripts.tiktok_backfill import backfill_tiktok_orders as pull_tiktok_orders
+    from scripts.tiktok_backfill import refresh_access_token as refresh_tiktok_access_token
+    from scripts.tiktok_backfill import fetch_tiktok_order_details as _fetch_tiktok_order_details
+    from scripts.tiktok_backfill import order_record_from_payload as _order_record_from_payload
+except Exception:  # pragma: no cover - fallback if the script module is unavailable
+    pull_tiktok_orders = None
+    refresh_tiktok_access_token = None
+    _fetch_tiktok_order_details = None
+    _order_record_from_payload = None
 
 
 settings = get_settings()
@@ -144,7 +169,13 @@ setup_runtime_file_logging("app.log")
 REPORT_SOURCE_ALL = "all"
 REPORT_SOURCE_DISCORD = "discord"
 REPORT_SOURCE_SHOPIFY = "shopify"
-REPORT_SOURCE_OPTIONS = {REPORT_SOURCE_ALL, REPORT_SOURCE_DISCORD, REPORT_SOURCE_SHOPIFY}
+REPORT_SOURCE_TIKTOK = "tiktok"
+REPORT_SOURCE_OPTIONS = {
+    REPORT_SOURCE_ALL,
+    REPORT_SOURCE_DISCORD,
+    REPORT_SOURCE_SHOPIFY,
+    REPORT_SOURCE_TIKTOK,
+}
 
 
 def count_rows(session: Session, stmt) -> int:
@@ -181,6 +212,85 @@ def build_reports_url(
     if not params:
         return "/reports"
     return f"/reports?{urlencode(params)}"
+
+
+def build_tiktok_orders_url(
+    *,
+    start: str = "",
+    end: str = "",
+    financial_status: str = "",
+    fulfillment_status: str = "",
+    order_status: str = "",
+    source: str = "",
+    currency: str = "",
+    search: str = "",
+    sort_by: str = "",
+    sort_dir: str = "",
+    page: int = 1,
+    limit: int = 50,
+) -> str:
+    params: dict[str, str] = {}
+    if start:
+        params["start"] = start
+    if end:
+        params["end"] = end
+    if financial_status:
+        params["financial_status"] = financial_status
+    if fulfillment_status:
+        params["fulfillment_status"] = fulfillment_status
+    if order_status:
+        params["order_status"] = order_status
+    if source:
+        params["source"] = source
+    if currency:
+        params["currency"] = currency
+    if search:
+        params["search"] = search
+    if sort_by:
+        params["sort_by"] = sort_by
+    if sort_dir:
+        params["sort_dir"] = sort_dir
+    if page > 1:
+        params["page"] = str(page)
+    if limit and limit != 50:
+        params["limit"] = str(limit)
+    if not params:
+        return "/tiktok/orders"
+    return f"/tiktok/orders?{urlencode(params)}"
+
+
+def build_tiktok_sort_url(
+    *,
+    current_sort_by: str,
+    current_sort_dir: str,
+    target_sort_by: str,
+    start: str = "",
+    end: str = "",
+    financial_status: str = "",
+    fulfillment_status: str = "",
+    order_status: str = "",
+    source: str = "",
+    currency: str = "",
+    search: str = "",
+    limit: int = 50,
+) -> str:
+    next_dir = "asc"
+    if current_sort_by == target_sort_by and current_sort_dir == "asc":
+        next_dir = "desc"
+    return build_tiktok_orders_url(
+        start=start,
+        end=end,
+        financial_status=financial_status,
+        fulfillment_status=fulfillment_status,
+        order_status=order_status,
+        source=source,
+        currency=currency,
+        search=search,
+        sort_by=target_sort_by,
+        sort_dir=next_dir,
+        limit=limit,
+    )
+
 
 
 def normalize_filesystem_path(path: Path) -> str:
@@ -452,6 +562,32 @@ def build_shopify_item_summary(line_items_json: str) -> str:
     return summary
 
 
+def build_tiktok_item_summary(line_items_summary_json: str, line_items_json: str = "") -> str:
+    try:
+        items = json.loads(line_items_summary_json or "[]")
+    except json.JSONDecodeError:
+        items = []
+    if not isinstance(items, list) or not items:
+        try:
+            items = json.loads(line_items_json or "[]")
+        except json.JSONDecodeError:
+            return ""
+        if not isinstance(items, list):
+            return ""
+    parts: list[str] = []
+    for item in items[:4]:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("title") or item.get("product_name") or item.get("item_name") or "").strip()
+        quantity = int(item.get("quantity") or 0)
+        if not name:
+            continue
+        parts.append(f"{name} x{quantity or 1}")
+    summary = ", ".join(parts)
+    if len(items) > 4:
+        summary = f"{summary}, +{len(items) - 4} more"
+    return summary
+
 def build_shopify_orders_url(
     *,
     financial_status: str = "",
@@ -587,20 +723,37 @@ def build_report_period_comparison_rows(
             end=end if isinstance(end, datetime) else None,
         )
         shopify_summary = build_shopify_reporting_summary(shopify_rows)
+        tiktok_rows = get_tiktok_reporting_rows(
+            session,
+            start=start if isinstance(start, datetime) else None,
+            end=end if isinstance(end, datetime) else None,
+        )
+        tiktok_summary = build_tiktok_reporting_summary(tiktok_rows)
+        discord_gross = round(float(discord_summary["totals"].get("money_in", 0.0) or 0.0), 2)
+        discord_outflow = round(float(discord_summary["totals"].get("money_out", 0.0) or 0.0), 2)
         discord_net = round(float(discord_summary["totals"].get("net", 0.0) or 0.0), 2)
         shopify_gross = round(float(shopify_summary["gross_revenue"] or 0.0), 2)
         shopify_tax = round(float(shopify_summary["total_tax"] or 0.0), 2)
         shopify_net = round(float(shopify_summary["net_revenue"] or 0.0), 2)
+        tiktok_gross = round(float(tiktok_summary["gross_revenue"] or 0.0), 2)
+        tiktok_tax = round(float(tiktok_summary["total_tax"] or 0.0), 2)
+        tiktok_net = round(float(tiktok_summary["net_revenue"] or 0.0), 2)
         rows.append(
             {
                 "key": period.get("key") or "",
                 "label": period.get("label") or "Period",
+                "discord_gross": discord_gross,
+                "discord_outflow": discord_outflow,
                 "discord_net": discord_net,
                 "shopify_gross": shopify_gross,
                 "shopify_tax": shopify_tax,
                 "shopify_net": shopify_net,
-                "combined_net": round(discord_net + shopify_net, 2),
+                "tiktok_gross": tiktok_gross,
+                "tiktok_tax": tiktok_tax,
+                "tiktok_net": tiktok_net,
+                "combined_revenue": round(discord_gross + shopify_net + tiktok_net, 2),
                 "shopify_tax_unknown_orders": int(shopify_summary["tax_unknown_orders"] or 0),
+                "tiktok_tax_unknown_orders": int(tiktok_summary["tax_unknown_orders"] or 0),
             }
         )
     return rows
@@ -658,10 +811,850 @@ def run_shopify_backfill_in_background(*, since: Optional[str], limit: Optional[
         )
 
 
-def local_runtime_details() -> dict:
+_tiktok_state_lock = threading.Lock()
+_tiktok_state = {
+    "last_authorization_at": None,
+    "last_callback": None,
+    "last_webhook_at": None,
+    "last_webhook": None,
+    "is_pull_running": False,
+    "last_pull_started_at": None,
+    "last_pull_finished_at": None,
+    "last_pull_at": None,
+    "last_pull": None,
+    "last_error": None,
+}
+
+_background_task_state_lock = threading.Lock()
+_background_task_state = {
+    "failed_tasks": {},
+    "last_failure": None,
+    "last_failure_at": None,
+}
+
+
+def read_tiktok_integration_state() -> dict[str, object]:
+    with _tiktok_state_lock:
+        return dict(_tiktok_state)
+
+
+def update_tiktok_integration_state(**changes: object) -> dict[str, object]:
+    with _tiktok_state_lock:
+        _tiktok_state.update(changes)
+        return dict(_tiktok_state)
+
+
+def read_background_task_state() -> dict[str, object]:
+    with _background_task_state_lock:
+        state = dict(_background_task_state)
+        failed_tasks = state.get("failed_tasks")
+        if isinstance(failed_tasks, dict):
+            state["failed_tasks"] = dict(failed_tasks)
+        return state
+
+
+def _background_task_alert_messages(state: Optional[dict[str, object]] = None) -> list[str]:
+    task_state = state if state is not None else read_background_task_state()
+    failed_tasks = task_state.get("failed_tasks")
+    if not isinstance(failed_tasks, dict) or not failed_tasks:
+        return []
+    alerts: list[str] = []
+    for task_name, failure in sorted(failed_tasks.items(), key=lambda item: str(item[0]).lower()):
+        error_message = ""
+        if isinstance(failure, dict):
+            error_message = str(failure.get("error") or "").strip()
+        error_label = error_message or "unknown error"
+        task_label = str(task_name).replace("_", " ").replace("-", " ").strip() or "background task"
+        alerts.append(f"{task_label} failed: {error_label}")
+    return alerts
+
+
+def reset_background_task_failures() -> None:
+    with _background_task_state_lock:
+        _background_task_state.update(
+            {
+                "failed_tasks": {},
+                "last_failure": None,
+                "last_failure_at": None,
+            }
+        )
+
+
+def record_background_task_failure(
+    *,
+    task_name: str,
+    runtime_name: str,
+    error_message: str,
+) -> dict[str, object]:
+    failure = {
+        "task_name": task_name,
+        "runtime_name": runtime_name,
+        "error": error_message,
+        "failed_at": utcnow(),
+    }
+    with _background_task_state_lock:
+        failed_tasks = dict(_background_task_state.get("failed_tasks") or {})
+        failed_tasks[task_name] = failure
+        _background_task_state.update(
+            {
+                "failed_tasks": failed_tasks,
+                "last_failure": failure,
+                "last_failure_at": failure["failed_at"],
+            }
+        )
+        return dict(_background_task_state)
+
+
+def track_background_task_failure(
+    task: asyncio.Task,
+    *,
+    runtime_name: str,
+    task_name: str,
+    stop_event: asyncio.Event,
+) -> asyncio.Task:
+    def _handle_completion(done_task: asyncio.Task) -> None:
+        if done_task.cancelled():
+            return
+        try:
+            done_task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            record_background_task_failure(
+                task_name=task_name,
+                runtime_name=runtime_name,
+                error_message=str(exc),
+            )
+            print(
+                structured_log_line(
+                    runtime=runtime_name,
+                    action="runtime.background_task.failed",
+                    success=False,
+                    task_name=task_name,
+                    error=str(exc),
+                )
+            )
+            return
+        if stop_event.is_set():
+            return
+        error_message = "background task exited unexpectedly"
+        record_background_task_failure(
+            task_name=task_name,
+            runtime_name=runtime_name,
+            error_message=error_message,
+        )
+        print(
+            structured_log_line(
+                runtime=runtime_name,
+                action="runtime.background_task.failed",
+                success=False,
+                task_name=task_name,
+                error=error_message,
+            )
+        )
+
+    task.add_done_callback(_handle_completion)
+    return task
+
+
+def track_background_task(
+    task: asyncio.Task,
+    *,
+    runtime_name: str,
+    task_name: str,
+    stop_event: asyncio.Event,
+) -> asyncio.Task:
+    return track_background_task_failure(
+        task,
+        runtime_name=runtime_name,
+        task_name=task_name,
+        stop_event=stop_event,
+    )
+
+
+def _normalize_optional_query_message(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return ""
+
+
+def summarize_tiktok_query_params(params: dict[str, str]) -> dict[str, str]:
+    allowed_keys = ("app_key", "code", "locale", "shop_region", "shop_id", "state")
+    summary: dict[str, str] = {}
+    for key in allowed_keys:
+        value = (params.get(key) or "").strip()
+        if value:
+            summary[key] = value if key != "code" else f"{value[:8]}..."
+    return summary
+
+
+def summarize_tiktok_payload(payload: object) -> dict[str, object]:
+    if isinstance(payload, dict):
+        return {
+            "kind": "object",
+            "keys": sorted(str(key) for key in payload.keys()),
+        }
+    if isinstance(payload, list):
+        return {
+            "kind": "list",
+            "length": len(payload),
+        }
     return {
-        "discord_status": discord_runtime_state.get("status"),
-        "discord_error": discord_runtime_state.get("error"),
+        "kind": type(payload).__name__,
+    }
+
+
+def get_latest_tiktok_auth_row(session: Session) -> Optional[TikTokAuth]:
+    stmt = select(TikTokAuth).order_by(TikTokAuth.updated_at.desc(), TikTokAuth.id.desc())
+    return session.exec(stmt).first()
+
+
+def ensure_tiktok_auth_row(session: Session) -> Optional[TikTokAuth]:
+    auth_row = get_latest_tiktok_auth_row(session)
+    configured_shop_id = (settings.tiktok_shop_id or "").strip()
+    configured_shop_cipher = (settings.tiktok_shop_cipher or "").strip()
+    configured_access_token = (settings.tiktok_access_token or "").strip()
+    configured_refresh_token = (settings.tiktok_refresh_token or "").strip()
+    configured_app_key = (settings.tiktok_app_key or "").strip()
+    configured_redirect_uri = (settings.tiktok_redirect_uri or "").strip()
+
+    has_configured_identity = bool(configured_shop_id or configured_shop_cipher)
+    has_configured_tokens = bool(configured_access_token or configured_refresh_token)
+    if not has_configured_identity or not has_configured_tokens or not configured_app_key:
+        return auth_row
+
+    # Once we have a persisted auth row, it becomes the source of truth.
+    # Configured tokens are only for first-install bootstrap or manual recovery.
+    if auth_row is not None:
+        return auth_row
+
+    received_at = utcnow()
+    sync_state = read_tiktok_integration_state()
+    last_callback = sync_state.get("last_callback")
+    shop_region = None
+    if isinstance(last_callback, dict):
+        callback_query = last_callback.get("query")
+        if isinstance(callback_query, dict):
+            shop_region = str(callback_query.get("shop_region") or "").strip() or None
+    upsert_tiktok_auth_from_callback(
+        session,
+        TikTokAuth,
+        token_result={
+            "access_token": configured_access_token or None,
+            "refresh_token": configured_refresh_token or None,
+            "shop_id": configured_shop_id or None,
+            "shop_cipher": configured_shop_cipher or None,
+            "shop_region": shop_region,
+        },
+        app_key=configured_app_key,
+        redirect_uri=configured_redirect_uri,
+        fallback_shop_id=configured_shop_id or None,
+        source="configured_env",
+        received_at=received_at,
+        dry_run=False,
+    )
+    session.commit()
+    update_tiktok_integration_state(
+        last_authorization_at=received_at,
+        last_error=None,
+    )
+    return get_latest_tiktok_auth_row(session)
+
+
+def _resolve_tiktok_pull_credentials(auth_row: Optional[TikTokAuth]) -> tuple[str, str, str]:
+    auth_shop_id = (auth_row.tiktok_shop_id if auth_row else "") or ""
+    shop_id = auth_shop_id.strip()
+    if not shop_id or shop_id.startswith("pending:"):
+        shop_id = (settings.tiktok_shop_id or "").strip()
+
+    shop_cipher = ((auth_row.shop_cipher if auth_row else "") or "").strip()
+    if not shop_cipher:
+        shop_cipher = (settings.tiktok_shop_cipher or "").strip()
+
+    access_token = ((auth_row.access_token if auth_row else "") or "").strip()
+    if not access_token:
+        access_token = (settings.tiktok_access_token or "").strip()
+
+    return shop_id, shop_cipher, access_token
+
+
+def describe_tiktok_sync_status(auth_row: Optional[TikTokAuth], sync_state: dict[str, object]) -> dict[str, object]:
+    last_pull = sync_state.get("last_pull")
+    pull_status = "idle"
+    if isinstance(last_pull, dict):
+        pull_status = str(last_pull.get("status") or "idle").strip() or "idle"
+    is_running = bool(sync_state.get("is_pull_running"))
+
+    has_tokens = bool(
+        (auth_row and ((auth_row.access_token or "").strip() or (auth_row.refresh_token or "").strip()))
+        or (settings.tiktok_access_token or "").strip()
+        or (settings.tiktok_refresh_token or "").strip()
+    )
+    shop_key = (settings.tiktok_shop_id or "").strip() or (auth_row.tiktok_shop_id if auth_row else "")
+    shop_cipher = (settings.tiktok_shop_cipher or "").strip() or (auth_row.shop_cipher if auth_row else "")
+    resolved_identifier = shop_key or shop_cipher or (auth_row.seller_id if auth_row else "") or (auth_row.open_id if auth_row else "")
+
+    if auth_row and has_tokens:
+        status_label = "Connected"
+        status_tone = "ok"
+    elif auth_row:
+        status_label = "Pending token refresh"
+        status_tone = "warn"
+    else:
+        status_label = "Not connected"
+        status_tone = "bad"
+
+    if is_running:
+        sync_label = "Sync running"
+    elif pull_status in {"success"}:
+        sync_label = "Sync healthy"
+    elif pull_status in {"waiting", "skipped"}:
+        sync_label = "Waiting for identifiers"
+    elif pull_status in {"failed", "error"}:
+        sync_label = "Sync error"
+    else:
+        sync_label = "Idle"
+
+    return {
+        "status_label": status_label,
+        "status_tone": status_tone,
+        "sync_label": sync_label,
+        "sync_status": "running" if is_running else pull_status,
+        "shop_key": resolved_identifier or "unknown",
+        "has_tokens": has_tokens,
+        "is_running": is_running,
+        "last_pull_started_at": sync_state.get("last_pull_started_at"),
+        "last_pull_finished_at": sync_state.get("last_pull_finished_at"),
+        "last_pull": last_pull if isinstance(last_pull, dict) else {},
+    }
+
+
+def _format_tiktok_status_timestamp(value: object) -> str:
+    if value in (None, ""):
+        return "none yet"
+    if isinstance(value, datetime):
+        return format_pacific_datetime(value)
+    if isinstance(value, str):
+        raw_value = value.strip()
+        if not raw_value:
+            return "none yet"
+        try:
+            parsed_value = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+        except ValueError:
+            return raw_value
+        return format_pacific_datetime(parsed_value)
+    return str(value)
+
+
+def build_tiktok_status_snapshot(session: Session) -> dict[str, object]:
+    auth_row = get_latest_tiktok_auth_row(session)
+    integration_state = read_tiktok_integration_state()
+    sync_snapshot = describe_tiktok_sync_status(auth_row, integration_state)
+    last_callback = integration_state.get("last_callback")
+    if not isinstance(last_callback, dict):
+        last_callback = {}
+    last_webhook = integration_state.get("last_webhook")
+    if not isinstance(last_webhook, dict):
+        last_webhook = {}
+    last_pull = sync_snapshot.get("last_pull") if isinstance(sync_snapshot.get("last_pull"), dict) else {}
+    last_pull_started = sync_snapshot.get("last_pull_started_at")
+    last_pull_finished = sync_snapshot.get("last_pull_finished_at")
+    return {
+        "status_label": sync_snapshot["status_label"],
+        "status_tone": sync_snapshot["status_tone"],
+        "sync_label": sync_snapshot["sync_label"],
+        "sync_status": sync_snapshot["sync_status"],
+        "shop_key": sync_snapshot["shop_key"],
+        "has_tokens": sync_snapshot["has_tokens"],
+        "is_running": sync_snapshot["is_running"],
+        "last_authorization_label": _format_tiktok_status_timestamp(
+            integration_state.get("last_authorization_at")
+            or (auth_row.updated_at if auth_row and getattr(auth_row, "updated_at", None) else None)
+        ),
+        "last_callback_label": _format_tiktok_status_timestamp(last_callback.get("received_at")),
+        "last_callback": last_callback,
+        "last_webhook_label": _format_tiktok_status_timestamp(integration_state.get("last_webhook_at")),
+        "last_webhook": last_webhook,
+        "last_pull_started_label": _format_tiktok_status_timestamp(last_pull_started),
+        "last_pull_finished_label": _format_tiktok_status_timestamp(last_pull_finished),
+        "last_pull": last_pull,
+        "last_error": integration_state.get("last_error") or "",
+    }
+
+
+def resolve_tiktok_shop_pull_base_url() -> str:
+    explicit_shop_api_base = (settings.tiktok_shop_api_base_url or "").strip()
+    if explicit_shop_api_base:
+        return explicit_shop_api_base
+    generic_base = (settings.tiktok_api_base_url or "").strip()
+    if generic_base and "open-api" in generic_base:
+        return generic_base
+    return "https://open-api.tiktokglobalshop.com"
+
+
+def _refresh_tiktok_auth_if_needed(
+    session: Session,
+    *,
+    runtime_name: str,
+    force: bool = False,
+) -> Optional[dict[str, object]]:
+    if refresh_tiktok_access_token is None:
+        return None
+
+    auth_row = get_latest_tiktok_auth_row(session)
+    if auth_row is None:
+        return None
+
+    app_key = (settings.tiktok_app_key or auth_row.app_key or "").strip()
+    app_secret = (settings.tiktok_app_secret or "").strip()
+    refresh_token = (auth_row.refresh_token or settings.tiktok_refresh_token or "").strip()
+    if not app_key or not app_secret or not refresh_token:
+        return None
+
+    token_expires_at = auth_row.access_token_expires_at
+    if token_expires_at is not None and token_expires_at.tzinfo is None:
+        token_expires_at = token_expires_at.replace(tzinfo=timezone.utc)
+    should_refresh = force or not auth_row.access_token or not token_expires_at or token_expires_at <= utcnow() + timedelta(minutes=10)
+    if not should_refresh:
+        return None
+
+    with httpx.Client(timeout=40.0, follow_redirects=True) as client:
+        refreshed = refresh_tiktok_access_token(
+            client,
+            base_url=resolve_tiktok_shop_pull_base_url(),
+            app_key=app_key,
+            app_secret=app_secret,
+            refresh_token=refresh_token,
+        )
+
+    status, auth_record = upsert_tiktok_auth_from_callback(
+        session,
+        TikTokAuth,
+        token_result=refreshed,
+        app_key=app_key,
+        redirect_uri=(auth_row.redirect_uri or settings.tiktok_redirect_uri or "").strip(),
+        fallback_shop_id=(settings.tiktok_shop_id or auth_row.tiktok_shop_id or "").strip(),
+        source="oauth_refresh",
+        received_at=utcnow(),
+        dry_run=False,
+    )
+    update_tiktok_integration_state(
+        is_pull_running=False,
+        last_pull_started_at=utcnow(),
+        last_pull_finished_at=utcnow(),
+        last_error=None,
+        last_pull_at=utcnow(),
+        last_pull={
+            "status": "refresh",
+            "auth_status": status,
+            "shop_id": auth_record.get("tiktok_shop_id"),
+            "runtime": runtime_name,
+        },
+    )
+    session.commit()
+    return {"status": status, "auth_record": auth_record}
+
+
+def run_tiktok_pull_cycle(
+    *,
+    runtime_name: str,
+    limit: Optional[int] = None,
+    lookback_hours: Optional[float] = None,
+    since: Optional[str] = None,
+    trigger: str = "automatic",
+) -> dict[str, object]:
+    if pull_tiktok_orders is None:
+        return {"status": "disabled", "reason": "TikTok backfill helper unavailable"}
+    if not settings.tiktok_sync_enabled and trigger == "automatic":
+        return {"status": "disabled", "reason": "TikTok automatic sync disabled"}
+    if not (settings.tiktok_app_key or "").strip() or not (settings.tiktok_app_secret or "").strip():
+        return {"status": "disabled", "reason": "TikTok app credentials are missing"}
+
+    started_at = utcnow()
+    update_tiktok_integration_state(
+        is_pull_running=True,
+        last_pull_started_at=started_at,
+        last_pull_finished_at=None,
+        last_error=None,
+        last_pull={
+            "status": "running",
+            "runtime": runtime_name,
+            "trigger": trigger,
+        },
+    )
+
+    try:
+      with managed_session() as session:
+        auth_row = ensure_tiktok_auth_row(session)
+        if auth_row is None and not ((settings.tiktok_shop_id or "").strip() and (settings.tiktok_access_token or "").strip()):
+            result = {"status": "waiting", "reason": "TikTok auth has not been captured yet", "trigger": trigger}
+            update_tiktok_integration_state(
+                is_pull_running=False,
+                last_pull_finished_at=utcnow(),
+                last_pull_at=utcnow(),
+                last_pull={**result, "runtime": runtime_name},
+            )
+            return result
+
+        refresh_result = _refresh_tiktok_auth_if_needed(session, runtime_name=runtime_name)
+        if refresh_result is not None:
+            auth_row = ensure_tiktok_auth_row(session)
+
+        shop_id, shop_cipher, access_token = _resolve_tiktok_pull_credentials(auth_row)
+        if not shop_id and not shop_cipher:
+            result = {
+                "status": "waiting",
+                "reason": "missing shop identifier",
+                "runtime": runtime_name,
+                "trigger": trigger,
+            }
+            update_tiktok_integration_state(
+                is_pull_running=False,
+                last_pull_finished_at=utcnow(),
+                last_pull_at=utcnow(),
+                last_pull=result,
+            )
+            return result
+        if not access_token:
+            result = {
+                "status": "waiting",
+                "reason": "missing access token",
+                "runtime": runtime_name,
+                "shop_id": shop_id,
+                "trigger": trigger,
+            }
+            update_tiktok_integration_state(
+                is_pull_running=False,
+                last_pull_finished_at=utcnow(),
+                last_pull_at=utcnow(),
+                last_pull=result,
+            )
+            return result
+
+        since_dt = parse_report_datetime(since)
+        if since_dt is None:
+            since_dt = utcnow() - timedelta(hours=max(float(lookback_hours or settings.tiktok_sync_lookback_hours or 0.0), 1.0))
+        # Gap detection: if the newest order in DB is older than our lookback window,
+        # extend since_dt back to cover the gap (capped at startup_backfill_days).
+        if trigger not in ("startup", "manual"):
+            gap_floor = utcnow() - timedelta(days=max(int(settings.tiktok_startup_backfill_days or 1), 1))
+            newest_created = session.exec(select(func.max(TikTokOrder.created_at))).one()
+            if newest_created is not None:
+                if newest_created.tzinfo is None:
+                    newest_created = newest_created.replace(tzinfo=timezone.utc)
+            if newest_created is not None and newest_created < since_dt:
+                gap_since = max(newest_created - timedelta(hours=1), gap_floor)
+                if gap_since < since_dt:
+                    since_dt = gap_since
+        safe_limit = max(int(limit or settings.tiktok_sync_limit or 0), 1)
+        def _run_pull_with_current_credentials(current_access_token: str):
+            return pull_tiktok_orders(
+                session,
+                base_url=resolve_tiktok_shop_pull_base_url(),
+                app_key=(settings.tiktok_app_key or "").strip(),
+                app_secret=(settings.tiktok_app_secret or "").strip(),
+                access_token=current_access_token,
+                shop_id=shop_id,
+                shop_cipher=shop_cipher,
+                since=since_dt,
+                limit=safe_limit,
+                dry_run=False,
+                runtime_name=runtime_name,
+            )
+
+        try:
+            summary = _run_pull_with_current_credentials(access_token)
+        except httpx.HTTPStatusError as exc:
+            if exc.response is None or exc.response.status_code != 401:
+                raise
+            refresh_result = _refresh_tiktok_auth_if_needed(
+                session,
+                runtime_name=f"{runtime_name}_401_refresh",
+                force=True,
+            )
+            if refresh_result is None:
+                raise
+            auth_row = ensure_tiktok_auth_row(session)
+            shop_id, shop_cipher, access_token = _resolve_tiktok_pull_credentials(auth_row)
+            summary = _run_pull_with_current_credentials(access_token)
+        last_pull = {
+            "status": "success",
+            "runtime": runtime_name,
+            "shop_id": shop_id or None,
+            "shop_cipher": shop_cipher or None,
+            "trigger": trigger,
+            "since": since_dt.isoformat(),
+            "limit": safe_limit,
+            "fetched": summary.fetched,
+            "inserted": summary.inserted,
+            "updated": summary.updated,
+            "failed": summary.failed,
+            "detail_calls": summary.detail_calls,
+        }
+        update_tiktok_integration_state(
+            is_pull_running=False,
+            last_pull_finished_at=utcnow(),
+            last_pull_at=utcnow(),
+            last_pull=last_pull,
+            last_error=None,
+        )
+        session.commit()
+        return last_pull
+    except Exception:
+        update_tiktok_integration_state(
+            is_pull_running=False,
+            last_pull_finished_at=utcnow(),
+            last_pull_at=utcnow(),
+            last_pull={"status": "failed", "runtime": runtime_name, "trigger": trigger},
+            last_error="pull cycle crashed",
+        )
+        raise
+
+
+async def periodic_tiktok_pull_loop(stop_event: asyncio.Event) -> None:
+    runtime_name = f"{settings.runtime_name}_tiktok_pull"
+    if not settings.tiktok_sync_enabled:
+        print("[tiktok] periodic pull loop disabled by configuration")
+        return
+    if pull_tiktok_orders is None:
+        print("[tiktok] periodic pull loop disabled because backfill helper could not be imported")
+        return
+    if not ((settings.tiktok_app_key or "").strip() and (settings.tiktok_app_secret or "").strip()):
+        print("[tiktok] periodic pull loop disabled because TikTok credentials are missing")
+        return
+
+    interval_seconds = max(int(settings.tiktok_sync_interval_minutes or 0), 1) * 60
+    while not stop_event.is_set():
+        try:
+            result = await asyncio.to_thread(
+                run_tiktok_pull_cycle,
+                runtime_name=runtime_name,
+                limit=settings.tiktok_sync_limit,
+                lookback_hours=settings.tiktok_sync_lookback_hours,
+                trigger="automatic",
+            )
+            print(
+                structured_log_line(
+                    runtime=runtime_name,
+                    action="tiktok.pull.cycle",
+                    success=result.get("status") == "success",
+                    status=str(result.get("status") or "unknown"),
+                    shop_id=result.get("shop_id"),
+                    reason=result.get("reason"),
+                    fetched=result.get("fetched"),
+                    inserted=result.get("inserted"),
+                    updated=result.get("updated"),
+                    failed=result.get("failed"),
+                    detail_calls=result.get("detail_calls"),
+                )
+            )
+        except Exception as exc:
+            update_tiktok_integration_state(
+                last_pull_at=utcnow(),
+                last_pull={"status": "failed", "runtime": runtime_name, "error": str(exc)},
+                last_error=str(exc),
+            )
+            print(
+                structured_log_line(
+                    runtime=runtime_name,
+                    action="tiktok.pull.failed",
+                    success=False,
+                    error=str(exc),
+                )
+            )
+
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+        except asyncio.TimeoutError:
+            continue
+
+
+async def tiktok_startup_backfill(stop_event: asyncio.Event) -> None:
+    """On startup, pull up to tiktok_startup_backfill_days of history to fill any gaps."""
+    runtime_name = f"{settings.runtime_name}_tiktok_startup"
+    if pull_tiktok_orders is None or not settings.tiktok_sync_enabled:
+        return
+    if not ((settings.tiktok_app_key or "").strip() and (settings.tiktok_app_secret or "").strip()):
+        return
+    backfill_days = max(int(settings.tiktok_startup_backfill_days or 1), 1)
+    # Small delay so auth bootstrap and DB init complete first.
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=8.0)
+    except asyncio.TimeoutError:
+        pass
+    if stop_event.is_set():
+        return
+    full_backfill_floor = utcnow() - timedelta(days=backfill_days)
+    since_dt = full_backfill_floor
+    with managed_session() as session:
+        newest_created = session.exec(select(func.max(TikTokOrder.created_at))).one()
+        if newest_created is not None:
+            if newest_created.tzinfo is None:
+                newest_created = newest_created.replace(tzinfo=timezone.utc)
+            since_dt = max(newest_created - timedelta(hours=2), full_backfill_floor)
+    print(
+        structured_log_line(
+            runtime=runtime_name,
+            action="tiktok.startup_backfill.start",
+            since=since_dt.isoformat(),
+            backfill_days=backfill_days,
+        )
+    )
+    try:
+        result = await asyncio.to_thread(
+            run_tiktok_pull_cycle,
+            runtime_name=runtime_name,
+            since=since_dt.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+            limit=5000,
+            trigger="startup",
+        )
+        print(
+            structured_log_line(
+                runtime=runtime_name,
+                action="tiktok.startup_backfill.complete",
+                success=result.get("status") == "success",
+                status=str(result.get("status") or "unknown"),
+                fetched=result.get("fetched"),
+                inserted=result.get("inserted"),
+                updated=result.get("updated"),
+                failed=result.get("failed"),
+            )
+        )
+    except Exception as exc:
+        print(
+            structured_log_line(
+                runtime=runtime_name,
+                action="tiktok.startup_backfill.failed",
+                success=False,
+                error=str(exc),
+            )
+        )
+
+
+def _enrich_tiktok_order_from_api(order_id: str) -> None:
+    """Fetch full order details from TikTok API and update the DB record."""
+    if _fetch_tiktok_order_details is None or _order_record_from_payload is None:
+        return
+    runtime_name = f"{settings.runtime_name}_tiktok_webhook_enrich"
+    try:
+        with managed_session() as session:
+            auth_row = get_latest_tiktok_auth_row(session)
+            if auth_row is None:
+                return
+            shop_id, shop_cipher, access_token = _resolve_tiktok_pull_credentials(auth_row)
+            if not access_token or (not shop_id and not shop_cipher):
+                return
+
+            with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+                details = _fetch_tiktok_order_details(
+                    client,
+                    base_url=resolve_tiktok_shop_pull_base_url(),
+                    app_key=(settings.tiktok_app_key or "").strip(),
+                    app_secret=(settings.tiktok_app_secret or "").strip(),
+                    access_token=access_token,
+                    shop_id=shop_id,
+                    shop_cipher=shop_cipher,
+                    order_ids=[order_id],
+                )
+
+            if not details:
+                return
+            record = _order_record_from_payload(
+                details[0],
+                shop_id=shop_id,
+                shop_cipher=shop_cipher,
+                source="webhook_enriched",
+            )
+            from .tiktok_ingest import upsert_tiktok_order
+            upsert_tiktok_order(session, TikTokOrder, record)
+            session.commit()
+            print(
+                structured_log_line(
+                    runtime=runtime_name,
+                    action="tiktok.webhook.order_enriched",
+                    success=True,
+                    tiktok_order_id=order_id,
+                )
+            )
+    except Exception as exc:
+        print(
+            structured_log_line(
+                runtime=runtime_name,
+                action="tiktok.webhook.order_enrich_failed",
+                success=False,
+                error=str(exc),
+                tiktok_order_id=order_id,
+            )
+            )
+
+
+def _start_tiktok_webhook_enrichment(order_id: str) -> None:
+    if not order_id or _fetch_tiktok_order_details is None:
+        return
+    threading.Thread(
+        target=_enrich_tiktok_order_from_api,
+        args=(order_id,),
+        daemon=True,
+        name=f"tiktok-enrich-{order_id[:12]}",
+    ).start()
+
+
+def run_tiktok_pull_in_background(*, since: Optional[str], limit: Optional[int], trigger: str = "manual") -> None:
+    runtime_name = f"{settings.runtime_name}_tiktok_manual"
+    try:
+        result = run_tiktok_pull_cycle(
+            runtime_name=runtime_name,
+            since=since,
+            limit=limit,
+            lookback_hours=settings.tiktok_sync_lookback_hours,
+            trigger=trigger,
+        )
+        print(
+            structured_log_line(
+                runtime=runtime_name,
+                action="tiktok.pull.background_complete",
+                success=result.get("status") == "success",
+                status=str(result.get("status") or "unknown"),
+                trigger=trigger,
+                shop_id=result.get("shop_id"),
+                reason=result.get("reason"),
+                fetched=result.get("fetched"),
+                inserted=result.get("inserted"),
+                updated=result.get("updated"),
+                failed=result.get("failed"),
+            )
+        )
+    except Exception as exc:
+        update_tiktok_integration_state(
+            is_pull_running=False,
+            last_pull_finished_at=utcnow(),
+            last_pull_at=utcnow(),
+            last_pull={"status": "failed", "runtime": runtime_name, "trigger": trigger, "error": str(exc)},
+            last_error=str(exc),
+        )
+        print(
+            structured_log_line(
+                runtime=runtime_name,
+                action="tiktok.pull.background_failed",
+                success=False,
+                error=str(exc),
+                trigger=trigger,
+            )
+        )
+
+
+def local_runtime_details() -> dict:
+    background_task_alerts = _background_task_alert_messages()
+    discord_status = discord_runtime_state.get("status")
+    discord_error = discord_runtime_state.get("error")
+    if background_task_alerts:
+        discord_status = "degraded"
+        discord_error = background_task_alerts[0]
+    return {
+        "discord_status": discord_status,
+        "discord_error": discord_error,
         "parser_worker_enabled": settings.parser_worker_enabled,
         "discord_ingest_enabled": settings.discord_ingest_enabled,
         "periodic_attachment_repair_enabled": settings.periodic_attachment_repair_enabled,
@@ -671,20 +1664,35 @@ def local_runtime_details() -> dict:
         "periodic_attachment_repair_min_age_minutes": settings.periodic_attachment_repair_min_age_minutes,
         "periodic_stitch_audit_enabled": settings.periodic_stitch_audit_enabled,
         "periodic_stitch_audit_interval_minutes": settings.periodic_stitch_audit_interval_minutes,
+        "tiktok_sync_enabled": settings.tiktok_sync_enabled,
+        "tiktok_sync_interval_minutes": settings.tiktok_sync_interval_minutes,
+        "tiktok_sync_lookback_hours": settings.tiktok_sync_lookback_hours,
+        "tiktok_sync_limit": settings.tiktok_sync_limit,
         "backfill_queue_expected": settings.discord_ingest_enabled,
         "last_recent_audit_at": discord_runtime_state.get("last_recent_audit_at"),
         "last_recent_audit_summary": discord_runtime_state.get("last_recent_audit_summary"),
         "last_attachment_repair_at": discord_runtime_state.get("last_attachment_repair_at"),
         "last_attachment_repair_summary": discord_runtime_state.get("last_attachment_repair_summary"),
+        "background_task_alerts": background_task_alerts,
+        "background_task_failure_count": len(background_task_alerts),
     }
 
 
 def app_runtime_details() -> dict:
+    background_task_alerts = _background_task_alert_messages()
     return {
         "service_mode": "web-app",
+        "discord_status": "degraded" if background_task_alerts else "running",
+        "discord_error": background_task_alerts[0] if background_task_alerts else "",
         "parser_worker_enabled": settings.parser_worker_enabled,
         "discord_ingest_enabled": settings.discord_ingest_enabled,
         "periodic_stitch_audit_enabled": settings.periodic_stitch_audit_enabled,
+        "tiktok_sync_enabled": settings.tiktok_sync_enabled,
+        "tiktok_sync_interval_minutes": settings.tiktok_sync_interval_minutes,
+        "last_tiktok_pull_at": read_tiktok_integration_state().get("last_pull_at"),
+        "last_tiktok_pull": read_tiktok_integration_state().get("last_pull"),
+        "background_task_alerts": background_task_alerts,
+        "background_task_failure_count": len(background_task_alerts),
     }
 
 
@@ -1664,6 +2672,7 @@ async def lifespan(app: FastAPI):
     with managed_session() as session:
         seed_default_users(session)
     seed_channels_from_env()
+    reset_background_task_failures()
 
     stop_event = asyncio.Event()
     app.state.stop_event = stop_event
@@ -1702,27 +2711,47 @@ async def lifespan(app: FastAPI):
     else:
         app.state.heartbeat_thread = None
 
-    discord_task = asyncio.create_task(run_discord_bot(stop_event), name="discord-ingest")
+    discord_task = track_background_task(
+        asyncio.create_task(run_discord_bot(stop_event), name="discord-ingest"),
+        runtime_name=WORKER_RUNTIME_NAME,
+        task_name="discord-ingest",
+        stop_event=stop_event,
+    )
     background_tasks.append(discord_task)
     app.state.discord_task = discord_task
 
     if settings.discord_ingest_enabled:
-        backfill_task = asyncio.create_task(
-            backfill_request_loop(stop_event, get_discord_client),
-            name="backfill-queue",
+        backfill_task = track_background_task(
+            asyncio.create_task(
+                backfill_request_loop(stop_event, get_discord_client),
+                name="backfill-queue",
+            ),
+            runtime_name=WORKER_RUNTIME_NAME,
+            task_name="backfill-queue",
+            stop_event=stop_event,
         )
         background_tasks.append(backfill_task)
         app.state.backfill_task = backfill_task
-        recent_audit_task = asyncio.create_task(
-            recent_message_audit_loop(stop_event, get_discord_client),
-            name="recent-message-audit",
+        recent_audit_task = track_background_task(
+            asyncio.create_task(
+                recent_message_audit_loop(stop_event, get_discord_client),
+                name="recent-message-audit",
+            ),
+            runtime_name=WORKER_RUNTIME_NAME,
+            task_name="recent-message-audit",
+            stop_event=stop_event,
         )
         background_tasks.append(recent_audit_task)
         app.state.recent_audit_task = recent_audit_task
         if settings.periodic_attachment_repair_enabled:
-            attachment_repair_task = asyncio.create_task(
-                periodic_attachment_repair_loop(stop_event, get_discord_client),
-                name="attachment-repair-audit",
+            attachment_repair_task = track_background_task(
+                asyncio.create_task(
+                    periodic_attachment_repair_loop(stop_event, get_discord_client),
+                    name="attachment-repair-audit",
+                ),
+                runtime_name=WORKER_RUNTIME_NAME,
+                task_name="attachment-repair-audit",
+                stop_event=stop_event,
             )
             background_tasks.append(attachment_repair_task)
             app.state.attachment_repair_task = attachment_repair_task
@@ -1734,9 +2763,14 @@ async def lifespan(app: FastAPI):
         app.state.attachment_repair_task = None
 
     if settings.discord_ingest_enabled and settings.parser_worker_enabled:
-        stitch_audit_task = asyncio.create_task(
-            periodic_stitch_audit_loop(stop_event),
-            name="stitch-audit",
+        stitch_audit_task = track_background_task(
+            asyncio.create_task(
+                periodic_stitch_audit_loop(stop_event),
+                name="stitch-audit",
+            ),
+            runtime_name=WORKER_RUNTIME_NAME,
+            task_name="stitch-audit",
+            stop_event=stop_event,
         )
         background_tasks.append(stitch_audit_task)
         app.state.stitch_audit_task = stitch_audit_task
@@ -1744,12 +2778,44 @@ async def lifespan(app: FastAPI):
         app.state.stitch_audit_task = None
 
     if settings.parser_worker_enabled:
-        worker_task = asyncio.create_task(parser_loop(stop_event), name="parser-worker")
+        worker_task = track_background_task(
+            asyncio.create_task(parser_loop(stop_event), name="parser-worker"),
+            runtime_name=WORKER_RUNTIME_NAME,
+            task_name="parser-worker",
+            stop_event=stop_event,
+        )
         background_tasks.append(worker_task)
         app.state.worker_task = worker_task
     else:
         app.state.worker_task = None
         print("[worker] parser worker disabled by configuration")
+
+    if (settings.tiktok_app_key or "").strip() and (settings.tiktok_app_secret or "").strip():
+        tiktok_pull_task = track_background_task(
+            asyncio.create_task(
+                periodic_tiktok_pull_loop(stop_event),
+                name="tiktok-order-pull",
+            ),
+            runtime_name=WORKER_RUNTIME_NAME,
+            task_name="tiktok-order-pull",
+            stop_event=stop_event,
+        )
+        background_tasks.append(tiktok_pull_task)
+        app.state.tiktok_pull_task = tiktok_pull_task
+        tiktok_backfill_task = track_background_task(
+            asyncio.create_task(
+                tiktok_startup_backfill(stop_event),
+                name="tiktok-startup-backfill",
+            ),
+            runtime_name=WORKER_RUNTIME_NAME,
+            task_name="tiktok-startup-backfill",
+            stop_event=stop_event,
+        )
+        background_tasks.append(tiktok_backfill_task)
+        app.state.tiktok_backfill_task = tiktok_backfill_task
+    else:
+        app.state.tiktok_pull_task = None
+        app.state.tiktok_backfill_task = None
 
     yield
 
@@ -1901,6 +2967,8 @@ PUBLIC_PATH_PREFIXES = (
     "/health",
     "/login",
     "/webhooks/shopify",
+    "/webhooks/tiktok",
+    "/integrations/tiktok/callback",
 )
 
 
@@ -1911,7 +2979,7 @@ def user_role_for_path(path: str) -> Optional[str]:
         return "reviewer"
     if path.startswith("/review") or path.startswith("/messages") or path.startswith("/channels"):
         return "reviewer"
-    if path.startswith("/reports") or path.startswith("/shopify-orders") or path.startswith("/shopify/orders"):
+    if path.startswith("/reports") or path.startswith("/shopify-orders") or path.startswith("/shopify/orders") or path.startswith("/tiktok/orders") or path == "/tiktok":
         return "viewer"
     if path == "/":
         return "viewer"
@@ -2049,12 +3117,14 @@ def dashboard_page(
             "discord_trade_in": 0.0,
             "discord_total": 0.0,
             "shopify_total": 0.0,
+            "tiktok_total": 0.0,
             "total": 0.0,
             "total_display": format_dashboard_money(0.0),
             "discord_total_display": format_dashboard_money(0.0),
             "discord_sales_display": format_dashboard_money(0.0),
             "discord_trade_in_display": format_dashboard_money(0.0),
             "shopify_total_display": format_dashboard_money(0.0),
+            "tiktok_total_display": format_dashboard_money(0.0),
         },
     )
     dashboard_snapshot["today"].setdefault(
@@ -2074,6 +3144,72 @@ def dashboard_page(
         },
     )
     parser_progress = get_parser_progress(session)
+    today_start_local = utcnow().astimezone(PACIFIC_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+    tomorrow_start_local = today_start_local + timedelta(days=1)
+    today_start = today_start_local.astimezone(timezone.utc)
+    tomorrow_start = tomorrow_start_local.astimezone(timezone.utc)
+    tiktok_rows = get_tiktok_reporting_rows(session, start=today_start, end=tomorrow_start)
+    tiktok_summary = build_tiktok_reporting_summary(tiktok_rows)
+    tiktok_auth_row = get_latest_tiktok_auth_row(session)
+    tiktok_sync_snapshot = describe_tiktok_sync_status(tiktok_auth_row, read_tiktok_integration_state())
+    dashboard_snapshot["today"]["tiktok"] = {
+        "order_count": int(tiktok_summary.get("orders", 0) or 0),
+        "paid_order_count": int(tiktok_summary.get("paid_orders", 0) or 0),
+        "gross": round(float(tiktok_summary.get("gross_revenue", 0.0) or 0.0), 2),
+        "tax": round(float(tiktok_summary.get("total_tax", 0.0) or 0.0), 2),
+        "net": round(float(tiktok_summary.get("net_revenue", 0.0) or 0.0), 2),
+        "order_count_display": str(int(tiktok_summary.get("orders", 0) or 0)),
+        "paid_order_count_display": str(int(tiktok_summary.get("paid_orders", 0) or 0)),
+        "gross_display": format_dashboard_money(float(tiktok_summary.get("gross_revenue", 0.0) or 0.0)),
+        "tax_display": format_dashboard_money(float(tiktok_summary.get("total_tax", 0.0) or 0.0)),
+        "net_display": format_dashboard_money(float(tiktok_summary.get("net_revenue", 0.0) or 0.0)),
+    }
+    dashboard_snapshot["today"]["revenue"]["tiktok_total"] = round(float(tiktok_summary.get("net_revenue", 0.0) or 0.0), 2)
+    dashboard_snapshot["today"]["revenue"]["tiktok_total_display"] = format_dashboard_money(
+        float(tiktok_summary.get("net_revenue", 0.0) or 0.0)
+    )
+    dashboard_snapshot["today"]["revenue"]["total"] = round(
+        float(dashboard_snapshot["today"]["revenue"].get("discord_total", 0.0) or 0.0)
+        + float(dashboard_snapshot["today"]["revenue"].get("shopify_total", 0.0) or 0.0)
+        + float(dashboard_snapshot["today"]["revenue"].get("tiktok_total", 0.0) or 0.0),
+        2,
+    )
+    dashboard_snapshot["today"]["revenue"]["total_display"] = format_dashboard_money(
+        float(dashboard_snapshot["today"]["revenue"]["total"] or 0.0)
+    )
+    tiktok_orders: list[dict] = []
+    recent_tiktok_rows = session.exec(
+        select(TikTokOrder)
+        .where(TikTokOrder.created_at >= today_start)
+        .where(TikTokOrder.created_at <= tomorrow_start)
+        .order_by(TikTokOrder.created_at.desc(), TikTokOrder.id.desc())
+        .limit(25)
+    ).all()
+    for order in recent_tiktok_rows:
+        if classify_tiktok_reporting_status(order) != "paid":
+            continue
+        fulfillment_value = (order.fulfillment_status or order.order_status or "").strip().lower()
+        if fulfillment_value in {"fulfilled", "completed", "delivered"}:
+            fulfillment_label = "Completed"
+        elif fulfillment_value in {"awaiting_shipment", "awaiting_collection"}:
+            fulfillment_label = "Awaiting shipment"
+        elif fulfillment_value in {"partial", "partially_shipped"}:
+            fulfillment_label = "Partial"
+        else:
+            fulfillment_label = (order.fulfillment_status or order.order_status or "").strip() or "Pending"
+        tiktok_orders.append(
+            {
+                "id": order.id,
+                "order_number": order.order_number or order.tiktok_order_id,
+                "created_at": format_pacific_datetime(order.created_at, include_zone=False),
+                "customer_name": (order.customer_name or "").strip() or "Customer",
+                "total_price": round(float(order.total_price or 0.0), 2),
+                "fulfillment_label": fulfillment_label,
+            }
+        )
+        if len(tiktok_orders) >= 10:
+            break
+    tiktok_recent_order_count = len(tiktok_orders)
     recent_reviewed = build_message_list_items(
         session,
         session.exec(
@@ -2137,10 +3273,19 @@ def dashboard_page(
             "dashboard_snapshot": dashboard_snapshot,
             "recent_reviewed": recent_reviewed,
             "recent_deals": recent_deals,
-            "shopify_connected": shopify_connected,
-            "shopify_message": shopify_message,
-            "shopify_orders": shopify_orders,
-            "parser_progress": parser_progress,
+        "shopify_connected": shopify_connected,
+        "shopify_message": shopify_message,
+        "shopify_orders": shopify_orders,
+        "tiktok_connected": bool(tiktok_auth_row or tiktok_sync_snapshot.get("has_tokens")),
+        "tiktok_message": "" if (tiktok_auth_row or tiktok_sync_snapshot.get("has_tokens")) else "TikTok Shop not connected yet",
+        "tiktok_orders": tiktok_orders,
+        "tiktok_recent_order_count": tiktok_recent_order_count,
+        "parser_progress": parser_progress,
+        "tiktok_summary": tiktok_summary,
+        "tiktok_sync_snapshot": tiktok_sync_snapshot,
+        "tiktok_auth_row": tiktok_auth_row,
+        "tiktok_today_rows": tiktok_rows,
+            "tiktok_today_totals": tiktok_summary.get("totals", {}),
         },
     )
 
@@ -2156,12 +3301,30 @@ def partner_page(
 @app.get("/status", response_class=HTMLResponse)
 def status_page(
     request: Request,
+    success: Optional[str] = Query(default=None),
+    error: Optional[str] = Query(default=None),
     session: Session = Depends(get_session),
 ):
     if denial := require_role_response(request, "viewer"):
         return denial
 
+    def _normalize_optional_query_text(value: object) -> str:
+        candidate = getattr(value, "default", value)
+        if candidate is None:
+            return ""
+        if isinstance(candidate, str):
+            return candidate.strip()
+        return str(candidate).strip()
+
+    success_text = _normalize_optional_query_text(success)
+    error_text = _normalize_optional_query_text(error)
     status_snapshot = build_status_snapshot(session)
+    query_alerts = [message for message in (error_text, success_text) if message]
+    if query_alerts:
+        status_snapshot["alert_messages"] = [
+            *status_snapshot.get("alert_messages", []),
+            *query_alerts,
+        ]
     health_snapshot = build_health_snapshot(session)
     debug_snapshot = build_debug_snapshot(session)
 
@@ -3123,6 +4286,8 @@ def build_status_snapshot(session: Session) -> dict:
     app_runtime, worker_runtime = get_runtime_status_pair(session)
     db_health = get_database_health(session)
     parser_progress = get_parser_progress(session)
+    tiktok_sync = build_tiktok_status_snapshot(session)
+    background_task_alerts = _background_task_alert_messages()
     latest_ingested_row = session.exec(
         select(DiscordMessage)
         .order_by(DiscordMessage.ingested_at.desc())
@@ -3241,6 +4406,7 @@ def build_status_snapshot(session: Session) -> dict:
             "status_tone": recovery_status_tone,
             "window_label": recovery_window_label,
         },
+        "tiktok_sync": tiktok_sync,
         "stitch_recovery": {
             "enabled": stitch_enabled,
             "status_label": stitch_status_label,
@@ -3255,6 +4421,7 @@ def build_status_snapshot(session: Session) -> dict:
                 db_health.get("alert_message"),
                 app_runtime.get("alert_message"),
                 worker_runtime.get("alert_message"),
+                *background_task_alerts,
             )
             if message
         ],
@@ -4042,6 +5209,297 @@ async def shopify_orders_webhook(request: Request):
     return Response(status_code=200)
 
 
+@app.get("/integrations/tiktok/callback")
+def tiktok_oauth_callback(request: Request):
+    query_params = dict(request.query_params)
+    runtime_name = f"{settings.runtime_name}_tiktok"
+    received_at = utcnow()
+    app_key = (query_params.get("app_key") or "").strip()
+    code = (query_params.get("code") or "").strip()
+    if not code:
+        update_tiktok_integration_state(
+            last_error="Missing authorization code",
+            last_callback={
+                "received_at": received_at.isoformat(),
+                "query": summarize_tiktok_query_params(query_params),
+            },
+        )
+        print(
+            structured_log_line(
+                runtime=runtime_name,
+                action="tiktok.oauth.callback.failed",
+                success=False,
+                error="Missing TikTok authorization code",
+                request_path=str(request.url.path),
+                query=summarize_tiktok_query_params(query_params),
+            )
+        )
+        return RedirectResponse(
+            url="/status?error=TikTok+callback+missing+authorization+code",
+            status_code=303,
+        )
+
+    expected_app_key = (settings.tiktok_app_key or "").strip()
+    if expected_app_key and app_key and app_key != expected_app_key:
+        update_tiktok_integration_state(
+            last_error="App key mismatch",
+            last_callback={
+                "received_at": received_at.isoformat(),
+                "query": summarize_tiktok_query_params(query_params),
+            },
+        )
+        print(
+            structured_log_line(
+                runtime=runtime_name,
+                action="tiktok.oauth.callback.failed",
+                success=False,
+                error="TikTok app key mismatch",
+                request_path=str(request.url.path),
+                query=summarize_tiktok_query_params(query_params),
+            )
+        )
+        return RedirectResponse(
+            url="/status?error=TikTok+callback+app+key+mismatch",
+            status_code=303,
+        )
+
+    callback_summary = {
+        "received_at": received_at.isoformat(),
+        "query": summarize_tiktok_query_params(query_params),
+    }
+    missing_auth_config = [
+        label
+        for label, value in (
+            ("app key", settings.tiktok_app_key),
+            ("app secret", settings.tiktok_app_secret),
+        )
+        if not (value or "").strip()
+    ]
+    if not missing_auth_config:
+        try:
+            token_result = exchange_tiktok_authorization_code(
+                auth_code=code,
+                app_key=(settings.tiktok_app_key or "").strip(),
+                app_secret=(settings.tiktok_app_secret or "").strip(),
+                runtime_name=runtime_name,
+            )
+
+            def persist_tiktok_auth(session: Session):
+                status, auth_record = upsert_tiktok_auth_from_callback(
+                    session,
+                    TikTokAuth,
+                    token_result=token_result,
+                    app_key=(settings.tiktok_app_key or "").strip(),
+                    redirect_uri=(settings.tiktok_redirect_uri or "").strip(),
+                    fallback_shop_id=(settings.tiktok_shop_id or "").strip(),
+                    pending_key_seed=code,
+                    source="oauth_callback",
+                    received_at=received_at,
+                    dry_run=False,
+                )
+                auth_row = session.exec(
+                    select(TikTokAuth).where(
+                        TikTokAuth.tiktok_shop_id == auth_record["tiktok_shop_id"]
+                    )
+                ).first()
+                shop_name = auth_row.shop_name if auth_row is not None else None
+                return status, auth_record, shop_name
+
+            auth_status, auth_record, shop_name = run_write_with_retry(persist_tiktok_auth)
+            auth_lookup_key = str(auth_record.get("tiktok_shop_id") or "").strip()
+            auth_pending = auth_lookup_key.startswith("pending:")
+            callback_summary["auth_status"] = auth_status
+            callback_summary["shop_key_status"] = "pending" if auth_pending else "resolved"
+            if auth_pending:
+                callback_summary["pending_shop_key"] = auth_lookup_key
+            else:
+                callback_summary["shop_id"] = auth_lookup_key
+            callback_summary["shop_region"] = query_params.get("shop_region") or auth_record.get("shop_region")
+            if shop_name:
+                callback_summary["shop_name"] = shop_name
+        except Exception as exc:
+            callback_summary["exchange_error"] = str(exc)
+            update_tiktok_integration_state(
+                last_error=str(exc),
+                last_callback=callback_summary,
+            )
+            request.session["tiktok_callback"] = callback_summary
+            print(
+                structured_log_line(
+                    runtime=runtime_name,
+                    action="tiktok.oauth.callback.exchange_failed",
+                    success=False,
+                    error=str(exc),
+                    request_path=str(request.url.path),
+                    query=summarize_tiktok_query_params(query_params),
+                )
+            )
+            return RedirectResponse(
+                url="/status?error=TikTok+authorization+exchange+failed",
+                status_code=303,
+            )
+    else:
+        missing_label = ", ".join(missing_auth_config)
+        config_error = f"TikTok auth config missing: {missing_label}"
+        callback_summary["exchange_error"] = config_error
+        update_tiktok_integration_state(
+            last_error=config_error,
+            last_callback=callback_summary,
+        )
+        request.session["tiktok_callback"] = callback_summary
+        print(
+            structured_log_line(
+                runtime=runtime_name,
+                action="tiktok.oauth.callback.misconfigured",
+                success=False,
+                error=config_error,
+                request_path=str(request.url.path),
+                query=summarize_tiktok_query_params(query_params),
+            )
+        )
+        return RedirectResponse(
+            url=f"/status?{urlencode({'error': config_error})}",
+            status_code=303,
+        )
+
+    update_tiktok_integration_state(
+        last_authorization_at=received_at,
+        last_callback=callback_summary,
+        last_error=None,
+    )
+    request.session["tiktok_callback"] = callback_summary
+    print(
+        structured_log_line(
+            runtime=runtime_name,
+            action="tiktok.oauth.callback.received",
+            success=True,
+            request_path=str(request.url.path),
+            query=summarize_tiktok_query_params(query_params),
+            shop_key_status=callback_summary.get("shop_key_status") or "resolved",
+        )
+    )
+    success_message = "TikTok authorization captured"
+    if callback_summary.get("shop_key_status") == "pending":
+        success_message = "TikTok authorization captured; waiting for shop identifier"
+    return RedirectResponse(
+        url=f"/status?{urlencode({'success': success_message})}",
+        status_code=303,
+    )
+
+
+@app.post("/webhooks/tiktok/orders")
+async def tiktok_orders_webhook(request: Request):
+    raw_body = await request.body()
+    runtime_name = f"{settings.runtime_name}_tiktok"
+    body_hash = hashlib.sha256(raw_body).hexdigest()
+    webhook_secret = ((settings.tiktok_webhook_secret or "").strip() or (settings.tiktok_app_secret or "").strip())
+    topic = (
+        request.headers.get("X-TikTok-Topic")
+        or request.headers.get("X-Event-Type")
+        or request.headers.get("X-TT-Event")
+        or "unknown"
+    )
+
+    try:
+        payload = parse_tiktok_webhook_payload(
+            raw_body,
+            app_secret=webhook_secret,
+            headers=request.headers,
+        )
+    except Exception as exc:
+        update_tiktok_integration_state(
+            last_error=str(exc),
+            last_webhook={
+                "received_at": utcnow().isoformat(),
+                "topic": topic,
+                "body_sha256": body_hash,
+                "error": str(exc),
+            },
+        )
+        print(
+            structured_log_line(
+                runtime=runtime_name,
+                action="tiktok.webhook.failed",
+                success=False,
+                error=str(exc),
+                topic=topic,
+                request_path=str(request.url.path),
+                body_sha256=body_hash,
+            )
+        )
+        raise HTTPException(status_code=400, detail="Invalid TikTok webhook payload") from exc
+
+    order_upsert_status = ""
+    if isinstance(payload, dict):
+        try:
+            def persist_tiktok_order(session: Session):
+                return upsert_tiktok_order_from_payload(
+                    session,
+                    TikTokOrder,
+                    payload,
+                    source="webhook",
+                    received_at=utcnow(),
+                    dry_run=False,
+                )
+
+            order_upsert_status, order_record = run_write_with_retry(persist_tiktok_order)
+        except Exception as exc:
+            order_record = {}
+            print(
+                structured_log_line(
+                    runtime=runtime_name,
+                    action="tiktok.webhook.order_upsert_failed",
+                    success=False,
+                    error=str(exc),
+                    topic=topic,
+                    request_path=str(request.url.path),
+                    body_sha256=body_hash,
+                )
+            )
+        else:
+            print(
+                structured_log_line(
+                    runtime=runtime_name,
+                    action="tiktok.webhook.order_upserted",
+                    success=True,
+                    topic=topic,
+                    order_status=order_upsert_status,
+                    tiktok_order_id=order_record.get("tiktok_order_id"),
+                    shop_id=order_record.get("shop_id"),
+                )
+            )
+            enrich_order_id = (order_record.get("tiktok_order_id") or "").strip()
+            _start_tiktok_webhook_enrichment(enrich_order_id)
+    else:
+        order_record = {}
+
+    webhook_summary = {
+        "received_at": utcnow().isoformat(),
+        "topic": topic,
+        "body_sha256": body_hash,
+        "payload": summarize_tiktok_payload(payload),
+        "order_status": order_upsert_status or None,
+        "tiktok_order_id": order_record.get("tiktok_order_id"),
+    }
+    update_tiktok_integration_state(
+        last_webhook_at=utcnow(),
+        last_webhook=webhook_summary,
+        last_error=None,
+    )
+    print(
+        structured_log_line(
+            runtime=runtime_name,
+            action="tiktok.webhook.received",
+            success=True,
+            topic=topic,
+            request_path=str(request.url.path),
+            body_sha256=body_hash,
+            payload=summarize_tiktok_payload(payload),
+        )
+    )
+    return Response(status_code=200)
+
+
 @app.post("/shopify/backfill")
 def shopify_backfill_start(
     request: Request,
@@ -4325,6 +5783,8 @@ def reports_page(
     discord_summary = build_transaction_summary(transactions)
     shopify_rows = get_shopify_reporting_rows(session, start=start_dt, end=end_dt)
     shopify_summary = build_shopify_reporting_summary(shopify_rows)
+    tiktok_rows = get_tiktok_reporting_rows(session, start=start_dt, end=end_dt)
+    tiktok_summary = build_tiktok_reporting_summary(tiktok_rows)
     shopify_timeline_map: dict[str, dict[str, float | int]] = {}
     for row in shopify_rows:
         status = (row.financial_status or "").strip().lower()
@@ -4366,6 +5826,7 @@ def reports_page(
         }
         for day_key, values in sorted(shopify_timeline_map.items())
     ]
+    tiktok_daily_totals = list(tiktok_summary.get("daily_totals", []))
     summary = discord_summary
     channels = get_channel_filter_choices(session)
     period_rows = build_report_period_comparison_rows(
@@ -4375,13 +5836,19 @@ def reports_page(
         entry_kind=entry_kind,
     )
     report_totals = {
+        "discord_gross": round(float(discord_summary["totals"].get("money_in", 0.0) or 0.0), 2),
+        "discord_outflow": round(float(discord_summary["totals"].get("money_out", 0.0) or 0.0), 2),
         "discord_net": round(float(discord_summary["totals"].get("net", 0.0) or 0.0), 2),
         "shopify_gross": round(float(shopify_summary["gross_revenue"] or 0.0), 2),
         "shopify_tax": round(float(shopify_summary["total_tax"] or 0.0), 2),
         "shopify_net": round(float(shopify_summary["net_revenue"] or 0.0), 2),
-        "combined_net": round(
-            float(discord_summary["totals"].get("net", 0.0) or 0.0)
-            + float(shopify_summary["net_revenue"] or 0.0),
+        "tiktok_gross": round(float(tiktok_summary["gross_revenue"] or 0.0), 2),
+        "tiktok_tax": round(float(tiktok_summary["total_tax"] or 0.0), 2),
+        "tiktok_net": round(float(tiktok_summary["net_revenue"] or 0.0), 2),
+        "combined_revenue": round(
+            float(discord_summary["totals"].get("money_in", 0.0) or 0.0)
+            + float(shopify_summary["net_revenue"] or 0.0)
+            + float(tiktok_summary["net_revenue"] or 0.0),
             2,
         ),
     }
@@ -4401,17 +5868,460 @@ def reports_page(
             "summary": summary,
             "discord_summary": discord_summary,
             "shopify_summary": shopify_summary,
+            "tiktok_summary": tiktok_summary,
             "report_totals": report_totals,
             "period_rows": period_rows,
             "show_discord_reports": selected_source in {REPORT_SOURCE_ALL, REPORT_SOURCE_DISCORD},
             "show_shopify_reports": selected_source in {REPORT_SOURCE_ALL, REPORT_SOURCE_SHOPIFY},
+            "show_tiktok_reports": selected_source in {REPORT_SOURCE_ALL, REPORT_SOURCE_TIKTOK},
             "reports_url": build_reports_url,
             "expense_chart": build_bar_chart_rows(summary["expense_categories"]),
             "channel_chart": build_bar_chart_rows(summary["channel_net"]),
             "transactions": transactions,
             "shopify_daily_totals": shopify_daily_totals,
+            "tiktok_daily_totals": tiktok_daily_totals,
         },
     )
+
+
+@app.get("/tiktok", include_in_schema=False)
+def tiktok_orders_redirect():
+    return RedirectResponse(url="/tiktok/orders", status_code=307)
+
+
+@app.post("/tiktok/orders/sync-form")
+def tiktok_orders_sync_form(
+    request: Request,
+    since: Optional[str] = Form(default=None),
+    limit: Optional[str] = Form(default=""),
+):
+    if denial := require_role_response(request, "admin"):
+        return denial
+
+    if read_tiktok_integration_state().get("is_pull_running"):
+        return RedirectResponse(
+            url="/tiktok/orders?success=TikTok+sync+already+running",
+            status_code=303,
+        )
+
+    raw_limit = (limit or "").strip()
+    safe_limit: Optional[int]
+    if not raw_limit:
+        safe_limit = settings.tiktok_sync_limit
+    else:
+        try:
+            safe_limit = max(int(raw_limit), 1)
+        except ValueError:
+            return RedirectResponse(
+                url="/tiktok/orders?error=Sync+limit+must+be+a+number",
+                status_code=303,
+            )
+
+    thread = threading.Thread(
+        target=run_tiktok_pull_in_background,
+        kwargs={
+            "since": (since or "").strip() or None,
+            "limit": safe_limit,
+            "trigger": "manual",
+        },
+        daemon=True,
+        name="tiktok-pull-manual",
+    )
+    thread.start()
+    return RedirectResponse(
+        url="/tiktok/orders?success=Started+TikTok+sync+orders+will+appear+shortly",
+        status_code=303,
+    )
+
+
+def _get_tiktok_filter_options(session: Session) -> dict[str, list[str]]:
+    def _distinct(col):
+        try:
+            return sorted({v for v in session.exec(select(col).distinct()).all() if v not in (None, "")})
+        except Exception:
+            return []
+    return {
+        "financial_statuses": _distinct(TikTokOrder.financial_status),
+        "fulfillment_statuses": _distinct(TikTokOrder.fulfillment_status),
+        "order_statuses": _distinct(TikTokOrder.order_status),
+        "source_options": _distinct(TikTokOrder.source),
+        "currency_options": _distinct(TikTokOrder.currency),
+    }
+
+
+def _collect_tiktok_orders_page_data(
+    session: Session,
+    *,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    financial_status: Optional[str] = None,
+    fulfillment_status: Optional[str] = None,
+    order_status: Optional[str] = None,
+    source: Optional[str] = None,
+    currency: Optional[str] = None,
+    search: Optional[str] = None,
+    sort_by: str = "date",
+    sort_dir: str = "desc",
+    page: int = 1,
+    limit: int = 50,
+) -> dict[str, object]:
+    start_dt = parse_report_datetime(start)
+    end_dt = parse_report_datetime(end, end_of_day=True)
+    auth_row = ensure_tiktok_auth_row(session)
+    integration_state = read_tiktok_integration_state()
+    sync_snapshot = describe_tiktok_sync_status(auth_row, integration_state)
+    page_data = build_tiktok_orders_page_reporting_data(
+        session,
+        start=start_dt,
+        end=end_dt,
+        financial_status=financial_status,
+        fulfillment_status=fulfillment_status,
+        order_status=order_status,
+        source=source,
+        currency=currency,
+        search=search,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        page=page,
+        limit=limit,
+    )
+    recent_orders = [
+        {
+            "order": row,
+            "customer_label": (row.customer_name or "").strip() or "Guest",
+            "items_summary": build_tiktok_item_summary(
+                row.line_items_summary_json or "",
+                row.line_items_json or "",
+            ),
+            "net_amount": (
+                round(float(row.subtotal_ex_tax or 0.0), 2)
+                if row.subtotal_ex_tax is not None
+                else round(float(row.total_price or 0.0) - float(row.total_tax or 0.0), 2)
+            ),
+        }
+        for row in page_data["rows"]
+    ]
+    return {
+        "summary": page_data["summary"],
+        "orders": recent_orders,
+        "auth_row": auth_row,
+        "sync_snapshot": sync_snapshot,
+        "integration_state": integration_state,
+        "daily_totals": page_data.get("daily_totals", []),
+        "line_item_summary": page_data.get("line_item_summary", {}),
+        "total_count": page_data.get("total_count", 0),
+        "page": page_data.get("page", max(page, 1)),
+        "page_size": page_data.get("page_size", limit),
+        "has_more": page_data.get("has_more", False),
+    }
+
+
+@app.get("/tiktok/orders", response_class=HTMLResponse)
+def tiktok_orders_page(
+    request: Request,
+    start: Optional[str] = Query(default=None),
+    end: Optional[str] = Query(default=None),
+    financial_status: Optional[str] = Query(default=None),
+    fulfillment_status: Optional[str] = Query(default=None),
+    order_status: Optional[str] = Query(default=None),
+    source: Optional[str] = Query(default=None),
+    currency: Optional[str] = Query(default=None),
+    search: Optional[str] = Query(default=None),
+    sort_by: str = Query(default="date"),
+    sort_dir: str = Query(default="desc"),
+    page: int = Query(default=1),
+    limit: int = Query(default=50, ge=1, le=100),
+    success: Optional[str] = Query(default=None),
+    error: Optional[str] = Query(default=None),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "viewer"):
+        return denial
+    page_data = _collect_tiktok_orders_page_data(
+        session,
+        start=start,
+        end=end,
+        financial_status=financial_status,
+        fulfillment_status=fulfillment_status,
+        order_status=order_status,
+        source=source,
+        currency=currency,
+        search=search,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        page=page,
+        limit=limit,
+    )
+    total_count = int(page_data.get("total_count", 0) or 0)
+    pagination = build_pagination(page=page, limit=limit, total_rows=total_count)
+    filter_opts = _get_tiktok_filter_options(session)
+    sync_since_default = (utcnow() - timedelta(days=30)).strftime("%Y-%m-%d")
+    unfiltered_total = int(session.exec(select(func.count()).select_from(TikTokOrder)).one())
+    latest_updated_at = session.exec(select(func.max(TikTokOrder.updated_at))).one()
+    latest_updated_at_text = None
+    if latest_updated_at is not None:
+        if latest_updated_at.tzinfo is None:
+            latest_updated_at = latest_updated_at.replace(tzinfo=timezone.utc)
+        latest_updated_at_text = latest_updated_at.isoformat()
+    orders = page_data["orders"]
+    context = {
+        "request": request,
+        "title": "TikTok Orders",
+        "success": success,
+        "error": error,
+        "summary": page_data["summary"],
+        "orders": orders,
+        "recent_orders": orders,  # kept for test compatibility
+        "daily_totals": page_data.get("daily_totals", []),
+        "line_item_summary": page_data.get("line_item_summary", {}),
+        "auth_row": page_data["auth_row"],
+        "sync_snapshot": page_data["sync_snapshot"],
+        "integration_state": page_data["integration_state"],
+        "pagination": pagination,
+        "selected_start": start or "",
+        "selected_end": end or "",
+        "selected_financial_status": financial_status or "",
+        "selected_fulfillment_status": fulfillment_status or "",
+        "selected_order_status": order_status or "",
+        "selected_source": source or "",
+        "selected_currency": currency or "",
+        "selected_search": search or "",
+        "selected_sort_by": sort_by,
+        "selected_sort_dir": sort_dir,
+        "financial_statuses": filter_opts["financial_statuses"],
+        "fulfillment_statuses": filter_opts["fulfillment_statuses"],
+        "order_statuses": filter_opts["order_statuses"],
+        "source_options": filter_opts["source_options"],
+        "currency_options": filter_opts["currency_options"],
+        "auto_sync_enabled": bool(settings.tiktok_sync_enabled),
+        "sync_interval_minutes": int(settings.tiktok_sync_interval_minutes or 0),
+        "sync_since_default": sync_since_default,
+        "sync_limit_default": int(settings.tiktok_sync_limit or 250),
+        "current_user": getattr(request.state, "current_user", None),
+        "page_url": build_tiktok_orders_url,
+        "sort_url": build_tiktok_sort_url,
+        "unfiltered_total": unfiltered_total,
+        "latest_updated_at": latest_updated_at_text,
+    }
+    return templates.TemplateResponse(request, "tiktok_orders.html", context)
+
+
+@app.get("/tiktok/orders/poll")
+def tiktok_orders_poll(session: Session = Depends(get_session)):
+    total = int(session.exec(select(func.count()).select_from(TikTokOrder)).one())
+    latest_updated_at = session.exec(select(func.max(TikTokOrder.updated_at))).one()
+    latest_updated_at_text = None
+    if latest_updated_at is not None:
+        if latest_updated_at.tzinfo is None:
+            latest_updated_at = latest_updated_at.replace(tzinfo=timezone.utc)
+        latest_updated_at_text = latest_updated_at.isoformat()
+    return {"total": total, "latest_updated_at": latest_updated_at_text}
+
+
+# ---------------------------------------------------------------------------
+# Streamer dashboard
+# ---------------------------------------------------------------------------
+
+def _build_streamer_order_card(order: TikTokOrder) -> dict:
+    """Build a card-ready dict from a TikTokOrder, extracting sku_image from raw line items."""
+    raw_items: list[dict] = []
+    try:
+        raw_items = json.loads(order.line_items_json) if order.line_items_json else []
+    except (json.JSONDecodeError, TypeError):
+        pass
+    if not isinstance(raw_items, list):
+        raw_items = [raw_items] if isinstance(raw_items, dict) else []
+
+    summary_items: list[dict] = []
+    try:
+        summary_items = json.loads(order.line_items_summary_json) if order.line_items_summary_json else []
+    except (json.JSONDecodeError, TypeError):
+        pass
+    if not isinstance(summary_items, list):
+        summary_items = []
+
+    items: list[dict] = []
+    for idx, raw in enumerate(raw_items):
+        if not isinstance(raw, dict):
+            continue
+        title = str(
+            raw.get("product_name") or raw.get("sku_name") or raw.get("title") or raw.get("item_name") or ""
+        ).strip()
+        if not title and idx < len(summary_items):
+            title = str(summary_items[idx].get("title") or "").strip()
+        if not title:
+            title = "Unknown item"
+        qty_raw = raw.get("quantity") or raw.get("sku_quantity") or raw.get("count")
+        try:
+            quantity = int(qty_raw or 0)
+        except (TypeError, ValueError):
+            quantity = 0
+        if quantity < 1 and idx < len(summary_items):
+            try:
+                quantity = int(summary_items[idx].get("quantity") or 1)
+            except (TypeError, ValueError):
+                quantity = 1
+        if quantity < 1:
+            quantity = 1
+
+        sku_image = str(
+            raw.get("sku_image") or raw.get("product_image") or raw.get("image_url") or ""
+        ).strip() or None
+        if not sku_image and idx < len(summary_items):
+            sku_image = str(summary_items[idx].get("sku_image") or "").strip() or None
+
+        unit_price: float = 0.0
+        for price_key in ("sale_price", "sku_sale_price", "price", "unit_price"):
+            val = raw.get(price_key)
+            if val is not None:
+                try:
+                    unit_price = float(val)
+                except (TypeError, ValueError):
+                    pass
+                else:
+                    break
+
+        items.append({
+            "title": title,
+            "quantity": quantity,
+            "sku_image": sku_image,
+            "unit_price": unit_price,
+        })
+
+    if not items and summary_items:
+        for si in summary_items:
+            if not isinstance(si, dict):
+                continue
+            items.append({
+                "title": str(si.get("title") or "Unknown item"),
+                "quantity": int(si.get("quantity") or 1),
+                "sku_image": str(si.get("sku_image") or "").strip() or None,
+                "unit_price": float(si.get("unit_price") or 0),
+            })
+
+    created_at_val = order.created_at
+    if created_at_val is not None and hasattr(created_at_val, "tzinfo") and created_at_val.tzinfo is None:
+        created_at_val = created_at_val.replace(tzinfo=timezone.utc)
+    updated_at_val = order.updated_at
+    if updated_at_val is not None and hasattr(updated_at_val, "tzinfo") and updated_at_val.tzinfo is None:
+        updated_at_val = updated_at_val.replace(tzinfo=timezone.utc)
+
+    return {
+        "tiktok_order_id": order.tiktok_order_id,
+        "order_number": order.order_number or "",
+        "customer_name": order.customer_name or "Guest",
+        "created_at": created_at_val.isoformat() if created_at_val else "",
+        "updated_at": updated_at_val.isoformat() if updated_at_val else "",
+        "total_price": float(order.total_price or 0),
+        "items": items,
+    }
+
+
+def _streamer_session_gmv(session: Session) -> dict:
+    """Calculate today's GMV for the streamer dashboard (Pacific time)."""
+    now_pacific = datetime.now(PACIFIC_TZ)
+    today_start_pacific = now_pacific.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start_utc = today_start_pacific.astimezone(timezone.utc)
+
+    today_orders = session.exec(
+        select(TikTokOrder).where(TikTokOrder.created_at >= today_start_utc)
+    ).all()
+
+    paid_statuses = {
+        "paid", "completed", "awaiting_shipment", "awaiting_collection",
+        "awaiting_delivery", "in_transit", "delivered",
+    }
+    gmv = 0.0
+    paid_count = 0
+    for o in today_orders:
+        status = (o.financial_status or o.order_status or "").lower().strip()
+        if status in paid_statuses:
+            gmv += float(o.total_price or 0)
+            paid_count += 1
+
+    return {
+        "session_gmv": round(gmv, 2),
+        "session_orders": paid_count,
+        "session_total_orders": len(today_orders),
+    }
+
+
+@app.get("/tiktok/streamer", response_class=HTMLResponse)
+def tiktok_streamer_page(
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "viewer"):
+        return denial
+
+    orders = session.exec(
+        select(TikTokOrder).order_by(TikTokOrder.created_at.desc()).limit(50)
+    ).all()
+
+    cards = [_build_streamer_order_card(o) for o in orders]
+
+    latest_updated_at = session.exec(select(func.max(TikTokOrder.updated_at))).one()
+    latest_updated_at_text = None
+    if latest_updated_at is not None:
+        if latest_updated_at.tzinfo is None:
+            latest_updated_at = latest_updated_at.replace(tzinfo=timezone.utc)
+        latest_updated_at_text = latest_updated_at.isoformat()
+
+    total_count = int(session.exec(select(func.count()).select_from(TikTokOrder)).one())
+    gmv_data = _streamer_session_gmv(session)
+
+    return templates.TemplateResponse(request, "tiktok_streamer.html", {
+        "request": request,
+        "title": "TikTok Live Orders",
+        "orders_json": json.dumps(cards),
+        "latest_updated_at": latest_updated_at_text,
+        "total_count": total_count,
+        "session_gmv": gmv_data["session_gmv"],
+        "session_orders": gmv_data["session_orders"],
+        "session_total_orders": gmv_data["session_total_orders"],
+        "current_user": getattr(request.state, "current_user", None),
+    })
+
+
+@app.get("/tiktok/streamer/poll")
+def tiktok_streamer_poll(
+    since: Optional[str] = Query(default=None),
+    session: Session = Depends(get_session),
+):
+    query = select(TikTokOrder).order_by(TikTokOrder.updated_at.desc()).limit(20)
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since)
+            if since_dt.tzinfo is None:
+                since_dt = since_dt.replace(tzinfo=timezone.utc)
+            query = select(TikTokOrder).where(
+                TikTokOrder.updated_at > since_dt
+            ).order_by(TikTokOrder.updated_at.desc()).limit(20)
+        except (ValueError, TypeError):
+            pass
+
+    orders = session.exec(query).all()
+    cards = [_build_streamer_order_card(o) for o in orders]
+
+    latest_updated_at = session.exec(select(func.max(TikTokOrder.updated_at))).one()
+    latest_updated_at_text = None
+    if latest_updated_at is not None:
+        if latest_updated_at.tzinfo is None:
+            latest_updated_at = latest_updated_at.replace(tzinfo=timezone.utc)
+        latest_updated_at_text = latest_updated_at.isoformat()
+
+    total_count = int(session.exec(select(func.count()).select_from(TikTokOrder)).one())
+
+    gmv_data = _streamer_session_gmv(session)
+
+    return {
+        "orders": cards,
+        "latest_updated_at": latest_updated_at_text,
+        "total_count": total_count,
+        "session_gmv": gmv_data["session_gmv"],
+        "session_orders": gmv_data["session_orders"],
+        "session_total_orders": gmv_data["session_total_orders"],
+    }
 
 
 @app.get("/bookkeeping", response_class=HTMLResponse)

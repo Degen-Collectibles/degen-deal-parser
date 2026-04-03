@@ -5,6 +5,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from sqlalchemy import func, or_
 from sqlmodel import Session, select
 from zoneinfo import ZoneInfo
 
@@ -14,6 +15,7 @@ from .models import (
     PARSE_PARSED,
     PARSE_REVIEW_REQUIRED,
     ShopifyOrder,
+    TikTokOrder,
     normalize_money_value,
     signed_money_delta,
 )
@@ -94,6 +96,162 @@ def get_shopify_reporting_rows(
     return session.exec(stmt).all()
 
 
+def get_tiktok_reporting_rows(
+    session: Session,
+    *,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+) -> list[TikTokOrder]:
+    return get_tiktok_order_rows(session, start=start, end=end, sort_by="date", sort_dir="asc")
+
+
+def _normalize_tiktok_text(value: Optional[str]) -> str:
+    return (value or "").strip().lower()
+
+
+def _build_tiktok_orders_base_query(
+    *,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    shop_id: Optional[str] = None,
+    seller_id: Optional[str] = None,
+    source: Optional[str] = None,
+    financial_status: Optional[str] = None,
+    fulfillment_status: Optional[str] = None,
+    order_status: Optional[str] = None,
+    currency: Optional[str] = None,
+    search: Optional[str] = None,
+):
+    stmt = select(TikTokOrder)
+    if start:
+        stmt = stmt.where(TikTokOrder.created_at >= start)
+    if end:
+        stmt = stmt.where(TikTokOrder.created_at <= end)
+    if shop_id:
+        stmt = stmt.where(TikTokOrder.shop_id == shop_id)
+    if seller_id:
+        stmt = stmt.where(TikTokOrder.seller_id == seller_id)
+    if source:
+        stmt = stmt.where(func.lower(func.coalesce(TikTokOrder.source, "")) == source.strip().lower())
+    if financial_status:
+        stmt = stmt.where(func.lower(TikTokOrder.financial_status) == financial_status.strip().lower())
+    if fulfillment_status:
+        stmt = stmt.where(func.lower(func.coalesce(TikTokOrder.fulfillment_status, "")) == fulfillment_status.strip().lower())
+    if order_status:
+        stmt = stmt.where(func.lower(func.coalesce(TikTokOrder.order_status, "")) == order_status.strip().lower())
+    if currency:
+        stmt = stmt.where(func.lower(func.coalesce(TikTokOrder.currency, "")) == currency.strip().lower())
+    if search:
+        pattern = f"%{search.strip().lower()}%"
+        stmt = stmt.where(
+            or_(
+                func.lower(TikTokOrder.tiktok_order_id).like(pattern),
+                func.lower(TikTokOrder.order_number).like(pattern),
+                func.lower(func.coalesce(TikTokOrder.customer_name, "")).like(pattern),
+                func.lower(func.coalesce(TikTokOrder.customer_email, "")).like(pattern),
+                func.lower(func.coalesce(TikTokOrder.shop_id, "")).like(pattern),
+                func.lower(func.coalesce(TikTokOrder.shop_cipher, "")).like(pattern),
+                func.lower(func.coalesce(TikTokOrder.seller_id, "")).like(pattern),
+                func.lower(func.coalesce(TikTokOrder.currency, "")).like(pattern),
+                func.lower(func.coalesce(TikTokOrder.financial_status, "")).like(pattern),
+                func.lower(func.coalesce(TikTokOrder.fulfillment_status, "")).like(pattern),
+                func.lower(func.coalesce(TikTokOrder.order_status, "")).like(pattern),
+                func.lower(func.coalesce(TikTokOrder.line_items_summary_json, "")).like(pattern),
+                func.lower(func.coalesce(TikTokOrder.line_items_json, "")).like(pattern),
+            )
+        )
+    return stmt
+
+
+def _resolve_tiktok_order_sort_column(sort_by: str):
+    normalized = _normalize_tiktok_text(sort_by)
+    net_expr = func.coalesce(TikTokOrder.subtotal_ex_tax, TikTokOrder.total_price - func.coalesce(TikTokOrder.total_tax, 0.0))
+    return {
+        "date": TikTokOrder.created_at,
+        "created_at": TikTokOrder.created_at,
+        "updated_at": TikTokOrder.updated_at,
+        "gross": TikTokOrder.total_price,
+        "tax": func.coalesce(TikTokOrder.total_tax, 0.0),
+        "net": net_expr,
+        "order_number": TikTokOrder.order_number,
+        "status": TikTokOrder.financial_status,
+        "fulfillment": func.coalesce(TikTokOrder.fulfillment_status, ""),
+        "currency": func.coalesce(TikTokOrder.currency, ""),
+    }.get(normalized, TikTokOrder.created_at)
+
+
+def count_tiktok_order_rows(
+    session: Session,
+    *,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    shop_id: Optional[str] = None,
+    seller_id: Optional[str] = None,
+    source: Optional[str] = None,
+    financial_status: Optional[str] = None,
+    fulfillment_status: Optional[str] = None,
+    order_status: Optional[str] = None,
+    currency: Optional[str] = None,
+    search: Optional[str] = None,
+) -> int:
+    stmt = _build_tiktok_orders_base_query(
+        start=start,
+        end=end,
+        shop_id=shop_id,
+        seller_id=seller_id,
+        source=source,
+        financial_status=financial_status,
+        fulfillment_status=fulfillment_status,
+        order_status=order_status,
+        currency=currency,
+        search=search,
+    )
+    count_stmt = select(func.count()).select_from(stmt.order_by(None).subquery())
+    return int(session.exec(count_stmt).one())
+
+
+def get_tiktok_order_rows(
+    session: Session,
+    *,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    shop_id: Optional[str] = None,
+    seller_id: Optional[str] = None,
+    source: Optional[str] = None,
+    financial_status: Optional[str] = None,
+    fulfillment_status: Optional[str] = None,
+    order_status: Optional[str] = None,
+    currency: Optional[str] = None,
+    search: Optional[str] = None,
+    sort_by: str = "date",
+    sort_dir: str = "desc",
+    page: int = 1,
+    limit: Optional[int] = None,
+) -> list[TikTokOrder]:
+    stmt = _build_tiktok_orders_base_query(
+        start=start,
+        end=end,
+        shop_id=shop_id,
+        seller_id=seller_id,
+        source=source,
+        financial_status=financial_status,
+        fulfillment_status=fulfillment_status,
+        order_status=order_status,
+        currency=currency,
+        search=search,
+    )
+    safe_sort_dir = _normalize_tiktok_text(sort_dir)
+    sort_column = _resolve_tiktok_order_sort_column(sort_by)
+    if safe_sort_dir == "asc":
+        stmt = stmt.order_by(sort_column.asc(), TikTokOrder.id.asc())
+    else:
+        stmt = stmt.order_by(sort_column.desc(), TikTokOrder.id.desc())
+    if limit:
+        offset = (max(page, 1) - 1) * limit
+        stmt = stmt.offset(offset).limit(limit)
+    return session.exec(stmt).all()
+
+
 def _safe_json_list(value: Optional[str]) -> list[dict[str, object]]:
     try:
         loaded = json.loads(value or "[]")
@@ -104,15 +262,20 @@ def _safe_json_list(value: Optional[str]) -> list[dict[str, object]]:
     return [item for item in loaded if isinstance(item, dict)]
 
 
-def build_shopify_line_item_summary(rows: list[ShopifyOrder]) -> dict:
+def _build_external_line_item_summary(
+    rows: list[object],
+    *,
+    summary_attr: str = "line_items_summary_json",
+    fallback_attr: str = "line_items_json",
+) -> dict:
     total_orders_with_items = 0
     total_line_items = 0
     title_counts: defaultdict[str, int] = defaultdict(int)
 
     for row in rows:
-        summaries = _safe_json_list(
-            row.line_items_summary_json if row.line_items_summary_json != "[]" else row.line_items_json
-        )
+        summary_value = getattr(row, summary_attr, None)
+        fallback_value = getattr(row, fallback_attr, None)
+        summaries = _safe_json_list(summary_value if summary_value != "[]" else fallback_value)
         if not summaries:
             continue
 
@@ -142,6 +305,133 @@ def build_shopify_line_item_summary(rows: list[ShopifyOrder]) -> dict:
             for title, quantity in sorted(title_counts.items(), key=lambda item: (-item[1], item[0]))[:10]
         ],
     }
+
+
+def build_shopify_line_item_summary(rows: list[ShopifyOrder]) -> dict:
+    return _build_external_line_item_summary(rows)
+
+
+def build_tiktok_line_item_summary(rows: list[TikTokOrder]) -> dict:
+    return _build_external_line_item_summary(rows)
+
+
+def _tiktok_daily_totals_bucket() -> dict[str, object]:
+    return {
+        "orders": 0,
+        "paid_orders": 0,
+        "pending_orders": 0,
+        "refunded_orders": 0,
+        "other_orders": 0,
+        "gross": 0.0,
+        "tax": 0.0,
+        "net": 0.0,
+        "tax_unknown_orders": 0,
+    }
+
+
+def _tiktok_status_key(row: TikTokOrder) -> str:
+    return (row.financial_status or row.order_status or "").strip().lower()
+
+
+_TIKTOK_PAID_STATUSES = {
+    "paid",
+    "completed",
+    "awaiting_shipment",
+    "awaiting_collection",
+    "awaiting_delivery",
+    "in_transit",
+    "delivered",
+}
+
+_TIKTOK_PENDING_STATUSES = {
+    "pending",
+    "unpaid",
+    "awaiting_payment",
+    "payment_pending",
+}
+
+_TIKTOK_REFUNDED_STATUSES = {
+    "refunded",
+    "cancelled",
+    "canceled",
+    "return_requested",
+    "refund_requested",
+    "return_or_refund_request_pending",
+    "refund_complete",
+}
+
+
+def classify_tiktok_reporting_status(row: TikTokOrder) -> str:
+    status = _tiktok_status_key(row)
+    if status in _TIKTOK_PAID_STATUSES:
+        return "paid"
+    if status in _TIKTOK_PENDING_STATUSES:
+        return "pending"
+    if status in _TIKTOK_REFUNDED_STATUSES:
+        return "refunded"
+    return "other"
+
+
+def _tiktok_day_key(value: Optional[datetime]) -> str:
+    if value is None:
+        return ""
+    parsed = value
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(REPORTING_TZ).date().isoformat()
+
+
+def build_tiktok_daily_totals(rows: list[TikTokOrder]) -> list[dict[str, object]]:
+    daily_totals: defaultdict[str, dict[str, object]] = defaultdict(_tiktok_daily_totals_bucket)
+
+    for row in rows:
+        day_key = _tiktok_day_key(row.created_at)
+        if not day_key:
+            continue
+
+        bucket = daily_totals[day_key]
+        bucket["orders"] += 1
+
+        status = classify_tiktok_reporting_status(row)
+        if status == "paid":
+            bucket["paid_orders"] += 1
+        elif status == "pending":
+            bucket["pending_orders"] += 1
+        elif status == "refunded":
+            bucket["refunded_orders"] += 1
+        else:
+            bucket["other_orders"] += 1
+
+        if status != "paid":
+            continue
+
+        gross_value = float(row.total_price or 0.0)
+        bucket["gross"] += gross_value
+
+        if row.total_tax is None:
+            bucket["tax_unknown_orders"] += 1
+            continue
+
+        tax_value = float(row.total_tax or 0.0)
+        net_value = float(row.subtotal_ex_tax) if row.subtotal_ex_tax is not None else gross_value - tax_value
+        bucket["tax"] += tax_value
+        bucket["net"] += net_value
+
+    return [
+        {
+            "date": date_key,
+            "orders": values["orders"],
+            "paid_orders": values["paid_orders"],
+            "pending_orders": values["pending_orders"],
+            "refunded_orders": values["refunded_orders"],
+            "other_orders": values["other_orders"],
+            "gross": round(values["gross"], 2),
+            "tax": round(values["tax"], 2),
+            "net": round(values["net"], 2),
+            "tax_unknown_orders": values["tax_unknown_orders"],
+        }
+        for date_key, values in sorted(daily_totals.items())
+    ]
 
 
 def build_shopify_reporting_summary(rows: list[ShopifyOrder]) -> dict:
@@ -201,6 +491,157 @@ def build_shopify_reporting_summary(rows: list[ShopifyOrder]) -> dict:
             else ""
         ),
         "line_item_summary": line_item_summary,
+    }
+
+
+def build_tiktok_reporting_summary(rows: list[TikTokOrder]) -> dict:
+    status_counts = {"paid": 0, "pending": 0, "refunded": 0, "other": 0}
+    order_status_counts: defaultdict[str, int] = defaultdict(int)
+    fulfillment_status_counts: defaultdict[str, int] = defaultdict(int)
+    paid_order_count = 0
+    tax_unknown_count = 0
+    paid_gross = 0.0
+    paid_tax = 0.0
+    paid_net = 0.0
+    paid_known_tax_orders = 0
+    line_item_summary = build_tiktok_line_item_summary(rows)
+
+    for row in rows:
+        status = classify_tiktok_reporting_status(row)
+        order_status = (row.order_status or "").strip().lower()
+        fulfillment_status = (row.fulfillment_status or "").strip().lower()
+        if status == "paid":
+            status_counts["paid"] += 1
+        elif status == "pending":
+            status_counts["pending"] += 1
+        elif status == "refunded":
+            status_counts["refunded"] += 1
+        else:
+            status_counts["other"] += 1
+
+        if order_status:
+            order_status_counts[order_status] += 1
+        if fulfillment_status:
+            fulfillment_status_counts[fulfillment_status] += 1
+
+        if status != "paid":
+            continue
+
+        paid_order_count += 1
+        gross_value = float(row.total_price or 0.0)
+        paid_gross += gross_value
+
+        if row.total_tax is None:
+            tax_unknown_count += 1
+            continue
+
+        tax_value = float(row.total_tax or 0.0)
+        net_value = float(row.subtotal_ex_tax) if row.subtotal_ex_tax is not None else gross_value - tax_value
+        paid_tax += tax_value
+        paid_net += net_value
+        paid_known_tax_orders += 1
+
+    avg_paid_net = round(paid_net / paid_known_tax_orders, 2) if paid_known_tax_orders else 0.0
+
+    return {
+        "orders": len(rows),
+        "status_counts": status_counts,
+        "paid_orders": paid_order_count,
+        "paid_orders_with_known_tax": paid_known_tax_orders,
+        "tax_unknown_orders": tax_unknown_count,
+        "gross_revenue": round(paid_gross, 2),
+        "total_tax": round(paid_tax, 2),
+        "net_revenue": round(paid_net, 2),
+        "avg_order_value_net": avg_paid_net,
+        "has_missing_tax_data": tax_unknown_count > 0,
+        "warning": (
+            f"{tax_unknown_count} orders missing tax data - totals may be incomplete"
+            if tax_unknown_count
+            else ""
+        ),
+        "order_status_counts": dict(sorted(order_status_counts.items(), key=lambda item: (-item[1], item[0]))),
+        "fulfillment_status_counts": dict(
+            sorted(fulfillment_status_counts.items(), key=lambda item: (-item[1], item[0]))
+        ),
+        "line_item_summary": line_item_summary,
+        "daily_totals": build_tiktok_daily_totals(rows),
+    }
+
+
+def build_tiktok_orders_page_data(
+    session: Session,
+    *,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    shop_id: Optional[str] = None,
+    seller_id: Optional[str] = None,
+    source: Optional[str] = None,
+    financial_status: Optional[str] = None,
+    fulfillment_status: Optional[str] = None,
+    order_status: Optional[str] = None,
+    currency: Optional[str] = None,
+    search: Optional[str] = None,
+    sort_by: str = "date",
+    sort_dir: str = "desc",
+    page: int = 1,
+    limit: Optional[int] = None,
+) -> dict[str, object]:
+    rows = get_tiktok_order_rows(
+        session,
+        start=start,
+        end=end,
+        shop_id=shop_id,
+        seller_id=seller_id,
+        source=source,
+        financial_status=financial_status,
+        fulfillment_status=fulfillment_status,
+        order_status=order_status,
+        currency=currency,
+        search=search,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        page=page,
+        limit=limit,
+    )
+    total_count = count_tiktok_order_rows(
+        session,
+        start=start,
+        end=end,
+        shop_id=shop_id,
+        seller_id=seller_id,
+        source=source,
+        financial_status=financial_status,
+        fulfillment_status=fulfillment_status,
+        order_status=order_status,
+        currency=currency,
+        search=search,
+    )
+    summary_rows = get_tiktok_order_rows(
+        session,
+        start=start,
+        end=end,
+        shop_id=shop_id,
+        seller_id=seller_id,
+        source=source,
+        financial_status=financial_status,
+        fulfillment_status=fulfillment_status,
+        order_status=order_status,
+        currency=currency,
+        search=search,
+        sort_by="date",
+        sort_dir="desc",
+    )
+    summary = build_tiktok_reporting_summary(summary_rows)
+    daily_totals = summary.get("daily_totals", [])
+    return {
+        "rows": rows,
+        "total_count": total_count,
+        "summary": summary,
+        "daily_totals": daily_totals,
+        "line_item_summary": summary.get("line_item_summary", {}),
+        "page": max(page, 1),
+        "page_size": limit,
+        "has_more": bool(limit and (page * limit) < total_count),
     }
 
 

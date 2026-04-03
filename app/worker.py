@@ -647,7 +647,11 @@ async def process_once():
 
         skipped_rows = session.exec(
             select(DiscordMessage)
-            .where(DiscordMessage.parse_status.in_(sorted(expand_parse_status_filter_values([PARSE_PENDING]))))
+            .where(
+                DiscordMessage.parse_status.in_(
+                    sorted(expand_parse_status_filter_values([PARSE_PENDING, PARSE_FAILED]))
+                )
+            )
             .where(DiscordMessage.parse_attempts >= settings.parser_max_attempts)
             .order_by(DiscordMessage.created_at)
             .limit(settings.parser_batch_size)
@@ -1104,6 +1108,7 @@ async def process_row(row_id: int):
             primary_row.money_out = financials.money_out
             primary_row.expense_category = financials.expense_category
             if result.get("ignore_message"):
+                clear_parsed_fields(primary_row)
                 set_row_status(primary_row, PARSE_IGNORED, clear_error=True)
             else:
                 set_row_status(

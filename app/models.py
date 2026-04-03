@@ -350,6 +350,59 @@ class ShopifyOrder(SQLModel, table=True):
     received_at: datetime = Field(default_factory=utcnow, index=True)
 
 
+class TikTokAuth(SQLModel, table=True):
+    __tablename__ = "tiktok_auth"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    tiktok_shop_id: str = Field(index=True, unique=True)
+    shop_cipher: Optional[str] = Field(default=None, index=True)
+    seller_id: Optional[str] = Field(default=None, index=True)
+    open_id: Optional[str] = Field(default=None, index=True)
+    shop_name: Optional[str] = Field(default=None, index=True)
+    shop_region: Optional[str] = Field(default=None, index=True)
+    seller_name: Optional[str] = Field(default=None, index=True)
+    app_key: Optional[str] = Field(default=None, index=True)
+    redirect_uri: Optional[str] = None
+    access_token: Optional[str] = None
+    refresh_token: Optional[str] = None
+    access_token_expires_at: Optional[datetime] = Field(default=None, index=True)
+    refresh_token_expires_at: Optional[datetime] = Field(default=None, index=True)
+    scopes_json: str = Field(default="[]")
+    raw_payload: str = Field(default="{}")
+    source: str = Field(default="oauth", index=True)
+    received_at: Optional[datetime] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+    updated_at: datetime = Field(default_factory=utcnow, index=True)
+
+
+class TikTokOrder(SQLModel, table=True):
+    __tablename__ = "tiktok_orders"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    tiktok_order_id: str = Field(index=True, unique=True)
+    shop_id: Optional[str] = Field(default=None, index=True)
+    shop_cipher: Optional[str] = Field(default=None, index=True)
+    seller_id: Optional[str] = Field(default=None, index=True)
+    order_number: str = Field(index=True)
+    created_at: datetime = Field(index=True)
+    updated_at: datetime = Field(index=True)
+    customer_name: Optional[str] = Field(default=None, index=True)
+    customer_email: Optional[str] = Field(default=None, index=True)
+    total_price: float = 0.0
+    subtotal_price: float = 0.0
+    total_tax: Optional[float] = None
+    subtotal_ex_tax: Optional[float] = None
+    financial_status: str = Field(default="", index=True)
+    fulfillment_status: Optional[str] = Field(default=None, index=True)
+    order_status: Optional[str] = Field(default=None, index=True)
+    currency: Optional[str] = Field(default=None, index=True)
+    line_items_json: str = "[]"
+    line_items_summary_json: str = "[]"
+    raw_payload: str = "{}"
+    source: str = Field(default="webhook", index=True)
+    received_at: datetime = Field(default_factory=utcnow, index=True)
+
+
 class User(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     username: str = Field(index=True, unique=True)

@@ -82,6 +82,7 @@
                     <a href="{{ reports_url(source='all', start=selected_start, end=selected_end, channel_id=selected_channel_id, entry_kind=selected_entry_kind) }}" class="toggle-link{% if selected_source == 'all' %} active{% endif %}">All</a>
                     <a href="{{ reports_url(source='discord', start=selected_start, end=selected_end, channel_id=selected_channel_id, entry_kind=selected_entry_kind) }}" class="toggle-link{% if selected_source == 'discord' %} active{% endif %}">Discord</a>
                     <a href="{{ reports_url(source='shopify', start=selected_start, end=selected_end, channel_id=selected_channel_id, entry_kind=selected_entry_kind) }}" class="toggle-link{% if selected_source == 'shopify' %} active{% endif %}">Shopify</a>
+                    <a href="{{ reports_url(source='tiktok', start=selected_start, end=selected_end, channel_id=selected_channel_id, entry_kind=selected_entry_kind) }}" class="toggle-link{% if selected_source == 'tiktok' %} active{% endif %}">TikTok</a>
                 </div>
                 <div class="summary-strip">
                     <div class="helper-card">Use this page to spot channel or category drift before jumping back into the review queue.</div>
@@ -105,14 +106,15 @@
                 <label>Financial Kind<select name="entry_kind"><option value="">All</option><option value="sale" {% if selected_entry_kind == "sale" %}selected{% endif %}>sale</option><option value="buy" {% if selected_entry_kind == "buy" %}selected{% endif %}>buy</option><option value="trade" {% if selected_entry_kind == "trade" %}selected{% endif %}>trade</option><option value="expense" {% if selected_entry_kind == "expense" %}selected{% endif %}>expense</option><option value="unknown" {% if selected_entry_kind == "unknown" %}selected{% endif %}>unknown</option></select></label>
                 <button type="submit" class="secondary-button">Apply</button>
             </form>
-            <div class="scope-strip">
-                <div class="small">Current scope: {{ selected_source }} source view. Channel and financial kind filters apply to Discord data only.</div>
-                <div class="actions">
-                    <span class="scope-chip">{{ discord_summary["rows"] }} Discord transactions</span>
-                    <span class="scope-chip">{{ shopify_summary["orders"] }} Shopify orders</span>
-                    <span class="scope-chip">{{ selected_start or "start" }} to {{ selected_end or "today" }}</span>
+                <div class="scope-strip">
+                    <div class="small">Current scope: {{ selected_source }} source view. Channel and financial kind filters apply to Discord data only.</div>
+                    <div class="actions">
+                        <span class="scope-chip">{{ discord_summary["rows"] }} Discord transactions</span>
+                        <span class="scope-chip">{{ shopify_summary["orders"] }} Shopify orders</span>
+                        <span class="scope-chip">{{ tiktok_summary["orders"] }} TikTok orders</span>
+                        <span class="scope-chip">{{ selected_start or "start" }} to {{ selected_end or "today" }}</span>
+                    </div>
                 </div>
-            </div>
         </div>
 
         {% if show_shopify_reports and shopify_summary["has_missing_tax_data"] %}
@@ -123,7 +125,13 @@
             <div class="section-header">
                 <div>
                     <h2 class="section-title">Period Comparison</h2>
-                    <div class="section-subtitle">Discord net stays intact, Shopify paid-order revenue is split into gross, tax, and ex-tax net, and combined totals join Discord net with Shopify net.</div>
+                    <div class="section-subtitle">
+                        {% if selected_source == 'all' %}
+                        Discord cash in is shown as gross, Discord cash out is shown separately, and combined revenue joins Discord gross with Shopify net and TikTok net.
+                        {% else %}
+                        Discord net stays intact, while Shopify and TikTok paid-order revenue are split into gross, tax, and ex-tax net.
+                        {% endif %}
+                    </div>
                 </div>
             </div>
             <div class="table-shell">
@@ -131,18 +139,20 @@
                     <thead>
                         <tr>
                             <th>Period</th>
-                            {% if show_discord_reports %}<th>Discord</th>{% endif %}
+                            {% if show_discord_reports and selected_source == 'all' %}<th>Discord Gross</th><th>Discord Outflow</th>{% elif show_discord_reports %}<th>Discord Net</th>{% endif %}
                             {% if show_shopify_reports %}<th>Shopify Gross</th><th>Shopify Tax</th><th>Shopify Net</th>{% endif %}
-                            {% if selected_source == 'all' %}<th>Combined</th>{% endif %}
+                            {% if show_tiktok_reports|default(false) %}<th>TikTok Gross</th><th>TikTok Tax</th><th>TikTok Net</th>{% endif %}
+                            {% if selected_source == 'all' %}<th>Combined Revenue</th>{% endif %}
                         </tr>
                     </thead>
                     <tbody>
                         {% for row in period_rows %}
                         <tr>
                             <td>{{ row["label"] }}{% if row["shopify_tax_unknown_orders"] %}<div class="small">{{ row["shopify_tax_unknown_orders"] }} tax unknown</div>{% endif %}</td>
-                            {% if show_discord_reports %}<td>${{ "%.2f"|format(row["discord_net"]) }}</td>{% endif %}
+                            {% if show_discord_reports and selected_source == 'all' %}<td>${{ "%.2f"|format(row["discord_gross"]) }}</td><td>${{ "%.2f"|format(row["discord_outflow"]) }}</td>{% elif show_discord_reports %}<td>${{ "%.2f"|format(row["discord_net"]) }}</td>{% endif %}
                             {% if show_shopify_reports %}<td>${{ "%.2f"|format(row["shopify_gross"]) }}</td><td>${{ "%.2f"|format(row["shopify_tax"]) }}</td><td>${{ "%.2f"|format(row["shopify_net"]) }}</td>{% endif %}
-                            {% if selected_source == 'all' %}<td>${{ "%.2f"|format(row["combined_net"]) }}</td>{% endif %}
+                            {% if show_tiktok_reports|default(false) %}<td>${{ "%.2f"|format(row["tiktok_gross"]) }}</td><td>${{ "%.2f"|format(row["tiktok_tax"]) }}</td><td>${{ "%.2f"|format(row["tiktok_net"]) }}</td>{% endif %}
+                            {% if selected_source == 'all' %}<td>${{ "%.2f"|format(row["combined_revenue"]) }}</td>{% endif %}
                         </tr>
                         {% endfor %}
                     </tbody>
@@ -165,13 +175,21 @@
             <div class="metric"><div class="metric-label">Tax</div><div class="metric-value">${{ "%.2f"|format(shopify_summary["total_tax"]) }}</div></div>
             <div class="metric"><div class="metric-label">Net</div><div class="metric-value">${{ "%.2f"|format(shopify_summary["net_revenue"]) }}</div></div>
             <div class="metric"><div class="metric-label">Avg Net Order</div><div class="metric-value">${{ "%.2f"|format(shopify_summary["avg_order_value_net"]) }}</div></div>
+            {% elif selected_source == 'tiktok' %}
+            <div class="metric"><div class="metric-label">Orders</div><div class="metric-value">{{ tiktok_summary["orders"] }}</div></div>
+            <div class="metric"><div class="metric-label">Paid Orders</div><div class="metric-value">{{ tiktok_summary["paid_orders"] }}</div></div>
+            <div class="metric"><div class="metric-label">Gross</div><div class="metric-value">${{ "%.2f"|format(tiktok_summary["gross_revenue"]) }}</div></div>
+            <div class="metric"><div class="metric-label">Tax</div><div class="metric-value">${{ "%.2f"|format(tiktok_summary["total_tax"]) }}</div></div>
+            <div class="metric"><div class="metric-label">Net</div><div class="metric-value">${{ "%.2f"|format(tiktok_summary["net_revenue"]) }}</div></div>
+            <div class="metric"><div class="metric-label">Avg Net Order</div><div class="metric-value">${{ "%.2f"|format(tiktok_summary["avg_order_value_net"]) }}</div></div>
             {% else %}
-            <div class="metric"><div class="metric-label">Discord Net</div><div class="metric-value">${{ "%.2f"|format(report_totals["discord_net"]) }}</div></div>
+            <div class="metric"><div class="metric-label">Discord Gross</div><div class="metric-value">${{ "%.2f"|format(report_totals["discord_gross"]) }}</div></div>
+            <div class="metric"><div class="metric-label">Discord Outflow</div><div class="metric-value">${{ "%.2f"|format(report_totals["discord_outflow"]) }}</div></div>
             <div class="metric"><div class="metric-label">Shopify Gross</div><div class="metric-value">${{ "%.2f"|format(report_totals["shopify_gross"]) }}</div></div>
-            <div class="metric"><div class="metric-label">Shopify Tax</div><div class="metric-value">${{ "%.2f"|format(report_totals["shopify_tax"]) }}</div></div>
-            <div class="metric"><div class="metric-label">Shopify Net</div><div class="metric-value">${{ "%.2f"|format(report_totals["shopify_net"]) }}</div></div>
-            <div class="metric"><div class="metric-label">Combined</div><div class="metric-value">${{ "%.2f"|format(report_totals["combined_net"]) }}</div></div>
-            <div class="metric"><div class="metric-label">Tax Unknown</div><div class="metric-value">{{ shopify_summary["tax_unknown_orders"] }}</div></div>
+            <div class="metric"><div class="metric-label">TikTok Gross</div><div class="metric-value">${{ "%.2f"|format(report_totals["tiktok_gross"]) }}</div></div>
+            <div class="metric"><div class="metric-label">Shopify + TikTok Net</div><div class="metric-value">${{ "%.2f"|format(report_totals["shopify_net"] + report_totals["tiktok_net"]) }}</div></div>
+            <div class="metric"><div class="metric-label">Combined Revenue</div><div class="metric-value">${{ "%.2f"|format(report_totals["combined_revenue"]) }}</div></div>
+            <div class="metric"><div class="metric-label">Tax Unknown</div><div class="metric-value">{{ shopify_summary["tax_unknown_orders"] + tiktok_summary["tax_unknown_orders"] }}</div></div>
             {% endif %}
         </div>
 
@@ -211,6 +229,48 @@
                         </tr>
                         {% else %}
                         <tr><td colspan="6" class="small">No Shopify paid orders in this view.</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        {% endif %}
+
+        {% if show_tiktok_reports|default(false) %}
+        <div class="card">
+            <div class="section-header">
+                <div>
+                    <h2 class="section-title">TikTok Breakdown</h2>
+                    <div class="section-subtitle">TikTok order counts and revenue mirror the Shopify view so the same reporting patterns can carry over cleanly.</div>
+                </div>
+            </div>
+            <div class="summary-grid" style="grid-template-columns:repeat(6,minmax(0,1fr));">
+                <div class="metric"><div class="metric-label">Orders</div><div class="metric-value">{{ tiktok_summary["orders"] }}</div></div>
+                <div class="metric"><div class="metric-label">Paid Orders</div><div class="metric-value">{{ tiktok_summary["paid_orders"] }}</div></div>
+                <div class="metric"><div class="metric-label">Gross</div><div class="metric-value">${{ "%.2f"|format(tiktok_summary["gross_revenue"]) }}</div></div>
+                <div class="metric"><div class="metric-label">Tax</div><div class="metric-value">${{ "%.2f"|format(tiktok_summary["total_tax"]) }}</div></div>
+                <div class="metric"><div class="metric-label">Net</div><div class="metric-value">${{ "%.2f"|format(tiktok_summary["net_revenue"]) }}</div></div>
+                <div class="metric"><div class="metric-label">Avg Net Order</div><div class="metric-value">${{ "%.2f"|format(tiktok_summary["avg_order_value_net"]) }}</div></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2 style="margin-top:0;">TikTok Daily Totals</h2>
+            <div class="table-shell">
+                <table>
+                    <thead><tr><th>Date</th><th>Orders</th><th>Gross</th><th>Tax</th><th>Net</th><th>Tax Unknown</th></tr></thead>
+                    <tbody>
+                        {% for row in tiktok_daily_totals %}
+                        <tr>
+                            <td>{{ row["date"] }}</td>
+                            <td>{{ row["orders"] }}</td>
+                            <td>${{ "%.2f"|format(row["gross"]) }}</td>
+                            <td>${{ "%.2f"|format(row["tax"]) }}</td>
+                            <td>${{ "%.2f"|format(row["net"]) }}</td>
+                            <td>{{ row["tax_unknown_orders"] }}</td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan="6" class="small">No TikTok orders in this view.</td></tr>
                         {% endfor %}
                     </tbody>
                 </table>

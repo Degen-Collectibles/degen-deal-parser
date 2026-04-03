@@ -19,6 +19,8 @@ _db_failure_state = {
 }
 LEGACY_SHOPIFY_TABLE = "shopifyorder"
 SHOPIFY_TABLE = "shopify_orders"
+TIKTOK_AUTH_TABLE = "tiktok_auth"
+TIKTOK_ORDERS_TABLE = "tiktok_orders"
 
 
 def normalize_database_url(raw_database_url: str) -> str:
@@ -130,6 +132,44 @@ SQLITE_ADDITIVE_MIGRATIONS = {
         "source": "TEXT DEFAULT 'webhook'",
         "received_at": "TIMESTAMP",
     },
+    TIKTOK_AUTH_TABLE: {
+        "shop_cipher": "TEXT",
+        "seller_id": "TEXT",
+        "open_id": "TEXT",
+        "shop_name": "TEXT",
+        "shop_region": "TEXT",
+        "seller_name": "TEXT",
+        "app_key": "TEXT",
+        "redirect_uri": "TEXT",
+        "access_token": "TEXT",
+        "refresh_token": "TEXT",
+        "access_token_expires_at": "TIMESTAMP",
+        "refresh_token_expires_at": "TIMESTAMP",
+        "scopes_json": "TEXT DEFAULT '[]'",
+        "raw_payload": "TEXT DEFAULT '{}'",
+        "source": "TEXT DEFAULT 'oauth'",
+        "received_at": "TIMESTAMP",
+        "created_at": "TIMESTAMP",
+        "updated_at": "TIMESTAMP",
+    },
+    TIKTOK_ORDERS_TABLE: {
+        "shop_id": "TEXT",
+        "shop_cipher": "TEXT",
+        "seller_id": "TEXT",
+        "customer_name": "TEXT",
+        "customer_email": "TEXT",
+        "total_tax": "REAL",
+        "subtotal_ex_tax": "REAL",
+        "financial_status": "TEXT DEFAULT ''",
+        "fulfillment_status": "TEXT",
+        "order_status": "TEXT",
+        "currency": "TEXT",
+        "line_items_json": "TEXT DEFAULT '[]'",
+        "line_items_summary_json": "TEXT DEFAULT '[]'",
+        "raw_payload": "TEXT DEFAULT '{}'",
+        "source": "TEXT DEFAULT 'webhook'",
+        "received_at": "TIMESTAMP",
+    },
 }
 
 
@@ -143,6 +183,10 @@ SQLITE_INDEX_MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS ix_discordmessage_last_stitched_at ON discordmessage (last_stitched_at)",
     "CREATE UNIQUE INDEX IF NOT EXISTS ix_shopify_orders_shopify_order_id ON shopify_orders (shopify_order_id)",
     "CREATE INDEX IF NOT EXISTS ix_shopify_orders_created_at ON shopify_orders (created_at)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ix_tiktok_auth_tiktok_shop_id ON tiktok_auth (tiktok_shop_id)",
+    "CREATE INDEX IF NOT EXISTS ix_tiktok_auth_app_key ON tiktok_auth (app_key)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ix_tiktok_orders_tiktok_order_id ON tiktok_orders (tiktok_order_id)",
+    "CREATE INDEX IF NOT EXISTS ix_tiktok_orders_created_at ON tiktok_orders (created_at)",
 ]
 
 
@@ -174,6 +218,44 @@ POSTGRES_ADDITIVE_MIGRATIONS = {
         "subtotal_ex_tax": "DOUBLE PRECISION",
         "financial_status": "TEXT DEFAULT ''",
         "fulfillment_status": "TEXT",
+        "line_items_json": "TEXT DEFAULT '[]'",
+        "line_items_summary_json": "TEXT DEFAULT '[]'",
+        "raw_payload": "TEXT DEFAULT '{}'",
+        "source": "TEXT DEFAULT 'webhook'",
+        "received_at": "TIMESTAMP",
+    },
+    TIKTOK_AUTH_TABLE: {
+        "shop_cipher": "TEXT",
+        "seller_id": "TEXT",
+        "open_id": "TEXT",
+        "shop_name": "TEXT",
+        "shop_region": "TEXT",
+        "seller_name": "TEXT",
+        "app_key": "TEXT",
+        "redirect_uri": "TEXT",
+        "access_token": "TEXT",
+        "refresh_token": "TEXT",
+        "access_token_expires_at": "TIMESTAMP",
+        "refresh_token_expires_at": "TIMESTAMP",
+        "scopes_json": "TEXT DEFAULT '[]'",
+        "raw_payload": "TEXT DEFAULT '{}'",
+        "source": "TEXT DEFAULT 'oauth'",
+        "received_at": "TIMESTAMP",
+        "created_at": "TIMESTAMP",
+        "updated_at": "TIMESTAMP",
+    },
+    TIKTOK_ORDERS_TABLE: {
+        "shop_id": "TEXT",
+        "shop_cipher": "TEXT",
+        "seller_id": "TEXT",
+        "customer_name": "TEXT",
+        "customer_email": "TEXT",
+        "total_tax": "DOUBLE PRECISION",
+        "subtotal_ex_tax": "DOUBLE PRECISION",
+        "financial_status": "TEXT DEFAULT ''",
+        "fulfillment_status": "TEXT",
+        "order_status": "TEXT",
+        "currency": "TEXT",
         "line_items_json": "TEXT DEFAULT '[]'",
         "line_items_summary_json": "TEXT DEFAULT '[]'",
         "raw_payload": "TEXT DEFAULT '{}'",
@@ -426,6 +508,30 @@ def ensure_postgres_schema() -> None:
             text(
                 "CREATE INDEX IF NOT EXISTS ix_shopify_orders_created_at "
                 "ON shopify_orders (created_at)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_tiktok_auth_tiktok_shop_id "
+                "ON tiktok_auth (tiktok_shop_id)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_tiktok_auth_app_key "
+                "ON tiktok_auth (app_key)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_tiktok_orders_tiktok_order_id "
+                "ON tiktok_orders (tiktok_order_id)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_tiktok_orders_created_at "
+                "ON tiktok_orders (created_at)"
             )
         )
         migrate_legacy_postgres_shopify_orders(connection)

@@ -325,6 +325,23 @@ class NavigationValidationTests(unittest.TestCase):
                     self.assertEqual(response.status_code, 301, path)
                     self.assertEqual(response.headers.get("location"), expected_location, path)
 
+    def test_status_page_surfaces_background_task_failures(self) -> None:
+        with Session(self.engine) as session, patch("app.main.require_role_response", return_value=None), patch(
+            "app.main.read_background_task_state",
+            return_value={
+                "failed_tasks": {
+                    "tiktok-order-pull": {
+                        "error": "simulated task failure",
+                    }
+                }
+            },
+        ):
+            response = main_module.status_page(make_request("/status"), session=session)
+            body = response.body.decode("utf-8")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("tiktok order pull failed: simulated task failure", body.lower())
+
     def test_primary_review_page_exposes_reparse_and_ignore_workflow_copy(self) -> None:
         with Session(self.engine) as session, patch("app.main.require_role_response", return_value=None), patch(
             "app.main.get_available_channel_choices",

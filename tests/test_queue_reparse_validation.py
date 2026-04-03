@@ -1,5 +1,7 @@
 import unittest
+import asyncio
 from datetime import timedelta
+from contextlib import contextmanager
 from pathlib import Path
 import shutil
 import uuid
@@ -40,6 +42,7 @@ from app.reparse_runs import (
 from app.reporting import get_financial_rows
 from app.transactions import get_transactions, sync_transaction_from_message
 from app.worker import MAX_ATTEMPTS_ERROR, close_or_recover_unfinished_attempts, queue_reparse_range
+from app.worker import process_once, process_row
 
 
 def make_request(path: str) -> Request:
@@ -93,6 +96,30 @@ class QueueReparseValidationTests(unittest.TestCase):
             session.refresh(row)
 
             self.assertEqual(row.parse_status, PARSE_FAILED)
+            self.assertEqual(row.last_error, MAX_ATTEMPTS_ERROR)
+
+    def test_process_once_exhausts_failed_row_at_retry_cap(self) -> None:
+        with self.session() as session:
+            row = self.make_message(
+                discord_message_id="failed-at-cap",
+                parse_status=PARSE_FAILED,
+                parse_attempts=3,
+                last_error=None,
+            )
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+
+            @contextmanager
+            def fake_managed_session():
+                yield session
+
+            with patch("app.worker.managed_session", new=fake_managed_session):
+                asyncio.run(process_once())
+
+            session.refresh(row)
+            self.assertEqual(row.parse_status, PARSE_FAILED)
+            self.assertEqual(row.parse_attempts, 3)
             self.assertEqual(row.last_error, MAX_ATTEMPTS_ERROR)
 
     def test_queue_reparse_range_includes_legacy_needs_review_alias(self) -> None:
@@ -360,6 +387,67 @@ class QueueReparseValidationTests(unittest.TestCase):
                 select(Transaction).where(Transaction.source_message_id == row.id)
             ).first()
             self.assertIsNone(transaction)
+
+    def test_ignored_primary_row_clears_stale_parsed_and_financial_fields(self) -> None:
+        with self.session() as session, patch("app.worker.parse_message") as parse_message_mock:
+            row = self.make_message(
+                discord_message_id="ignored-primary",
+                parse_status=PARSE_PENDING,
+                parse_attempts=0,
+            )
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+
+            parse_message_mock.return_value = {
+                "parsed_type": "buy",
+                "parsed_amount": 25.0,
+                "parsed_payment_method": "zelle",
+                "parsed_cash_direction": None,
+                "parsed_category": "inventory",
+                "parsed_items": ["Charizard"],
+                "parsed_items_in": ["Charizard"],
+                "parsed_items_out": [],
+                "parsed_trade_summary": "ignored",
+                "parsed_notes": "ignored by parser",
+                "image_summary": "image used",
+                "confidence": 0.77,
+                "needs_review": False,
+                "ignore_message": True,
+            }
+
+            @contextmanager
+            def fake_managed_session():
+                yield session
+
+            with patch("app.worker.managed_session", new=fake_managed_session):
+                asyncio.run(process_row(row.id))
+
+            session.refresh(row)
+            self.assertEqual(row.parse_status, PARSE_IGNORED)
+            self.assertTrue(
+                all(
+                    value in (None, "[]", "")
+                    for value in (
+                        row.deal_type,
+                        row.amount,
+                        row.payment_method,
+                        row.cash_direction,
+                        row.category,
+                        row.trade_summary,
+                        row.notes,
+                        row.confidence,
+                        row.image_summary,
+                        row.entry_kind,
+                        row.money_in,
+                        row.money_out,
+                        row.expense_category,
+                    )
+                )
+            )
+            self.assertEqual(row.item_names_json, "[]")
+            self.assertEqual(row.items_in_json, "[]")
+            self.assertEqual(row.items_out_json, "[]")
 
     def test_get_transactions_misses_legacy_transaction_needs_review_status(self) -> None:
         with self.session() as session:

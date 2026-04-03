@@ -67,11 +67,17 @@ class Pass2ConsolidationTests(unittest.TestCase):
 
     def test_status_page_contains_merged_sections_and_collapsed_debug_details(self) -> None:
         with Session(self.engine) as session, patch("app.main.require_role_response", return_value=None):
-            response = main_module.status_page(make_request("/status", role="viewer"), session=session)
+            response = main_module.status_page(
+                make_request("/status", role="viewer"),
+                success=None,
+                error=None,
+                session=session,
+            )
         body = response.body.decode("utf-8")
         self.assertEqual(response.status_code, 200)
         self.assertIn("Runtime Health", body)
         self.assertIn("Queue Summary", body)
+        self.assertIn("TikTok Sync", body)
         self.assertIn("Recent Reparse", body)
         self.assertIn("Debug Detail", body)
         self.assertIn('<details class="card" id="debug-detail">', body)

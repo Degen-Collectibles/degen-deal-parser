@@ -126,6 +126,21 @@ class Settings(BaseSettings):
     shopify_webhook_secret: str = Field(default="", alias="SHOPIFY_WEBHOOK_SECRET")
     shopify_api_key: str = Field(default="", alias="SHOPIFY_API_KEY")
     shopify_store_domain: str = Field(default="", alias="SHOPIFY_STORE_DOMAIN")
+    tiktok_app_key: str = Field(default="", alias="TIKTOK_APP_KEY")
+    tiktok_app_secret: str = Field(default="", alias="TIKTOK_APP_SECRET")
+    tiktok_redirect_uri: str = Field(default="", alias="TIKTOK_REDIRECT_URI")
+    tiktok_shop_id: str = Field(default="", alias="TIKTOK_SHOP_ID")
+    tiktok_shop_cipher: str = Field(default="", alias="TIKTOK_SHOP_CIPHER")
+    tiktok_access_token: str = Field(default="", alias="TIKTOK_ACCESS_TOKEN")
+    tiktok_refresh_token: str = Field(default="", alias="TIKTOK_REFRESH_TOKEN")
+    tiktok_webhook_secret: str = Field(default="", alias="TIKTOK_WEBHOOK_SECRET")
+    tiktok_api_base_url: str = Field(default="https://open.tiktokapis.com", alias="TIKTOK_BASE_URL")
+    tiktok_shop_api_base_url: str = Field(default="", alias="TIKTOK_SHOP_API_BASE_URL")
+    tiktok_sync_enabled: bool = Field(default=True, alias="TIKTOK_SYNC_ENABLED")
+    tiktok_sync_interval_minutes: int = Field(default=15, alias="TIKTOK_SYNC_INTERVAL_MINUTES")
+    tiktok_sync_lookback_hours: float = Field(default=24.0, alias="TIKTOK_SYNC_LOOKBACK_HOURS")
+    tiktok_sync_limit: int = Field(default=100, alias="TIKTOK_SYNC_LIMIT")
+    tiktok_startup_backfill_days: int = Field(default=30, alias="TIKTOK_STARTUP_BACKFILL_DAYS")
 
     @property
     def channel_ids(self) -> List[int]:

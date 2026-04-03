@@ -170,6 +170,142 @@ When touching bookkeeping:
 - public Google Sheets auto-import path
 - reconciliation page loads
 
+## TikTok Shop Integration (CRITICAL — read before touching TikTok code)
+
+### Current state (as of 2026-04-03)
+
+TikTok Shop order sync is **working**. The backfill script pulls orders from the
+TikTok Shop Open Platform **V2 API** and stores them in the `TikTokOrder` model.
+Orders are visible on `/reports`.
+
+The OAuth callback (`/integrations/tiktok/callback`) and token refresh are also
+working. They use the **TikTok Shop-specific auth endpoints** at
+`auth.tiktok-shops.com`, not the generic TikTok OAuth at `open.tiktokapis.com`.
+
+### Files
+
+| File | Role |
+|---|---|
+| `scripts/tiktok_backfill.py` | CLI backfill — fetches historical orders from TikTok Shop API |
+| `app/tiktok_ingest.py` | Shared utilities: token exchange, webhook parsing, order normalization |
+| `app/models.py` | `TikTokOrder` and `TikTokAuth` SQLModel definitions |
+| `app/reporting.py` | TikTok order reporting/summary functions |
+| `app/main.py` | FastAPI routes for `/integrations/tiktok/callback` and `/webhooks/tiktok/orders` |
+| `tests/test_tiktok_reporting.py` | 17 regression tests covering auth, webhooks, upsert, and reporting |
+
+### TikTok Shop API V2 — what you must know
+
+TikTok **deprecated V1 entirely** (HTTP 410). All API calls must use V2.
+The V1→V2 migration involved several breaking changes that are easy to get wrong:
+
+1. **Base URL**: `https://open-api.tiktokglobalshop.com` (global, no `.us` subdomain).
+   The `.us` regional domain returns 503 for V2 paths.
+
+2. **Endpoint paths include the version**: e.g. `/order/202309/orders/search`.
+   V1 paths like `/api/orders/search` return 410.
+
+3. **`version=202309` query parameter**: must be present in every request AND
+   included in the HMAC signature (it is NOT excluded like `access_token`).
+
+4. **Auth via header, not query param**: V2 requires `x-tts-access-token: <token>`
+   as a request header. The `access_token` query param is still sent (for
+   backwards compat / load balancer routing) but is excluded from the signature.
+
+5. **Pagination is in query params, not body**: `page_size` and `page_token`
+   go in the URL query string. The POST body contains only search filters.
+
+6. **Signature algorithm** (HMAC-SHA256):
+   ```
+   canonical = sorted query params (excluding: sign, access_token)
+   string_to_sign = app_secret + path + key1val1key2val2... + body_json + app_secret
+   sign = HMAC-SHA256(app_secret, string_to_sign).hex()
+   ```
+   - Body MUST be the exact JSON bytes sent in the request (use pre-serialized `raw_body`).
+   - `version`, `shop_cipher`, `shop_id`, `app_key`, `timestamp`, `page_size`,
+     `page_token` are all included in the signature.
+
+7. **Response field names (V2)**:
+   - `payment` (not `payment_info`) — contains `total_amount`, `sub_total`, `tax`
+   - `line_items` (not `item_list`) — each has `product_name`, `sale_price`, `sku_id`
+   - `id` (not `order_id`) at the order level
+   - Pagination: `next_page_token` in `data` object
+   - `buyer_nickname` for customer display name
+
+8. **V2 search returns full order details** — line items, payment, addresses
+   are all included in `/order/202309/orders/search` results. A separate
+   detail fetch is unnecessary for backfill.
+
+### Running the backfill
+
+```powershell
+# IMPORTANT: override system DATABASE_URL if it points to old Postgres
+$env:DATABASE_URL = "sqlite:///data/degen_live.db"
+
+# Dry run first
+.\.venv\Scripts\python.exe scripts\tiktok_backfill.py --dry-run --limit 5
+
+# Real sync
+.\.venv\Scripts\python.exe scripts\tiktok_backfill.py --limit 500
+```
+
+### Required env vars
+
+```
+TIKTOK_APP_KEY          — TikTok Shop app key
+TIKTOK_APP_SECRET       — TikTok Shop app secret
+TIKTOK_SHOP_ID          — numeric shop ID (e.g. 7495987383262087496)
+TIKTOK_SHOP_CIPHER      — shop cipher from API Testing Tool
+TIKTOK_ACCESS_TOKEN     — access token from API Testing Tool
+```
+
+Optional:
+```
+TIKTOK_SHOP_API_BASE_URL — override base URL (default: https://open-api.tiktokglobalshop.com)
+TIKTOK_REFRESH_TOKEN     — for automated token refresh (not yet implemented)
+```
+
+### TikTok Shop auth protocol (CRITICAL — different from generic TikTok)
+
+TikTok Shop uses a **completely different auth endpoint** from generic TikTok OAuth.
+This is the single most common mistake when implementing TikTok Shop auth.
+
+| | Generic TikTok OAuth (WRONG for Shop) | TikTok Shop (CORRECT) |
+|---|---|---|
+| Auth host | `open.tiktokapis.com` | `auth.tiktok-shops.com` |
+| Token exchange path | `/v2/oauth/token/` | `/api/v2/token/get` |
+| Token refresh path | `/v2/oauth/token/` | `/api/v2/token/refresh` |
+| HTTP method | POST with form body | GET with query params |
+| App key param | `client_key` | `app_key` |
+| App secret param | `client_secret` | `app_secret` |
+| Auth code param | `code` | `auth_code` |
+| Grant type | `authorization_code` | `authorized_code` |
+| redirect_uri | required | not used |
+
+Token exchange example URL:
+```
+https://auth.tiktok-shops.com/api/v2/token/get?app_key=XXX&app_secret=XXX&auth_code=XXX&grant_type=authorized_code
+```
+
+The response wraps data in a `data` object with `code: 0` for success:
+```json
+{"code": 0, "message": "success", "data": {"access_token": "...", "access_token_expire_in": 7200, ...}}
+```
+
+### Known gotchas for future agents
+
+- **DO NOT use `open.tiktokapis.com` for Shop auth**. Shop auth lives at `auth.tiktok-shops.com`.
+- **DO NOT use `client_key`/`client_secret`/`code`/`authorization_code`** for Shop auth. Use `app_key`/`app_secret`/`auth_code`/`authorized_code`.
+- **DO NOT POST to Shop auth endpoints**. They expect GET with query params.
+- **DO NOT revert to V1 paths** (`/api/orders/search`). They are dead (410).
+- **DO NOT use the `.us` subdomain** (`open-api.us.tiktokglobalshop.com`). It 503s.
+- **DO NOT put `page_size` in the POST body**. V2 wants it as a query param.
+- **DO NOT omit `x-tts-access-token` header**. V2 requires it.
+- **DO NOT omit `version` from the signature**. Only `sign` and `access_token` are excluded.
+- **System `DATABASE_URL` env var** may override `.env`. Check with `echo $env:DATABASE_URL`.
+- Auth codes expire in ~60 seconds. The exchange must happen immediately on callback.
+- Access tokens expire. When they do, the user must get a new one from the
+  API Testing Tool (or implement refresh token flow using `TIKTOK_REFRESH_TOKEN`).
+
 ## Notes For Future Agents
 
 - SQLite schema has evolved additively; avoid reset-based development if possible

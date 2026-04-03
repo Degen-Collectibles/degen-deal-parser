@@ -21,14 +21,33 @@ class TeeStream:
         return len(data)
 
     def flush(self) -> None:
-        self._primary.flush()
-        self._mirror.flush()
+        try:
+            self._primary.flush()
+        except (OSError, ValueError):
+            pass
+        if getattr(self._mirror, "closed", False):
+            return
+        try:
+            self._mirror.flush()
+        except (OSError, ValueError):
+            pass
 
     def isatty(self) -> bool:
         return bool(getattr(self._primary, "isatty", lambda: False)())
 
     def fileno(self) -> int:
         return self._primary.fileno()
+
+
+def _close_runtime_log_handle(handle: TextIO) -> None:
+    try:
+        handle.flush()
+    except (OSError, ValueError):
+        pass
+    try:
+        handle.close()
+    except (OSError, ValueError):
+        pass
 
 
 def setup_runtime_file_logging(default_name: str = "app.log") -> Path | None:
@@ -57,8 +76,7 @@ def setup_runtime_file_logging(default_name: str = "app.log") -> Path | None:
         sys.stderr = TeeStream(sys.stderr, handle)
         setattr(sys.stderr, "_degen_tee_wrapped", True)
 
-    atexit.register(handle.flush)
-    atexit.register(handle.close)
+    atexit.register(_close_runtime_log_handle, handle)
     print(f"[logging] writing runtime output to {os.path.normpath(str(log_path))}")
     return log_path
 

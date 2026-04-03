@@ -41,10 +41,11 @@
         .metric-footnote { color:var(--muted); font-size:12px; margin-top:6px; }
         .metrics-stack { display:grid; gap:12px; }
         .metric-group { display:grid; gap:12px; }
-        .metric-group.supporting { grid-template-columns:repeat(3,minmax(0,1fr)); }
+        .metric-group.supporting { grid-template-columns:repeat(4,minmax(0,1fr)); }
         .metric-card-lead .metric-value { font-size:36px; }
         .layout { display:grid; grid-template-columns:1.15fr .85fr; gap:18px; }
         .double-grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+        .orders-grid { display:grid; grid-template-columns:1fr 1fr 1fr; gap:18px; }
         .review-item { padding:12px 0; border-top:1px solid #eee3d3; }
         .review-item:first-child { border-top:none; padding-top:0; }
         .review-item.compact { padding:8px 0; }
@@ -70,7 +71,7 @@
         .search-form { display:grid; gap:10px; grid-template-columns:repeat(3,minmax(0,1fr)); }
         .search-form input { width:100%; min-width:0; padding:12px 14px; min-height:44px; border:1px solid var(--line); border-radius:14px; font:inherit; }
         @media (max-width:1180px){ .workspace-card-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
-        @media (max-width:1000px){ .hero, .layout, .summary-grid, .double-grid, .metric-group.supporting, .search-form { grid-template-columns:1fr; } .page { padding:16px 14px 28px; } .eyebrow { margin:0 auto; } .workspace-nav { position:static; } .alert { align-items:flex-start; } }
+        @media (max-width:1000px){ .hero, .layout, .summary-grid, .double-grid, .orders-grid, .metric-group.supporting, .search-form { grid-template-columns:1fr; } .page { padding:16px 14px 28px; } .eyebrow { margin:0 auto; } .workspace-nav { position:static; } .alert { align-items:flex-start; } }
         @media (max-width:720px){ .workspace-card-grid { grid-template-columns:1fr; } .hero-actions, .stack, .top-actions, .quick-links { width:100%; } .hero-actions .button, .stack .button, .search-form .button { width:100%; justify-content:center; } .row-top, .row-bottom { display:grid; grid-template-columns:1fr; } .amount { white-space:normal; } }
     </style>
 </head>
@@ -87,6 +88,7 @@
                     {% if current_user and current_user.role in ["admin","reviewer"] %}<a class="button primary-button" href="/review">Review Now</a>{% endif %}
                     <a class="button secondary-button" href="/deals">Browse Deals</a>
                     <a class="button secondary-button" href="/shopify/orders">Shopify Orders</a>
+                    <a class="button secondary-button" href="/tiktok/orders">TikTok Shop Orders</a>
                     <a class="button secondary-button" href="/reports">Open Reports</a>
                     {% if current_user and current_user.role == "admin" %}<a class="button secondary-button" href="/bookkeeping">Bookkeeping</a>{% endif %}
                 </div>
@@ -154,6 +156,11 @@
                 {% else %}
                 <div class="metric-footnote">Shopify: No Shopify orders today</div>
                 {% endif %}
+                {% if dashboard_snapshot["today"]["tiktok"]["order_count"] > 0 %}
+                <div class="metric-footnote">TikTok Shop paid-order revenue: {{ dashboard_snapshot["today"]["tiktok"]["net_display"] }} net from {{ dashboard_snapshot["today"]["tiktok"]["paid_order_count_display"] }} revenue-counted order{{ "" if dashboard_snapshot["today"]["tiktok"]["paid_order_count"] == 1 else "s" }}</div>
+                {% else %}
+                <div class="metric-footnote">TikTok Shop: No paid TikTok orders today</div>
+                {% endif %}
             </div>
             <div class="metric metric-card-lead">
                 <div class="metric-label">Today's Purchases</div>
@@ -182,6 +189,12 @@
                         <div class="metric-value">{{ dashboard_snapshot["today"]["shopify"]["gross_display"] }}</div>
                         <div class="metric-footnote">Gross</div>
                         <div class="metric-footnote">Tax {{ dashboard_snapshot["today"]["shopify"]["tax_display"] }}</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">{{ dashboard_snapshot["today"]["tiktok"]["order_count"] }} TikTok Shop rows today</div>
+                        <div class="metric-value">{{ dashboard_snapshot["today"]["tiktok"]["gross_display"] }}</div>
+                        <div class="metric-footnote">{{ dashboard_snapshot["today"]["tiktok"]["paid_order_count_display"] }} revenue-counted order{{ "" if dashboard_snapshot["today"]["tiktok"]["paid_order_count"] == 1 else "s" }} generating {{ dashboard_snapshot["today"]["tiktok"]["net_display"] }} net</div>
+                        <div class="metric-footnote">Tax {{ dashboard_snapshot["today"]["tiktok"]["tax_display"] }}</div>
                     </div>
                 </div>
             </div>
@@ -288,7 +301,7 @@
         </div>
         {% endif %}
 
-        <div class="double-grid">
+        <div class="orders-grid">
             <div class="card">
                 <h2 class="section-title">Recent Deals</h2>
                 <p class="section-subtitle">The latest confirmed Discord deals.</p>
@@ -344,6 +357,41 @@
                 {% else %}
                 <div class="list-row">
                     <div class="small">No Shopify orders yet - orders will appear here automatically.</div>
+                </div>
+                {% endif %}
+            </div>
+
+            <div class="card">
+                <h2 class="section-title">Recent TikTok Orders</h2>
+                <p class="section-subtitle">{{ dashboard_snapshot["today"]["tiktok"]["order_count"] }} TikTok rows today &middot; {{ dashboard_snapshot["today"]["tiktok"]["net_display"] }} net from revenue-counted orders.</p>
+                {% if tiktok_orders %}
+                <div class="small" style="margin:-4px 0 12px;">Showing a sample of {{ tiktok_recent_order_count }} recent revenue-counted order{{ "" if tiktok_recent_order_count == 1 else "s" }} from today's TikTok rows.</div>
+                {% endif %}
+                {% if tiktok_orders %}
+                <div class="list">
+                    {% for order in tiktok_orders %}
+                    <a class="list-row" href="/tiktok/orders?search={{ order['order_number'] }}">
+                        <div class="row-top">
+                            <div>
+                                <strong>#{{ order["order_number"] }}</strong>
+                                <div class="small">{{ order["created_at"] }}</div>
+                            </div>
+                            <div class="amount">${{ "%.2f"|format(order["total_price"]) }}</div>
+                        </div>
+                        <div class="row-bottom">
+                            <div>{{ order["customer_name"] }}</div>
+                            <span class="pill">{{ order["fulfillment_label"] }}</span>
+                        </div>
+                    </a>
+                    {% endfor %}
+                </div>
+                {% elif tiktok_connected %}
+                <div class="list-row">
+                    <div class="small">No recent revenue-counted TikTok orders yet - the sampled list will appear here automatically.</div>
+                </div>
+                {% else %}
+                <div class="list-row">
+                    <div class="small">{{ tiktok_message }}</div>
                 </div>
                 {% endif %}
             </div>

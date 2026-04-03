@@ -1,16 +1,21 @@
 import json
+import io
 import shutil
+import threading
 import unittest
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
 import app.main as main_module
-from app.runtime_monitor import get_runtime_heartbeat_status
-from app.models import RuntimeHeartbeat
+from app import runtime_logging
+from app import runtime_monitor
+from app.runtime_monitor import get_runtime_heartbeat_status, upsert_runtime_heartbeat
+from app.models import RuntimeHeartbeat, TikTokAuth
+from app.models import utcnow
 
 
 class RuntimeSplitStatusTests(unittest.TestCase):
@@ -107,6 +112,30 @@ class RuntimeSplitStatusTests(unittest.TestCase):
         self.assertTrue(heartbeat["needs_attention"])
         self.assertIn("degraded state", heartbeat["alert_message"])
 
+    def test_runtime_heartbeat_serializes_datetime_details(self) -> None:
+        with Session(self.engine) as session:
+            recorded_at = utcnow()
+            upsert_runtime_heartbeat(
+                session,
+                runtime_name="local_worker",
+                host_name="worker-host",
+                status="running",
+                details={
+                    "discord_status": "ready",
+                    "last_pull_at": recorded_at,
+                    "nested": {"last_callback_at": recorded_at},
+                },
+            )
+
+            heartbeat = session.exec(
+                select(RuntimeHeartbeat).where(RuntimeHeartbeat.runtime_name == "local_worker")
+            ).first()
+
+        self.assertIsNotNone(heartbeat)
+        payload = json.loads(heartbeat.details_json)
+        self.assertEqual(payload["last_pull_at"], recorded_at.isoformat())
+        self.assertEqual(payload["nested"]["last_callback_at"], recorded_at.isoformat())
+
     def test_health_endpoint_surfaces_db_and_runtime_status(self) -> None:
         @contextmanager
         def fake_managed_session():
@@ -140,6 +169,139 @@ class RuntimeSplitStatusTests(unittest.TestCase):
         self.assertEqual(health.local_runtime_status, "degraded")
         self.assertEqual(health.local_runtime_label, "Degraded")
         self.assertTrue(health.local_runtime_needs_attention)
+
+    def test_status_snapshot_surfaces_tiktok_sync_freshness(self) -> None:
+        auth_updated_at = utcnow()
+        callback_received_at = utcnow()
+        webhook_received_at = utcnow()
+        pull_started_at = utcnow()
+        pull_finished_at = utcnow()
+        with Session(self.engine) as session:
+            session.add(
+                TikTokAuth(
+                    tiktok_shop_id="shop-1",
+                    shop_cipher="cipher-1",
+                    access_token="access-token",
+                    refresh_token="refresh-token",
+                )
+            )
+            session.commit()
+
+            with patch.object(
+                main_module,
+                "read_tiktok_integration_state",
+                return_value={
+                    "last_authorization_at": auth_updated_at,
+                    "last_callback": {
+                        "received_at": callback_received_at.isoformat(),
+                        "query": {"app_key": "app-key", "shop_region": "US"},
+                    },
+                    "last_webhook_at": webhook_received_at,
+                    "last_webhook": {
+                        "received_at": webhook_received_at.isoformat(),
+                        "topic": "order.status.change",
+                        "body_sha256": "abc123",
+                        "payload": {"kind": "object", "keys": ["order_id"]},
+                    },
+                    "is_pull_running": False,
+                    "last_pull_started_at": pull_started_at,
+                    "last_pull_finished_at": pull_finished_at,
+                    "last_pull": {
+                        "status": "success",
+                        "trigger": "automatic",
+                        "fetched": 2,
+                        "inserted": 1,
+                        "updated": 1,
+                        "failed": 0,
+                    },
+                    "last_error": None,
+                },
+            ):
+                snapshot = main_module.build_status_snapshot(session)
+
+        tiktok_snapshot = snapshot["tiktok_sync"]
+        self.assertEqual(tiktok_snapshot["status_label"], "Connected")
+        self.assertEqual(tiktok_snapshot["sync_label"], "Sync healthy")
+        self.assertNotEqual(tiktok_snapshot["last_authorization_label"], "none yet")
+        self.assertNotEqual(tiktok_snapshot["last_callback_label"], "none yet")
+        self.assertNotEqual(tiktok_snapshot["last_webhook_label"], "none yet")
+        self.assertNotEqual(tiktok_snapshot["last_pull_started_label"], "none yet")
+        self.assertNotEqual(tiktok_snapshot["last_pull_finished_label"], "none yet")
+        self.assertEqual(tiktok_snapshot["last_pull"]["status"], "success")
+        json.dumps(tiktok_snapshot)
+
+    def test_runtime_heartbeat_loop_survives_details_provider_failure(self) -> None:
+        class StopAfterOneWait:
+            def __init__(self) -> None:
+                self._is_set = False
+                self.wait_calls: list[float | None] = []
+
+            def is_set(self) -> bool:
+                return self._is_set
+
+            def wait(self, timeout: float | None = None) -> bool:
+                self.wait_calls.append(timeout)
+                self._is_set = True
+                return True
+
+        stop_event = StopAfterOneWait()
+        details_provider_calls = []
+        captured_exceptions = []
+
+        def details_provider() -> dict:
+            details_provider_calls.append("called")
+            raise RuntimeError("details provider exploded")
+
+        def capture_excepthook(args: threading.ExceptHookArgs) -> None:
+            captured_exceptions.append(args)
+
+        original_excepthook = threading.excepthook
+        threading.excepthook = capture_excepthook
+        try:
+            runtime_monitor.runtime_heartbeat_loop(
+                stop_event,  # type: ignore[arg-type]
+                runtime_name="local_worker",
+                host_name="worker-host",
+                details_provider=details_provider,
+            )
+        finally:
+            threading.excepthook = original_excepthook
+
+        self.assertEqual(details_provider_calls, ["called"])
+        self.assertEqual(stop_event.wait_calls, [runtime_monitor.RUNTIME_HEARTBEAT_INTERVAL_SECONDS])
+        self.assertEqual(captured_exceptions, [])
+
+    def test_tee_stream_flush_ignores_closed_mirror(self) -> None:
+        class PrimaryStream:
+            def __init__(self) -> None:
+                self.flushed = False
+
+            def write(self, data: str) -> int:
+                return len(data)
+
+            def flush(self) -> None:
+                self.flushed = True
+
+            def isatty(self) -> bool:
+                return False
+
+            def fileno(self) -> int:
+                return 1
+
+        primary = PrimaryStream()
+        mirror = io.StringIO()
+        mirror.close()
+        tee = runtime_logging.TeeStream(primary, mirror)
+
+        tee.flush()
+
+        self.assertTrue(primary.flushed)
+
+    def test_runtime_log_cleanup_ignores_already_closed_handle(self) -> None:
+        handle = io.StringIO()
+        handle.close()
+
+        runtime_logging._close_runtime_log_handle(handle)
 
 
 if __name__ == "__main__":
