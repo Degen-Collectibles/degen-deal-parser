@@ -224,6 +224,61 @@ class AttachmentRepairAuditTests(unittest.TestCase):
         self.assertEqual(result["repaired_rows"], 1)
         self.assertEqual(result["failed_rows"], 0)
 
+    def test_sync_attachment_assets_retries_cleanly_after_transient_write_retry(self) -> None:
+        payloads = [
+            {
+                "url": "https://cdn.example.com/retry.png",
+                "filename": "retry.png",
+                "content_type": "image/png",
+                "is_image": True,
+            }
+        ]
+        attempts = {"count": 0}
+
+        @contextmanager
+        def temp_managed_session():
+            with Session(self.engine) as session:
+                yield session
+
+        def fake_run_write_with_retry(operation, **kwargs):
+            for _ in range(2):
+                with Session(self.engine) as session:
+                    result = operation(session)
+                    if attempts["count"] == 0:
+                        attempts["count"] += 1
+                        session.rollback()
+                        continue
+                    session.commit()
+                    return result
+            raise AssertionError("write retry did not succeed")
+
+        with patch.object(discord_ingest, "managed_session", temp_managed_session), patch.object(
+            discord_ingest,
+            "run_write_with_retry",
+            side_effect=fake_run_write_with_retry,
+        ), patch.object(
+            discord_ingest.httpx,
+            "Client",
+            return_value=_FakeHTTPClient(b"retry-bytes"),
+        ), patch.object(
+            discord_ingest,
+            "write_attachment_cache_file",
+            side_effect=lambda *args, **kwargs: None,
+        ), patch.object(
+            discord_ingest,
+            "delete_attachment_cache_file",
+            side_effect=lambda *args, **kwargs: None,
+        ):
+            discord_ingest.sync_attachment_assets(1, payloads)
+
+        with Session(self.engine) as session:
+            assets = session.exec(select(AttachmentAsset).where(AttachmentAsset.message_id == 1)).all()
+
+        self.assertEqual(attempts["count"], 1)
+        self.assertEqual(len(assets), 1)
+        self.assertEqual(assets[0].source_url, "https://cdn.example.com/retry.png")
+        self.assertEqual(assets[0].data, b"retry-bytes")
+
     def test_run_periodic_attachment_repair_once_uses_discord_fallback_after_url_failures(self) -> None:
         client = SimpleNamespace(
             is_closed=lambda: False,

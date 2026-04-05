@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from pathlib import Path
 import shutil
 import uuid
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
 from sqlmodel import Session, SQLModel, create_engine, select
@@ -20,6 +20,7 @@ from app.main import (
     reparse_message_form,
 )
 from app.models import (
+    AttachmentAsset,
     DiscordMessage,
     OperationsLog,
     PARSE_FAILED,
@@ -33,6 +34,7 @@ from app.models import (
     Transaction,
     utcnow,
 )
+from app.parser import choose_image_urls
 from app.reparse_runs import (
     create_reparse_run_record,
     finalize_reparse_run_queue_record,
@@ -121,6 +123,110 @@ class QueueReparseValidationTests(unittest.TestCase):
             self.assertEqual(row.parse_status, PARSE_FAILED)
             self.assertEqual(row.parse_attempts, 3)
             self.assertEqual(row.last_error, MAX_ATTEMPTS_ERROR)
+
+    def test_process_once_exhausts_failed_row_only_once_when_already_at_retry_cap(self) -> None:
+        with self.session() as session:
+            row = self.make_message(
+                discord_message_id="failed-at-cap-repeat",
+                parse_status=PARSE_FAILED,
+                parse_attempts=3,
+                last_error="re-queued after stitch group changed",
+            )
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+
+            @contextmanager
+            def fake_managed_session():
+                yield session
+
+            with patch("app.worker.managed_session", new=fake_managed_session):
+                asyncio.run(process_once())
+                asyncio.run(process_once())
+
+            session.refresh(row)
+            self.assertEqual(row.parse_status, PARSE_FAILED)
+            self.assertEqual(row.parse_attempts, 3)
+            self.assertTrue(row.last_error.startswith(MAX_ATTEMPTS_ERROR))
+            self.assertIn("Previous error: re-queued after stitch group changed", row.last_error)
+
+            logs = session.exec(
+                select(OperationsLog).where(OperationsLog.event_type == "queue.max_attempts_reached")
+            ).all()
+            self.assertEqual(len(logs), 1)
+
+    def test_choose_image_urls_accepts_data_image_urls(self) -> None:
+        urls = [
+            "data:image/png;base64,ZmFrZS1pbWFnZS1ieXRlcw==",
+            "https://example.com/not-an-image.txt",
+        ]
+
+        self.assertEqual(
+            choose_image_urls(urls, use_first_image_only=True),
+            ["data:image/png;base64,ZmFrZS1pbWFnZS1ieXRlcw=="],
+        )
+
+    def test_process_row_prefers_cached_image_assets_over_raw_discord_urls(self) -> None:
+        raw_url = (
+            "https://cdn.discordapp.com/attachments/chan/msg/expired.jpg"
+            "?ex=69cad376&is=69c981f6&hm=deadbeef"
+        )
+        expected_data_url = "data:image/jpeg;base64,Y2FjaGVkLWltYWdlLWJ5dGVz"
+
+        with self.session() as session, patch("app.worker.parse_message") as parse_message_mock, patch(
+            "app.worker.recover_attachment_assets_for_message",
+            new_callable=AsyncMock,
+        ) as recover_mock:
+            row = self.make_message(
+                discord_message_id="cached-image-row",
+                parse_status=PARSE_PENDING,
+                parse_attempts=0,
+                attachment_urls_json=f'["{raw_url}"]',
+            )
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+
+            session.add(
+                AttachmentAsset(
+                    message_id=row.id,
+                    source_url=raw_url,
+                    filename="expired.jpg",
+                    content_type="image/jpeg",
+                    is_image=True,
+                    data=b"cached-image-bytes",
+                )
+            )
+            session.commit()
+
+            parse_message_mock.return_value = {
+                "parsed_type": "sell",
+                "parsed_amount": 25.0,
+                "parsed_payment_method": "cash",
+                "parsed_cash_direction": "to_store",
+                "parsed_category": "singles",
+                "parsed_items": ["Charizard"],
+                "parsed_items_in": [],
+                "parsed_items_out": ["Charizard"],
+                "parsed_trade_summary": None,
+                "parsed_notes": "cached image parse",
+                "image_summary": "cached image used",
+                "confidence": 0.95,
+                "needs_review": False,
+                "ignore_message": False,
+            }
+
+            @contextmanager
+            def fake_managed_session():
+                yield session
+
+            with patch("app.worker.managed_session", new=fake_managed_session):
+                asyncio.run(process_row(row.id))
+
+            recover_mock.assert_not_awaited()
+            parse_message_mock.assert_awaited_once()
+            attachment_urls = parse_message_mock.await_args.kwargs["attachment_urls"]
+            self.assertEqual(attachment_urls, [expected_data_url])
 
     def test_queue_reparse_range_includes_legacy_needs_review_alias(self) -> None:
         with self.session() as session:

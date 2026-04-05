@@ -8,13 +8,17 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
+import logging
 import httpx
 from sqlalchemy import or_, select
+from sqlalchemy.exc import OperationalError
 from sqlmodel import Session
 
 from .attachment_storage import attachment_cache_path, write_attachment_cache_file
-from .db import managed_session
+from .db import is_sqlite_lock_error, managed_session
 from .models import AttachmentAsset, DiscordMessage
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -245,48 +249,57 @@ def restore_missing_assets_from_urls(message_id: int, attachment_urls: list[str]
         return restored, failed
 
     new_assets: list[AttachmentAsset] = []
-    with managed_session() as session:
-        existing_urls = {
-            str(asset.source_url)
-            for asset in session.exec(
-                select(AttachmentAsset).where(AttachmentAsset.message_id == message_id)
-            ).all()
-            if asset.source_url
-        }
+    try:
+        with managed_session() as session:
+            existing_urls = {
+                str(asset.source_url)
+                for asset in session.exec(
+                    select(AttachmentAsset).where(AttachmentAsset.message_id == message_id)
+                ).all()
+                if asset.source_url
+            }
 
-        for index, url in enumerate(attachment_urls):
-            if url in existing_urls:
-                continue
+            for index, url in enumerate(attachment_urls):
+                if url in existing_urls:
+                    continue
 
-            try:
-                data, content_type = download_attachment(url)
-            except Exception:
-                failed += 1
-                continue
+                try:
+                    data, content_type = download_attachment(url)
+                except Exception:
+                    failed += 1
+                    continue
 
-            filename = filename_from_url(url, index)
-            asset = AttachmentAsset(
-                message_id=message_id,
-                source_url=url,
-                filename=filename,
-                content_type=content_type or mimetypes.guess_type(filename)[0],
-                is_image=is_image_attachment(filename, content_type),
-                data=data,
+                filename = filename_from_url(url, index)
+                asset = AttachmentAsset(
+                    message_id=message_id,
+                    source_url=url,
+                    filename=filename,
+                    content_type=content_type or mimetypes.guess_type(filename)[0],
+                    is_image=is_image_attachment(filename, content_type),
+                    data=data,
+                )
+                session.add(asset)
+                new_assets.append(asset)
+                restored += 1
+
+            if new_assets:
+                session.commit()
+                for asset in new_assets:
+                    session.refresh(asset)
+                    if asset.id is not None:
+                        write_attachment_cache_file(
+                            asset.id,
+                            filename=asset.filename,
+                            content_type=asset.content_type,
+                            data=asset.data,
+                        )
+    except OperationalError as exc:
+        if is_sqlite_lock_error(exc):
+            logger.warning(
+                "SQLite busy during attachment restore for message_id=%s; skipping this cycle",
+                message_id,
             )
-            session.add(asset)
-            new_assets.append(asset)
-            restored += 1
-
-        if new_assets:
-            session.commit()
-            for asset in new_assets:
-                session.refresh(asset)
-                if asset.id is not None:
-                    write_attachment_cache_file(
-                        asset.id,
-                        filename=asset.filename,
-                        content_type=asset.content_type,
-                        data=asset.data,
-                    )
+            return 0, len(attachment_urls)
+        raise
 
     return restored, failed

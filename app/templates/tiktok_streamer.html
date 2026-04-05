@@ -2,6 +2,7 @@
 <html>
 <head>
     <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ title }}</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -24,9 +25,12 @@
             --tiktok-pink: #fe2c55;
             --green: #3ecf8e;
             --green-glow: rgba(62, 207, 142, .15);
+            --red: #ef4444;
+            --red-glow: rgba(239, 68, 68, .18);
             --gmv-gradient: linear-gradient(135deg, #fe2c55 0%, #ff6b81 50%, #25f4ee 100%);
             --shadow: 0 8px 32px rgba(0, 0, 0, .5);
             --card-radius: 16px;
+            --chat-width: 360px;
         }
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
@@ -38,7 +42,31 @@
         }
         a { color: inherit; text-decoration: none; }
 
-        .page { max-width: 860px; margin: 0 auto; padding: 12px 16px 60px; }
+        /* ---- Split layout ---- */
+        .split-layout {
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+        }
+        .orders-panel {
+            flex: 1;
+            min-width: 0;
+            overflow-y: auto;
+            padding: 12px 16px 60px;
+        }
+        .orders-panel-inner {
+            max-width: 860px;
+            margin: 0 auto;
+        }
+        .chat-panel {
+            width: var(--chat-width);
+            flex-shrink: 0;
+            display: flex;
+            flex-direction: column;
+            border-left: 1px solid var(--border);
+            background: var(--bg);
+            height: 100vh;
+        }
 
         /* ---- TikTok-branded header ---- */
         .streamer-header {
@@ -105,16 +133,20 @@
         }
         .badge-mute:hover { background: var(--bg-card-hover); }
         .badge-mute.is-muted { opacity: .35; }
-        /* ---- Compact nav dropdown ---- */
-        .nav-menu-wrap {
-            position: relative;
+        .badge-chat-toggle {
+            cursor: pointer;
+            user-select: none;
+            display: none;
         }
+        .badge-chat-toggle:hover { background: var(--bg-card-hover); }
+
+        /* ---- Compact nav dropdown ---- */
+        .nav-menu-wrap { position: relative; }
         .nav-menu-btn {
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            width: 34px;
-            height: 34px;
+            width: 34px; height: 34px;
             border-radius: 10px;
             border: 1px solid var(--border);
             background: var(--bg-card);
@@ -213,9 +245,7 @@
             position: relative;
             z-index: 1;
         }
-        .gmv-stat {
-            text-align: center;
-        }
+        .gmv-stat { text-align: center; }
         .gmv-stat-value {
             font-size: 24px;
             font-weight: 800;
@@ -230,8 +260,160 @@
             color: var(--text-muted);
             margin-top: 2px;
         }
+        .gmv-live-stat { text-align: center; }
+        .gmv-live-value {
+            font-size: 28px; font-weight: 900;
+            letter-spacing: -.03em; color: var(--green);
+        }
+        .gmv-live-sub {
+            display: flex; gap: 12px; justify-content: center; margin-top: 4px;
+        }
+        .gmv-live-sub span {
+            font-size: 10px; font-weight: 700; color: var(--text-muted);
+        }
+        .gmv-live-sub strong {
+            color: var(--text-secondary); font-weight: 800;
+        }
+        
 
-        /* ---- Orders list (single column) ---- */
+        /* ---- Leaderboard toggle ---- */
+        .leaderboard-header {
+            display: flex; align-items: center; justify-content: space-between;
+            margin-bottom: 10px;
+        }
+        .leaderboard-label {
+            font-size: 11px; font-weight: 800;
+            text-transform: uppercase; letter-spacing: .12em;
+            color: var(--text-muted);
+        }
+        .lb-toggle {
+            display: inline-flex; background: var(--bg-card); border: 1px solid var(--border);
+            border-radius: 8px; overflow: hidden; font-size: 10px; font-weight: 700;
+        }
+        .lb-toggle-btn {
+            padding: 4px 10px; cursor: pointer; color: var(--text-muted);
+            background: transparent; border: none; transition: all .2s;
+            font-family: inherit; font-size: inherit; font-weight: inherit;
+            text-transform: uppercase; letter-spacing: .06em;
+        }
+        .lb-toggle-btn.active {
+            background: var(--accent); color: #000;
+        }
+        .lb-toggle-btn:not(.active):hover {
+            color: var(--text); background: var(--bg-card-hover);
+        }
+
+        /* ---- Top Sellers strip ---- */
+        .top-sellers { margin-bottom: 16px; }
+        .top-sellers-label {
+            font-size: 11px; font-weight: 800;
+            text-transform: uppercase; letter-spacing: .12em;
+            color: var(--text-muted); margin-bottom: 10px;
+        }
+        .top-sellers-scroll {
+            position: relative;
+        }
+        .top-sellers-strip {
+            display: flex; gap: 10px;
+            overflow-x: auto; scroll-snap-type: x mandatory;
+            -webkit-overflow-scrolling: touch;
+            scroll-behavior: smooth;
+            scrollbar-width: none; padding-bottom: 4px;
+        }
+        .top-sellers-strip::-webkit-scrollbar { display: none; }
+        .ts-arrow {
+            position: absolute; top: 50%; transform: translateY(-50%);
+            width: 32px; height: 32px; border-radius: 50%;
+            background: var(--bg-card); border: 1px solid var(--border);
+            color: var(--text); font-size: 16px; cursor: pointer;
+            display: flex; align-items: center; justify-content: center;
+            z-index: 2; transition: background .15s, border-color .15s, opacity .2s;
+            opacity: 0; pointer-events: none;
+        }
+        .ts-arrow:hover { background: var(--bg-card-hover); border-color: var(--border-glow); }
+        .ts-arrow.visible { opacity: 1; pointer-events: auto; }
+        .ts-arrow-left { left: -6px; }
+        .ts-arrow-right { right: -6px; }
+        .ts-card {
+            flex: 0 0 120px; scroll-snap-align: start;
+            background: var(--bg-card); border: 1px solid var(--border);
+            border-radius: 14px; padding: 12px 10px;
+            text-align: center; transition: border-color .2s, transform .2s;
+        }
+        .ts-card:hover { border-color: var(--border-glow); transform: translateY(-2px); }
+        .ts-img {
+            width: 56px; height: 56px; border-radius: 10px;
+            object-fit: cover; margin: 0 auto 8px; display: block;
+            background: var(--bg-card-hover);
+        }
+        .ts-placeholder-img {
+            width: 56px; height: 56px; border-radius: 10px;
+            margin: 0 auto 8px; display: flex; align-items: center;
+            justify-content: center; background: var(--bg-card-hover);
+            font-size: 22px; color: var(--text-muted);
+        }
+        .ts-title {
+            font-size: 11px; font-weight: 700; color: var(--text);
+            line-height: 1.3; max-height: 2.6em; overflow: hidden;
+        }
+        .ts-variant {
+            font-size: 9px; font-weight: 600; color: var(--accent);
+            opacity: .85; margin-bottom: 2px; white-space: nowrap;
+            overflow: hidden; text-overflow: ellipsis;
+            display: -webkit-box; -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical; margin-bottom: 4px;
+        }
+        .ts-qty {
+            font-size: 10px; font-weight: 700; color: var(--text-secondary);
+            margin-bottom: 2px;
+        }
+        .ts-revenue {
+            font-size: 13px; font-weight: 800; color: var(--green);
+        }
+
+        /* ---- Top Buyers strip ---- */
+        .top-buyers { margin-bottom: 16px; }
+        .top-buyers-label {
+            font-size: 11px; font-weight: 800;
+            text-transform: uppercase; letter-spacing: .12em;
+            color: var(--text-muted); margin-bottom: 10px;
+        }
+        .top-buyers-strip {
+            display: flex; gap: 10px;
+            overflow-x: auto; scroll-snap-type: x mandatory;
+            -webkit-overflow-scrolling: touch;
+            scroll-behavior: smooth;
+            scrollbar-width: none; padding-bottom: 4px;
+        }
+        .top-buyers-strip::-webkit-scrollbar { display: none; }
+        .tb-card {
+            flex: 0 0 120px; scroll-snap-align: start;
+            background: var(--bg-card); border: 1px solid var(--border);
+            border-radius: 14px; padding: 12px 10px;
+            text-align: center; transition: border-color .2s, transform .2s;
+        }
+        .tb-card:hover { border-color: var(--border-glow); transform: translateY(-2px); }
+        .tb-rank {
+            width: 28px; height: 28px; border-radius: 50%;
+            margin: 0 auto 8px; display: flex; align-items: center;
+            justify-content: center; background: var(--bg-card-hover);
+            font-size: 13px; font-weight: 800; color: var(--accent);
+        }
+        .tb-name {
+            font-size: 11px; font-weight: 700; color: var(--text);
+            line-height: 1.3; max-height: 2.6em; overflow: hidden;
+            display: -webkit-box; -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical; margin-bottom: 4px;
+        }
+        .tb-orders {
+            font-size: 10px; font-weight: 700; color: var(--text-secondary);
+            margin-bottom: 2px;
+        }
+        .tb-spent {
+            font-size: 13px; font-weight: 800; color: var(--green);
+        }
+
+        /* ---- Orders list ---- */
         .orders-list {
             display: flex;
             flex-direction: column;
@@ -256,13 +438,43 @@
             border-color: var(--green);
             box-shadow: 0 0 18px var(--green-glow), inset 0 0 18px var(--green-glow);
         }
+        .order-row.is-refund {
+            border-color: var(--red);
+            box-shadow: 0 0 18px var(--red-glow), inset 0 0 18px var(--red-glow);
+            background: rgba(239, 68, 68, .06);
+        }
+        .order-row.is-refund .row-price {
+            color: var(--red);
+            text-decoration: line-through;
+        }
+        .order-row.is-refund .refund-badge {
+            display: inline-flex;
+        }
+        .refund-badge {
+            display: none;
+            align-items: center;
+            gap: 4px;
+            font-size: 11px;
+            font-weight: 800;
+            color: var(--red);
+            background: rgba(239, 68, 68, .12);
+            padding: 2px 8px;
+            border-radius: 6px;
+            text-transform: uppercase;
+            letter-spacing: .04em;
+        }
         @keyframes row-slide-in {
             from { opacity: 0; transform: translateY(-20px) scale(.98); }
             to { opacity: 1; transform: translateY(0) scale(1); }
         }
-        .order-row.is-expanded {
-            border-color: rgba(254, 44, 85, .3);
+        @keyframes refund-flash {
+            0%, 100% { box-shadow: 0 0 18px var(--red-glow), inset 0 0 18px var(--red-glow); }
+            50% { box-shadow: 0 0 28px rgba(239, 68, 68, .35), inset 0 0 28px rgba(239, 68, 68, .25); }
         }
+        .order-row.is-refund-alert {
+            animation: refund-flash 1s ease-in-out 3;
+        }
+        .order-row.is-expanded { border-color: rgba(254, 44, 85, .3); }
 
         .order-row-main {
             display: flex;
@@ -271,8 +483,7 @@
             padding: 14px 16px;
         }
         .row-thumb {
-            width: 72px;
-            height: 72px;
+            width: 72px; height: 72px;
             border-radius: 12px;
             object-fit: cover;
             flex-shrink: 0;
@@ -280,342 +491,362 @@
             border: 1px solid var(--border);
         }
         .row-thumb-placeholder {
-            width: 72px;
-            height: 72px;
+            width: 72px; height: 72px;
             border-radius: 12px;
             background: linear-gradient(135deg, #1a1a20 0%, #111115 100%);
             border: 1px solid var(--border);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 28px;
-            color: var(--text-muted);
+            display: flex; align-items: center; justify-content: center;
+            font-size: 28px; color: var(--text-muted);
             flex-shrink: 0;
         }
-        .row-info {
-            flex: 1;
-            min-width: 0;
-        }
+        .row-info { flex: 1; min-width: 0; }
         .row-product-name {
-            font-size: 16px;
-            font-weight: 800;
-            letter-spacing: -.01em;
-            line-height: 1.25;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
+            font-size: 16px; font-weight: 800;
+            letter-spacing: -.01em; line-height: 1.25;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .row-variant {
+            font-size: 11px; color: var(--accent); font-weight: 600;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+            opacity: .85; margin-top: 1px;
         }
         .row-sub {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            margin-top: 3px;
-            flex-wrap: wrap;
+            display: flex; align-items: center;
+            gap: 8px; margin-top: 3px; flex-wrap: wrap;
         }
         .row-order-num {
-            font-size: 12px;
-            color: var(--text-muted);
+            font-size: 12px; color: var(--text-muted);
             font-family: "Consolas", "SF Mono", monospace;
         }
-        .row-customer {
-            font-size: 14px;
-            color: var(--text);
-            font-weight: 700;
-        }
+        .row-customer { font-size: 14px; color: var(--text); font-weight: 700; }
         .row-last4 {
-            font-size: 15px;
-            font-weight: 900;
+            font-size: 15px; font-weight: 900;
             font-family: "Consolas", "SF Mono", monospace;
             color: var(--tiktok-cyan);
             background: rgba(37, 244, 238, .12);
-            padding: 2px 10px;
-            border-radius: 7px;
+            padding: 2px 10px; border-radius: 7px;
             letter-spacing: .06em;
         }
         .row-copy-btn {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            width: 30px;
-            height: 26px;
+            display: inline-flex; align-items: center; justify-content: center;
+            width: 30px; height: 26px;
             border-radius: 8px;
             border: 1px solid var(--border);
             background: var(--bg-card);
             color: var(--text-muted);
-            font-size: 14px;
-            cursor: pointer;
-            transition: all .15s;
-            flex-shrink: 0;
+            font-size: 14px; cursor: pointer;
+            transition: all .15s; flex-shrink: 0;
         }
         .row-copy-btn:hover { background: var(--bg-card-hover); color: var(--text); border-color: var(--border-glow); }
         .row-copy-btn.is-copied {
             background: rgba(62, 207, 142, .15);
-            border-color: var(--green);
-            color: var(--green);
+            border-color: var(--green); color: var(--green);
         }
-        .row-time {
-            font-size: 11px;
-            color: var(--text-muted);
-        }
+        .row-time { font-size: 11px; color: var(--text-muted); }
         .row-items-count {
-            font-size: 11px;
-            font-weight: 700;
+            font-size: 11px; font-weight: 700;
             color: var(--tiktok-cyan);
             background: rgba(37, 244, 238, .1);
-            padding: 2px 8px;
-            border-radius: 6px;
+            padding: 2px 8px; border-radius: 6px;
         }
         .row-right {
-            display: flex;
-            flex-direction: column;
-            align-items: flex-end;
-            gap: 4px;
-            flex-shrink: 0;
+            display: flex; flex-direction: column;
+            align-items: flex-end; gap: 4px; flex-shrink: 0;
         }
         .row-price {
-            font-size: 20px;
-            font-weight: 900;
-            letter-spacing: -.02em;
-            color: var(--green);
+            font-size: 20px; font-weight: 900;
+            letter-spacing: -.02em; color: var(--green);
         }
         .row-qty-badge {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            background: var(--accent);
-            color: #fff;
-            font-size: 12px;
-            font-weight: 800;
-            min-width: 26px;
-            height: 22px;
-            border-radius: 7px;
-            padding: 0 7px;
+            display: inline-flex; align-items: center; justify-content: center;
+            background: var(--accent); color: #fff;
+            font-size: 12px; font-weight: 800;
+            min-width: 26px; height: 22px;
+            border-radius: 7px; padding: 0 7px;
         }
         .row-expand-hint {
-            font-size: 16px;
-            color: var(--text-muted);
-            transition: transform .2s;
-            flex-shrink: 0;
-            margin-left: 4px;
+            font-size: 16px; color: var(--text-muted);
+            transition: transform .2s; flex-shrink: 0; margin-left: 4px;
         }
         .order-row.is-expanded .row-expand-hint { transform: rotate(180deg); }
 
         /* ---- Expanded detail panel ---- */
         .order-detail {
-            max-height: 0;
-            overflow: hidden;
+            max-height: 0; overflow: hidden;
             transition: max-height .35s cubic-bezier(.4, 0, .2, 1);
             background: var(--bg-expanded);
         }
-        .order-row.is-expanded .order-detail {
-            max-height: 800px;
-        }
+        .order-row.is-expanded .order-detail { max-height: 800px; }
         .order-detail-inner {
             padding: 0 16px 16px;
             border-top: 1px solid var(--border);
         }
-        /* ---- Shipping label section ---- */
         .label-banner {
-            display: flex;
-            align-items: center;
-            gap: 16px;
-            padding: 16px;
-            margin: 12px 0;
+            display: flex; align-items: center; gap: 16px;
+            padding: 16px; margin: 12px 0;
             background: linear-gradient(135deg, rgba(37, 244, 238, .06) 0%, rgba(254, 44, 85, .06) 100%);
             border: 1px dashed rgba(255,255,255,.12);
             border-radius: 14px;
         }
-        .label-text {
-            flex: 1;
-            min-width: 0;
-        }
+        .label-text { flex: 1; min-width: 0; }
         .label-hint {
-            font-size: 9px;
-            font-weight: 800;
-            text-transform: uppercase;
-            letter-spacing: .14em;
-            color: var(--text-muted);
-            margin-bottom: 4px;
+            font-size: 9px; font-weight: 800;
+            text-transform: uppercase; letter-spacing: .14em;
+            color: var(--text-muted); margin-bottom: 4px;
         }
         .label-name {
-            font-size: 28px;
-            font-weight: 900;
-            letter-spacing: -.02em;
-            line-height: 1.1;
-            color: var(--text);
+            font-size: 28px; font-weight: 900;
+            letter-spacing: -.02em; line-height: 1.1; color: var(--text);
         }
         .label-last4 {
-            font-size: 32px;
-            font-weight: 900;
+            font-size: 32px; font-weight: 900;
             font-family: "Consolas", "SF Mono", monospace;
-            color: var(--tiktok-cyan);
-            letter-spacing: .08em;
-            line-height: 1.1;
+            color: var(--tiktok-cyan); letter-spacing: .08em; line-height: 1.1;
         }
         .label-copy-btn {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            padding: 10px 18px;
-            border-radius: 12px;
+            display: inline-flex; align-items: center; gap: 6px;
+            padding: 10px 18px; border-radius: 12px;
             border: 1px solid var(--border);
-            background: var(--bg-card);
-            color: var(--text-secondary);
-            font-size: 13px;
-            font-weight: 700;
-            cursor: pointer;
-            transition: all .15s;
-            flex-shrink: 0;
-            white-space: nowrap;
+            background: var(--bg-card); color: var(--text-secondary);
+            font-size: 13px; font-weight: 700;
+            cursor: pointer; transition: all .15s;
+            flex-shrink: 0; white-space: nowrap;
         }
         .label-copy-btn:hover { background: var(--bg-card-hover); color: var(--text); border-color: var(--border-glow); }
         .label-copy-btn.is-copied {
             background: rgba(62, 207, 142, .15);
-            border-color: var(--green);
-            color: var(--green);
+            border-color: var(--green); color: var(--green);
         }
-
         .detail-items-title {
-            font-size: 10px;
-            font-weight: 800;
-            text-transform: uppercase;
-            letter-spacing: .12em;
-            color: var(--text-muted);
-            padding: 12px 0 8px;
+            font-size: 10px; font-weight: 800;
+            text-transform: uppercase; letter-spacing: .12em;
+            color: var(--text-muted); padding: 12px 0 8px;
         }
         .detail-item {
-            display: flex;
-            align-items: center;
-            gap: 12px;
+            display: flex; align-items: center; gap: 12px;
             padding: 10px 0;
             border-bottom: 1px solid rgba(255,255,255,.04);
         }
         .detail-item:last-child { border-bottom: none; }
         .detail-item-img {
-            width: 56px;
-            height: 56px;
-            border-radius: 10px;
-            object-fit: cover;
-            background: var(--bg);
-            border: 1px solid var(--border);
+            width: 56px; height: 56px;
+            border-radius: 10px; object-fit: cover;
+            background: var(--bg); border: 1px solid var(--border);
             flex-shrink: 0;
         }
         .detail-item-img-placeholder {
-            width: 56px;
-            height: 56px;
-            border-radius: 10px;
-            background: var(--bg);
+            width: 56px; height: 56px;
+            border-radius: 10px; background: var(--bg);
             border: 1px solid var(--border);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 22px;
-            color: var(--text-muted);
-            flex-shrink: 0;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 22px; color: var(--text-muted); flex-shrink: 0;
         }
         .detail-item-info { flex: 1; min-width: 0; }
-        .detail-item-name {
-            font-size: 14px;
-            font-weight: 700;
-            line-height: 1.3;
-        }
-        .detail-item-price {
-            font-size: 12px;
-            color: var(--text-secondary);
-            margin-top: 2px;
-        }
-        .detail-item-qty {
-            font-size: 15px;
-            font-weight: 800;
-            color: var(--accent);
-            flex-shrink: 0;
-        }
+        .detail-item-name { font-size: 14px; font-weight: 700; line-height: 1.3; }
+        .detail-item-variant { font-size: 11px; color: var(--accent); font-weight: 600; margin-top: 1px; opacity: .85; }
+        .detail-item-price { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+        .detail-item-qty { font-size: 15px; font-weight: 800; color: var(--accent); flex-shrink: 0; }
 
         /* ---- Toast overlay ---- */
         .toast-container {
             position: fixed;
-            top: 16px;
-            right: 16px;
-            z-index: 9999;
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-            max-width: 380px;
-            pointer-events: none;
+            top: 16px; right: 16px; z-index: 9999;
+            display: flex; flex-direction: column; gap: 8px;
+            max-width: 380px; pointer-events: none;
         }
         .toast {
-            display: flex;
-            gap: 10px;
-            align-items: center;
+            display: flex; gap: 10px; align-items: center;
             background: var(--bg-card);
             border: 1px solid var(--green);
             border-radius: 14px;
             padding: 12px 14px;
-            box-shadow: 0 12px 40px rgba(0, 0, 0, .65), 0 0 20px var(--green-glow);
-            pointer-events: auto;
-            cursor: pointer;
+            box-shadow: 0 12px 40px rgba(0,0,0,.65), 0 0 20px var(--green-glow);
+            pointer-events: auto; cursor: pointer;
             animation: toast-in .4s cubic-bezier(.22, 1, .36, 1);
             transition: opacity .25s, transform .25s;
         }
-        .toast.is-leaving {
-            opacity: 0;
-            transform: translateX(50px) scale(.95);
-        }
+        .toast.is-leaving { opacity: 0; transform: translateX(50px) scale(.95); }
         @keyframes toast-in {
             from { opacity: 0; transform: translateX(50px) scale(.95); }
             to { opacity: 1; transform: translateX(0) scale(1); }
         }
         .toast-img {
             width: 48px; height: 48px;
-            border-radius: 10px;
-            object-fit: cover;
-            flex-shrink: 0;
-            background: var(--bg);
+            border-radius: 10px; object-fit: cover;
+            flex-shrink: 0; background: var(--bg);
         }
         .toast-img-placeholder {
             width: 48px; height: 48px;
-            border-radius: 10px;
-            background: var(--bg);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 20px;
-            color: var(--text-muted);
-            flex-shrink: 0;
+            border-radius: 10px; background: var(--bg);
+            display: flex; align-items: center; justify-content: center;
+            font-size: 20px; color: var(--text-muted); flex-shrink: 0;
         }
         .toast-body { flex: 1; min-width: 0; }
         .toast-label {
-            font-size: 10px;
-            font-weight: 800;
-            text-transform: uppercase;
-            letter-spacing: .1em;
-            color: var(--green);
-            margin-bottom: 1px;
+            font-size: 10px; font-weight: 800;
+            text-transform: uppercase; letter-spacing: .1em;
+            color: var(--green); margin-bottom: 1px;
         }
         .toast-title {
-            font-size: 14px;
-            font-weight: 700;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
+            font-size: 14px; font-weight: 700;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
         }
-        .toast-sub {
-            font-size: 11px;
-            color: var(--text-muted);
-        }
+        .toast-sub { font-size: 11px; color: var(--text-muted); }
 
         /* ---- Empty state ---- */
         .empty-state {
-            text-align: center;
-            padding: 80px 20px;
+            text-align: center; padding: 80px 20px;
             color: var(--text-muted);
         }
         .empty-state-icon { font-size: 56px; margin-bottom: 14px; }
         .empty-state-text { font-size: 18px; font-weight: 800; }
         .empty-state-sub { font-size: 13px; margin-top: 6px; color: var(--text-muted); }
 
+        /* ============ Chat Panel ============ */
+        .chat-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 14px 16px;
+            border-bottom: 1px solid var(--border);
+            flex-shrink: 0;
+        }
+        .chat-header-title {
+            font-size: 15px;
+            font-weight: 800;
+            letter-spacing: -.01em;
+        }
+        .chat-status-dot {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+        .chat-status-dot.is-connected { background: var(--green); box-shadow: 0 0 6px var(--green); }
+        .chat-status-dot.is-disconnected { background: var(--accent); }
+        .chat-status-dot.is-not-configured { background: var(--text-muted); }
+        .chat-viewer-count {
+            font-size: 11px;
+            font-weight: 700;
+            color: var(--text-muted);
+            margin-left: auto;
+        }
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .chat-msg {
+            font-size: 13px;
+            line-height: 1.45;
+            padding: 3px 0;
+            animation: chat-fade-in .25s ease-out;
+            word-break: break-word;
+        }
+        @keyframes chat-fade-in {
+            from { opacity: 0; transform: translateY(4px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .chat-msg-user {
+            font-weight: 700;
+            margin-right: 4px;
+        }
+        .chat-msg-user.is-chat { color: var(--text); }
+        .chat-msg-user.is-gift { color: var(--tiktok-pink); }
+        .chat-msg-user.is-follow { color: var(--tiktok-cyan); }
+        .chat-msg-user.is-like { color: var(--accent); }
+        .chat-msg-user.is-share { color: var(--green); }
+        .chat-msg-text { color: var(--text-secondary); }
+        .chat-msg-gift-icon { margin-right: 3px; }
+        .chat-empty {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            flex: 1;
+            color: var(--text-muted);
+            text-align: center;
+            padding: 40px 20px;
+            gap: 8px;
+        }
+        .chat-empty-icon { font-size: 36px; }
+        .chat-empty-text { font-size: 13px; font-weight: 700; }
+        .chat-empty-sub { font-size: 11px; }
+
+        /* ---- Mobile bottom drawer ---- */
+        .chat-drawer-toggle {
+            display: none;
+            position: fixed;
+            bottom: 0; left: 0; right: 0;
+            z-index: 200;
+            background: var(--bg-card);
+            border-top: 1px solid var(--border);
+            padding: 10px 16px;
+            text-align: center;
+            font-size: 13px;
+            font-weight: 700;
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: background .15s;
+        }
+        .chat-drawer-toggle:hover { background: var(--bg-card-hover); }
+        .chat-drawer-toggle .chat-toggle-dot {
+            display: inline-block;
+            width: 7px; height: 7px;
+            border-radius: 50%;
+            margin-right: 6px;
+            vertical-align: middle;
+        }
+
+        .chat-mobile-drawer {
+            display: none;
+            position: fixed;
+            bottom: 0; left: 0; right: 0;
+            z-index: 300;
+            background: var(--bg);
+            border-top: 1px solid var(--border);
+            height: 50vh;
+            transform: translateY(100%);
+            transition: transform .3s cubic-bezier(.4, 0, .2, 1);
+            flex-direction: column;
+        }
+        .chat-mobile-drawer.is-open {
+            transform: translateY(0);
+        }
+        .chat-mobile-drawer .chat-drawer-close {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 10px;
+            border-bottom: 1px solid var(--border);
+            font-size: 13px;
+            font-weight: 700;
+            color: var(--text-muted);
+            cursor: pointer;
+        }
+        .chat-mobile-drawer .chat-drawer-close:hover { background: var(--bg-card); }
+        .chat-mobile-drawer .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+        }
+
+        /* ---- Responsive ---- */
+        @media (max-width: 768px) {
+            .chat-panel { display: none !important; }
+            .badge-chat-toggle { display: inline-flex; }
+            .chat-drawer-toggle { display: block; }
+            .chat-mobile-drawer { display: flex; }
+            .split-layout { height: auto; }
+            .orders-panel { height: auto; overflow: visible; padding-bottom: 70px; }
+        }
+        @media (min-width: 769px) {
+            .chat-drawer-toggle { display: none !important; }
+            .chat-mobile-drawer { display: none !important; }
+        }
         @media (max-width: 500px) {
-            .page { padding: 10px 10px 40px; }
+            .orders-panel { padding: 10px 10px 70px; }
             .gmv-value { font-size: 32px; }
             .row-thumb, .row-thumb-placeholder { width: 56px; height: 56px; }
             .row-product-name { font-size: 14px; }
@@ -625,110 +856,225 @@
     </style>
 </head>
 <body>
-    <div class="page">
-        <div class="streamer-header">
-            <div class="tiktok-logo">
-                <svg width="32" height="36" viewBox="0 0 48 55" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <path d="M33.3 0H25.5V37.8C25.5 41.7 22.3 44.9 18.4 44.9C14.5 44.9 11.3 41.7 11.3 37.8C11.3 34 14.4 30.8 18.1 30.7V22.8C10 22.9 3.4 29.6 3.4 37.8C3.4 46.1 10.1 52.8 18.4 52.8C26.7 52.8 33.4 46 33.4 37.8V18.3C36.3 20.5 39.9 21.8 43.8 21.8V13.9C38 13.8 33.3 9.4 33.3 3.5V0Z" fill="url(#tt-grad)"/>
-                    <defs>
-                        <linearGradient id="tt-grad" x1="0" y1="0" x2="48" y2="55" gradientUnits="userSpaceOnUse">
-                            <stop stop-color="#25F4EE"/>
-                            <stop offset="0.5" stop-color="#FE2C55"/>
-                            <stop offset="1" stop-color="#FE2C55"/>
-                        </linearGradient>
-                    </defs>
-                </svg>
-            </div>
-            <div class="streamer-title">Live Orders</div>
-            <div class="header-right">
-                <span class="badge badge-live">
-                    <span class="live-dot"></span>
-                    LIVE
-                </span>
-                <span class="badge" style="color:var(--green);" id="order-count-badge">
-                    <span id="order-count">{{ total_count }}</span> orders
-                </span>
-                <span class="badge badge-mute" id="mute-toggle" title="Toggle sound">
-                    <span id="mute-icon">&#x1F50A;</span>
-                </span>
-                <div class="nav-menu-wrap">
-                    <button class="nav-menu-btn" id="nav-menu-btn" title="Navigation">&#x2630;</button>
-                    <div class="nav-dropdown" id="nav-dropdown">
-                        <div class="nav-dropdown-label">Workspace</div>
-                        <a href="/dashboard">Dashboard</a>
-                        <a href="/tiktok/orders">TikTok Orders</a>
-                        <a href="/shopify/orders">Shopify Orders</a>
-                        <a href="/reports">Reports</a>
-                        <a href="/bookkeeping">Bookkeeping</a>
-                        <a href="/review">Review</a>
-                        <a href="/deals">Deals</a>
-                        <div class="nav-dropdown-label">Operators</div>
-                        <a href="/table">Table</a>
-                        <a href="/status">Status</a>
-                        <a href="/admin">Admin</a>
+    <div class="split-layout">
+        <!-- ===== Left: Orders Panel ===== -->
+        <div class="orders-panel">
+            <div class="orders-panel-inner">
+                <div class="streamer-header">
+                    <div class="tiktok-logo">
+                        <svg width="32" height="36" viewBox="0 0 48 55" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M33.3 0H25.5V37.8C25.5 41.7 22.3 44.9 18.4 44.9C14.5 44.9 11.3 41.7 11.3 37.8C11.3 34 14.4 30.8 18.1 30.7V22.8C10 22.9 3.4 29.6 3.4 37.8C3.4 46.1 10.1 52.8 18.4 52.8C26.7 52.8 33.4 46 33.4 37.8V18.3C36.3 20.5 39.9 21.8 43.8 21.8V13.9C38 13.8 33.3 9.4 33.3 3.5V0Z" fill="url(#tt-grad)"/>
+                            <defs>
+                                <linearGradient id="tt-grad" x1="0" y1="0" x2="48" y2="55" gradientUnits="userSpaceOnUse">
+                                    <stop stop-color="#25F4EE"/>
+                                    <stop offset="0.5" stop-color="#FE2C55"/>
+                                    <stop offset="1" stop-color="#FE2C55"/>
+                                </linearGradient>
+                            </defs>
+                        </svg>
                     </div>
+                    <div class="streamer-title">Live Orders</div>
+                    <div class="header-right">
+                        <span class="badge badge-live">
+                            <span class="live-dot"></span>
+                            LIVE
+                        </span>
+                        <span class="badge" style="color:var(--green);" id="order-count-badge">
+                            <span id="order-count">{{ total_count }}</span> orders
+                        </span>
+                        <span class="badge badge-mute" id="mute-toggle" title="Toggle sound">
+                            <span id="mute-icon">&#x1F50A;</span>
+                        </span>
+                        <span class="badge badge-chat-toggle" id="chat-toggle-btn" title="Toggle chat">
+                            &#x1F4AC; Chat
+                        </span>
+                        <div class="nav-menu-wrap">
+                            <button class="nav-menu-btn" id="nav-menu-btn" title="Navigation">&#x2630;</button>
+                            <div class="nav-dropdown" id="nav-dropdown">
+                                <div class="nav-dropdown-label">Workspace</div>
+                                <a href="/dashboard">Dashboard</a>
+                                <a href="/tiktok/orders">TikTok Orders</a>
+                                <a href="/shopify/orders">Shopify Orders</a>
+                                <a href="/reports">Reports</a>
+                                <a href="/bookkeeping">Bookkeeping</a>
+                                <a href="/review">Review</a>
+                                <a href="/deals">Deals</a>
+                                <div class="nav-dropdown-label">Operators</div>
+                                <a href="/table">Table</a>
+                                <a href="/status">Status</a>
+                                <a href="/admin">Admin</a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- GMV Hero -->
+                <div class="gmv-hero">
+                    <div class="gmv-row">
+                        <div class="gmv-main">
+                            <div class="gmv-label">Today's GMV</div>
+                            <div class="gmv-value" id="gmv-value">${{ "%.2f"|format(session_gmv) }}</div>
+                        </div>
+                        <div class="gmv-stats">
+                            <div class="gmv-live-stat" id="stream-gmv-wrap" style="display:none;">
+                                <div class="gmv-label">Stream GMV</div>
+                                <div class="gmv-live-value" id="stream-gmv-value">--</div>
+                                <div class="gmv-live-sub">
+                                    <span><strong id="stream-items-sold">0</strong> items</span>
+                                    <span><strong id="stream-orders">0</strong> orders</span>
+                                </div>
+                            </div>
+                            <div class="gmv-stat">
+                                <div class="gmv-stat-value" id="gmv-paid-count">{{ session_orders }}</div>
+                                <div class="gmv-stat-label">Paid Orders</div>
+                            </div>
+                            <div class="gmv-stat">
+                                <div class="gmv-stat-value" id="gmv-total-count">{{ session_total_orders }}</div>
+                                <div class="gmv-stat-label">Total Orders</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Leaderboard toggle + Top Sellers + Top Buyers -->
+                <div id="leaderboard-section" style="display:none;">
+                    <div class="leaderboard-header">
+                        <div class="leaderboard-label" id="lb-title">Leaderboard</div>
+                        <div class="lb-toggle" id="lb-toggle">
+                            <button class="lb-toggle-btn active" data-mode="today">Today</button>
+                            <button class="lb-toggle-btn" data-mode="stream">Stream</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="top-sellers" id="top-sellers" style="display:none;">
+                    <div class="top-sellers-label">Top Sellers</div>
+                    <div class="top-sellers-scroll">
+                        <button class="ts-arrow ts-arrow-left" id="ts-arrow-left" aria-label="Scroll left">&#x276E;</button>
+                        <div class="top-sellers-strip" id="top-sellers-strip"></div>
+                        <button class="ts-arrow ts-arrow-right" id="ts-arrow-right" aria-label="Scroll right">&#x276F;</button>
+                    </div>
+                </div>
+
+                <div class="top-buyers" id="top-buyers" style="display:none;">
+                    <div class="top-buyers-label">Top Buyers</div>
+                    <div class="top-buyers-strip" id="top-buyers-strip"></div>
+                </div>
+
+                <div class="toast-container" id="toast-container"></div>
+
+                <div class="orders-list" id="orders-list"></div>
+
+                <div class="empty-state" id="empty-state" style="display:none;">
+                    <div class="empty-state-icon">&#x1F3AC;</div>
+                    <div class="empty-state-text">Waiting for orders...</div>
+                    <div class="empty-state-sub">New orders will slide in here automatically</div>
                 </div>
             </div>
         </div>
 
-        <!-- GMV Hero -->
-        <div class="gmv-hero">
-            <div class="gmv-row">
-                <div class="gmv-main">
-                    <div class="gmv-label">Today's GMV</div>
-                    <div class="gmv-value" id="gmv-value">${{ "%.2f"|format(session_gmv) }}</div>
-                </div>
-                <div class="gmv-stats">
-                    <div class="gmv-stat">
-                        <div class="gmv-stat-value" id="gmv-paid-count">{{ session_orders }}</div>
-                        <div class="gmv-stat-label">Paid Orders</div>
-                    </div>
-                    <div class="gmv-stat">
-                        <div class="gmv-stat-value" id="gmv-total-count">{{ session_total_orders }}</div>
-                        <div class="gmv-stat-label">Total Orders</div>
-                    </div>
-                </div>
+        <!-- ===== Right: Chat Panel (desktop) ===== -->
+        <div class="chat-panel" id="chat-panel-desktop">
+            <div class="chat-header">
+                <span class="chat-status-dot" id="chat-dot-desktop"></span>
+                <span class="chat-header-title">Live Chat</span>
+                <span class="chat-viewer-count" id="chat-viewers-desktop"></span>
             </div>
+            <div class="chat-messages" id="chat-messages-desktop"></div>
         </div>
+    </div>
 
-        <div class="toast-container" id="toast-container"></div>
-
-        <div class="orders-list" id="orders-list"></div>
-
-        <div class="empty-state" id="empty-state" style="display:none;">
-            <div class="empty-state-icon">&#x1F3AC;</div>
-            <div class="empty-state-text">Waiting for orders...</div>
-            <div class="empty-state-sub">New orders will slide in here automatically</div>
+    <!-- ===== Mobile: bottom toggle + drawer ===== -->
+    <div class="chat-drawer-toggle" id="chat-drawer-toggle">
+        <span class="chat-toggle-dot" id="chat-dot-mobile-toggle"></span> Live Chat
+    </div>
+    <div class="chat-mobile-drawer" id="chat-mobile-drawer">
+        <div class="chat-drawer-close" id="chat-drawer-close">
+            <span>&#x25BC; Hide Chat</span>
         </div>
+        <div class="chat-header" style="border-bottom:1px solid var(--border);">
+            <span class="chat-status-dot" id="chat-dot-mobile"></span>
+            <span class="chat-header-title">Live Chat</span>
+            <span class="chat-viewer-count" id="chat-viewers-mobile"></span>
+        </div>
+        <div class="chat-messages" id="chat-messages-mobile"></div>
     </div>
 
     <script>
     (function () {
-        const POLL_INTERVAL_MS = 10000;
-        const TOAST_DURATION_MS = 8000;
+        var ORDER_POLL_MS = 10000;
+        var CHAT_POLL_MS = 3000;
+        var TOAST_DURATION_MS = 8000;
 
-        let _orders = [];
+        /* ---- Orders state ---- */
+        var _orders = [];
         try { _orders = {{ orders_json|safe }}; } catch (e) {}
-        let _latestUpdatedAt = {{ latest_updated_at|tojson }};
-        let _knownIds = new Set(_orders.map(o => o.tiktok_order_id));
-        let _muted = false;
-        let _audioCtx = null;
-        let _pollTimer = null;
+        var _latestUpdatedAt = {{ latest_updated_at|tojson }};
+        var _topSellers = [];
+        try { _topSellers = {{ top_sellers_json|safe }}; } catch (e) {}
+        var _topBuyers = [];
+        try { _topBuyers = {{ top_buyers_json|safe }}; } catch (e) {}
+        var _streamTopSellers = [];
+        try { _streamTopSellers = {{ stream_top_sellers_json|safe }}; } catch (e) {}
+        var _streamTopBuyers = [];
+        try { _streamTopBuyers = {{ stream_top_buyers_json|safe }}; } catch (e) {}
+        var _lbMode = 'today';
+        var _knownIds = new Set(_orders.map(function(o) { return o.tiktok_order_id; }));
+        var _muted = false;
+        var _audioCtx = null;
+        var _liveAnalytics = {};
+        try { _liveAnalytics = {{ live_analytics_json|safe }}; } catch (e) {}
+        var _streamData = {};
+        try { _streamData = {{ stream_data_json|safe }}; } catch (e) {}
 
-        const list = document.getElementById('orders-list');
-        const emptyState = document.getElementById('empty-state');
-        const toastContainer = document.getElementById('toast-container');
-        const countEl = document.getElementById('order-count');
-        const gmvEl = document.getElementById('gmv-value');
-        const gmvPaidEl = document.getElementById('gmv-paid-count');
-        const gmvTotalEl = document.getElementById('gmv-total-count');
-        const muteToggle = document.getElementById('mute-toggle');
-        const muteIcon = document.getElementById('mute-icon');
+        /* ---- Chat state ---- */
+        var _chatIdx = 0;
+        var _chatStatus = {{ chat_status|tojson }};
+        var _chatAutoScroll = true;
+        var _chatDrawerOpen = false;
 
+        /* ---- DOM refs ---- */
+        var list = document.getElementById('orders-list');
+        var emptyState = document.getElementById('empty-state');
+        var toastContainer = document.getElementById('toast-container');
+        var countEl = document.getElementById('order-count');
+        var gmvEl = document.getElementById('gmv-value');
+        var gmvPaidEl = document.getElementById('gmv-paid-count');
+        var gmvTotalEl = document.getElementById('gmv-total-count');
+        var streamGmvWrap = document.getElementById('stream-gmv-wrap');
+        var streamGmvValue = document.getElementById('stream-gmv-value');
+        var streamItemsSold = document.getElementById('stream-items-sold');
+        var streamOrdersEl = document.getElementById('stream-orders');
+        var muteToggle = document.getElementById('mute-toggle');
+        var muteIcon = document.getElementById('mute-icon');
+
+        var chatDesktopMsgs = document.getElementById('chat-messages-desktop');
+        var chatMobileMsgs = document.getElementById('chat-messages-mobile');
+        var chatDotDesktop = document.getElementById('chat-dot-desktop');
+        var chatDotMobile = document.getElementById('chat-dot-mobile');
+        var chatDotMobileToggle = document.getElementById('chat-dot-mobile-toggle');
+        var chatViewersDesktop = document.getElementById('chat-viewers-desktop');
+        var chatViewersMobile = document.getElementById('chat-viewers-mobile');
+        var chatDrawerToggle = document.getElementById('chat-drawer-toggle');
+        var chatMobileDrawer = document.getElementById('chat-mobile-drawer');
+        var chatDrawerClose = document.getElementById('chat-drawer-close');
+        var chatToggleBtn = document.getElementById('chat-toggle-btn');
+
+        var leaderboardSection = document.getElementById('leaderboard-section');
+        var lbToggle = document.getElementById('lb-toggle');
+        var topSellersWrap = document.getElementById('top-sellers');
+        var topSellersStrip = document.getElementById('top-sellers-strip');
+        var tsArrowLeft = document.getElementById('ts-arrow-left');
+        var tsArrowRight = document.getElementById('ts-arrow-right');
+
+        var topBuyersWrap = document.getElementById('top-buyers');
+        var topBuyersStrip = document.getElementById('top-buyers-strip');
+
+        /* ---- Utility ---- */
         function relativeTime(isoStr) {
             if (!isoStr) return '';
-            const then = new Date(isoStr);
-            const diff = Math.max(0, Math.floor((Date.now() - then.getTime()) / 1000));
+            var then = new Date(isoStr);
+            var diff = Math.max(0, Math.floor((Date.now() - then.getTime()) / 1000));
             if (diff < 60) return 'just now';
             if (diff < 3600) return Math.floor(diff / 60) + ' min ago';
             if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
@@ -736,7 +1082,7 @@
         }
 
         function esc(str) {
-            const d = document.createElement('div');
+            var d = document.createElement('div');
             d.textContent = str;
             return d.innerHTML;
         }
@@ -745,14 +1091,113 @@
             return str.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
         }
 
-        function thumbHTML(item, cls, phCls, size) {
+        /* ---- Top Sellers render + scroll ---- */
+        function updateTsArrows() {
+            var s = topSellersStrip;
+            var canScrollLeft = s.scrollLeft > 2;
+            var canScrollRight = s.scrollLeft + s.clientWidth < s.scrollWidth - 2;
+            tsArrowLeft.classList.toggle('visible', canScrollLeft);
+            tsArrowRight.classList.toggle('visible', canScrollRight);
+        }
+
+        topSellersStrip.addEventListener('scroll', updateTsArrows);
+        tsArrowLeft.addEventListener('click', function() {
+            topSellersStrip.scrollBy({ left: -260, behavior: 'smooth' });
+        });
+        tsArrowRight.addEventListener('click', function() {
+            topSellersStrip.scrollBy({ left: 260, behavior: 'smooth' });
+        });
+
+        function renderTopSellers(sellers) {
+            if (!sellers || !sellers.length) {
+                topSellersWrap.style.display = 'none';
+                return;
+            }
+            topSellersWrap.style.display = '';
+            var html = '';
+            sellers.forEach(function(p) {
+                var imgHTML = p.sku_image
+                    ? '<img class="ts-img" src="' + escAttr(p.sku_image) + '" alt="" loading="lazy">'
+                    : '<div class="ts-placeholder-img">&#x1F4E6;</div>';
+                html += '<div class="ts-card">'
+                    + imgHTML
+                    + '<div class="ts-title">' + esc(p.title) + '</div>'
+                    + (p.variant ? '<div class="ts-variant">' + esc(p.variant) + '</div>' : '')
+                    + '<div class="ts-qty">' + p.qty + ' sold</div>'
+                    + '<div class="ts-revenue">$' + p.revenue.toFixed(2) + '</div>'
+                    + '</div>';
+            });
+            topSellersStrip.innerHTML = html;
+            requestAnimationFrame(updateTsArrows);
+        }
+        /* ---- Top Buyers render ---- */
+        function renderTopBuyers(buyers) {
+            if (!buyers || !buyers.length) {
+                topBuyersWrap.style.display = 'none';
+                return;
+            }
+            topBuyersWrap.style.display = '';
+            var html = '';
+            buyers.forEach(function(b, i) {
+                html += '<div class="tb-card">'
+                    + '<div class="tb-rank">#' + (i + 1) + '</div>'
+                    + '<div class="tb-name">' + esc(b.name) + '</div>'
+                    + '<div class="tb-orders">' + b.orders + ' order' + (b.orders !== 1 ? 's' : '') + '</div>'
+                    + '<div class="tb-spent">$' + b.spent.toFixed(2) + '</div>'
+                    + '</div>';
+            });
+            topBuyersStrip.innerHTML = html;
+        }
+
+        /* ---- Leaderboard toggle ---- */
+        function renderLeaderboard() {
+            var sellers = _lbMode === 'stream' ? _streamTopSellers : _topSellers;
+            var buyers = _lbMode === 'stream' ? _streamTopBuyers : _topBuyers;
+            var hasData = (sellers && sellers.length) || (buyers && buyers.length);
+            var hasStream = (_streamTopSellers && _streamTopSellers.length) || (_streamTopBuyers && _streamTopBuyers.length);
+            leaderboardSection.style.display = hasData || hasStream ? '' : 'none';
+            lbToggle.style.display = hasStream ? '' : 'none';
+            renderTopSellers(sellers);
+            renderTopBuyers(buyers);
+        }
+
+        lbToggle.addEventListener('click', function(e) {
+            var btn = e.target.closest('.lb-toggle-btn');
+            if (!btn || btn.classList.contains('active')) return;
+            _lbMode = btn.getAttribute('data-mode');
+            lbToggle.querySelectorAll('.lb-toggle-btn').forEach(function(b) {
+                b.classList.toggle('active', b === btn);
+            });
+            renderLeaderboard();
+        });
+
+        renderLeaderboard();
+
+        var REFUND_STATUSES = new Set([
+            'cancel', 'cancelled', 'in_cancel', 'reverse', 'refund', 'refunded',
+            'partially_refunded', 'refund_request', 'refund_requested',
+        ]);
+        function isRefundOrder(order) {
+            var os = (order.order_status || '').toLowerCase().trim();
+            var fs = (order.financial_status || '').toLowerCase().trim();
+            return REFUND_STATUSES.has(os) || REFUND_STATUSES.has(fs);
+        }
+
+        function refundLabel(order) {
+            var s = (order.order_status || order.financial_status || 'refund').toLowerCase().trim();
+            if (s.indexOf('cancel') >= 0) return 'CANCELLED';
+            if (s.indexOf('partial') >= 0) return 'PARTIAL REFUND';
+            return 'REFUND';
+        }
+
+        function thumbHTML(item, cls, phCls) {
             if (item && item.sku_image) {
-                return '<img class="' + cls + '" src="' + escAttr(item.sku_image) + '" alt="" loading="lazy" onerror="this.outerHTML=phFor(\'' + cls + '\',' + size + ')">';
+                return '<img class="' + cls + '" src="' + escAttr(item.sku_image) + '" alt="" loading="lazy" onerror="this.outerHTML=phFor(\'' + cls + '\')">';
             }
             return '<div class="' + phCls + '">&#x1F4E6;</div>';
         }
 
-        window.phFor = function(cls, size) {
+        window.phFor = function(cls) {
             return '<div class="' + cls.replace('img','img-placeholder').replace('thumb','thumb-placeholder') + '">&#x1F4E6;</div>';
         };
 
@@ -778,6 +1223,7 @@
             }).catch(function() {});
         }
 
+        /* ---- Label banner ---- */
         function renderLabelBanner(order) {
             var name = esc(order.customer_name || 'Guest');
             var l4 = esc(last4(order.order_number || order.tiktok_order_id));
@@ -792,25 +1238,22 @@
             return html;
         }
 
-        window._copyLabel = function(btn) {
-            copyToClipboard(btn.getAttribute('data-label'), btn);
-        };
-
-        window._copyRow = function(btn) {
-            copyToClipboard(btn.getAttribute('data-label'), btn);
-        };
+        window._copyLabel = function(btn) { copyToClipboard(btn.getAttribute('data-label'), btn); };
+        window._copyRow = function(btn) { copyToClipboard(btn.getAttribute('data-label'), btn); };
 
         function mergeItems(items) {
             if (!items || items.length === 0) return [];
             var map = {};
             var order = [];
             items.forEach(function(item) {
-                var key = (item.title || 'Unknown item').toLowerCase().trim();
+                var key = (item.title || 'Unknown item').toLowerCase().trim()
+                    + '||' + (item.variant || '').toLowerCase().trim();
                 if (map[key]) {
                     map[key].quantity += (item.quantity || 1);
                 } else {
                     var merged = {
                         title: item.title || 'Unknown item',
+                        variant: item.variant || null,
                         quantity: item.quantity || 1,
                         sku_image: item.sku_image || null,
                         unit_price: item.unit_price || 0,
@@ -818,9 +1261,7 @@
                     map[key] = merged;
                     order.push(merged);
                 }
-                if (!map[key].sku_image && item.sku_image) {
-                    map[key].sku_image = item.sku_image;
-                }
+                if (!map[key].sku_image && item.sku_image) map[key].sku_image = item.sku_image;
             });
             return order;
         }
@@ -845,6 +1286,7 @@
                 }
                 html += '<div class="detail-item-info">';
                 html += '<div class="detail-item-name">' + esc(item.title) + '</div>';
+                if (item.variant) html += '<div class="detail-item-variant">' + esc(item.variant) + '</div>';
                 html += '<div class="detail-item-price">$' + (item.unit_price || 0).toFixed(2) + ' each</div>';
                 html += '</div>';
                 html += '<div class="detail-item-qty">x' + item.quantity + '</div>';
@@ -853,39 +1295,42 @@
             return html;
         }
 
+        /* ---- Order row ---- */
         function renderRow(order, isNew) {
             var firstItem = order.items && order.items.length > 0 ? order.items[0] : null;
             var totalQty = (order.items || []).reduce(function(s, i) { return s + (i.quantity || 1); }, 0);
             var productName = firstItem ? firstItem.title : 'Unknown item';
             var itemCount = (order.items || []).length;
             var l4 = last4(order.order_number || order.tiktok_order_id);
+            var refund = isRefundOrder(order);
 
-            var html = '<div class="order-row' + (isNew ? ' is-new' : '') + '" data-order-id="' + escAttr(order.tiktok_order_id) + '">';
+            var rowClasses = 'order-row';
+            if (refund) rowClasses += ' is-refund';
+            else if (isNew) rowClasses += ' is-new';
 
+            var html = '<div class="' + rowClasses + '" data-order-id="' + escAttr(order.tiktok_order_id) + '">';
             html += '<div class="order-row-main">';
-            html += thumbHTML(firstItem, 'row-thumb', 'row-thumb-placeholder', 72);
+            html += thumbHTML(firstItem, 'row-thumb', 'row-thumb-placeholder');
             html += '<div class="row-info">';
             html += '<div class="row-product-name">' + esc(productName) + '</div>';
+            if (firstItem && firstItem.variant) html += '<div class="row-variant">' + esc(firstItem.variant) + '</div>';
             html += '<div class="row-sub">';
             html += '<span class="row-customer">' + esc(order.customer_name || 'Guest') + '</span>';
             html += '<span class="row-last4">#' + esc(l4) + '</span>';
+            html += '<span class="refund-badge">&#x26A0; ' + (refund ? refundLabel(order) : 'REFUND') + '</span>';
             html += '<button class="row-copy-btn" title="Copy label" data-label="' + escAttr(labelText(order)) + '" onclick="event.stopPropagation();window._copyRow(this)">&#x1F4CB;</button>';
             html += '<span class="row-time">' + relativeTime(order.created_at) + '</span>';
             if (itemCount > 1) html += '<span class="row-items-count">' + itemCount + ' items</span>';
-            html += '</div>';
-            html += '</div>';
-
+            html += '</div></div>';
             html += '<div class="row-right">';
             html += '<span class="row-price">$' + (order.total_price || 0).toFixed(2) + '</span>';
             if (totalQty > 1) html += '<span class="row-qty-badge">x' + totalQty + '</span>';
             html += '</div>';
             html += '<span class="row-expand-hint">&#x25BC;</span>';
             html += '</div>';
-
             html += '<div class="order-detail"><div class="order-detail-inner">';
             html += renderDetailItems(order);
             html += '</div></div>';
-
             html += '</div>';
             return html;
         }
@@ -926,10 +1371,10 @@
             bindRowClicks();
         }
 
+        /* ---- Toasts ---- */
         function showToast(order) {
             var firstItem = order.items && order.items.length > 0 ? order.items[0] : null;
             var totalQty = (order.items || []).reduce(function(s, i) { return s + (i.quantity || 1); }, 0);
-
             var el = document.createElement('div');
             el.className = 'toast';
             var html = '';
@@ -943,10 +1388,10 @@
             html += '<div class="toast-title">' + esc(firstItem ? firstItem.title : 'Unknown item');
             if (totalQty > 1) html += ' x' + totalQty;
             html += '</div>';
+            if (firstItem && firstItem.variant) html += '<div class="toast-sub" style="color:var(--accent);font-weight:600;font-size:11px;margin-bottom:2px;">' + esc(firstItem.variant) + '</div>';
             html += '<div class="toast-sub">' + esc(order.customer_name || 'Guest') + ' &middot; $' + (order.total_price || 0).toFixed(2) + '</div>';
             html += '</div>';
             el.innerHTML = html;
-
             el.addEventListener('click', function() { dismissToast(el); });
             toastContainer.appendChild(el);
             setTimeout(function() { dismissToast(el); }, TOAST_DURATION_MS);
@@ -959,13 +1404,13 @@
             setTimeout(function() { el.remove(); }, 300);
         }
 
+        /* ---- Sound ---- */
         function playChime() {
             if (_muted) return;
             try {
                 if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
                 var ctx = _audioCtx;
                 var now = ctx.currentTime;
-
                 var notes = [
                     { freq: 523.25, start: 0, dur: 0.12 },
                     { freq: 659.25, start: 0.08, dur: 0.12 },
@@ -995,13 +1440,114 @@
             }
         });
 
+        function formatGmv(val) {
+            if (val >= 1000) return '$' + (val / 1000).toFixed(1) + 'K';
+            return '$' + val.toFixed(2);
+        }
+
+        function updateStreamGmv(data) {
+            if (data.stream_gmv != null && data.stream_start_utc) {
+                streamGmvWrap.style.display = '';
+                streamGmvValue.textContent = formatGmv(data.stream_gmv);
+                streamItemsSold.textContent = data.stream_items || 0;
+                streamOrdersEl.textContent = data.stream_orders || 0;
+            } else {
+                streamGmvWrap.style.display = 'none';
+            }
+        }
+        updateStreamGmv(_streamData);
+
         function updateGMV(data) {
             if (data.session_gmv != null) gmvEl.textContent = '$' + data.session_gmv.toFixed(2);
             if (data.session_orders != null) gmvPaidEl.textContent = data.session_orders;
             if (data.session_total_orders != null) gmvTotalEl.textContent = data.session_total_orders;
+            updateStreamGmv({
+                stream_gmv: data.stream_gmv,
+                stream_orders: data.stream_orders,
+                stream_items: data.stream_items,
+                stream_start_utc: data.stream_start_utc
+            });
+            if (data.top_sellers) _topSellers = data.top_sellers;
+            if (data.top_buyers) _topBuyers = data.top_buyers;
+            if (data.stream_top_sellers) _streamTopSellers = data.stream_top_sellers;
+            if (data.stream_top_buyers) _streamTopBuyers = data.stream_top_buyers;
+            renderLeaderboard();
         }
 
-        async function poll() {
+        /* ---- Order polling ---- */
+        function handleRefundUpdate(order) {
+            var existingEl = list.querySelector('[data-order-id="' + escAttr(order.tiktok_order_id) + '"]');
+            if (existingEl) existingEl.remove();
+
+            var idx = _orders.findIndex(function(o) { return o.tiktok_order_id === order.tiktok_order_id; });
+            if (idx >= 0) {
+                _orders.splice(idx, 1);
+            }
+            _orders.unshift(order);
+
+            var fragment = document.createElement('div');
+            fragment.innerHTML = renderRow(order, false);
+            var newEl = fragment.firstChild;
+            newEl.classList.add('is-refund-alert');
+            list.insertBefore(newEl, list.firstChild);
+            emptyState.style.display = 'none';
+            list.style.display = '';
+            bindRowClicks();
+
+            showRefundToast(order);
+            playAlertSound();
+        }
+
+        function showRefundToast(order) {
+            var firstItem = order.items && order.items.length > 0 ? order.items[0] : null;
+            var el = document.createElement('div');
+            el.className = 'toast';
+            el.style.borderColor = 'var(--red)';
+            el.style.boxShadow = '0 12px 40px rgba(0,0,0,.65), 0 0 20px var(--red-glow)';
+            var html = '';
+            if (firstItem && firstItem.sku_image) {
+                html += '<img class="toast-img" src="' + escAttr(firstItem.sku_image) + '" alt="" loading="lazy">';
+            } else {
+                html += '<div class="toast-img-placeholder">&#x26A0;</div>';
+            }
+            html += '<div class="toast-body">';
+            html += '<div class="toast-label" style="color:var(--red);">&#x26A0; ' + refundLabel(order) + '</div>';
+            html += '<div class="toast-title">' + esc(order.customer_name || 'Guest') + ' #' + esc(last4(order.order_number || order.tiktok_order_id)) + '</div>';
+            html += '<div class="toast-sub">$' + (order.total_price || 0).toFixed(2) + '</div>';
+            html += '</div>';
+            el.innerHTML = html;
+            el.addEventListener('click', function() { dismissToast(el); });
+            toastContainer.appendChild(el);
+            setTimeout(function() { dismissToast(el); }, TOAST_DURATION_MS);
+        }
+
+        function playAlertSound() {
+            if (_muted) return;
+            try {
+                if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                var ctx = _audioCtx;
+                var now = ctx.currentTime;
+                var notes = [
+                    { freq: 440, start: 0, dur: 0.15 },
+                    { freq: 370, start: 0.12, dur: 0.15 },
+                    { freq: 330, start: 0.24, dur: 0.25 },
+                ];
+                notes.forEach(function(n) {
+                    var osc = ctx.createOscillator();
+                    var gain = ctx.createGain();
+                    osc.type = 'triangle';
+                    osc.frequency.setValueAtTime(n.freq, now + n.start);
+                    gain.gain.setValueAtTime(0.2, now + n.start);
+                    gain.gain.exponentialRampToValueAtTime(0.001, now + n.start + n.dur + 0.15);
+                    osc.connect(gain);
+                    gain.connect(ctx.destination);
+                    osc.start(now + n.start);
+                    osc.stop(now + n.start + n.dur + 0.2);
+                });
+            } catch (e) {}
+        }
+
+        async function pollOrders() {
             if (document.hidden) return;
             try {
                 var url = '/tiktok/streamer/poll' + (_latestUpdatedAt ? '?since=' + encodeURIComponent(_latestUpdatedAt) : '');
@@ -1011,38 +1557,180 @@
 
                 if (data.total_count != null) countEl.textContent = data.total_count;
                 if (data.latest_updated_at) _latestUpdatedAt = data.latest_updated_at;
-
                 updateGMV(data);
 
-                var newOrders = (data.orders || []).filter(function(o) { return !_knownIds.has(o.tiktok_order_id); });
+                var newOrders = [];
+                var refundUpdates = [];
+
+                (data.orders || []).forEach(function(o) {
+                    if (!_knownIds.has(o.tiktok_order_id)) {
+                        newOrders.push(o);
+                    } else if (isRefundOrder(o)) {
+                        var existing = _orders.find(function(ex) { return ex.tiktok_order_id === o.tiktok_order_id; });
+                        if (existing && !isRefundOrder(existing)) {
+                            refundUpdates.push(o);
+                        }
+                    }
+                });
+
                 if (newOrders.length > 0) {
                     newOrders.forEach(function(o) {
                         _knownIds.add(o.tiktok_order_id);
                         _orders.unshift(o);
                     });
                     prependRows(newOrders);
-                    newOrders.forEach(function(o) { showToast(o); });
-                    playChime();
+                    var nonRefundNew = newOrders.filter(function(o) { return !isRefundOrder(o); });
+                    nonRefundNew.forEach(function(o) { showToast(o); });
+                    if (nonRefundNew.length > 0) playChime();
+
+                    var refundNew = newOrders.filter(function(o) { return isRefundOrder(o); });
+                    refundNew.forEach(function(o) { showRefundToast(o); });
+                    if (refundNew.length > 0) playAlertSound();
+                }
+
+                refundUpdates.forEach(function(o) { handleRefundUpdate(o); });
+            } catch (e) {}
+        }
+
+        /* ============ Chat ============ */
+        function chatDotClass(status) {
+            if (status === 'connected') return 'is-connected';
+            if (status === 'not_configured' || status === 'stopped') return 'is-not-configured';
+            return 'is-disconnected';
+        }
+
+        function updateChatDots(status) {
+            var cls = 'chat-status-dot ' + chatDotClass(status);
+            chatDotDesktop.className = cls;
+            chatDotMobile.className = cls;
+            chatDotMobileToggle.className = 'chat-toggle-dot';
+            chatDotMobileToggle.style.background =
+                status === 'connected' ? 'var(--green)' :
+                (status === 'not_configured' || status === 'stopped') ? 'var(--text-muted)' : 'var(--accent)';
+        }
+
+        function updateViewerCount(count) {
+            var text = count > 0 ? count.toLocaleString() + ' viewers' : '';
+            chatViewersDesktop.textContent = text;
+            chatViewersMobile.textContent = text;
+        }
+
+        function renderChatMsg(msg) {
+            var typeClass = 'is-' + (msg.type || 'chat');
+            var html = '<div class="chat-msg">';
+            if (msg.type === 'gift') html += '<span class="chat-msg-gift-icon">&#x1F48E;</span>';
+            html += '<span class="chat-msg-user ' + typeClass + '">' + esc(msg.user) + '</span>';
+            html += '<span class="chat-msg-text">' + esc(msg.text) + '</span>';
+            html += '</div>';
+            return html;
+        }
+
+        function renderChatEmpty(status) {
+            if (status === 'not_configured') {
+                return '<div class="chat-empty"><div class="chat-empty-icon">&#x1F4AC;</div>'
+                    + '<div class="chat-empty-text">Chat not connected</div>'
+                    + '<div class="chat-empty-sub">Add TIKTOK_LIVE_API_KEY and TIKTOK_LIVE_USERNAME to .env</div></div>';
+            }
+            if (status === 'connecting') {
+                return '<div class="chat-empty"><div class="chat-empty-icon">&#x23F3;</div>'
+                    + '<div class="chat-empty-text">Connecting to chat...</div></div>';
+            }
+            if (status === 'stream_ended') {
+                return '<div class="chat-empty"><div class="chat-empty-icon">&#x1F3AC;</div>'
+                    + '<div class="chat-empty-text">Stream ended</div>'
+                    + '<div class="chat-empty-sub">Chat will reconnect when the next stream starts</div></div>';
+            }
+            if (status === 'disconnected' || status === 'error') {
+                return '<div class="chat-empty"><div class="chat-empty-icon">&#x26A0;</div>'
+                    + '<div class="chat-empty-text">Chat disconnected</div>'
+                    + '<div class="chat-empty-sub">Will attempt to reconnect automatically</div></div>';
+            }
+            return '<div class="chat-empty"><div class="chat-empty-icon">&#x1F4AC;</div>'
+                + '<div class="chat-empty-text">Waiting for messages...</div></div>';
+        }
+
+        function isScrolledToBottom(el) {
+            return el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+        }
+
+        function appendChatMessages(messages, container) {
+            var wasAtBottom = isScrolledToBottom(container);
+            var emptyEl = container.querySelector('.chat-empty');
+            if (emptyEl && messages.length > 0) emptyEl.remove();
+
+            messages.forEach(function(msg) {
+                container.insertAdjacentHTML('beforeend', renderChatMsg(msg));
+            });
+
+            while (container.children.length > 200) {
+                container.removeChild(container.firstChild);
+            }
+
+            if (wasAtBottom) {
+                container.scrollTop = container.scrollHeight;
+            }
+        }
+
+        function initChatPanel(container, status) {
+            container.innerHTML = renderChatEmpty(status);
+        }
+
+        async function pollChat() {
+            if (document.hidden) return;
+            try {
+                var resp = await fetch('/tiktok/streamer/chat/poll?since=' + _chatIdx, { cache: 'no-store' });
+                if (!resp.ok) return;
+                var data = await resp.json();
+
+                _chatStatus = data.status || _chatStatus;
+                updateChatDots(_chatStatus);
+                updateViewerCount(data.viewer_count || 0);
+
+                if (data.latest_idx) _chatIdx = data.latest_idx;
+
+                var msgs = data.messages || [];
+                if (msgs.length > 0) {
+                    appendChatMessages(msgs, chatDesktopMsgs);
+                    appendChatMessages(msgs, chatMobileMsgs);
+                } else if (chatDesktopMsgs.children.length === 0 || chatDesktopMsgs.querySelector('.chat-empty')) {
+                    initChatPanel(chatDesktopMsgs, _chatStatus);
+                    initChatPanel(chatMobileMsgs, _chatStatus);
                 }
             } catch (e) {}
         }
 
-        function startPolling() {
-            if (_pollTimer) clearInterval(_pollTimer);
-            _pollTimer = setInterval(poll, POLL_INTERVAL_MS);
+        /* ---- Mobile drawer ---- */
+        function openDrawer() {
+            _chatDrawerOpen = true;
+            chatMobileDrawer.classList.add('is-open');
+            chatDrawerToggle.style.display = 'none';
+        }
+        function closeDrawer() {
+            _chatDrawerOpen = false;
+            chatMobileDrawer.classList.remove('is-open');
+            chatDrawerToggle.style.display = '';
         }
 
-        document.addEventListener('visibilitychange', function() {
-            if (!document.hidden) poll();
+        chatDrawerToggle.addEventListener('click', openDrawer);
+        chatDrawerClose.addEventListener('click', closeDrawer);
+        chatToggleBtn.addEventListener('click', function() {
+            if (_chatDrawerOpen) closeDrawer();
+            else openDrawer();
         });
 
+        /* ---- Scroll tracking for auto-scroll ---- */
+        chatDesktopMsgs.addEventListener('scroll', function() {
+            _chatAutoScroll = isScrolledToBottom(chatDesktopMsgs);
+        });
+
+        /* ---- Relative time refresh ---- */
         setInterval(function() {
             document.querySelectorAll('.row-time').forEach(function(el, idx) {
                 if (_orders[idx]) el.textContent = relativeTime(_orders[idx].created_at);
             });
         }, 30000);
 
-        // Nav dropdown toggle
+        /* ---- Nav dropdown ---- */
         var navBtn = document.getElementById('nav-menu-btn');
         var navDrop = document.getElementById('nav-dropdown');
         navBtn.addEventListener('click', function(e) {
@@ -1053,8 +1741,19 @@
             if (!e.target.closest('.nav-menu-wrap')) navDrop.classList.remove('is-open');
         });
 
+        document.addEventListener('visibilitychange', function() {
+            if (!document.hidden) { pollOrders(); pollChat(); }
+        });
+
+        /* ---- Init ---- */
         renderAll();
-        startPolling();
+        updateChatDots(_chatStatus);
+        initChatPanel(chatDesktopMsgs, _chatStatus);
+        initChatPanel(chatMobileMsgs, _chatStatus);
+
+        setInterval(pollOrders, ORDER_POLL_MS);
+        setInterval(pollChat, CHAT_POLL_MS);
+        pollChat();
     })();
     </script>
 </body>

@@ -131,6 +131,8 @@ def first_nonempty_value(*values: Any) -> Any:
 
 def is_image_url(url: str) -> bool:
     url_lower = url.lower()
+    if url_lower.startswith("data:image/"):
+        return True
     return any(ext in url_lower for ext in [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"])
 
 

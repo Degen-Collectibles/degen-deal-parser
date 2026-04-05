@@ -23,8 +23,8 @@ if str(ROOT_DIR) not in sys.path:
 
 load_dotenv(ROOT_DIR / ".env")
 
-from app.db import init_db, managed_session  # noqa: E402
-from app.models import TikTokAuth, TikTokOrder, utcnow  # noqa: E402
+from app.db import init_db, is_sqlite_lock_error, managed_session  # noqa: E402
+from app.models import TikTokAuth, TikTokOrder, TikTokProduct, utcnow  # noqa: E402
 from app.runtime_logging import structured_log_line  # noqa: E402
 from app.tiktok_ingest import (  # noqa: E402
     TIKTOK_DEFAULT_API_BASE_URL,
@@ -47,6 +47,16 @@ SHOP_TOKEN_REFRESH_PATH = TIKTOK_SHOP_TOKEN_REFRESH_PATH
 TIKTOK_API_VERSION = "202309"
 ORDER_SEARCH_PATH = f"/order/{TIKTOK_API_VERSION}/orders/search"
 ORDER_DETAIL_PATH = f"/order/{TIKTOK_API_VERSION}/orders"
+PRODUCT_SEARCH_PATH = f"/product/{TIKTOK_API_VERSION}/products/search"
+PRODUCT_CREATE_PATH = f"/product/{TIKTOK_API_VERSION}/products"
+PRODUCT_DETAIL_PATH = f"/product/{TIKTOK_API_VERSION}/products"
+PRODUCT_EDIT_PATH = f"/product/{TIKTOK_API_VERSION}/products"
+IMAGE_UPLOAD_PATH = f"/product/{TIKTOK_API_VERSION}/images/upload"
+CATEGORIES_PATH = f"/product/{TIKTOK_API_VERSION}/categories"
+CATEGORY_ATTRIBUTES_PATH = f"/product/{TIKTOK_API_VERSION}/categories"
+BRANDS_PATH = f"/product/{TIKTOK_API_VERSION}/brands"
+LIVE_ANALYTICS_PATH = "/analytics/202509/shop_lives/overview_performance"
+LIVE_CORE_STATS_PATH_TEMPLATE = "/analytics/202502/live_rooms/{live_room_id}/core_stats"
 DEFAULT_SHOP_API_BASE_URL = "https://open-api.tiktokglobalshop.com"
 
 
@@ -70,6 +80,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--access-token", type=str, default=None, help="Override TIKTOK_ACCESS_TOKEN for this run.")
     parser.add_argument("--refresh-token", type=str, default=None, help="Refresh the access token before pulling orders.")
     parser.add_argument("--auth-code", type=str, default=None, help="Exchange an authorization code for tokens before pulling orders.")
+    parser.add_argument("--products", action="store_true", help="Sync TikTok Shop product catalog instead of orders.")
     return parser.parse_args()
 
 
@@ -689,6 +700,763 @@ def fetch_tiktok_order_details(
     return []
 
 
+def _try_live_core_stats(
+    client: httpx.Client,
+    *,
+    base_url: str,
+    app_key: str,
+    app_secret: str,
+    creator_access_token: str,
+    shop_cipher: str,
+    live_room_id: str,
+    currency: str = "USD",
+) -> dict[str, Any] | None:
+    """Try the real-time live_core_stats endpoint (Creator auth, needs live_room_id).
+    Returns None if missing params, 403, or endpoint unavailable.
+    """
+    if not creator_access_token or not live_room_id:
+        return None
+    path = LIVE_CORE_STATS_PATH_TEMPLATE.format(live_room_id=live_room_id)
+    url, _body_json, headers = build_tiktok_request(
+        base_url=base_url,
+        path=path,
+        app_key=app_key,
+        app_secret=app_secret,
+        shop_id="",
+        shop_cipher=shop_cipher,
+        access_token=creator_access_token,
+        body=None,
+        extra_query={"currency": currency} if currency else None,
+        api_version="",
+    )
+    headers["Content-Type"] = "application/json"
+    resp = client.request("GET", url, headers=headers)
+    try:
+        payload = resp.json()
+    except Exception:
+        return None
+    if resp.status_code == 403 or (isinstance(payload, dict) and payload.get("code") == 40006):
+        return None
+    if not resp.is_success:
+        return None
+    code = payload.get("code") if isinstance(payload, dict) else None
+    if code not in (0, "0"):
+        return None
+    data = payload.get("data") or {}
+    return {
+        "source": "live_core_stats",
+        "realtime": True,
+        "raw": data,
+    }
+
+
+def _parse_live_core_stats(raw: dict, currency: str = "USD") -> dict[str, Any]:
+    """Best-effort extraction from live_core_stats response shape."""
+    gmv_obj = raw.get("gmv") or raw.get("live_gmv") or {}
+    try:
+        gmv = float(gmv_obj.get("amount") or gmv_obj.get("value") or 0)
+    except (TypeError, ValueError):
+        gmv = 0.0
+    return {
+        "gmv": gmv,
+        "currency": gmv_obj.get("currency") or currency,
+        "items_sold": int(raw.get("items_sold") or raw.get("total_items_sold") or 0),
+        "sku_orders": int(raw.get("sku_orders") or raw.get("total_orders") or 0),
+        "customers": int(raw.get("customers") or raw.get("total_buyers") or 0),
+        "source": "live_core_stats",
+        "realtime": True,
+    }
+
+
+def fetch_tiktok_live_analytics(
+    client: httpx.Client,
+    *,
+    base_url: str,
+    app_key: str,
+    app_secret: str,
+    access_token: str,
+    shop_cipher: str,
+    currency: str = "USD",
+    creator_access_token: str = "",
+    live_room_id: str = "",
+) -> dict[str, Any]:
+    """Fetch LIVE stream analytics.
+
+    Strategy:
+      1. Try live_core_stats (real-time, needs Creator token + live_room_id)
+      2. Fall back to overview_performance (delayed ~2 days)
+    """
+    core = _try_live_core_stats(
+        client,
+        base_url=base_url,
+        app_key=app_key,
+        app_secret=app_secret,
+        creator_access_token=creator_access_token,
+        shop_cipher=shop_cipher,
+        live_room_id=live_room_id,
+        currency=currency,
+    )
+    if core is not None:
+        return _parse_live_core_stats(core["raw"], currency=currency)
+
+    now = datetime.now(timezone.utc)
+    start_str = (now - timedelta(days=7)).strftime("%Y-%m-%d")
+    end_str = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    extra_query: dict[str, Any] = {
+        "start_date_ge": start_str,
+        "end_date_lt": end_str,
+        "granularity": "1D",
+        "currency": currency,
+    }
+    url, _body_json, headers = build_tiktok_request(
+        base_url=base_url,
+        path=LIVE_ANALYTICS_PATH,
+        app_key=app_key,
+        app_secret=app_secret,
+        shop_id="",
+        shop_cipher=shop_cipher,
+        access_token=access_token,
+        body=None,
+        extra_query=extra_query,
+        api_version="",
+    )
+    headers["Content-Type"] = "application/json"
+    resp = client.request("GET", url, headers=headers)
+    try:
+        payload = resp.json()
+    except Exception:
+        payload = None
+    if not resp.is_success and payload is None:
+        raise RuntimeError(
+            f"{LIVE_ANALYTICS_PATH}: HTTP {resp.status_code} — {(resp.text or '')[:500]}"
+        )
+    if isinstance(payload, dict):
+        code = payload.get("code")
+        if code in (66007001, "66007001"):
+            return {"gmv": 0.0, "items_sold": 0, "sku_orders": 0, "customers": 0,
+                    "currency": currency, "rpc_error": True}
+    if not resp.is_success:
+        raise RuntimeError(
+            f"{LIVE_ANALYTICS_PATH}: HTTP {resp.status_code} — {(resp.text or '')[:500]}"
+        )
+    raise_for_tiktok_error(payload, path=LIVE_ANALYTICS_PATH)
+    data = extract_tiktok_data(payload)
+
+    latest_date = data.get("latest_available_date") or ""
+    perf = data.get("performance") or {}
+    intervals = perf.get("intervals") or []
+
+    best: dict[str, Any] | None = None
+    for iv in intervals:
+        gmv_obj = iv.get("gmv") or {}
+        try:
+            amt = float(gmv_obj.get("amount") or 0)
+        except (TypeError, ValueError):
+            amt = 0.0
+        items = int(iv.get("items_sold") or 0)
+        if amt > 0 or items > 0:
+            candidate = {
+                "gmv": amt,
+                "currency": gmv_obj.get("currency") or currency,
+                "items_sold": items,
+                "sku_orders": int(iv.get("sku_orders") or 0),
+                "customers": int(iv.get("customers") or 0),
+                "date": iv.get("start_date") or "",
+            }
+            if best is None or (candidate.get("date") or "") > (best.get("date") or ""):
+                best = candidate
+
+    if best is None:
+        return {"gmv": 0.0, "items_sold": 0, "sku_orders": 0, "customers": 0,
+                "currency": currency, "source": "overview_delayed",
+                "latest_available_date": latest_date}
+
+    best["source"] = "overview_delayed"
+    best["latest_available_date"] = latest_date
+    best["realtime"] = False
+    return best
+
+
+def fetch_tiktok_product_list_page(
+    client: httpx.Client,
+    *,
+    base_url: str,
+    app_key: str,
+    app_secret: str,
+    access_token: str,
+    shop_id: str,
+    shop_cipher: str,
+    page_size: int,
+    cursor: Optional[str] = None,
+    status_filter: Optional[str] = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    extra_query: dict[str, Any] = {
+        "page_size": str(max(1, min(page_size, 50))),
+    }
+    if cursor:
+        extra_query["page_token"] = cursor
+    body: dict[str, Any] = {}
+    if status_filter:
+        body["status"] = status_filter
+
+    url, body_json, headers = build_tiktok_request(
+        base_url=base_url,
+        path=PRODUCT_SEARCH_PATH,
+        app_key=app_key,
+        app_secret=app_secret,
+        shop_id=shop_id,
+        shop_cipher=shop_cipher,
+        access_token=access_token,
+        body=body,
+        extra_query=extra_query,
+    )
+    payload = request_json(client, method="POST", url=url, raw_body=body_json, extra_headers=headers)
+    raise_for_tiktok_error(payload, path=PRODUCT_SEARCH_PATH)
+    data = extract_tiktok_data(payload)
+    products = data.get("products") or []
+    if not isinstance(products, list):
+        products = extract_first_order_list(payload)
+    return payload, [p for p in products if isinstance(p, dict)]
+
+
+def product_record_from_payload(
+    payload: dict[str, Any],
+    *,
+    shop_id: Optional[str],
+    shop_cipher: Optional[str],
+    source: str,
+) -> dict[str, Any]:
+    product_id = str(
+        _first_present(payload, ("id", "product_id"))
+        or ""
+    ).strip()
+    if not product_id:
+        raise ValueError("TikTok payload is missing product id")
+
+    images = payload.get("main_images") or payload.get("images") or []
+    if not isinstance(images, list):
+        images = []
+    image_urls = []
+    for img in images:
+        if isinstance(img, dict):
+            thumb_urls = img.get("thumb_urls") or img.get("urls") or []
+            if isinstance(thumb_urls, list) and thumb_urls:
+                url = str(thumb_urls[0]).strip()
+            else:
+                url = str(img.get("url") or img.get("uri") or img.get("thumb_url") or "").strip()
+            if url and url.startswith("http"):
+                image_urls.append(url)
+            elif url:
+                image_urls.append(f"https://p16-oec-general-useast5.ttcdn-us.com/{url}")
+        elif isinstance(img, str) and img.strip():
+            val = img.strip()
+            if val.startswith("http"):
+                image_urls.append(val)
+            else:
+                image_urls.append(f"https://p16-oec-general-useast5.ttcdn-us.com/{val}")
+    main_image_url = image_urls[0] if image_urls else None
+
+    category_chains = payload.get("category_chains") or []
+    category_id = None
+    category_name = None
+    if isinstance(category_chains, list) and category_chains:
+        last_chain = category_chains[-1] if isinstance(category_chains[-1], dict) else {}
+        cat_list = last_chain.get("categories") or last_chain.get("category_list") or []
+        if isinstance(cat_list, list) and cat_list:
+            leaf = cat_list[-1] if isinstance(cat_list[-1], dict) else {}
+            category_id = str(leaf.get("id") or "").strip() or None
+            category_name = str(leaf.get("local_name") or leaf.get("name") or "").strip() or None
+    if not category_id:
+        category_id = str(_first_present(payload, ("category_id",)) or "").strip() or None
+
+    brand = payload.get("brand") or {}
+    if not isinstance(brand, dict):
+        brand = {}
+
+    raw_skus = payload.get("skus") or payload.get("sku_list") or payload.get("variants") or []
+    if not isinstance(raw_skus, list):
+        raw_skus = []
+    skus = []
+    for sku in raw_skus:
+        if not isinstance(sku, dict):
+            continue
+        sku_id = str(_first_present(sku, ("id", "sku_id")) or "").strip()
+        seller_sku = str(_first_present(sku, ("seller_sku", "outer_sku_id")) or "").strip() or None
+        price_info = sku.get("price") or {}
+        if not isinstance(price_info, dict):
+            price_info = {}
+        price = money_to_float(
+            _first_present(price_info, ("sale_price", "original_price", "tax_exclusive_price"))
+            or _first_present(sku, ("price", "sale_price", "original_price"))
+        )
+        inventory_list = sku.get("inventory") or []
+        total_inventory = 0
+        if isinstance(inventory_list, list):
+            for inv in inventory_list:
+                if isinstance(inv, dict):
+                    total_inventory += int(inv.get("quantity") or 0)
+        elif isinstance(inventory_list, (int, float)):
+            total_inventory = int(inventory_list)
+        sales_attrs = sku.get("sales_attributes") or []
+        if not isinstance(sales_attrs, list):
+            sales_attrs = []
+        skus.append({
+            "sku_id": sku_id,
+            "seller_sku": seller_sku,
+            "price": price,
+            "inventory": total_inventory,
+            "sales_attributes": [
+                {"id": str(a.get("id") or ""), "name": str(a.get("name") or ""),
+                 "value_id": str(a.get("value_id") or ""), "value_name": str(a.get("value_name") or "")}
+                for a in sales_attrs if isinstance(a, dict)
+            ],
+        })
+
+    audit = payload.get("audit") or {}
+    audit_status = None
+    if isinstance(audit, dict):
+        audit_status = str(audit.get("status") or "").strip() or None
+    if not audit_status:
+        audit_status = str(_first_present(payload, ("audit_status",)) or "").strip() or None
+
+    created_at = parse_datetime(
+        _first_present(payload, ("create_time", "created_at", "created_time"))
+    )
+    updated_at = parse_datetime(
+        _first_present(payload, ("update_time", "updated_at", "updated_time"))
+        or created_at
+    )
+
+    return {
+        "tiktok_product_id": product_id,
+        "shop_id": str(_first_present(payload, ("shop_id", "shopId")) or shop_id or "").strip() or None,
+        "shop_cipher": str(_first_present(payload, ("shop_cipher", "shopCipher")) or shop_cipher or "").strip() or None,
+        "title": str(_first_present(payload, ("title", "product_name", "name")) or "").strip(),
+        "description": str(_first_present(payload, ("description", "product_description")) or "").strip() or None,
+        "status": str(_first_present(payload, ("status",)) or "").strip() or None,
+        "audit_status": audit_status,
+        "category_id": category_id,
+        "category_name": category_name,
+        "brand_id": str(brand.get("id") or "").strip() or None,
+        "brand_name": str(brand.get("name") or "").strip() or None,
+        "main_image_url": main_image_url,
+        "images_json": json_dumps(image_urls),
+        "skus_json": json_dumps(skus),
+        "sales_attributes_json": json_dumps(payload.get("sales_attributes") or []),
+        "product_attributes_json": json_dumps(payload.get("product_attributes") or []),
+        "raw_payload": json_dumps(payload),
+        "source": source,
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "synced_at": utcnow(),
+    }
+
+
+def upsert_tiktok_product_row(
+    session: Session,
+    payload: dict[str, Any],
+    *,
+    shop_id: Optional[str],
+    shop_cipher: Optional[str],
+    source: str,
+    dry_run: bool = False,
+) -> str:
+    record = product_record_from_payload(payload, shop_id=shop_id, shop_cipher=shop_cipher, source=source)
+    existing = session.exec(
+        select(TikTokProduct).where(TikTokProduct.tiktok_product_id == record["tiktok_product_id"])
+    ).first()
+
+    if existing is None:
+        if not dry_run:
+            session.add(TikTokProduct(**record))
+        return "inserted"
+
+    for field_name, value in record.items():
+        setattr(existing, field_name, value)
+    if not dry_run:
+        session.add(existing)
+    return "updated"
+
+
+def backfill_tiktok_products(
+    session: Session,
+    *,
+    base_url: str,
+    app_key: str,
+    app_secret: str,
+    access_token: str,
+    shop_id: str,
+    shop_cipher: str = "",
+    limit: Optional[int] = None,
+    dry_run: bool = False,
+    runtime_name: str = "tiktok_backfill",
+) -> TikTokPullSummary:
+    summary = TikTokPullSummary()
+    if limit == 0:
+        return summary
+
+    remaining = limit if limit and limit > 0 else None
+    cursor: Optional[str] = None
+
+    with httpx.Client(timeout=40.0, follow_redirects=True) as client:
+        while True:
+            page_size = min(50, remaining) if remaining else 50
+            payload, products = fetch_tiktok_product_list_page(
+                client,
+                base_url=base_url,
+                app_key=app_key,
+                app_secret=app_secret,
+                access_token=access_token,
+                shop_id=shop_id,
+                shop_cipher=shop_cipher,
+                page_size=page_size,
+                cursor=cursor,
+            )
+
+            if not products:
+                print(
+                    structured_log_line(
+                        runtime=runtime_name,
+                        action="tiktok.products.page_empty",
+                        success=True,
+                        dry_run=dry_run,
+                    )
+                )
+                break
+
+            for product_payload in products:
+                if remaining is not None and remaining <= 0:
+                    break
+                summary.fetched += 1
+                pid = str(
+                    product_payload.get("id") or product_payload.get("product_id") or ""
+                ).strip()
+                if pid and not dry_run:
+                    try:
+                        detail = fetch_tiktok_product_detail(
+                            client,
+                            base_url=base_url,
+                            app_key=app_key,
+                            app_secret=app_secret,
+                            access_token=access_token,
+                            shop_id=shop_id,
+                            shop_cipher=shop_cipher,
+                            product_id=pid,
+                        )
+                        if isinstance(detail, dict) and detail:
+                            product_payload = detail
+                    except Exception as detail_exc:
+                        print(
+                            structured_tiktok_log_line(
+                                runtime=runtime_name,
+                                action="tiktok.products.detail_fetch_warning",
+                                success=False,
+                                error=str(detail_exc)[:200],
+                                product_id=pid,
+                            )
+                        )
+                try:
+                    result = upsert_tiktok_product_row(
+                        session,
+                        product_payload,
+                        shop_id=shop_id,
+                        shop_cipher=shop_cipher,
+                        source="backfill",
+                        dry_run=dry_run,
+                    )
+                    if result == "inserted":
+                        summary.inserted += 1
+                    else:
+                        summary.updated += 1
+                    if not dry_run:
+                        _commit_retry_delay = 0.4
+                        for _commit_attempt in range(4):
+                            try:
+                                session.commit()
+                                break
+                            except Exception as _commit_exc:
+                                if is_sqlite_lock_error(_commit_exc) and _commit_attempt < 3:
+                                    time.sleep(_commit_retry_delay)
+                                    _commit_retry_delay *= 2
+                                    continue
+                                raise
+                    elif session.in_transaction():
+                        session.rollback()
+                except Exception as exc:
+                    summary.failed += 1
+                    if session.in_transaction():
+                        session.rollback()
+                    print(
+                        structured_tiktok_log_line(
+                            runtime=runtime_name,
+                            action="tiktok.products.product_failed",
+                            success=False,
+                            error=str(exc),
+                            product_id=product_payload.get("id")
+                            or product_payload.get("product_id"),
+                            shop_id=shop_id,
+                            shop_cipher=shop_cipher or None,
+                        )
+                    )
+
+                if summary.fetched % 25 == 0:
+                    print(
+                        structured_tiktok_log_line(
+                            runtime=runtime_name,
+                            action="tiktok.products.progress",
+                            success=True,
+                            fetched=summary.fetched,
+                            inserted=summary.inserted,
+                            updated=summary.updated,
+                            failed=summary.failed,
+                            dry_run=dry_run,
+                        )
+                    )
+                if remaining is not None:
+                    remaining -= 1
+
+            cursor = extract_next_cursor(payload)
+            if remaining is not None and remaining <= 0:
+                break
+            if not cursor:
+                break
+
+    return summary
+
+
+def fetch_tiktok_categories(
+    client: httpx.Client,
+    *,
+    base_url: str,
+    app_key: str,
+    app_secret: str,
+    access_token: str,
+    shop_id: str,
+    shop_cipher: str,
+    keyword: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    extra_query: dict[str, Any] = {}
+    if keyword:
+        extra_query["keyword"] = keyword
+    url, body_json, headers = build_tiktok_request(
+        base_url=base_url,
+        path=CATEGORIES_PATH,
+        app_key=app_key,
+        app_secret=app_secret,
+        shop_id=shop_id,
+        shop_cipher=shop_cipher,
+        access_token=access_token,
+        body=None,
+        extra_query=extra_query,
+    )
+    payload = request_json(client, method="GET", url=url, extra_headers=headers)
+    raise_for_tiktok_error(payload, path=CATEGORIES_PATH)
+    data = extract_tiktok_data(payload)
+    categories = data.get("categories") or []
+    if not isinstance(categories, list):
+        return []
+    return [c for c in categories if isinstance(c, dict)]
+
+
+def fetch_tiktok_category_attributes(
+    client: httpx.Client,
+    *,
+    base_url: str,
+    app_key: str,
+    app_secret: str,
+    access_token: str,
+    shop_id: str,
+    shop_cipher: str,
+    category_id: str,
+) -> list[dict[str, Any]]:
+    path = f"{CATEGORY_ATTRIBUTES_PATH}/{category_id}/attributes"
+    url, body_json, headers = build_tiktok_request(
+        base_url=base_url,
+        path=path,
+        app_key=app_key,
+        app_secret=app_secret,
+        shop_id=shop_id,
+        shop_cipher=shop_cipher,
+        access_token=access_token,
+        body=None,
+    )
+    payload = request_json(client, method="GET", url=url, extra_headers=headers)
+    raise_for_tiktok_error(payload, path=path)
+    data = extract_tiktok_data(payload)
+    attributes = data.get("attributes") or []
+    if not isinstance(attributes, list):
+        return []
+    return [a for a in attributes if isinstance(a, dict)]
+
+
+def fetch_tiktok_brands(
+    client: httpx.Client,
+    *,
+    base_url: str,
+    app_key: str,
+    app_secret: str,
+    access_token: str,
+    shop_id: str,
+    shop_cipher: str,
+    brand_name: Optional[str] = None,
+    category_id: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    extra_query: dict[str, Any] = {}
+    if brand_name:
+        extra_query["brand_name"] = brand_name
+    if category_id:
+        extra_query["category_id"] = category_id
+    extra_query["page_size"] = "50"
+    url, body_json, headers = build_tiktok_request(
+        base_url=base_url,
+        path=BRANDS_PATH,
+        app_key=app_key,
+        app_secret=app_secret,
+        shop_id=shop_id,
+        shop_cipher=shop_cipher,
+        access_token=access_token,
+        body=None,
+        extra_query=extra_query,
+    )
+    payload = request_json(client, method="GET", url=url, extra_headers=headers)
+    raise_for_tiktok_error(payload, path=BRANDS_PATH)
+    data = extract_tiktok_data(payload)
+    brands = data.get("brands") or []
+    if not isinstance(brands, list):
+        return []
+    return [b for b in brands if isinstance(b, dict)]
+
+
+def upload_tiktok_product_image(
+    client: httpx.Client,
+    *,
+    base_url: str,
+    app_key: str,
+    app_secret: str,
+    access_token: str,
+    shop_id: str,
+    shop_cipher: str,
+    image_data: bytes,
+    file_name: str = "image.jpg",
+) -> str:
+    query_params: dict[str, Any] = {
+        "app_key": app_key,
+        "timestamp": int(time.time()),
+        "version": TIKTOK_API_VERSION,
+    }
+    if shop_id:
+        query_params["shop_id"] = shop_id
+    if shop_cipher:
+        query_params["shop_cipher"] = shop_cipher
+    query_params["sign"] = build_tiktok_sign(
+        path=IMAGE_UPLOAD_PATH,
+        query_params=query_params,
+        body="",
+        app_secret=app_secret,
+    )
+    query_params["access_token"] = access_token
+    url = f"{base_url.rstrip('/')}{IMAGE_UPLOAD_PATH}?{urlencode(query_params)}"
+    content_type = "image/jpeg"
+    if file_name.lower().endswith(".png"):
+        content_type = "image/png"
+    elif file_name.lower().endswith(".webp"):
+        content_type = "image/webp"
+    response = client.post(
+        url,
+        files={"data": (file_name, image_data, content_type)},
+        headers={"x-tts-access-token": access_token},
+    )
+    response.raise_for_status()
+    payload = response.json()
+    raise_for_tiktok_error(payload, path=IMAGE_UPLOAD_PATH)
+    data = extract_tiktok_data(payload)
+    uri = data.get("uri") or data.get("url") or ""
+    if not uri:
+        raise RuntimeError("TikTok image upload did not return a URI")
+    return str(uri).strip()
+
+
+def create_tiktok_product(
+    client: httpx.Client,
+    *,
+    base_url: str,
+    app_key: str,
+    app_secret: str,
+    access_token: str,
+    shop_id: str,
+    shop_cipher: str,
+    product_body: dict[str, Any],
+) -> dict[str, Any]:
+    url, body_json, headers = build_tiktok_request(
+        base_url=base_url,
+        path=PRODUCT_CREATE_PATH,
+        app_key=app_key,
+        app_secret=app_secret,
+        shop_id=shop_id,
+        shop_cipher=shop_cipher,
+        access_token=access_token,
+        body=product_body,
+    )
+    payload = request_json(client, method="POST", url=url, raw_body=body_json, extra_headers=headers)
+    raise_for_tiktok_error(payload, path=PRODUCT_CREATE_PATH)
+    return extract_tiktok_data(payload)
+
+
+def edit_tiktok_product(
+    client: httpx.Client,
+    *,
+    base_url: str,
+    app_key: str,
+    app_secret: str,
+    access_token: str,
+    shop_id: str,
+    shop_cipher: str,
+    product_id: str,
+    product_body: dict[str, Any],
+) -> dict[str, Any]:
+    path = f"{PRODUCT_EDIT_PATH}/{product_id}"
+    url, body_json, headers = build_tiktok_request(
+        base_url=base_url,
+        path=path,
+        app_key=app_key,
+        app_secret=app_secret,
+        shop_id=shop_id,
+        shop_cipher=shop_cipher,
+        access_token=access_token,
+        body=product_body,
+    )
+    payload = request_json(client, method="PUT", url=url, raw_body=body_json, extra_headers=headers)
+    raise_for_tiktok_error(payload, path=path)
+    return extract_tiktok_data(payload)
+
+
+def fetch_tiktok_product_detail(
+    client: httpx.Client,
+    *,
+    base_url: str,
+    app_key: str,
+    app_secret: str,
+    access_token: str,
+    shop_id: str,
+    shop_cipher: str,
+    product_id: str,
+) -> dict[str, Any]:
+    path = f"{PRODUCT_DETAIL_PATH}/{product_id}"
+    url, body_json, headers = build_tiktok_request(
+        base_url=base_url,
+        path=path,
+        app_key=app_key,
+        app_secret=app_secret,
+        shop_id=shop_id,
+        shop_cipher=shop_cipher,
+        access_token=access_token,
+        body=None,
+    )
+    payload = request_json(client, method="GET", url=url, extra_headers=headers)
+    raise_for_tiktok_error(payload, path=path)
+    return extract_tiktok_data(payload)
+
+
 def backfill_tiktok_orders(
     session: Session,
     *,
@@ -757,7 +1525,17 @@ def backfill_tiktok_orders(
                     else:
                         summary.updated += 1
                     if not dry_run:
-                        session.commit()
+                        _commit_retry_delay = 0.4
+                        for _commit_attempt in range(4):
+                            try:
+                                session.commit()
+                                break
+                            except Exception as _commit_exc:
+                                if is_sqlite_lock_error(_commit_exc) and _commit_attempt < 3:
+                                    time.sleep(_commit_retry_delay)
+                                    _commit_retry_delay *= 2
+                                    continue
+                                raise
                     elif session.in_transaction():
                         session.rollback()
                 except Exception as exc:
@@ -937,21 +1715,36 @@ def main() -> int:
                 "Missing TikTok access token. Set TIKTOK_ACCESS_TOKEN, pass --access-token, or exchange a fresh auth code with --auth-code."
             )
 
-        summary = backfill_tiktok_orders(
-            session,
-            base_url=base_url,
-            app_key=app_key,
-            app_secret=app_secret,
-            access_token=access_token,
-            shop_id=shop_id,
-            shop_cipher=shop_cipher,
-            since=since,
-            limit=args.limit,
-            dry_run=args.dry_run,
-        )
+        if args.products:
+            summary = backfill_tiktok_products(
+                session,
+                base_url=base_url,
+                app_key=app_key,
+                app_secret=app_secret,
+                access_token=access_token,
+                shop_id=shop_id,
+                shop_cipher=shop_cipher,
+                limit=args.limit,
+                dry_run=args.dry_run,
+            )
+            label = "TikTok product sync summary"
+        else:
+            summary = backfill_tiktok_orders(
+                session,
+                base_url=base_url,
+                app_key=app_key,
+                app_secret=app_secret,
+                access_token=access_token,
+                shop_id=shop_id,
+                shop_cipher=shop_cipher,
+                since=since,
+                limit=args.limit,
+                dry_run=args.dry_run,
+            )
+            label = "TikTok backfill summary"
 
     print(
-        "TikTok backfill summary: "
+        f"{label}: "
         f"fetched={summary.fetched}, "
         f"inserted={summary.inserted}, "
         f"updated={summary.updated}, "

@@ -11,3 +11,4 @@ itsdangerous
 jinja2
 python-multipart
 psycopg[binary]
+tiksync

@@ -373,6 +373,9 @@ class TikTokAuth(SQLModel, table=True):
     received_at: Optional[datetime] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=utcnow, index=True)
     updated_at: datetime = Field(default_factory=utcnow, index=True)
+    creator_access_token: Optional[str] = Field(default=None)
+    creator_refresh_token: Optional[str] = Field(default=None)
+    creator_token_expires_at: Optional[datetime] = Field(default=None)
 
 
 class TikTokOrder(SQLModel, table=True):
@@ -401,6 +404,33 @@ class TikTokOrder(SQLModel, table=True):
     raw_payload: str = "{}"
     source: str = Field(default="webhook", index=True)
     received_at: datetime = Field(default_factory=utcnow, index=True)
+
+
+class TikTokProduct(SQLModel, table=True):
+    __tablename__ = "tiktok_products"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    tiktok_product_id: str = Field(index=True, unique=True)
+    shop_id: Optional[str] = Field(default=None, index=True)
+    shop_cipher: Optional[str] = Field(default=None, index=True)
+    title: str = Field(index=True)
+    description: Optional[str] = None
+    status: Optional[str] = Field(default=None, index=True)
+    audit_status: Optional[str] = Field(default=None, index=True)
+    category_id: Optional[str] = Field(default=None, index=True)
+    category_name: Optional[str] = None
+    brand_id: Optional[str] = None
+    brand_name: Optional[str] = None
+    main_image_url: Optional[str] = None
+    images_json: str = "[]"
+    skus_json: str = "[]"
+    sales_attributes_json: str = "[]"
+    product_attributes_json: str = "[]"
+    raw_payload: str = "{}"
+    source: str = Field(default="sync", index=True)
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+    updated_at: datetime = Field(default_factory=utcnow, index=True)
+    synced_at: datetime = Field(default_factory=utcnow, index=True)
 
 
 class User(SQLModel, table=True):
@@ -449,3 +479,9 @@ class OperationsLog(SQLModel, table=True):
     message: str
     details_json: str = "{}"
     created_at: datetime = Field(default_factory=utcnow, index=True)
+
+
+class AppSetting(SQLModel, table=True):
+    __tablename__ = "app_settings"
+    key: str = Field(primary_key=True)
+    value: str = Field(default="")

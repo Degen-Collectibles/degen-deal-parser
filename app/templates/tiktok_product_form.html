@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&amp;display=swap" rel="stylesheet">
+    <title>{{ title }}</title>
+    <style>
+        :root { --bg:#f4ebdf; --bg-deep:#ead8c0; --card:#fff9f2; --card-strong:#fffdf8; --line:#deccb6; --text:#24170f; --muted:#6b5849; --accent:#d55338; --accent-strong:#9f311d; --shadow:0 20px 44px rgba(77,46,20,.13); --green:#166647; --green-bg:#edf9f2; --yellow:#8a580d; --yellow-bg:#fff5df; --red:#9d2f2b; --red-bg:#fff0ef; --blue:#30548c; --blue-bg:#e7f0ff; --grey:#5d6a77; --grey-bg:#edf1f5; }
+        * { box-sizing:border-box; }
+        html { scroll-behavior: smooth; }
+        body { margin:0; font-family:"Inter", -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif; -webkit-font-smoothing: antialiased; color:var(--text); background:radial-gradient(circle at top left, rgba(240,196,107,.26), transparent 24%), radial-gradient(circle at 84% 10%, rgba(213,83,56,.10), transparent 18%), linear-gradient(180deg,#fcf7f0 0%, var(--bg) 46%, var(--bg-deep) 100%); }
+        a { color:inherit; text-decoration:none; }
+        .page { max-width:900px; margin:0 auto; padding: 28px 28px 60px; }
+        .card { background:linear-gradient(180deg, var(--card-strong), var(--card)); border:1px solid var(--line); border-radius:24px; box-shadow:var(--shadow); padding:24px; margin-bottom:18px; }
+        .banner { padding:12px 16px; border-radius:14px; margin-bottom:16px; font-weight:700; border:1px solid; }
+        .banner-error { background:#fff0ef; border-color:#efb8b4; color:#9d2f2b; }
+        h1 { margin:10px 0 18px; font-size:32px; letter-spacing:-.04em; font-weight:800; color:var(--text); }
+        .section-title { margin:0 0 14px; font-size:20px; letter-spacing:-.03em; font-weight:800; color:var(--text); }
+        p, .subtle { color:var(--muted); }
+        .subtle { font-size:12px; line-height:1.5; }
+        .button, button { appearance:none; border:none; border-radius:16px; padding:12px 18px; font:inherit; font-weight:800; cursor:pointer; transition:transform .15s ease; }
+        .button:hover, button:hover { transform:translateY(-1px); }
+        .primary-button { background:linear-gradient(135deg,var(--accent-strong),#df623f 55%, #f0875e); color:#fff; box-shadow:0 14px 24px rgba(159,49,29,.24); }
+        .secondary-button { background:linear-gradient(180deg,#fffdfa,#fff4e8); color:var(--text); border:1px solid var(--line); }
+        .outline-button { background:transparent; color:var(--muted); border:1px dashed var(--line); }
+        label { display:block; font-size:12px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; margin-bottom:6px; }
+        input, select, textarea { width:100%; padding:10px 12px; border-radius:12px; border:1px solid var(--line); background:#fff; color:var(--text); font:inherit; }
+        textarea { min-height:100px; resize:vertical; }
+        .form-group { margin-bottom:16px; }
+        .form-row { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+        .form-row-3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:14px; }
+        .actions { display:flex; gap:12px; margin-top:20px; }
+        .category-cascade { display:flex; gap:10px; flex-wrap:wrap; align-items:end; }
+        .category-cascade select { width:auto; min-width:180px; }
+        .drop-zone { border:2px dashed var(--line); border-radius:16px; padding:28px; text-align:center; color:var(--muted); cursor:pointer; transition: border-color .2s, background .2s; }
+        .drop-zone:hover, .drop-zone.drag-over { border-color:var(--accent); background:rgba(213,83,56,.04); }
+        .image-previews { display:flex; gap:10px; flex-wrap:wrap; margin-top:12px; }
+        .image-preview { width:80px; height:80px; border-radius:12px; object-fit:cover; border:1px solid var(--line); }
+        .image-preview-wrap { position:relative; }
+        .image-remove { position:absolute; top:-6px; right:-6px; width:20px; height:20px; border-radius:50%; background:var(--red); color:#fff; font-size:12px; font-weight:900; display:flex; align-items:center; justify-content:center; cursor:pointer; border:none; padding:0; }
+        .sku-row { display:grid; grid-template-columns:1fr 100px 100px auto; gap:10px; align-items:end; margin-bottom:10px; padding:12px; border:1px solid var(--line); border-radius:14px; background:#fff; }
+        .loading-spinner { display:inline-block; width:16px; height:16px; border:2px solid var(--line); border-top-color:var(--accent); border-radius:50%; animation: spin .6s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes card-in { from { opacity:0; transform:translateY(16px) scale(.985); } to { opacity:1; transform:none; } }
+        .card { animation: card-in .5s cubic-bezier(.22,1,.36,1) both; }
+        @media (max-width:700px) { .form-row,.form-row-3,.sku-row { grid-template-columns:1fr; } .page { padding:16px 14px 28px; } }
+    </style>
+    <link rel="stylesheet" href="/static/courtyard-theme.css?v=3">
+</head>
+<body>
+    <div class="page">
+        {% include "_workspace_nav.html" %}
+
+        {% if request.query_params.get("error") %}
+        <div class="banner banner-error">{{ request.query_params.get("error") }}</div>
+        {% endif %}
+
+        <h1>{{ title }}</h1>
+
+        <form method="post" action="/tiktok/products/create" id="product-form">
+
+        <div class="card">
+            <h2 class="section-title">Category</h2>
+            <div class="subtle" style="margin-bottom:12px;">Select a leaf category from TikTok's catalog. Type to search or browse the tree.</div>
+            <div class="form-group">
+                <label>Search categories</label>
+                <div style="display:flex; gap:10px;">
+                    <input type="text" id="category-search" placeholder="e.g. Trading Cards, Collectibles">
+                    <button type="button" class="secondary-button" id="category-search-btn" style="white-space:nowrap;">Search</button>
+                </div>
+            </div>
+            <div id="category-results" style="margin-bottom:12px;"></div>
+            <input type="hidden" name="category_id" id="category-id-input" value="">
+            <div id="selected-category" class="subtle" style="font-weight:700; color:var(--green);"></div>
+        </div>
+
+        <div class="card">
+            <h2 class="section-title">Basic Info</h2>
+            <div class="form-group">
+                <label>Product Title *</label>
+                <input type="text" name="title" required maxlength="255" placeholder="e.g. 2024 Panini Prizm Football Blaster Box">
+            </div>
+            <div class="form-group">
+                <label>Description</label>
+                <textarea name="description" placeholder="Describe the product..."></textarea>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Brand (optional)</label>
+                    <div style="display:flex; gap:10px;">
+                        <input type="text" id="brand-search" placeholder="Search brands...">
+                        <button type="button" class="secondary-button" id="brand-search-btn" style="white-space:nowrap;">Search</button>
+                    </div>
+                    <div id="brand-results" style="margin-top:6px;"></div>
+                    <input type="hidden" name="brand_id" id="brand-id-input" value="">
+                    <div id="selected-brand" class="subtle" style="font-weight:700; color:var(--green); margin-top:4px;"></div>
+                </div>
+                <div class="form-group">
+                    <label>Seller SKU</label>
+                    <input type="text" name="seller_sku" placeholder="Your internal SKU">
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2 class="section-title">Images</h2>
+            <div class="subtle" style="margin-bottom:12px;">Upload 1-10 product images. Images are uploaded to TikTok immediately. JPEG/PNG, max 5MB each.</div>
+            <div class="drop-zone" id="drop-zone">
+                Click or drag images here to upload
+                <input type="file" id="image-input" accept="image/jpeg,image/png,image/webp" multiple style="display:none;">
+            </div>
+            <div class="image-previews" id="image-previews"></div>
+            <input type="hidden" name="image_uris" id="image-uris-input" value="">
+        </div>
+
+        <div class="card">
+            <h2 class="section-title">Pricing &amp; Inventory</h2>
+            <div class="subtle" style="margin-bottom:12px;">Set price and stock. For simple products with one variant, fill in below. For multi-variant products, add SKU rows.</div>
+            <div class="form-row-3">
+                <div class="form-group">
+                    <label>Price (USD) *</label>
+                    <input type="number" name="price" step="0.01" min="0" required placeholder="29.99">
+                </div>
+                <div class="form-group">
+                    <label>Inventory</label>
+                    <input type="number" name="inventory" min="0" value="0" placeholder="100">
+                </div>
+                <div></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2 class="section-title">Submit</h2>
+            <div class="actions">
+                <button type="submit" class="primary-button" name="save_as_draft" value="0">Publish Product</button>
+                <button type="submit" class="secondary-button" name="save_as_draft" value="1">Save as Draft</button>
+                <a href="/tiktok/products" class="button outline-button">Cancel</a>
+            </div>
+        </div>
+
+        </form>
+    </div>
+
+    <script>
+    (function() {
+        var imageUris = [];
+        var imageUrisInput = document.getElementById('image-uris-input');
+        var previews = document.getElementById('image-previews');
+        var dropZone = document.getElementById('drop-zone');
+        var fileInput = document.getElementById('image-input');
+
+        function updateImageUrisInput() {
+            imageUrisInput.value = imageUris.join(',');
+        }
+
+        dropZone.addEventListener('click', function() { fileInput.click(); });
+        dropZone.addEventListener('dragover', function(e) { e.preventDefault(); dropZone.classList.add('drag-over'); });
+        dropZone.addEventListener('dragleave', function() { dropZone.classList.remove('drag-over'); });
+        dropZone.addEventListener('drop', function(e) {
+            e.preventDefault();
+            dropZone.classList.remove('drag-over');
+            handleFiles(e.dataTransfer.files);
+        });
+        fileInput.addEventListener('change', function() { handleFiles(fileInput.files); fileInput.value = ''; });
+
+        function handleFiles(files) {
+            for (var i = 0; i < files.length; i++) {
+                if (imageUris.length >= 10) break;
+                uploadImage(files[i]);
+            }
+        }
+
+        function uploadImage(file) {
+            var idx = imageUris.length;
+            var wrap = document.createElement('div');
+            wrap.className = 'image-preview-wrap';
+            wrap.innerHTML = '<div class="loading-spinner" style="width:80px;height:80px;display:flex;align-items:center;justify-content:center;"></div>';
+            previews.appendChild(wrap);
+
+            var fd = new FormData();
+            fd.append('file', file);
+            fetch('/tiktok/products/upload-image', { method: 'POST', body: fd })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data.error) {
+                        wrap.remove();
+                        alert('Upload failed: ' + data.error);
+                        return;
+                    }
+                    imageUris.push(data.uri);
+                    updateImageUrisInput();
+                    var localUrl = URL.createObjectURL(file);
+                    wrap.innerHTML = '<img class="image-preview" src="' + localUrl + '">' +
+                        '<button type="button" class="image-remove" data-idx="' + (imageUris.length - 1) + '">&times;</button>';
+                    wrap.querySelector('.image-remove').addEventListener('click', function() {
+                        var removeIdx = parseInt(this.getAttribute('data-idx'));
+                        imageUris.splice(removeIdx, 1);
+                        updateImageUrisInput();
+                        wrap.remove();
+                    });
+                })
+                .catch(function(err) {
+                    wrap.remove();
+                    alert('Upload failed: ' + err.message);
+                });
+        }
+
+        // Category search
+        var catSearchInput = document.getElementById('category-search');
+        var catSearchBtn = document.getElementById('category-search-btn');
+        var catResults = document.getElementById('category-results');
+        var catIdInput = document.getElementById('category-id-input');
+        var selectedCatEl = document.getElementById('selected-category');
+
+        catSearchBtn.addEventListener('click', searchCategories);
+        catSearchInput.addEventListener('keypress', function(e) { if (e.key === 'Enter') { e.preventDefault(); searchCategories(); } });
+
+        function searchCategories() {
+            var keyword = catSearchInput.value.trim();
+            if (!keyword) return;
+            catResults.innerHTML = '<span class="loading-spinner"></span> Searching...';
+            fetch('/tiktok/products/categories?keyword=' + encodeURIComponent(keyword))
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data.error) { catResults.textContent = data.error; return; }
+                    var cats = data.categories || [];
+                    if (!cats.length) { catResults.textContent = 'No categories found.'; return; }
+                    var html = '<div style="max-height:240px; overflow-y:auto; border:1px solid var(--line); border-radius:12px; background:#fff;">';
+                    for (var i = 0; i < cats.length; i++) {
+                        var c = cats[i];
+                        var name = c.local_name || c.name || c.id;
+                        var isLeaf = c.is_leaf ? ' [leaf]' : '';
+                        var disabled = c.is_leaf ? '' : ' style="color:var(--muted);"';
+                        html += '<div style="padding:8px 12px; border-bottom:1px solid var(--line); cursor:pointer; font-size:13px;"' + disabled + ' data-cat-id="' + c.id + '" data-cat-name="' + name + '" data-leaf="' + (c.is_leaf ? '1' : '0') + '" class="cat-option">' + name + isLeaf + '</div>';
+                    }
+                    html += '</div>';
+                    catResults.innerHTML = html;
+                    catResults.querySelectorAll('.cat-option').forEach(function(el) {
+                        el.addEventListener('click', function() {
+                            if (this.getAttribute('data-leaf') !== '1') {
+                                alert('Please select a leaf category.');
+                                return;
+                            }
+                            catIdInput.value = this.getAttribute('data-cat-id');
+                            selectedCatEl.textContent = 'Selected: ' + this.getAttribute('data-cat-name') + ' (' + this.getAttribute('data-cat-id') + ')';
+                            catResults.innerHTML = '';
+                        });
+                    });
+                })
+                .catch(function(err) { catResults.textContent = 'Error: ' + err.message; });
+        }
+
+        // Brand search
+        var brandSearchInput = document.getElementById('brand-search');
+        var brandSearchBtn = document.getElementById('brand-search-btn');
+        var brandResults = document.getElementById('brand-results');
+        var brandIdInput = document.getElementById('brand-id-input');
+        var selectedBrandEl = document.getElementById('selected-brand');
+
+        brandSearchBtn.addEventListener('click', searchBrands);
+        brandSearchInput.addEventListener('keypress', function(e) { if (e.key === 'Enter') { e.preventDefault(); searchBrands(); } });
+
+        function searchBrands() {
+            var keyword = brandSearchInput.value.trim();
+            if (!keyword) return;
+            brandResults.innerHTML = '<span class="loading-spinner"></span>';
+            var catId = catIdInput.value;
+            var url = '/tiktok/products/brands?brand_name=' + encodeURIComponent(keyword);
+            if (catId) url += '&category_id=' + encodeURIComponent(catId);
+            fetch(url)
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data.error) { brandResults.textContent = data.error; return; }
+                    var brands = data.brands || [];
+                    if (!brands.length) { brandResults.textContent = 'No brands found.'; return; }
+                    var html = '<div style="max-height:180px; overflow-y:auto; border:1px solid var(--line); border-radius:10px; background:#fff;">';
+                    for (var i = 0; i < brands.length; i++) {
+                        var b = brands[i];
+                        html += '<div style="padding:6px 10px; border-bottom:1px solid var(--line); cursor:pointer; font-size:13px;" data-brand-id="' + b.id + '" data-brand-name="' + (b.name || b.id) + '" class="brand-option">' + (b.name || b.id) + '</div>';
+                    }
+                    html += '</div>';
+                    brandResults.innerHTML = html;
+                    brandResults.querySelectorAll('.brand-option').forEach(function(el) {
+                        el.addEventListener('click', function() {
+                            brandIdInput.value = this.getAttribute('data-brand-id');
+                            selectedBrandEl.textContent = 'Selected: ' + this.getAttribute('data-brand-name');
+                            brandResults.innerHTML = '';
+                        });
+                    });
+                })
+                .catch(function(err) { brandResults.textContent = 'Error: ' + err.message; });
+        }
+    })();
+    </script>
+</body>
+</html>

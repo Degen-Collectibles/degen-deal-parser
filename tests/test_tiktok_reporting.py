@@ -418,7 +418,7 @@ class TikTokRegressionTests(unittest.TestCase):
         update_tiktok_integration_state.assert_called_once()
         self.assertEqual(update_tiktok_integration_state.call_args.kwargs["last_error"], "Missing authorization code")
 
-    def test_tiktok_webhook_missing_secret_returns_400_and_records_error(self) -> None:
+    def test_tiktok_webhook_missing_secret_accepts_with_unverified_signature(self) -> None:
         body = json.dumps({"order_id": "tt-1", "status": "PAID"}).encode("utf-8")
         request = FakeTikTokRequest(
             "/webhooks/tiktok/orders",
@@ -426,17 +426,22 @@ class TikTokRegressionTests(unittest.TestCase):
             body=body,
         )
 
-        with patch.object(main_module.settings, "tiktok_webhook_secret", ""), patch.object(
-            main_module.settings, "tiktok_app_secret", ""
+        with patch.object(main_module.settings, "tiktok_app_secret", ""), patch.object(
+            main_module.settings, "tiktok_shop_id", ""
+        ), patch.object(
+            main_module,
+            "run_write_with_retry",
+            return_value=("inserted", {"tiktok_order_id": "tt-1", "shop_id": ""}),
+        ), patch.object(
+            main_module, "_start_tiktok_webhook_enrichment",
+        ), patch.object(
+            main_module, "_fetch_tiktok_order_details", object(),
         ), patch.object(
             main_module, "update_tiktok_integration_state"
         ) as update_tiktok_integration_state:
-            with self.assertRaises(HTTPException) as ctx:
-                asyncio.run(main_module.tiktok_orders_webhook(request))
+            response = asyncio.run(main_module.tiktok_orders_webhook(request))
 
-        self.assertEqual(ctx.exception.status_code, 400)
-        update_tiktok_integration_state.assert_called_once()
-        self.assertIn("secret is not configured", update_tiktok_integration_state.call_args.kwargs["last_error"])
+        self.assertEqual(response.status_code, 200)
 
     def test_tiktok_webhook_uses_app_secret_when_webhook_secret_is_blank(self) -> None:
         secret = "app-secret"
@@ -457,9 +462,7 @@ class TikTokRegressionTests(unittest.TestCase):
             body=body,
         )
 
-        with patch.object(main_module.settings, "tiktok_webhook_secret", ""), patch.object(
-            main_module.settings, "tiktok_app_secret", secret
-        ), patch.object(
+        with patch.object(main_module.settings, "tiktok_app_secret", secret), patch.object(
             main_module,
             "run_write_with_retry",
             return_value=("inserted", {"tiktok_order_id": "tt-3", "shop_id": "shop-1"}),
@@ -480,7 +483,7 @@ class TikTokRegressionTests(unittest.TestCase):
         update_tiktok_integration_state.assert_called_once()
 
     def test_tiktok_webhook_accepts_signed_json_and_stubs_background_enrichment(self) -> None:
-        secret = "webhook-secret"
+        secret = "app-secret"
         timestamp = "1710000000"
         body = json.dumps({"order_id": "tt-2", "status": "PAID"}).encode("utf-8")
         signature = hmac.new(
@@ -498,7 +501,7 @@ class TikTokRegressionTests(unittest.TestCase):
             body=body,
         )
 
-        with patch.object(main_module.settings, "tiktok_webhook_secret", secret), patch.object(
+        with patch.object(main_module.settings, "tiktok_app_secret", secret), patch.object(
             main_module,
             "run_write_with_retry",
             return_value=("updated", {"tiktok_order_id": "tt-2", "shop_id": "shop-1"}),
@@ -527,7 +530,7 @@ class TikTokRegressionTests(unittest.TestCase):
             body=b"not-json",
         )
 
-        with patch.object(main_module.settings, "tiktok_webhook_secret", "configured-secret"), patch.object(
+        with patch.object(main_module.settings, "tiktok_app_secret", "configured-secret"), patch.object(
             main_module, "update_tiktok_integration_state"
         ) as update_tiktok_integration_state:
             with self.assertRaises(HTTPException) as ctx:

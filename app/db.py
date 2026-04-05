@@ -151,6 +151,9 @@ SQLITE_ADDITIVE_MIGRATIONS = {
         "received_at": "TIMESTAMP",
         "created_at": "TIMESTAMP",
         "updated_at": "TIMESTAMP",
+        "creator_access_token": "TEXT",
+        "creator_refresh_token": "TEXT",
+        "creator_token_expires_at": "TIMESTAMP",
     },
     TIKTOK_ORDERS_TABLE: {
         "shop_id": "TEXT",
@@ -243,6 +246,9 @@ POSTGRES_ADDITIVE_MIGRATIONS = {
         "received_at": "TIMESTAMP",
         "created_at": "TIMESTAMP",
         "updated_at": "TIMESTAMP",
+        "creator_access_token": "TEXT",
+        "creator_refresh_token": "TEXT",
+        "creator_token_expires_at": "TIMESTAMP",
     },
     TIKTOK_ORDERS_TABLE: {
         "shop_id": "TEXT",
@@ -636,22 +642,29 @@ def is_sqlite_lock_error(exc: Exception) -> bool:
 
 @contextmanager
 def managed_session():
-    attempts = 1 if database_url.startswith("sqlite") else 5
-    delay_seconds = 0.75
+    sqlite_mode = database_url.startswith("sqlite")
+    attempts = 3 if sqlite_mode else 5
+    delay_seconds = 0.5 if sqlite_mode else 0.75
     if is_postgres_database_url(database_url) and recent_db_failure():
         raise OperationalError("Database circuit open", None, None)
 
     for attempt in range(1, attempts + 1):
         session = Session(engine)
         try:
-            if not database_url.startswith("sqlite"):
+            if not sqlite_mode:
                 session.exec(text("SELECT 1"))
             clear_db_failure()
             yield session
             return
-        except OperationalError:
-            mark_db_failure()
-            dispose_engine()
+        except OperationalError as exc:
+            if sqlite_mode and is_sqlite_lock_error(exc) and attempt < attempts:
+                session.close()
+                time.sleep(delay_seconds)
+                delay_seconds *= 2
+                continue
+            if not sqlite_mode:
+                mark_db_failure()
+                dispose_engine()
             if attempt >= attempts:
                 raise
             time.sleep(delay_seconds)

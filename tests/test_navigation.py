@@ -84,6 +84,7 @@ class NavigationValidationTests(unittest.TestCase):
             ('href="/dashboard">Dashboard<'),
             ('href="/review">Review<'),
             ('href="/deals">Deals<'),
+            ('href="/finance">Finance<'),
             ('href="/reports">Reports<'),
             ('href="/bookkeeping">Bookkeeping<'),
             ('href="/shopify/orders">Shopify Orders<'),
@@ -98,6 +99,15 @@ class NavigationValidationTests(unittest.TestCase):
             self.assertIn(expected, source)
 
         self.assertNotIn('href="/review-table"', source)
+
+    def test_admin_role_home_redirects_to_dashboard(self) -> None:
+        self.assertEqual(main_module.app_home_for_role("admin"), "/dashboard")
+        self.assertEqual(main_module.app_home_for_role("owner"), "/dashboard")
+
+        with patch("app.main.get_request_user", return_value=SimpleNamespace(role="admin")):
+            response = main_module.login_page(make_request("/login"))
+            self.assertEqual(response.status_code, 303)
+            self.assertEqual(response.headers.get("location"), "/dashboard")
 
     def test_operator_view_badge_is_present_on_operator_templates(self) -> None:
         operator_templates = {
@@ -165,7 +175,8 @@ class NavigationValidationTests(unittest.TestCase):
         status_source = read_template("status.html")
         admin_source = read_template("admin_home.html")
 
-        self.assertIn('<a class="shared-nav-home" href="/dashboard">', nav_source)
+        self.assertIn('href="/dashboard" aria-label="Open dashboard"', nav_source)
+        self.assertIn('class="streamer-title-wrap" href="/dashboard"', nav_source)
         self.assertIn('href="/dashboard">&larr; Dashboard<', status_source)
         self.assertIn('href="/dashboard">&larr; Dashboard<', admin_source)
 
@@ -263,6 +274,16 @@ class NavigationValidationTests(unittest.TestCase):
                         channel_id=None,
                         entry_kind=None,
                         source=main_module.REPORT_SOURCE_ALL,
+                        session=session,
+                    ),
+                ),
+                (
+                    "/finance",
+                    lambda request: main_module.finance_page(
+                        request,
+                        start=None,
+                        end=None,
+                        window=main_module.FINANCE_WINDOW_MTD,
                         session=session,
                     ),
                 ),

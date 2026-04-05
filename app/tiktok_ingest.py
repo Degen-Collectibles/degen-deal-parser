@@ -809,31 +809,73 @@ def parse_tiktok_webhook_headers(headers: Any) -> dict[str, Optional[str]]:
     return normalized_headers
 
 
+def _build_webhook_signature_candidates(
+    *,
+    raw_body: bytes,
+    app_secret: str,
+    received_timestamp: Optional[str] = None,
+    request_path: Optional[str] = None,
+) -> list[tuple[str, str]]:
+    """Return (label, hex_signature) pairs for every plausible signing method."""
+    secret = (app_secret or "").strip()
+    if not secret:
+        return []
+    secret_bytes = secret.encode("utf-8")
+    body_text = raw_body.decode("utf-8", errors="ignore")
+    path = (request_path or "").strip()
+    ts = (received_timestamp or "").strip()
+
+    candidates: list[tuple[str, bytes]] = []
+
+    # --- HMAC-based candidates ---
+    candidates.append(("hmac(body)", raw_body))
+    if ts:
+        candidates.append(("hmac(ts.body)", f"{ts}.{body_text}".encode("utf-8")))
+        candidates.append(("hmac(ts+body)", f"{ts}{body_text}".encode("utf-8")))
+    candidates.append(("hmac(s+body+s)", f"{secret}{body_text}{secret}".encode("utf-8")))
+    if path:
+        candidates.append(("hmac(s+path+body+s)", f"{secret}{path}{body_text}{secret}".encode("utf-8")))
+    if ts and path:
+        candidates.append(("hmac(s+path+ts+body+s)", f"{secret}{path}{ts}{body_text}{secret}".encode("utf-8")))
+
+    results: list[tuple[str, str]] = []
+    for label, payload in candidates:
+        digest = hmac.new(secret_bytes, payload, hashlib.sha256).hexdigest()
+        results.append((label, digest))
+
+    # --- Plain SHA256 (non-HMAC) candidates ---
+    sha_candidates: list[tuple[str, bytes]] = [
+        ("sha256(s+body)", f"{secret}{body_text}".encode("utf-8")),
+        ("sha256(body+s)", f"{body_text}{secret}".encode("utf-8")),
+        ("sha256(s+body+s)", f"{secret}{body_text}{secret}".encode("utf-8")),
+    ]
+    if path:
+        sha_candidates.append(("sha256(s+path+body+s)", f"{secret}{path}{body_text}{secret}".encode("utf-8")))
+    for label, payload in sha_candidates:
+        results.append((label, hashlib.sha256(payload).hexdigest()))
+
+    return results
+
+
 def verify_tiktok_webhook_signature(
     *,
     raw_body: bytes,
     app_secret: str,
     received_signature: Optional[str] = None,
     received_timestamp: Optional[str] = None,
+    request_path: Optional[str] = None,
 ) -> bool:
-    normalized_secret = (app_secret or "").strip()
     normalized_signature = (received_signature or "").strip()
-    if not normalized_secret or not normalized_signature:
+    if not normalized_signature:
         return False
 
-    candidate_payloads: list[bytes] = [raw_body]
-    if received_timestamp:
-        raw_body_text = raw_body.decode("utf-8", errors="ignore")
-        candidate_payloads.append(f"{received_timestamp}.{raw_body_text}".encode("utf-8"))
-        candidate_payloads.append(f"{received_timestamp}{raw_body_text}".encode("utf-8"))
-
-    expected_signatures: set[str] = set()
-    for candidate_payload in candidate_payloads:
-        digest = hmac.new(normalized_secret.encode("utf-8"), candidate_payload, hashlib.sha256).digest()
-        expected_signatures.add(digest.hex())
-        expected_signatures.add(base64.b64encode(digest).decode("utf-8"))
-
-    return any(hmac.compare_digest(normalized_signature, expected) for expected in expected_signatures)
+    candidates = _build_webhook_signature_candidates(
+        raw_body=raw_body,
+        app_secret=app_secret,
+        received_timestamp=received_timestamp,
+        request_path=request_path,
+    )
+    return any(hmac.compare_digest(normalized_signature, sig) for _, sig in candidates)
 
 
 def parse_tiktok_webhook_payload(
@@ -841,15 +883,20 @@ def parse_tiktok_webhook_payload(
     *,
     app_secret: str,
     headers: Optional[MutableMapping[str, str]] = None,
+    request_path: Optional[str] = None,
+    strict_signature: bool = True,
 ) -> dict[str, Any]:
     normalized_secret = (app_secret or "").strip()
-    if not normalized_secret:
+    if not normalized_secret and strict_signature:
         raise TikTokIngestError("TikTok webhook secret is not configured")
 
     try:
         payload = json.loads(raw_body.decode("utf-8"))
     except json.JSONDecodeError as exc:
         raise TikTokIngestError(f"TikTok webhook payload was not valid JSON: {exc}") from exc
+
+    if not isinstance(payload, dict):
+        raise TikTokIngestError("TikTok webhook payload must be a JSON object")
 
     header_signature = None
     header_timestamp = None
@@ -860,24 +907,28 @@ def parse_tiktok_webhook_payload(
 
     payload_signature = None
     payload_timestamp = None
-    if isinstance(payload, dict):
-        payload_signature = str(_pick_first(payload, "signature", "sign") or "").strip() or None
-        payload_timestamp = str(_pick_first(payload, "timestamp", "ts") or "").strip() or None
+    payload_signature = str(_pick_first(payload, "signature", "sign") or "").strip() or None
+    payload_timestamp = str(_pick_first(payload, "timestamp", "ts") or "").strip() or None
 
     signature = header_signature or payload_signature
     timestamp = header_timestamp or payload_timestamp
-    if not signature:
-        raise TikTokIngestError("TikTok webhook signature is missing")
-    if not verify_tiktok_webhook_signature(
-        raw_body=raw_body,
-        app_secret=normalized_secret,
-        received_signature=signature,
-        received_timestamp=timestamp,
-    ):
+
+    sig_verified = False
+    if signature and normalized_secret:
+        sig_verified = verify_tiktok_webhook_signature(
+            raw_body=raw_body,
+            app_secret=normalized_secret,
+            received_signature=signature,
+            received_timestamp=timestamp,
+            request_path=request_path,
+        )
+
+    if not sig_verified and strict_signature:
+        if not signature:
+            raise TikTokIngestError("TikTok webhook signature is missing")
         raise TikTokIngestError("TikTok webhook signature verification failed")
 
-    if not isinstance(payload, dict):
-        raise TikTokIngestError("TikTok webhook payload must be a JSON object")
+    payload["_signature_verified"] = sig_verified
     return payload
 
 
@@ -896,6 +947,196 @@ def structured_tiktok_log_line(
         error=error,
         **fields,
     )
+
+
+def _extract_tiktok_product_payload(raw_payload: Any) -> dict[str, Any]:
+    payload = _safe_json_obj(raw_payload)
+    if not payload:
+        raise TikTokIngestError("TikTok product payload must be a JSON object")
+    for candidate in ("data", "product"):
+        nested = payload.get(candidate)
+        if isinstance(nested, dict):
+            return nested
+    return payload
+
+
+def _extract_product_skus(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_skus = payload.get("skus") or payload.get("sku_list") or payload.get("variants") or []
+    if not isinstance(raw_skus, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for sku in raw_skus:
+        if not isinstance(sku, dict):
+            continue
+        sku_id = str(_pick_first(sku, "id", "sku_id") or "").strip()
+        seller_sku = str(_pick_first(sku, "seller_sku", "outer_sku_id") or "").strip() or None
+        price_info = sku.get("price") or {}
+        if not isinstance(price_info, dict):
+            price_info = {}
+        price = money_to_float(
+            _pick_first(price_info, "sale_price", "original_price", "tax_exclusive_price")
+            or _pick_first(sku, "price", "sale_price", "original_price")
+        )
+        inventory_list = sku.get("inventory") or []
+        total_inventory = 0
+        if isinstance(inventory_list, list):
+            for inv in inventory_list:
+                if isinstance(inv, dict):
+                    total_inventory += int(inv.get("quantity") or 0)
+        elif isinstance(inventory_list, (int, float)):
+            total_inventory = int(inventory_list)
+        sales_attrs = sku.get("sales_attributes") or []
+        if not isinstance(sales_attrs, list):
+            sales_attrs = []
+        result.append({
+            "sku_id": sku_id,
+            "seller_sku": seller_sku,
+            "price": price,
+            "inventory": total_inventory,
+            "sales_attributes": [
+                {
+                    "id": str(a.get("id") or ""),
+                    "name": str(a.get("name") or ""),
+                    "value_id": str(a.get("value_id") or ""),
+                    "value_name": str(a.get("value_name") or ""),
+                }
+                for a in sales_attrs if isinstance(a, dict)
+            ],
+        })
+    return result
+
+
+def normalize_tiktok_product_payload(
+    raw_payload: Any,
+    *,
+    source: str = "sync",
+    received_at: Optional[datetime] = None,
+) -> dict[str, Any]:
+    payload = _extract_tiktok_product_payload(raw_payload)
+    product_id = _pick_first(payload, "id", "product_id")
+    if product_id in (None, ""):
+        raise TikTokIngestError("TikTok product payload is missing a product identifier")
+
+    images = payload.get("main_images") or payload.get("images") or []
+    if not isinstance(images, list):
+        images = []
+    image_urls = []
+    for img in images:
+        if isinstance(img, dict):
+            thumb_urls = img.get("thumb_urls") or img.get("urls") or []
+            if isinstance(thumb_urls, list) and thumb_urls:
+                url = str(thumb_urls[0]).strip()
+            else:
+                url = str(img.get("url") or img.get("uri") or img.get("thumb_url") or "").strip()
+            if url and url.startswith("http"):
+                image_urls.append(url)
+            elif url:
+                image_urls.append(f"https://p16-oec-general-useast5.ttcdn-us.com/{url}")
+        elif isinstance(img, str) and img.strip():
+            val = img.strip()
+            if val.startswith("http"):
+                image_urls.append(val)
+            else:
+                image_urls.append(f"https://p16-oec-general-useast5.ttcdn-us.com/{val}")
+    main_image_url = image_urls[0] if image_urls else None
+
+    category_chains = payload.get("category_chains") or []
+    category_id = None
+    category_name = None
+    if isinstance(category_chains, list) and category_chains:
+        last_chain = category_chains[-1] if isinstance(category_chains[-1], dict) else {}
+        cat_list = last_chain.get("categories") or last_chain.get("category_list") or []
+        if isinstance(cat_list, list) and cat_list:
+            leaf = cat_list[-1] if isinstance(cat_list[-1], dict) else {}
+            category_id = str(leaf.get("id") or "").strip() or None
+            category_name = str(leaf.get("local_name") or leaf.get("name") or "").strip() or None
+    if not category_id:
+        category_id = str(_pick_first(payload, "category_id") or "").strip() or None
+
+    brand = payload.get("brand") or {}
+    if not isinstance(brand, dict):
+        brand = {}
+
+    skus = _extract_product_skus(payload)
+    sales_attributes = payload.get("sales_attributes") or []
+    product_attributes = payload.get("product_attributes") or []
+
+    created_at = parse_tiktok_datetime(
+        _pick_first(payload, "create_time", "created_at", "created_time")
+    )
+    updated_at = parse_tiktok_datetime(
+        _pick_first(payload, "update_time", "updated_at", "updated_time")
+    ) or created_at or received_at or datetime.now(timezone.utc)
+
+    return {
+        "tiktok_product_id": str(product_id).strip(),
+        "title": str(_pick_first(payload, "title", "product_name", "name") or "").strip(),
+        "description": str(_pick_first(payload, "description", "product_description") or "").strip() or None,
+        "status": str(_pick_first(payload, "status") or "").strip() or None,
+        "audit_status": str(
+            _pick_first(payload, "audit.status", "audit_status") or ""
+        ).strip() or None,
+        "category_id": category_id,
+        "category_name": category_name,
+        "brand_id": str(brand.get("id") or "").strip() or None,
+        "brand_name": str(brand.get("name") or "").strip() or None,
+        "main_image_url": main_image_url,
+        "images_json": json_dumps(image_urls),
+        "skus_json": json_dumps(skus),
+        "sales_attributes_json": json_dumps(
+            sales_attributes if isinstance(sales_attributes, list) else []
+        ),
+        "product_attributes_json": json_dumps(
+            product_attributes if isinstance(product_attributes, list) else []
+        ),
+        "raw_payload": json_dumps(payload),
+        "source": source,
+        "shop_id": str(_pick_first(payload, "shop_id", "shopId") or "").strip() or None,
+        "shop_cipher": str(_pick_first(payload, "shop_cipher", "shopCipher") or "").strip() or None,
+        "created_at": created_at or received_at or datetime.now(timezone.utc),
+        "updated_at": updated_at,
+        "synced_at": received_at or datetime.now(timezone.utc),
+    }
+
+
+def upsert_tiktok_product(
+    session: Session,
+    product_model_type: type[Any],
+    product_record: dict[str, Any],
+    *,
+    lookup_field: str = "tiktok_product_id",
+    dry_run: bool = False,
+) -> str:
+    return upsert_model_row(
+        session,
+        product_model_type,
+        product_record,
+        lookup_field=lookup_field,
+        dry_run=dry_run,
+    )
+
+
+def upsert_tiktok_product_from_payload(
+    session: Session,
+    product_model_type: type[Any],
+    payload: Any,
+    *,
+    source: str = "sync",
+    received_at: Optional[datetime] = None,
+    dry_run: bool = False,
+) -> tuple[str, dict[str, Any]]:
+    product_record = normalize_tiktok_product_payload(
+        payload,
+        source=source,
+        received_at=received_at,
+    )
+    status = upsert_tiktok_product(
+        session,
+        product_model_type,
+        product_record,
+        dry_run=dry_run,
+    )
+    return status, product_record
 
 
 __all__ = [
@@ -931,6 +1172,10 @@ __all__ = [
     "upsert_tiktok_auth_from_callback",
     "upsert_tiktok_order",
     "upsert_tiktok_order_from_payload",
+    "upsert_tiktok_product",
+    "upsert_tiktok_product_from_payload",
+    "normalize_tiktok_product_payload",
     "validate_tiktok_api_response",
     "verify_tiktok_webhook_signature",
+    "_build_webhook_signature_candidates",
 ]

@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import mimetypes
 import json
 import logging
@@ -14,8 +15,9 @@ from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, select
 
 from .config import get_settings
-from .db import dispose_engine, managed_session
+from .db import dispose_engine, is_sqlite_lock_error, managed_session
 from .discord_ingest import get_discord_client, recover_attachment_assets_for_message, sync_attachment_assets
+from .display_media import extract_image_urls, parse_attachment_urls_json
 from .financials import compute_financials
 from .models import (
     AttachmentAsset,
@@ -126,15 +128,37 @@ def reset_for_reprocess(
         row.parse_attempts = 0
 
 
+def exhausted_retry_error(existing_error: str | None, *, reason: str) -> str:
+    existing = (existing_error or "").strip()
+    if not existing:
+        return reason
+    if existing.startswith(reason):
+        return existing
+    return f"{reason} Previous error: {existing}"
+
+
+def row_retry_limit_already_exhausted(row: DiscordMessage, *, reason: str) -> bool:
+    return (
+        canonical_status(row) == PARSE_FAILED
+        and (row.parse_attempts or 0) >= settings.parser_max_attempts
+        and ((row.last_error or "").strip().startswith(reason))
+    )
+
+
 def exhaust_retry_limit(session: Session, row: DiscordMessage, *, reason: str) -> None:
-    set_row_status(row, PARSE_FAILED, error=row.last_error or reason)
+    if row_retry_limit_already_exhausted(row, reason=reason):
+        session.add(row)
+        return
+
+    exhausted_error = exhausted_retry_error(row.last_error, reason=reason)
+    set_row_status(row, PARSE_FAILED, error=exhausted_error)
     session.add(row)
     worker_log(
         action="max_attempts_reached",
         row=row,
         level="warning",
         success=False,
-        error=row.last_error,
+        error=exhausted_error,
         session=session,
         parse_attempts=row.parse_attempts,
         max_attempts=settings.parser_max_attempts,
@@ -606,6 +630,95 @@ def clear_stale_group_members(
     return stale_rows
 
 
+def _attachment_asset_content_type(asset: AttachmentAsset) -> str:
+    if asset.content_type:
+        return asset.content_type.split(";", 1)[0].strip() or "application/octet-stream"
+    guessed_type, _ = mimetypes.guess_type(asset.filename or "")
+    return guessed_type or "application/octet-stream"
+
+
+def _attachment_asset_data_url(asset: AttachmentAsset) -> str | None:
+    if not asset.data:
+        return None
+    content_type = _attachment_asset_content_type(asset)
+    encoded = base64.b64encode(asset.data).decode("ascii")
+    return f"data:{content_type};base64,{encoded}"
+
+
+def _cached_parser_image_inputs(session: Session, group_rows: list[DiscordMessage]) -> list[str]:
+    row_ids = [row.id for row in group_rows if row.id is not None]
+    if not row_ids:
+        return []
+
+    image_assets = session.exec(
+        select(AttachmentAsset)
+        .where(AttachmentAsset.message_id.in_(row_ids))
+        .where(AttachmentAsset.is_image == True)  # noqa: E712
+        .order_by(AttachmentAsset.message_id.asc(), AttachmentAsset.id.asc())
+    ).all()
+    if not image_assets:
+        return []
+
+    assets_by_message_id: dict[int, list[AttachmentAsset]] = {}
+    for asset in image_assets:
+        assets_by_message_id.setdefault(asset.message_id, []).append(asset)
+
+    parser_inputs: list[str] = []
+    for row in group_rows:
+        if row.id is None:
+            continue
+        for asset in assets_by_message_id.get(row.id, []):
+            data_url = _attachment_asset_data_url(asset)
+            if data_url:
+                parser_inputs.append(data_url)
+    return parser_inputs
+
+
+async def build_parser_attachment_inputs(
+    session: Session,
+    group_rows: list[DiscordMessage],
+    fallback_attachment_urls: list[str],
+) -> list[str]:
+    parser_inputs = _cached_parser_image_inputs(session, group_rows)
+    if parser_inputs:
+        return parser_inputs
+
+    recovered_any = False
+    for grouped_row in group_rows:
+        if grouped_row.id is None:
+            continue
+        if not extract_image_urls(parse_attachment_urls_json(grouped_row.attachment_urls_json)):
+            continue
+        if not grouped_row.channel_id or not grouped_row.discord_message_id:
+            continue
+        try:
+            recovered = await recover_attachment_assets_for_message(
+                channel_id=grouped_row.channel_id,
+                discord_message_id=grouped_row.discord_message_id,
+                message_row_id=grouped_row.id,
+            )
+            recovered_any = recovered_any or recovered
+        except OperationalError as exc:
+            if is_sqlite_lock_error(exc):
+                worker_log(
+                    action="attachment_recovery_sqlite_busy",
+                    level="warning",
+                    success=False,
+                    error="SQLite busy during attachment recovery; falling back to URLs",
+                    message_id=grouped_row.id,
+                )
+            else:
+                raise
+
+    if recovered_any:
+        session.expire_all()
+        parser_inputs = _cached_parser_image_inputs(session, group_rows)
+        if parser_inputs:
+            return parser_inputs
+
+    return fallback_attachment_urls
+
+
 async def parser_loop(stop_event: asyncio.Event):
     next_reprocess_at = schedule_next_reprocess_run()
     next_offline_audit_at = utcnow()
@@ -1034,6 +1147,11 @@ async def process_row(row_id: int):
         stale_rows = clear_stale_group_members(session, group_rows, primary_row)
 
         combined_text, combined_attachments, grouped_row_ids = combine_group_payload(group_rows)
+        parser_attachment_inputs = await build_parser_attachment_inputs(
+            session,
+            group_rows,
+            combined_attachments,
+        )
 
         group_id = str(uuid.uuid4()) if len(group_rows) > 1 else None
         stitched_at = utcnow() if group_id else None
@@ -1055,7 +1173,7 @@ async def process_row(row_id: int):
         try:
             result = await parse_message(
                 content=combined_text,
-                attachment_urls=combined_attachments,
+                attachment_urls=parser_attachment_inputs,
                 author_name=row.author_name or "",
                 channel_name=row.channel_name or "",
             )

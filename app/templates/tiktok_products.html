@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&amp;display=swap" rel="stylesheet">
+    <title>{{ title }}</title>
+    <style>
+        * { box-sizing:border-box; }
+        html { scroll-behavior: smooth; }
+        body { margin:0; }
+        a { color:inherit; text-decoration:none; }
+        .page { max-width:1660px; margin:0 auto; padding: 28px 28px 60px; }
+        .hero { display:grid; grid-template-columns:minmax(220px,300px) 1fr; gap:24px; align-items:center; padding:28px; margin-bottom:18px; }
+        .logo-wrap img { width:100%; max-width:280px; display:block; margin:0 auto; }
+        .card { padding:18px; margin-bottom:18px; }
+        .banner { padding:12px 16px; border-radius:14px; margin-bottom:16px; font-weight:700; border:1px solid; }
+        .eyebrow, .pill, .status-pill { display:inline-flex; align-items:center; padding:6px 10px; border-radius:999px; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; }
+        .eyebrow { width:fit-content; }
+        .status-activate,.status-approved { color:#8eedb0 !important; background:rgba(76,165,114,.16) !important; border:1px solid rgba(76,165,114,.24) !important; }
+        .status-draft,.status-auditing,.status-pre_approved { color:#ffd27b !important; background:rgba(255,174,72,.16) !important; border:1px solid rgba(255,174,72,.22) !important; }
+        .status-failed,.status-platform_deactivated { color:#ff9a8e !important; background:rgba(255,93,75,.14) !important; border:1px solid rgba(255,93,75,.22) !important; }
+        .status-running,.status-sync { color:#98b9ff !important; background:rgba(72,129,255,.14) !important; border:1px solid rgba(72,129,255,.22) !important; }
+        .status-seller_deactivated,.status-freeze,.status-deleted { color:#b8c2cc !important; background:rgba(113,132,152,.18) !important; border:1px solid rgba(113,132,152,.24) !important; }
+        h1 { margin:10px 0 8px; font-size:clamp(34px,4vw,56px); line-height:.93; letter-spacing:-.045em; font-weight: 800; }
+        p { margin:0 0 16px; max-width:900px; line-height:1.6; font-size:15px; }
+        .hero-meta, .section-header, .filter-row, .table-meta, .pagination-bar, .pagination-controls, .summary-strip { display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:space-between; }
+        .button, button { appearance:none; border:none; border-radius:16px; padding:11px 15px; font:inherit; font-weight:800; cursor:pointer; transition:transform .15s ease; }
+        .button:hover, button:hover { transform:translateY(-1px); }
+        .filters-form { display:grid; grid-template-columns:repeat(auto-fill, minmax(160px, 1fr)) auto; gap:10px; align-items:end; }
+        .sync-form { display:grid; grid-template-columns:minmax(0,220px) auto; gap:10px; align-items:end; }
+        .section-header { margin-bottom:12px; }
+        .section-title { margin:0; font-size:24px; letter-spacing:-.04em; }
+        .summary-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin-bottom:12px; }
+        .metric-label { font-size:11px; text-transform:uppercase; letter-spacing:.08em; margin-bottom:8px; font-weight:800; }
+        .metric-value { font-size:28px; font-weight:800; letter-spacing:-.04em; font-variant-numeric: tabular-nums; }
+        .subtle { font-size:12px; line-height:1.5; }
+        .table-scroll-top { overflow-x:auto; overflow-y:hidden; border-bottom:none; border-radius:20px 20px 0 0; height:18px; }
+        .table-scroll-top-inner { height:1px; }
+        .table-shell { overflow:auto; border-radius:0 0 20px 20px; max-height:72vh; }
+        table { width:100%; border-collapse:separate; border-spacing:0; min-width:1000px; }
+        th, td { padding:10px 12px; vertical-align:top; text-align:left; font-size:13px; line-height:1.35; }
+        thead th { position:sticky; top:0; z-index:2; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; }
+        .muted-cell { color:var(--preview-muted, #a7b0ba); }
+        .mono { font-family:"Consolas","Courier New",monospace; font-size:12px; }
+        .product-thumb { width:48px; height:48px; border-radius:10px; object-fit:cover; border:1px solid rgba(255,255,255,.08); background:rgba(255,255,255,.04); }
+        .product-thumb-placeholder { width:48px; height:48px; border-radius:10px; background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.08); display:flex; align-items:center; justify-content:center; color:var(--preview-muted, #a7b0ba); font-size:16px; }
+        .product-title { font-weight:700; max-width:340px; white-space:normal; }
+        .product-title a { color:var(--preview-text, #f5f1e8) !important; text-decoration:none; }
+        .product-title a:hover { color:var(--preview-gold, #ebc67a) !important; text-decoration:underline; }
+        @keyframes card-in { from { opacity:0; transform:translateY(16px) scale(.985); } to { opacity:1; transform:none; } }
+        .hero, .card, .metric { animation: card-in .5s cubic-bezier(.22,1,.36,1) both; }
+        .hero, .card, .metric { transition: transform .2s ease, box-shadow .2s ease; }
+        @media (max-width:1200px){.filters-form,.summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.hero{grid-template-columns:1fr}}
+        @media (max-width:800px){.page{padding:16px 14px 28px}.filters-form,.summary-grid{grid-template-columns:1fr}}
+    </style>
+    <link rel="stylesheet" href="/static/courtyard-theme.css?v=3">
+</head>
+<body>
+    <div class="page">
+        {% include "_workspace_nav.html" %}
+
+        {% if success_message %}<div class="banner banner-success">{{ success_message }}</div>{% endif %}
+        {% if error_message %}<div class="banner banner-error">{{ error_message }}</div>{% endif %}
+
+        <section class="hero">
+            <div class="logo-wrap"><img src="/static/degen-logo.png" alt="Degen Collectibles logo"></div>
+            <div>
+                <div class="eyebrow"><svg style="display:inline-block;vertical-align:middle;margin-right:6px" width="16" height="18" viewBox="0 0 24 24" fill="none" stroke="#ff0050" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>TikTok Shop Product Catalog</div>
+                <h1>{{ title }}</h1>
+                <p>View and manage your TikTok Shop product listings. Sync your catalog, track audit status, and create new listings.</p>
+                <div class="hero-meta">
+                    <span class="pill">{{ total_count }} product{{ "s" if total_count != 1 }}</span>
+                    {% if sync_state.get("is_running") %}<span class="status-pill status-running">Syncing...</span>{% endif %}
+                    {% if sync_state.get("last_error") %}<span class="status-pill status-bad">{{ sync_state["last_error"][:60] }}</span>{% endif %}
+                    <a href="/tiktok/products/new" class="button primary-button" style="padding:8px 16px; font-size:13px;">+ New Product</a>
+                </div>
+            </div>
+        </section>
+
+        <div class="summary-grid">
+            <div class="metric"><div class="metric-label">Total Products</div><div class="metric-value">{{ summary_total }}</div></div>
+            <div class="metric"><div class="metric-label">Active</div><div class="metric-value">{{ summary_active }}</div></div>
+            <div class="metric"><div class="metric-label">Draft</div><div class="metric-value">{{ summary_draft }}</div></div>
+            <div class="metric"><div class="metric-label">Deactivated</div><div class="metric-value">{{ summary_deactivated }}</div></div>
+        </div>
+
+        <div class="card">
+            <div class="section-header">
+                <div>
+                    <h2 class="section-title">Filters &amp; Sync</h2>
+                    <div class="subtle">Filter products by status, audit result, or search text. Admins can manually sync the catalog from TikTok.</div>
+                </div>
+            </div>
+            <form method="get" action="/tiktok/products" class="filters-form">
+                <div>
+                    <label>Status</label>
+                    <select name="status">
+                        <option value="">All</option>
+                        {% for value in filter_options["statuses"] %}<option value="{{ value }}" {% if filter_status == value %}selected{% endif %}>{{ value }}</option>{% endfor %}
+                    </select>
+                </div>
+                <div>
+                    <label>Audit Status</label>
+                    <select name="audit_status">
+                        <option value="">All</option>
+                        {% for value in filter_options["audit_statuses"] %}<option value="{{ value }}" {% if filter_audit_status == value %}selected{% endif %}>{{ value }}</option>{% endfor %}
+                    </select>
+                </div>
+                <div>
+                    <label>Search</label>
+                    <input type="text" name="search" value="{{ filter_search }}" placeholder="Title, ID, category, brand">
+                </div>
+                <input type="hidden" name="sort_by" value="{{ sort_by }}">
+                <input type="hidden" name="sort_dir" value="{{ sort_dir }}">
+                <button type="submit" class="primary-button">Apply</button>
+            </form>
+            {% if current_user and current_user.role == "admin" %}
+            <form method="post" action="/tiktok/products/sync-form" class="sync-form" style="margin-top:14px;">
+                <div>
+                    <label>Sync limit</label>
+                    <input type="number" name="limit" min="1" value="200" placeholder="200">
+                </div>
+                <button type="submit" class="secondary-button">Sync Products from TikTok</button>
+            </form>
+            {% endif %}
+        </div>
+
+        <div class="card" id="products-table">
+            <div class="table-meta">
+                <div>
+                    <h2 class="section-title">Products</h2>
+                    {% set start_row = (page - 1) * page_size + 1 %}
+                    {% set end_row = start_row + products|length - 1 %}
+                    <div class="subtle">Rows {{ start_row }}-{{ end_row }} of {{ total_count }}</div>
+                </div>
+                <div class="pagination-controls">
+                    {% if page > 1 %}
+                    <a class="button secondary-button" href="/tiktok/products?status={{ filter_status }}&audit_status={{ filter_audit_status }}&search={{ filter_search }}&sort_by={{ sort_by }}&sort_dir={{ sort_dir }}&page={{ page - 1 }}&limit={{ page_size }}">Previous</a>
+                    {% endif %}
+                    {% if has_more %}
+                    <a class="button secondary-button" href="/tiktok/products?status={{ filter_status }}&audit_status={{ filter_audit_status }}&search={{ filter_search }}&sort_by={{ sort_by }}&sort_dir={{ sort_dir }}&page={{ page + 1 }}&limit={{ page_size }}">Next</a>
+                    {% endif %}
+                </div>
+            </div>
+            <div class="table-scroll-top"><div class="table-scroll-top-inner"></div></div>
+            <div class="table-shell">
+                <table>
+                    <thead>
+                        <tr>
+                            <th></th>
+                            <th>Title</th>
+                            <th>Status</th>
+                            <th>Audit</th>
+                            <th>Category</th>
+                            <th>Brand</th>
+                            <th>SKUs</th>
+                            <th>Price</th>
+                            <th>Inventory</th>
+                            <th>Product ID</th>
+                            <th>Last Synced</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for item in products %}
+                        {% set p = item["product"] %}
+                        <tr>
+                            <td>
+                                {% if p.main_image_url %}
+                                <img class="product-thumb" src="{{ p.main_image_url }}" alt="" loading="lazy">
+                                {% else %}
+                                <div class="product-thumb-placeholder">?</div>
+                                {% endif %}
+                            </td>
+                            <td class="product-title">
+                                <a href="/tiktok/products/{{ p.tiktok_product_id }}">{{ p.title or "(untitled)" }}</a>
+                            </td>
+                            <td>
+                                {% if p.status %}
+                                <span class="status-pill status-{{ p.status|lower }}">{{ p.status }}</span>
+                                {% else %}
+                                <span class="muted-cell">-</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if p.audit_status %}
+                                <span class="status-pill status-{{ p.audit_status|lower }}">{{ p.audit_status }}</span>
+                                {% else %}
+                                <span class="muted-cell">-</span>
+                                {% endif %}
+                            </td>
+                            <td>{{ p.category_name or "-" }}</td>
+                            <td>{{ p.brand_name or "-" }}</td>
+                            <td>{{ item["sku_count"] }}</td>
+                            <td>{{ item["price_label"] }}</td>
+                            <td>{{ item["total_inventory"] }}</td>
+                            <td class="mono muted-cell">{{ p.tiktok_product_id[:16] }}{% if p.tiktok_product_id|length > 16 %}...{% endif %}</td>
+                            <td class="muted-cell">{{ p.synced_at.strftime("%Y-%m-%d %H:%M") if p.synced_at else "-" }}</td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan="11" style="text-align:center; padding:40px; color:var(--muted);">No products found. Sync your catalog from TikTok Shop to get started.</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    (function() {
+        var pollInterval = 8000;
+        var pollTimer;
+        function pollStatus() {
+            fetch('/tiktok/products/poll')
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data.is_syncing) {
+                        pollInterval = 3000;
+                    } else {
+                        pollInterval = 15000;
+                    }
+                    pollTimer = setTimeout(pollStatus, pollInterval);
+                })
+                .catch(function() {
+                    pollTimer = setTimeout(pollStatus, 15000);
+                });
+        }
+        pollTimer = setTimeout(pollStatus, pollInterval);
+    })();
+    </script>
+</body>
+</html>

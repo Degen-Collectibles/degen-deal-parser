@@ -18,7 +18,7 @@ from .attachment_repair import (
 from .attachment_storage import delete_attachment_cache_file, write_attachment_cache_file
 from .bookkeeping import auto_import_public_google_sheet, extract_google_sheet_url
 from .config import get_settings
-from .db import engine, managed_session
+from .db import engine, managed_session, run_write_with_retry
 from .models import (
     AttachmentAsset,
     AvailableDiscordChannel,
@@ -279,67 +279,97 @@ def get_cached_available_discord_channels() -> list[dict]:
 
 def sync_attachment_assets(message_id: int, attachment_payloads: list[dict]) -> None:
     with managed_session() as session:
+        existing_urls = {
+            asset.source_url
+            for asset in session.exec(
+                select(AttachmentAsset).where(AttachmentAsset.message_id == message_id)
+            ).all()
+        }
+
+    keep_urls = {payload["url"] for payload in attachment_payloads}
+    missing_payloads = [
+        payload
+        for payload in attachment_payloads
+        if payload["url"] not in existing_urls
+    ]
+    downloaded_payloads: list[dict] = []
+
+    if missing_payloads:
+        with httpx.Client(follow_redirects=True, timeout=20.0) as client:
+            for payload in missing_payloads:
+                try:
+                    response = client.get(payload["url"])
+                    response.raise_for_status()
+                except Exception as exc:
+                    ingest_log(
+                        action="attachment_cache_failed",
+                        level="error",
+                        success=False,
+                        error=str(exc),
+                        message_id=message_id,
+                        attachment_url=payload["url"],
+                    )
+                    continue
+
+                downloaded_payloads.append(
+                    {
+                        "source_url": payload["url"],
+                        "filename": payload.get("filename"),
+                        "content_type": payload.get("content_type") or response.headers.get("content-type"),
+                        "is_image": bool(payload.get("is_image")),
+                        "data": response.content,
+                    }
+                )
+
+    def write_assets(session: Session) -> tuple[list[tuple[int, str | None, str | None]], list[tuple[int, str | None, str | None, bytes]]]:
         existing_assets = session.exec(
             select(AttachmentAsset).where(AttachmentAsset.message_id == message_id)
         ).all()
         existing_by_url = {asset.source_url: asset for asset in existing_assets}
-        keep_urls = {payload["url"] for payload in attachment_payloads}
+        deleted_assets: list[tuple[int, str | None, str | None]] = []
+        new_assets: list[tuple[int, str | None, str | None, bytes]] = []
 
         for asset in existing_assets:
             if asset.source_url not in keep_urls:
                 if asset.id is not None:
-                    delete_attachment_cache_file(
-                        asset.id,
-                        filename=asset.filename,
-                        content_type=asset.content_type,
-                    )
+                    deleted_assets.append((asset.id, asset.filename, asset.content_type))
                 session.delete(asset)
 
-        missing_payloads = [
-            payload
-            for payload in attachment_payloads
-            if payload["url"] not in existing_by_url
-        ]
-        new_assets: list[AttachmentAsset] = []
-
-        if missing_payloads:
-            with httpx.Client(follow_redirects=True, timeout=20.0) as client:
-                for payload in missing_payloads:
-                    try:
-                        response = client.get(payload["url"])
-                        response.raise_for_status()
-                    except Exception as exc:
-                        ingest_log(
-                            action="attachment_cache_failed",
-                            level="error",
-                            success=False,
-                            error=str(exc),
-                            message_id=message_id,
-                            attachment_url=payload["url"],
-                        )
-                        continue
-
-                    asset = AttachmentAsset(
-                        message_id=message_id,
-                        source_url=payload["url"],
-                        filename=payload.get("filename"),
-                        content_type=payload.get("content_type") or response.headers.get("content-type"),
-                        is_image=bool(payload.get("is_image")),
-                        data=response.content,
-                    )
-                    session.add(asset)
-                    new_assets.append(asset)
-
-        session.commit()
-        for asset in new_assets:
-            session.refresh(asset)
+        for payload in downloaded_payloads:
+            if payload["source_url"] in existing_by_url:
+                continue
+            asset = AttachmentAsset(
+                message_id=message_id,
+                source_url=payload["source_url"],
+                filename=payload["filename"],
+                content_type=payload["content_type"],
+                is_image=bool(payload["is_image"]),
+                data=payload["data"],
+            )
+            session.add(asset)
+            session.flush()
             if asset.id is not None:
-                write_attachment_cache_file(
-                    asset.id,
-                    filename=asset.filename,
-                    content_type=asset.content_type,
-                    data=asset.data,
-                )
+                new_assets.append((asset.id, asset.filename, asset.content_type, asset.data))
+            existing_by_url[payload["source_url"]] = asset
+
+        return deleted_assets, new_assets
+
+    deleted_assets, new_assets = run_write_with_retry(write_assets)
+
+    for asset_id, filename, content_type in deleted_assets:
+        delete_attachment_cache_file(
+            asset_id,
+            filename=filename,
+            content_type=content_type,
+        )
+
+    for asset_id, filename, content_type, data in new_assets:
+        write_attachment_cache_file(
+            asset_id,
+            filename=filename,
+            content_type=content_type,
+            data=data,
+        )
 
 
 def get_message_row(session: Session, discord_message_id: str) -> Optional[DiscordMessage]:

@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
@@ -64,6 +64,7 @@ from .db import (
     engine,
     get_session,
     init_db,
+    is_sqlite_lock_error,
     managed_session,
     recent_db_failure,
     run_write_with_retry,
@@ -81,6 +82,7 @@ from .discord_ingest import (
 )
 from .financials import compute_financials
 from .models import (
+    AppSetting,
     AttachmentAsset,
     BackfillRequest,
     BookkeepingImport,
@@ -98,9 +100,12 @@ from .models import (
     ShopifyOrder,
     TikTokAuth,
     TikTokOrder,
+    TikTokProduct,
     User,
     WatchedChannel,
+    normalize_money_value,
     normalize_parse_status,
+    signed_money_delta,
     utcnow,
 )
 from .ops_log import list_operations_logs, list_operations_logs_for_backfill_request, parse_operations_log_details
@@ -138,10 +143,19 @@ from .display_media import (
 from .transactions import build_transaction_summary, get_transactions, rebuild_transactions, sync_transaction_from_message
 from .tiktok_ingest import (
     TikTokIngestError,
+    _build_webhook_signature_candidates,
     exchange_tiktok_authorization_code,
+    parse_tiktok_webhook_headers,
     parse_tiktok_webhook_payload,
     upsert_tiktok_auth_from_callback,
     upsert_tiktok_order_from_payload,
+)
+from .tiktok_live_chat import (
+    get_chat_status,
+    get_recent_messages as get_live_chat_messages,
+    get_room_id as get_live_room_id,
+    start_live_chat,
+    stop_live_chat,
 )
 from .worker import (
     STALE_PROCESSING_AFTER,
@@ -153,14 +167,36 @@ from .worker import (
 )
 try:
     from scripts.tiktok_backfill import backfill_tiktok_orders as pull_tiktok_orders
+    from scripts.tiktok_backfill import backfill_tiktok_products as pull_tiktok_products
     from scripts.tiktok_backfill import refresh_access_token as refresh_tiktok_access_token
     from scripts.tiktok_backfill import fetch_tiktok_order_details as _fetch_tiktok_order_details
     from scripts.tiktok_backfill import order_record_from_payload as _order_record_from_payload
+    from scripts.tiktok_backfill import (
+        fetch_tiktok_categories as _fetch_tiktok_categories,
+        fetch_tiktok_category_attributes as _fetch_tiktok_category_attributes,
+        fetch_tiktok_brands as _fetch_tiktok_brands,
+        upload_tiktok_product_image as _upload_tiktok_product_image,
+        create_tiktok_product as _create_tiktok_product,
+        fetch_tiktok_product_detail as _fetch_tiktok_product_detail,
+        product_record_from_payload as _product_record_from_payload,
+        upsert_tiktok_product_row as _upsert_tiktok_product_row,
+        fetch_tiktok_live_analytics as _fetch_tiktok_live_analytics,
+    )
 except Exception:  # pragma: no cover - fallback if the script module is unavailable
     pull_tiktok_orders = None
+    pull_tiktok_products = None
     refresh_tiktok_access_token = None
     _fetch_tiktok_order_details = None
     _order_record_from_payload = None
+    _fetch_tiktok_categories = None
+    _fetch_tiktok_category_attributes = None
+    _fetch_tiktok_brands = None
+    _upload_tiktok_product_image = None
+    _create_tiktok_product = None
+    _fetch_tiktok_product_detail = None
+    _fetch_tiktok_live_analytics = None
+    _product_record_from_payload = None
+    _upsert_tiktok_product_row = None
 
 
 settings = get_settings()
@@ -175,6 +211,24 @@ REPORT_SOURCE_OPTIONS = {
     REPORT_SOURCE_DISCORD,
     REPORT_SOURCE_SHOPIFY,
     REPORT_SOURCE_TIKTOK,
+}
+
+FINANCE_WINDOW_MTD = "mtd"
+FINANCE_WINDOW_30D = "30d"
+FINANCE_WINDOW_90D = "90d"
+FINANCE_WINDOW_YTD = "ytd"
+FINANCE_WINDOW_OPTIONS = {
+    FINANCE_WINDOW_MTD,
+    FINANCE_WINDOW_30D,
+    FINANCE_WINDOW_90D,
+    FINANCE_WINDOW_YTD,
+}
+FINANCE_WINDOW_LABELS = {
+    FINANCE_WINDOW_MTD: "Month to date",
+    FINANCE_WINDOW_30D: "Last 30 days",
+    FINANCE_WINDOW_90D: "Last 90 days",
+    FINANCE_WINDOW_YTD: "Year to date",
+    "custom": "Custom range",
 }
 
 
@@ -212,6 +266,29 @@ def build_reports_url(
     if not params:
         return "/reports"
     return f"/reports?{urlencode(params)}"
+
+
+def normalize_finance_window(value: Optional[str]) -> str:
+    normalized = (value or "").strip().lower()
+    return normalized if normalized in FINANCE_WINDOW_OPTIONS else FINANCE_WINDOW_MTD
+
+
+def build_finance_url(
+    *,
+    start: str = "",
+    end: str = "",
+    window: str = FINANCE_WINDOW_MTD,
+) -> str:
+    params: dict[str, str] = {}
+    if start:
+        params["start"] = start
+    if end:
+        params["end"] = end
+    if not params:
+        params["window"] = normalize_finance_window(window)
+    if not params:
+        return "/finance"
+    return f"/finance?{urlencode(params)}"
 
 
 def build_tiktok_orders_url(
@@ -303,6 +380,12 @@ def normalize_filesystem_path(path: Path) -> str:
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=normalize_filesystem_path(BASE_DIR / "templates"))
 PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
+
+_live_analytics_cache: dict[str, object] = {}
+_live_analytics_lock = threading.Lock()
+_LIVE_ANALYTICS_POLL_SECONDS = 60
+
+_stream_range: dict[str, Optional[datetime]] = {"start": None, "end": None}
 
 PARSE_STATUS_OPTIONS = [
     PARSE_PENDING,
@@ -756,6 +839,563 @@ def build_report_period_comparison_rows(
                 "tiktok_tax_unknown_orders": int(tiktok_summary["tax_unknown_orders"] or 0),
             }
         )
+    return rows
+
+
+def shift_month_start(value: datetime, months: int) -> datetime:
+    month_index = (value.month - 1) + months
+    year = value.year + (month_index // 12)
+    month = (month_index % 12) + 1
+    return value.replace(year=year, month=month, day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+def format_finance_range_label(start: datetime, end: datetime) -> str:
+    start_local = start.astimezone(PACIFIC_TZ)
+    end_local = end.astimezone(PACIFIC_TZ)
+    if start_local.year == end_local.year:
+        return f"{start_local.strftime('%b %d')} - {end_local.strftime('%b %d, %Y')}"
+    return f"{start_local.strftime('%b %d, %Y')} - {end_local.strftime('%b %d, %Y')}"
+
+
+def safe_percent(numerator: float, denominator: float) -> Optional[float]:
+    if abs(float(denominator or 0.0)) < 0.005:
+        return None
+    return round((float(numerator or 0.0) / float(denominator)) * 100.0, 1)
+
+
+def percent_change(current: float, prior: float) -> Optional[float]:
+    if abs(float(prior or 0.0)) < 0.005:
+        return None
+    return round(((float(current or 0.0) - float(prior or 0.0)) / abs(float(prior))) * 100.0, 1)
+
+
+def format_signed_money(value: float) -> str:
+    amount = round(float(value or 0.0), 2)
+    sign = "+" if amount > 0 else "-" if amount < 0 else ""
+    return f"{sign}{format_dashboard_money(abs(amount))}"
+
+
+def format_percent_value(value: Optional[float]) -> str:
+    if value is None:
+        return "--"
+    return f"{float(value):.1f}%"
+
+
+def format_percent_points(value: Optional[float]) -> str:
+    if value is None:
+        return "--"
+    return f"{float(value):+.1f} pts"
+
+
+def resolve_finance_range(
+    *,
+    start: Optional[str],
+    end: Optional[str],
+    window: Optional[str],
+) -> dict[str, object]:
+    normalized_window = normalize_finance_window(window)
+    now_local = datetime.now(PACIFIC_TZ)
+    today_start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_end_local = today_start_local + timedelta(days=1) - timedelta(microseconds=1)
+
+    start_dt = parse_report_datetime(start)
+    end_dt = parse_report_datetime(end, end_of_day=True)
+    manual_range = bool(start_dt or end_dt)
+
+    if manual_range:
+        if end_dt is None:
+            end_dt = today_end_local.astimezone(timezone.utc)
+        if start_dt is None:
+            end_local = end_dt.astimezone(PACIFIC_TZ)
+            start_local = end_local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            start_dt = start_local.astimezone(timezone.utc)
+        selected_window = "custom"
+    else:
+        if normalized_window == FINANCE_WINDOW_30D:
+            start_local = today_start_local - timedelta(days=29)
+        elif normalized_window == FINANCE_WINDOW_90D:
+            start_local = today_start_local - timedelta(days=89)
+        elif normalized_window == FINANCE_WINDOW_YTD:
+            start_local = today_start_local.replace(month=1, day=1)
+        else:
+            start_local = today_start_local.replace(day=1)
+        start_dt = start_local.astimezone(timezone.utc)
+        end_dt = today_end_local.astimezone(timezone.utc)
+        selected_window = normalized_window
+
+    if end_dt < start_dt:
+        start_dt, end_dt = end_dt, start_dt
+
+    current_span = end_dt - start_dt
+    previous_end_dt = start_dt - timedelta(microseconds=1)
+    previous_start_dt = previous_end_dt - current_span
+
+    start_local = start_dt.astimezone(PACIFIC_TZ)
+    end_local = end_dt.astimezone(PACIFIC_TZ)
+    day_count = max((end_local.date() - start_local.date()).days + 1, 1)
+
+    return {
+        "start_dt": start_dt,
+        "end_dt": end_dt,
+        "previous_start_dt": previous_start_dt,
+        "previous_end_dt": previous_end_dt,
+        "selected_start": start_local.strftime("%Y-%m-%d"),
+        "selected_end": end_local.strftime("%Y-%m-%d"),
+        "selected_window": selected_window,
+        "window_label": FINANCE_WINDOW_LABELS.get(selected_window, FINANCE_WINDOW_LABELS[FINANCE_WINDOW_MTD]),
+        "label": format_finance_range_label(start_dt, end_dt),
+        "previous_label": format_finance_range_label(previous_start_dt, previous_end_dt),
+        "day_count": day_count,
+        "as_of_label": now_local.strftime("%b %d, %Y %I:%M %p"),
+    }
+
+
+def compose_finance_statement(
+    *,
+    discord_summary: dict[str, object],
+    shopify_summary: dict[str, object],
+    tiktok_summary: dict[str, object],
+    day_count: int,
+) -> dict[str, object]:
+    discord_totals = discord_summary.get("totals", {})
+    expense_categories = discord_summary.get("expense_categories", {})
+
+    discord_money_in = round(float(discord_totals.get("money_in", 0.0) or 0.0), 2)
+    discord_money_out = round(float(discord_totals.get("money_out", 0.0) or 0.0), 2)
+    discord_sales = round(float(discord_totals.get("sales", 0.0) or 0.0), 2)
+    discord_buys = round(float(discord_totals.get("buys", 0.0) or 0.0), 2)
+    discord_trade_in = round(float(discord_totals.get("trade_cash_in", 0.0) or 0.0), 2)
+    discord_trade_out = round(float(discord_totals.get("trade_cash_out", 0.0) or 0.0), 2)
+    inventory_expense = round(float(expense_categories.get("inventory", 0.0) or 0.0), 2)
+
+    inventory_spend = round(discord_buys + discord_trade_out + inventory_expense, 2)
+    operating_expenses = round(max(discord_money_out - inventory_spend, 0.0), 2)
+
+    shopify_net_revenue = round(float(shopify_summary.get("net_revenue", 0.0) or 0.0), 2)
+    shopify_tax = round(float(shopify_summary.get("total_tax", 0.0) or 0.0), 2)
+    tiktok_net_revenue = round(float(tiktok_summary.get("net_revenue", 0.0) or 0.0), 2)
+    tiktok_tax = round(float(tiktok_summary.get("total_tax", 0.0) or 0.0), 2)
+
+    revenue = round(discord_money_in + shopify_net_revenue + tiktok_net_revenue, 2)
+    gross_profit = round(revenue - inventory_spend, 2)
+    operating_profit = round(gross_profit - operating_expenses, 2)
+    external_tax = round(shopify_tax + tiktok_tax, 2)
+
+    gross_margin_pct = safe_percent(gross_profit, revenue)
+    operating_margin_pct = safe_percent(operating_profit, revenue)
+    inventory_ratio_pct = safe_percent(inventory_spend, revenue)
+    opex_ratio_pct = safe_percent(operating_expenses, revenue)
+
+    return {
+        "discord_rows": int(discord_summary.get("rows", 0) or 0),
+        "discord_revenue": discord_money_in,
+        "discord_money_out": discord_money_out,
+        "discord_sales": discord_sales,
+        "discord_buys": discord_buys,
+        "discord_trade_in": discord_trade_in,
+        "discord_trade_out": discord_trade_out,
+        "inventory_expense": inventory_expense,
+        "inventory_spend": inventory_spend,
+        "operating_expenses": operating_expenses,
+        "shopify_net_revenue": shopify_net_revenue,
+        "shopify_tax": shopify_tax,
+        "shopify_paid_orders": int(shopify_summary.get("paid_orders", 0) or 0),
+        "shopify_tax_unknown_orders": int(shopify_summary.get("tax_unknown_orders", 0) or 0),
+        "tiktok_net_revenue": tiktok_net_revenue,
+        "tiktok_tax": tiktok_tax,
+        "tiktok_paid_orders": int(tiktok_summary.get("paid_orders", 0) or 0),
+        "tiktok_tax_unknown_orders": int(tiktok_summary.get("tax_unknown_orders", 0) or 0),
+        "revenue": revenue,
+        "gross_profit": gross_profit,
+        "operating_profit": operating_profit,
+        "external_tax": external_tax,
+        "gross_margin_pct": gross_margin_pct,
+        "operating_margin_pct": operating_margin_pct,
+        "inventory_ratio_pct": inventory_ratio_pct,
+        "opex_ratio_pct": opex_ratio_pct,
+        "review_required": int(discord_summary.get("counts", {}).get("needs_review", 0) or 0),
+        "tax_unknown_orders": int(shopify_summary.get("tax_unknown_orders", 0) or 0)
+        + int(tiktok_summary.get("tax_unknown_orders", 0) or 0),
+        "day_count": max(day_count, 1),
+        "avg_daily_revenue": round(revenue / max(day_count, 1), 2),
+        "avg_daily_profit": round(operating_profit / max(day_count, 1), 2),
+        "revenue_display": format_dashboard_money(revenue),
+        "gross_profit_display": format_dashboard_money(gross_profit),
+        "operating_profit_display": format_dashboard_money(operating_profit),
+        "inventory_spend_display": format_dashboard_money(inventory_spend),
+        "operating_expenses_display": format_dashboard_money(operating_expenses),
+        "external_tax_display": format_dashboard_money(external_tax),
+        "discord_revenue_display": format_dashboard_money(discord_money_in),
+        "shopify_net_revenue_display": format_dashboard_money(shopify_net_revenue),
+        "tiktok_net_revenue_display": format_dashboard_money(tiktok_net_revenue),
+        "discord_sales_display": format_dashboard_money(discord_sales),
+        "discord_buys_display": format_dashboard_money(discord_buys),
+        "discord_trade_in_display": format_dashboard_money(discord_trade_in),
+        "discord_trade_out_display": format_dashboard_money(discord_trade_out),
+        "inventory_expense_display": format_dashboard_money(inventory_expense),
+        "avg_daily_revenue_display": format_dashboard_money(round(revenue / max(day_count, 1), 2)),
+        "avg_daily_profit_display": format_dashboard_money(round(operating_profit / max(day_count, 1), 2)),
+        "gross_margin_display": format_percent_value(gross_margin_pct),
+        "operating_margin_display": format_percent_value(operating_margin_pct),
+        "inventory_ratio_display": format_percent_value(inventory_ratio_pct),
+        "opex_ratio_display": format_percent_value(opex_ratio_pct),
+    }
+
+
+def build_finance_range_snapshot(
+    session: Session,
+    *,
+    start: datetime,
+    end: datetime,
+    day_count: int,
+) -> dict[str, object]:
+    transactions = get_transactions(session, start=start, end=end)
+    discord_summary = build_transaction_summary(transactions)
+    shopify_rows = get_shopify_reporting_rows(session, start=start, end=end)
+    shopify_summary = build_shopify_reporting_summary(shopify_rows)
+    tiktok_rows = get_tiktok_reporting_rows(session, start=start, end=end)
+    tiktok_summary = build_tiktok_reporting_summary(tiktok_rows)
+    statement = compose_finance_statement(
+        discord_summary=discord_summary,
+        shopify_summary=shopify_summary,
+        tiktok_summary=tiktok_summary,
+        day_count=day_count,
+    )
+    return {
+        "transactions": transactions,
+        "discord_summary": discord_summary,
+        "shopify_summary": shopify_summary,
+        "tiktok_summary": tiktok_summary,
+        "statement": statement,
+    }
+
+
+def build_finance_statement_rows(
+    current_statement: dict[str, object],
+    prior_statement: dict[str, object],
+) -> list[dict[str, object]]:
+    row_specs = [
+        ("Discord cash-in revenue", "discord_revenue", "money"),
+        ("Shopify net revenue", "shopify_net_revenue", "money"),
+        ("TikTok Shop net revenue", "tiktok_net_revenue", "money"),
+        ("Total revenue", "revenue", "money"),
+        ("Inventory cash deployed", "inventory_spend", "money"),
+        ("Gross profit", "gross_profit", "money"),
+        ("Operating expenses", "operating_expenses", "money"),
+        ("Operating profit", "operating_profit", "money"),
+        ("Operating margin", "operating_margin_pct", "percent"),
+    ]
+
+    rows: list[dict[str, object]] = []
+    for label, key, kind in row_specs:
+        current_value = float(current_statement.get(key, 0.0) or 0.0)
+        prior_value = float(prior_statement.get(key, 0.0) or 0.0)
+        if kind == "percent":
+            current_display = format_percent_value(current_value)
+            prior_display = format_percent_value(prior_value)
+        else:
+            current_display = format_dashboard_money(current_value)
+            prior_display = format_dashboard_money(prior_value)
+        rows.append(
+            {
+                "label": label,
+                "current_display": current_display,
+                "prior_display": prior_display,
+            }
+        )
+    return rows
+
+
+def build_finance_kpi_rows(
+    current_statement: dict[str, object],
+    prior_statement: dict[str, object],
+) -> list[dict[str, object]]:
+    kpi_specs = [
+        ("Net Revenue", "revenue", "money", "up", "Discord cash in + platform net sales"),
+        ("Gross Profit", "gross_profit", "money", "up", "Revenue less inventory cash deployment"),
+        ("Operating Profit", "operating_profit", "money", "up", "Gross profit after operating spend"),
+        ("Operating Margin", "operating_margin_pct", "percent", "up", "Operating profit divided by revenue"),
+        ("Inventory Spend", "inventory_spend", "money", "down", "Buys, trade cash out, and inventory-tagged expenses"),
+        ("Tax Collected", "external_tax", "money", "neutral", "Shopify and TikTok tax tracked separately from net revenue"),
+    ]
+
+    rows: list[dict[str, object]] = []
+    for label, key, kind, preferred_direction, footnote in kpi_specs:
+        current_value = float(current_statement.get(key, 0.0) or 0.0)
+        prior_value = float(prior_statement.get(key, 0.0) or 0.0)
+        delta = round(current_value - prior_value, 2)
+        if kind == "percent":
+            value_display = format_percent_value(current_value)
+            delta_display = format_percent_points(delta)
+        else:
+            value_display = format_dashboard_money(current_value)
+            delta_display = format_signed_money(delta)
+
+        tone = "neutral"
+        if preferred_direction == "neutral" or abs(delta) < 0.005:
+            tone = "neutral"
+        elif preferred_direction == "up":
+            tone = "positive" if delta > 0 else "negative"
+        elif preferred_direction == "down":
+            tone = "positive" if delta < 0 else "negative"
+
+        rows.append(
+            {
+                "label": label,
+                "value_display": value_display,
+                "delta_display": delta_display,
+                "footnote": footnote,
+                "tone": tone,
+            }
+        )
+    return rows
+
+
+def build_finance_source_mix_rows(statement: dict[str, object]) -> list[dict[str, object]]:
+    source_values = {
+        "Discord": float(statement.get("discord_revenue", 0.0) or 0.0),
+        "Shopify": float(statement.get("shopify_net_revenue", 0.0) or 0.0),
+        "TikTok Shop": float(statement.get("tiktok_net_revenue", 0.0) or 0.0),
+    }
+    filtered = {label: value for label, value in source_values.items() if value > 0}
+    if not filtered:
+        filtered = source_values
+
+    max_value = max([abs(value) for value in filtered.values()] or [1.0])
+    total_value = sum(float(value or 0.0) for value in filtered.values()) or 1.0
+    return [
+        {
+            "label": label,
+            "value": round(value, 2),
+            "value_display": format_dashboard_money(value),
+            "share_display": format_percent_value(safe_percent(value, total_value)),
+            "width_pct": round((abs(value) / max_value) * 100.0, 1) if max_value else 0.0,
+        }
+        for label, value in sorted(filtered.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
+
+def build_finance_spend_mix_rows(statement: dict[str, object]) -> list[dict[str, object]]:
+    spend_values = {
+        "Buys": float(statement.get("discord_buys", 0.0) or 0.0),
+        "Trade cash out": float(statement.get("discord_trade_out", 0.0) or 0.0),
+        "Inventory-tagged expenses": float(statement.get("inventory_expense", 0.0) or 0.0),
+        "Operating expenses": float(statement.get("operating_expenses", 0.0) or 0.0),
+    }
+    filtered = {label: value for label, value in spend_values.items() if value > 0}
+    if not filtered:
+        filtered = spend_values
+
+    max_value = max([abs(value) for value in filtered.values()] or [1.0])
+    total_value = sum(float(value or 0.0) for value in filtered.values()) or 1.0
+    return [
+        {
+            "label": label,
+            "value": round(value, 2),
+            "value_display": format_dashboard_money(value),
+            "share_display": format_percent_value(safe_percent(value, total_value)),
+            "width_pct": round((abs(value) / max_value) * 100.0, 1) if max_value else 0.0,
+        }
+        for label, value in sorted(filtered.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
+
+def build_finance_channel_rows(transactions) -> list[dict[str, object]]:
+    channel_totals: dict[str, dict[str, object]] = {}
+    for row in transactions:
+        channel_label = row.channel_name or row.channel_id or "Unknown channel"
+        bucket = channel_totals.setdefault(
+            channel_label,
+            {
+                "label": channel_label,
+                "count": 0,
+                "money_in": 0.0,
+                "money_out": 0.0,
+                "net": 0.0,
+            },
+        )
+        money_in = normalize_money_value(row.money_in)
+        money_out = normalize_money_value(row.money_out)
+        bucket["count"] = int(bucket["count"]) + 1
+        bucket["money_in"] = float(bucket["money_in"]) + money_in
+        bucket["money_out"] = float(bucket["money_out"]) + money_out
+        bucket["net"] = float(bucket["net"]) + signed_money_delta(money_in, money_out)
+
+    rows = [
+        {
+            "label": bucket["label"],
+            "count": int(bucket["count"]),
+            "money_in_display": format_dashboard_money(float(bucket["money_in"])),
+            "money_out_display": format_dashboard_money(float(bucket["money_out"])),
+            "net_display": format_dashboard_money(float(bucket["net"])),
+        }
+        for bucket in sorted(
+            channel_totals.values(),
+            key=lambda item: (-float(item["net"]), -int(item["count"]), str(item["label"]).lower()),
+        )[:6]
+    ]
+    return rows
+
+
+def build_finance_notes(
+    *,
+    current_statement: dict[str, object],
+    prior_statement: dict[str, object],
+    range_label: str,
+    prior_label: str,
+    source_mix_rows: list[dict[str, object]],
+    top_channels: list[dict[str, object]],
+) -> list[dict[str, str]]:
+    notes: list[dict[str, str]] = []
+
+    profit_delta = float(current_statement.get("operating_profit", 0.0) or 0.0) - float(
+        prior_statement.get("operating_profit", 0.0) or 0.0
+    )
+    margin_label = str(current_statement.get("operating_margin_display") or "--")
+    if float(current_statement.get("operating_profit", 0.0) or 0.0) >= 0:
+        notes.append(
+            {
+                "title": "Profit posture",
+                "body": (
+                    f"{range_label} closed at {current_statement['operating_profit_display']} "
+                    f"of operating profit and {margin_label} margin, "
+                    f"{format_signed_money(profit_delta)} versus {prior_label}."
+                ),
+            }
+        )
+    else:
+        notes.append(
+            {
+                "title": "Profit posture",
+                "body": (
+                    f"{range_label} is currently running at {current_statement['operating_profit_display']} "
+                    f"operating profit with {margin_label} margin, "
+                    f"{format_signed_money(profit_delta)} versus {prior_label}."
+                ),
+            }
+        )
+
+    if source_mix_rows:
+        lead_source = source_mix_rows[0]
+        notes.append(
+            {
+                "title": "Lead revenue source",
+                "body": (
+                    f"{lead_source['label']} is contributing {lead_source['share_display']} "
+                    f"of selected-range revenue at {lead_source['value_display']}."
+                ),
+            }
+        )
+
+    tax_unknown_orders = int(current_statement.get("tax_unknown_orders", 0) or 0)
+    review_required = int(current_statement.get("review_required", 0) or 0)
+    if tax_unknown_orders:
+        notes.append(
+            {
+                "title": "Data coverage",
+                "body": (
+                    f"{tax_unknown_orders} external orders are missing tax detail, "
+                    "so platform net sales on this page are intentionally conservative."
+                ),
+            }
+        )
+    elif review_required:
+        notes.append(
+            {
+                "title": "Review backlog",
+                "body": (
+                    f"{review_required} Discord transactions in this range still need human review. "
+                    "The P&L is usable, but the cash mix can still tighten up as those rows are approved."
+                ),
+            }
+        )
+    else:
+        notes.append(
+            {
+                "title": "Data coverage",
+                "body": "No tax gaps or in-range Discord review backlog were detected for this view.",
+            }
+        )
+
+    if top_channels:
+        lead_channel = top_channels[0]
+        notes.append(
+            {
+                "title": "Best Discord lane",
+                "body": (
+                    f"{lead_channel['label']} led Discord activity with {lead_channel['net_display']} net "
+                    f"across {lead_channel['count']} transaction"
+                    f"{'' if lead_channel['count'] == 1 else 's'}."
+                ),
+            }
+        )
+
+    return notes[:4]
+
+
+def build_finance_quality_rows(
+    *,
+    current_statement: dict[str, object],
+    range_data: dict[str, object],
+) -> list[dict[str, str]]:
+    return [
+        {
+            "label": "Range length",
+            "value": f"{range_data['day_count']} days",
+            "detail": str(range_data["label"]),
+        },
+        {
+            "label": "Discord rows",
+            "value": str(current_statement["discord_rows"]),
+            "detail": f"{current_statement['review_required']} still flagged for review",
+        },
+        {
+            "label": "Paid platform orders",
+            "value": str(
+                int(current_statement["shopify_paid_orders"]) + int(current_statement["tiktok_paid_orders"])
+            ),
+            "detail": (
+                f"Shopify {current_statement['shopify_paid_orders']} | "
+                f"TikTok {current_statement['tiktok_paid_orders']}"
+            ),
+        },
+        {
+            "label": "Tax completeness",
+            "value": str(current_statement["tax_unknown_orders"]),
+            "detail": "Orders missing tax detail on external platforms",
+        },
+    ]
+
+
+def build_finance_monthly_rows(session: Session, *, months: int = 6) -> list[dict[str, object]]:
+    now_local = datetime.now(PACIFIC_TZ)
+    current_month_start = now_local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    rows: list[dict[str, object]] = []
+
+    for offset in range(months - 1, -1, -1):
+        month_start_local = shift_month_start(current_month_start, -offset)
+        next_month_start_local = shift_month_start(month_start_local, 1)
+        month_end_local = next_month_start_local - timedelta(microseconds=1)
+        day_count = max((month_end_local.date() - month_start_local.date()).days + 1, 1)
+        snapshot = build_finance_range_snapshot(
+            session,
+            start=month_start_local.astimezone(timezone.utc),
+            end=month_end_local.astimezone(timezone.utc),
+            day_count=day_count,
+        )
+        statement = snapshot["statement"]
+        rows.append(
+            {
+                "label": month_start_local.strftime("%b %Y"),
+                "revenue_display": statement["revenue_display"],
+                "operating_profit_display": statement["operating_profit_display"],
+                "margin_display": statement["operating_margin_display"],
+                "discord_display": statement["discord_revenue_display"],
+                "shopify_display": statement["shopify_net_revenue_display"],
+                "tiktok_display": statement["tiktok_net_revenue_display"],
+            }
+        )
+
     return rows
 
 
@@ -1569,7 +2209,17 @@ def _enrich_tiktok_order_from_api(order_id: str) -> None:
             )
             from .tiktok_ingest import upsert_tiktok_order
             upsert_tiktok_order(session, TikTokOrder, record)
-            session.commit()
+            _enrich_delay = 0.4
+            for _enrich_attempt in range(4):
+                try:
+                    session.commit()
+                    break
+                except Exception as _enrich_exc:
+                    if is_sqlite_lock_error(_enrich_exc) and _enrich_attempt < 3:
+                        time.sleep(_enrich_delay)
+                        _enrich_delay *= 2
+                        continue
+                    raise
             print(
                 structured_log_line(
                     runtime=runtime_name,
@@ -2667,8 +3317,44 @@ def build_watched_channel_groups(
 
 
 @asynccontextmanager
+def _load_stream_range() -> None:
+    """Load persisted stream range from DB into memory."""
+    try:
+        with managed_session() as session:
+            for key in ("stream_start_utc", "stream_end_utc"):
+                row = session.get(AppSetting, key)
+                if row and row.value:
+                    dt = datetime.fromisoformat(row.value)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    field = "start" if "start" in key else "end"
+                    _stream_range[field] = dt
+    except Exception:
+        pass
+
+
+def _save_stream_range() -> None:
+    """Persist current stream range to DB."""
+    def _do(session: Session):
+        for field, key in (("start", "stream_start_utc"), ("end", "stream_end_utc")):
+            val = _stream_range.get(field)
+            val_str = val.isoformat() if val else ""
+            existing = session.get(AppSetting, key)
+            if existing:
+                existing.value = val_str
+                session.add(existing)
+            else:
+                session.add(AppSetting(key=key, value=val_str))
+        session.commit()
+    try:
+        run_write_with_retry(_do)
+    except Exception:
+        pass
+
+
 async def lifespan(app: FastAPI):
     init_db()
+    _load_stream_range()
     with managed_session() as session:
         seed_default_users(session)
     seed_channels_from_env()
@@ -2817,10 +3503,36 @@ async def lifespan(app: FastAPI):
         app.state.tiktok_pull_task = None
         app.state.tiktok_backfill_task = None
 
+    live_analytics_stop = threading.Event()
+    app.state.live_analytics_stop = live_analytics_stop
+    live_analytics_thread = threading.Thread(
+        target=_poll_tiktok_live_analytics,
+        args=(live_analytics_stop,),
+        name="tiktok-live-analytics",
+        daemon=True,
+    )
+    live_analytics_thread.start()
+    app.state.live_analytics_thread = live_analytics_thread
+
+    live_chat_username = (settings.tiktok_live_username or "").strip()
+    live_chat_api_key = (settings.tiktok_live_api_key or "").strip()
+    if live_chat_username and live_chat_api_key:
+        live_chat_task = asyncio.create_task(
+            start_live_chat(live_chat_username, live_chat_api_key),
+            name="tiktok-live-chat",
+        )
+        background_tasks.append(live_chat_task)
+        app.state.live_chat_task = live_chat_task
+        print(f"[tiktok-live-chat] starting for @{live_chat_username}")
+    else:
+        app.state.live_chat_task = None
+
     yield
 
     stop_event.set()
     heartbeat_stop_event.set()
+    live_analytics_stop.set()
+    await stop_live_chat()
 
     done, pending = await asyncio.wait(background_tasks, timeout=10)
     for task in pending:
@@ -2862,8 +3574,9 @@ async def handle_operational_error(request: Request, exc: OperationalError):
             "detail": "The local database is handling another write right now. Please retry in a few seconds.",
         }
         html_message = (
+            '<meta http-equiv="refresh" content="3">'
             "<h1>SQLite temporarily busy</h1>"
-            "<p>The local database is handling another write right now. Please retry in a few seconds.</p>"
+            "<p>The local database is handling another write right now. Retrying automatically&hellip;</p>"
         )
     else:
         payload = {
@@ -2979,7 +3692,7 @@ def user_role_for_path(path: str) -> Optional[str]:
         return "reviewer"
     if path.startswith("/review") or path.startswith("/messages") or path.startswith("/channels"):
         return "reviewer"
-    if path.startswith("/reports") or path.startswith("/shopify-orders") or path.startswith("/shopify/orders") or path.startswith("/tiktok/orders") or path == "/tiktok":
+    if path.startswith("/reports") or path.startswith("/shopify-orders") or path.startswith("/shopify/orders") or path.startswith("/tiktok/orders") or path.startswith("/tiktok/products") or path == "/tiktok":
         return "viewer"
     if path == "/":
         return "viewer"
@@ -3009,7 +3722,7 @@ def redirect_to_login(request: Request) -> RedirectResponse:
 
 def app_home_for_role(role: str) -> str:
     if role == "admin":
-        return "/admin"
+        return "/dashboard"
     if role == "reviewer":
         return "/review"
     return "/dashboard"
@@ -5387,12 +6100,117 @@ def tiktok_oauth_callback(request: Request):
     )
 
 
+@app.get("/integrations/tiktok/creator-callback")
+def tiktok_creator_oauth_callback(request: Request):
+    """Handle Creator-type OAuth callback — stores creator_access_token for live analytics."""
+    query_params = dict(request.query_params)
+    runtime_name = f"{settings.runtime_name}_tiktok_creator"
+    received_at = utcnow()
+    code = (query_params.get("code") or "").strip()
+
+    if not code:
+        print(structured_log_line(
+            runtime=runtime_name, action="tiktok.creator.callback.failed",
+            success=False, error="Missing authorization code",
+        ))
+        return RedirectResponse(
+            url="/status?error=Creator+callback+missing+authorization+code",
+            status_code=303,
+        )
+
+    app_key = (settings.tiktok_app_key or "").strip()
+    app_secret = (settings.tiktok_app_secret or "").strip()
+    if not app_key or not app_secret:
+        print(structured_log_line(
+            runtime=runtime_name, action="tiktok.creator.callback.misconfigured",
+            success=False, error="Missing app_key or app_secret",
+        ))
+        return RedirectResponse(
+            url="/status?error=Creator+auth+config+missing", status_code=303,
+        )
+
+    try:
+        token_result = exchange_tiktok_authorization_code(
+            auth_code=code,
+            app_key=app_key,
+            app_secret=app_secret,
+            runtime_name=runtime_name,
+        )
+    except Exception as exc:
+        print(structured_log_line(
+            runtime=runtime_name, action="tiktok.creator.callback.exchange_failed",
+            success=False, error=str(exc),
+        ))
+        return RedirectResponse(
+            url="/status?error=Creator+token+exchange+failed", status_code=303,
+        )
+
+    creator_access = token_result.access_token
+    creator_refresh = token_result.refresh_token
+    creator_expires = token_result.access_token_expires_at
+
+    if not creator_access:
+        print(structured_log_line(
+            runtime=runtime_name, action="tiktok.creator.callback.no_token",
+            success=False, error="Token exchange returned empty access_token",
+        ))
+        return RedirectResponse(
+            url="/status?error=Creator+token+empty", status_code=303,
+        )
+
+    def _persist_creator_token(session: Session):
+        auth_row = get_latest_tiktok_auth_row(session)
+        if auth_row is None:
+            print(structured_log_line(
+                runtime=runtime_name, action="tiktok.creator.callback.no_seller_auth",
+                success=False,
+                error="No existing TikTokAuth row — authorize as Seller first",
+            ))
+            return False
+        auth_row.creator_access_token = creator_access
+        auth_row.creator_refresh_token = creator_refresh
+        auth_row.creator_token_expires_at = creator_expires
+        auth_row.updated_at = received_at
+        session.add(auth_row)
+        session.commit()
+        return True
+
+    try:
+        ok = run_write_with_retry(_persist_creator_token)
+    except Exception as exc:
+        print(structured_log_line(
+            runtime=runtime_name, action="tiktok.creator.callback.db_failed",
+            success=False, error=str(exc)[:400],
+        ))
+        return RedirectResponse(
+            url="/status?error=Creator+token+save+failed", status_code=303,
+        )
+
+    if not ok:
+        return RedirectResponse(
+            url="/status?error=No+seller+auth+row+found.+Authorize+as+seller+first.",
+            status_code=303,
+        )
+
+    print(structured_log_line(
+        runtime=runtime_name, action="tiktok.creator.callback.success",
+        success=True, expires_at=str(creator_expires),
+    ))
+    return RedirectResponse(
+        url=f"/status?{urlencode({'success': 'Creator authorization captured — live analytics enabled'})}",
+        status_code=303,
+    )
+
+
 @app.post("/webhooks/tiktok/orders")
 async def tiktok_orders_webhook(request: Request):
     raw_body = await request.body()
     runtime_name = f"{settings.runtime_name}_tiktok"
     body_hash = hashlib.sha256(raw_body).hexdigest()
-    webhook_secret = ((settings.tiktok_webhook_secret or "").strip() or (settings.tiktok_app_secret or "").strip())
+
+    primary_secret = (settings.tiktok_app_secret or "").strip()
+    configured_shop_id = (settings.tiktok_shop_id or "").strip()
+
     topic = (
         request.headers.get("X-TikTok-Topic")
         or request.headers.get("X-Event-Type")
@@ -5403,8 +6221,10 @@ async def tiktok_orders_webhook(request: Request):
     try:
         payload = parse_tiktok_webhook_payload(
             raw_body,
-            app_secret=webhook_secret,
+            app_secret=primary_secret,
             headers=request.headers,
+            request_path=str(request.url.path),
+            strict_signature=False,
         )
     except Exception as exc:
         update_tiktok_integration_state(
@@ -5428,6 +6248,52 @@ async def tiktok_orders_webhook(request: Request):
             )
         )
         raise HTTPException(status_code=400, detail="Invalid TikTok webhook payload") from exc
+
+    sig_verified = payload.pop("_signature_verified", False)
+    payload_shop_id = str(payload.get("shop_id") or "").strip()
+    shop_id_matches = (
+        not configured_shop_id
+        or not payload_shop_id
+        or payload_shop_id == configured_shop_id
+    )
+
+    if not sig_verified and not shop_id_matches:
+        err = f"Unverified webhook with mismatched shop_id (got {payload_shop_id})"
+        update_tiktok_integration_state(
+            last_error=err,
+            last_webhook={
+                "received_at": utcnow().isoformat(),
+                "topic": topic,
+                "body_sha256": body_hash,
+                "error": err,
+            },
+        )
+        print(
+            structured_log_line(
+                runtime=runtime_name,
+                action="tiktok.webhook.rejected",
+                success=False,
+                error=err,
+                topic=topic,
+                payload_shop_id=payload_shop_id,
+                configured_shop_id=configured_shop_id,
+            )
+        )
+        raise HTTPException(status_code=400, detail="Invalid TikTok webhook payload")
+
+    if not sig_verified:
+        print(
+            structured_log_line(
+                runtime=runtime_name,
+                action="tiktok.webhook.signature_unverified",
+                success=True,
+                topic=topic,
+                request_path=str(request.url.path),
+                body_sha256=body_hash,
+                shop_id_matches=shop_id_matches,
+                payload_shop_id=payload_shop_id,
+            )
+        )
 
     order_upsert_status = ""
     if isinstance(payload, dict):
@@ -5884,6 +6750,93 @@ def reports_page(
     )
 
 
+@app.get("/pnl", include_in_schema=False)
+def finance_redirect():
+    return RedirectResponse(url="/finance", status_code=307)
+
+
+@app.get("/finance", response_class=HTMLResponse)
+def finance_page(
+    request: Request,
+    start: Optional[str] = Query(default=None),
+    end: Optional[str] = Query(default=None),
+    window: Optional[str] = Query(default=FINANCE_WINDOW_MTD),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "viewer"):
+        return denial
+
+    range_data = resolve_finance_range(start=start, end=end, window=window)
+    current_snapshot = build_finance_range_snapshot(
+        session,
+        start=range_data["start_dt"],
+        end=range_data["end_dt"],
+        day_count=int(range_data["day_count"]),
+    )
+    prior_snapshot = build_finance_range_snapshot(
+        session,
+        start=range_data["previous_start_dt"],
+        end=range_data["previous_end_dt"],
+        day_count=int(range_data["day_count"]),
+    )
+
+    current_statement = current_snapshot["statement"]
+    prior_statement = prior_snapshot["statement"]
+    source_mix_rows = build_finance_source_mix_rows(current_statement)
+    spend_mix_rows = build_finance_spend_mix_rows(current_statement)
+    top_channels = build_finance_channel_rows(current_snapshot["transactions"])
+    analyst_notes = build_finance_notes(
+        current_statement=current_statement,
+        prior_statement=prior_statement,
+        range_label=str(range_data["label"]),
+        prior_label=str(range_data["previous_label"]),
+        source_mix_rows=source_mix_rows,
+        top_channels=top_channels,
+    )
+    quick_windows = [
+        {
+            "label": FINANCE_WINDOW_LABELS[window_key],
+            "url": build_finance_url(window=window_key),
+            "active": range_data["selected_window"] == window_key,
+        }
+        for window_key in (
+            FINANCE_WINDOW_MTD,
+            FINANCE_WINDOW_30D,
+            FINANCE_WINDOW_90D,
+            FINANCE_WINDOW_YTD,
+        )
+    ]
+
+    return templates.TemplateResponse(
+        request,
+        "finance.html",
+        {
+            "request": request,
+            "title": "Executive Finance",
+            "current_user": getattr(request.state, "current_user", None),
+            "selected_start": range_data["selected_start"],
+            "selected_end": range_data["selected_end"],
+            "selected_window": range_data["selected_window"],
+            "range_data": range_data,
+            "quick_windows": quick_windows,
+            "current_statement": current_statement,
+            "prior_statement": prior_statement,
+            "kpi_rows": build_finance_kpi_rows(current_statement, prior_statement),
+            "statement_rows": build_finance_statement_rows(current_statement, prior_statement),
+            "source_mix_rows": source_mix_rows,
+            "spend_mix_rows": spend_mix_rows,
+            "top_channels": top_channels,
+            "analyst_notes": analyst_notes,
+            "quality_rows": build_finance_quality_rows(
+                current_statement=current_statement,
+                range_data=range_data,
+            ),
+            "monthly_rows": build_finance_monthly_rows(session),
+            "finance_url": build_finance_url,
+        },
+    )
+
+
 @app.get("/tiktok", include_in_schema=False)
 def tiktok_orders_redirect():
     return RedirectResponse(url="/tiktok/orders", status_code=307)
@@ -6151,6 +7104,10 @@ def _build_streamer_order_card(order: TikTokOrder) -> dict:
             title = str(summary_items[idx].get("title") or "").strip()
         if not title:
             title = "Unknown item"
+
+        sku_name = str(raw.get("sku_name") or "").strip()
+        variant = sku_name if sku_name and sku_name.lower() != "default" and sku_name.lower() != title.lower() else None
+
         qty_raw = raw.get("quantity") or raw.get("sku_quantity") or raw.get("count")
         try:
             quantity = int(qty_raw or 0)
@@ -6183,6 +7140,7 @@ def _build_streamer_order_card(order: TikTokOrder) -> dict:
 
         items.append({
             "title": title,
+            "variant": variant,
             "quantity": quantity,
             "sku_image": sku_image,
             "unit_price": unit_price,
@@ -6194,6 +7152,7 @@ def _build_streamer_order_card(order: TikTokOrder) -> dict:
                 continue
             items.append({
                 "title": str(si.get("title") or "Unknown item"),
+                "variant": None,
                 "quantity": int(si.get("quantity") or 1),
                 "sku_image": str(si.get("sku_image") or "").strip() or None,
                 "unit_price": float(si.get("unit_price") or 0),
@@ -6213,12 +7172,85 @@ def _build_streamer_order_card(order: TikTokOrder) -> dict:
         "created_at": created_at_val.isoformat() if created_at_val else "",
         "updated_at": updated_at_val.isoformat() if updated_at_val else "",
         "total_price": float(order.total_price or 0),
+        "order_status": (order.order_status or "").strip().lower(),
+        "financial_status": (order.financial_status or "").strip().lower(),
         "items": items,
     }
 
 
+def _poll_tiktok_live_analytics(stop_event: threading.Event) -> None:
+    """Background thread: poll TikTok LIVE analytics endpoint every 60s."""
+    if _fetch_tiktok_live_analytics is None:
+        return
+    runtime_name = f"{settings.runtime_name}_live_analytics"
+    while not stop_event.is_set():
+        try:
+            with managed_session() as session:
+                auth_row = get_latest_tiktok_auth_row(session)
+            if auth_row is None:
+                stop_event.wait(_LIVE_ANALYTICS_POLL_SECONDS)
+                continue
+
+            shop_id, shop_cipher, access_token = _resolve_tiktok_pull_credentials(auth_row)
+            if not access_token or not shop_cipher:
+                stop_event.wait(_LIVE_ANALYTICS_POLL_SECONDS)
+                continue
+
+            creator_token = (auth_row.creator_access_token or "").strip() if auth_row else ""
+            room_id = get_live_room_id() or ""
+
+            with httpx.Client(timeout=20.0, follow_redirects=True) as client:
+                result = _fetch_tiktok_live_analytics(
+                    client,
+                    base_url=resolve_tiktok_shop_pull_base_url(),
+                    app_key=(settings.tiktok_app_key or "").strip(),
+                    app_secret=(settings.tiktok_app_secret or "").strip(),
+                    access_token=access_token,
+                    shop_cipher=shop_cipher,
+                    currency="USD",
+                    creator_access_token=creator_token,
+                    live_room_id=room_id,
+                )
+
+            if result.get("rpc_error"):
+                with _live_analytics_lock:
+                    _live_analytics_cache["ok"] = False
+                    _live_analytics_cache["rpc_error"] = True
+            else:
+                with _live_analytics_lock:
+                    _live_analytics_cache.update(result)
+                    _live_analytics_cache["ok"] = True
+                    _live_analytics_cache.pop("rpc_error", None)
+                source = result.get("source", "unknown")
+                if source == "live_core_stats":
+                    print(structured_log_line(
+                        runtime=runtime_name,
+                        action="tiktok.live_analytics.realtime_ok",
+                        success=True,
+                        gmv=result.get("gmv"),
+                    ))
+        except Exception as exc:
+            print(
+                structured_log_line(
+                    runtime=runtime_name,
+                    action="tiktok.live_analytics.poll_failed",
+                    success=False,
+                    error=str(exc)[:600],
+                )
+            )
+            with _live_analytics_lock:
+                _live_analytics_cache["ok"] = False
+
+        stop_event.wait(_LIVE_ANALYTICS_POLL_SECONDS)
+
+
+def _get_live_analytics_snapshot() -> dict:
+    with _live_analytics_lock:
+        return dict(_live_analytics_cache)
+
+
 def _streamer_session_gmv(session: Session) -> dict:
-    """Calculate today's GMV for the streamer dashboard (Pacific time)."""
+    """Calculate today's GMV and top sellers for the streamer dashboard (Pacific time)."""
     now_pacific = datetime.now(PACIFIC_TZ)
     today_start_pacific = now_pacific.replace(hour=0, minute=0, second=0, microsecond=0)
     today_start_utc = today_start_pacific.astimezone(timezone.utc)
@@ -6233,17 +7265,182 @@ def _streamer_session_gmv(session: Session) -> dict:
     }
     gmv = 0.0
     paid_count = 0
+    product_agg: dict[str, dict] = {}
+    customer_agg: dict[str, dict] = {}
+
     for o in today_orders:
         status = (o.financial_status or o.order_status or "").lower().strip()
-        if status in paid_statuses:
-            gmv += float(o.total_price or 0)
-            paid_count += 1
+        if status not in paid_statuses:
+            continue
+        order_gmv = float(o.subtotal_price if o.subtotal_price is not None else (o.total_price or 0))
+        gmv += order_gmv
+        paid_count += 1
 
-    return {
+        buyer_name = (o.customer_name or "").strip() or "Guest"
+        buyer_key = buyer_name.lower()
+        if buyer_key in customer_agg:
+            customer_agg[buyer_key]["spent"] += order_gmv
+            customer_agg[buyer_key]["orders"] += 1
+        else:
+            customer_agg[buyer_key] = {"name": buyer_name, "spent": order_gmv, "orders": 1}
+
+        raw_items: list[dict] = []
+        try:
+            raw_items = json.loads(o.line_items_json) if o.line_items_json else []
+        except (json.JSONDecodeError, TypeError):
+            pass
+        if not isinstance(raw_items, list):
+            raw_items = [raw_items] if isinstance(raw_items, dict) else []
+
+        for raw in raw_items:
+            if not isinstance(raw, dict):
+                continue
+            title = str(
+                raw.get("product_name") or raw.get("sku_name") or raw.get("title") or raw.get("item_name") or ""
+            ).strip()
+            if not title:
+                title = "Unknown item"
+
+            sku_name = str(raw.get("sku_name") or "").strip()
+            variant = sku_name if sku_name and sku_name.lower() != "default" and sku_name.lower() != title.lower() else None
+            key = (title.lower() + "||" + (variant or "").lower()).strip()
+
+            qty_raw = raw.get("quantity") or raw.get("sku_quantity") or raw.get("count")
+            try:
+                qty = max(int(qty_raw or 0), 1)
+            except (TypeError, ValueError):
+                qty = 1
+
+            unit_price = 0.0
+            for pk in ("sale_price", "sku_sale_price", "price", "unit_price"):
+                val = raw.get(pk)
+                if val is not None:
+                    try:
+                        unit_price = float(val)
+                    except (TypeError, ValueError):
+                        continue
+                    break
+
+            sku_image = str(
+                raw.get("sku_image") or raw.get("product_image") or raw.get("image_url") or ""
+            ).strip() or None
+
+            if key in product_agg:
+                product_agg[key]["qty"] += qty
+                product_agg[key]["revenue"] += round(qty * unit_price, 2)
+                if not product_agg[key]["sku_image"] and sku_image:
+                    product_agg[key]["sku_image"] = sku_image
+            else:
+                product_agg[key] = {
+                    "title": title,
+                    "variant": variant,
+                    "sku_image": sku_image,
+                    "qty": qty,
+                    "revenue": round(qty * unit_price, 2),
+                }
+
+    top_sellers = sorted(product_agg.values(), key=lambda p: p["revenue"], reverse=True)[:8]
+    for ts in top_sellers:
+        ts["revenue"] = round(ts["revenue"], 2)
+
+    top_buyers = sorted(customer_agg.values(), key=lambda b: b["spent"], reverse=True)[:10]
+    for tb in top_buyers:
+        tb["spent"] = round(tb["spent"], 2)
+
+    result: dict[str, Any] = {
         "session_gmv": round(gmv, 2),
         "session_orders": paid_count,
         "session_total_orders": len(today_orders),
+        "top_sellers": top_sellers,
+        "top_buyers": top_buyers,
     }
+
+    sr_start = _stream_range.get("start")
+    sr_end = _stream_range.get("end")
+    if sr_start is not None:
+        stream_gmv = 0.0
+        stream_paid = 0
+        stream_items = 0
+        stream_product_agg: dict[str, dict] = {}
+        stream_customer_agg: dict[str, dict] = {}
+        q = select(TikTokOrder).where(TikTokOrder.created_at >= sr_start)
+        if sr_end is not None:
+            q = q.where(TikTokOrder.created_at <= sr_end)
+        stream_orders_rows = session.exec(q).all()
+        for o in stream_orders_rows:
+            status = (o.financial_status or o.order_status or "").lower().strip()
+            if status not in paid_statuses:
+                continue
+            o_gmv = float(o.subtotal_price if o.subtotal_price is not None else (o.total_price or 0))
+            stream_gmv += o_gmv
+            stream_paid += 1
+
+            buyer_name = (o.customer_name or "").strip() or "Guest"
+            buyer_key = buyer_name.lower()
+            if buyer_key in stream_customer_agg:
+                stream_customer_agg[buyer_key]["spent"] += o_gmv
+                stream_customer_agg[buyer_key]["orders"] += 1
+            else:
+                stream_customer_agg[buyer_key] = {"name": buyer_name, "spent": o_gmv, "orders": 1}
+
+            try:
+                s_items = json.loads(o.line_items_json) if o.line_items_json else []
+            except (json.JSONDecodeError, TypeError):
+                s_items = []
+            if not isinstance(s_items, list):
+                s_items = [s_items] if isinstance(s_items, dict) else []
+            for it in s_items:
+                if not isinstance(it, dict):
+                    continue
+                s_title = str(
+                    it.get("product_name") or it.get("sku_name") or it.get("title") or it.get("item_name") or ""
+                ).strip() or "Unknown item"
+                s_sku = str(it.get("sku_name") or "").strip()
+                s_variant = s_sku if s_sku and s_sku.lower() != "default" and s_sku.lower() != s_title.lower() else None
+                s_key = (s_title.lower() + "||" + (s_variant or "").lower()).strip()
+                try:
+                    s_qty = max(int(it.get("quantity") or it.get("sku_quantity") or 1), 1)
+                except (TypeError, ValueError):
+                    s_qty = 1
+                stream_items += s_qty
+                s_unit = 0.0
+                for pk in ("sale_price", "sku_sale_price", "price", "unit_price"):
+                    val = it.get(pk)
+                    if val is not None:
+                        try:
+                            s_unit = float(val)
+                        except (TypeError, ValueError):
+                            continue
+                        break
+                s_img = str(it.get("sku_image") or it.get("product_image") or it.get("image_url") or "").strip() or None
+                if s_key in stream_product_agg:
+                    stream_product_agg[s_key]["qty"] += s_qty
+                    stream_product_agg[s_key]["revenue"] += round(s_qty * s_unit, 2)
+                    if not stream_product_agg[s_key]["sku_image"] and s_img:
+                        stream_product_agg[s_key]["sku_image"] = s_img
+                else:
+                    stream_product_agg[s_key] = {
+                        "title": s_title, "variant": s_variant, "sku_image": s_img,
+                        "qty": s_qty, "revenue": round(s_qty * s_unit, 2),
+                    }
+
+        stream_top_sellers = sorted(stream_product_agg.values(), key=lambda p: p["revenue"], reverse=True)[:8]
+        for sts in stream_top_sellers:
+            sts["revenue"] = round(sts["revenue"], 2)
+        stream_top_buyers = sorted(stream_customer_agg.values(), key=lambda b: b["spent"], reverse=True)[:10]
+        for stb in stream_top_buyers:
+            stb["spent"] = round(stb["spent"], 2)
+
+        result["stream_gmv"] = round(stream_gmv, 2)
+        result["stream_orders"] = stream_paid
+        result["stream_items"] = stream_items
+        result["stream_top_sellers"] = stream_top_sellers
+        result["stream_top_buyers"] = stream_top_buyers
+        result["stream_start_utc"] = sr_start.isoformat()
+        if sr_end:
+            result["stream_end_utc"] = sr_end.isoformat()
+
+    return result
 
 
 @app.get("/tiktok/streamer", response_class=HTMLResponse)
@@ -6270,6 +7467,16 @@ def tiktok_streamer_page(
     total_count = int(session.exec(select(func.count()).select_from(TikTokOrder)).one())
     gmv_data = _streamer_session_gmv(session)
 
+    chat_info = get_chat_status()
+    live_analytics = _get_live_analytics_snapshot()
+
+    stream_data = {
+        "stream_gmv": gmv_data.get("stream_gmv"),
+        "stream_orders": gmv_data.get("stream_orders"),
+        "stream_items": gmv_data.get("stream_items"),
+        "stream_start_utc": gmv_data.get("stream_start_utc"),
+    }
+
     return templates.TemplateResponse(request, "tiktok_streamer.html", {
         "request": request,
         "title": "TikTok Live Orders",
@@ -6279,6 +7486,13 @@ def tiktok_streamer_page(
         "session_gmv": gmv_data["session_gmv"],
         "session_orders": gmv_data["session_orders"],
         "session_total_orders": gmv_data["session_total_orders"],
+        "top_sellers_json": json.dumps(gmv_data.get("top_sellers", [])),
+        "top_buyers_json": json.dumps(gmv_data.get("top_buyers", [])),
+        "stream_top_sellers_json": json.dumps(gmv_data.get("stream_top_sellers", [])),
+        "stream_top_buyers_json": json.dumps(gmv_data.get("stream_top_buyers", [])),
+        "live_analytics_json": json.dumps(live_analytics),
+        "stream_data_json": json.dumps(stream_data),
+        "chat_status": chat_info["status"],
         "current_user": getattr(request.state, "current_user", None),
     })
 
@@ -6288,15 +7502,28 @@ def tiktok_streamer_poll(
     since: Optional[str] = Query(default=None),
     session: Session = Depends(get_session),
 ):
-    query = select(TikTokOrder).order_by(TikTokOrder.updated_at.desc()).limit(20)
+    created_at_floor = datetime.now(timezone.utc) - timedelta(hours=24)
+
+    query = (
+        select(TikTokOrder)
+        .where(TikTokOrder.created_at >= created_at_floor)
+        .order_by(TikTokOrder.updated_at.desc())
+        .limit(20)
+    )
     if since:
         try:
             since_dt = datetime.fromisoformat(since)
             if since_dt.tzinfo is None:
                 since_dt = since_dt.replace(tzinfo=timezone.utc)
-            query = select(TikTokOrder).where(
-                TikTokOrder.updated_at > since_dt
-            ).order_by(TikTokOrder.updated_at.desc()).limit(20)
+            query = (
+                select(TikTokOrder)
+                .where(
+                    TikTokOrder.updated_at > since_dt,
+                    TikTokOrder.created_at >= created_at_floor,
+                )
+                .order_by(TikTokOrder.updated_at.desc())
+                .limit(20)
+            )
         except (ValueError, TypeError):
             pass
 
@@ -6321,7 +7548,683 @@ def tiktok_streamer_poll(
         "session_gmv": gmv_data["session_gmv"],
         "session_orders": gmv_data["session_orders"],
         "session_total_orders": gmv_data["session_total_orders"],
+        "top_sellers": gmv_data.get("top_sellers", []),
+        "top_buyers": gmv_data.get("top_buyers", []),
+        "stream_top_sellers": gmv_data.get("stream_top_sellers", []),
+        "stream_top_buyers": gmv_data.get("stream_top_buyers", []),
+        "live_analytics": _get_live_analytics_snapshot(),
+        "stream_gmv": gmv_data.get("stream_gmv"),
+        "stream_orders": gmv_data.get("stream_orders"),
+        "stream_items": gmv_data.get("stream_items"),
+        "stream_start_utc": gmv_data.get("stream_start_utc"),
     }
+
+
+@app.get("/tiktok/streamer/config", response_class=HTMLResponse)
+def tiktok_streamer_config(request: Request):
+    """Backend page to configure the stream date range shown on the streamer dashboard."""
+    s = _stream_range["start"]
+    e = _stream_range["end"]
+    start_val = s.astimezone(PACIFIC_TZ).strftime("%Y-%m-%dT%H:%M") if s else ""
+    end_val = e.astimezone(PACIFIC_TZ).strftime("%Y-%m-%dT%H:%M") if e else ""
+
+    html = f"""<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Stream Config</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/themes/dark.css">
+<style>
+  body {{ font-family: system-ui, sans-serif; background: #0f0f0f; color: #e5e5e5;
+         display: flex; justify-content: center; padding: 60px 16px; margin: 0; }}
+  .card {{ background: #1a1a1a; border-radius: 16px; padding: 32px; max-width: 440px; width: 100%; }}
+  h1 {{ font-size: 20px; margin: 0 0 8px; }}
+  .subtitle {{ font-size: 13px; color: #888; margin-bottom: 24px; }}
+  label {{ display: block; font-size: 11px; font-weight: 700; text-transform: uppercase;
+           letter-spacing: .1em; color: #888; margin-bottom: 6px; }}
+  .fp-input {{ width: 100%; padding: 12px 14px; border-radius: 10px;
+    border: 1px solid #333; background: #111; color: #e5e5e5; font-size: 15px;
+    margin-bottom: 18px; box-sizing: border-box; cursor: pointer; }}
+  .fp-input:focus {{ outline: none; border-color: #22c55e; }}
+  .row {{ display: flex; gap: 12px; margin-top: 8px; }}
+  button {{ flex: 1; padding: 13px; border: none; border-radius: 10px; font-size: 14px;
+            font-weight: 700; cursor: pointer; transition: all .15s; }}
+  button:hover {{ opacity: .85; }}
+  .btn-save {{ background: #22c55e; color: #000; }}
+  .btn-clear {{ background: #333; color: #ccc; }}
+  .status {{ margin-top: 16px; font-size: 13px; color: #22c55e; display: none; text-align: center;
+             padding: 8px; border-radius: 8px; background: rgba(34,197,94,.1); }}
+  a {{ color: #22c55e; text-decoration: none; }}
+  a:hover {{ text-decoration: underline; }}
+  .flatpickr-calendar {{ font-family: system-ui, sans-serif !important; }}
+</style>
+</head><body>
+<div class="card">
+  <h1>Stream Config</h1>
+  <p class="subtitle">Set the date range for the current stream. GMV will be calculated from orders in this window.</p>
+  <label>Stream Start (Pacific)</label>
+  <input class="fp-input" id="start" placeholder="Click to pick date & time" readonly>
+  <label>Stream End (Pacific) — leave blank for ongoing</label>
+  <input class="fp-input" id="end" placeholder="Click to pick date & time (optional)" readonly>
+  <div class="row">
+    <button class="btn-save" onclick="save()">Save</button>
+    <button class="btn-clear" onclick="clearRange()">Clear</button>
+  </div>
+  <div class="status" id="status"></div>
+  <p style="margin-top:24px;font-size:12px;text-align:center;">
+    <a href="/tiktok/streamer">&larr; Back to Streamer Dashboard</a>
+  </p>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
+<script>
+var fpOpts = {{
+  enableTime: true,
+  dateFormat: 'Y-m-d H:i',
+  altInput: true,
+  altFormat: 'M j, Y  h:i K',
+  time_24hr: false,
+  theme: 'dark',
+  disableMobile: true
+}};
+var fpStart = flatpickr('#start', Object.assign({{}}, fpOpts, {{
+  defaultDate: '{start_val}'.replace('T', ' ') || null
+}}));
+var fpEnd = flatpickr('#end', Object.assign({{}}, fpOpts, {{
+  defaultDate: '{end_val}'.replace('T', ' ') || null
+}}));
+function flash(msg, ok) {{
+  var el = document.getElementById('status');
+  el.textContent = msg;
+  el.style.color = ok ? '#22c55e' : '#ef4444';
+  el.style.background = ok ? 'rgba(34,197,94,.1)' : 'rgba(239,68,68,.1)';
+  el.style.display = 'block';
+  setTimeout(function() {{ el.style.display = 'none'; }}, 3000);
+}}
+function save() {{
+  var s = document.getElementById('start').value;
+  var e = document.getElementById('end').value;
+  fetch('/tiktok/streamer/config', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{ start: s, end: e }}) }})
+    .then(function(r) {{ return r.json(); }})
+    .then(function(d) {{ flash(d.ok ? 'Saved!' : (d.error || 'Error'), d.ok); }});
+}}
+function clearRange() {{
+  fpStart.clear();
+  fpEnd.clear();
+  fetch('/tiktok/streamer/config', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{ start: '', end: '' }}) }})
+    .then(function(r) {{ return r.json(); }})
+    .then(function() {{ flash('Cleared!', true); }});
+}}
+</script>
+</body></html>"""
+    return HTMLResponse(content=html)
+
+
+@app.post("/tiktok/streamer/config")
+def tiktok_streamer_config_save(request: Request, body: dict = None):
+    """Save the stream date range."""
+    if body is None:
+        body = {}
+    start_str = (body.get("start") or "").strip()
+    end_str = (body.get("end") or "").strip()
+
+    if start_str:
+        try:
+            naive = datetime.fromisoformat(start_str)
+            _stream_range["start"] = naive.replace(tzinfo=PACIFIC_TZ).astimezone(timezone.utc)
+        except (ValueError, TypeError):
+            return {"ok": False, "error": "Invalid start date"}
+    else:
+        _stream_range["start"] = None
+
+    if end_str:
+        try:
+            naive = datetime.fromisoformat(end_str)
+            _stream_range["end"] = naive.replace(tzinfo=PACIFIC_TZ).astimezone(timezone.utc)
+        except (ValueError, TypeError):
+            return {"ok": False, "error": "Invalid end date"}
+    else:
+        _stream_range["end"] = None
+
+    _save_stream_range()
+    return {"ok": True, "start": str(_stream_range["start"] or ""), "end": str(_stream_range["end"] or "")}
+
+
+@app.get("/tiktok/streamer/chat/poll")
+def tiktok_streamer_chat_poll(
+    since: int = Query(default=0),
+):
+    messages = get_live_chat_messages(since_idx=since)
+    status_info = get_chat_status()
+    latest_idx = messages[-1]["idx"] if messages else since
+    return {
+        "messages": messages,
+        "latest_idx": latest_idx,
+        "status": status_info["status"],
+        "viewer_count": status_info["viewer_count"],
+    }
+
+
+_tiktok_product_sync_state: dict[str, object] = {
+    "is_running": False,
+    "last_finished_at": None,
+    "last_error": None,
+}
+_tiktok_product_sync_lock = threading.Lock()
+
+
+def _read_tiktok_product_sync_state() -> dict[str, object]:
+    with _tiktok_product_sync_lock:
+        return dict(_tiktok_product_sync_state)
+
+
+def _update_tiktok_product_sync_state(**changes: object) -> None:
+    with _tiktok_product_sync_lock:
+        _tiktok_product_sync_state.update(changes)
+
+
+def run_tiktok_product_sync_background(*, limit: Optional[int], trigger: str = "manual") -> None:
+    runtime_name = f"{settings.runtime_name}_tiktok_product_sync"
+    _update_tiktok_product_sync_state(is_running=True, last_error=None)
+    try:
+        if pull_tiktok_products is None:
+            _update_tiktok_product_sync_state(is_running=False, last_error="product sync unavailable")
+            return
+
+        with managed_session() as session:
+            auth_row = ensure_tiktok_auth_row(session)
+            shop_id, shop_cipher, access_token = _resolve_tiktok_pull_credentials(auth_row)
+            if not shop_id and not shop_cipher:
+                _update_tiktok_product_sync_state(is_running=False, last_error="missing shop identity")
+                return
+            if not access_token:
+                _update_tiktok_product_sync_state(is_running=False, last_error="missing access token")
+                return
+            summary = pull_tiktok_products(
+                session,
+                base_url=resolve_tiktok_shop_pull_base_url(),
+                app_key=(settings.tiktok_app_key or "").strip(),
+                app_secret=(settings.tiktok_app_secret or "").strip(),
+                access_token=access_token,
+                shop_id=shop_id,
+                shop_cipher=shop_cipher,
+                limit=limit,
+                dry_run=False,
+                runtime_name=runtime_name,
+            )
+            session.commit()
+            print(
+                structured_log_line(
+                    runtime=runtime_name,
+                    action="tiktok.products.sync_complete",
+                    success=True,
+                    trigger=trigger,
+                    fetched=summary.fetched,
+                    inserted=summary.inserted,
+                    updated=summary.updated,
+                    failed=summary.failed,
+                )
+            )
+        _update_tiktok_product_sync_state(is_running=False, last_finished_at=utcnow(), last_error=None)
+    except Exception as exc:
+        _update_tiktok_product_sync_state(is_running=False, last_finished_at=utcnow(), last_error=str(exc))
+        print(
+            structured_log_line(
+                runtime=runtime_name,
+                action="tiktok.products.sync_failed",
+                success=False,
+                error=str(exc),
+                trigger=trigger,
+            )
+        )
+
+
+@app.post("/tiktok/products/sync-form")
+def tiktok_products_sync_form(
+    request: Request,
+    limit: Optional[str] = Form(default=""),
+):
+    if denial := require_role_response(request, "admin"):
+        return denial
+    sync_state = _read_tiktok_product_sync_state()
+    if sync_state.get("is_running"):
+        return RedirectResponse(url="/tiktok/products?success=Product+sync+already+running", status_code=303)
+
+    raw_limit = (limit or "").strip()
+    safe_limit: Optional[int]
+    if not raw_limit:
+        safe_limit = 200
+    else:
+        try:
+            safe_limit = max(int(raw_limit), 1)
+        except ValueError:
+            return RedirectResponse(url="/tiktok/products?error=Limit+must+be+a+number", status_code=303)
+
+    thread = threading.Thread(
+        target=run_tiktok_product_sync_background,
+        kwargs={"limit": safe_limit, "trigger": "manual"},
+        daemon=True,
+        name="tiktok-product-sync-manual",
+    )
+    thread.start()
+    return RedirectResponse(url="/tiktok/products?success=Started+product+sync", status_code=303)
+
+
+def _get_tiktok_product_filter_options(session: Session) -> dict[str, list[str]]:
+    def _distinct(col):
+        try:
+            return sorted({v for v in session.exec(select(col).distinct()).all() if v not in (None, "")})
+        except Exception:
+            return []
+    return {
+        "statuses": _distinct(TikTokProduct.status),
+        "audit_statuses": _distinct(TikTokProduct.audit_status),
+        "source_options": _distinct(TikTokProduct.source),
+    }
+
+
+def _build_product_sku_summary(skus_json: str) -> dict[str, object]:
+    try:
+        skus = json.loads(skus_json) if skus_json else []
+    except (json.JSONDecodeError, TypeError):
+        skus = []
+    if not isinstance(skus, list):
+        skus = []
+    count = len(skus)
+    prices = [s.get("price") or 0 for s in skus if isinstance(s, dict)]
+    total_inventory = sum(s.get("inventory") or 0 for s in skus if isinstance(s, dict))
+    min_price = min(prices) if prices else 0
+    max_price = max(prices) if prices else 0
+    return {
+        "count": count,
+        "min_price": round(float(min_price), 2),
+        "max_price": round(float(max_price), 2),
+        "total_inventory": total_inventory,
+    }
+
+
+@app.get("/tiktok/products", response_class=HTMLResponse)
+def tiktok_products_page(
+    request: Request,
+    status: Optional[str] = Query(default=None),
+    audit_status: Optional[str] = Query(default=None),
+    search: Optional[str] = Query(default=None),
+    sort_by: str = Query(default="updated"),
+    sort_dir: str = Query(default="desc"),
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=50, ge=1, le=200),
+    success: Optional[str] = Query(default=None),
+    error: Optional[str] = Query(default=None),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "viewer"):
+        return denial
+
+    query = select(TikTokProduct)
+    if status:
+        query = query.where(TikTokProduct.status == status)
+    if audit_status:
+        query = query.where(TikTokProduct.audit_status == audit_status)
+    if search:
+        term = f"%{search}%"
+        query = query.where(
+            (TikTokProduct.title.ilike(term))
+            | (TikTokProduct.tiktok_product_id.ilike(term))
+            | (TikTokProduct.category_name.ilike(term))
+            | (TikTokProduct.brand_name.ilike(term))
+        )
+
+    sort_column_map = {
+        "title": TikTokProduct.title,
+        "status": TikTokProduct.status,
+        "updated": TikTokProduct.updated_at,
+        "created": TikTokProduct.created_at,
+        "synced": TikTokProduct.synced_at,
+    }
+    sort_col = sort_column_map.get(sort_by, TikTokProduct.updated_at)
+    query = query.order_by(sort_col.desc() if sort_dir == "desc" else sort_col.asc(), TikTokProduct.id.desc())
+
+    count_query = select(func.count()).select_from(TikTokProduct)
+    if query.whereclause is not None:
+        count_query = count_query.where(query.whereclause)
+    total_count = session.exec(count_query).one()
+    offset = (max(page, 1) - 1) * limit
+    rows = session.exec(query.offset(offset).limit(limit)).all()
+    has_more = (offset + limit) < total_count
+
+    products = []
+    for row in rows:
+        sku_info = _build_product_sku_summary(row.skus_json)
+        products.append({
+            "product": row,
+            "sku_count": sku_info["count"],
+            "min_price": sku_info["min_price"],
+            "max_price": sku_info["max_price"],
+            "total_inventory": sku_info["total_inventory"],
+            "price_label": (
+                f"${sku_info['min_price']:.2f}" if sku_info["min_price"] == sku_info["max_price"]
+                else f"${sku_info['min_price']:.2f} - ${sku_info['max_price']:.2f}"
+            ) if sku_info["count"] > 0 else "-",
+        })
+
+    filter_options = _get_tiktok_product_filter_options(session)
+    sync_state = _read_tiktok_product_sync_state()
+
+    summary_total = int(session.exec(select(func.count()).select_from(TikTokProduct)).one())
+    summary_active = int(session.exec(
+        select(func.count()).select_from(TikTokProduct).where(TikTokProduct.status == "ACTIVATE")
+    ).one())
+    summary_draft = int(session.exec(
+        select(func.count()).select_from(TikTokProduct).where(TikTokProduct.status == "DRAFT")
+    ).one())
+    summary_deactivated = int(session.exec(
+        select(func.count()).select_from(TikTokProduct).where(
+            TikTokProduct.status.in_(["SELLER_DEACTIVATED", "PLATFORM_DEACTIVATED"])
+        )
+    ).one())
+
+    return templates.TemplateResponse(request, "tiktok_products.html", {
+        "request": request,
+        "title": "TikTok Products",
+        "products": products,
+        "total_count": total_count,
+        "page": max(page, 1),
+        "page_size": limit,
+        "has_more": has_more,
+        "filter_status": status or "",
+        "filter_audit_status": audit_status or "",
+        "filter_search": search or "",
+        "sort_by": sort_by,
+        "sort_dir": sort_dir,
+        "filter_options": filter_options,
+        "sync_state": sync_state,
+        "success_message": success,
+        "error_message": error,
+        "summary_total": summary_total,
+        "summary_active": summary_active,
+        "summary_draft": summary_draft,
+        "summary_deactivated": summary_deactivated,
+        "current_user": getattr(request.state, "current_user", None),
+    })
+
+
+@app.get("/tiktok/products/poll")
+def tiktok_products_poll(
+    session: Session = Depends(get_session),
+):
+    total = int(session.exec(select(func.count()).select_from(TikTokProduct)).one())
+    active = int(session.exec(
+        select(func.count()).select_from(TikTokProduct).where(TikTokProduct.status == "ACTIVATE")
+    ).one())
+    sync_state = _read_tiktok_product_sync_state()
+    latest_synced = session.exec(select(func.max(TikTokProduct.synced_at))).one()
+    latest_synced_text = None
+    if latest_synced is not None:
+        if latest_synced.tzinfo is None:
+            latest_synced = latest_synced.replace(tzinfo=timezone.utc)
+        latest_synced_text = latest_synced.isoformat()
+    return {
+        "total": total,
+        "active": active,
+        "is_syncing": sync_state.get("is_running", False),
+        "last_error": sync_state.get("last_error"),
+        "latest_synced_at": latest_synced_text,
+    }
+
+
+def _get_tiktok_api_client_context(session: Session) -> dict[str, Any]:
+    auth_row = ensure_tiktok_auth_row(session)
+    shop_id, shop_cipher, access_token = _resolve_tiktok_pull_credentials(auth_row)
+    return {
+        "base_url": resolve_tiktok_shop_pull_base_url(),
+        "app_key": (settings.tiktok_app_key or "").strip(),
+        "app_secret": (settings.tiktok_app_secret or "").strip(),
+        "access_token": access_token,
+        "shop_id": shop_id,
+        "shop_cipher": shop_cipher,
+    }
+
+
+@app.get("/tiktok/products/categories")
+def tiktok_products_categories_api(
+    request: Request,
+    keyword: Optional[str] = Query(default=None),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "viewer"):
+        return denial
+    if _fetch_tiktok_categories is None:
+        return JSONResponse({"error": "TikTok API helpers unavailable"}, status_code=503)
+    ctx = _get_tiktok_api_client_context(session)
+    if not ctx["access_token"]:
+        return JSONResponse({"error": "TikTok auth not configured"}, status_code=400)
+    with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+        categories = _fetch_tiktok_categories(
+            client, keyword=keyword or None, **ctx,
+        )
+    return {"categories": categories}
+
+
+@app.get("/tiktok/products/categories/{category_id}/attributes")
+def tiktok_products_category_attributes_api(
+    request: Request,
+    category_id: str,
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "viewer"):
+        return denial
+    if _fetch_tiktok_category_attributes is None:
+        return JSONResponse({"error": "TikTok API helpers unavailable"}, status_code=503)
+    ctx = _get_tiktok_api_client_context(session)
+    if not ctx["access_token"]:
+        return JSONResponse({"error": "TikTok auth not configured"}, status_code=400)
+    with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+        attributes = _fetch_tiktok_category_attributes(
+            client, category_id=category_id, **ctx,
+        )
+    return {"attributes": attributes}
+
+
+@app.get("/tiktok/products/brands")
+def tiktok_products_brands_api(
+    request: Request,
+    brand_name: Optional[str] = Query(default=None),
+    category_id: Optional[str] = Query(default=None),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "viewer"):
+        return denial
+    if _fetch_tiktok_brands is None:
+        return JSONResponse({"error": "TikTok API helpers unavailable"}, status_code=503)
+    ctx = _get_tiktok_api_client_context(session)
+    if not ctx["access_token"]:
+        return JSONResponse({"error": "TikTok auth not configured"}, status_code=400)
+    with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+        brands = _fetch_tiktok_brands(
+            client, brand_name=brand_name or None, category_id=category_id or None, **ctx,
+        )
+    return {"brands": brands}
+
+
+@app.post("/tiktok/products/upload-image")
+async def tiktok_products_upload_image(
+    request: Request,
+    file: UploadFile = File(...),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "admin"):
+        return denial
+    if _upload_tiktok_product_image is None:
+        return JSONResponse({"error": "TikTok API helpers unavailable"}, status_code=503)
+    ctx = _get_tiktok_api_client_context(session)
+    if not ctx["access_token"]:
+        return JSONResponse({"error": "TikTok auth not configured"}, status_code=400)
+    image_data = await file.read()
+    if len(image_data) > 5 * 1024 * 1024:
+        return JSONResponse({"error": "Image must be under 5MB"}, status_code=400)
+    with httpx.Client(timeout=60.0, follow_redirects=True) as client:
+        try:
+            uri = _upload_tiktok_product_image(
+                client,
+                image_data=image_data,
+                file_name=file.filename or "image.jpg",
+                **ctx,
+            )
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)}, status_code=500)
+    return {"uri": uri}
+
+
+@app.get("/tiktok/products/new", response_class=HTMLResponse)
+def tiktok_products_new_page(
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "admin"):
+        return denial
+    return templates.TemplateResponse(request, "tiktok_product_form.html", {
+        "request": request,
+        "title": "New TikTok Product",
+        "mode": "create",
+        "product": None,
+        "current_user": getattr(request.state, "current_user", None),
+    })
+
+
+@app.post("/tiktok/products/create")
+async def tiktok_products_create(
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "admin"):
+        return denial
+    if _create_tiktok_product is None:
+        return RedirectResponse(url="/tiktok/products?error=TikTok+API+helpers+unavailable", status_code=303)
+
+    form = await request.form()
+    title = (form.get("title") or "").strip()
+    description = (form.get("description") or "").strip()
+    category_id = (form.get("category_id") or "").strip()
+    brand_id = (form.get("brand_id") or "").strip()
+
+    if not title:
+        return RedirectResponse(url="/tiktok/products/new?error=Title+is+required", status_code=303)
+    if not category_id:
+        return RedirectResponse(url="/tiktok/products/new?error=Category+is+required", status_code=303)
+
+    image_uris_raw = form.get("image_uris") or ""
+    image_uris = [u.strip() for u in image_uris_raw.split(",") if u.strip()]
+    main_images = [{"uri": uri} for uri in image_uris]
+
+    skus = []
+    sku_index = 0
+    while True:
+        price_key = f"sku_price_{sku_index}"
+        if price_key not in form:
+            break
+        price = (form.get(price_key) or "0").strip()
+        inventory = (form.get(f"sku_inventory_{sku_index}") or "0").strip()
+        seller_sku = (form.get(f"sku_seller_sku_{sku_index}") or "").strip()
+        sku_entry: dict[str, Any] = {
+            "sales_attributes": [],
+            "price": {
+                "amount": price,
+                "currency": "USD",
+            },
+            "inventory": [{"quantity": int(inventory or 0)}],
+        }
+        if seller_sku:
+            sku_entry["seller_sku"] = seller_sku
+        skus.append(sku_entry)
+        sku_index += 1
+
+    if not skus:
+        skus = [{
+            "sales_attributes": [],
+            "price": {"amount": (form.get("price") or "0").strip(), "currency": "USD"},
+            "inventory": [{"quantity": int((form.get("inventory") or "0").strip() or 0)}],
+        }]
+        seller_sku_single = (form.get("seller_sku") or "").strip()
+        if seller_sku_single:
+            skus[0]["seller_sku"] = seller_sku_single
+
+    product_body: dict[str, Any] = {
+        "title": title,
+        "description": description or title,
+        "category_id": category_id,
+        "main_images": main_images,
+        "skus": skus,
+        "is_cod_allowed": False,
+    }
+    if brand_id:
+        product_body["brand"] = {"id": brand_id}
+
+    save_as_draft = (form.get("save_as_draft") or "").strip()
+    if save_as_draft == "1":
+        product_body["save_mode"] = "AS_DRAFT"
+
+    ctx = _get_tiktok_api_client_context(session)
+    if not ctx["access_token"]:
+        return RedirectResponse(url="/tiktok/products/new?error=TikTok+auth+not+configured", status_code=303)
+
+    try:
+        with httpx.Client(timeout=60.0, follow_redirects=True) as client:
+            result = _create_tiktok_product(client, product_body=product_body, **ctx)
+    except Exception as exc:
+        error_msg = str(exc)[:200].replace(" ", "+")
+        return RedirectResponse(url=f"/tiktok/products/new?error={error_msg}", status_code=303)
+
+    new_product_id = result.get("product_id") or result.get("id") or ""
+    if new_product_id and _upsert_tiktok_product_row is not None:
+        try:
+            with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+                detail = _fetch_tiktok_product_detail(
+                    client, product_id=str(new_product_id), **ctx,
+                )
+            _upsert_tiktok_product_row(
+                session, detail,
+                shop_id=ctx["shop_id"], shop_cipher=ctx["shop_cipher"],
+                source="created", dry_run=False,
+            )
+            session.commit()
+        except Exception:
+            pass
+
+    return RedirectResponse(url="/tiktok/products?success=Product+created+successfully", status_code=303)
+
+
+@app.get("/tiktok/products/{product_id}", response_class=HTMLResponse)
+def tiktok_product_detail_page(
+    request: Request,
+    product_id: str,
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "viewer"):
+        return denial
+    product = session.exec(
+        select(TikTokProduct).where(TikTokProduct.tiktok_product_id == product_id)
+    ).first()
+    if product is None:
+        return RedirectResponse(url="/tiktok/products?error=Product+not+found", status_code=303)
+
+    try:
+        skus = json.loads(product.skus_json) if product.skus_json else []
+    except (json.JSONDecodeError, TypeError):
+        skus = []
+    try:
+        images = json.loads(product.images_json) if product.images_json else []
+    except (json.JSONDecodeError, TypeError):
+        images = []
+
+    return templates.TemplateResponse(request, "tiktok_product_detail.html", {
+        "request": request,
+        "title": product.title or "Product Detail",
+        "product": product,
+        "skus": skus,
+        "images": images,
+        "current_user": getattr(request.state, "current_user", None),
+    })
 
 
 @app.get("/bookkeeping", response_class=HTMLResponse)
