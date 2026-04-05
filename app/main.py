@@ -3557,7 +3557,7 @@ app.add_middleware(
     session_cookie=settings.session_cookie_name,
     https_only=settings.session_https_only,
     same_site=settings.session_same_site,
-    domain=settings.session_domain or None,
+    domain=settings.effective_session_domain or None,
 )
 app.mount("/static", StaticFiles(directory=normalize_filesystem_path(BASE_DIR / "static")), name="static")
 

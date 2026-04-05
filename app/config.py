@@ -166,13 +166,20 @@ class Settings(BaseSettings):
         return channel_ids
 
     @property
+    def effective_session_domain(self) -> str:
+        raw = (self.session_domain or "").strip().lower()
+        if not raw or raw == "none":
+            return ""
+        return self.session_domain.strip()
+
+    @property
     def public_host_mode(self) -> bool:
         parsed = urlparse(self.public_base_url or "")
         hostname = (parsed.hostname or "").lower()
         is_local_host = hostname in {"", "127.0.0.1", "localhost"}
         return bool(
             self.session_https_only
-            or self.session_domain
+            or self.effective_session_domain
             or (hostname and not is_local_host)
         )
 
