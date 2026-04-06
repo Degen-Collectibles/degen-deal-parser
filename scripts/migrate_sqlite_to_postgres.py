@@ -63,7 +63,11 @@ def main() -> None:
     postgres_url = build_postgres_url()
 
     sqlite_engine = create_engine(sqlite_url)
-    postgres_engine = create_engine(postgres_url, pool_pre_ping=True)
+    postgres_engine = create_engine(
+        postgres_url,
+        pool_pre_ping=True,
+        connect_args={"options": "-c timezone=UTC"},
+    )
 
     SQLModel.metadata.create_all(postgres_engine)
 
@@ -95,6 +99,8 @@ def main() -> None:
             print(f"{table_name}: {len(rows)} rows")
 
     print("Migration complete.")
+    sqlite_engine.dispose()
+    postgres_engine.dispose()
 
 
 if __name__ == "__main__":
