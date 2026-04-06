@@ -17,6 +17,7 @@ from .discord_ingest import (
 from .ops_log import write_operations_log
 from .runtime_logging import setup_runtime_file_logging
 from .runtime_monitor import runtime_heartbeat_loop
+from .tiktok_auth_refresh import refresh_tiktok_auth_if_needed
 from .worker import (
     parser_loop,
     periodic_stitch_audit_loop,
@@ -24,6 +25,35 @@ from .worker import (
 
 settings = get_settings()
 setup_runtime_file_logging("worker.log")
+
+
+def _resolve_tiktok_base_url() -> str:
+    explicit = (settings.tiktok_shop_api_base_url or "").strip()
+    if explicit:
+        return explicit
+    generic = (settings.tiktok_api_base_url or "").strip()
+    if generic and "open-api" in generic:
+        return generic
+    return "https://open-api.tiktokglobalshop.com"
+
+
+async def periodic_tiktok_token_refresh_loop(stop_event: asyncio.Event) -> None:
+    interval = max(settings.tiktok_token_refresh_interval_minutes, 1.0)
+    while not stop_event.is_set():
+        await asyncio.sleep(interval * 60)
+        if stop_event.is_set():
+            break
+        try:
+            with managed_session() as session:
+                await asyncio.to_thread(
+                    refresh_tiktok_auth_if_needed,
+                    session,
+                    runtime_name=settings.runtime_name,
+                    resolve_base_url=_resolve_tiktok_base_url,
+                    update_state=None,
+                )
+        except Exception as exc:
+            print(f"[worker] tiktok-token-refresh error: {exc}")
 
 
 def worker_runtime_details() -> dict:
@@ -64,6 +94,9 @@ def _recreate_task(task_name: str, stop_event: asyncio.Event) -> asyncio.Task | 
             periodic_attachment_repair_loop(stop_event, get_discord_client), name="attachment-repair-audit"
         ),
         "parser-worker": lambda: asyncio.create_task(parser_loop(stop_event), name="parser-worker"),
+        "tiktok-token-refresh": lambda: asyncio.create_task(
+            periodic_tiktok_token_refresh_loop(stop_event), name="tiktok-token-refresh"
+        ),
     }
     factory = factories.get(task_name)
     return factory() if factory else None
@@ -141,6 +174,13 @@ async def run_worker_service() -> None:
         )
     if settings.parser_worker_enabled:
         background_tasks.append(asyncio.create_task(parser_loop(stop_event), name="parser-worker"))
+    if settings.tiktok_token_refresh_enabled:
+        background_tasks.append(
+            asyncio.create_task(
+                periodic_tiktok_token_refresh_loop(stop_event),
+                name="tiktok-token-refresh",
+            )
+        )
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):

@@ -112,6 +112,8 @@ class FakeTikTokHTTPClient:
 
 class TikTokRegressionTests(unittest.TestCase):
     def setUp(self) -> None:
+        import app.cache as cache_module
+        cache_module._cache.clear()
         self.temp_dir = Path.cwd() / "tests" / ".tmp_tiktok_reporting" / str(uuid.uuid4())
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         db_path = self.temp_dir / "tiktok_reporting.db"

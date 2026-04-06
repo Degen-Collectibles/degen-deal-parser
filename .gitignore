@@ -21,3 +21,15 @@ htmlcov/
 
 .DS_Store
 Thumbs.db
+
+# Local databases
+*.db
+*.db-shm
+*.db-wal
+
+# Local tool directories
+.claude/
+.codex/
+
+# Temp test artifacts
+tests/.tmp_*/

@@ -106,6 +106,17 @@ class Settings(BaseSettings):
         alias="PERIODIC_ATTACHMENT_REPAIR_MIN_AGE_MINUTES",
     )
 
+    auto_promote_enabled: bool = Field(default=True, alias="AUTO_PROMOTE_ENABLED")
+    auto_promote_min_count: int = Field(default=5, alias="AUTO_PROMOTE_MIN_COUNT")
+    auto_promote_min_confidence: float = Field(default=0.85, alias="AUTO_PROMOTE_MIN_CONFIDENCE")
+    auto_promote_interval_minutes: float = Field(default=30.0, alias="AUTO_PROMOTE_INTERVAL_MINUTES")
+
+    tiktok_token_refresh_enabled: bool = Field(default=True, alias="TIKTOK_TOKEN_REFRESH_ENABLED")
+    tiktok_token_refresh_interval_minutes: float = Field(
+        default=30.0,
+        alias="TIKTOK_TOKEN_REFRESH_INTERVAL_MINUTES",
+    )
+
     stitch_enabled: bool = Field(default=True, alias="STITCH_ENABLED")
     stitch_window_seconds: int = Field(default=30, alias="STITCH_WINDOW_SECONDS")
     stitch_max_messages: int = Field(default=3, alias="STITCH_MAX_MESSAGES")

@@ -14,7 +14,7 @@ from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 import httpx
-from sqlalchemy import func
+from sqlalchemy import distinct, func
 from sqlalchemy.exc import OperationalError
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -33,6 +33,7 @@ from .bookkeeping import (
     list_detected_bookkeeping_posts,
     reconcile_bookkeeping_import,
 )
+from .cache import cache_get, cache_invalidate, cache_set
 from .backfill_requests import (
     backfill_request_loop,
     cancel_backfill_request,
@@ -108,7 +109,7 @@ from .models import (
     signed_money_delta,
     utcnow,
 )
-from .ops_log import list_operations_logs, list_operations_logs_for_backfill_request, parse_operations_log_details
+from .ops_log import count_recent_errors, list_operations_logs, list_operations_logs_for_backfill_request, parse_operations_log_details
 from .reparse_runs import list_recent_reparse_runs, safe_create_reparse_run, safe_finalize_reparse_run_queue
 from .reparse import reparse_message_row, reparse_message_rows
 from .reporting import (
@@ -141,6 +142,7 @@ from .display_media import (
     row_has_images,
 )
 from .transactions import build_transaction_summary, get_transactions, rebuild_transactions, sync_transaction_from_message
+from .tiktok_auth_refresh import refresh_tiktok_auth_if_needed as _refresh_tiktok_auth_fn
 from .tiktok_ingest import (
     TikTokIngestError,
     _build_webhook_signature_candidates,
@@ -1874,65 +1876,13 @@ def _refresh_tiktok_auth_if_needed(
     runtime_name: str,
     force: bool = False,
 ) -> Optional[dict[str, object]]:
-    if refresh_tiktok_access_token is None:
-        return None
-
-    auth_row = get_latest_tiktok_auth_row(session)
-    if auth_row is None:
-        return None
-
-    app_key = (settings.tiktok_app_key or auth_row.app_key or "").strip()
-    app_secret = (settings.tiktok_app_secret or "").strip()
-    refresh_token = (auth_row.refresh_token or settings.tiktok_refresh_token or "").strip()
-    if not app_key or not app_secret or not refresh_token:
-        return None
-
-    token_expires_at = auth_row.access_token_expires_at
-    if token_expires_at is not None and token_expires_at.tzinfo is None:
-        token_expires_at = token_expires_at.replace(tzinfo=timezone.utc)
-    should_refresh = force or not auth_row.access_token or not token_expires_at or token_expires_at <= utcnow() + timedelta(minutes=10)
-    if not should_refresh:
-        return None
-
-    with httpx.Client(timeout=40.0, follow_redirects=True) as client:
-        refreshed = refresh_tiktok_access_token(
-            client,
-            base_url=resolve_tiktok_shop_pull_base_url(),
-            app_key=app_key,
-            app_secret=app_secret,
-            refresh_token=refresh_token,
-        )
-
-    token_data = refreshed
-    if isinstance(refreshed, dict) and isinstance(refreshed.get("data"), dict):
-        token_data = refreshed["data"]
-
-    status, auth_record = upsert_tiktok_auth_from_callback(
+    return _refresh_tiktok_auth_fn(
         session,
-        TikTokAuth,
-        token_result=token_data,
-        app_key=app_key,
-        redirect_uri=(auth_row.redirect_uri or settings.tiktok_redirect_uri or "").strip(),
-        fallback_shop_id=(settings.tiktok_shop_id or auth_row.tiktok_shop_id or "").strip(),
-        source="oauth_refresh",
-        received_at=utcnow(),
-        dry_run=False,
+        runtime_name=runtime_name,
+        force=force,
+        resolve_base_url=resolve_tiktok_shop_pull_base_url,
+        update_state=update_tiktok_integration_state,
     )
-    update_tiktok_integration_state(
-        is_pull_running=False,
-        last_pull_started_at=utcnow(),
-        last_pull_finished_at=utcnow(),
-        last_error=None,
-        last_pull_at=utcnow(),
-        last_pull={
-            "status": "refresh",
-            "auth_status": status,
-            "shop_id": auth_record.get("tiktok_shop_id"),
-            "runtime": runtime_name,
-        },
-    )
-    session.commit()
-    return {"status": status, "auth_record": auth_record}
 
 
 def run_tiktok_pull_cycle(
@@ -4103,10 +4053,27 @@ def status_json(
 @app.get("/ops-log", response_class=HTMLResponse)
 def operations_log_page(
     request: Request,
+    event_type_prefix: Optional[str] = Query(default=None),
+    level: Optional[str] = Query(default=None),
+    since: Optional[str] = Query(default=None),
+    until: Optional[str] = Query(default=None),
     session: Session = Depends(get_session),
 ):
     if denial := require_role_response(request, "viewer"):
         return denial
+
+    since_dt = parse_report_datetime(since)
+    until_dt = parse_report_datetime(until, end_of_day=True)
+
+    logs = serialize_operations_logs(
+        list_operations_logs(
+            session,
+            event_type_prefix=event_type_prefix or None,
+            level=level or None,
+            since=since_dt,
+            until=until_dt,
+        )
+    )
 
     return templates.TemplateResponse(
         request,
@@ -4115,10 +4082,21 @@ def operations_log_page(
             "request": request,
             "title": "Operations Log",
             "current_user": getattr(request.state, "current_user", None),
-            "logs": serialize_operations_logs(list_operations_logs(session)),
+            "logs": logs,
             "snapshot": build_status_snapshot(session),
+            "error_badge_count": count_recent_errors(session),
+            "selected_event_type_prefix": event_type_prefix or "",
+            "selected_level": level or "",
+            "selected_since": since or "",
+            "selected_until": until or "",
+            "event_type_prefixes": ["queue.", "ingest.", "backfill"],
         },
     )
+
+
+@app.get("/ops-log/error-count")
+def ops_log_error_count(session: Session = Depends(get_session)):
+    return {"count": count_recent_errors(session)}
 
 
 @app.get("/ops-log/backfill/{request_id}", response_class=HTMLResponse)
@@ -5284,10 +5262,13 @@ def build_debug_snapshot(session: Session) -> dict:
         PARSE_FAILED: 0,
         PARSE_IGNORED: 0,
     }
-    for raw_status in session.exec(select(DiscordMessage.parse_status)).all():
+    for raw_status, count in session.exec(
+        select(DiscordMessage.parse_status, func.count(DiscordMessage.id))
+        .group_by(DiscordMessage.parse_status)
+    ).all():
         normalized = normalize_parse_status(raw_status)
         if normalized in queue_counts:
-            queue_counts[normalized] += 1
+            queue_counts[normalized] += count
 
     processing_rows = session.exec(
         select(DiscordMessage)
@@ -6591,7 +6572,7 @@ def shopify_orders_page(
             break
     if not summary:
         summary = build_shopify_order_summary([])
-    status_rows = session.exec(select(ShopifyOrder.financial_status)).all()
+    status_rows = session.exec(select(distinct(ShopifyOrder.financial_status))).all()
     financial_statuses = sorted(
         {
             str(value[0] if isinstance(value, tuple) else value).strip()
@@ -6767,68 +6748,97 @@ def reports_page(
     selected_source = normalize_report_source(source)
     start_dt = parse_report_datetime(start)
     end_dt = parse_report_datetime(end, end_of_day=True)
+
+    reports_cache_key = f"reports:{start or ''}:{end or ''}:{channel_id or ''}:{entry_kind or ''}:{selected_source}"
+    cached_reports = cache_get(reports_cache_key)
+    if cached_reports is None:
+        transactions_all = get_transactions(
+            session,
+            start=start_dt,
+            end=end_dt,
+            channel_id=channel_id,
+            entry_kind=entry_kind,
+        )
+        discord_summary = build_transaction_summary(transactions_all)
+        shopify_rows = get_shopify_reporting_rows(session, start=start_dt, end=end_dt)
+        shopify_summary = build_shopify_reporting_summary(shopify_rows)
+        tiktok_rows = get_tiktok_reporting_rows(session, start=start_dt, end=end_dt)
+        tiktok_summary = build_tiktok_reporting_summary(tiktok_rows)
+        shopify_timeline_map: dict[str, dict[str, float | int]] = {}
+        for row in shopify_rows:
+            status = (row.financial_status or "").strip().lower()
+            if status != "paid":
+                continue
+            created_at = row.created_at
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            day_key = created_at.astimezone(PACIFIC_TZ).date().isoformat()
+            bucket = shopify_timeline_map.setdefault(
+                day_key,
+                {
+                    "date": day_key,
+                    "orders": 0,
+                    "gross": 0.0,
+                    "tax": 0.0,
+                    "net": 0.0,
+                    "tax_unknown_orders": 0,
+                },
+            )
+            bucket["orders"] = int(bucket["orders"]) + 1
+            gross_value = float(row.total_price or 0.0)
+            bucket["gross"] = float(bucket["gross"]) + gross_value
+            if row.total_tax is None:
+                bucket["tax_unknown_orders"] = int(bucket["tax_unknown_orders"]) + 1
+                continue
+            tax_value = float(row.total_tax or 0.0)
+            net_value = float(row.subtotal_ex_tax) if row.subtotal_ex_tax is not None else gross_value - tax_value
+            bucket["tax"] = float(bucket["tax"]) + tax_value
+            bucket["net"] = float(bucket["net"]) + net_value
+        shopify_daily_totals = [
+            {
+                "date": day_key,
+                "orders": int(values["orders"]),
+                "gross": round(float(values["gross"]), 2),
+                "tax": round(float(values["tax"]), 2),
+                "net": round(float(values["net"]), 2),
+                "tax_unknown_orders": int(values["tax_unknown_orders"]),
+            }
+            for day_key, values in sorted(shopify_timeline_map.items())
+        ]
+        tiktok_daily_totals = list(tiktok_summary.get("daily_totals", []))
+        period_rows = build_report_period_comparison_rows(
+            session,
+            periods=build_reporting_periods(selected_start=start_dt, selected_end=end_dt),
+            channel_id=channel_id,
+            entry_kind=entry_kind,
+        )
+        cached_reports = {
+            "discord_summary": discord_summary,
+            "shopify_summary": shopify_summary,
+            "tiktok_summary": tiktok_summary,
+            "shopify_daily_totals": shopify_daily_totals,
+            "tiktok_daily_totals": tiktok_daily_totals,
+            "period_rows": period_rows,
+        }
+        cache_set(reports_cache_key, cached_reports)
+    else:
+        discord_summary = cached_reports["discord_summary"]
+        shopify_summary = cached_reports["shopify_summary"]
+        tiktok_summary = cached_reports["tiktok_summary"]
+        shopify_daily_totals = cached_reports["shopify_daily_totals"]
+        tiktok_daily_totals = cached_reports["tiktok_daily_totals"]
+        period_rows = cached_reports["period_rows"]
+
     transactions = get_transactions(
         session,
         start=start_dt,
         end=end_dt,
         channel_id=channel_id,
         entry_kind=entry_kind,
+        limit=50,
     )
-    discord_summary = build_transaction_summary(transactions)
-    shopify_rows = get_shopify_reporting_rows(session, start=start_dt, end=end_dt)
-    shopify_summary = build_shopify_reporting_summary(shopify_rows)
-    tiktok_rows = get_tiktok_reporting_rows(session, start=start_dt, end=end_dt)
-    tiktok_summary = build_tiktok_reporting_summary(tiktok_rows)
-    shopify_timeline_map: dict[str, dict[str, float | int]] = {}
-    for row in shopify_rows:
-        status = (row.financial_status or "").strip().lower()
-        if status != "paid":
-            continue
-        created_at = row.created_at
-        if created_at.tzinfo is None:
-            created_at = created_at.replace(tzinfo=timezone.utc)
-        day_key = created_at.astimezone(PACIFIC_TZ).date().isoformat()
-        bucket = shopify_timeline_map.setdefault(
-            day_key,
-            {
-                "date": day_key,
-                "orders": 0,
-                "gross": 0.0,
-                "tax": 0.0,
-                "net": 0.0,
-                "tax_unknown_orders": 0,
-            },
-        )
-        bucket["orders"] = int(bucket["orders"]) + 1
-        gross_value = float(row.total_price or 0.0)
-        bucket["gross"] = float(bucket["gross"]) + gross_value
-        if row.total_tax is None:
-            bucket["tax_unknown_orders"] = int(bucket["tax_unknown_orders"]) + 1
-            continue
-        tax_value = float(row.total_tax or 0.0)
-        net_value = float(row.subtotal_ex_tax) if row.subtotal_ex_tax is not None else gross_value - tax_value
-        bucket["tax"] = float(bucket["tax"]) + tax_value
-        bucket["net"] = float(bucket["net"]) + net_value
-    shopify_daily_totals = [
-        {
-            "date": day_key,
-            "orders": int(values["orders"]),
-            "gross": round(float(values["gross"]), 2),
-            "tax": round(float(values["tax"]), 2),
-            "net": round(float(values["net"]), 2),
-            "tax_unknown_orders": int(values["tax_unknown_orders"]),
-        }
-        for day_key, values in sorted(shopify_timeline_map.items())
-    ]
-    tiktok_daily_totals = list(tiktok_summary.get("daily_totals", []))
     summary = discord_summary
     channels = get_channel_filter_choices(session)
-    period_rows = build_report_period_comparison_rows(
-        session,
-        periods=build_reporting_periods(selected_start=start_dt, selected_end=end_dt),
-        channel_id=channel_id,
-        entry_kind=entry_kind,
-    )
     report_totals = {
         "discord_gross": round(float(discord_summary["totals"].get("money_in", 0.0) or 0.0), 2),
         "discord_outflow": round(float(discord_summary["totals"].get("money_out", 0.0) or 0.0), 2),
@@ -6871,7 +6881,7 @@ def reports_page(
             "reports_url": build_reports_url,
             "expense_chart": build_bar_chart_rows(summary["expense_categories"]),
             "channel_chart": build_bar_chart_rows(summary["channel_net"]),
-            "transactions": transactions,
+            "transactions": transactions[-50:],
             "shopify_daily_totals": shopify_daily_totals,
             "tiktok_daily_totals": tiktok_daily_totals,
         },
@@ -6895,18 +6905,25 @@ def finance_page(
         return denial
 
     range_data = resolve_finance_range(start=start, end=end, window=window)
-    current_snapshot = build_finance_range_snapshot(
-        session,
-        start=range_data["start_dt"],
-        end=range_data["end_dt"],
-        day_count=int(range_data["day_count"]),
-    )
-    prior_snapshot = build_finance_range_snapshot(
-        session,
-        start=range_data["previous_start_dt"],
-        end=range_data["previous_end_dt"],
-        day_count=int(range_data["day_count"]),
-    )
+    finance_cache_key = f"finance:{start or ''}:{end or ''}:{window or ''}"
+    cached_finance = cache_get(finance_cache_key)
+    if cached_finance is None:
+        current_snapshot = build_finance_range_snapshot(
+            session,
+            start=range_data["start_dt"],
+            end=range_data["end_dt"],
+            day_count=int(range_data["day_count"]),
+        )
+        prior_snapshot = build_finance_range_snapshot(
+            session,
+            start=range_data["previous_start_dt"],
+            end=range_data["previous_end_dt"],
+            day_count=int(range_data["day_count"]),
+        )
+        cache_set(finance_cache_key, {"current": current_snapshot, "prior": prior_snapshot})
+    else:
+        current_snapshot = cached_finance["current"]
+        prior_snapshot = cached_finance["prior"]
 
     current_statement = current_snapshot["statement"]
     prior_statement = prior_snapshot["statement"]

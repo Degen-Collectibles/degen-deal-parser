@@ -15,6 +15,7 @@ from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, select
 
 from .config import get_settings
+from .corrections import auto_promote_eligible_patterns
 from .db import dispose_engine, is_sqlite_lock_error, managed_session
 from .discord_ingest import get_discord_client, recover_attachment_assets_for_message, sync_attachment_assets
 from .display_media import extract_image_urls, parse_attachment_urls_json
@@ -171,6 +172,10 @@ def schedule_next_reprocess_run() -> datetime:
 
 def schedule_next_offline_audit_run() -> datetime:
     return utcnow() + timedelta(minutes=max(settings.periodic_offline_audit_interval_minutes, 1.0))
+
+
+def schedule_next_auto_promote_run() -> datetime:
+    return utcnow() + timedelta(minutes=max(settings.auto_promote_interval_minutes, 1.0))
 
 
 def normalize_legacy_queue_states(session: Session) -> int:
@@ -720,9 +725,24 @@ async def build_parser_attachment_inputs(
     return fallback_attachment_urls
 
 
+def auto_promote_once() -> None:
+    with managed_session() as session:
+        promoted = auto_promote_eligible_patterns(
+            session,
+            min_count=settings.auto_promote_min_count,
+            min_confidence=settings.auto_promote_min_confidence,
+        )
+    for normalized_text in promoted:
+        worker_log(
+            action="auto_promoted_correction_pattern",
+            normalized_text=normalized_text,
+        )
+
+
 async def parser_loop(stop_event: asyncio.Event):
     next_reprocess_at = schedule_next_reprocess_run()
     next_offline_audit_at = utcnow()
+    next_auto_promote_at = utcnow() + timedelta(minutes=10)
     while not stop_event.is_set():
         try:
             await process_once()
@@ -732,6 +752,9 @@ async def parser_loop(stop_event: asyncio.Event):
             if settings.parser_reprocess_enabled and utcnow() >= next_reprocess_at:
                 await auto_reprocess_once()
                 next_reprocess_at = schedule_next_reprocess_run()
+            if settings.auto_promote_enabled and utcnow() >= next_auto_promote_at:
+                await asyncio.to_thread(auto_promote_once)
+                next_auto_promote_at = schedule_next_auto_promote_run()
         except OperationalError as e:
             worker_log(action="loop_database_error", level="error", success=False, error=str(e))
             dispose_engine()

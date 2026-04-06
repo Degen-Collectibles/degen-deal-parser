@@ -778,3 +778,47 @@ def promote_correction_pattern(session: Session, normalized_text: str) -> int:
         correction.updated_at = utcnow()
         session.add(correction)
     return len(corrections)
+
+
+def auto_promote_eligible_patterns(
+    session: Session,
+    *,
+    min_count: int = 5,
+    min_confidence: float = 0.85,
+) -> list[str]:
+    """Promote correction patterns that meet the count and confidence thresholds.
+
+    Returns the list of normalized_text values that were promoted.
+    """
+    candidates = session.exec(
+        select(ReviewCorrection).where(ReviewCorrection.correction_source != "promoted_rule")
+    ).all()
+
+    # Group by normalized_text
+    groups: dict[str, list[ReviewCorrection]] = {}
+    for c in candidates:
+        key = c.normalized_text or ""
+        if not key:
+            continue
+        groups.setdefault(key, []).append(c)
+
+    promoted: list[str] = []
+    for normalized_text, group in groups.items():
+        if len(group) < min_count:
+            continue
+        confidence_values = [c.confidence for c in group if c.confidence is not None]
+        if not confidence_values:
+            continue
+        avg_confidence = sum(confidence_values) / len(confidence_values)
+        if avg_confidence < min_confidence:
+            continue
+
+        for correction in group:
+            correction.correction_source = "promoted_rule"
+            correction.updated_at = utcnow()
+            session.add(correction)
+        promoted.append(normalized_text)
+
+    if promoted:
+        session.commit()
+    return promoted

@@ -196,6 +196,7 @@
         </a>
         <div class="header-right">
             <span class="badge">{{ current_label }}</span>
+            <a href="/ops-log?level=error" id="ops-error-badge" style="display:none; background:rgba(142,39,34,.9); color:#fff; border-color:rgba(142,39,34,.5);" class="badge" title="Recent worker errors"></a>
             <div class="nav-menu-wrap">
                 <button class="nav-menu-btn" id="nav-menu-btn" type="button" title="Navigation" aria-haspopup="true" aria-expanded="false">&#x2630;</button>
                 <div class="nav-dropdown" id="nav-dropdown">
@@ -220,6 +221,17 @@
     </div>
 </div>
 <script>
+    (function () {
+        var errorBadge = document.getElementById('ops-error-badge');
+        if (errorBadge) {
+            fetch('/ops-log/error-count').then(function(r) { return r.json(); }).then(function(data) {
+                if (data.count > 0) {
+                    errorBadge.textContent = data.count + ' error' + (data.count !== 1 ? 's' : '');
+                    errorBadge.style.display = 'inline-flex';
+                }
+            }).catch(function() {});
+        }
+    })();
     (function () {
         var nav = document.querySelector('[data-shared-nav]');
         if (!nav || nav.dataset.bound === 'true') return;

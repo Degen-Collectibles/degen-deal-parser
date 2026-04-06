@@ -341,7 +341,7 @@
                 <table>
                     <thead><tr><th>When</th><th>Channel</th><th>Author</th><th>Kind</th><th>Type</th><th>Amount</th><th>Money In</th><th>Money Out</th><th>Category</th></tr></thead>
                     <tbody>
-                        {% for row in transactions[-50:] | reverse %}
+                        {% for row in transactions | reverse %}
                         <tr><td>{{ row.occurred_at|pacific_datetime }}</td><td>{{ row.channel_name or row.channel_id or "" }}</td><td>{{ row.author_name or "" }}</td><td><span class="chip">{{ row.entry_kind or "" }}</span></td><td>{{ row.deal_type or "" }}</td><td>{{ "$%.2f"|format(row.amount) if row.amount is not none else "" }}</td><td>{{ "$%.2f"|format(row.money_in) if row.money_in is not none else "" }}</td><td>{{ "$%.2f"|format(row.money_out) if row.money_out is not none else "" }}</td><td>{{ row.category or row.expense_category or "" }}</td></tr>
                         {% else %}
                         <tr><td colspan="9" class="small">No transactions in this view.</td></tr>

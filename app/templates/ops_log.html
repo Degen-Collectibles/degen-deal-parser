@@ -48,7 +48,12 @@
             <div>
                 <div class="eyebrow">Operations Trace</div>
                 <h1>Operations Log</h1>
-                <div style="margin-bottom:10px;"><span class="pill">Operator View</span></div>
+                <div style="margin-bottom:10px;">
+                    <span class="pill">Operator View</span>
+                    {% if error_badge_count > 0 %}
+                    <span class="pill error" style="margin-left:6px;">{{ error_badge_count }} error{{ "s" if error_badge_count != 1 else "" }} (last hour)</span>
+                    {% endif %}
+                </div>
                 <p>Use this page to see what the app and worker actually did: backfill queue requests, worker pickup, completion, and failures.</p>
                 <div class="actions">
                     <a class="button" href="/dashboard">Dashboard</a>
@@ -74,6 +79,41 @@
             </div>
         </div>
 
+        <div class="card" style="margin-bottom:14px;">
+            <form method="get" style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end;">
+                <div>
+                    <label style="display:block; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin-bottom:4px;">Source</label>
+                    <select name="event_type_prefix" style="border:1px solid var(--line); border-radius:10px; padding:8px 10px; font-size:13px; background:var(--card); color:var(--text); font-family:inherit;">
+                        <option value="" {% if not selected_event_type_prefix %}selected{% endif %}>All</option>
+                        {% for prefix in event_type_prefixes %}
+                        <option value="{{ prefix }}" {% if selected_event_type_prefix == prefix %}selected{% endif %}>{{ prefix }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div>
+                    <label style="display:block; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin-bottom:4px;">Level</label>
+                    <select name="level" style="border:1px solid var(--line); border-radius:10px; padding:8px 10px; font-size:13px; background:var(--card); color:var(--text); font-family:inherit;">
+                        <option value="" {% if not selected_level %}selected{% endif %}>All</option>
+                        <option value="info" {% if selected_level == "info" %}selected{% endif %}>Info</option>
+                        <option value="warning" {% if selected_level == "warning" %}selected{% endif %}>Warning</option>
+                        <option value="error" {% if selected_level == "error" %}selected{% endif %}>Error</option>
+                    </select>
+                </div>
+                <div>
+                    <label style="display:block; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin-bottom:4px;">Since</label>
+                    <input type="date" name="since" value="{{ selected_since }}" style="border:1px solid var(--line); border-radius:10px; padding:8px 10px; font-size:13px; background:var(--card); color:var(--text); font-family:inherit;">
+                </div>
+                <div>
+                    <label style="display:block; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin-bottom:4px;">Until</label>
+                    <input type="date" name="until" value="{{ selected_until }}" style="border:1px solid var(--line); border-radius:10px; padding:8px 10px; font-size:13px; background:var(--card); color:var(--text); font-family:inherit;">
+                </div>
+                <button type="submit" class="button" style="padding:8px 16px;">Filter</button>
+                {% if selected_event_type_prefix or selected_level or selected_since or selected_until %}
+                <a href="/ops-log" class="button" style="padding:8px 16px; color:var(--muted);">Clear</a>
+                {% endif %}
+            </form>
+        </div>
+
         <div class="card">
             <h2 style="margin-top:0;">Recent Events</h2>
             {% for row in logs %}
@@ -88,6 +128,12 @@
                     {% endif %}
                 </div>
                 <div>{{ row["message"] }}</div>
+                {% if row["details"] %}
+                <details style="margin-top:6px;">
+                    <summary style="cursor:pointer; font-size:12px; color:var(--muted); user-select:none;">Details</summary>
+                    <pre style="font-size:11px; background:#f9f4ec; padding:8px; border-radius:8px; overflow-x:auto; margin-top:4px; white-space:pre-wrap; word-break:break-all;">{{ row["details"] | tojson(indent=2) }}</pre>
+                </details>
+                {% endif %}
                 {% if row["action_links"] %}
                 <div class="action-row">
                     {% if row["action_links"]["open_row"] %}<a class="button" href="{{ row['action_links']['open_row'] }}">Open Row</a>{% endif %}

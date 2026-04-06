@@ -240,10 +240,12 @@ def get_transactions(
     end: Optional[datetime] = None,
     channel_id: Optional[str] = None,
     entry_kind: Optional[str] = None,
+    limit: Optional[int] = None,
 ) -> list[Transaction]:
-    return session.exec(
-        transaction_base_query(start=start, end=end, channel_id=channel_id, entry_kind=entry_kind)
-    ).all()
+    stmt = transaction_base_query(start=start, end=end, channel_id=channel_id, entry_kind=entry_kind)
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    return session.exec(stmt).all()
 
 
 def build_transaction_summary(rows: list[Transaction]) -> dict:
