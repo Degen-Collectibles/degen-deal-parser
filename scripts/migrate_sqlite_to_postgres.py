@@ -58,6 +58,9 @@ def clean_row(row_mapping):
     return {key: clean_value(value) for key, value in row_mapping.items()}
 
 
+BATCH_SIZE = 500
+
+
 def main() -> None:
     sqlite_url = build_sqlite_url()
     postgres_url = build_postgres_url()
@@ -76,12 +79,14 @@ def main() -> None:
 
     table_names = [table.name for table in SQLModel.metadata.sorted_tables]
 
-    with sqlite_engine.connect() as sqlite_connection, postgres_engine.begin() as postgres_connection:
+    with postgres_engine.begin() as conn:
         for table_name in reversed(table_names):
             if table_name not in metadata.tables:
                 continue
-            postgres_connection.execute(text(f'TRUNCATE TABLE "{table_name}" RESTART IDENTITY CASCADE'))
+            conn.execute(text(f'TRUNCATE TABLE "{table_name}" RESTART IDENTITY CASCADE'))
+    print("Tables truncated.")
 
+    with sqlite_engine.connect() as sqlite_connection:
         for table_name in table_names:
             table = metadata.tables.get(table_name)
             if table is None:
@@ -92,11 +97,21 @@ def main() -> None:
                 print(f"{table_name}: 0 rows")
                 continue
 
-            postgres_connection.execute(table.insert(), [clean_row(row) for row in rows])
-            if "id" in table.c:
-                reset_postgres_sequences(postgres_connection, table_name)
+            cleaned = [clean_row(row) for row in rows]
+            inserted = 0
+            for i in range(0, len(cleaned), BATCH_SIZE):
+                batch = cleaned[i : i + BATCH_SIZE]
+                with postgres_engine.begin() as conn:
+                    conn.execute(table.insert(), batch)
+                inserted += len(batch)
+                if len(cleaned) > BATCH_SIZE:
+                    print(f"  {table_name}: {inserted}/{len(cleaned)} rows...", flush=True)
 
-            print(f"{table_name}: {len(rows)} rows")
+            with postgres_engine.begin() as conn:
+                if "id" in table.c:
+                    reset_postgres_sequences(conn, table_name)
+
+            print(f"{table_name}: {len(cleaned)} rows")
 
     print("Migration complete.")
     sqlite_engine.dispose()
