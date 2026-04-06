@@ -204,10 +204,39 @@ POSTGRES_ADDITIVE_MIGRATIONS = {
         "features_json": "TEXT DEFAULT '{}'",
     },
     "discordmessage": {
+        "guild_id": "TEXT",
         "last_seen_at": "TIMESTAMP",
-        "active_reparse_run_id": "TEXT",
+        "edited_at": "TIMESTAMP",
         "deleted_at": "TIMESTAMP",
+        "is_deleted": "BOOLEAN DEFAULT FALSE",
+        "stitched_group_id": "TEXT",
+        "stitched_primary": "BOOLEAN DEFAULT FALSE",
+        "stitched_message_ids_json": "TEXT DEFAULT '[]'",
         "last_stitched_at": "TIMESTAMP",
+        "entry_kind": "TEXT",
+        "money_in": "DOUBLE PRECISION",
+        "money_out": "DOUBLE PRECISION",
+        "expense_category": "TEXT",
+        "reviewed_by": "TEXT",
+        "reviewed_at": "TIMESTAMP",
+        "active_reparse_run_id": "TEXT",
+    },
+    "watchedchannel": {
+        "backfill_enabled": "BOOLEAN DEFAULT TRUE",
+        "backfill_after": "TIMESTAMP",
+        "backfill_before": "TIMESTAMP",
+        "created_at": "TIMESTAMP",
+        "updated_at": "TIMESTAMP",
+    },
+    "bookkeepingentry": {
+        "sheet_name": "TEXT",
+    },
+    "parseattempt": {
+        "input_tokens": "INTEGER",
+        "cached_input_tokens": "INTEGER",
+        "output_tokens": "INTEGER",
+        "total_tokens": "INTEGER",
+        "estimated_cost_usd": "DOUBLE PRECISION",
     },
     SHOPIFY_TABLE: {
         "customer_name": "TEXT",
@@ -264,6 +293,23 @@ POSTGRES_ADDITIVE_MIGRATIONS = {
         "received_at": "TIMESTAMP",
     },
 }
+
+
+POSTGRES_INDEX_MIGRATIONS = [
+    "CREATE INDEX IF NOT EXISTS ix_watchedchannel_is_enabled ON watchedchannel (is_enabled)",
+    "CREATE INDEX IF NOT EXISTS ix_watchedchannel_backfill_enabled ON watchedchannel (backfill_enabled)",
+    "CREATE INDEX IF NOT EXISTS ix_watchedchannel_backfill_after ON watchedchannel (backfill_after)",
+    "CREATE INDEX IF NOT EXISTS ix_watchedchannel_backfill_before ON watchedchannel (backfill_before)",
+    "CREATE INDEX IF NOT EXISTS ix_reviewcorrection_pattern_type ON reviewcorrection (pattern_type)",
+    "CREATE INDEX IF NOT EXISTS ix_discordmessage_active_reparse_run_id ON discordmessage (active_reparse_run_id)",
+    "CREATE INDEX IF NOT EXISTS ix_discordmessage_last_stitched_at ON discordmessage (last_stitched_at)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ix_shopify_orders_shopify_order_id ON shopify_orders (shopify_order_id)",
+    "CREATE INDEX IF NOT EXISTS ix_shopify_orders_created_at ON shopify_orders (created_at)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ix_tiktok_auth_tiktok_shop_id ON tiktok_auth (tiktok_shop_id)",
+    "CREATE INDEX IF NOT EXISTS ix_tiktok_auth_app_key ON tiktok_auth (app_key)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ix_tiktok_orders_tiktok_order_id ON tiktok_orders (tiktok_order_id)",
+    "CREATE INDEX IF NOT EXISTS ix_tiktok_orders_created_at ON tiktok_orders (created_at)",
+]
 
 
 def sqlite_table_exists(connection, table_name: str) -> bool:
@@ -493,48 +539,8 @@ def ensure_postgres_schema() -> None:
                         f"ADD COLUMN IF NOT EXISTS {column_name} {column_type}"
                     )
                 )
-        connection.execute(
-            text(
-                "CREATE INDEX IF NOT EXISTS ix_discordmessage_last_stitched_at "
-                "ON discordmessage (last_stitched_at)"
-            )
-        )
-        connection.execute(
-            text(
-                "CREATE UNIQUE INDEX IF NOT EXISTS ix_shopify_orders_shopify_order_id "
-                "ON shopify_orders (shopify_order_id)"
-            )
-        )
-        connection.execute(
-            text(
-                "CREATE INDEX IF NOT EXISTS ix_shopify_orders_created_at "
-                "ON shopify_orders (created_at)"
-            )
-        )
-        connection.execute(
-            text(
-                "CREATE UNIQUE INDEX IF NOT EXISTS ix_tiktok_auth_tiktok_shop_id "
-                "ON tiktok_auth (tiktok_shop_id)"
-            )
-        )
-        connection.execute(
-            text(
-                "CREATE INDEX IF NOT EXISTS ix_tiktok_auth_app_key "
-                "ON tiktok_auth (app_key)"
-            )
-        )
-        connection.execute(
-            text(
-                "CREATE UNIQUE INDEX IF NOT EXISTS ix_tiktok_orders_tiktok_order_id "
-                "ON tiktok_orders (tiktok_order_id)"
-            )
-        )
-        connection.execute(
-            text(
-                "CREATE INDEX IF NOT EXISTS ix_tiktok_orders_created_at "
-                "ON tiktok_orders (created_at)"
-            )
-        )
+        for idx_stmt in POSTGRES_INDEX_MIGRATIONS:
+            connection.execute(text(idx_stmt))
         migrate_legacy_postgres_shopify_orders(connection)
 
 

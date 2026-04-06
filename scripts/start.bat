@@ -1,4 +1,4 @@
 @echo off
 cd /d "%~dp0.."
-powershell -ExecutionPolicy Bypass -File .\scripts\run_local_host.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\run_hosted.ps1
 pause
