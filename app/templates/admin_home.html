@@ -116,6 +116,16 @@
                         <p class="small">Open the collapsed debug section for queue counts, stuck processing rows, recent worker failures, and raw debug payloads.</p>
                         <div class="action-card-footer"><span class="small">Operational diagnosis</span><span class="pill">debug</span></div>
                     </a>
+                    <a class="action-card" href="/admin/logs?file=app">
+                        <h3>App Log</h3>
+                        <p class="small">View recent web process output including request errors, startup messages, and webhook activity.</p>
+                        <div class="action-card-footer"><span class="small">Web process log tail</span><span class="pill">logs</span></div>
+                    </a>
+                    <a class="action-card" href="/admin/logs?file=worker">
+                        <h3>Worker Log</h3>
+                        <p class="small">View recent worker output including Discord ingest, parser runs, stitch audits, and background task errors.</p>
+                        <div class="action-card-footer"><span class="small">Worker process log tail</span><span class="pill">logs</span></div>
+                    </a>
                     <a class="action-card" href="/status#queue-summary">
                         <h3>System Status</h3>
                         <p class="small">Open the consolidated status page for queue state, recent failed rows, stuck processing, and the latest reparse summary.</p>

@@ -424,8 +424,8 @@
                             <div class="item"><strong>Worker heartbeat:</strong> <span class="pill {% if debug['worker_runtime']['needs_attention'] %}warn{% else %}ok{% endif %}">{{ debug["worker_runtime"]["label"] }}</span> <span class="small">{{ debug["worker_runtime"]["updated_at_label"] }}</span></div>
                             <div class="item"><strong>App host:</strong> {{ debug["app_runtime"]["host_name"] or "unknown" }}</div>
                             <div class="item"><strong>Worker host:</strong> {{ debug["worker_runtime"]["host_name"] or "unknown" }}</div>
-                            <div class="item"><strong>App log:</strong> {{ debug["log_paths"]["app"] }}</div>
-                            <div class="item"><strong>Worker log:</strong> {{ debug["log_paths"]["worker"] }}</div>
+                            <div class="item"><strong>App log:</strong> <a href="/admin/logs?file=app">{{ debug["log_paths"]["app"] }}</a></div>
+                            <div class="item"><strong>Worker log:</strong> <a href="/admin/logs?file=worker">{{ debug["log_paths"]["worker"] }}</a></div>
                         </div>
                     </div>
                     <div class="card">
