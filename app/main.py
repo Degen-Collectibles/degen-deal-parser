@@ -3397,16 +3397,15 @@ async def lifespan(app: FastAPI):
     else:
         app.state.heartbeat_thread = None
 
-    discord_task = track_background_task(
-        asyncio.create_task(run_discord_bot(stop_event), name="discord-ingest"),
-        runtime_name=WORKER_RUNTIME_NAME,
-        task_name="discord-ingest",
-        stop_event=stop_event,
-    )
-    background_tasks.append(discord_task)
-    app.state.discord_task = discord_task
-
     if settings.discord_ingest_enabled:
+        discord_task = track_background_task(
+            asyncio.create_task(run_discord_bot(stop_event), name="discord-ingest"),
+            runtime_name=WORKER_RUNTIME_NAME,
+            task_name="discord-ingest",
+            stop_event=stop_event,
+        )
+        background_tasks.append(discord_task)
+        app.state.discord_task = discord_task
         backfill_task = track_background_task(
             asyncio.create_task(
                 backfill_request_loop(stop_event, get_discord_client),
@@ -3444,6 +3443,7 @@ async def lifespan(app: FastAPI):
         else:
             app.state.attachment_repair_task = None
     else:
+        app.state.discord_task = None
         app.state.backfill_task = None
         app.state.recent_audit_task = None
         app.state.attachment_repair_task = None
@@ -3488,14 +3488,9 @@ async def lifespan(app: FastAPI):
         )
         background_tasks.append(tiktok_pull_task)
         app.state.tiktok_pull_task = tiktok_pull_task
-        tiktok_backfill_task = track_background_task(
-            asyncio.create_task(
-                tiktok_startup_backfill(stop_event),
-                name="tiktok-startup-backfill",
-            ),
-            runtime_name=WORKER_RUNTIME_NAME,
-            task_name="tiktok-startup-backfill",
-            stop_event=stop_event,
+        tiktok_backfill_task = asyncio.create_task(
+            tiktok_startup_backfill(stop_event),
+            name="tiktok-startup-backfill",
         )
         background_tasks.append(tiktok_backfill_task)
         app.state.tiktok_backfill_task = tiktok_backfill_task
