@@ -4154,6 +4154,64 @@ def admin_debug_page(
     return RedirectResponse(url="/status", status_code=301)
 
 
+@app.get("/admin/logs", response_class=HTMLResponse)
+def admin_logs_page(
+    request: Request,
+    file: str = Query(default="app"),
+    lines: int = Query(default=200, ge=10, le=2000),
+):
+    role_response = require_role_response(request, "admin")
+    if role_response:
+        return role_response
+
+    allowed_files = {"app": "app.log", "worker": "worker.log"}
+    log_filename = allowed_files.get(file, "app.log")
+    log_path = resolve_runtime_log_path(log_filename)
+
+    tail_lines: list[str] = []
+    if log_path.exists():
+        try:
+            raw = log_path.read_text(encoding="utf-8", errors="replace")
+            all_lines = raw.splitlines()
+            tail_lines = all_lines[-lines:]
+        except OSError:
+            tail_lines = ["(unable to read log file)"]
+    else:
+        tail_lines = [f"(log file not found: {log_path})"]
+
+    log_content = "\n".join(tail_lines)
+    nav_links = " | ".join(
+        f'<a href="/admin/logs?file={k}&lines={lines}" style="{"font-weight:bold" if k == file else ""}">{k}.log</a>'
+        for k in allowed_files
+    )
+
+    return HTMLResponse(
+        f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>Logs — {log_filename}</title>
+<style>
+body {{ margin:0; padding:20px; background:#0a0c10; color:#c8d0da; font-family:monospace; font-size:13px; }}
+nav {{ margin-bottom:16px; font-size:14px; }}
+nav a {{ color:#ff8844; text-decoration:none; margin-right:12px; }}
+pre {{ white-space:pre-wrap; word-break:break-all; line-height:1.6; }}
+h1 {{ font-size:18px; color:#eee; margin:0 0 8px; }}
+.controls {{ margin-bottom:12px; color:#888; font-size:12px; }}
+.controls a {{ color:#ff8844; }}
+</style></head><body>
+<h1>{log_filename}</h1>
+<nav>{nav_links}</nav>
+<div class="controls">
+Showing last {len(tail_lines)} lines &mdash;
+<a href="/admin/logs?file={file}&lines=50">50</a> |
+<a href="/admin/logs?file={file}&lines=200">200</a> |
+<a href="/admin/logs?file={file}&lines=500">500</a> |
+<a href="/admin/logs?file={file}&lines=1000">1000</a>
+&mdash; <a href="/status">&larr; Status</a>
+</div>
+<pre>{log_content}</pre>
+<script>window.scrollTo(0, document.body.scrollHeight);</script>
+</body></html>"""
+    )
+
+
 @app.get("/admin/health", response_class=HTMLResponse)
 def admin_health_page(
     request: Request,
