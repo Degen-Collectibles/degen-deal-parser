@@ -47,6 +47,7 @@ connect_args = {"check_same_thread": False} if database_url.startswith("sqlite")
     "keepalives_interval": 10,
     "keepalives_count": 5,
     "application_name": "degen-live-parser",
+    "options": "-c timezone=UTC",
 }
 
 engine_kwargs = {
