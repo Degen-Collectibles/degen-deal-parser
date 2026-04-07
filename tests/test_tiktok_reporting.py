@@ -582,6 +582,43 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(parsed["order_id"], "tt-9")
         self.assertEqual(parsed["status"], "PAID")
 
+    def test_tiktok_webhook_prefers_tiktok_signature_pair_over_mismatched_split_headers(self) -> None:
+        """TikTok-Signature t+s must stay paired; a bogus x-tiktok-timestamp must not break verification."""
+        secret = "app-secret"
+        raw_body = json.dumps({"order_id": "tt-pair", "status": "PAID"}, separators=(",", ":")).encode("utf-8")
+        good_ts = "1710000000"
+        bad_ts = "9999999999"
+        signature = hmac.new(
+            secret.encode("utf-8"),
+            f"{good_ts}.{raw_body.decode('utf-8')}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        headers = {
+            "x-tiktok-signature": signature,
+            "x-tiktok-timestamp": bad_ts,
+            "TikTok-Signature": f"t={good_ts},s={signature}",
+            "X-TikTok-Topic": "order.status.change",
+        }
+        parsed = parse_tiktok_webhook_payload(raw_body, app_secret=secret, headers=headers)
+        self.assertEqual(parsed["order_id"], "tt-pair")
+
+    def test_tiktok_webhook_accepts_uppercase_hex_signature(self) -> None:
+        secret = "app-secret"
+        timestamp = "1710000000"
+        raw_body = b'{"order_id":"tt-upper","status":"PAID"}'
+        digest = hmac.new(
+            secret.encode("utf-8"),
+            f"{timestamp}.{raw_body.decode('utf-8')}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        headers = {
+            "x-tiktok-signature": digest.upper(),
+            "x-tiktok-timestamp": timestamp,
+            "X-TikTok-Topic": "order.status.change",
+        }
+        parsed = parse_tiktok_webhook_payload(raw_body, app_secret=secret, headers=headers)
+        self.assertEqual(parsed["order_id"], "tt-upper")
+
     def test_tiktok_order_payload_normalization_and_reconciliation_snapshot(self) -> None:
         normalized = normalize_tiktok_order_payload(
             {
@@ -611,6 +648,27 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(json.loads(normalized["line_items_summary_json"])[0]["title"], "Charizard")
         self.assertEqual(snapshot["line_item_count"], 2)
         self.assertEqual(snapshot["customer_name"], "Casey")
+
+    def test_tiktok_order_envelope_merges_parent_shop_id_into_data(self) -> None:
+        """Shop webhooks often send shop_id on the envelope and order fields under data."""
+        normalized = normalize_tiktok_order_payload(
+            {
+                "type": 1,
+                "tts_notification_id": "7625789752946231054",
+                "shop_id": "7495987383262087496",
+                "timestamp": 1775530257,
+                "data": {
+                    "is_on_hold_order": False,
+                    "order_id": "577299788258775181",
+                    "order_status": "COMPLETED",
+                    "update_time": 1775517537,
+                },
+            },
+            source="webhook",
+        )
+        self.assertEqual(normalized["tiktok_order_id"], "577299788258775181")
+        self.assertEqual(normalized["shop_id"], "7495987383262087496")
+        self.assertEqual(normalized["financial_status"], "COMPLETED")
 
     def test_tiktok_order_upsert_persists_and_updates_existing_row(self) -> None:
         with Session(self.engine) as session:

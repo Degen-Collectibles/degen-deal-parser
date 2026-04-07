@@ -392,13 +392,21 @@ def _extract_tiktok_order_payload(raw_payload: Any) -> dict[str, Any]:
     for candidate in ("data", "order", "orders"):
         nested = payload.get(candidate)
         if isinstance(nested, dict):
-            return nested
+            merged = dict(nested)
+            parent_shop = _pick_first(payload, "shop_id", "shopId")
+            if parent_shop not in (None, "") and not str(merged.get("shop_id") or "").strip():
+                merged["shop_id"] = parent_shop
+            return merged
 
     order_list = payload.get("order_list") or payload.get("list")
     if isinstance(order_list, list) and order_list:
         first = order_list[0]
         if isinstance(first, dict):
-            return first
+            merged = dict(first)
+            parent_shop = _pick_first(payload, "shop_id", "shopId")
+            if parent_shop not in (None, "") and not str(merged.get("shop_id") or "").strip():
+                merged["shop_id"] = parent_shop
+            return merged
 
     return payload
 
@@ -778,26 +786,43 @@ def parse_tiktok_webhook_headers(headers: Any) -> dict[str, Optional[str]]:
     if not callable(header_get):
         header_get = lambda _name, _default=None: _default  # type: ignore[assignment]
 
-    for header_name in TIKTOK_WEBHOOK_SIGNATURE_HEADERS:
-        normalized_headers["signature"] = header_get(header_name)
-        if normalized_headers["signature"]:
-            break
-    for header_name in TIKTOK_WEBHOOK_TIMESTAMP_HEADERS:
-        normalized_headers["timestamp"] = header_get(header_name)
-        if normalized_headers["timestamp"]:
-            break
-    combined_signature = header_get("tiktok-signature") or header_get("TikTok-Signature")
-    if combined_signature and (not normalized_headers.get("signature") or not normalized_headers.get("timestamp")):
-        parts: dict[str, str] = {}
-        for chunk in str(combined_signature).split(","):
+    combined_raw = header_get("tiktok-signature") or header_get("TikTok-Signature")
+    combined_parts: dict[str, str] = {}
+    if combined_raw:
+        for chunk in str(combined_raw).split(","):
             if "=" not in chunk:
                 continue
             key, value = chunk.split("=", 1)
-            parts[key.strip().lower()] = value.strip()
-        if not normalized_headers.get("timestamp"):
-            normalized_headers["timestamp"] = parts.get("t")
-        if not normalized_headers.get("signature"):
-            normalized_headers["signature"] = parts.get("s")
+            combined_parts[key.strip().lower()] = value.strip()
+
+    sig_from_headers = None
+    for header_name in TIKTOK_WEBHOOK_SIGNATURE_HEADERS:
+        sig_from_headers = header_get(header_name)
+        if sig_from_headers:
+            break
+    ts_from_headers = None
+    for header_name in TIKTOK_WEBHOOK_TIMESTAMP_HEADERS:
+        ts_from_headers = header_get(header_name)
+        if ts_from_headers:
+            break
+
+    sig_c = combined_parts.get("s")
+    ts_c = combined_parts.get("t")
+    # TikTok docs define t,s as a pair on TikTok-Signature; prefer that over mixing
+    # separate x-tiktok-* headers (a wrong x-tiktok-timestamp breaks HMAC otherwise).
+    if sig_c and ts_c:
+        normalized_headers["signature"] = sig_c
+        normalized_headers["timestamp"] = ts_c
+    elif sig_c:
+        normalized_headers["signature"] = sig_c
+        normalized_headers["timestamp"] = ts_from_headers
+    elif ts_c:
+        normalized_headers["timestamp"] = ts_c
+        normalized_headers["signature"] = sig_from_headers
+    else:
+        normalized_headers["signature"] = sig_from_headers
+        normalized_headers["timestamp"] = ts_from_headers
+
     normalized_headers["event"] = (
         header_get("x-tiktok-topic")
         or header_get("X-TikTok-Topic")
@@ -857,6 +882,13 @@ def _build_webhook_signature_candidates(
     return results
 
 
+def _normalize_webhook_signature_for_compare(sig: str) -> str:
+    s = sig.strip()
+    if len(s) == 64 and all(c in "0123456789abcdefABCDEF" for c in s):
+        return s.lower()
+    return s
+
+
 def verify_tiktok_webhook_signature(
     *,
     raw_body: bytes,
@@ -865,7 +897,7 @@ def verify_tiktok_webhook_signature(
     received_timestamp: Optional[str] = None,
     request_path: Optional[str] = None,
 ) -> bool:
-    normalized_signature = (received_signature or "").strip()
+    normalized_signature = _normalize_webhook_signature_for_compare(received_signature or "")
     if not normalized_signature:
         return False
 
@@ -875,7 +907,10 @@ def verify_tiktok_webhook_signature(
         received_timestamp=received_timestamp,
         request_path=request_path,
     )
-    return any(hmac.compare_digest(normalized_signature, sig) for _, sig in candidates)
+    return any(
+        hmac.compare_digest(normalized_signature, _normalize_webhook_signature_for_compare(sig))
+        for _, sig in candidates
+    )
 
 
 def parse_tiktok_webhook_payload(
@@ -913,15 +948,24 @@ def parse_tiktok_webhook_payload(
     signature = header_signature or payload_signature
     timestamp = header_timestamp or payload_timestamp
 
+    timestamp_candidates: list[str] = []
+    for ts in (timestamp, payload_timestamp):
+        t = str(ts or "").strip()
+        if t and t not in timestamp_candidates:
+            timestamp_candidates.append(t)
+
     sig_verified = False
     if signature and normalized_secret:
-        sig_verified = verify_tiktok_webhook_signature(
-            raw_body=raw_body,
-            app_secret=normalized_secret,
-            received_signature=signature,
-            received_timestamp=timestamp,
-            request_path=request_path,
-        )
+        for ts in timestamp_candidates or [None]:
+            if verify_tiktok_webhook_signature(
+                raw_body=raw_body,
+                app_secret=normalized_secret,
+                received_signature=signature,
+                received_timestamp=ts,
+                request_path=request_path,
+            ):
+                sig_verified = True
+                break
 
     if not sig_verified and strict_signature:
         if not signature:
