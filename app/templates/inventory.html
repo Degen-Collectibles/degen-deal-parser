@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <title>Inventory</title>
+    <style>
+        :root { --bg:#f4ebdf; --bg-deep:#ead8c0; --card:#fff9f2; --card-strong:#fffdf8; --line:#deccb6; --text:#24170f; --muted:#6b5849; --accent:#d55338; --accent-strong:#9f311d; --shadow:0 20px 44px rgba(77,46,20,.13); }
+        * { box-sizing:border-box; }
+        html { scroll-behavior:smooth; }
+        body { margin:0; font-family:"Inter",-apple-system,BlinkMacSystemFont,sans-serif; -webkit-font-smoothing:antialiased; color:var(--text); background:radial-gradient(circle at top left,rgba(240,196,107,.26),transparent 24%),radial-gradient(circle at 84% 10%,rgba(213,83,56,.10),transparent 18%),linear-gradient(180deg,#fcf7f0 0%,var(--bg) 46%,var(--bg-deep) 100%); }
+        a { color:inherit; text-decoration:none; }
+        .page { max-width:1600px; margin:0 auto; padding:28px 28px 60px; }
+        .card { padding:18px; margin-bottom:18px; background:linear-gradient(180deg,var(--card-strong),var(--card)); border:1px solid var(--line); border-radius:24px; box-shadow:var(--shadow); }
+        h1 { margin:10px 0 8px; font-size:clamp(30px,4vw,48px); line-height:.93; letter-spacing:-.045em; color:#ffffff; font-weight:800; }
+        p { color:#a7b0ba; }
+        .eyebrow { display:inline-flex; align-items:center; padding:6px 10px; border-radius:999px; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; background:rgba(37,28,22,.06); color:#ebc67a; }
+        .button, button { appearance:none; border:none; border-radius:14px; padding:10px 14px; font:inherit; font-weight:700; cursor:pointer; transition:transform .15s; }
+        .button:hover, button:hover { transform:translateY(-1px); }
+        .primary-button { background:linear-gradient(135deg,var(--accent-strong),#df623f 55%,#f0875e); color:#fff; box-shadow:0 10px 20px rgba(159,49,29,.22); }
+        .secondary-button { background:linear-gradient(180deg,#fffdfa,#fff4e8); color:var(--text); border:1px solid var(--line); }
+        label { display:flex; flex-direction:column; gap:5px; color:#a7b0ba; font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; }
+        input, select { width:100%; padding:10px 12px; border-radius:12px; border:1px solid var(--line); background:#fff; color:var(--text); font:inherit; }
+        .filters { display:grid; grid-template-columns:2fr 1fr 1fr 1fr auto auto; gap:10px; align-items:end; margin-bottom:14px; }
+        .scan-row { display:flex; gap:10px; align-items:center; margin-bottom:14px; }
+        .scan-input { flex:1; max-width:320px; padding:11px 14px; border-radius:14px; border:2px solid var(--accent); background:#fff; font:inherit; font-size:14px; font-weight:600; }
+        .scan-input:focus { outline:none; box-shadow:0 0 0 3px rgba(213,83,56,.2); }
+        .scan-label { font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; color:#a7b0ba; }
+        .table-shell { overflow:auto; border:1px solid #eadfce; border-radius:20px; background:#fff; max-height:72vh; margin-bottom:16px; }
+        table { width:100%; border-collapse:separate; border-spacing:0; min-width:900px; }
+        th, td { padding:10px 14px; border-bottom:1px solid #efe4d6; text-align:left; vertical-align:middle; font-size:13px; }
+        thead th { position:sticky; top:0; z-index:2; background:#fff6ea; color:#a7b0ba; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; white-space:nowrap; }
+        tbody tr:hover { background:#fff9f1; }
+        tbody tr:last-child td { border-bottom:none; }
+        .badge { display:inline-flex; align-items:center; padding:4px 8px; border-radius:999px; font-size:11px; font-weight:700; white-space:nowrap; }
+        .badge-in-stock { background:#edf9f2; color:#166647; }
+        .badge-listed { background:#e7f0ff; color:#30548c; }
+        .badge-sold { background:#f5eadc; color:#6b5849; }
+        .badge-held { background:#fff5df; color:#8a580d; }
+        .badge-single { background:#f0f4ff; color:#3b4fa8; }
+        .badge-slab { background:#fdf0ff; color:#7e3b9a; }
+        .btn-sm { padding:5px 10px; border-radius:10px; font-size:12px; font-weight:700; border:1px solid var(--line); background:#fff; color:var(--text); cursor:pointer; text-decoration:none; display:inline-block; }
+        .price-cell { font-variant-numeric:tabular-nums; font-weight:700; color:#166647; }
+        .price-none { color:#a7b0ba; }
+        .pagination { display:flex; gap:8px; align-items:center; justify-content:center; flex-wrap:wrap; }
+        .page-btn { padding:7px 13px; border-radius:12px; border:1px solid var(--line); background:#fff; color:var(--text); font:inherit; font-size:13px; font-weight:600; cursor:pointer; text-decoration:none; }
+        .page-btn.active { background:var(--accent); color:#fff; border-color:var(--accent); }
+        .section-header { display:flex; gap:10px; align-items:center; justify-content:space-between; margin-bottom:12px; flex-wrap:wrap; }
+        .section-title { margin:0; font-size:22px; font-weight:800; letter-spacing:-.04em; }
+        .count-badge { font-size:12px; font-weight:700; color:#a7b0ba; }
+        .toast { position:fixed; bottom:24px; right:24px; padding:12px 18px; border-radius:16px; font-weight:700; font-size:14px; background:#1a1206; color:#fff; box-shadow:0 8px 24px rgba(0,0,0,.3); display:none; z-index:99; }
+        .toast.error { background:#9d2f2b; }
+        @keyframes card-in { from{opacity:0;transform:translateY(16px) scale(.985)} to{opacity:1;transform:none} }
+        .card { animation:card-in .45s cubic-bezier(.22,1,.36,1) both; }
+        @media(max-width:900px) { .filters{grid-template-columns:1fr 1fr;} .page{padding:16px 14px 28px;} }
+    </style>
+    <link rel="stylesheet" href="/static/courtyard-theme.css?v=4">
+</head>
+<body>
+<div class="page">
+    {% include "_workspace_nav.html" %}
+
+    <div class="card">
+        <div class="eyebrow" style="margin-bottom:12px;">Inventory</div>
+        <h1>Inventory</h1>
+        <p>Manage singles and slabs. Scan a barcode to pull up an item instantly.</p>
+
+        <!-- Barcode scan row -->
+        <div class="scan-row">
+            <span class="scan-label">Scan barcode:</span>
+            <input id="barcode-scan" class="scan-input" type="text" placeholder="DGN-000001" autocomplete="off" autofocus>
+        </div>
+
+        <!-- Filters -->
+        <form method="get" action="/inventory" class="filters">
+            <label>Search
+                <input type="text" name="q" value="{{ q }}" placeholder="Card name, barcode, cert #…">
+            </label>
+            <label>Status
+                <select name="status">
+                    <option value="">All</option>
+                    {% for s in statuses %}
+                    <option value="{{ s }}" {% if status_filter == s %}selected{% endif %}>{{ s.replace("_", " ").title() }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label>Game
+                <select name="game">
+                    <option value="">All</option>
+                    {% for g in games %}
+                    <option value="{{ g }}" {% if game_filter == g %}selected{% endif %}>{{ g }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label>Type
+                <select name="item_type">
+                    <option value="">All</option>
+                    <option value="single" {% if type_filter == "single" %}selected{% endif %}>Single</option>
+                    <option value="slab" {% if type_filter == "slab" %}selected{% endif %}>Slab</option>
+                </select>
+            </label>
+            <label>&nbsp;<button type="submit" class="secondary-button" style="white-space:nowrap;">Filter</button></label>
+            <label>&nbsp;<a href="/inventory/new" class="button primary-button" style="white-space:nowrap;">+ Add Item</a></label>
+        </form>
+    </div>
+
+    <div class="card">
+        <div class="section-header">
+            <h2 class="section-title">Items <span class="count-badge">{{ total }} total</span></h2>
+            <div style="display:flex;gap:8px;">
+                <a href="/inventory/scan" class="btn-sm">Scan Mode</a>
+                <a href="/inventory/labels{% if status_filter %}?status={{ status_filter }}{% endif %}" class="btn-sm">Print Labels</a>
+            </div>
+        </div>
+
+        <div class="table-shell">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Barcode</th>
+                        <th>Card Name</th>
+                        <th>Game</th>
+                        <th>Type</th>
+                        <th>Set</th>
+                        <th>Grade / Cond</th>
+                        <th>Cost</th>
+                        <th>Price</th>
+                        <th>Status</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for item in items %}
+                <tr>
+                    <td style="font-family:monospace;font-size:12px;">{{ item.barcode }}</td>
+                    <td style="font-weight:700;">{{ item.card_name }}</td>
+                    <td><span style="font-size:12px;">{{ item.game }}</span></td>
+                    <td>
+                        {% if item.item_type == "slab" %}
+                        <span class="badge badge-slab">Slab</span>
+                        {% else %}
+                        <span class="badge badge-single">Single</span>
+                        {% endif %}
+                    </td>
+                    <td style="font-size:12px;color:#a7b0ba;">{{ item.set_name or "—" }}</td>
+                    <td style="font-size:12px;">
+                        {% if item.grading_company and item.grade %}
+                            {{ item.grading_company }} {{ item.grade }}
+                        {% elif item.condition %}
+                            {{ item.condition }}
+                        {% else %}—{% endif %}
+                    </td>
+                    <td class="price-cell">{% if item.cost_basis is not none %}${{ "%.2f"|format(item.cost_basis) }}{% else %}<span class="price-none">—</span>{% endif %}</td>
+                    <td class="price-cell">
+                        {% set ep = effective_price(item) %}
+                        {% if ep is not none %}${{ "%.2f"|format(ep) }}{% if item.list_price is not none %}<span style="font-size:10px;color:#a7b0ba;margin-left:3px;">manual</span>{% endif %}
+                        {% else %}<span class="price-none">—</span>{% endif %}
+                    </td>
+                    <td>
+                        <span class="badge badge-{{ item.status }}">{{ item.status.replace("_"," ").title() }}</span>
+                    </td>
+                    <td><a href="/inventory/{{ item.id }}" class="btn-sm">View</a></td>
+                </tr>
+                {% else %}
+                <tr><td colspan="10" style="text-align:center;color:#a7b0ba;padding:32px;">No items found.</td></tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        {% if total_pages > 1 %}
+        <div class="pagination">
+            {% if page > 1 %}<a class="page-btn" href="?page={{ page - 1 }}&q={{ q }}&status={{ status_filter }}&game={{ game_filter }}&item_type={{ type_filter }}">‹ Prev</a>{% endif %}
+            <span style="font-size:13px;color:#a7b0ba;">Page {{ page }} of {{ total_pages }}</span>
+            {% if page < total_pages %}<a class="page-btn" href="?page={{ page + 1 }}&q={{ q }}&status={{ status_filter }}&game={{ game_filter }}&item_type={{ type_filter }}">Next ›</a>{% endif %}
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<div id="scan-toast" class="toast"></div>
+
+<script>
+(function () {
+    var scanInput = document.getElementById('barcode-scan');
+    var toast = document.getElementById('scan-toast');
+    if (!scanInput) return;
+
+    function showToast(msg, isError) {
+        toast.textContent = msg;
+        toast.className = 'toast' + (isError ? ' error' : '');
+        toast.style.display = 'block';
+        clearTimeout(toast._timer);
+        toast._timer = setTimeout(function() { toast.style.display = 'none'; }, 3000);
+    }
+
+    scanInput.addEventListener('keydown', function (e) {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        var val = scanInput.value.trim();
+        if (!val) return;
+        fetch('/inventory/api/lookup?barcode=' + encodeURIComponent(val))
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.found) {
+                    window.location.href = data.redirect;
+                } else {
+                    showToast('Item not found: ' + val, true);
+                    scanInput.value = '';
+                    scanInput.focus();
+                }
+            })
+            .catch(function() {
+                showToast('Lookup failed', true);
+                scanInput.value = '';
+            });
+    });
+})();
+</script>
+</body>
+</html>

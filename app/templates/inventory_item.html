@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <title>{{ item.card_name }} — Inventory</title>
+    <style>
+        :root { --bg:#f4ebdf; --bg-deep:#ead8c0; --card:#fff9f2; --card-strong:#fffdf8; --line:#deccb6; --text:#24170f; --muted:#6b5849; --accent:#d55338; --accent-strong:#9f311d; --shadow:0 20px 44px rgba(77,46,20,.13); }
+        * { box-sizing:border-box; }
+        body { margin:0; font-family:"Inter",-apple-system,BlinkMacSystemFont,sans-serif; -webkit-font-smoothing:antialiased; color:var(--text); background:radial-gradient(circle at top left,rgba(240,196,107,.26),transparent 24%),radial-gradient(circle at 84% 10%,rgba(213,83,56,.10),transparent 18%),linear-gradient(180deg,#fcf7f0 0%,var(--bg) 46%,var(--bg-deep) 100%); }
+        a { color:inherit; text-decoration:none; }
+        .page { max-width:1200px; margin:0 auto; padding:28px 28px 60px; }
+        .card { padding:22px; margin-bottom:18px; background:linear-gradient(180deg,var(--card-strong),var(--card)); border:1px solid var(--line); border-radius:24px; box-shadow:var(--shadow); }
+        .two-col { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+        label { display:flex; flex-direction:column; gap:6px; color:#a7b0ba; font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; margin-bottom:12px; }
+        input, select, textarea { width:100%; padding:10px 12px; border-radius:12px; border:1px solid var(--line); background:#fff; color:var(--text); font:inherit; }
+        textarea { resize:vertical; min-height:80px; }
+        .button, button { appearance:none; border:none; border-radius:14px; padding:10px 16px; font:inherit; font-weight:700; cursor:pointer; transition:transform .15s; }
+        .button:hover, button:hover { transform:translateY(-1px); }
+        .primary-button { background:linear-gradient(135deg,var(--accent-strong),#df623f 55%,#f0875e); color:#fff; box-shadow:0 10px 20px rgba(159,49,29,.22); }
+        .secondary-button { background:linear-gradient(180deg,#fffdfa,#fff4e8); color:var(--text); border:1px solid var(--line); }
+        .danger-button { background:#fff0ef; color:#9d2f2b; border:1px solid #efb8b4; }
+        h2 { margin:0 0 16px; font-size:20px; font-weight:800; letter-spacing:-.03em; }
+        .eyebrow { display:inline-flex; align-items:center; padding:5px 10px; border-radius:999px; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; background:rgba(37,28,22,.06); color:#ebc67a; }
+        .badge { display:inline-flex; align-items:center; padding:4px 9px; border-radius:999px; font-size:12px; font-weight:700; }
+        .badge-in-stock { background:#edf9f2; color:#166647; }
+        .badge-listed { background:#e7f0ff; color:#30548c; }
+        .badge-sold { background:#f5eadc; color:#6b5849; }
+        .badge-held { background:#fff5df; color:#8a580d; }
+        .price-big { font-size:32px; font-weight:800; letter-spacing:-.04em; color:#166647; font-variant-numeric:tabular-nums; }
+        .price-row { display:flex; gap:16px; align-items:baseline; flex-wrap:wrap; margin-bottom:12px; }
+        .price-label { font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; color:#a7b0ba; }
+        .price-val { font-size:18px; font-weight:700; font-variant-numeric:tabular-nums; }
+        .price-none { color:#a7b0ba; }
+        .barcode-section { display:flex; flex-direction:column; align-items:center; gap:8px; padding:16px; border:1px solid var(--line); border-radius:16px; background:#fff; }
+        .barcode-svg-wrap svg { max-width:240px; height:auto; display:block; }
+        .barcode-code { font-family:monospace; font-size:14px; font-weight:700; color:#a7b0ba; }
+        .shopify-section { padding:14px 16px; border:1px solid #a6e2bf; border-radius:16px; background:#edf9f2; margin-bottom:12px; }
+        .shopify-section.not-linked { border-color:var(--line); background:#fff; }
+        .history-table { width:100%; border-collapse:collapse; font-size:12px; }
+        .history-table th { text-align:left; padding:6px 8px; color:#a7b0ba; font-weight:800; text-transform:uppercase; letter-spacing:.07em; border-bottom:1px solid var(--line); }
+        .history-table td { padding:6px 8px; border-bottom:1px solid #f0ebe3; font-variant-numeric:tabular-nums; }
+        .action-row { display:flex; gap:10px; flex-wrap:wrap; margin-top:16px; }
+        .back-link { color:#a7b0ba; font-size:13px; font-weight:600; margin-bottom:12px; display:inline-block; }
+        .back-link:hover { color:var(--text); }
+        .section-divider { margin:0 0 16px; padding-bottom:12px; border-bottom:1px solid var(--line); }
+        @keyframes card-in { from{opacity:0;transform:translateY(12px) scale(.988)} to{opacity:1;transform:none} }
+        .card { animation:card-in .4s cubic-bezier(.22,1,.36,1) both; }
+        @media(max-width:800px) { .two-col{grid-template-columns:1fr;} .page{padding:16px 14px 28px;} }
+    </style>
+    <link rel="stylesheet" href="/static/courtyard-theme.css?v=4">
+</head>
+<body>
+<div class="page">
+    {% include "_workspace_nav.html" %}
+
+    <a href="/inventory" class="back-link">← Back to Inventory</a>
+
+    <!-- Header card -->
+    <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;">
+            <div>
+                <span class="eyebrow" style="margin-bottom:8px;">{{ item.item_type.title() }}</span>
+                <h1 style="margin:8px 0 4px;font-size:clamp(24px,4vw,40px);line-height:1;letter-spacing:-.04em;color:#fff;font-weight:800;">{{ item.card_name }}</h1>
+                {% if item.set_name %}<p style="color:#a7b0ba;margin:4px 0;">{{ item.set_name }}{% if item.card_number %} · #{{ item.card_number }}{% endif %}</p>{% endif %}
+                <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                    <span class="badge badge-{{ item.status }}">{{ item.status.replace("_"," ").title() }}</span>
+                    <span style="font-size:12px;color:#a7b0ba;">{{ item.game }}</span>
+                    {% if item.language and item.language != "English" %}<span style="font-size:12px;color:#a7b0ba;">{{ item.language }}</span>{% endif %}
+                    <span style="font-family:monospace;font-size:12px;color:#a7b0ba;">{{ item.barcode }}</span>
+                </div>
+            </div>
+            <!-- Barcode -->
+            <div class="barcode-section">
+                <div class="barcode-svg-wrap">{{ barcode_svg | safe }}</div>
+                <span class="barcode-code">{{ item.barcode }}</span>
+                <a href="/inventory/{{ item.id }}/barcode.svg" download="{{ item.barcode }}.svg" class="secondary-button button" style="font-size:12px;padding:6px 12px;">Download SVG</a>
+            </div>
+        </div>
+    </div>
+
+    <div class="two-col">
+        <!-- Pricing card -->
+        <div class="card">
+            <h2 class="section-divider">Pricing</h2>
+            <div class="price-row">
+                {% if effective_price is not none %}
+                <div>
+                    <div class="price-label">Effective Price</div>
+                    <div class="price-big">${{ "%.2f"|format(effective_price) }}</div>
+                    {% if item.list_price is not none %}<div style="font-size:11px;color:#a7b0ba;">Manual override active</div>{% endif %}
+                </div>
+                {% else %}
+                <div><div class="price-label">Effective Price</div><div class="price-val price-none">Not priced</div></div>
+                {% endif %}
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px;">
+                <div><div class="price-label">Auto Price</div><div class="price-val">{% if item.auto_price is not none %}${{ "%.2f"|format(item.auto_price) }}{% else %}<span class="price-none">—</span>{% endif %}</div></div>
+                <div><div class="price-label">List Price</div><div class="price-val">{% if item.list_price is not none %}${{ "%.2f"|format(item.list_price) }}{% else %}<span class="price-none">—</span>{% endif %}</div></div>
+                <div><div class="price-label">Cost Basis</div><div class="price-val">{% if item.cost_basis is not none %}${{ "%.2f"|format(item.cost_basis) }}{% else %}<span class="price-none">—</span>{% endif %}</div></div>
+            </div>
+            {% if item.last_priced_at %}<p style="font-size:12px;margin:0 0 12px;">Last priced: {{ item.last_priced_at.strftime("%b %d, %Y %H:%M") }} UTC</p>{% endif %}
+            <form method="post" action="/inventory/{{ item.id }}/reprice" style="display:inline;">
+                <button type="submit" class="secondary-button">Refresh Price</button>
+            </form>
+
+            {% if price_history %}
+            <hr style="border:none;border-top:1px solid var(--line);margin:16px 0;">
+            <h2 style="font-size:14px;margin:0 0 10px;">Price History</h2>
+            <table class="history-table">
+                <thead><tr><th>Date</th><th>Source</th><th>Market</th><th>Low</th><th>High</th></tr></thead>
+                <tbody>
+                {% for h in price_history %}
+                <tr>
+                    <td>{{ h.fetched_at.strftime("%b %d") }}</td>
+                    <td>{{ h.source }}</td>
+                    <td>{% if h.market_price is not none %}${{ "%.2f"|format(h.market_price) }}{% else %}—{% endif %}</td>
+                    <td>{% if h.low_price is not none %}${{ "%.2f"|format(h.low_price) }}{% else %}—{% endif %}</td>
+                    <td>{% if h.high_price is not none %}${{ "%.2f"|format(h.high_price) }}{% else %}—{% endif %}</td>
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+            {% endif %}
+        </div>
+
+        <!-- Shopify card -->
+        <div class="card">
+            <h2 class="section-divider">Shopify</h2>
+            {% if item.shopify_product_id %}
+            <div class="shopify-section">
+                <div style="font-weight:700;color:#166647;margin-bottom:6px;">Linked to Shopify</div>
+                <div style="font-size:12px;color:#6b5849;">Product ID: {{ item.shopify_product_id }}</div>
+                <div style="font-size:12px;color:#6b5849;margin-bottom:10px;">Variant ID: {{ item.shopify_variant_id }}</div>
+                <form method="post" action="/inventory/{{ item.id }}/push-shopify" style="display:inline;">
+                    <button type="submit" class="secondary-button" style="font-size:13px;">Sync Price to Shopify</button>
+                </form>
+            </div>
+            {% else %}
+            <div class="shopify-section not-linked">
+                <div style="font-weight:700;color:#a7b0ba;margin-bottom:6px;">Not listed on Shopify</div>
+                <p style="margin:0 0 12px;font-size:13px;color:#a7b0ba;">Push this item to create a Shopify product with the barcode as SKU.</p>
+                <form method="post" action="/inventory/{{ item.id }}/push-shopify" style="display:inline;">
+                    <button type="submit" class="primary-button">Push to Shopify</button>
+                </form>
+            </div>
+            {% endif %}
+
+            {% if item.sold_at %}
+            <div style="margin-top:14px;padding:12px 14px;border:1px solid #a6e2bf;border-radius:14px;background:#edf9f2;">
+                <div style="font-weight:700;color:#166647;">Sold</div>
+                <div style="font-size:13px;color:#6b5849;">{{ item.sold_at.strftime("%b %d, %Y") }}{% if item.sold_price %} · ${{ "%.2f"|format(item.sold_price) }}{% endif %}</div>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Edit form -->
+    <div class="card">
+        <h2 class="section-divider">Edit Item</h2>
+        <form method="post" action="/inventory/{{ item.id }}/edit">
+            <div class="two-col">
+                <div>
+                    <label>Card Name <input type="text" name="card_name" value="{{ item.card_name }}" required></label>
+                    <label>Game
+                        <select name="game">
+                            {% for g in games %}<option value="{{ g }}" {% if item.game == g %}selected{% endif %}>{{ g }}</option>{% endfor %}
+                        </select>
+                    </label>
+                    <label>Type
+                        <select name="item_type">
+                            {% for t in item_types %}<option value="{{ t }}" {% if item.item_type == t %}selected{% endif %}>{{ t.title() }}</option>{% endfor %}
+                        </select>
+                    </label>
+                    <label>Set Name <input type="text" name="set_name" value="{{ item.set_name or '' }}"></label>
+                    <label>Set Code <input type="text" name="set_code" value="{{ item.set_code or '' }}" placeholder="e.g. base1"></label>
+                    <label>Card Number <input type="text" name="card_number" value="{{ item.card_number or '' }}"></label>
+                    <label>Language <input type="text" name="language" value="{{ item.language or 'English' }}"></label>
+                    <label>Condition
+                        <select name="condition">
+                            <option value="">—</option>
+                            {% for c in conditions %}<option value="{{ c }}" {% if item.condition == c %}selected{% endif %}>{{ c }}</option>{% endfor %}
+                        </select>
+                    </label>
+                    <label>Quantity <input type="number" name="quantity" value="{{ item.quantity }}" min="1"></label>
+                </div>
+                <div>
+                    <!-- Slab section -->
+                    <label>Grading Company
+                        <select name="grading_company">
+                            <option value="">—</option>
+                            {% for gc in grading_companies %}<option value="{{ gc }}" {% if item.grading_company == gc %}selected{% endif %}>{{ gc }}</option>{% endfor %}
+                        </select>
+                    </label>
+                    <label>Grade <input type="text" name="grade" value="{{ item.grade or '' }}" placeholder="e.g. 10, 9.5"></label>
+                    <label>Cert Number <input type="text" name="cert_number" value="{{ item.cert_number or '' }}"></label>
+                    <label>Cost Basis ($) <input type="text" name="cost_basis" value="{{ '%.2f'|format(item.cost_basis) if item.cost_basis is not none else '' }}" placeholder="0.00"></label>
+                    <label>List Price ($) <input type="text" name="list_price" value="{{ '%.2f'|format(item.list_price) if item.list_price is not none else '' }}" placeholder="Leave blank to use auto price"></label>
+                    <label>Status
+                        <select name="status">
+                            {% for s in statuses %}<option value="{{ s }}" {% if item.status == s %}selected{% endif %}>{{ s.replace("_"," ").title() }}</option>{% endfor %}
+                        </select>
+                    </label>
+                    <label>Image URL <input type="url" name="image_url" value="{{ item.image_url or '' }}"></label>
+                    <label>Notes <textarea name="notes">{{ item.notes or '' }}</textarea></label>
+                </div>
+            </div>
+            <div class="action-row">
+                <button type="submit" class="primary-button">Save Changes</button>
+                <a href="/inventory/{{ item.id }}/barcode.svg" download="{{ item.barcode }}.svg" class="button secondary-button">Download Barcode</a>
+                <a href="/inventory/labels?ids={{ item.id }}" class="button secondary-button">Print Label</a>
+            </div>
+        </form>
+    </div>
+</div>
+</body>
+</html>

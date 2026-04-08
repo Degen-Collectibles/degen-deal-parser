@@ -1757,3 +1757,123 @@ def should_stitch_rows(base_row: DiscordMessage, candidate_rows: list[DiscordMes
     # Good common case:
     # one image/incomplete row + one payment/direction fragment
     return True
+
+
+# ---------------------------------------------------------------------------
+# Inventory pricing refresh loop
+# ---------------------------------------------------------------------------
+
+async def _refresh_inventory_prices_once() -> None:
+    """
+    Fetch updated prices for inventory items that are stale (in_stock or listed,
+    and last_priced_at is NULL or older than INVENTORY_PRICE_STALE_HOURS).
+    Rate-limited to 1 request per second to avoid hammering pricing APIs.
+    """
+    from datetime import timedelta
+    import httpx
+    from .models import InventoryItem, PriceHistory, INVENTORY_IN_STOCK, INVENTORY_LISTED
+    from .inventory_pricing import fetch_price_for_item, price_result_to_json
+
+    stale_cutoff = utcnow() - timedelta(hours=settings.inventory_price_stale_hours)
+
+    with managed_session() as session:
+        items = session.exec(
+            select(InventoryItem)
+            .where(InventoryItem.status.in_([INVENTORY_IN_STOCK, INVENTORY_LISTED]))
+            .where(
+                or_(
+                    InventoryItem.last_priced_at == None,  # noqa: E711
+                    InventoryItem.last_priced_at < stale_cutoff,
+                )
+            )
+            .order_by(InventoryItem.last_priced_at.asc().nullsfirst())
+            .limit(50)
+        ).all()
+        item_ids = [i.id for i in items]
+
+    if not item_ids:
+        return
+
+    worker_log(
+        action="inventory.price_refresh.start",
+        success=True,
+        count=len(item_ids),
+    )
+
+    refreshed = 0
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        for item_id in item_ids:
+            with managed_session() as session:
+                item = session.get(InventoryItem, item_id)
+                if not item:
+                    continue
+                try:
+                    result = await fetch_price_for_item(
+                        item,
+                        client,
+                        api_key=settings.scrydex_api_key,
+                        base_url=settings.scrydex_base_url,
+                    )
+                    if result:
+                        item.auto_price = result.get("market_price")
+                        item.last_priced_at = utcnow()
+                        item.updated_at = utcnow()
+                        session.add(item)
+                        history = PriceHistory(
+                            item_id=item.id,
+                            source=result.get("source", "unknown"),
+                            market_price=result.get("market_price"),
+                            low_price=result.get("low_price"),
+                            high_price=result.get("high_price"),
+                            raw_response_json=price_result_to_json(result),
+                        )
+                        session.add(history)
+                        session.commit()
+                        refreshed += 1
+                except Exception as exc:
+                    worker_log(
+                        action="inventory.price_refresh.item_failed",
+                        level="warning",
+                        success=False,
+                        error=str(exc),
+                        inventory_item_id=item_id,
+                    )
+
+            # Rate limit: 1 req/sec
+            await asyncio.sleep(1.0)
+
+    worker_log(
+        action="inventory.price_refresh.done",
+        success=True,
+        refreshed=refreshed,
+        checked=len(item_ids),
+    )
+
+
+async def periodic_inventory_price_loop(stop_event: asyncio.Event) -> None:
+    """Background loop that refreshes stale inventory prices every N hours."""
+    interval_hours = max(settings.inventory_price_refresh_interval_hours, 0.5)
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_hours * 3600)
+            break
+        except asyncio.TimeoutError:
+            pass
+
+        try:
+            await _refresh_inventory_prices_once()
+        except OperationalError as exc:
+            worker_log(
+                action="inventory.price_refresh.db_error",
+                level="error",
+                success=False,
+                error=str(exc),
+            )
+            dispose_engine()
+        except Exception as exc:
+            worker_log(
+                action="inventory.price_refresh.loop_error",
+                level="error",
+                success=False,
+                error=str(exc),
+            )

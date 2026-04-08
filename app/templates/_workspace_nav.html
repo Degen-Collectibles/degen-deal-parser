@@ -14,6 +14,7 @@
 {% set active_admin = current_path.startswith("/admin") or current_path.startswith("/ops-log") or current_path.startswith("/learned-rule-log") %}
 {% set active_hits = current_path.startswith("/hits") %}
 {% set active_stream_mgr = current_path.startswith("/stream-manager") %}
+{% set active_inventory = current_path.startswith("/inventory") %}
 {% if active_dashboard %}
     {% set current_label = "Dashboard" %}
 {% elif active_review %}
@@ -44,6 +45,8 @@
     {% set current_label = "Live Hits" %}
 {% elif active_stream_mgr %}
     {% set current_label = "Stream Manager" %}
+{% elif active_inventory %}
+    {% set current_label = "Inventory" %}
 {% else %}
     {% set current_label = "Workspace" %}
 {% endif %}
@@ -226,6 +229,7 @@
                     <a class="{% if active_streamer %}is-active{% endif %}" href="/tiktok/streamer">Streamer</a>
                     <a class="{% if active_hits %}is-active{% endif %}" href="/hits">Live Hits</a>
                     <a class="{% if active_stream_mgr %}is-active{% endif %}" href="/stream-manager">Stream Manager</a>
+                    <a class="{% if active_inventory %}is-active{% endif %}" href="/inventory">Inventory</a>
                     {% if is_admin %}
                     <div class="nav-dropdown-label">Operators</div>
                     <a class="{% if active_table %}is-active{% endif %}" href="/table">Table</a>

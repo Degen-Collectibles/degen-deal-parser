@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <title>Print Labels — Inventory</title>
+    <style>
+        :root { --bg:#f4ebdf; --bg-deep:#ead8c0; --card:#fff9f2; --card-strong:#fffdf8; --line:#deccb6; --text:#24170f; --muted:#6b5849; --accent:#d55338; --shadow:0 20px 44px rgba(77,46,20,.13); }
+        * { box-sizing:border-box; }
+        body { margin:0; font-family:"Inter",-apple-system,BlinkMacSystemFont,sans-serif; -webkit-font-smoothing:antialiased; color:var(--text); background:radial-gradient(circle at top left,rgba(240,196,107,.26),transparent 24%),linear-gradient(180deg,#fcf7f0 0%,var(--bg) 46%,var(--bg-deep) 100%); }
+        a { color:inherit; text-decoration:none; }
+        .page { max-width:1200px; margin:0 auto; padding:28px 28px 60px; }
+        .card { padding:18px; margin-bottom:18px; background:linear-gradient(180deg,var(--card-strong),var(--card)); border:1px solid var(--line); border-radius:24px; box-shadow:var(--shadow); }
+        .button, button { appearance:none; border:none; border-radius:14px; padding:10px 16px; font:inherit; font-weight:700; cursor:pointer; transition:transform .15s; }
+        .button:hover, button:hover { transform:translateY(-1px); }
+        .primary-button { background:linear-gradient(135deg,#9f311d,#df623f 55%,#f0875e); color:#fff; box-shadow:0 10px 20px rgba(159,49,29,.22); }
+        .secondary-button { background:linear-gradient(180deg,#fffdfa,#fff4e8); color:var(--text); border:1px solid var(--line); }
+        h1 { margin:8px 0 6px; font-size:clamp(26px,4vw,36px); line-height:1; letter-spacing:-.04em; color:#fff; font-weight:800; }
+        p { color:#a7b0ba; margin:0 0 14px; }
+        .back-link { color:#a7b0ba; font-size:13px; font-weight:600; margin-bottom:12px; display:inline-block; }
+        .back-link:hover { color:var(--text); }
+        .eyebrow { display:inline-flex; align-items:center; padding:5px 10px; border-radius:999px; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; background:rgba(37,28,22,.06); color:#ebc67a; margin-bottom:10px; }
+        .toolbar { display:flex; gap:10px; align-items:center; margin-bottom:18px; flex-wrap:wrap; }
+
+        /* Label grid — screen view */
+        .labels-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:12px; }
+        .label-card {
+            border:1px solid var(--line);
+            border-radius:16px;
+            background:#fff;
+            padding:12px;
+            display:flex;
+            flex-direction:column;
+            align-items:center;
+            gap:6px;
+            text-align:center;
+        }
+        .label-barcode svg { width:100%; max-width:200px; height:auto; }
+        .label-code { font-family:monospace; font-size:12px; font-weight:700; color:#a7b0ba; }
+        .label-name { font-size:13px; font-weight:800; color:var(--text); max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .label-sub { font-size:11px; color:#a7b0ba; }
+        .empty-state { text-align:center; padding:48px 24px; color:#a7b0ba; }
+
+        /* Print styles */
+        @media print {
+            .no-print { display:none !important; }
+            body { background:#fff; }
+            .page { padding:0; max-width:100%; }
+            .labels-grid {
+                display:grid;
+                grid-template-columns:repeat(4,1fr);
+                gap:4mm;
+                padding:4mm;
+            }
+            .label-card {
+                border:0.5pt solid #ccc;
+                border-radius:4pt;
+                padding:4mm;
+                break-inside:avoid;
+                page-break-inside:avoid;
+            }
+            .label-barcode svg { max-width:100%; }
+        }
+    </style>
+    <link rel="stylesheet" href="/static/courtyard-theme.css?v=4">
+</head>
+<body>
+<div class="page">
+    <div class="no-print">
+        {% include "_workspace_nav.html" %}
+        <a href="/inventory" class="back-link">← Back to Inventory</a>
+        <div class="card">
+            <span class="eyebrow">Inventory</span>
+            <h1>Print Labels</h1>
+            <p>{{ labels|length }} label{% if labels|length != 1 %}s{% endif %} ready to print. Each label includes the Code 128 barcode, barcode number, card name, and grade/condition.</p>
+            <div class="toolbar">
+                <button onclick="window.print()" class="primary-button">Print Labels</button>
+                <a href="/inventory" class="button secondary-button">Back</a>
+            </div>
+        </div>
+    </div>
+
+    {% if labels %}
+    <div class="labels-grid">
+        {% for label in labels %}
+        <div class="label-card">
+            <div class="label-barcode">{{ label.barcode_svg | safe }}</div>
+            <div class="label-code">{{ label.barcode_value }}</div>
+            <div class="label-name" title="{{ label.item.card_name }}">{{ label.item.card_name }}</div>
+            {% if label.item.set_name %}<div class="label-sub">{{ label.item.set_name }}</div>{% endif %}
+            {% if label.grade_or_condition %}<div class="label-sub">{{ label.grade_or_condition }}</div>{% endif %}
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state no-print">
+        <div style="font-size:32px;margin-bottom:12px;">&#9641;</div>
+        <div style="font-weight:700;font-size:16px;margin-bottom:8px;">No items selected</div>
+        <p>Use <code>?ids=1,2,3</code> or <code>?status=in_stock</code> to select items for printing.</p>
+        <a href="/inventory" class="button secondary-button" style="margin-top:8px;display:inline-block;">Browse Inventory</a>
+    </div>
+    {% endif %}
+</div>
+</body>
+</html>

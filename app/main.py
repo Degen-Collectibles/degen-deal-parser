@@ -139,6 +139,7 @@ from .runtime_monitor import get_runtime_heartbeat_status, runtime_heartbeat_loo
 from .schemas import HealthOut
 from .shopify_ingest import (
     backfill_shopify_orders,
+    mark_inventory_sold_from_shopify_order,
     read_shopify_backfill_state,
     update_shopify_backfill_state,
     upsert_shopify_order,
@@ -173,6 +174,7 @@ from .worker import (
     STALE_PROCESSING_AFTER,
     clear_parsed_fields,
     parser_loop,
+    periodic_inventory_price_loop,
     periodic_stitch_audit_loop,
     queue_auto_reprocess_candidates,
     queue_reparse_range,
@@ -3627,6 +3629,22 @@ async def lifespan(app: FastAPI):
     else:
         app.state.live_chat_task = None
 
+    # Inventory pricing refresh background loop
+    if settings.inventory_auto_price_enabled:
+        inv_price_task = track_background_task(
+            asyncio.create_task(
+                periodic_inventory_price_loop(stop_event),
+                name="inventory-price-refresh",
+            ),
+            runtime_name=WORKER_RUNTIME_NAME,
+            task_name="inventory-price-refresh",
+            stop_event=stop_event,
+        )
+        background_tasks.append(inv_price_task)
+        app.state.inv_price_task = inv_price_task
+    else:
+        app.state.inv_price_task = None
+
     yield
 
     stop_event.set()
@@ -3660,6 +3678,9 @@ app.add_middleware(
     domain=settings.effective_session_domain or None,
 )
 app.mount("/static", StaticFiles(directory=normalize_filesystem_path(BASE_DIR / "static")), name="static")
+
+from .inventory import router as inventory_router  # noqa: E402 — after app is created
+app.include_router(inventory_router)
 
 
 @app.exception_handler(OperationalError)
@@ -6277,6 +6298,22 @@ async def shopify_orders_webhook(request: Request):
             )
 
         outcome = run_write_with_retry(write_shopify_order)
+        # Mark inventory items sold if any line item SKU matches a DGN-XXXXXX barcode
+        try:
+            def _mark_sold(session: Session) -> int:
+                return mark_inventory_sold_from_shopify_order(
+                    session, payload, runtime_name=webhook_runtime
+                )
+            run_write_with_retry(_mark_sold)
+        except Exception as _inv_exc:
+            print(
+                structured_log_line(
+                    runtime=webhook_runtime,
+                    action="inventory.sold_marking.failed",
+                    success=False,
+                    error=str(_inv_exc),
+                )
+            )
     except Exception as exc:
         print(
             structured_log_line(
