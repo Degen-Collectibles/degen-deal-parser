@@ -29,11 +29,9 @@ Get-Process -Name powershell -ErrorAction SilentlyContinue |
 Write-Host "Waiting for ports to free up..."
 Start-Sleep -Seconds 3
 
-# --- Relaunch supervisor detached ---
+# --- Relaunch via scheduled task (runs in interactive session) ---
 
-Start-Process -FilePath "powershell.exe" `
-    -ArgumentList @("-ExecutionPolicy", "Bypass", "-File", "$repoRoot\scripts\run_hosted.ps1") `
-    -WorkingDirectory $repoRoot `
-    -WindowStyle Hidden
+Stop-ScheduledTask -TaskName "DegenParser" -ErrorAction SilentlyContinue
+Start-ScheduledTask -TaskName "DegenParser"
 
-Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Supervisor relaunched. Web + Worker will start automatically."
+Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] DegenParser scheduled task triggered. Web + Worker will start automatically."
