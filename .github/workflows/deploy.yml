@@ -1,0 +1,30 @@
+name: Deploy to Machine B
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    defaults:
+      run:
+        working-directory: C:\Users\Degen\degen-deal-parser
+
+    steps:
+      - name: Pull latest code
+        run: git pull origin main
+
+      - name: Install dependencies
+        run: .\.venv\Scripts\pip.exe install -r requirements.txt
+
+      - name: Redeploy app
+        run: powershell -ExecutionPolicy Bypass -File .\scripts\redeploy.ps1
+
+      - name: Verify health
+        shell: powershell
+        run: |
+          Start-Sleep -Seconds 30
+          $r = Invoke-WebRequest -Uri http://127.0.0.1:8000/health -UseBasicParsing -TimeoutSec 10
+          if ($r.StatusCode -ne 200) { throw "Health check failed: $($r.StatusCode)" }
+          Write-Host "Health check passed."
