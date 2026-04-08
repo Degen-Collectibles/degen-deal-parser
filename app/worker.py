@@ -1600,6 +1600,8 @@ def has_descriptive_text(row: DiscordMessage) -> bool:
     text = normalize_text(row.content)
     if not text or is_payment_only_text(text):
         return False
+    if is_explicit_buy_sell_text(text):
+        return True
     return len(text) >= 8
 
 
