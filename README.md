@@ -51,7 +51,10 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run_hosted.ps1
 
 Core:
 ```
+# Local dev (SQLite):
 DATABASE_URL=sqlite:///data/degen_live.db
+# Production (Postgres on Machine B):
+# DATABASE_URL=postgresql+psycopg://user:pass@localhost:5432/degen_live
 SESSION_SECRET=<strong random secret>
 DISCORD_BOT_TOKEN=<discord bot token>
 OPENAI_API_KEY=<openai key>
@@ -93,7 +96,7 @@ Currently deployed on a Windows PC ("Machine B") running 24/7:
 Local development on a separate Windows PC:
 - Web-only via `scripts/run_local_web.ps1`
 - Discord ingest and worker disabled
-- Each machine has its own SQLite database
+- Machine B uses **PostgreSQL** (production data); Machine A uses **SQLite** (local dev copy, not synced)
 
 ## Debugging
 

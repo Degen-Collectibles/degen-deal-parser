@@ -5,13 +5,13 @@
 Degen Collectibles — Discord deal parser + TikTok Shop livestream platform.
 
 This project has two major verticals:
-1. **Discord deal parsing** — ingests Discord deal-log messages, stores raw messages in SQLite, parses them into structured transactions, normalizes them for financial reporting
+1. **Discord deal parsing** — ingests Discord deal-log messages, stores raw messages, parses them into structured transactions, normalizes them for financial reporting
 2. **TikTok Shop livestream tools** — order sync, live streamer dashboard, analytics, and product management
 
 Current stack:
 - Python 3.14, FastAPI, Uvicorn
 - discord.py for Discord ingestion
-- SQLite (WAL mode) with SQLModel ORM
+- PostgreSQL (production on Machine B) / SQLite (local dev on Machine A) with SQLModel ORM
 - OpenAI API (parser fallback only)
 - TikTok Shop Open Platform API (orders, products, live analytics)
 - TikSync SDK (live chat WebSocket)
@@ -259,7 +259,9 @@ Both are stored in the `TikTokAuth` DB table and auto-refreshed.
 
 ## Notes For Future Agents
 
-- SQLite schema has evolved additively; avoid reset-based development if possible
+- Database schema has evolved additively; avoid reset-based development if possible
+- Production uses PostgreSQL; local dev uses SQLite. The app auto-detects via `DATABASE_URL`
+- Both engines are fully supported — `app/db.py` handles connection config, pooling, and migrations for each
 - do not break working buys/sells/trades while improving expense handling
 - if a row looks wrong in the UI, always check whether the real issue is:
   - bad stitching

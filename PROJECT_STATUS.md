@@ -9,7 +9,7 @@ Last updated: 2026-04-08
 - Run: `powershell -ExecutionPolicy Bypass -File .\scripts\run_local_web.ps1`
 - Web-only mode: Discord ingest, parser worker, and backfill are **disabled**
 - Used for UI development and testing
-- SQLite database at `data/degen_live.db` (local copy, not synced)
+- **SQLite** database at `data/degen_live.db` (local copy, not synced with production)
 - Access at `http://127.0.0.1:8000`
 
 ### Machine B — Production (Windows PC, runs 24/7)
@@ -17,11 +17,12 @@ Last updated: 2026-04-08
 - Run: `powershell -ExecutionPolicy Bypass -File .\scripts\run_hosted.ps1`
 - Runs both web server and worker process with auto-restart (up to 20 restarts)
 - Discord bot, parser worker, TikTok order sync, webhook listener, live chat all run here
+- **PostgreSQL** database (`postgresql+psycopg://...@localhost:5432/degen_live`)
 - Exposed via **Cloudflare tunnel** at `ops.degencollectibles.com`
 - HTTPS-only session cookies, domain-scoped auth
 - Health check loop monitors `/health` endpoint
 
-Both machines share the same codebase via git pull. Each has its own SQLite database.
+Both machines share the same codebase via git pull. Machine B uses Postgres (production data). Machine A uses a local SQLite copy for dev/testing — it does not share data with production.
 
 ## What's Working
 
@@ -64,7 +65,9 @@ Both machines share the same codebase via git pull. Each has its own SQLite data
 ### Infrastructure
 - Role-based auth (admin, reviewer, viewer)
 - User management UI (`/admin/users`)
-- SQLite WAL mode with busy_timeout + retry logic for concurrency
+- **Production: PostgreSQL** with connection pooling (QueuePool, pool_size=5, max_overflow=10), TCP keepalives, pool_pre_ping
+- **Local dev: SQLite** with WAL mode, busy_timeout, retry logic
+- The app auto-detects which DB engine to use based on `DATABASE_URL`
 - Structured JSON logging
 - Auto-restart scripts for production stability
 - CI workflow (GitHub Actions)
@@ -76,7 +79,7 @@ Both machines share the same codebase via git pull. Each has its own SQLite data
 - **`app/templates/tiktok_streamer.html` is ~2,400 lines** with all CSS and JS inline. Should be split into separate assets eventually.
 
 ### Important
-- **SQLite concurrency** — web + worker + webhooks + background pollers all write to the same DB. WAL mode + retries handle most cases, but `database is locked` errors still occur under heavy load.
+- **Database backups** — production Postgres (`degen_live`) on Machine B has no automated `pg_dump` schedule yet. Should be added.
 - **TikTok analytics data is delayed ~2 days** for the `overview_performance` endpoint. The `performance` (session list) endpoint is near-real-time.
 - **Webhook payloads arrive incomplete** ($0.00, "Guest", no items). The app works around this by fetching full order details async, but there's a brief window where incomplete data shows.
 - **Creator token** for `live_core_stats` requires manual OAuth (separate from Shop token) and a `live_room_id` captured from TikSync WebSocket. This is fragile.
