@@ -2,17 +2,21 @@
 
 ## Project
 
-Degen Collectibles Discord deal / ledger parser.
+Degen Collectibles — Discord deal parser + TikTok Shop livestream platform.
 
-This project ingests Discord deal-log messages, stores raw messages in SQLite, parses them into structured transactions, normalizes them for financial reporting, and provides a FastAPI/Jinja review UI.
+This project has two major verticals:
+1. **Discord deal parsing** — ingests Discord deal-log messages, stores raw messages in SQLite, parses them into structured transactions, normalizes them for financial reporting
+2. **TikTok Shop livestream tools** — order sync, live streamer dashboard, analytics, and product management
 
 Current stack:
-- Python
-- FastAPI
-- discord.py
-- SQLite
-- OpenAI API
-- HTML/Jinja templates
+- Python 3.14, FastAPI, Uvicorn
+- discord.py for Discord ingestion
+- SQLite (WAL mode) with SQLModel ORM
+- OpenAI API (parser fallback only)
+- TikTok Shop Open Platform API (orders, products, live analytics)
+- TikSync SDK (live chat WebSocket)
+- Jinja2 templates with vanilla JS + Chart.js
+- Role-based auth (admin, reviewer, viewer)
 ## Core Principles (VERY IMPORTANT)
 
 ### 1. Source of truth
@@ -33,17 +37,39 @@ Current stack:
 
 ## Run
 
-Use the venv Python directly on Windows:
-
+**Local dev (web-only, no Discord/worker):**
 ```powershell
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
+powershell -ExecutionPolicy Bypass -File .\scripts\run_local_web.ps1
 ```
 
-Main pages:
-- `/table`
-- `/review-table`
-- `/reports`
-- `/bookkeeping`
+**Production (Machine B — web + worker + auto-restart):**
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_hosted.ps1
+```
+
+**Quick compile check after code changes:**
+```powershell
+.\.venv\Scripts\python.exe -m compileall app
+```
+
+### Main pages
+
+Discord side:
+- `/table` — main deal queue
+- `/review-table` — review queue
+- `/reports` — financial reports
+- `/bookkeeping` — sheet import + reconciliation
+
+TikTok side:
+- `/tiktok/orders` — order listing with livestream filter
+- `/tiktok/streamer` — live streamer dashboard (real-time orders, GMV, chat)
+- `/tiktok/analytics` — stream analytics with charts and growth metrics
+- `/tiktok/streamer/config` — manual stream time configuration
+
+Admin:
+- `/admin/home` — admin dashboard
+- `/admin/debug` — system diagnostics
+- `/admin/users` — user management
 
 ## Core Architecture
 
@@ -134,7 +160,18 @@ Infra / Routing agent:
 - `app/db.py`
 - `app/config.py`
 
+TikTok / Streamer agent:
+- `app/tiktok_ingest.py`
+- `app/tiktok_auth_refresh.py`
+- `app/tiktok_live_chat.py`
+- `scripts/tiktok_backfill.py`
+- `app/templates/tiktok_streamer.html`
+- `app/templates/tiktok_analytics.html`
+- `app/templates/tiktok_orders.html`
+
 Do not assign overlapping files to multiple agents at the same time.
+
+**WARNING: `app/main.py` is 10,000+ lines.** It contains routes for both Discord and TikTok features, plus all background task logic. This is the highest-priority refactoring target. Be careful when editing — changes can have wide blast radius.
 
 ## Safe Change Priorities
 
@@ -170,141 +207,55 @@ When touching bookkeeping:
 - public Google Sheets auto-import path
 - reconciliation page loads
 
-## TikTok Shop Integration (CRITICAL — read before touching TikTok code)
+## TikTok Shop Integration
 
-### Current state (as of 2026-04-03)
+**Full API reference: see `TIKTOK_API.md` in project root.**
 
-TikTok Shop order sync is **working**. The backfill script pulls orders from the
-TikTok Shop Open Platform **V2 API** and stores them in the `TikTokOrder` model.
-Orders are visible on `/reports`.
+That file documents every endpoint, auth flow, response shape, and known gotcha.
+Read it before touching any TikTok code.
 
-The OAuth callback (`/integrations/tiktok/callback`) and token refresh are also
-working. They use the **TikTok Shop-specific auth endpoints** at
-`auth.tiktok-shops.com`, not the generic TikTok OAuth at `open.tiktokapis.com`.
+### Current state (as of 2026-04-08)
 
-### Files
+Everything is working:
+- OAuth token exchange + auto-refresh (background loop every 30 min)
+- Order sync (backfill + periodic poll + webhook enrichment)
+- Live streamer dashboard with real-time orders, GMV, chat, refund alerts
+- Live analytics (stream session list, per-stream GMV, per-minute charts)
+- Analytics page with daily trends and growth metrics
+- Product sync and management
+
+### Key files
 
 | File | Role |
 |---|---|
-| `scripts/tiktok_backfill.py` | CLI backfill — fetches historical orders from TikTok Shop API |
-| `app/tiktok_ingest.py` | Shared utilities: token exchange, webhook parsing, order normalization |
-| `app/models.py` | `TikTokOrder` and `TikTokAuth` SQLModel definitions |
+| `scripts/tiktok_backfill.py` | API signing, order/product fetching, all analytics API calls |
+| `app/tiktok_ingest.py` | OAuth token exchange, webhook parsing, order normalization |
+| `app/tiktok_auth_refresh.py` | Background token refresh logic |
+| `app/tiktok_live_chat.py` | TikSync WebSocket for live chat + room ID capture |
+| `app/models.py` | `TikTokOrder`, `TikTokAuth`, `TikTokProduct`, `AppSetting` models |
 | `app/reporting.py` | TikTok order reporting/summary functions |
-| `app/main.py` | FastAPI routes for `/integrations/tiktok/callback` and `/webhooks/tiktok/orders` |
-| `tests/test_tiktok_reporting.py` | 17 regression tests covering auth, webhooks, upsert, and reporting |
+| `app/main.py` | All TikTok routes, streamer dashboard, analytics, background pollers |
+| `app/templates/tiktok_streamer.html` | Streamer dashboard (orders, GMV, chat, top sellers) |
+| `app/templates/tiktok_analytics.html` | Analytics page (charts, stream selector, KPIs) |
+| `app/templates/tiktok_orders.html` | Order listing with livestream filter |
+| `TIKTOK_API.md` | Complete API reference for all endpoints |
 
-### TikTok Shop API V2 — what you must know
+### Two token types
 
-TikTok **deprecated V1 entirely** (HTTP 410). All API calls must use V2.
-The V1→V2 migration involved several breaking changes that are easy to get wrong:
+1. **Shop token** (Seller, `user_type=0`) — used for orders, products, shop analytics. Auth at `auth.tiktok-shops.com`.
+2. **Creator token** (`user_type=1`) — used for real-time `live_core_stats`. Auth at `open.tiktokapis.com`. Separate OAuth flow.
 
-1. **Base URL**: `https://open-api.tiktokglobalshop.com` (global, no `.us` subdomain).
-   The `.us` regional domain returns 503 for V2 paths.
+Both are stored in the `TikTokAuth` DB table and auto-refreshed.
 
-2. **Endpoint paths include the version**: e.g. `/order/202309/orders/search`.
-   V1 paths like `/api/orders/search` return 410.
+### Critical rules
 
-3. **`version=202309` query parameter**: must be present in every request AND
-   included in the HMAC signature (it is NOT excluded like `access_token`).
-
-4. **Auth via header, not query param**: V2 requires `x-tts-access-token: <token>`
-   as a request header. The `access_token` query param is still sent (for
-   backwards compat / load balancer routing) but is excluded from the signature.
-
-5. **Pagination is in query params, not body**: `page_size` and `page_token`
-   go in the URL query string. The POST body contains only search filters.
-
-6. **Signature algorithm** (HMAC-SHA256):
-   ```
-   canonical = sorted query params (excluding: sign, access_token)
-   string_to_sign = app_secret + path + key1val1key2val2... + body_json + app_secret
-   sign = HMAC-SHA256(app_secret, string_to_sign).hex()
-   ```
-   - Body MUST be the exact JSON bytes sent in the request (use pre-serialized `raw_body`).
-   - `version`, `shop_cipher`, `shop_id`, `app_key`, `timestamp`, `page_size`,
-     `page_token` are all included in the signature.
-
-7. **Response field names (V2)**:
-   - `payment` (not `payment_info`) — contains `total_amount`, `sub_total`, `tax`
-   - `line_items` (not `item_list`) — each has `product_name`, `sale_price`, `sku_id`
-   - `id` (not `order_id`) at the order level
-   - Pagination: `next_page_token` in `data` object
-   - `buyer_nickname` for customer display name
-
-8. **V2 search returns full order details** — line items, payment, addresses
-   are all included in `/order/202309/orders/search` results. A separate
-   detail fetch is unnecessary for backfill.
-
-### Running the backfill
-
-```powershell
-# IMPORTANT: override system DATABASE_URL if it points to old Postgres
-$env:DATABASE_URL = "sqlite:///data/degen_live.db"
-
-# Dry run first
-.\.venv\Scripts\python.exe scripts\tiktok_backfill.py --dry-run --limit 5
-
-# Real sync
-.\.venv\Scripts\python.exe scripts\tiktok_backfill.py --limit 500
-```
-
-### Required env vars
-
-```
-TIKTOK_APP_KEY          — TikTok Shop app key
-TIKTOK_APP_SECRET       — TikTok Shop app secret
-TIKTOK_SHOP_ID          — numeric shop ID (e.g. 7495987383262087496)
-TIKTOK_SHOP_CIPHER      — shop cipher from API Testing Tool
-TIKTOK_ACCESS_TOKEN     — access token from API Testing Tool
-```
-
-Optional:
-```
-TIKTOK_SHOP_API_BASE_URL — override base URL (default: https://open-api.tiktokglobalshop.com)
-TIKTOK_REFRESH_TOKEN     — for automated token refresh (not yet implemented)
-```
-
-### TikTok Shop auth protocol (CRITICAL — different from generic TikTok)
-
-TikTok Shop uses a **completely different auth endpoint** from generic TikTok OAuth.
-This is the single most common mistake when implementing TikTok Shop auth.
-
-| | Generic TikTok OAuth (WRONG for Shop) | TikTok Shop (CORRECT) |
-|---|---|---|
-| Auth host | `open.tiktokapis.com` | `auth.tiktok-shops.com` |
-| Token exchange path | `/v2/oauth/token/` | `/api/v2/token/get` |
-| Token refresh path | `/v2/oauth/token/` | `/api/v2/token/refresh` |
-| HTTP method | POST with form body | GET with query params |
-| App key param | `client_key` | `app_key` |
-| App secret param | `client_secret` | `app_secret` |
-| Auth code param | `code` | `auth_code` |
-| Grant type | `authorization_code` | `authorized_code` |
-| redirect_uri | required | not used |
-
-Token exchange example URL:
-```
-https://auth.tiktok-shops.com/api/v2/token/get?app_key=XXX&app_secret=XXX&auth_code=XXX&grant_type=authorized_code
-```
-
-The response wraps data in a `data` object with `code: 0` for success:
-```json
-{"code": 0, "message": "success", "data": {"access_token": "...", "access_token_expire_in": 7200, ...}}
-```
-
-### Known gotchas for future agents
-
-- **DO NOT use `open.tiktokapis.com` for Shop auth**. Shop auth lives at `auth.tiktok-shops.com`.
-- **DO NOT use `client_key`/`client_secret`/`code`/`authorization_code`** for Shop auth. Use `app_key`/`app_secret`/`auth_code`/`authorized_code`.
-- **DO NOT POST to Shop auth endpoints**. They expect GET with query params.
-- **DO NOT revert to V1 paths** (`/api/orders/search`). They are dead (410).
-- **DO NOT use the `.us` subdomain** (`open-api.us.tiktokglobalshop.com`). It 503s.
-- **DO NOT put `page_size` in the POST body**. V2 wants it as a query param.
-- **DO NOT omit `x-tts-access-token` header**. V2 requires it.
-- **DO NOT omit `version` from the signature**. Only `sign` and `access_token` are excluded.
-- **System `DATABASE_URL` env var** may override `.env`. Check with `echo $env:DATABASE_URL`.
-- Auth codes expire in ~60 seconds. The exchange must happen immediately on callback.
-- Access tokens expire. When they do, the user must get a new one from the
-  API Testing Tool (or implement refresh token flow using `TIKTOK_REFRESH_TOKEN`).
+- **DO NOT use `open.tiktokapis.com` for Shop auth** — Shop uses `auth.tiktok-shops.com`
+- **DO NOT mix token types** — Shop token cannot call Creator endpoints and vice versa
+- **DO NOT use V1 API paths** — they return 410
+- **DO NOT use `today=true`** on overview_performance — causes 66007001 Rpc error
+- **GMV = `subtotal_price`** (product value only), not `total_price` (includes tax + shipping)
+- **Webhook payloads are incomplete** — always fetch full details from API after receiving
+- See `TIKTOK_API.md` for the complete list of gotchas
 
 ## Notes For Future Agents
 

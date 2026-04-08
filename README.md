@@ -1,230 +1,105 @@
 # Degen Deal Parser
 
-Internal Discord deal and ledger parser for Degen Collectibles.
+Internal platform for Degen Collectibles — Discord deal parsing + TikTok Shop livestream tools.
 
-This app:
-- ingests watched Discord deal-log channels
-- stores raw messages and attachments
-- parses buys, sales, trades, and expenses
-- provides review, reporting, and bookkeeping reconciliation pages
-- supports a partner-facing `/deals` view and employee-friendly `/review` flow
+## Quick Start
 
-## Local Run
-
-From the project root:
-
+**Local dev (web-only, no Discord bot):**
 ```powershell
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
+powershell -ExecutionPolicy Bypass -File .\scripts\run_local_web.ps1
+```
+Then open: `http://127.0.0.1:8000/login`
+
+**Production (web + worker + auto-restart):**
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_hosted.ps1
 ```
 
-For fast local UI and design work, use:
-
+**Compile check after code changes:**
 ```powershell
-.\scripts\run_ui_dev.ps1
+.\.venv\Scripts\python.exe -m compileall app
 ```
 
-That mode:
-- runs against local SQLite at `data/degen_ui_dev.db`
-- disables Discord ingest and parser worker
-- keeps hot reload on for templates and styling
-- avoids shared Postgres latency during design work
+## What This App Does
 
-Then open:
-- `http://127.0.0.1:8000/login`
+**Discord side:**
+- Ingests watched Discord deal-log channels
+- Parses buys, sales, trades, and expenses (rule-based + OpenAI fallback)
+- Review/approval workflow, financial reporting, bookkeeping reconciliation
 
-## Attachment Cache Warmup
+**TikTok side:**
+- TikTok Shop order sync (API + webhooks)
+- Live streamer dashboard with real-time orders, GMV, chat, alerts
+- Stream analytics with charts and growth metrics
+- Product management
 
-If older Discord rows have `attachment_urls_json` but no `AttachmentAsset` rows, run the one-time repair script:
+## Key Pages
 
-```powershell
-.\.venv\Scripts\python.exe .\scripts\warmup_attachment_cache.py
-```
+| Page | Purpose |
+|---|---|
+| `/table` | Main deal queue |
+| `/review-table` | Review queue |
+| `/reports` | Financial reports |
+| `/bookkeeping` | Sheet import + reconciliation |
+| `/tiktok/orders` | TikTok order listing |
+| `/tiktok/streamer` | Live streamer dashboard |
+| `/tiktok/analytics` | Stream analytics |
+| `/admin/home` | Admin dashboard |
+| `/admin/debug` | System diagnostics |
 
-Helpful options:
-- `--dry-run` to preview what would be repaired
-- `--limit N` to process only the first `N` uncached rows
-
-The script repairs from stored attachment URLs first and only falls back to Discord message fetches when the direct URL path still leaves gaps.
-
-## Important Env Vars
+## Required Env Vars
 
 Core:
-- `DISCORD_BOT_TOKEN`
-- `OPENAI_API_KEY`
-- `DATABASE_URL`
-- `SESSION_SECRET`
-
-Auth:
-- `ADMIN_USERNAME`
-- `ADMIN_PASSWORD`
-- `REVIEWER_USERNAME`
-- `REVIEWER_PASSWORD`
-
-Session / deploy:
-- `PUBLIC_BASE_URL`
-- `SESSION_COOKIE_NAME`
-- `SESSION_HTTPS_ONLY`
-- `SESSION_SAME_SITE`
-- `SESSION_DOMAIN`
-
-Worker controls:
-- `DISCORD_INGEST_ENABLED`
-- `PARSER_WORKER_ENABLED`
-
-## Render Deployment
-
-Recommended public URL:
-- `ops.degencollectibles.com`
-
-Recommended first deployment:
-- host the FastAPI app separately from Shopify
-- keep `degencollectibles.com` on Shopify
-- point a subdomain like `ops.degencollectibles.com` to Render
-- this repo now includes [render.yaml](/C:/Users/jeffr/discord-deal-parser/live-deal-parser/render.yaml) as a starting blueprint
-
-### Render service settings
-
-Build command:
-
-```bash
-pip install -r requirements.txt
 ```
-
-Start command:
-
-```bash
-python -m uvicorn app.main:app --host 0.0.0.0 --port 10000
-```
-
-If you use the included Render blueprint:
-- it mounts a persistent disk at `/var/data`
-- it sets `DATABASE_URL=sqlite:////var/data/degen_live.db`
-- you still need to fill in the secret env vars in Render
-
-### Recommended production env vars
-
-```text
-PUBLIC_BASE_URL=https://ops.degencollectibles.com
+DATABASE_URL=sqlite:///data/degen_live.db
 SESSION_SECRET=<strong random secret>
-SESSION_COOKIE_NAME=degen_session
-SESSION_HTTPS_ONLY=true
-SESSION_SAME_SITE=lax
-SESSION_DOMAIN=ops.degencollectibles.com
-```
-
-If you use SQLite initially:
-- set `DATABASE_URL` to a writable persistent disk path on the host
-- do not rely on ephemeral container storage if you care about preserving data
-
-Better long-term option:
-- move to Postgres before broader partner/employee use
-
-### Shared Postgres setup
-
-If you want:
-- Discord ingestion running on your local machine
-- the employee/partner web UI running on Render
-- both sharing the same data
-
-then use one shared Postgres database for both.
-
-This app now supports either of these `DATABASE_URL` forms:
-
-```text
-postgresql+psycopg://USER:PASSWORD@HOST:5432/DBNAME
-postgres://USER:PASSWORD@HOST:5432/DBNAME
-```
-
-The app normalizes `postgres://...` to the SQLAlchemy `psycopg` driver automatically.
-
-Recommended durable architecture:
-- web UI host:
-  - `DISCORD_INGEST_ENABLED=false`
-  - `PARSER_WORKER_ENABLED=false`
-- dedicated worker host:
-  - `DISCORD_INGEST_ENABLED=true`
-  - `PARSER_WORKER_ENABLED=true`
-
-That keeps the employee/partner UI isolated from Discord connectivity and parser load, while the background ingest worker runs on an always-on host with a stable network path.
-
-### Dedicated worker host
-
-This repo now includes a standalone worker entrypoint:
-
-```bash
-python -m app.worker_service
-```
-
-That process:
-- initializes the shared database
-- seeds watched channels from `DISCORD_CHANNEL_IDS` if provided
-- runs Discord ingestion
-- runs the parser worker
-- writes the shared runtime heartbeat used by `/dashboard`, `/table`, and `/status`
-
-Recommended worker env vars:
-
-```text
-DATABASE_URL=<shared postgres url>
-DISCORD_BOT_TOKEN=<discord token>
+DISCORD_BOT_TOKEN=<discord bot token>
 OPENAI_API_KEY=<openai key>
-DISCORD_INGEST_ENABLED=true
-PARSER_WORKER_ENABLED=true
-STARTUP_BACKFILL_ENABLED=false
-AUTH_RESEED_PASSWORDS=false
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=<strong password>
 ```
 
-`STARTUP_BACKFILL_ENABLED=false` is recommended on an always-on worker host to reduce Discord startup pressure and avoid repeated heavy reconnect backfills on deploys.
-
-### Render split deployment
-
-The included [render.yaml](/C:/Users/jeffr/discord-deal-parser/live-deal-parser/render.yaml) now models the durable split:
-- `degen-deal-parser` web service for the UI
-- `degen-deal-parser-worker` worker service for Discord ingest + parser processing
-
-Both services should use the same Postgres `DATABASE_URL`.
-
-## Debugging Workflow
-
-Start with `/admin/debug` before reading code.
-
-1. Check the separate web app and worker heartbeat indicators.
-2. Check queue state counts.
-3. Check the `Stuck Processing` section for rows that have been in `processing` too long.
-4. Check `Recent Worker Failures`.
-5. If you need raw runtime output, open:
-   - `logs/app.log` for web app issues
-   - `logs/worker.log` for ingest/parser/backfill issues
-
-Local run commands:
-
-```powershell
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
-.\.venv\Scripts\python.exe -m app.worker_service
+TikTok (needed for order sync and streamer dashboard):
+```
+TIKTOK_APP_KEY=<tiktok partner center app key>
+TIKTOK_APP_SECRET=<tiktok partner center app secret>
+TIKTOK_REDIRECT_URI=<oauth callback url>
+TIKTOK_SHOP_CIPHER=<from oauth response>
 ```
 
-Quick diagnosis rules:
-- app heartbeat healthy + worker heartbeat stale: the UI is up, but background processing is down
-- worker heartbeat healthy + backlog growing + stuck rows present: the worker is alive, but specific rows are hanging or repeatedly failing
-- recent worker failure events show `parse_failed` or `transaction_sync_failed`: start with that row on `/admin/debug`, then confirm details in `logs/worker.log`
-- app heartbeat unhealthy: start with `logs/app.log`
+TikTok Live Chat (optional):
+```
+TIKTOK_LIVE_API_KEY=<tiksync api key>
+TIKTOK_LIVE_USERNAME=<tiktok username>
+```
 
-### Discord bot and parser worker
+See `app/config.py` for the complete list of all settings.
 
-For production, prefer the dedicated worker host instead of relying on the FastAPI app lifespan to keep the background jobs alive.
+## Documentation
 
-## Shopify Domain Setup
+| File | What It Covers |
+|---|---|
+| `AGENTS.md` | Project rules, architecture, coding conventions (read by AI tools automatically) |
+| `TIKTOK_API.md` | Every TikTok API endpoint, auth flow, response shape, and known gotcha |
+| `PROJECT_STATUS.md` | Current deployment setup, what's working, known issues, recent changes |
 
-Recommended approach:
-- keep Shopify storefront on `degencollectibles.com`
-- deploy this app on `ops.degencollectibles.com`
+## Deployment
 
-Do not use Shopify app proxy for this full internal tool unless you specifically want a storefront-coupled experience and are okay with proxy/auth constraints.
+Currently deployed on a Windows PC ("Machine B") running 24/7:
+- Web + worker via `scripts/run_hosted.ps1` with auto-restart
+- Exposed via Cloudflare tunnel at `ops.degencollectibles.com`
+- HTTPS-only session cookies
 
-## Production Notes
+Local development on a separate Windows PC:
+- Web-only via `scripts/run_local_web.ps1`
+- Discord ingest and worker disabled
+- Each machine has its own SQLite database
 
-- Rotate any existing Discord/OpenAI secrets before public deployment.
-- Change default admin credentials before sharing the app.
-- SQLite is okay for light internal use, but Postgres is the better next step.
-- The app stores uploaded/imported bookkeeping state in the database, so persistent storage matters.
-- If you split local ingestion from hosted UI, do not use two separate SQLite databases.
+## Debugging
+
+Start with `/admin/debug` before reading code:
+1. Check web app and worker heartbeat indicators
+2. Check queue state counts
+3. Check "Stuck Processing" section
+4. Check "Recent Worker Failures"
+5. Logs: `logs/app.log` (web) and `logs/worker.log` (worker)
