@@ -257,6 +257,41 @@ Both are stored in the `TikTokAuth` DB table and auto-refreshed.
 - **Webhook payloads are incomplete** — always fetch full details from API after receiving
 - See `TIKTOK_API.md` for the complete list of gotchas
 
+## Database: Dual-Engine Support (CRITICAL)
+
+Production (Machine B) runs **PostgreSQL**. Local dev (Machine A) runs **SQLite**. The app auto-detects via `DATABASE_URL`.
+
+### Schema migrations are additive, NOT reset-based
+
+New tables are created automatically by `SQLModel.metadata.create_all()`. But **new columns on existing tables** require explicit additive migrations in `app/db.py`:
+
+- `SQLITE_ADDITIVE_MIGRATIONS` — runs in `ensure_sqlite_schema()` using `ALTER TABLE ... ADD COLUMN`
+- `POSTGRES_ADDITIVE_MIGRATIONS` — runs in `ensure_postgres_schema()` using `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`
+
+**You MUST add new columns to BOTH dicts.** If you only add to one, the other environment will crash with `UndefinedColumn` or `no such column` errors at runtime.
+
+SQLite uses `REAL` and `BOOLEAN DEFAULT 0`. PostgreSQL uses `DOUBLE PRECISION` and `BOOLEAN DEFAULT FALSE`. Check existing entries for the correct type mapping.
+
+### Checklist when adding/changing a model field
+
+1. Add the field to the SQLModel class in `app/models.py`
+2. Add the column to `SQLITE_ADDITIVE_MIGRATIONS` in `app/db.py`
+3. Add the column to `POSTGRES_ADDITIVE_MIGRATIONS` in `app/db.py` (with Postgres types)
+4. If adding an index, add to both `SQLITE_INDEX_MIGRATIONS` and `POSTGRES_INDEX_MIGRATIONS`
+5. Run `compileall` and test locally
+6. After deploy, verify the column exists on production
+
+### Type differences between engines
+
+| Python/SQLModel | SQLite migration | PostgreSQL migration |
+|---|---|---|
+| `float` | `REAL` | `DOUBLE PRECISION` |
+| `bool` (default False) | `BOOLEAN DEFAULT 0` | `BOOLEAN DEFAULT FALSE` |
+| `bool` (default True) | `BOOLEAN DEFAULT 1` | `BOOLEAN DEFAULT TRUE` |
+| `int` | `INTEGER` | `INTEGER` |
+| `str` | `TEXT` | `TEXT` |
+| `datetime` | `TIMESTAMP` | `TIMESTAMP` |
+
 ## Notes For Future Agents
 
 - Database schema has evolved additively; avoid reset-based development if possible

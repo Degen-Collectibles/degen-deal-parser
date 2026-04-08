@@ -68,6 +68,7 @@ Both machines share the same codebase via git pull. Machine B uses Postgres (pro
 - **Production: PostgreSQL** with connection pooling (QueuePool, pool_size=5, max_overflow=10), TCP keepalives, pool_pre_ping
 - **Local dev: SQLite** with WAL mode, busy_timeout, retry logic
 - The app auto-detects which DB engine to use based on `DATABASE_URL`
+- **Dual-engine schema migrations** — new columns on existing tables must be added to BOTH `SQLITE_ADDITIVE_MIGRATIONS` and `POSTGRES_ADDITIVE_MIGRATIONS` in `app/db.py` (see AGENTS.md for full checklist)
 - Structured JSON logging
 - Auto-restart scripts for production stability
 - CI workflow (GitHub Actions)
