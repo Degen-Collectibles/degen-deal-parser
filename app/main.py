@@ -11525,6 +11525,7 @@ def stream_manager_page(
         item = {
             "id": sched.id,
             "date": sched.date,
+            "day_of_week": datetime.strptime(sched.date, "%Y-%m-%d").strftime("%A"),
             "start_time": sched.start_time,
             "end_time": sched.end_time,
             "start_display": _format_time_12h(sched.start_time),
@@ -11532,6 +11533,7 @@ def stream_manager_page(
             "is_overnight": sched.is_overnight,
             "title": sched.title or "",
             "notes": sched.notes or "",
+            "streamer_id": sched.streamer_id,
             "streamer_name": (s.display_name or s.name) if s else "Unknown",
             "streamer_color": (s.color or "#fe2c55") if s else "#fe2c55",
             "streamer_emoji": (s.avatar_emoji or "🎮") if s else "🎮",
@@ -11680,6 +11682,38 @@ def stream_manager_delete_schedule(
         session.delete(sched)
         session.commit()
     return RedirectResponse(url="/stream-manager?success=Shift+removed", status_code=303)
+
+
+@app.post("/stream-manager/schedule/{schedule_id}/edit")
+def stream_manager_edit_schedule(
+    request: Request,
+    schedule_id: int,
+    streamer_id: str = Form(...),
+    date: str = Form(...),
+    start_time: str = Form(...),
+    end_time: str = Form(...),
+    title: Optional[str] = Form(default=None),
+    notes: Optional[str] = Form(default=None),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "viewer"):
+        return denial
+
+    sched = session.get(StreamSchedule, schedule_id)
+    if sched:
+        st = start_time.strip()
+        et = end_time.strip()
+        sched.streamer_id = int(streamer_id)
+        sched.date = date.strip()
+        sched.start_time = st
+        sched.end_time = et
+        sched.is_overnight = et < st
+        sched.title = (title or "").strip() or None
+        sched.notes = (notes or "").strip() or None
+        sched.updated_at = utcnow()
+        session.add(sched)
+        session.commit()
+    return RedirectResponse(url="/stream-manager?success=Shift+updated", status_code=303)
 
 
 @app.post("/stream-manager/account/add")
