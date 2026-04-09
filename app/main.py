@@ -7783,7 +7783,13 @@ def _poll_live_session_list(runtime_name: str, access_token: str, shop_cipher: s
         if not sessions:
             return
 
-        latest = max(sessions, key=lambda s: s.get("end_time") or 0)
+        def _session_recency_key(s: dict) -> tuple:
+            et = s.get("end_time") or 0
+            st = s.get("start_time") or 0
+            is_active = 1 if et == 0 and st > 0 else 0
+            return (is_active, et, st)
+
+        latest = max(sessions, key=_session_recency_key)
         with _live_session_lock:
             _live_session_cache.update(latest)
             _live_session_cache["ok"] = True
@@ -7828,13 +7834,16 @@ def _get_live_session_snapshot() -> dict:
 
 
 def _is_currently_live() -> bool:
-    """Return True if the latest known stream session ended within the last 15 minutes."""
+    """Return True if a stream is actively running or ended within the last 15 minutes."""
     snap = _get_live_session_snapshot()
     if not snap.get("ok"):
         return False
+    start_ts = snap.get("start_time") or 0
     end_ts = snap.get("end_time") or 0
-    if end_ts <= 0:
+    if start_ts <= 0:
         return False
+    if end_ts <= 0:
+        return True
     now_ts = datetime.now(timezone.utc).timestamp()
     return (now_ts - end_ts) < 900
 
