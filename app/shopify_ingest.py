@@ -14,7 +14,7 @@ from typing import Any, Optional
 import httpx
 from sqlmodel import Session, select
 
-from .models import ShopifyOrder, utcnow
+from .models import ShopifyOrder, InventoryItem, INVENTORY_SOLD, utcnow
 from .runtime_logging import structured_log_line
 
 SHOPIFY_API_VERSION = "2024-01"
@@ -515,3 +515,63 @@ def repair_shopify_line_item_summaries(session: Session) -> int:
     if updated:
         session.commit()
     return updated
+
+
+def mark_inventory_sold_from_shopify_order(
+    session: Session,
+    payload: dict[str, Any],
+    *,
+    runtime_name: str = "shopify_ingest",
+) -> int:
+    """
+    Check line items in a Shopify order payload for SKUs matching inventory barcodes
+    (format: DGN-XXXXXX). For each match, mark the InventoryItem as sold.
+
+    Returns the count of items marked sold.
+    """
+    line_items = payload.get("line_items") or []
+    if not isinstance(line_items, list):
+        return 0
+
+    order_id = str(payload.get("id") or "")
+    sold_price_by_sku: dict[str, float] = {}
+    for item in line_items:
+        if not isinstance(item, dict):
+            continue
+        sku = str(item.get("sku") or "").strip()
+        if sku and sku.startswith("DGN-"):
+            sold_price_by_sku[sku] = money_to_float(item.get("price"))
+
+    if not sold_price_by_sku:
+        return 0
+
+    marked = 0
+    for sku, sale_price in sold_price_by_sku.items():
+        inv_item = session.exec(
+            select(InventoryItem).where(InventoryItem.barcode == sku)
+        ).first()
+        if inv_item is None or inv_item.status == INVENTORY_SOLD:
+            continue
+        inv_item.status = INVENTORY_SOLD
+        inv_item.sold_at = utcnow()
+        inv_item.sold_price = sale_price if sale_price > 0 else None
+        inv_item.updated_at = utcnow()
+        session.add(inv_item)
+        marked += 1
+        print(
+            structured_log_line(
+                runtime=runtime_name,
+                action="inventory.item.sold_via_shopify",
+                success=True,
+                barcode=sku,
+                inventory_item_id=inv_item.id,
+                card_name=inv_item.card_name,
+                sold_price=sale_price,
+                shopify_order_id=order_id,
+            )
+        )
+
+    if marked:
+        session.commit()
+
+    return marked

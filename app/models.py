@@ -589,3 +589,85 @@ class AppSetting(SQLModel, table=True):
     __tablename__ = "app_settings"
     key: str = Field(primary_key=True)
     value: str = Field(default="")
+
+
+# ---------------------------------------------------------------------------
+# Inventory
+# ---------------------------------------------------------------------------
+
+INVENTORY_IN_STOCK = "in_stock"
+INVENTORY_LISTED = "listed"
+INVENTORY_SOLD = "sold"
+INVENTORY_HELD = "held"
+ALL_INVENTORY_STATUSES = {INVENTORY_IN_STOCK, INVENTORY_LISTED, INVENTORY_SOLD, INVENTORY_HELD}
+
+ITEM_TYPE_SINGLE = "single"
+ITEM_TYPE_SLAB = "slab"
+
+GRADING_COMPANIES: list[str] = ["PSA", "BGS", "CGC", "SGC"]
+GAMES: list[str] = [
+    "Pokemon",
+    "MTG",
+    "Sports - Baseball",
+    "Sports - Basketball",
+    "Sports - Football",
+    "Sports - Hockey",
+    "Other",
+]
+CONDITIONS: list[str] = ["NM", "LP", "MP", "HP", "DMG"]
+PRICE_SOURCES: list[str] = ["scrydex", "130point", "alt", "card_ladder", "manual"]
+
+
+class InventoryItem(SQLModel, table=True):
+    __tablename__ = "inventory_items"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    barcode: str = Field(unique=True, index=True)          # e.g. "DGN-000001"
+    item_type: str = Field(index=True)                     # "single" | "slab"
+    game: str = Field(index=True)                          # "Pokemon" | "MTG" | ...
+    card_name: str = Field(index=True)
+    set_name: Optional[str] = Field(default=None)
+    set_code: Optional[str] = Field(default=None)          # for API lookup
+    card_number: Optional[str] = Field(default=None)
+    language: str = Field(default="English")
+    condition: Optional[str] = Field(default=None)         # singles: NM/LP/MP/HP/DMG
+    quantity: int = Field(default=1)
+
+    # Slab-specific
+    grading_company: Optional[str] = Field(default=None, index=True)  # PSA | BGS | CGC | SGC
+    grade: Optional[str] = Field(default=None)             # "10" | "9.5" | "9" ...
+    cert_number: Optional[str] = Field(default=None, index=True)
+    sub_grades_json: str = Field(default="{}")             # BGS sub-grades
+
+    # Pricing
+    cost_basis: Optional[float] = Field(default=None)     # what we paid
+    auto_price: Optional[float] = Field(default=None)     # latest price lookup
+    list_price: Optional[float] = Field(default=None)     # manual override
+    last_priced_at: Optional[datetime] = Field(default=None, index=True)
+
+    # Shopify
+    shopify_product_id: Optional[str] = Field(default=None, index=True)
+    shopify_variant_id: Optional[str] = Field(default=None)
+
+    # Status & tracking
+    status: str = Field(default=INVENTORY_IN_STOCK, index=True)
+    notes: Optional[str] = Field(default=None)
+    image_url: Optional[str] = Field(default=None)
+    sold_at: Optional[datetime] = Field(default=None, index=True)
+    sold_price: Optional[float] = Field(default=None)
+
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+    updated_at: Optional[datetime] = Field(default=None)
+
+
+class PriceHistory(SQLModel, table=True):
+    __tablename__ = "price_history"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    item_id: int = Field(foreign_key="inventory_items.id", index=True)
+    source: str = Field(index=True)                        # scrydex | 130point | alt | ...
+    market_price: Optional[float] = Field(default=None)
+    low_price: Optional[float] = Field(default=None)
+    high_price: Optional[float] = Field(default=None)
+    fetched_at: datetime = Field(default_factory=utcnow, index=True)
+    raw_response_json: str = Field(default="{}")

@@ -155,6 +155,18 @@ class Settings(BaseSettings):
     tiktok_live_api_key: str = Field(default="", alias="TIKTOK_LIVE_API_KEY")
     tiktok_live_username: str = Field(default="", alias="TIKTOK_LIVE_USERNAME")
 
+    # Inventory
+    shopify_access_token: str = Field(default="", alias="SHOPIFY_ACCESS_TOKEN")
+    scrydex_api_key: str = Field(default="", alias="SCRYDEX_API_KEY")
+    scrydex_base_url: str = Field(default="https://api.scrydex.io", alias="SCRYDEX_BASE_URL")
+    inventory_auto_price_enabled: bool = Field(default=True, alias="INVENTORY_AUTO_PRICE_ENABLED")
+    inventory_auto_shopify_push: bool = Field(default=False, alias="INVENTORY_AUTO_SHOPIFY_PUSH")
+    inventory_price_refresh_interval_hours: float = Field(default=6.0, alias="INVENTORY_PRICE_REFRESH_INTERVAL_HOURS")
+    inventory_price_stale_hours: float = Field(default=24.0, alias="INVENTORY_PRICE_STALE_HOURS")
+    # Card scanning
+    psa_api_key: str = Field(default="", alias="PSA_API_KEY")
+    pokemon_tcg_api_key: str = Field(default="", alias="POKEMON_TCG_API_KEY")
+
     @property
     def channel_ids(self) -> List[int]:
         channel_ids: list[int] = []
