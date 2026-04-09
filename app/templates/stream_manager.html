@@ -532,7 +532,7 @@
                         {% if sched.date != current_date.value %}
                             {% set current_date.value = sched.date %}
                             <div class="schedule-date-group {% if sched.date == today %}schedule-today{% endif %}">
-                                {% if sched.date == today %}Today{% else %}{{ sched.date }}{% endif %}
+                                {% if sched.date == today %}Today &mdash; {{ sched.day_of_week }}{% else %}{{ sched.day_of_week }}, {{ sched.date }}{% endif %}
                             </div>
                         {% endif %}
                         <div class="schedule-row">
@@ -546,6 +546,8 @@
                                 </div>
                                 {% if sched.title %}<div class="schedule-title-text">{{ sched.title }}</div>{% endif %}
                             </div>
+                            <button class="btn-icon" title="Edit shift" type="button"
+                                    onclick="openEditShift({{ sched.id }}, '{{ sched.streamer_id }}', '{{ sched.date }}', '{{ sched.start_time }}', '{{ sched.end_time }}', {{ sched.title | tojson }})">&#x270E;</button>
                             <form method="post" action="/stream-manager/schedule/{{ sched.id }}/delete" style="display:inline;" onsubmit="return confirm('Remove this shift?')">
                                 <button class="btn-icon btn-icon-danger" title="Remove" type="submit">&#x2715;</button>
                             </form>
@@ -633,6 +635,44 @@
                 <div style="margin-top:14px;display:flex;gap:8px;">
                     <button type="submit" class="btn btn-green">Save</button>
                     <button type="button" class="btn btn-ghost" onclick="closeEditAccount()">Cancel</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Edit Shift Modal -->
+    <div class="edit-backdrop" id="edit-shift-backdrop">
+        <div class="edit-modal">
+            <div class="edit-header">
+                <span class="edit-title">Edit Shift</span>
+                <button class="edit-close" onclick="closeEditShift()">&#x2715;</button>
+            </div>
+            <form method="post" id="edit-shift-form">
+                <div class="form-row">
+                    <label class="form-label">Who's streaming? *
+                        <select class="form-select" name="streamer_id" id="edit-shift-streamer" required>
+                            <option value="">— pick streamer —</option>
+                            {% for s in streamers %}
+                            <option value="{{ s.id }}">{{ s.display_name or s.name }}</option>
+                            {% endfor %}
+                        </select>
+                    </label>
+                    <label class="form-label">Date *
+                        <input class="form-input" type="date" name="date" id="edit-shift-date" required>
+                    </label>
+                    <label class="form-label">Start Time *
+                        <input class="form-input" type="time" name="start_time" id="edit-shift-start" required>
+                    </label>
+                    <label class="form-label">End Time *
+                        <input class="form-input" type="time" name="end_time" id="edit-shift-end" required>
+                    </label>
+                    <label class="form-label form-full">Title (optional)
+                        <input class="form-input" type="text" name="title" id="edit-shift-title" placeholder="e.g. Friday Night Pokemon Breaks">
+                    </label>
+                </div>
+                <div style="margin-top:14px;display:flex;gap:8px;">
+                    <button type="submit" class="btn btn-green">Save Changes</button>
+                    <button type="button" class="btn btn-ghost" onclick="closeEditShift()">Cancel</button>
                 </div>
             </form>
         </div>
@@ -764,7 +804,27 @@
         if (e.target === this) closeEditStreamer();
     });
     document.addEventListener('keydown', function(e) {
-        if (e.key === 'Escape') { closeEditStreamer(); closeEditAccount(); }
+        if (e.key === 'Escape') { closeEditStreamer(); closeEditAccount(); closeEditShift(); }
+    });
+
+    /* ---- Edit Shift Modal ---- */
+    function openEditShift(id, streamerId, date, startTime, endTime, title) {
+        document.getElementById('edit-shift-form').action = '/stream-manager/schedule/' + id + '/edit';
+        document.getElementById('edit-shift-date').value = date;
+        document.getElementById('edit-shift-start').value = startTime;
+        document.getElementById('edit-shift-end').value = endTime;
+        document.getElementById('edit-shift-title').value = title || '';
+        var sel = document.getElementById('edit-shift-streamer');
+        for (var i = 0; i < sel.options.length; i++) {
+            sel.options[i].selected = sel.options[i].value === String(streamerId);
+        }
+        document.getElementById('edit-shift-backdrop').classList.add('is-open');
+    }
+    function closeEditShift() {
+        document.getElementById('edit-shift-backdrop').classList.remove('is-open');
+    }
+    document.getElementById('edit-shift-backdrop').addEventListener('click', function(e) {
+        if (e.target === this) closeEditShift();
     });
     </script>
 </body>
