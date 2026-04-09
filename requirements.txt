@@ -14,3 +14,4 @@ psycopg[binary]
 Pillow
 tiksync
 python-barcode
+firecrawl-py

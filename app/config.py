@@ -167,6 +167,9 @@ class Settings(BaseSettings):
     psa_api_key: str = Field(default="", alias="PSA_API_KEY")
     pokemon_tcg_api_key: str = Field(default="", alias="POKEMON_TCG_API_KEY")
 
+    # Firecrawl (web scraping)
+    firecrawl_api_key: str = Field(default="", alias="FIRECRAWL_API_KEY")
+
     @property
     def channel_ids(self) -> List[int]:
         channel_ids: list[int] = []
