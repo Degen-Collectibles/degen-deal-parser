@@ -120,6 +120,7 @@
         }
         .badge-live:not(.is-live) .live-text-on { display: none; }
         .badge-live.is-live .live-text-off { display: none; }
+        .badge-streamer-name { color: var(--green); border-color: rgba(0,210,160,.3); gap: 4px; font-weight: 600; font-size: 11px; }
         @keyframes live-pulse {
             0%, 100% { box-shadow: 0 0 0 0 transparent; }
             50% { box-shadow: 0 0 14px 2px var(--accent-glow); }
@@ -1278,6 +1279,9 @@
                             <span class="live-text-on">LIVE</span>
                             <span class="live-text-off">OFFLINE</span>
                         </span>
+                        <span class="badge badge-streamer-name" id="streamer-name-badge" style="display:{% if current_streamer %}inline-flex{% else %}none{% endif %};">
+                            &#x1F3A4; <span id="streamer-name-text">{{ current_streamer or '' }}</span>
+                        </span>
                         <span class="badge" style="color:var(--green);" id="order-count-badge">
                             <span id="order-count">{{ total_count }}</span> orders
                         </span>
@@ -2367,6 +2371,17 @@
         }
         updateLiveBadge(_streamData.is_live);
 
+        var streamerBadge = document.getElementById('streamer-name-badge');
+        var streamerText = document.getElementById('streamer-name-text');
+        function updateStreamerBadge(name) {
+            if (name) {
+                streamerText.textContent = name;
+                streamerBadge.style.display = 'inline-flex';
+            } else {
+                streamerBadge.style.display = 'none';
+            }
+        }
+
         function updateGMV(data) {
             if (data.session_gmv != null) gmvEl.textContent = '$' + data.session_gmv.toFixed(2);
             if (data.session_orders != null) gmvPaidEl.textContent = data.session_orders;
@@ -2381,6 +2396,7 @@
                 stream_range_source: data.stream_range_source
             });
             if (data.is_live != null) updateLiveBadge(data.is_live);
+            updateStreamerBadge(data.current_streamer || '');
             if (data.top_sellers) _topSellers = data.top_sellers;
             if (data.top_buyers) _topBuyers = data.top_buyers;
             if (data.stream_top_sellers) _streamTopSellers = data.stream_top_sellers;

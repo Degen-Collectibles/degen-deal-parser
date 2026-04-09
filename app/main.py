@@ -8773,6 +8773,7 @@ def tiktok_streamer_poll(
         "order_velocity": _compute_order_velocity(session),
         "stream_end_utc": gmv_data.get("stream_end_utc"),
         "stream_duration_minutes": _compute_stream_duration_minutes(gmv_data),
+        "current_streamer": get_current_streamer(session) or "",
     }
 
 
