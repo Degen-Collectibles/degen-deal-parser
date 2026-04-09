@@ -777,3 +777,143 @@ def build_financial_summary(rows: list[DiscordMessage]) -> dict:
         ],
         "rows": len(rows),
     }
+
+
+# ---------------------------------------------------------------------------
+# TikTok Analytics — Repeat Buyers
+# ---------------------------------------------------------------------------
+
+def build_tiktok_buyer_insights(session: Session, days: int = 90) -> list[dict]:
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    orders = session.exec(
+        select(TikTokOrder).where(TikTokOrder.created_at >= cutoff)
+    ).all()
+
+    paid_statuses = {
+        "paid", "completed", "awaiting_shipment", "awaiting_collection",
+        "awaiting_delivery", "in_transit", "delivered",
+    }
+
+    agg: dict[str, dict] = {}
+    for o in orders:
+        status = (o.financial_status or o.order_status or "").lower().strip()
+        if status not in paid_statuses:
+            continue
+        buyer_name = (o.customer_name or "").strip() or "Guest"
+        buyer_key = buyer_name.lower()
+        gmv = float(o.subtotal_price if o.subtotal_price is not None else (o.total_price or 0))
+        if buyer_key not in agg:
+            agg[buyer_key] = {
+                "name": buyer_name,
+                "total_spent": 0.0,
+                "order_count": 0,
+                "first_order": o.created_at,
+                "last_order": o.created_at,
+                "stream_dates": set(),
+            }
+        entry = agg[buyer_key]
+        entry["total_spent"] += gmv
+        entry["order_count"] += 1
+        if o.created_at and (entry["first_order"] is None or o.created_at < entry["first_order"]):
+            entry["first_order"] = o.created_at
+        if o.created_at and (entry["last_order"] is None or o.created_at > entry["last_order"]):
+            entry["last_order"] = o.created_at
+        if o.created_at:
+            entry["stream_dates"].add(o.created_at.strftime("%Y-%m-%d"))
+
+    results = []
+    for entry in agg.values():
+        oc = entry["order_count"]
+        results.append({
+            "name": entry["name"],
+            "total_spent": round(entry["total_spent"], 2),
+            "order_count": oc,
+            "avg_order": round(entry["total_spent"] / oc, 2) if oc > 0 else 0,
+            "first_order": entry["first_order"].isoformat() if entry["first_order"] else None,
+            "last_order": entry["last_order"].isoformat() if entry["last_order"] else None,
+            "stream_count": len(entry["stream_dates"]),
+            "is_repeat": oc > 1,
+        })
+    results.sort(key=lambda x: x["total_spent"], reverse=True)
+    return results
+
+
+# ---------------------------------------------------------------------------
+# TikTok Analytics — Product Performance
+# ---------------------------------------------------------------------------
+
+def build_tiktok_product_performance(
+    session: Session,
+    days: int = 30,
+    stream_sessions: list[dict] | None = None,
+) -> list[dict]:
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    orders = session.exec(
+        select(TikTokOrder).where(TikTokOrder.created_at >= cutoff)
+    ).all()
+
+    paid_statuses = {
+        "paid", "completed", "awaiting_shipment", "awaiting_collection",
+        "awaiting_delivery", "in_transit", "delivered",
+    }
+
+    def _is_during_stream(ts: datetime | None) -> bool:
+        if not ts or not stream_sessions:
+            return False
+        ts_epoch = ts.timestamp()
+        for s in stream_sessions:
+            st = s.get("start_time", 0) or 0
+            et = s.get("end_time", 0) or 0
+            if st > 0 and ts_epoch >= st:
+                if et == 0 or ts_epoch <= et:
+                    return True
+        return False
+
+    agg: dict[str, dict] = {}
+    for o in orders:
+        status = (o.financial_status or o.order_status or "").lower().strip()
+        if status not in paid_statuses:
+            continue
+        raw_items: list[dict] = []
+        try:
+            raw_items = json.loads(o.line_items_json) if o.line_items_json else []
+        except (json.JSONDecodeError, TypeError):
+            pass
+        if not isinstance(raw_items, list):
+            continue
+        is_live = _is_during_stream(o.created_at)
+        for item in raw_items:
+            title = (item.get("product_name") or item.get("title") or "Unknown").strip()
+            key = title.lower()
+            qty = int(item.get("quantity", 1) or 1)
+            price = float(item.get("sale_price") or item.get("price") or 0)
+            revenue = price * qty
+            if key not in agg:
+                agg[key] = {
+                    "title": title,
+                    "qty": 0, "revenue": 0.0, "orders": 0,
+                    "live_qty": 0, "nonlive_qty": 0,
+                }
+            entry = agg[key]
+            entry["qty"] += qty
+            entry["revenue"] += revenue
+            entry["orders"] += 1
+            if is_live:
+                entry["live_qty"] += qty
+            else:
+                entry["nonlive_qty"] += qty
+
+    results = []
+    for entry in agg.values():
+        total_qty = entry["qty"] or 1
+        results.append({
+            "title": entry["title"],
+            "qty": entry["qty"],
+            "revenue": round(entry["revenue"], 2),
+            "orders": entry["orders"],
+            "avg_price": round(entry["revenue"] / entry["qty"], 2) if entry["qty"] > 0 else 0,
+            "live_pct": round((entry["live_qty"] / total_qty) * 100, 1),
+            "nonlive_pct": round((entry["nonlive_qty"] / total_qty) * 100, 1),
+        })
+    results.sort(key=lambda x: x["revenue"], reverse=True)
+    return results

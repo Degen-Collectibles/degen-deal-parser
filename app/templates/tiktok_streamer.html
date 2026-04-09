@@ -275,7 +275,162 @@
         .gmv-live-sub strong {
             color: var(--text-secondary); font-weight: 800;
         }
-        
+
+        /* ---- GMV Goal Bar ---- */
+        .goal-bar-wrap { margin-top: 14px; position: relative; z-index: 1; display: none; }
+        .goal-bar-header {
+            display: flex; justify-content: space-between; align-items: center;
+            margin-bottom: 6px;
+        }
+        .goal-bar-label {
+            font-size: 10px; font-weight: 800; text-transform: uppercase;
+            letter-spacing: .1em; color: var(--text-muted);
+        }
+        .goal-bar-amounts {
+            font-size: 11px; font-weight: 700; color: var(--text-secondary);
+        }
+        .goal-bar-amounts .goal-current { color: var(--green); }
+        .goal-bar-track {
+            width: 100%; height: 10px; border-radius: 8px;
+            background: rgba(255,255,255,.06); overflow: hidden;
+        }
+        .goal-bar-fill {
+            height: 100%; border-radius: 8px;
+            background: linear-gradient(90deg, var(--green), var(--tiktok-cyan));
+            transition: width .6s cubic-bezier(.22,1,.36,1);
+            position: relative;
+        }
+        .goal-bar-fill.reached {
+            background: linear-gradient(90deg, var(--green), #a3e635);
+            animation: goal-pulse 1.5s ease-in-out infinite;
+        }
+        @keyframes goal-pulse {
+            0%, 100% { box-shadow: 0 0 8px rgba(62,207,142,.3); }
+            50% { box-shadow: 0 0 20px rgba(62,207,142,.6), 0 0 40px rgba(62,207,142,.2); }
+        }
+        .goal-edit-target { cursor: pointer; border-bottom: 1px dashed var(--text-muted); }
+        .goal-edit-target:hover { color: var(--tiktok-cyan); border-color: var(--tiktok-cyan); }
+        .goal-inline-input {
+            background: var(--bg); border: 1px solid var(--border-glow); border-radius: 6px;
+            color: var(--text); font-size: 11px; font-weight: 700; padding: 2px 6px;
+            width: 70px; outline: none;
+        }
+        .goal-inline-input:focus { border-color: var(--tiktok-cyan); }
+
+        /* ---- Velocity Sparkline ---- */
+        .velocity-wrap {
+            display: none; align-items: center; gap: 10px;
+            margin-top: 10px; position: relative; z-index: 1;
+        }
+        .velocity-chart { flex-shrink: 0; }
+        .velocity-chart polyline { fill: none; stroke: var(--tiktok-cyan); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
+        .velocity-chart .vel-area { fill: url(#vel-grad); stroke: none; }
+        .velocity-rate {
+            font-size: 11px; font-weight: 700; color: var(--text-secondary);
+        }
+        .velocity-rate strong { color: var(--tiktok-cyan); font-weight: 800; }
+
+        /* ---- High-Value Toast ---- */
+        .toast-high-value {
+            border-color: #fbbf24 !important;
+            box-shadow: 0 12px 40px rgba(0,0,0,.65), 0 0 30px rgba(251,191,36,.25) !important;
+            animation: toast-in-hv .5s cubic-bezier(.22, 1, .36, 1);
+        }
+        .toast-high-value .toast-label { color: #fbbf24 !important; }
+        @keyframes toast-in-hv {
+            0% { opacity: 0; transform: translateX(50px) scale(.8); }
+            50% { transform: translateX(-5px) scale(1.04); }
+            100% { opacity: 1; transform: translateX(0) scale(1); }
+        }
+
+        /* ---- VIP Buyer Toast ---- */
+        .toast-vip {
+            border-color: #a78bfa !important;
+            box-shadow: 0 12px 40px rgba(0,0,0,.65), 0 0 30px rgba(167,139,250,.3) !important;
+            animation: toast-in-hv .5s cubic-bezier(.22, 1, .36, 1);
+        }
+        .toast-vip .toast-label { color: #a78bfa !important; }
+        .toast-vip-badge {
+            display: inline-block; font-size: 9px; font-weight: 800;
+            text-transform: uppercase; letter-spacing: .06em;
+            background: rgba(167,139,250,.15); color: #a78bfa;
+            padding: 2px 6px; border-radius: 4px; margin-left: 4px;
+        }
+
+        /* ---- Post-Stream Summary Overlay ---- */
+        .summary-overlay {
+            position: fixed; inset: 0; z-index: 10000;
+            display: none; align-items: center; justify-content: center;
+            background: rgba(0,0,0,.8); backdrop-filter: blur(8px);
+        }
+        .summary-overlay.active { display: flex; }
+        .summary-card {
+            background: var(--bg-card); border: 1px solid var(--border);
+            border-radius: 24px; padding: 32px; max-width: 480px; width: 92%;
+            position: relative;
+        }
+        .summary-card h2 {
+            font-size: 22px; font-weight: 900; margin: 0 0 4px;
+            background: var(--gmv-gradient); -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent; background-clip: text;
+        }
+        .summary-card .summary-duration {
+            font-size: 12px; color: var(--text-muted); font-weight: 600;
+            margin-bottom: 20px;
+        }
+        .summary-big-gmv {
+            font-size: 48px; font-weight: 900; text-align: center;
+            color: var(--green); margin: 10px 0;
+        }
+        .summary-stats-grid {
+            display: grid; grid-template-columns: repeat(3, 1fr);
+            gap: 10px; margin: 16px 0;
+        }
+        .summary-stat {
+            text-align: center; background: rgba(255,255,255,.03);
+            border-radius: 12px; padding: 12px 6px;
+        }
+        .summary-stat-value {
+            font-size: 20px; font-weight: 800; color: var(--text);
+        }
+        .summary-stat-label {
+            font-size: 10px; font-weight: 700; text-transform: uppercase;
+            letter-spacing: .08em; color: var(--text-muted); margin-top: 2px;
+        }
+        .summary-top-lists {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px;
+        }
+        .summary-top h4 {
+            font-size: 11px; font-weight: 800; text-transform: uppercase;
+            letter-spacing: .1em; color: var(--text-muted); margin: 0 0 6px;
+        }
+        .summary-top li {
+            font-size: 12px; font-weight: 600; color: var(--text-secondary);
+            margin-bottom: 3px; list-style: none;
+        }
+        .summary-top li strong { color: var(--text); }
+        .summary-actions {
+            display: flex; gap: 10px; justify-content: center; margin-top: 22px;
+        }
+        .summary-btn {
+            padding: 10px 20px; border-radius: 10px; font-size: 13px;
+            font-weight: 700; cursor: pointer; border: none;
+            transition: background .2s, transform .1s;
+        }
+        .summary-btn:hover { transform: scale(1.02); }
+        .summary-btn:active { transform: scale(.98); }
+        .summary-btn-dismiss {
+            background: var(--bg); border: 1px solid var(--border); color: var(--text);
+        }
+        .summary-btn-copy {
+            background: var(--green); color: #000;
+        }
+        .summary-btn-copy.copied { background: var(--tiktok-cyan); }
+        @media print {
+            .summary-overlay { position: static; background: #fff; }
+            .summary-card { box-shadow: none; border: 1px solid #ccc; }
+            .summary-actions { display: none; }
+        }
 
         /* ---- Leaderboard toggle ---- */
         .leaderboard-header {
@@ -1189,6 +1344,47 @@
                             </div>
                         </div>
                     </div>
+                    <!-- GMV Goal Bar -->
+                    <div class="goal-bar-wrap" id="goal-bar-wrap">
+                        <div class="goal-bar-header">
+                            <span class="goal-bar-label">Stream Goal</span>
+                            <span class="goal-bar-amounts">
+                                <span class="goal-current" id="goal-current">$0</span>
+                                <span> / </span>
+                                <span class="goal-edit-target" id="goal-edit-target" title="Click to edit goal">$<span id="goal-target-text">0</span></span>
+                            </span>
+                        </div>
+                        <div class="goal-bar-track">
+                            <div class="goal-bar-fill" id="goal-bar-fill" style="width:0%"></div>
+                        </div>
+                    </div>
+                    <!-- Velocity Sparkline -->
+                    <div class="velocity-wrap" id="velocity-wrap">
+                        <svg class="velocity-chart" width="120" height="32" viewBox="0 0 120 32" id="velocity-svg">
+                            <defs><linearGradient id="vel-grad" x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="0%" stop-color="rgba(37,244,238,.25)"/>
+                                <stop offset="100%" stop-color="rgba(37,244,238,0)"/>
+                            </linearGradient></defs>
+                            <polyline class="vel-area" id="vel-area" points=""/>
+                            <polyline id="vel-line" points=""/>
+                        </svg>
+                        <span class="velocity-rate" id="velocity-rate"><strong>0</strong> orders/min</span>
+                    </div>
+                </div>
+
+                <!-- Post-Stream Summary Overlay -->
+                <div class="summary-overlay" id="summary-overlay">
+                    <div class="summary-card" id="summary-card">
+                        <h2>Stream Complete</h2>
+                        <div class="summary-duration" id="summary-duration"></div>
+                        <div class="summary-big-gmv" id="summary-gmv">$0.00</div>
+                        <div class="summary-stats-grid" id="summary-stats-grid"></div>
+                        <div class="summary-top-lists" id="summary-top-lists"></div>
+                        <div class="summary-actions">
+                            <button class="summary-btn summary-btn-dismiss" id="summary-dismiss">Dismiss</button>
+                            <button class="summary-btn summary-btn-copy" id="summary-copy">Copy Summary</button>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- Leaderboard toggle + Top Sellers + Top Buyers -->
@@ -1367,6 +1563,11 @@
         try { _streamSessions = {{ stream_sessions_json|safe }}; } catch (e) {}
         _streamSessions.sort(function(a, b) { return (b.end_time || 0) - (a.end_time || 0); });
         var _buildVersion = {{ build_version|tojson }};
+        var _gmvGoal = {{ gmv_goal|tojson }};
+        var _highValueThreshold = {{ high_value_threshold|tojson }};
+        var _vipBuyerThreshold = {{ vip_buyer_threshold|tojson }};
+        var _wasLive = {{ stream_data_json|safe }}.is_live || false;
+        var _summaryDismissed = false;
 
         /* ---- Chat state ---- */
         var _chatIdx = 0;
@@ -1859,11 +2060,14 @@
         }
 
         /* ---- Toasts ---- */
-        function showToast(order) {
+        function showToast(order, highValue, isVip) {
             var firstItem = order.items && order.items.length > 0 ? order.items[0] : null;
             var totalQty = (order.items || []).reduce(function(s, i) { return s + (i.quantity || 1); }, 0);
             var el = document.createElement('div');
-            el.className = 'toast';
+            var cls = 'toast';
+            if (isVip) cls += ' toast-vip';
+            else if (highValue) cls += ' toast-high-value';
+            el.className = cls;
             var html = '';
             if (firstItem && firstItem.sku_image) {
                 html += '<img class="toast-img" src="' + escAttr(firstItem.sku_image) + '" alt="" loading="lazy">';
@@ -1871,17 +2075,22 @@
                 html += '<div class="toast-img-placeholder">&#x1F4E6;</div>';
             }
             html += '<div class="toast-body">';
-            html += '<div class="toast-label">New Order!</div>';
+            var label = 'New Order!';
+            if (isVip) label = '&#x1F451; VIP Buyer!';
+            else if (highValue) label = '&#x1F525; Big Order!';
+            html += '<div class="toast-label">' + label + '</div>';
             html += '<div class="toast-title">' + esc(firstItem ? firstItem.title : 'Unknown item');
             if (totalQty > 1) html += ' x' + totalQty;
             html += '</div>';
             if (firstItem && firstItem.variant) html += '<div class="toast-sub" style="color:var(--accent);font-weight:600;font-size:11px;margin-bottom:2px;">' + esc(firstItem.variant) + '</div>';
-            html += '<div class="toast-sub">' + esc(order.customer_name || 'Guest') + ' &middot; $' + (order.total_price || 0).toFixed(2) + '</div>';
+            html += '<div class="toast-sub">' + esc(order.customer_name || 'Guest');
+            if (isVip) html += ' <span class="toast-vip-badge">$' + (order.buyer_lifetime_spent || 0).toFixed(0) + ' lifetime</span>';
+            html += ' &middot; $' + (order.total_price || 0).toFixed(2) + '</div>';
             html += '</div>';
             el.innerHTML = html;
             el.addEventListener('click', function() { dismissToast(el); });
             toastContainer.appendChild(el);
-            setTimeout(function() { dismissToast(el); }, TOAST_DURATION_MS);
+            setTimeout(function() { dismissToast(el); }, (highValue || isVip) ? 12000 : TOAST_DURATION_MS);
         }
 
         function dismissToast(el) {
@@ -1925,6 +2134,195 @@
             if (!_muted && !_audioCtx) {
                 try { _audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
             }
+        });
+
+        function playHighValueChime() {
+            if (_muted) return;
+            try {
+                if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                var ctx = _audioCtx;
+                var now = ctx.currentTime;
+                var notes = [
+                    { freq: 783.99, start: 0, dur: 0.15 },
+                    { freq: 987.77, start: 0.1, dur: 0.15 },
+                    { freq: 1174.66, start: 0.2, dur: 0.15 },
+                    { freq: 1318.51, start: 0.32, dur: 0.25 },
+                ];
+                notes.forEach(function(n) {
+                    var osc = ctx.createOscillator();
+                    var gain = ctx.createGain();
+                    osc.type = 'triangle';
+                    osc.frequency.setValueAtTime(n.freq, now + n.start);
+                    gain.gain.setValueAtTime(0.2, now + n.start);
+                    gain.gain.exponentialRampToValueAtTime(0.001, now + n.start + n.dur + 0.2);
+                    osc.connect(gain);
+                    gain.connect(ctx.destination);
+                    osc.start(now + n.start);
+                    osc.stop(now + n.start + n.dur + 0.25);
+                });
+            } catch (e) {}
+        }
+
+        /* ---- GMV Goal Bar ---- */
+        function updateGoalBar(currentGmv) {
+            var wrap = document.getElementById('goal-bar-wrap');
+            if (!_gmvGoal || _gmvGoal <= 0) { wrap.style.display = 'none'; return; }
+            wrap.style.display = 'block';
+            var pct = Math.min((currentGmv / _gmvGoal) * 100, 100);
+            document.getElementById('goal-current').textContent = '$' + currentGmv.toFixed(0);
+            document.getElementById('goal-target-text').textContent = _gmvGoal.toFixed(0);
+            var fill = document.getElementById('goal-bar-fill');
+            fill.style.width = pct.toFixed(1) + '%';
+            if (currentGmv >= _gmvGoal) fill.classList.add('reached');
+            else fill.classList.remove('reached');
+        }
+
+        (function initGoalEdit() {
+            var target = document.getElementById('goal-edit-target');
+            target.addEventListener('click', function() {
+                var current = _gmvGoal || 0;
+                var inp = document.createElement('input');
+                inp.className = 'goal-inline-input';
+                inp.type = 'number'; inp.min = '0'; inp.step = '100';
+                inp.value = current > 0 ? current : '';
+                inp.placeholder = 'e.g. 5000';
+                target.replaceWith(inp);
+                inp.focus();
+                function save() {
+                    var val = parseFloat(inp.value) || 0;
+                    _gmvGoal = val;
+                    fetch('/tiktok/streamer/goal', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ goal: val }),
+                    });
+                    var newTarget = document.createElement('span');
+                    newTarget.className = 'goal-edit-target';
+                    newTarget.id = 'goal-edit-target';
+                    newTarget.title = 'Click to edit goal';
+                    newTarget.innerHTML = '$<span id="goal-target-text">' + val.toFixed(0) + '</span>';
+                    inp.replaceWith(newTarget);
+                    initGoalEditOn(newTarget);
+                    updateGoalBar(_lastStreamGmv || 0);
+                }
+                inp.addEventListener('blur', save);
+                inp.addEventListener('keydown', function(e) { if (e.key === 'Enter') { e.preventDefault(); inp.blur(); } });
+            });
+        })();
+        function initGoalEditOn(el) {
+            el.addEventListener('click', function() {
+                var current = _gmvGoal || 0;
+                var inp = document.createElement('input');
+                inp.className = 'goal-inline-input';
+                inp.type = 'number'; inp.min = '0'; inp.step = '100';
+                inp.value = current > 0 ? current : '';
+                inp.placeholder = 'e.g. 5000';
+                el.replaceWith(inp);
+                inp.focus();
+                function save() {
+                    var val = parseFloat(inp.value) || 0;
+                    _gmvGoal = val;
+                    fetch('/tiktok/streamer/goal', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ goal: val }),
+                    });
+                    var newTarget = document.createElement('span');
+                    newTarget.className = 'goal-edit-target';
+                    newTarget.id = 'goal-edit-target';
+                    newTarget.title = 'Click to edit goal';
+                    newTarget.innerHTML = '$<span id="goal-target-text">' + val.toFixed(0) + '</span>';
+                    inp.replaceWith(newTarget);
+                    initGoalEditOn(newTarget);
+                    updateGoalBar(_lastStreamGmv || 0);
+                }
+                inp.addEventListener('blur', save);
+                inp.addEventListener('keydown', function(e) { if (e.key === 'Enter') { e.preventDefault(); inp.blur(); } });
+            });
+        }
+        var _lastStreamGmv = 0;
+
+        /* ---- Velocity Sparkline ---- */
+        function updateVelocity(buckets) {
+            var wrap = document.getElementById('velocity-wrap');
+            if (!buckets || buckets.length === 0) { wrap.style.display = 'none'; return; }
+            wrap.style.display = 'flex';
+            var counts = buckets.map(function(b) { return b.count; });
+            var maxCount = Math.max.apply(null, counts) || 1;
+            var w = 120, h = 32, pad = 2;
+            var step = counts.length > 1 ? (w - 2 * pad) / (counts.length - 1) : 0;
+            var pts = counts.map(function(c, i) {
+                var x = pad + i * step;
+                var y = h - pad - ((c / maxCount) * (h - 2 * pad));
+                return x.toFixed(1) + ',' + y.toFixed(1);
+            });
+            document.getElementById('vel-line').setAttribute('points', pts.join(' '));
+            var areapts = [pad.toFixed(1) + ',' + (h - pad).toFixed(1)].concat(pts).concat([(pad + (counts.length - 1) * step).toFixed(1) + ',' + (h - pad).toFixed(1)]);
+            document.getElementById('vel-area').setAttribute('points', areapts.join(' '));
+            var recent = counts.slice(-5);
+            var avgRate = recent.reduce(function(s, c) { return s + c; }, 0) / recent.length;
+            document.getElementById('velocity-rate').innerHTML = '<strong>' + avgRate.toFixed(1) + '</strong> orders/min';
+        }
+
+        /* ---- Post-Stream Summary ---- */
+        function showPostStreamSummary(data) {
+            _summaryDismissed = false;
+            var overlay = document.getElementById('summary-overlay');
+            var dur = data.stream_duration_minutes;
+            var durText = dur ? (dur >= 60 ? Math.floor(dur / 60) + 'h ' + Math.round(dur % 60) + 'm' : Math.round(dur) + ' minutes') : '';
+            document.getElementById('summary-duration').textContent = durText ? 'Duration: ' + durText : '';
+            var gmv = data.stream_gmv || data.session_gmv || 0;
+            document.getElementById('summary-gmv').textContent = '$' + gmv.toFixed(2);
+            var orders = data.stream_orders || data.session_orders || 0;
+            var items = data.stream_items || 0;
+            var buyers = (data.stream_top_buyers || data.top_buyers || []).length;
+            var aov = orders > 0 ? gmv / orders : 0;
+            var ratePerHr = dur > 0 ? (orders / (dur / 60)).toFixed(1) : '--';
+            var statsHtml = '';
+            statsHtml += '<div class="summary-stat"><div class="summary-stat-value">' + orders + '</div><div class="summary-stat-label">Orders</div></div>';
+            statsHtml += '<div class="summary-stat"><div class="summary-stat-value">' + items + '</div><div class="summary-stat-label">Items</div></div>';
+            statsHtml += '<div class="summary-stat"><div class="summary-stat-value">$' + aov.toFixed(2) + '</div><div class="summary-stat-label">AOV</div></div>';
+            statsHtml += '<div class="summary-stat"><div class="summary-stat-value">' + buyers + '</div><div class="summary-stat-label">Customers</div></div>';
+            statsHtml += '<div class="summary-stat"><div class="summary-stat-value">' + ratePerHr + '</div><div class="summary-stat-label">Orders/hr</div></div>';
+            document.getElementById('summary-stats-grid').innerHTML = statsHtml;
+            var sellers = data.stream_top_sellers || data.top_sellers || [];
+            var buyersList = data.stream_top_buyers || data.top_buyers || [];
+            var listsHtml = '<div class="summary-top"><h4>Top Sellers</h4><ul>';
+            sellers.slice(0, 3).forEach(function(s) { listsHtml += '<li><strong>' + esc(s.title || s.name || '') + '</strong> &middot; $' + (s.revenue || s.total || 0).toFixed(2) + '</li>'; });
+            listsHtml += '</ul></div><div class="summary-top"><h4>Top Buyers</h4><ul>';
+            buyersList.slice(0, 3).forEach(function(b) { listsHtml += '<li><strong>' + esc(b.name || '') + '</strong> &middot; $' + (b.total || 0).toFixed(2) + '</li>'; });
+            listsHtml += '</ul></div>';
+            document.getElementById('summary-top-lists').innerHTML = listsHtml;
+            overlay.classList.add('active');
+            window._lastSummaryData = { gmv: gmv, orders: orders, items: items, aov: aov, ratePerHr: ratePerHr, durText: durText, sellers: sellers, buyers: buyersList };
+        }
+        document.getElementById('summary-dismiss').addEventListener('click', function() {
+            document.getElementById('summary-overlay').classList.remove('active');
+            _summaryDismissed = true;
+        });
+        document.getElementById('summary-copy').addEventListener('click', function() {
+            var d = window._lastSummaryData || {};
+            var text = 'Stream Summary\n';
+            if (d.durText) text += 'Duration: ' + d.durText + '\n';
+            text += 'GMV: $' + (d.gmv || 0).toFixed(2) + '\n';
+            text += 'Orders: ' + (d.orders || 0) + '\n';
+            text += 'Items: ' + (d.items || 0) + '\n';
+            text += 'AOV: $' + (d.aov || 0).toFixed(2) + '\n';
+            text += 'Orders/hr: ' + (d.ratePerHr || '--') + '\n';
+            if (d.sellers && d.sellers.length > 0) {
+                text += '\nTop Sellers:\n';
+                d.sellers.slice(0, 3).forEach(function(s, i) { text += (i + 1) + '. ' + (s.title || s.name || '') + ' - $' + (s.revenue || s.total || 0).toFixed(2) + '\n'; });
+            }
+            if (d.buyers && d.buyers.length > 0) {
+                text += '\nTop Buyers:\n';
+                d.buyers.slice(0, 3).forEach(function(b, i) { text += (i + 1) + '. ' + (b.name || '') + ' - $' + (b.total || 0).toFixed(2) + '\n'; });
+            }
+            navigator.clipboard.writeText(text).then(function() {
+                var btn = document.getElementById('summary-copy');
+                btn.textContent = 'Copied!';
+                btn.classList.add('copied');
+                setTimeout(function() { btn.textContent = 'Copy Summary'; btn.classList.remove('copied'); }, 2000);
+            });
         });
 
         function formatGmv(val) {
@@ -1973,6 +2371,7 @@
             if (data.session_gmv != null) gmvEl.textContent = '$' + data.session_gmv.toFixed(2);
             if (data.session_orders != null) gmvPaidEl.textContent = data.session_orders;
             if (data.session_total_orders != null) gmvTotalEl.textContent = data.session_total_orders;
+            _lastStreamGmv = data.stream_gmv || data.session_gmv || 0;
             updateStreamGmv({
                 stream_gmv: data.stream_gmv,
                 stream_orders: data.stream_orders,
@@ -2085,6 +2484,18 @@
                 if (data.latest_updated_at) _latestUpdatedAt = data.latest_updated_at;
                 updateGMV(data);
 
+                if (data.gmv_goal != null) _gmvGoal = data.gmv_goal;
+                if (data.high_value_threshold != null) _highValueThreshold = data.high_value_threshold;
+                if (data.vip_buyer_threshold != null) _vipBuyerThreshold = data.vip_buyer_threshold;
+                updateGoalBar(data.stream_gmv || data.session_gmv || 0);
+                updateVelocity(data.order_velocity || []);
+
+                var isLiveNow = !!data.is_live;
+                if (_wasLive && !isLiveNow && !_summaryDismissed) {
+                    showPostStreamSummary(data);
+                }
+                _wasLive = isLiveNow;
+
                 var newOrders = [];
                 var refundUpdates = [];
 
@@ -2106,8 +2517,16 @@
                     });
                     prependRows(newOrders);
                     var nonRefundNew = newOrders.filter(function(o) { return !isRefundOrder(o); });
-                    nonRefundNew.forEach(function(o) { showToast(o); });
-                    if (nonRefundNew.length > 0) playChime();
+                    var anySpecial = false;
+                    nonRefundNew.forEach(function(o) {
+                        var isHighValue = (o.total_price || 0) >= _highValueThreshold && _highValueThreshold > 0;
+                        var isVip = (o.buyer_lifetime_spent || 0) >= _vipBuyerThreshold && _vipBuyerThreshold > 0;
+                        showToast(o, isHighValue, isVip);
+                        if (isHighValue || isVip) anySpecial = true;
+                    });
+                    if (nonRefundNew.length > 0) {
+                        if (anySpecial) playHighValueChime(); else playChime();
+                    }
 
                     var refundNew = newOrders.filter(function(o) { return isRefundOrder(o); });
                     refundNew.forEach(function(o) { showRefundToast(o); });
@@ -2294,6 +2713,8 @@
 
         /* ---- Init ---- */
         renderAll();
+        updateGoalBar(_streamData.stream_gmv || {{ session_gmv|tojson }} || 0);
+        _lastStreamGmv = _streamData.stream_gmv || {{ session_gmv|tojson }} || 0;
         updateChatDots(_chatStatus);
         initChatPanel(chatDesktopMsgs, _chatStatus);
         initChatPanel(chatMobileMsgs, _chatStatus);

@@ -127,7 +127,9 @@ from .reporting import (
     build_financial_summary,
     build_reporting_periods,
     build_shopify_reporting_summary,
+    build_tiktok_buyer_insights,
     build_tiktok_orders_page_data as build_tiktok_orders_page_reporting_data,
+    build_tiktok_product_performance,
     build_tiktok_reporting_summary,
     classify_tiktok_reporting_status,
     get_financial_rows,
@@ -3419,6 +3421,21 @@ def build_watched_channel_groups(
         }
         for category_name, channels in sorted(grouped.items(), key=lambda item: item[0].lower())
     ]
+
+
+def _get_app_setting(session: Session, key: str, default: str = "") -> str:
+    row = session.get(AppSetting, key)
+    return row.value if row and row.value else default
+
+
+def _set_app_setting(session: Session, key: str, value: str) -> None:
+    existing = session.get(AppSetting, key)
+    if existing:
+        existing.value = value
+        session.add(existing)
+    else:
+        session.add(AppSetting(key=key, value=value))
+    session.commit()
 
 
 def _load_stream_range() -> None:
@@ -7706,6 +7723,33 @@ def _build_streamer_order_card(order: TikTokOrder) -> dict:
     }
 
 
+def _compute_buyer_lifetime_totals(session: Session) -> dict[str, float]:
+    """Return a dict mapping lowercased buyer name -> lifetime GMV across all paid orders."""
+    paid_statuses = {
+        "paid", "completed", "awaiting_shipment", "awaiting_collection",
+        "awaiting_delivery", "in_transit", "delivered",
+    }
+    rows = session.exec(
+        select(TikTokOrder.customer_name, TikTokOrder.subtotal_price, TikTokOrder.total_price, TikTokOrder.financial_status, TikTokOrder.order_status)
+    ).all()
+    agg: dict[str, float] = {}
+    for name, subtotal, total, fin_status, ord_status in rows:
+        status = (fin_status or ord_status or "").lower().strip()
+        if status not in paid_statuses:
+            continue
+        buyer_key = (name or "").strip().lower() or "guest"
+        gmv = float(subtotal if subtotal is not None else (total or 0))
+        agg[buyer_key] = agg.get(buyer_key, 0.0) + gmv
+    return agg
+
+
+def _enrich_cards_with_buyer_totals(cards: list[dict], buyer_totals: dict[str, float]) -> None:
+    """Attach buyer_lifetime_spent to each card in-place."""
+    for card in cards:
+        buyer_key = (card.get("customer_name") or "").strip().lower() or "guest"
+        card["buyer_lifetime_spent"] = round(buyer_totals.get(buyer_key, 0.0), 2)
+
+
 def _poll_tiktok_live_analytics(stop_event: threading.Event) -> None:
     """Background thread: poll TikTok LIVE analytics endpoint every 60s."""
     if _fetch_tiktok_live_analytics is None:
@@ -8430,6 +8474,120 @@ def tiktok_analytics_stream_detail(
     }
 
 
+@app.get("/tiktok/analytics/api/buyers")
+def tiktok_analytics_buyers(
+    request: Request,
+    days: int = Query(default=90, ge=7, le=365),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "viewer"):
+        return denial
+    return {"buyers": build_tiktok_buyer_insights(session, days=days)}
+
+
+@app.get("/tiktok/analytics/api/products")
+def tiktok_analytics_products(
+    request: Request,
+    days: int = Query(default=30, ge=7, le=365),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "viewer"):
+        return denial
+    streams = _get_live_sessions_list()
+    return {"products": build_tiktok_product_performance(session, days=days, stream_sessions=streams)}
+
+
+@app.get("/tiktok/analytics/api/compare")
+def tiktok_analytics_compare(
+    request: Request,
+    stream_a: str | None = Query(default=None),
+    stream_b: str | None = Query(default=None),
+    mode: str | None = Query(default=None),
+    offset: int = Query(default=0, ge=0),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "viewer"):
+        return denial
+    streams = _get_live_sessions_list()
+    streams.sort(key=lambda s: s.get("start_time", 0) or 0, reverse=True)
+
+    if mode == "weekly":
+        now_ts = datetime.now(timezone.utc).timestamp()
+        week_end = now_ts - offset * 7 * 86400
+        week_start = week_end - 7 * 86400
+        prev_end = week_start
+        prev_start = prev_end - 7 * 86400
+
+        def _aggregate_week(lo: float, hi: float) -> dict:
+            week_streams = [s for s in streams if lo <= (s.get("start_time") or 0) < hi]
+            start_utc = datetime.fromtimestamp(lo, tz=timezone.utc)
+            end_utc = datetime.fromtimestamp(hi, tz=timezone.utc)
+            enriched = _enrich_orders_for_range(session, start_utc, end_utc)
+            total_dur = sum(
+                ((s.get("end_time") or s.get("start_time", 0)) - s.get("start_time", 0)) / 3600
+                for s in week_streams
+            )
+            return {
+                "label": start_utc.strftime("%b %d") + " - " + end_utc.strftime("%b %d"),
+                "stream_count": len(week_streams),
+                "gmv": enriched.get("gmv", 0),
+                "orders": enriched.get("paid_orders", 0),
+                "items": enriched.get("total_items", 0),
+                "customers": len(enriched.get("top_buyers", [])),
+                "duration_hours": round(total_dur, 1),
+                "revenue_per_hour": round(enriched.get("gmv", 0) / total_dur, 2) if total_dur > 0 else 0,
+                "top_sellers": enriched.get("top_sellers", [])[:5],
+                "top_buyers": enriched.get("top_buyers", [])[:5],
+            }
+
+        return {
+            "mode": "weekly",
+            "a": _aggregate_week(week_start, week_end),
+            "b": _aggregate_week(prev_start, prev_end),
+        }
+
+    def _build_stream_data(live_id: str) -> dict | None:
+        info = next((s for s in streams if s.get("id") == live_id), None)
+        if not info:
+            return None
+        start_ts = info.get("start_time") or 0
+        end_ts = info.get("end_time") or 0
+        start_utc = datetime.fromtimestamp(start_ts, tz=timezone.utc) if start_ts > 0 else None
+        end_utc = datetime.fromtimestamp(end_ts, tz=timezone.utc) if end_ts > 0 else None
+        enriched = _enrich_orders_for_range(session, start_utc, end_utc) if start_utc else {}
+        dur_hours = ((end_ts or start_ts) - start_ts) / 3600 if start_ts > 0 else 0
+        gmv = enriched.get("gmv", 0)
+        oc = enriched.get("paid_orders", 0)
+        return {
+            "live_id": live_id,
+            "title": info.get("title", ""),
+            "date": datetime.fromtimestamp(start_ts, tz=timezone.utc).strftime("%b %d, %Y") if start_ts > 0 else "",
+            "gmv": gmv,
+            "orders": oc,
+            "items": enriched.get("total_items", 0),
+            "customers": len(enriched.get("top_buyers", [])),
+            "duration_hours": round(dur_hours, 1),
+            "aov": round(gmv / oc, 2) if oc > 0 else 0,
+            "revenue_per_hour": round(gmv / dur_hours, 2) if dur_hours > 0 else 0,
+            "top_sellers": enriched.get("top_sellers", [])[:5],
+            "top_buyers": enriched.get("top_buyers", [])[:5],
+        }
+
+    if not stream_a and not stream_b:
+        if len(streams) >= 2:
+            stream_a = streams[0].get("id")
+            stream_b = streams[1].get("id")
+        elif len(streams) == 1:
+            stream_a = streams[0].get("id")
+
+    return {
+        "mode": "streams",
+        "a": _build_stream_data(stream_a) if stream_a else None,
+        "b": _build_stream_data(stream_b) if stream_b else None,
+        "available_streams": [{"id": s.get("id"), "title": s.get("title", ""), "start_time": s.get("start_time")} for s in streams[:20]],
+    }
+
+
 @app.get("/tiktok/streamer", response_class=HTMLResponse)
 def tiktok_streamer_page(
     request: Request,
@@ -8443,6 +8601,8 @@ def tiktok_streamer_page(
     ).all()
 
     cards = [_build_streamer_order_card(o) for o in orders]
+    buyer_totals = _compute_buyer_lifetime_totals(session)
+    _enrich_cards_with_buyer_totals(cards, buyer_totals)
 
     latest_updated_at = session.exec(select(func.max(TikTokOrder.updated_at))).one()
     latest_updated_at_text = None
@@ -8493,6 +8653,9 @@ def tiktok_streamer_page(
         "streamers": get_streamer_names(session),
         "platforms": PLATFORMS,
         "current_streamer": _get_default_streamer_for_tiktok(session) or "",
+        "gmv_goal": float(_get_app_setting(session, "stream_gmv_goal", "0") or "0"),
+        "high_value_threshold": float(_get_app_setting(session, "high_value_threshold", "100") or "100"),
+        "vip_buyer_threshold": float(_get_app_setting(session, "vip_buyer_threshold", "5000") or "5000"),
     })
 
 
@@ -8531,6 +8694,9 @@ def tiktok_streamer_poll(
 
     orders = session.exec(query).all()
     cards = [_build_streamer_order_card(o) for o in orders]
+    if cards:
+        buyer_totals = _compute_buyer_lifetime_totals(session)
+        _enrich_cards_with_buyer_totals(cards, buyer_totals)
 
     latest_updated_at = session.exec(select(func.max(TikTokOrder.updated_at))).one()
     latest_updated_at_text = None
@@ -8564,14 +8730,95 @@ def tiktok_streamer_poll(
         "stream_sessions": _get_live_sessions_list(),
         "is_live": _is_currently_live(),
         "build_version": _BUILD_VERSION,
+        "gmv_goal": float(_get_app_setting(session, "stream_gmv_goal", "0") or "0"),
+        "high_value_threshold": float(_get_app_setting(session, "high_value_threshold", "100") or "100"),
+        "vip_buyer_threshold": float(_get_app_setting(session, "vip_buyer_threshold", "5000") or "5000"),
+        "order_velocity": _compute_order_velocity(session),
+        "stream_end_utc": gmv_data.get("stream_end_utc"),
+        "stream_duration_minutes": _compute_stream_duration_minutes(gmv_data),
     }
 
 
+def _compute_order_velocity(session: Session) -> list[dict]:
+    """Compute per-minute order counts for the current stream window."""
+    start = _stream_range.get("start")
+    if not start:
+        return []
+    end_dt = _stream_range.get("end") or datetime.now(timezone.utc)
+    orders = session.exec(
+        select(TikTokOrder.created_at)
+        .where(TikTokOrder.created_at >= start, TikTokOrder.created_at <= end_dt)
+        .order_by(TikTokOrder.created_at)
+    ).all()
+    if not orders:
+        return []
+    buckets: dict[int, int] = {}
+    for ts in orders:
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        minute_key = int(ts.timestamp()) // 60
+        buckets[minute_key] = buckets.get(minute_key, 0) + 1
+    start_min = int(start.timestamp()) // 60
+    end_min = int(end_dt.timestamp()) // 60
+    result = []
+    for m in range(max(start_min, end_min - 59), end_min + 1):
+        result.append({"minute": m, "count": buckets.get(m, 0)})
+    return result
+
+
+def _compute_stream_duration_minutes(gmv_data: dict) -> float | None:
+    start_utc = gmv_data.get("stream_start_utc")
+    end_utc = gmv_data.get("stream_end_utc")
+    if not start_utc:
+        return None
+    try:
+        st = datetime.fromisoformat(start_utc) if isinstance(start_utc, str) else start_utc
+        if st.tzinfo is None:
+            st = st.replace(tzinfo=timezone.utc)
+        if end_utc:
+            et = datetime.fromisoformat(end_utc) if isinstance(end_utc, str) else end_utc
+            if et.tzinfo is None:
+                et = et.replace(tzinfo=timezone.utc)
+        else:
+            et = datetime.now(timezone.utc)
+        return round((et - st).total_seconds() / 60, 1)
+    except Exception:
+        return None
+
+
+@app.get("/tiktok/streamer/goal")
+def get_streamer_goal(request: Request, session: Session = Depends(get_session)):
+    if denial := require_role_response(request, "viewer"):
+        return denial
+    return {
+        "gmv_goal": float(_get_app_setting(session, "stream_gmv_goal", "0") or "0"),
+        "high_value_threshold": float(_get_app_setting(session, "high_value_threshold", "100") or "100"),
+        "vip_buyer_threshold": float(_get_app_setting(session, "vip_buyer_threshold", "5000") or "5000"),
+    }
+
+
+@app.post("/tiktok/streamer/goal")
+def set_streamer_goal(request: Request, session: Session = Depends(get_session), body: dict = None):
+    if denial := require_role_response(request, "viewer"):
+        return denial
+    if body is None:
+        body = {}
+    if "goal" in body:
+        _set_app_setting(session, "stream_gmv_goal", str(float(body["goal"])))
+    if "high_value_threshold" in body:
+        _set_app_setting(session, "high_value_threshold", str(float(body["high_value_threshold"])))
+    if "vip_buyer_threshold" in body:
+        _set_app_setting(session, "vip_buyer_threshold", str(float(body["vip_buyer_threshold"])))
+    return {"ok": True}
+
+
 @app.get("/tiktok/streamer/config", response_class=HTMLResponse)
-def tiktok_streamer_config(request: Request):
+def tiktok_streamer_config(request: Request, session: Session = Depends(get_session)):
     """Backend page to configure the stream date range shown on the streamer dashboard."""
     if denial := require_role_response(request, "admin"):
         return denial
+    current_goal = float(_get_app_setting(session, "stream_gmv_goal", "0") or "0")
+    current_threshold = float(_get_app_setting(session, "high_value_threshold", "100") or "100")
     s = _stream_range["start"]
     e = _stream_range["end"]
     start_val = s.astimezone(PACIFIC_TZ).strftime("%Y-%m-%dT%H:%M") if s else ""
@@ -8655,6 +8902,17 @@ def tiktok_streamer_config(request: Request):
     <button class="btn-clear" onclick="clearRange()">Clear</button>
   </div>
   <div class="status" id="status"></div>
+  <hr>
+  <label>Stream GMV Goal ($)</label>
+  <input class="fp-input" id="gmv-goal" type="number" min="0" step="100" value="{current_goal:.0f}" placeholder="e.g. 5000" style="cursor:text;">
+  <label>High-Value Order Threshold ($)</label>
+  <input class="fp-input" id="hv-threshold" type="number" min="0" step="10" value="{current_threshold:.0f}" placeholder="e.g. 100" style="cursor:text;">
+  <label>VIP Buyer Lifetime Spend Threshold ($)</label>
+  <input class="fp-input" id="vip-threshold" type="number" min="0" step="500" value="{float(_get_app_setting(session, 'vip_buyer_threshold', '5000') or '5000'):.0f}" placeholder="e.g. 5000" style="cursor:text;">
+  <div class="row">
+    <button style="background:#6366f1;color:#fff;" onclick="saveGoalSettings()">Save Goal Settings</button>
+  </div>
+  <div class="status" id="goal-status"></div>
   <p style="margin-top:24px;font-size:12px;text-align:center;">
     <a href="/tiktok/streamer">&larr; Back to Streamer Dashboard</a>
   </p>
@@ -8706,6 +8964,22 @@ function useAuto() {{
     .then(function(d) {{
       if (d.ok) {{ flash('Switched to auto mode!', true); setTimeout(function(){{ location.reload(); }}, 1000); }}
       else {{ flash('Error switching to auto', false); }}
+    }});
+}}
+function saveGoalSettings() {{
+  var goal = parseFloat(document.getElementById('gmv-goal').value) || 0;
+  var threshold = parseFloat(document.getElementById('hv-threshold').value) || 100;
+  var vipThreshold = parseFloat(document.getElementById('vip-threshold').value) || 5000;
+  fetch('/tiktok/streamer/goal', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{ goal: goal, high_value_threshold: threshold, vip_buyer_threshold: vipThreshold }}) }})
+    .then(function(r) {{ return r.json(); }})
+    .then(function(d) {{
+      var el = document.getElementById('goal-status');
+      el.textContent = 'Saved!';
+      el.style.color = '#22c55e';
+      el.style.background = 'rgba(34,197,94,.1)';
+      el.style.display = 'block';
+      setTimeout(function() {{ el.style.display = 'none'; }}, 3000);
     }});
 }}
 </script>

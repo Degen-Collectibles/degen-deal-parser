@@ -119,6 +119,56 @@
 
         /* Scrollable table */
         .table-wrap { overflow-x: auto; }
+
+        /* Data tables (buyers, products) */
+        .data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        .data-table th { text-align: left; font-size: 10px; text-transform: uppercase;
+            letter-spacing: .08em; color: var(--text-muted); padding: 8px 10px;
+            border-bottom: 1px solid var(--border); font-weight: 700; cursor: pointer;
+            user-select: none; white-space: nowrap; }
+        .data-table th:hover { color: var(--text-secondary); }
+        .data-table th .sort-arrow { font-size: 9px; margin-left: 3px; }
+        .data-table td { padding: 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+        .data-table tr:hover { background: var(--bg-card-hover); }
+        .repeat-badge {
+            display: inline-block; font-size: 9px; font-weight: 800;
+            text-transform: uppercase; letter-spacing: .06em;
+            background: rgba(37,244,238,.12); color: var(--tiktok-cyan);
+            padding: 2px 7px; border-radius: 6px; margin-left: 6px;
+        }
+        .pct-bar-wrap { display: flex; align-items: center; gap: 4px; }
+        .pct-bar { height: 6px; border-radius: 4px; }
+        .pct-bar.live { background: var(--green); }
+        .pct-bar.nonlive { background: var(--text-muted); }
+
+        /* Compare cards */
+        .compare-picker { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+        .compare-picker select {
+            background: var(--bg); border: 1px solid var(--border); color: var(--text);
+            padding: 8px 12px; border-radius: 8px; font-size: 13px; font-weight: 600;
+            max-width: 300px;
+        }
+        .compare-picker .vs-label { font-size: 14px; font-weight: 800; color: var(--text-muted); }
+        .compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        @media (max-width: 700px) { .compare-grid { grid-template-columns: 1fr; } }
+        .compare-card { background: rgba(255,255,255,.02); border-radius: 14px; padding: 20px; }
+        .compare-card h3 { font-size: 14px; font-weight: 700; margin-bottom: 12px; color: var(--text-secondary); }
+        .compare-row { display: flex; justify-content: space-between; padding: 6px 0;
+            border-bottom: 1px solid rgba(255,255,255,.04); font-size: 13px; }
+        .compare-row .cl { color: var(--text-muted); }
+        .compare-row .cv { font-weight: 700; }
+        .delta-pill {
+            display: inline-block; font-size: 10px; font-weight: 700; padding: 1px 6px;
+            border-radius: 4px; margin-left: 6px;
+        }
+        .delta-pill.up { background: rgba(62,207,142,.15); color: var(--green); }
+        .delta-pill.down { background: rgba(239,68,68,.15); color: var(--red); }
+        .compare-presets { display: flex; gap: 8px; margin-bottom: 12px; }
+        .preset-btn { background: var(--bg-card); border: 1px solid var(--border);
+            color: var(--text-secondary); padding: 5px 12px; border-radius: 8px;
+            cursor: pointer; font-size: 11px; font-weight: 600; transition: all .15s; }
+        .preset-btn:hover { border-color: var(--text-muted); color: var(--text); }
+        .preset-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
     </style>
 </head>
 <body>
@@ -149,7 +199,7 @@
     <!-- Daily Trend Chart -->
     <div class="section">
         <div class="section-title">Daily GMV Trend</div>
-        <div class="days-picker">
+        <div class="days-picker" id="daily-days-picker">
             <button class="days-btn" data-days="7">7d</button>
             <button class="days-btn active" data-days="30">30d</button>
             <button class="days-btn" data-days="60">60d</button>
@@ -204,6 +254,82 @@
         <div style="margin-top:20px;">
             <div class="section-title" style="font-size:14px;">Top Buyers</div>
             <ul class="lb-list" id="detail-top-buyers"></ul>
+        </div>
+    </div>
+
+    <!-- Top Buyers (Repeat Tracking) -->
+    <div class="section" id="buyers-section">
+        <div class="section-title">Top Buyers <span class="badge" id="buyers-count">0</span></div>
+        <div class="days-picker" id="buyers-days-picker">
+            <button class="days-btn" data-days="7">7d</button>
+            <button class="days-btn" data-days="30">30d</button>
+            <button class="days-btn active" data-days="90">90d</button>
+        </div>
+        <div class="loading" id="buyers-loading"><span class="spinner"></span>Loading buyer data...</div>
+        <div class="table-wrap">
+            <table class="data-table" id="buyers-table" style="display:none;">
+                <thead>
+                    <tr>
+                        <th data-col="name">Customer</th>
+                        <th data-col="total_spent">Total Spent</th>
+                        <th data-col="order_count">Orders</th>
+                        <th data-col="stream_count">Streams</th>
+                        <th data-col="avg_order">Avg Order</th>
+                        <th data-col="first_order">First Seen</th>
+                        <th data-col="last_order">Last Seen</th>
+                    </tr>
+                </thead>
+                <tbody id="buyers-tbody"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Product Performance -->
+    <div class="section" id="products-section">
+        <div class="section-title">Product Performance <span class="badge" id="products-count">0</span></div>
+        <div class="days-picker" id="products-days-picker">
+            <button class="days-btn" data-days="7">7d</button>
+            <button class="days-btn active" data-days="30">30d</button>
+            <button class="days-btn" data-days="60">60d</button>
+        </div>
+        <div class="loading" id="products-loading"><span class="spinner"></span>Loading product data...</div>
+        <div class="table-wrap">
+            <table class="data-table" id="products-table" style="display:none;">
+                <thead>
+                    <tr>
+                        <th data-col="title">Product</th>
+                        <th data-col="revenue">Revenue</th>
+                        <th data-col="qty">Qty Sold</th>
+                        <th data-col="orders">Orders</th>
+                        <th data-col="avg_price">Avg Price</th>
+                        <th data-col="live_pct">Live %</th>
+                        <th data-col="nonlive_pct">Non-Live %</th>
+                    </tr>
+                </thead>
+                <tbody id="products-tbody"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Stream Comparison -->
+    <div class="section" id="compare-section">
+        <div class="section-title">Stream Comparison</div>
+        <div class="compare-presets" id="compare-presets">
+            <button class="preset-btn active" data-mode="streams">Pick Streams</button>
+            <button class="preset-btn" data-mode="weekly">Week vs Week</button>
+        </div>
+        <div class="compare-picker" id="compare-picker">
+            <select id="compare-a"></select>
+            <span class="vs-label">vs</span>
+            <select id="compare-b"></select>
+            <button class="days-btn" id="compare-go" style="margin-left:8px;">Compare</button>
+        </div>
+        <div class="loading" id="compare-loading" style="display:none;"><span class="spinner"></span>Comparing...</div>
+        <div class="compare-grid" id="compare-grid" style="display:none;"></div>
+        <div style="margin-top:16px;">
+            <div class="chart-wrap-sm" id="compare-chart-wrap" style="display:none;">
+                <canvas id="compare-chart"></canvas>
+            </div>
         </div>
     </div>
 </div>
@@ -524,9 +650,11 @@
         });
     }
 
-    /* Days picker */
-    document.querySelectorAll('.days-btn').forEach(function(b) {
+    /* Days picker (daily chart only) */
+    document.querySelectorAll('#daily-days-picker .days-btn').forEach(function(b) {
         b.addEventListener('click', function() {
+            document.querySelectorAll('#daily-days-picker .days-btn').forEach(function(x) { x.classList.remove('active'); });
+            b.classList.add('active');
             loadDaily(parseInt(b.dataset.days));
             loadStreams();
         });
@@ -535,6 +663,234 @@
     /* Init */
     loadDaily(30);
     loadStreams();
+
+    /* =========================================================
+       Feature 5: Repeat Buyer Tracking
+       ========================================================= */
+    var _buyersDays = 90;
+    var _buyersData = [];
+    var _buyersSortCol = 'total_spent';
+    var _buyersSortAsc = false;
+
+    function loadBuyers(days) {
+        _buyersDays = days;
+        document.getElementById('buyers-loading').style.display = '';
+        document.getElementById('buyers-table').style.display = 'none';
+        fetch('/tiktok/analytics/api/buyers?days=' + days)
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                _buyersData = data.buyers || [];
+                document.getElementById('buyers-count').textContent = _buyersData.length;
+                document.getElementById('buyers-loading').style.display = 'none';
+                document.getElementById('buyers-table').style.display = '';
+                renderBuyers();
+            })
+            .catch(function() { document.getElementById('buyers-loading').innerHTML = 'Failed to load buyer data.'; });
+    }
+    function renderBuyers() {
+        var sorted = _buyersData.slice().sort(function(a, b) {
+            var va = a[_buyersSortCol], vb = b[_buyersSortCol];
+            if (typeof va === 'string') va = va.toLowerCase();
+            if (typeof vb === 'string') vb = vb.toLowerCase();
+            if (va < vb) return _buyersSortAsc ? -1 : 1;
+            if (va > vb) return _buyersSortAsc ? 1 : -1;
+            return 0;
+        });
+        var html = sorted.map(function(b) {
+            var repeat = b.is_repeat ? '<span class="repeat-badge">Repeat</span>' : '';
+            var first = b.first_order ? new Date(b.first_order).toLocaleDateString('en-US', {month:'short',day:'numeric'}) : '--';
+            var last = b.last_order ? new Date(b.last_order).toLocaleDateString('en-US', {month:'short',day:'numeric'}) : '--';
+            return '<tr>' +
+                '<td>' + escHtml(b.name) + repeat + '</td>' +
+                '<td style="font-weight:700;color:var(--green);">' + fmtGmv(b.total_spent) + '</td>' +
+                '<td>' + b.order_count + '</td>' +
+                '<td>' + b.stream_count + '</td>' +
+                '<td>' + fmtGmv(b.avg_order) + '</td>' +
+                '<td style="color:var(--text-muted);font-size:12px;">' + first + '</td>' +
+                '<td style="color:var(--text-muted);font-size:12px;">' + last + '</td>' +
+                '</tr>';
+        }).join('');
+        document.getElementById('buyers-tbody').innerHTML = html;
+    }
+    document.querySelectorAll('#buyers-table th').forEach(function(th) {
+        th.addEventListener('click', function() {
+            var col = th.dataset.col;
+            if (_buyersSortCol === col) _buyersSortAsc = !_buyersSortAsc;
+            else { _buyersSortCol = col; _buyersSortAsc = false; }
+            renderBuyers();
+        });
+    });
+    document.querySelectorAll('#buyers-days-picker .days-btn').forEach(function(b) {
+        b.addEventListener('click', function() {
+            document.querySelectorAll('#buyers-days-picker .days-btn').forEach(function(x) { x.classList.remove('active'); });
+            b.classList.add('active');
+            loadBuyers(parseInt(b.dataset.days));
+        });
+    });
+    loadBuyers(90);
+
+    /* =========================================================
+       Feature 6: Product Performance
+       ========================================================= */
+    var _productsDays = 30;
+    var _productsData = [];
+    var _productsSortCol = 'revenue';
+    var _productsSortAsc = false;
+
+    function loadProducts(days) {
+        _productsDays = days;
+        document.getElementById('products-loading').style.display = '';
+        document.getElementById('products-table').style.display = 'none';
+        fetch('/tiktok/analytics/api/products?days=' + days)
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                _productsData = data.products || [];
+                document.getElementById('products-count').textContent = _productsData.length;
+                document.getElementById('products-loading').style.display = 'none';
+                document.getElementById('products-table').style.display = '';
+                renderProducts();
+            })
+            .catch(function() { document.getElementById('products-loading').innerHTML = 'Failed to load product data.'; });
+    }
+    function renderProducts() {
+        var sorted = _productsData.slice().sort(function(a, b) {
+            var va = a[_productsSortCol], vb = b[_productsSortCol];
+            if (typeof va === 'string') va = va.toLowerCase();
+            if (typeof vb === 'string') vb = vb.toLowerCase();
+            if (va < vb) return _productsSortAsc ? -1 : 1;
+            if (va > vb) return _productsSortAsc ? 1 : -1;
+            return 0;
+        });
+        var html = sorted.map(function(p) {
+            var maxPct = Math.max(p.live_pct, p.nonlive_pct, 1);
+            return '<tr>' +
+                '<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escHtml(p.title) + '</td>' +
+                '<td style="font-weight:700;color:var(--green);">' + fmtGmv(p.revenue) + '</td>' +
+                '<td>' + p.qty + '</td>' +
+                '<td>' + p.orders + '</td>' +
+                '<td>' + fmtGmv(p.avg_price) + '</td>' +
+                '<td><div class="pct-bar-wrap"><span class="pct-bar live" style="width:' + Math.max(p.live_pct, 2) + 'px;"></span> ' + p.live_pct + '%</div></td>' +
+                '<td><div class="pct-bar-wrap"><span class="pct-bar nonlive" style="width:' + Math.max(p.nonlive_pct, 2) + 'px;"></span> ' + p.nonlive_pct + '%</div></td>' +
+                '</tr>';
+        }).join('');
+        document.getElementById('products-tbody').innerHTML = html;
+    }
+    document.querySelectorAll('#products-table th').forEach(function(th) {
+        th.addEventListener('click', function() {
+            var col = th.dataset.col;
+            if (_productsSortCol === col) _productsSortAsc = !_productsSortAsc;
+            else { _productsSortCol = col; _productsSortAsc = false; }
+            renderProducts();
+        });
+    });
+    document.querySelectorAll('#products-days-picker .days-btn').forEach(function(b) {
+        b.addEventListener('click', function() {
+            document.querySelectorAll('#products-days-picker .days-btn').forEach(function(x) { x.classList.remove('active'); });
+            b.classList.add('active');
+            loadProducts(parseInt(b.dataset.days));
+        });
+    });
+    loadProducts(30);
+
+    /* =========================================================
+       Feature 7: Stream Comparison
+       ========================================================= */
+    var _compareMode = 'streams';
+    var _compareChart = null;
+
+    function populateCompareSelects() {
+        fetch('/tiktok/analytics/api/compare')
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                var avail = data.available_streams || [];
+                var optHtml = avail.map(function(s) {
+                    var label = (s.title || 'Stream') + ' (' + fmtDate(s.start_time) + ')';
+                    return '<option value="' + s.id + '">' + escHtml(label) + '</option>';
+                }).join('');
+                document.getElementById('compare-a').innerHTML = optHtml;
+                document.getElementById('compare-b').innerHTML = optHtml;
+                if (avail.length >= 2) {
+                    document.getElementById('compare-a').value = avail[0].id;
+                    document.getElementById('compare-b').value = avail[1].id;
+                }
+                if (data.a && data.b) renderComparison(data);
+            });
+    }
+
+    function doCompare() {
+        var loading = document.getElementById('compare-loading');
+        loading.style.display = '';
+        document.getElementById('compare-grid').style.display = 'none';
+        document.getElementById('compare-chart-wrap').style.display = 'none';
+        var url;
+        if (_compareMode === 'weekly') {
+            url = '/tiktok/analytics/api/compare?mode=weekly';
+        } else {
+            var a = document.getElementById('compare-a').value;
+            var b = document.getElementById('compare-b').value;
+            url = '/tiktok/analytics/api/compare?stream_a=' + encodeURIComponent(a) + '&stream_b=' + encodeURIComponent(b);
+        }
+        fetch(url)
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                loading.style.display = 'none';
+                renderComparison(data);
+            })
+            .catch(function() { loading.innerHTML = 'Failed to load comparison.'; });
+    }
+
+    function deltaPill(a, b) {
+        if (!a || !b || b === 0) return '';
+        var pct = ((a - b) / Math.abs(b) * 100).toFixed(0);
+        var cls = a >= b ? 'up' : 'down';
+        var arrow = a >= b ? '&#9650;' : '&#9660;';
+        return '<span class="delta-pill ' + cls + '">' + arrow + ' ' + Math.abs(pct) + '%</span>';
+    }
+
+    function renderCompareCard(d, other, label) {
+        if (!d) return '<div class="compare-card"><p style="color:var(--text-muted);">No data</p></div>';
+        var title = d.title || d.label || label;
+        var rows = [
+            ['GMV', fmtGmv(d.gmv || 0), deltaPill(d.gmv, other ? other.gmv : null)],
+            ['Orders', (d.orders || 0).toString(), deltaPill(d.orders, other ? other.orders : null)],
+            ['Items', (d.items || 0).toString(), deltaPill(d.items, other ? other.items : null)],
+            ['Customers', (d.customers || 0).toString(), deltaPill(d.customers, other ? other.customers : null)],
+            ['Duration', d.duration_hours ? d.duration_hours + 'h' : '--', ''],
+            ['AOV', d.aov ? fmtGmv(d.aov) : '--', deltaPill(d.aov, other ? other.aov : null)],
+            ['$/hr', d.revenue_per_hour ? fmtGmv(d.revenue_per_hour) : '--', deltaPill(d.revenue_per_hour, other ? other.revenue_per_hour : null)],
+        ];
+        var rhtml = rows.map(function(r) {
+            return '<div class="compare-row"><span class="cl">' + r[0] + '</span><span class="cv">' + r[1] + ' ' + r[2] + '</span></div>';
+        }).join('');
+        var sellersHtml = '';
+        if (d.top_sellers && d.top_sellers.length > 0) {
+            sellersHtml = '<div style="margin-top:12px;"><div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--text-muted);margin-bottom:6px;">Top Sellers</div>';
+            d.top_sellers.slice(0, 3).forEach(function(s) {
+                sellersHtml += '<div style="font-size:12px;color:var(--text-secondary);margin-bottom:3px;">' + escHtml(s.title || s.name || '') + ' — <strong style="color:var(--green);">' + fmtGmv(s.revenue || s.total || 0) + '</strong></div>';
+            });
+            sellersHtml += '</div>';
+        }
+        return '<div class="compare-card"><h3>' + escHtml(title) + (d.date ? ' <span style="font-size:11px;color:var(--text-muted);">(' + d.date + ')</span>' : '') + '</h3>' + rhtml + sellersHtml + '</div>';
+    }
+
+    function renderComparison(data) {
+        var grid = document.getElementById('compare-grid');
+        grid.style.display = 'grid';
+        grid.innerHTML = renderCompareCard(data.a, data.b, 'Stream A') + renderCompareCard(data.b, data.a, 'Stream B');
+    }
+
+    document.getElementById('compare-go').addEventListener('click', doCompare);
+    document.querySelectorAll('#compare-presets .preset-btn').forEach(function(b) {
+        b.addEventListener('click', function() {
+            document.querySelectorAll('#compare-presets .preset-btn').forEach(function(x) { x.classList.remove('active'); });
+            b.classList.add('active');
+            _compareMode = b.dataset.mode;
+            var picker = document.getElementById('compare-picker');
+            picker.style.display = _compareMode === 'weekly' ? 'none' : 'flex';
+            doCompare();
+        });
+    });
+    populateCompareSelects();
 })();
 </script>
 </body>
