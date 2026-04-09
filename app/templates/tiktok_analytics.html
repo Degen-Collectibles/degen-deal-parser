@@ -119,6 +119,12 @@
 
         /* Scrollable table */
         .table-wrap { overflow-x: auto; }
+        .table-scroll { max-height: 620px; overflow-y: auto; }
+        .table-scroll::-webkit-scrollbar { width: 6px; }
+        .table-scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,.15); border-radius: 3px; }
+        .table-scroll::-webkit-scrollbar-track { background: transparent; }
+        .show-more-btn { display:block; margin:10px auto 0; padding:6px 20px; background:rgba(255,255,255,.08); color:var(--text-muted); border:1px solid rgba(255,255,255,.12); border-radius:6px; cursor:pointer; font-size:12px; transition:all .15s; }
+        .show-more-btn:hover { background:rgba(255,255,255,.14); color:#fff; }
 
         /* Data tables (buyers, products) */
         .data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -267,20 +273,23 @@
         </div>
         <div class="loading" id="buyers-loading"><span class="spinner"></span>Loading buyer data...</div>
         <div class="table-wrap">
-            <table class="data-table" id="buyers-table" style="display:none;">
-                <thead>
-                    <tr>
-                        <th data-col="name">Customer</th>
-                        <th data-col="total_spent">Total Spent</th>
-                        <th data-col="order_count">Orders</th>
-                        <th data-col="stream_count">Streams</th>
-                        <th data-col="avg_order">Avg Order</th>
-                        <th data-col="first_order">First Seen</th>
-                        <th data-col="last_order">Last Seen</th>
-                    </tr>
-                </thead>
-                <tbody id="buyers-tbody"></tbody>
-            </table>
+            <div class="table-scroll" id="buyers-scroll">
+                <table class="data-table" id="buyers-table" style="display:none;">
+                    <thead>
+                        <tr>
+                            <th data-col="name">Customer</th>
+                            <th data-col="total_spent">Total Spent</th>
+                            <th data-col="order_count">Orders</th>
+                            <th data-col="stream_count">Streams</th>
+                            <th data-col="avg_order">Avg Order</th>
+                            <th data-col="first_order">First Seen</th>
+                            <th data-col="last_order">Last Seen</th>
+                        </tr>
+                    </thead>
+                    <tbody id="buyers-tbody"></tbody>
+                </table>
+            </div>
+            <button class="show-more-btn" id="buyers-show-more" style="display:none;"></button>
         </div>
     </div>
 
@@ -294,20 +303,23 @@
         </div>
         <div class="loading" id="products-loading"><span class="spinner"></span>Loading product data...</div>
         <div class="table-wrap">
-            <table class="data-table" id="products-table" style="display:none;">
-                <thead>
-                    <tr>
-                        <th data-col="title">Product</th>
-                        <th data-col="revenue">Revenue</th>
-                        <th data-col="qty">Qty Sold</th>
-                        <th data-col="orders">Orders</th>
-                        <th data-col="avg_price">Avg Price</th>
-                        <th data-col="live_pct">Live %</th>
-                        <th data-col="nonlive_pct">Non-Live %</th>
-                    </tr>
-                </thead>
-                <tbody id="products-tbody"></tbody>
-            </table>
+            <div class="table-scroll" id="products-scroll">
+                <table class="data-table" id="products-table" style="display:none;">
+                    <thead>
+                        <tr>
+                            <th data-col="title">Product</th>
+                            <th data-col="revenue">Revenue</th>
+                            <th data-col="qty">Qty Sold</th>
+                            <th data-col="orders">Orders</th>
+                            <th data-col="avg_price">Avg Price</th>
+                            <th data-col="live_pct">Live %</th>
+                            <th data-col="nonlive_pct">Non-Live %</th>
+                        </tr>
+                    </thead>
+                    <tbody id="products-tbody"></tbody>
+                </table>
+            </div>
+            <button class="show-more-btn" id="products-show-more" style="display:none;"></button>
         </div>
     </div>
 
@@ -671,9 +683,12 @@
     var _buyersData = [];
     var _buyersSortCol = 'total_spent';
     var _buyersSortAsc = false;
+    var _buyersLimit = 20;
+    var _buyersShowAll = false;
 
     function loadBuyers(days) {
         _buyersDays = days;
+        _buyersShowAll = false;
         document.getElementById('buyers-loading').style.display = '';
         document.getElementById('buyers-table').style.display = 'none';
         fetch('/tiktok/analytics/api/buyers?days=' + days)
@@ -696,7 +711,8 @@
             if (va > vb) return _buyersSortAsc ? 1 : -1;
             return 0;
         });
-        var html = sorted.map(function(b) {
+        var visible = _buyersShowAll ? sorted : sorted.slice(0, _buyersLimit);
+        var html = visible.map(function(b) {
             var repeat = b.is_repeat ? '<span class="repeat-badge">Repeat</span>' : '';
             var first = b.first_order ? new Date(b.first_order).toLocaleDateString('en-US', {month:'short',day:'numeric'}) : '--';
             var last = b.last_order ? new Date(b.last_order).toLocaleDateString('en-US', {month:'short',day:'numeric'}) : '--';
@@ -711,7 +727,21 @@
                 '</tr>';
         }).join('');
         document.getElementById('buyers-tbody').innerHTML = html;
+        var btn = document.getElementById('buyers-show-more');
+        if (sorted.length > _buyersLimit) {
+            btn.style.display = '';
+            btn.textContent = _buyersShowAll
+                ? 'Show Top ' + _buyersLimit + ' \u25B2'
+                : 'Show All ' + sorted.length + ' Buyers \u25BC';
+        } else {
+            btn.style.display = 'none';
+        }
     }
+    document.getElementById('buyers-show-more').addEventListener('click', function() {
+        _buyersShowAll = !_buyersShowAll;
+        renderBuyers();
+        if (!_buyersShowAll) document.getElementById('buyers-scroll').scrollTop = 0;
+    });
     document.querySelectorAll('#buyers-table th').forEach(function(th) {
         th.addEventListener('click', function() {
             var col = th.dataset.col;
@@ -736,9 +766,12 @@
     var _productsData = [];
     var _productsSortCol = 'revenue';
     var _productsSortAsc = false;
+    var _productsLimit = 20;
+    var _productsShowAll = false;
 
     function loadProducts(days) {
         _productsDays = days;
+        _productsShowAll = false;
         document.getElementById('products-loading').style.display = '';
         document.getElementById('products-table').style.display = 'none';
         fetch('/tiktok/analytics/api/products?days=' + days)
@@ -761,7 +794,8 @@
             if (va > vb) return _productsSortAsc ? 1 : -1;
             return 0;
         });
-        var html = sorted.map(function(p) {
+        var visible = _productsShowAll ? sorted : sorted.slice(0, _productsLimit);
+        var html = visible.map(function(p) {
             var maxPct = Math.max(p.live_pct, p.nonlive_pct, 1);
             return '<tr>' +
                 '<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escHtml(p.title) + '</td>' +
@@ -774,7 +808,21 @@
                 '</tr>';
         }).join('');
         document.getElementById('products-tbody').innerHTML = html;
+        var btn = document.getElementById('products-show-more');
+        if (sorted.length > _productsLimit) {
+            btn.style.display = '';
+            btn.textContent = _productsShowAll
+                ? 'Show Top ' + _productsLimit + ' \u25B2'
+                : 'Show All ' + sorted.length + ' Products \u25BC';
+        } else {
+            btn.style.display = 'none';
+        }
     }
+    document.getElementById('products-show-more').addEventListener('click', function() {
+        _productsShowAll = !_productsShowAll;
+        renderProducts();
+        if (!_productsShowAll) document.getElementById('products-scroll').scrollTop = 0;
+    });
     document.querySelectorAll('#products-table th').forEach(function(th) {
         th.addEventListener('click', function() {
             var col = th.dataset.col;
