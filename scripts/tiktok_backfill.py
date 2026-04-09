@@ -1862,6 +1862,7 @@ def backfill_tiktok_orders(
                 break
             if not cursor:
                 break
+            time.sleep(0.5)
 
     return summary
 

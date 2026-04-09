@@ -47,7 +47,7 @@ connect_args = {"check_same_thread": False} if database_url.startswith("sqlite")
     "keepalives_interval": 10,
     "keepalives_count": 5,
     "application_name": "degen-live-parser",
-    "options": "-c timezone=UTC",
+    "options": "-c timezone=UTC -c statement_timeout=120000",
 }
 
 if database_url.startswith("sqlite"):
@@ -55,7 +55,7 @@ if database_url.startswith("sqlite"):
     _pool_kwargs: dict = {}
 else:
     _poolclass = QueuePool
-    _pool_kwargs = {"pool_size": 5, "max_overflow": 10}
+    _pool_kwargs = {"pool_size": 5, "max_overflow": 10, "pool_timeout": 30, "pool_recycle": 600}
 
 engine_kwargs = {
     "echo": False,

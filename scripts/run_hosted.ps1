@@ -6,6 +6,9 @@ $workerScript = Join-Path $PSScriptRoot "run_hosted_worker.ps1"
 $healthUrl = "http://127.0.0.1:8000/health"
 $maxRestarts = 20
 $restartCooldownSeconds = 15
+$livenessCheckIntervalSeconds = 60
+$livenessTimeoutSeconds = 15
+$livenessFailuresBeforeRestart = 3
 
 function Wait-ForHealth {
     param(
@@ -66,11 +69,24 @@ Write-Host "Press Ctrl+C in this window to stop both processes."
 
 $webRestarts = 0
 $workerRestarts = 0
+$consecutiveLivenessFailures = 0
+$lastLivenessCheck = [DateTime]::MinValue
+
+function Test-Liveness {
+    param([string]$Url, [int]$TimeoutSeconds = 15)
+    try {
+        $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec $TimeoutSeconds
+        return ($response.StatusCode -ge 200 -and $response.StatusCode -lt 500)
+    } catch {
+        return $false
+    }
+}
 
 try {
     while ($true) {
         if ($webProcess.HasExited) {
             $webRestarts++
+            $consecutiveLivenessFailures = 0
             Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Web process crashed (restart $webRestarts/$maxRestarts)"
             if ($webRestarts -ge $maxRestarts) {
                 throw "Web process exceeded max restarts ($maxRestarts)."
@@ -82,6 +98,34 @@ try {
             }
             Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Web process recovered."
         }
+
+        # Liveness check: detect hung process (alive but not responding)
+        $now = Get-Date
+        if ((-not $webProcess.HasExited) -and (($now - $lastLivenessCheck).TotalSeconds -ge $livenessCheckIntervalSeconds)) {
+            $lastLivenessCheck = $now
+            if (Test-Liveness -Url $healthUrl -TimeoutSeconds $livenessTimeoutSeconds) {
+                $consecutiveLivenessFailures = 0
+            } else {
+                $consecutiveLivenessFailures++
+                Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Liveness check failed ($consecutiveLivenessFailures/$livenessFailuresBeforeRestart)"
+                if ($consecutiveLivenessFailures -ge $livenessFailuresBeforeRestart) {
+                    Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Web process is hung — killing and restarting."
+                    try { Stop-Process -Id $webProcess.Id -Force } catch {}
+                    Start-Sleep -Seconds 3
+                    $webRestarts++
+                    $consecutiveLivenessFailures = 0
+                    if ($webRestarts -ge $maxRestarts) {
+                        throw "Web process exceeded max restarts ($maxRestarts)."
+                    }
+                    $webProcess = Start-WebProcess
+                    if (-not (Wait-ForHealth -Url $healthUrl -TimeoutSeconds 90)) {
+                        throw "Web process failed health check after restart."
+                    }
+                    Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Web process recovered from hang."
+                }
+            }
+        }
+
         if ($workerProcess.HasExited) {
             $workerRestarts++
             Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Worker process crashed (restart $workerRestarts/$maxRestarts)"
