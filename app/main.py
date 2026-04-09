@@ -6683,16 +6683,15 @@ async def tiktok_orders_webhook(request: Request):
         raise HTTPException(status_code=400, detail="Invalid TikTok webhook payload")
 
     if not sig_verified:
-        sig_debug_headers = {
-            k: v for k, v in request.headers.items()
-            if any(t in k.lower() for t in ("signature", "sign", "tiktok", "tt-", "authorization", "timestamp"))
-        }
+        all_headers = dict(request.headers.items())
         parsed_h = parse_tiktok_webhook_headers(request.headers)
         payload_ts = str(payload.get("timestamp") or "").strip() or None
+        header_ts = parsed_h.get("timestamp")
+        ts_for_candidates = header_ts or payload_ts
         candidates = _build_webhook_signature_candidates(
             raw_body=raw_body,
             app_secret=primary_secret,
-            received_timestamp=payload_ts,
+            received_timestamp=ts_for_candidates,
             request_path=str(request.url.path),
         )
         received_norm = parsed_h.get("signature", "").lower().strip()
@@ -6703,17 +6702,18 @@ async def tiktok_orders_webhook(request: Request):
         ) if received_norm else False
         import pathlib as _pathlib
         _capture_path = _pathlib.Path("logs/webhook_capture.json")
-        if not _capture_path.exists():
-            try:
-                _capture_path.write_text(json.dumps({
-                    "raw_body": raw_body.decode("utf-8", errors="replace"),
-                    "received_signature": received_norm,
-                    "request_path": str(request.url.path),
-                    "payload_timestamp": payload_ts,
-                    "headers": sig_debug_headers,
-                }, indent=2))
-            except Exception:
-                pass
+        try:
+            _capture_path.write_text(json.dumps({
+                "raw_body": raw_body.decode("utf-8", errors="replace"),
+                "received_signature": received_norm,
+                "parsed_header_signature": parsed_h.get("signature"),
+                "parsed_header_timestamp": header_ts,
+                "request_path": str(request.url.path),
+                "payload_timestamp": payload_ts,
+                "all_headers": all_headers,
+            }, indent=2))
+        except Exception:
+            pass
         print(
             structured_log_line(
                 runtime=runtime_name,
@@ -6723,8 +6723,9 @@ async def tiktok_orders_webhook(request: Request):
                 body_sha256=body_hash,
                 shop_id_matches=shop_id_matches,
                 payload_shop_id=payload_shop_id,
-                debug_headers=sig_debug_headers,
+                all_headers=all_headers,
                 received_sig=received_norm[:16] if received_norm else None,
+                header_timestamp=header_ts,
                 payload_timestamp=payload_ts,
                 candidate_digests=candidate_detail,
                 any_match=match_found,
