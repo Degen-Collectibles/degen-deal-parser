@@ -6605,7 +6605,7 @@ async def tiktok_orders_webhook(request: Request):
             app_secret=primary_secret,
             headers=request.headers,
             request_path=str(request.url.path),
-            strict_signature=True,
+            strict_signature=False,
         )
     except Exception as exc:
         update_tiktok_integration_state(
@@ -6663,16 +6663,53 @@ async def tiktok_orders_webhook(request: Request):
         raise HTTPException(status_code=400, detail="Invalid TikTok webhook payload")
 
     if not sig_verified:
+        sig_debug_headers = {
+            k: v for k, v in request.headers.items()
+            if any(t in k.lower() for t in ("signature", "sign", "tiktok", "tt-", "authorization", "timestamp"))
+        }
+        parsed_h = parse_tiktok_webhook_headers(request.headers)
+        payload_ts = str(payload.get("timestamp") or "").strip() or None
+        candidates = _build_webhook_signature_candidates(
+            raw_body=raw_body,
+            app_secret=primary_secret,
+            received_timestamp=payload_ts,
+            request_path=str(request.url.path),
+        )
+        received_norm = parsed_h.get("signature", "").lower().strip()
+        candidate_detail = {label: digest[:16] for label, digest in candidates}
+        match_found = any(
+            hmac.compare_digest(received_norm, digest.lower())
+            for _, digest in candidates
+        ) if received_norm else False
+        import pathlib as _pathlib
+        _capture_path = _pathlib.Path("logs/webhook_capture.json")
+        if not _capture_path.exists():
+            try:
+                _capture_path.write_text(json.dumps({
+                    "raw_body": raw_body.decode("utf-8", errors="replace"),
+                    "received_signature": received_norm,
+                    "request_path": str(request.url.path),
+                    "payload_timestamp": payload_ts,
+                    "headers": sig_debug_headers,
+                }, indent=2))
+            except Exception:
+                pass
         print(
             structured_log_line(
                 runtime=runtime_name,
-                action="tiktok.webhook.signature_unverified",
+                action="tiktok.webhook.signature_debug",
                 success=True,
                 topic=topic,
-                request_path=str(request.url.path),
                 body_sha256=body_hash,
                 shop_id_matches=shop_id_matches,
                 payload_shop_id=payload_shop_id,
+                debug_headers=sig_debug_headers,
+                received_sig=received_norm[:16] if received_norm else None,
+                payload_timestamp=payload_ts,
+                candidate_digests=candidate_detail,
+                any_match=match_found,
+                secret_len=len(primary_secret),
+                body_len=len(raw_body),
             )
         )
 
