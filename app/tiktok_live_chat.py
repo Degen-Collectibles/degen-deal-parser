@@ -22,13 +22,48 @@ _viewer_count: int = 0
 _room_id: Optional[str] = None
 _stop_requested = False
 
+_viewers: dict[str, dict] = {}  # username -> {"joined_at": float, "last_active_at": float}
+_viewers_lock = threading.Lock()
+_DEFAULT_PRESENCE_TIMEOUT = 1800  # 30 min default — configurable via AppSetting
+_DEFAULT_ACTIVE_THRESHOLD = 300   # 5 min — "chatting" vs "watching" boundary
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _viewer_join(user: str) -> None:
+    """Record that a user entered the stream."""
+    if not user or user == "???":
+        return
+    now = time.monotonic()
+    with _viewers_lock:
+        if user not in _viewers:
+            _viewers[user] = {"joined_at": now, "last_active_at": now}
+
+
+def _viewer_activity(user: str) -> None:
+    """Record chat/gift/like/etc activity from a user."""
+    if not user or user == "???":
+        return
+    now = time.monotonic()
+    with _viewers_lock:
+        entry = _viewers.get(user)
+        if entry:
+            entry["last_active_at"] = now
+        else:
+            _viewers[user] = {"joined_at": now, "last_active_at": now}
+
+
+def _clear_viewers() -> None:
+    """Clear all viewer presence — called when stream ends or chat disconnects."""
+    with _viewers_lock:
+        _viewers.clear()
+
+
 def _append_message(msg_type: str, user: str, text: str) -> None:
     global _msg_index
+    _viewer_activity(user)
     with _buffer_lock:
         _msg_index += 1
         _buffer.append({
@@ -108,6 +143,11 @@ async def start_live_chat(username: str, api_key: str) -> None:
         user = (data or {}).get("uniqueId", "???")
         _append_message("share", user, "shared the stream!")
 
+    def on_member(data):
+        user = (data or {}).get("uniqueId", "???")
+        _viewer_join(user)
+        _append_message("join", user, "joined")
+
     def on_room_user(data):
         global _viewer_count
         _viewer_count = int((data or {}).get("viewerCount", 0))
@@ -120,6 +160,7 @@ async def start_live_chat(username: str, api_key: str) -> None:
             _status = "stopped"
         else:
             _status = "disconnected"
+        _clear_viewers()
         print(f"[tiktok-live-chat] disconnected: {reason}")
 
     def on_error(data):
@@ -130,6 +171,7 @@ async def start_live_chat(username: str, api_key: str) -> None:
     def on_stream_end(data):
         global _status
         _status = "stream_ended"
+        _clear_viewers()
         print("[tiktok-live-chat] stream ended")
 
     client.on("connected", on_connected)
@@ -138,6 +180,7 @@ async def start_live_chat(username: str, api_key: str) -> None:
     client.on("follow", on_follow)
     client.on("like", on_like)
     client.on("share", on_share)
+    client.on("member", on_member)
     client.on("roomUser", on_room_user)
     client.on("disconnected", on_disconnected)
     client.on("error", on_error)
@@ -161,6 +204,7 @@ async def stop_live_chat() -> None:
             pass
         _client = None
     _status = "stopped"
+    _clear_viewers()
 
 
 def get_recent_messages(since_idx: int = 0) -> list[dict]:
@@ -171,6 +215,32 @@ def get_recent_messages(since_idx: int = 0) -> list[dict]:
 
 def get_room_id() -> Optional[str]:
     return _room_id
+
+
+def get_stream_viewers(
+    presence_timeout: float | None = None,
+    active_threshold: float | None = None,
+) -> list[dict]:
+    """Return viewers still considered present in the stream.
+
+    *presence_timeout* — seconds since last activity before a viewer is evicted
+        entirely (default 30 min).  Handles multi-day streams without bloat.
+    *active_threshold* — seconds since last interaction to show as "chatting"
+        vs "watching" (default 5 min).
+
+    Each entry: {"username": str, "active": bool}
+    """
+    now = time.monotonic()
+    gone_cutoff = now - (presence_timeout or _DEFAULT_PRESENCE_TIMEOUT)
+    active_cutoff = now - (active_threshold or _DEFAULT_ACTIVE_THRESHOLD)
+    with _viewers_lock:
+        expired = [u for u, info in _viewers.items() if info["last_active_at"] < gone_cutoff]
+        for u in expired:
+            del _viewers[u]
+        return [
+            {"username": user, "active": info["last_active_at"] >= active_cutoff}
+            for user, info in _viewers.items()
+        ]
 
 
 def get_chat_status() -> dict:

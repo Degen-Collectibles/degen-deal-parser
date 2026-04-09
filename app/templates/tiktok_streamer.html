@@ -982,6 +982,8 @@
         .chat-msg-user.is-follow { color: var(--tiktok-cyan); }
         .chat-msg-user.is-like { color: var(--accent); }
         .chat-msg-user.is-share { color: var(--green); }
+        .chat-msg-user.is-join { color: var(--text-muted); }
+        .chat-msg.is-join-msg { opacity: .55; font-size: 12px; }
         .chat-msg-text { color: var(--text-secondary); }
         .chat-msg-gift-icon { margin-right: 3px; }
         .chat-empty {
@@ -998,6 +1000,82 @@
         .chat-empty-icon { font-size: 36px; }
         .chat-empty-text { font-size: 13px; font-weight: 700; }
         .chat-empty-sub { font-size: 11px; }
+
+        /* ---- VIP Viewers In Chat ---- */
+        .vip-viewers-panel {
+            border-bottom: 1px solid var(--border);
+            padding: 8px 12px;
+            display: none;
+        }
+        .vip-viewers-panel.has-vips { display: block; animation: chat-fade-in .3s ease-out; }
+        .vip-viewers-label {
+            font-size: 9px;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: .1em;
+            color: #a78bfa;
+            margin-bottom: 6px;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        .vip-viewer-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 4px 10px;
+            border-radius: 999px;
+            font-size: 11px;
+            font-weight: 700;
+            background: rgba(167, 139, 250, .12);
+            border: 1px solid rgba(167, 139, 250, .25);
+            color: #c4b5fd;
+            margin: 0 4px 4px 0;
+            animation: vip-chip-in .35s cubic-bezier(.22, 1, .36, 1);
+            transition: opacity .3s, transform .3s;
+        }
+        .vip-viewer-chip.is-watching {
+            opacity: .55;
+            border-style: dashed;
+        }
+        .vip-viewer-chip.is-leaving {
+            opacity: 0;
+            transform: scale(.9);
+        }
+        .vip-viewer-status {
+            width: 6px; height: 6px;
+            border-radius: 50%;
+            background: #a78bfa;
+            flex-shrink: 0;
+        }
+        .vip-viewer-chip.is-watching .vip-viewer-status { background: var(--text-muted); }
+        .vip-viewer-spent {
+            font-size: 10px;
+            color: #a78bfa;
+            font-weight: 600;
+        }
+        @keyframes vip-chip-in {
+            from { opacity: 0; transform: translateY(-6px) scale(.92); }
+            to { opacity: 1; transform: none; }
+        }
+
+        /* ---- VIP badge on order rows ---- */
+        .vip-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+            padding: 2px 7px;
+            border-radius: 999px;
+            font-size: 9px;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: .06em;
+            background: rgba(167, 139, 250, .15);
+            border: 1px solid rgba(167, 139, 250, .3);
+            color: #c4b5fd;
+            margin-left: 5px;
+            vertical-align: middle;
+        }
 
         /* ---- Mobile bottom drawer ---- */
         .chat-drawer-toggle {
@@ -1435,6 +1513,10 @@
                 <span class="chat-header-title">Live Chat</span>
                 <span class="chat-viewer-count" id="chat-viewers-desktop"></span>
             </div>
+            <div class="vip-viewers-panel" id="vip-viewers-desktop">
+                <div class="vip-viewers-label">&#x1F451; VIP Buyers In Chat</div>
+                <div id="vip-viewers-chips-desktop"></div>
+            </div>
             <div class="chat-messages" id="chat-messages-desktop"></div>
         </div>
     </div>
@@ -1455,6 +1537,10 @@
             <span class="chat-status-dot" id="chat-dot-mobile"></span>
             <span class="chat-header-title">Live Chat</span>
             <span class="chat-viewer-count" id="chat-viewers-mobile"></span>
+        </div>
+        <div class="vip-viewers-panel" id="vip-viewers-mobile">
+            <div class="vip-viewers-label">&#x1F451; VIP Buyers In Chat</div>
+            <div id="vip-viewers-chips-mobile"></div>
         </div>
         <div class="chat-messages" id="chat-messages-mobile"></div>
     </div>
@@ -1863,8 +1949,10 @@
             html += '<div class="row-info">';
             html += '<div class="row-product-name">' + esc(productName) + '</div>';
             if (firstItem && firstItem.variant) html += '<div class="row-variant">' + esc(firstItem.variant) + '</div>';
+            var isVip = (order.buyer_lifetime_spent || 0) >= _vipBuyerThreshold && _vipBuyerThreshold > 0;
             html += '<div class="row-sub">';
             html += '<span class="row-customer">' + esc(order.customer_name || 'Guest') + '</span>';
+            if (isVip) html += '<span class="vip-badge">&#x1F451; VIP</span>';
             html += '<span class="row-last4">#' + esc(l4) + '</span>';
             html += '<span class="refund-badge">&#x26A0; ' + (refund ? refundLabel(order) : 'REFUND') + '</span>';
             html += '<button class="row-copy-btn" title="Copy label" data-label="' + escAttr(labelText(order)) + '" onclick="event.stopPropagation();window._copyRow(this)">&#x1F4CB;</button>';
@@ -2580,10 +2668,12 @@
 
         function renderChatMsg(msg) {
             var typeClass = 'is-' + (msg.type || 'chat');
-            var html = '<div class="chat-msg">';
+            var isJoin = msg.type === 'join';
+            var html = '<div class="chat-msg' + (isJoin ? ' is-join-msg' : '') + '">';
             if (msg.type === 'gift') html += '<span class="chat-msg-gift-icon">&#x1F48E;</span>';
+            if (isJoin) html += '<span class="chat-msg-gift-icon">&#x1F464;</span>';
             html += '<span class="chat-msg-user ' + typeClass + '">' + esc(msg.user) + '</span>';
-            html += '<span class="chat-msg-text">' + esc(msg.text) + '</span>';
+            html += '<span class="chat-msg-text">' + esc(isJoin ? 'just joined' : msg.text) + '</span>';
             html += '</div>';
             return html;
         }
@@ -2638,6 +2728,36 @@
             container.innerHTML = renderChatEmpty(status);
         }
 
+        /* ---- VIP Viewers in Chat ---- */
+        var vipDesktopPanel = document.getElementById('vip-viewers-desktop');
+        var vipMobilePanel = document.getElementById('vip-viewers-mobile');
+        var vipDesktopChips = document.getElementById('vip-viewers-chips-desktop');
+        var vipMobileChips = document.getElementById('vip-viewers-chips-mobile');
+
+        function renderVipChips(vips) {
+            if (!vips || vips.length === 0) return '';
+            var html = '';
+            vips.forEach(function(v) {
+                var cls = 'vip-viewer-chip' + (v.active ? '' : ' is-watching');
+                var statusTitle = v.active ? 'Chatting' : 'Watching';
+                html += '<span class="' + cls + '" title="' + statusTitle + '">'
+                    + '<span class="vip-viewer-status"></span>'
+                    + esc(v.username)
+                    + ' <span class="vip-viewer-spent">$' + v.lifetime_spent.toLocaleString() + '</span>'
+                    + '</span>';
+            });
+            return html;
+        }
+
+        function updateVipViewers(vips) {
+            var hasVips = vips && vips.length > 0;
+            var html = hasVips ? renderVipChips(vips) : '';
+            vipDesktopChips.innerHTML = html;
+            vipMobileChips.innerHTML = html;
+            vipDesktopPanel.classList.toggle('has-vips', hasVips);
+            vipMobilePanel.classList.toggle('has-vips', hasVips);
+        }
+
         async function pollChat() {
             if (document.hidden) return;
             try {
@@ -2648,6 +2768,7 @@
                 _chatStatus = data.status || _chatStatus;
                 updateChatDots(_chatStatus);
                 updateViewerCount(data.viewer_count || 0);
+                updateVipViewers(data.vip_in_chat || []);
 
                 if (data.latest_idx) _chatIdx = data.latest_idx;
 

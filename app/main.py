@@ -170,6 +170,7 @@ from .tiktok_live_chat import (
     get_chat_status,
     get_recent_messages as get_live_chat_messages,
     get_room_id as get_live_room_id,
+    get_stream_viewers,
     start_live_chat,
     stop_live_chat,
 )
@@ -7595,6 +7596,13 @@ def tiktok_orders_page(
             latest_updated_at = latest_updated_at.replace(tzinfo=timezone.utc)
         latest_updated_at_text = latest_updated_at.isoformat()
     orders = page_data["orders"]
+    vip_threshold = float(_get_app_setting(session, "vip_buyer_threshold", "5000") or "5000")
+    buyer_totals = _compute_buyer_lifetime_totals(session)
+    for row in orders:
+        buyer_key = (row["customer_label"]).strip().lower() or "guest"
+        spent = buyer_totals.get(buyer_key, 0.0)
+        row["is_vip"] = spent >= vip_threshold > 0
+        row["lifetime_spent"] = round(spent, 2)
     context = {
         "request": request,
         "title": "TikTok Orders",
@@ -7635,6 +7643,7 @@ def tiktok_orders_page(
         "sort_url": build_tiktok_sort_url,
         "unfiltered_total": unfiltered_total,
         "latest_updated_at": latest_updated_at_text,
+        "vip_buyer_threshold": vip_threshold,
     }
     return templates.TemplateResponse(request, "tiktok_orders.html", context)
 
@@ -8847,6 +8856,8 @@ def set_streamer_goal(request: Request, session: Session = Depends(get_session),
         _set_app_setting(session, "high_value_threshold", str(float(body["high_value_threshold"])))
     if "vip_buyer_threshold" in body:
         _set_app_setting(session, "vip_buyer_threshold", str(float(body["vip_buyer_threshold"])))
+    if "vip_presence_timeout_min" in body:
+        _set_app_setting(session, "vip_presence_timeout_min", str(max(1.0, float(body["vip_presence_timeout_min"]))))
     return {"ok": True}
 
 
@@ -8947,6 +8958,9 @@ def tiktok_streamer_config(request: Request, session: Session = Depends(get_sess
   <input class="fp-input" id="hv-threshold" type="number" min="0" step="10" value="{current_threshold:.0f}" placeholder="e.g. 100" style="cursor:text;">
   <label>VIP Buyer Lifetime Spend Threshold ($)</label>
   <input class="fp-input" id="vip-threshold" type="number" min="0" step="500" value="{float(_get_app_setting(session, 'vip_buyer_threshold', '5000') or '5000'):.0f}" placeholder="e.g. 5000" style="cursor:text;">
+  <label>VIP Chat Presence Timeout (minutes)</label>
+  <input class="fp-input" id="vip-presence-timeout" type="number" min="1" step="5" value="{float(_get_app_setting(session, 'vip_presence_timeout_min', '30') or '30'):.0f}" placeholder="e.g. 30" style="cursor:text;">
+  <p style="font-size:11px;color:#666;margin:-12px 0 18px;">How long after a VIP's last activity before they drop off the "In Chat" panel. For long streams, try 60–120 min. They reappear instantly if they interact again.</p>
   <div class="row">
     <button style="background:#6366f1;color:#fff;" onclick="saveGoalSettings()">Save Goal Settings</button>
   </div>
@@ -9008,8 +9022,9 @@ function saveGoalSettings() {{
   var goal = parseFloat(document.getElementById('gmv-goal').value) || 0;
   var threshold = parseFloat(document.getElementById('hv-threshold').value) || 100;
   var vipThreshold = parseFloat(document.getElementById('vip-threshold').value) || 5000;
+  var presenceTimeout = parseFloat(document.getElementById('vip-presence-timeout').value) || 30;
   fetch('/tiktok/streamer/goal', {{ method: 'POST', headers: {{'Content-Type': 'application/json'}},
-    body: JSON.stringify({{ goal: goal, high_value_threshold: threshold, vip_buyer_threshold: vipThreshold }}) }})
+    body: JSON.stringify({{ goal: goal, high_value_threshold: threshold, vip_buyer_threshold: vipThreshold, vip_presence_timeout_min: presenceTimeout }}) }})
     .then(function(r) {{ return r.json(); }})
     .then(function(d) {{
       var el = document.getElementById('goal-status');
@@ -9081,17 +9096,37 @@ def tiktok_streamer_config_auto(request: Request):
 def tiktok_streamer_chat_poll(
     request: Request,
     since: int = Query(default=0),
+    session: Session = Depends(get_session),
 ):
     if denial := require_role_response(request, "viewer"):
         return denial
     messages = get_live_chat_messages(since_idx=since)
     status_info = get_chat_status()
     latest_idx = messages[-1]["idx"] if messages else since
+
+    vip_threshold = float(_get_app_setting(session, "vip_buyer_threshold", "5000") or "5000")
+    presence_timeout_min = float(_get_app_setting(session, "vip_presence_timeout_min", "30") or "30")
+    vip_in_chat: list[dict] = []
+    if vip_threshold > 0:
+        viewers = get_stream_viewers(presence_timeout=presence_timeout_min * 60)
+        buyer_totals = _compute_buyer_lifetime_totals(session)
+        for v in viewers:
+            key = v["username"].strip().lower()
+            spent = buyer_totals.get(key, 0.0)
+            if spent >= vip_threshold:
+                vip_in_chat.append({
+                    "username": v["username"],
+                    "lifetime_spent": round(spent, 2),
+                    "active": v["active"],
+                })
+        vip_in_chat.sort(key=lambda x: x["lifetime_spent"], reverse=True)
+
     return {
         "messages": messages,
         "latest_idx": latest_idx,
         "status": status_info["status"],
         "viewer_count": status_info["viewer_count"],
+        "vip_in_chat": vip_in_chat,
     }
 
 

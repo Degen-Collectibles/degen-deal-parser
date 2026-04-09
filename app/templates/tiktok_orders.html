@@ -73,6 +73,30 @@
         @media (max-width:800px){.page{padding:16px 14px 28px}.filters-form,.sync-form,.summary-grid,.helper-grid{grid-template-columns:1fr}}
     </style>
     <link rel="stylesheet" href="/static/courtyard-theme.css?v=4">
+    <style>
+        .vip-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+            padding: 3px 8px;
+            border-radius: 999px;
+            font-size: 10px;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: .06em;
+            background: linear-gradient(135deg, rgba(139, 92, 246, .12), rgba(167, 139, 250, .18));
+            border: 1px solid rgba(139, 92, 246, .3);
+            color: #7c3aed;
+            margin-left: 6px;
+            vertical-align: middle;
+            white-space: nowrap;
+        }
+        .vip-badge-spent {
+            font-size: 9px;
+            font-weight: 600;
+            color: #8b5cf6;
+        }
+    </style>
 </head>
 <body>
     <div class="page">
@@ -299,7 +323,7 @@
                         <tr>
                             <td><strong>{{ row["order"].order_number }}</strong><div class="muted-cell mono">{{ row["order"].tiktok_order_id }}</div></td>
                             <td>{{ row["order"].created_at|pacific_datetime }}</td>
-                            <td>{{ row["customer_label"] }}</td>
+                            <td>{{ row["customer_label"] }}{% if row.get("is_vip") %}<span class="vip-badge">&#x1F451; VIP <span class="vip-badge-spent">${{ "%.0f"|format(row["lifetime_spent"]) }}</span></span>{% endif %}</td>
                             <td class="item-summary">{{ row["items_summary"] or "No items listed" }}</td>
                             <td>${{ "%.2f"|format(row["order"].total_price or 0) }}</td>
                             <td>{% if row["order"].total_tax is not none %}${{ "%.2f"|format(row["order"].total_tax) }}{% else %}<span class="muted-cell">Unknown</span>{% endif %}</td>
