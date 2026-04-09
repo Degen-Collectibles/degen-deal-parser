@@ -29,8 +29,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run_hosted.ps1
 
 **TikTok side:**
 - TikTok Shop order sync (API + webhooks)
-- Live streamer dashboard with real-time orders, GMV, chat, alerts
-- Stream analytics with charts and growth metrics
+- Live streamer dashboard with real-time orders, GMV, chat, goal bar, high-value/VIP alerts, velocity sparkline, post-stream summary
+- Stream analytics with buyer tracking, product performance, stream-over-stream comparison
 - Product management
 
 ## Key Pages
@@ -42,8 +42,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run_hosted.ps1
 | `/reports` | Financial reports |
 | `/bookkeeping` | Sheet import + reconciliation |
 | `/tiktok/orders` | TikTok order listing |
-| `/tiktok/streamer` | Live streamer dashboard |
-| `/tiktok/analytics` | Stream analytics |
+| `/tiktok/streamer` | Live streamer dashboard (orders, GMV, goal bar, alerts, sparkline) |
+| `/tiktok/analytics` | Stream analytics, buyer tracking, product performance, comparison |
+| `/tiktok/streamer/config` | Stream time config + GMV goal + alert thresholds |
 | `/admin/home` | Admin dashboard |
 | `/admin/debug` | System diagnostics |
 

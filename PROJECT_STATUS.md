@@ -1,6 +1,6 @@
 # Project Status
 
-Last updated: 2026-04-08
+Last updated: 2026-04-09
 
 ## Deployment
 
@@ -50,12 +50,20 @@ Both machines share the same codebase via git pull. Machine B uses Postgres (pro
   - LIVE/OFFLINE badge (dynamic, based on actual stream status)
   - "Log a Hit" feature for streamers
   - Copy-to-clipboard for customer labels
+  - **GMV Goal Bar** — progress bar with click-to-edit target, pulsing glow at 100%+
+  - **High-Value Order Alerts** — gold toast + distinct chime for orders above threshold (default $100)
+  - **VIP Buyer Alerts** — purple toast with lifetime spend badge for buyers above threshold (default $5,000)
+  - **Order Velocity Sparkline** — SVG per-minute order rate in the GMV hero section
+  - **Post-Stream Summary Card** — auto-triggered overlay with full stream stats + copy-to-clipboard
 - **Analytics page** (`/tiktok/analytics`):
   - Daily GMV trend chart (7d/30d/60d/90d)
   - Stream session list with GMV, duration, revenue/hour, % change
   - Per-minute GMV chart for individual streams
   - Top sellers/buyers per stream
   - Local data fallback when TikTok API is unavailable
+  - **Repeat Buyer Tracking** — sortable buyer table with repeat badges, lifetime stats
+  - **Product Performance Ranking** — revenue, qty, live/non-live split per product
+  - **Stream-over-Stream Comparison** — side-by-side delta cards, "Pick Streams" or "Week vs Week" modes
 - **Orders page** (`/tiktok/orders`):
   - Full order listing with date filters
   - Livestream filter dropdown (auto-sets date range to stream window)
@@ -76,8 +84,8 @@ Both machines share the same codebase via git pull. Machine B uses Postgres (pro
 ## Known Issues / Technical Debt
 
 ### Critical
-- **`app/main.py` is 10,487 lines.** Contains all routes, background tasks, TikTok integration, streamer dashboard logic in a single file. This is the #1 refactoring target.
-- **`app/templates/tiktok_streamer.html` is ~2,400 lines** with all CSS and JS inline. Should be split into separate assets eventually.
+- **`app/main.py` is ~12,000 lines.** Contains all routes, background tasks, TikTok integration, streamer dashboard logic in a single file. This is the #1 refactoring target.
+- **`app/templates/tiktok_streamer.html` is ~2,700 lines** with all CSS and JS inline. Should be split into separate assets eventually.
 
 ### Important
 - **Database backups** — production Postgres (`degen_live`) on Machine B has no automated `pg_dump` schedule yet. Should be added.
@@ -93,22 +101,29 @@ Both machines share the same codebase via git pull. Machine B uses Postgres (pro
 
 ## Recent Changes (Last 20 Commits)
 
-1. TikTok analytics page with Chart.js charts, stream selector, KPI cards
-2. Livestream filter on orders page
-3. Stream dividers on streamer dashboard
-4. Collapsible chat panel (closed by default)
-5. Dynamic LIVE/OFFLINE badge
-6. TIKTOK_API.md documentation
-7. Parser stitch tolerance improvements
-8. Stream team deployment (admin users, route auth, viewer accounts)
-9. Live Hit Tracker and Stream Manager
-10. Cloudflare timeout fixes
-11. TikTok webhook signature verification fixes
-12. Image loading optimizations (thumbnails, lazy loading, ETag, caching)
-13. CI workflow, dashboard widget, confidence scoring
-14. Ops log filters, pagination, caching, auto-promote, TikTok refresh
-15. Security and stability audit
-16. Auto-restart logic for production scripts
+1. **Streamer dashboard + analytics features (8 total):**
+   - GMV goal bar, high-value order alerts, VIP buyer alerts
+   - Order velocity sparkline, post-stream summary card
+   - Repeat buyer tracking, product performance ranking, stream comparison
+2. TikTok webhook signature verification fix (HMAC-SHA256 with app_key+body)
+3. Streamer dashboard divider fixes (correct ordering + date-based groups)
+4. Auto-reload streamer dashboard on deploy via build version check
+5. Live stream detection fix (prioritize active streams)
+6. TikTok analytics page with Chart.js charts, stream selector, KPI cards
+7. Livestream filter on orders page
+8. Stream dividers on streamer dashboard
+9. Collapsible chat panel (closed by default)
+10. Dynamic LIVE/OFFLINE badge
+11. TIKTOK_API.md documentation
+12. Parser stitch tolerance improvements
+13. Stream team deployment (admin users, route auth, viewer accounts)
+14. Live Hit Tracker and Stream Manager
+15. Cloudflare timeout fixes
+16. Image loading optimizations (thumbnails, lazy loading, ETag, caching)
+17. CI workflow, dashboard widget, confidence scoring
+18. Ops log filters, pagination, caching, auto-promote, TikTok refresh
+19. Security and stability audit
+20. Auto-restart logic for production scripts
 
 ## Key Documentation
 

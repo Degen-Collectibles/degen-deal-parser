@@ -77,9 +77,9 @@ Discord side:
 
 TikTok side:
 - `/tiktok/orders` — order listing with livestream filter
-- `/tiktok/streamer` — live streamer dashboard (real-time orders, GMV, chat)
-- `/tiktok/analytics` — stream analytics with charts and growth metrics
-- `/tiktok/streamer/config` — manual stream time configuration
+- `/tiktok/streamer` — live streamer dashboard (real-time orders, GMV, chat, goal bar, alerts)
+- `/tiktok/analytics` — stream analytics, buyer tracking, product performance, stream comparison
+- `/tiktok/streamer/config` — stream time config + GMV goal + alert thresholds
 
 Admin:
 - `/admin/home` — admin dashboard
@@ -309,10 +309,10 @@ Everything is working:
 | `app/tiktok_auth_refresh.py` | Background token refresh logic |
 | `app/tiktok_live_chat.py` | TikSync WebSocket for live chat + room ID capture |
 | `app/models.py` | `TikTokOrder`, `TikTokAuth`, `TikTokProduct`, `AppSetting` models |
-| `app/reporting.py` | TikTok order reporting/summary functions |
+| `app/reporting.py` | TikTok order reporting/summary functions, buyer insights, product performance |
 | `app/main.py` | All TikTok routes, streamer dashboard, analytics, background pollers |
-| `app/templates/tiktok_streamer.html` | Streamer dashboard (orders, GMV, chat, top sellers) |
-| `app/templates/tiktok_analytics.html` | Analytics page (charts, stream selector, KPIs) |
+| `app/templates/tiktok_streamer.html` | Streamer dashboard (orders, GMV, chat, goal bar, sparkline, alerts, summary) |
+| `app/templates/tiktok_analytics.html` | Analytics page (charts, stream selector, buyers, products, comparison) |
 | `app/templates/tiktok_orders.html` | Order listing with livestream filter |
 | `TIKTOK_API.md` | Complete API reference for all endpoints |
 
@@ -332,6 +332,40 @@ Both are stored in the `TikTokAuth` DB table and auto-refreshed.
 - **GMV = `subtotal_price`** (product value only), not `total_price` (includes tax + shipping)
 - **Webhook payloads are incomplete** — always fetch full details from API after receiving
 - See `TIKTOK_API.md` for the complete list of gotchas
+
+## Streamer Dashboard Features
+
+The streamer dashboard (`/tiktok/streamer`) includes:
+
+- **GMV Goal Bar** — progress bar showing stream GMV vs a configurable goal. Click-to-edit inline. Pulsing glow at 100%+. Stored as `AppSetting` key `stream_gmv_goal`.
+- **High-Value Order Alerts** — gold toast with "Big Order!" label and distinct chime when order exceeds threshold. `AppSetting` key `high_value_threshold` (default $100).
+- **VIP Buyer Alerts** — purple toast with "VIP Buyer!" label and lifetime spend badge when buyer's all-time spend exceeds threshold. `AppSetting` key `vip_buyer_threshold` (default $5,000). Each poll response includes `buyer_lifetime_spent` per order card.
+- **Order Velocity Sparkline** — SVG sparkline in the GMV hero showing per-minute order counts for the last 60 minutes, with a "X orders/min" rate label.
+- **Post-Stream Summary Card** — full-screen overlay triggered when `is_live` transitions from true to false. Shows GMV, orders, items, AOV, customers, orders/hr, top sellers/buyers. "Copy Summary" for pasting into Discord.
+
+### AppSetting keys used by the dashboard
+
+| Key | Default | Purpose |
+|---|---|---|
+| `stream_gmv_goal` | `"0"` (disabled) | Dollar target for the GMV goal bar |
+| `high_value_threshold` | `"100"` | Minimum order $ to trigger gold alert toast |
+| `vip_buyer_threshold` | `"5000"` | Minimum lifetime buyer $ to trigger VIP toast |
+| `stream_start_utc` | | Persisted stream range start |
+| `stream_end_utc` | | Persisted stream range end |
+| `stream_range_source` | | `"auto"` or `"manual"` |
+
+All three thresholds are editable from `/tiktok/streamer/config` and via `POST /tiktok/streamer/goal`.
+
+## Analytics Page Features
+
+The analytics page (`/tiktok/analytics`) includes:
+
+- **Daily GMV Trend** — Chart.js line chart with 7d/30d/60d/90d picker
+- **Live Streams Table** — session list with GMV, duration, revenue/hr, % change vs previous
+- **Stream Detail Panel** — per-minute GMV chart, top sellers/buyers
+- **Repeat Buyer Tracking** — sortable table of all buyers with total spent, order count, streams, avg order, first/last seen. Repeat buyers get a cyan badge. API: `GET /tiktok/analytics/api/buyers?days=90`
+- **Product Performance Ranking** — sortable table of products with revenue, qty, orders, avg price, and live% / non-live% split. API: `GET /tiktok/analytics/api/products?days=30`
+- **Stream-over-Stream Comparison** — side-by-side cards with delta pills (green/red % change). Supports "Pick Streams" and "Week vs Week" modes. API: `GET /tiktok/analytics/api/compare?stream_a=X&stream_b=Y` or `?mode=weekly`
 
 ## Infrastructure: Machine A / Machine B
 
