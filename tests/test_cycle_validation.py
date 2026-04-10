@@ -18,7 +18,7 @@ import app.discord_ingest as discord_ingest_module
 import app.main as main_module
 from app.corrections import get_learned_rule_match
 from app.db import fixup_transaction_parse_status_aliases
-from app.main import admin_parser_reparse_runs_json, admin_parser_reparse_runs_page
+from app.routers.admin_actions import admin_parser_reparse_runs_json, admin_parser_reparse_runs_page
 from app.models import ReparseRun, ReviewCorrection, Transaction, utcnow
 
 
@@ -154,7 +154,7 @@ class CycleValidationTests(unittest.TestCase):
             )
             session.commit()
 
-            with patch("app.main.require_role_response", return_value=None):
+            with patch("app.routers.admin_actions.require_role_response", return_value=None):
                 response = admin_parser_reparse_runs_page(
                     make_request("/admin/parser/reparse-runs"),
                     limit=20,
@@ -193,7 +193,7 @@ class CycleValidationTests(unittest.TestCase):
             )
             session.commit()
 
-            with patch("app.main.require_role_response", return_value=None):
+            with patch("app.routers.admin_actions.require_role_response", return_value=None):
                 payload = admin_parser_reparse_runs_json(
                     make_request("/admin/parser/reparse-runs.json"),
                     limit=20,
@@ -211,15 +211,19 @@ class CycleValidationTests(unittest.TestCase):
         self.assertIn("selected_count", run)
 
     def test_reviewer_focus_page_uses_cached_or_proxy_attachment_urls(self) -> None:
-        source = inspect.getsource(main_module.reviewer_focus_page)
+        from app.routers.messages import reviewer_focus_page
+        from app.shared import build_message_list_items
+        from app.display_media import get_cached_attachment_map
+
+        source = inspect.getsource(reviewer_focus_page)
         self.assertIn("build_message_list_items", source)
         self.assertNotIn("attachment_urls_json", source)
 
-        build_source = inspect.getsource(main_module.build_message_list_items)
+        build_source = inspect.getsource(build_message_list_items)
         self.assertIn('f"/messages/{item[\'id\']}/attachments/{index}"', build_source)
         self.assertNotIn("attachment_urls_json", source)
 
-        cache_source = inspect.getsource(main_module.get_cached_attachment_map)
+        cache_source = inspect.getsource(get_cached_attachment_map)
         self.assertIn('f"/attachments/{asset_id}"', cache_source)
 
     def test_settings_raise_on_public_host_mode_with_weak_defaults(self) -> None:

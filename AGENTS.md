@@ -170,11 +170,29 @@ Data / Reporting agent:
 - `app/financials.py`
 
 Infra / Routing agent:
-- `app/main.py`
+- `app/main.py` (~720 lines — app init, middleware, lifespan, static files, health endpoint)
+- `app/shared.py` (~5000 lines — shared helpers, constants, state, background task logic)
 - `app/channels.py`
 - `app/discord_ingest.py`
 - `app/db.py`
 - `app/config.py`
+
+Router agent (route handlers split from old main.py):
+- `app/routers/dashboard.py` — `/dashboard`, `/status`, `/ops-log`
+- `app/routers/deals.py` — `/deals`, `/login`, `/logout`, deal detail
+- `app/routers/messages.py` — `/table`, `/review-table`, `/review`
+- `app/routers/channels_api.py` — `/channels`, `/messages` API, inline edits
+- `app/routers/admin.py` — `/admin`, `/admin/users`, `/admin/debug`
+- `app/routers/admin_actions.py` — `/admin/channels`, reparse, learned rules
+- `app/routers/reports.py` — `/reports`, `/finance`, `/pnl`
+- `app/routers/bookkeeping.py` — `/bookkeeping`
+- `app/routers/shopify.py` — `/shopify/orders`, TikTok OAuth callback
+- `app/routers/tiktok_orders.py` — `/tiktok/orders`, webhook, sync
+- `app/routers/tiktok_streamer.py` — `/tiktok/streamer`, poll, goal, config
+- `app/routers/tiktok_analytics.py` — `/tiktok/analytics` + API endpoints
+- `app/routers/tiktok_products.py` — `/tiktok/products`
+- `app/routers/hits.py` — `/hits`, live hit tracking
+- `app/routers/stream_manager.py` — `/stream-manager`
 
 TikTok / Streamer agent:
 - `app/tiktok_ingest.py`
@@ -187,7 +205,18 @@ TikTok / Streamer agent:
 
 Do not assign overlapping files to multiple agents at the same time.
 
-**WARNING: `app/main.py` is 10,000+ lines.** It contains routes for both Discord and TikTok features, plus all background task logic. This is the highest-priority refactoring target. Be careful when editing — changes can have wide blast radius.
+### Architecture Note: Router Refactoring (2026-04)
+
+`app/main.py` was refactored from ~12,000 lines into:
+- `app/main.py` (~720 lines) — FastAPI app creation, middleware, lifespan, static files, health, and router includes
+- `app/shared.py` (~5000 lines) — shared helpers, constants, background task logic, state management (imported by all routers via `from ..shared import *`)
+- `app/routers/*.py` (15 router modules) — route handlers grouped by feature
+
+When writing tests that patch dependencies for router functions:
+- **Patch the module where the function is looked up at runtime**, not `app.main`
+- Router functions import helpers via `from ..shared import *`, so patch targets should be `app.routers.<module>.function_name` or `app.shared.function_name`
+- `app.main` re-exports some router functions for backward compatibility, but patches on `app.main` will NOT affect the router's namespace lookup
+- `main_module.settings` patches still work because `settings` is a shared singleton object
 
 ## Stitching Behavior (CRITICAL)
 

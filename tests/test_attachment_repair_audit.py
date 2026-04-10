@@ -17,7 +17,7 @@ from app.discord_ingest import (
     run_periodic_attachment_repair_once,
     run_periodic_recent_audit_once,
 )
-from app.main import find_nearby_image_candidates
+from app.shared import find_nearby_image_candidates
 from app.models import AttachmentAsset, DiscordMessage, PARSE_PARSED, WatchedChannel
 
 

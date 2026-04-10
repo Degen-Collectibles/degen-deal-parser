@@ -11,6 +11,7 @@ from unittest.mock import patch
 from sqlmodel import Session, SQLModel, create_engine, select
 
 import app.main as main_module
+import app.shared as shared_module
 from app import runtime_logging
 from app import runtime_monitor
 from app.runtime_monitor import get_runtime_heartbeat_status, upsert_runtime_heartbeat
@@ -66,8 +67,8 @@ class RuntimeSplitStatusTests(unittest.TestCase):
             )
             session.commit()
 
-            with patch.object(main_module, "APP_HEARTBEAT_RUNTIME_NAME", "local_web_app"), patch.object(
-                main_module, "WORKER_RUNTIME_NAME", "local_worker"
+            with patch.object(shared_module, "APP_HEARTBEAT_RUNTIME_NAME", "local_web_app"), patch.object(
+                shared_module, "WORKER_RUNTIME_NAME", "local_worker"
             ):
                 snapshot = main_module.build_status_snapshot(session)
 
@@ -79,7 +80,7 @@ class RuntimeSplitStatusTests(unittest.TestCase):
 
     def test_status_snapshot_marks_recent_sqlite_contention_as_attention_needed(self) -> None:
         with Session(self.engine) as session:
-            with patch.object(main_module, "recent_db_failure", return_value=True):
+            with patch.object(shared_module, "recent_db_failure", return_value=True):
                 snapshot = main_module.build_status_snapshot(session)
 
         self.assertFalse(snapshot["db_ok"])
@@ -188,7 +189,7 @@ class RuntimeSplitStatusTests(unittest.TestCase):
             session.commit()
 
             with patch.object(
-                main_module,
+                shared_module,
                 "read_tiktok_integration_state",
                 return_value={
                     "last_authorization_at": auth_updated_at,

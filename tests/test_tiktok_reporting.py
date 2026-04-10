@@ -16,6 +16,11 @@ from fastapi import HTTPException
 from sqlmodel import Session, SQLModel, create_engine, select
 
 import app.main as main_module
+import app.routers.reports as reports_module
+import app.routers.dashboard as dashboard_module
+import app.routers.tiktok_orders as tiktok_orders_module
+import app.routers.shopify as shopify_module
+import app.shared as shared_module
 from app.models import TikTokAuth, TikTokOrder, utcnow
 from app.reporting import (
     build_tiktok_line_item_summary,
@@ -156,9 +161,9 @@ class TikTokRegressionTests(unittest.TestCase):
         with patch.object(main_module.settings, "tiktok_app_key", "expected-key"), patch.object(
             main_module.settings, "tiktok_app_secret", ""
         ), patch.object(
-            main_module, "update_tiktok_integration_state"
+            shopify_module, "update_tiktok_integration_state"
         ) as update_tiktok_integration_state:
-            response = main_module.tiktok_oauth_callback(request)  # type: ignore[arg-type]
+            response = shopify_module.tiktok_oauth_callback(request)  # type: ignore[arg-type]
 
         self.assertEqual(response.status_code, 303)
         self.assertEqual(
@@ -315,11 +320,11 @@ class TikTokRegressionTests(unittest.TestCase):
             "tiktok_redirect_uri",
             "https://ops.degencollectibles.com/integrations/tiktok/callback",
         ), patch.object(
-            main_module,
+            shopify_module,
             "exchange_tiktok_authorization_code",
             return_value=fake_token_result,
         ) as exchange_tiktok_authorization_code_mock, patch.object(
-            main_module,
+            shopify_module,
             "run_write_with_retry",
             return_value=(
                 "inserted",
@@ -327,9 +332,9 @@ class TikTokRegressionTests(unittest.TestCase):
                 SimpleNamespace(shop_name=None),
             ),
         ), patch.object(
-            main_module, "update_tiktok_integration_state"
+            shopify_module, "update_tiktok_integration_state"
         ) as update_tiktok_integration_state:
-            response = main_module.tiktok_oauth_callback(request)  # type: ignore[arg-type]
+            response = shopify_module.tiktok_oauth_callback(request)  # type: ignore[arg-type]
 
         self.assertEqual(response.status_code, 303)
         self.assertEqual(response.headers["location"], "/status?success=TikTok+authorization+captured")
@@ -373,11 +378,11 @@ class TikTokRegressionTests(unittest.TestCase):
             "tiktok_redirect_uri",
             "https://ops.degencollectibles.com/integrations/tiktok/callback",
         ), patch.object(
-            main_module,
+            shopify_module,
             "exchange_tiktok_authorization_code",
             return_value=fake_token_result,
         ), patch.object(
-            main_module,
+            shopify_module,
             "run_write_with_retry",
             return_value=(
                 "inserted",
@@ -385,9 +390,9 @@ class TikTokRegressionTests(unittest.TestCase):
                 SimpleNamespace(shop_name=None),
             ),
         ), patch.object(
-            main_module, "update_tiktok_integration_state"
+            shopify_module, "update_tiktok_integration_state"
         ) as update_tiktok_integration_state:
-            response = main_module.tiktok_oauth_callback(request)  # type: ignore[arg-type]
+            response = shopify_module.tiktok_oauth_callback(request)  # type: ignore[arg-type]
 
         self.assertEqual(response.status_code, 303)
         self.assertEqual(
@@ -412,9 +417,9 @@ class TikTokRegressionTests(unittest.TestCase):
         ), patch.object(
             main_module.settings, "tiktok_redirect_uri", ""
         ), patch.object(
-            main_module, "update_tiktok_integration_state"
+            shopify_module, "update_tiktok_integration_state"
         ) as update_tiktok_integration_state:
-            response = main_module.tiktok_oauth_callback(request)  # type: ignore[arg-type]
+            response = shopify_module.tiktok_oauth_callback(request)  # type: ignore[arg-type]
 
         self.assertEqual(response.status_code, 303)
         self.assertEqual(response.headers["location"], "/status?error=TikTok+callback+missing+authorization+code")
@@ -432,10 +437,10 @@ class TikTokRegressionTests(unittest.TestCase):
         with patch.object(main_module.settings, "tiktok_app_secret", ""), patch.object(
             main_module.settings, "tiktok_shop_id", ""
         ), patch.object(
-            main_module, "update_tiktok_integration_state"
+            tiktok_orders_module, "update_tiktok_integration_state"
         ) as update_tiktok_integration_state:
             with self.assertRaises(HTTPException) as ctx:
-                asyncio.run(main_module.tiktok_orders_webhook(request))
+                asyncio.run(tiktok_orders_module.tiktok_orders_webhook(request))
 
         self.assertEqual(ctx.exception.status_code, 400)
         update_tiktok_integration_state.assert_called_once()
@@ -460,20 +465,16 @@ class TikTokRegressionTests(unittest.TestCase):
         )
 
         with patch.object(main_module.settings, "tiktok_app_secret", secret), patch.object(
-            main_module,
+            tiktok_orders_module,
             "run_write_with_retry",
             return_value=("inserted", {"tiktok_order_id": "tt-3", "shop_id": "shop-1"}),
         ), patch.object(
-            main_module,
+            tiktok_orders_module,
             "_start_tiktok_webhook_enrichment",
         ) as start_tiktok_webhook_enrichment, patch.object(
-            main_module,
-            "_fetch_tiktok_order_details",
-            object(),
-        ), patch.object(
-            main_module, "update_tiktok_integration_state"
+            tiktok_orders_module, "update_tiktok_integration_state"
         ) as update_tiktok_integration_state:
-            response = asyncio.run(main_module.tiktok_orders_webhook(request))
+            response = asyncio.run(tiktok_orders_module.tiktok_orders_webhook(request))
 
         self.assertEqual(response.status_code, 200)
         start_tiktok_webhook_enrichment.assert_called_once_with("tt-3")
@@ -499,20 +500,16 @@ class TikTokRegressionTests(unittest.TestCase):
         )
 
         with patch.object(main_module.settings, "tiktok_app_secret", secret), patch.object(
-            main_module,
+            tiktok_orders_module,
             "run_write_with_retry",
             return_value=("updated", {"tiktok_order_id": "tt-2", "shop_id": "shop-1"}),
         ), patch.object(
-            main_module,
+            tiktok_orders_module,
             "_start_tiktok_webhook_enrichment",
         ) as start_tiktok_webhook_enrichment, patch.object(
-            main_module,
-            "_fetch_tiktok_order_details",
-            object(),
-        ), patch.object(
-            main_module, "update_tiktok_integration_state"
+            tiktok_orders_module, "update_tiktok_integration_state"
         ) as update_tiktok_integration_state:
-            response = asyncio.run(main_module.tiktok_orders_webhook(request))
+            response = asyncio.run(tiktok_orders_module.tiktok_orders_webhook(request))
 
         self.assertEqual(response.status_code, 200)
         start_tiktok_webhook_enrichment.assert_called_once_with("tt-2")
@@ -528,10 +525,10 @@ class TikTokRegressionTests(unittest.TestCase):
         )
 
         with patch.object(main_module.settings, "tiktok_app_secret", "configured-secret"), patch.object(
-            main_module, "update_tiktok_integration_state"
+            tiktok_orders_module, "update_tiktok_integration_state"
         ) as update_tiktok_integration_state:
             with self.assertRaises(HTTPException) as ctx:
-                asyncio.run(main_module.tiktok_orders_webhook(request))
+                asyncio.run(tiktok_orders_module.tiktok_orders_webhook(request))
 
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertEqual(ctx.exception.detail, "Invalid TikTok webhook payload")
@@ -828,16 +825,16 @@ class TikTokRegressionTests(unittest.TestCase):
             )
             session.commit()
 
-            with patch.object(main_module, "require_role_response", return_value=None), patch.object(
-                main_module, "get_transactions", return_value=[]
+            with patch.object(reports_module, "require_role_response", return_value=None), patch.object(
+                reports_module, "get_transactions", return_value=[]
             ), patch.object(
-                main_module,
+                reports_module,
                 "build_transaction_summary",
                 return_value={"totals": {"net": 0.0}, "expense_categories": [], "channel_net": []},
             ), patch.object(
-                main_module, "get_shopify_reporting_rows", return_value=[]
+                reports_module, "get_shopify_reporting_rows", return_value=[]
             ), patch.object(
-                main_module,
+                reports_module,
                 "build_shopify_reporting_summary",
                 return_value={
                     "gross_revenue": 0.0,
@@ -846,13 +843,13 @@ class TikTokRegressionTests(unittest.TestCase):
                     "tax_unknown_orders": 0,
                 },
             ), patch.object(
-                main_module, "build_report_period_comparison_rows", return_value=[]
+                reports_module, "build_report_period_comparison_rows", return_value=[]
             ), patch.object(
-                main_module, "get_channel_filter_choices", return_value=([], False)
+                reports_module, "get_channel_filter_choices", return_value=([], False)
             ), patch.object(
-                main_module.templates, "TemplateResponse", side_effect=fake_template_response
+                reports_module, "templates", SimpleNamespace(TemplateResponse=fake_template_response)
             ):
-                response = main_module.reports_page(  # type: ignore[arg-type]
+                response = reports_module.reports_page(  # type: ignore[arg-type]
                     request,
                     start=None,
                     end=None,
@@ -1038,10 +1035,10 @@ class TikTokRegressionTests(unittest.TestCase):
             )
             session.commit()
 
-            with patch.object(main_module, "require_role_response", return_value=None), patch.object(
-                main_module, "get_transactions", return_value=[]
+            with patch.object(reports_module, "require_role_response", return_value=None), patch.object(
+                reports_module, "get_transactions", return_value=[]
             ), patch.object(
-                main_module,
+                reports_module,
                 "build_transaction_summary",
                 return_value={
                     "totals": {"net": 100.0, "money_in": 160.0, "money_out": 60.0},
@@ -1049,9 +1046,9 @@ class TikTokRegressionTests(unittest.TestCase):
                     "channel_net": [],
                 },
             ), patch.object(
-                main_module, "get_shopify_reporting_rows", return_value=[]
+                reports_module, "get_shopify_reporting_rows", return_value=[]
             ), patch.object(
-                main_module,
+                reports_module,
                 "build_shopify_reporting_summary",
                 return_value={
                     "orders": 1,
@@ -1061,13 +1058,13 @@ class TikTokRegressionTests(unittest.TestCase):
                     "tax_unknown_orders": 0,
                 },
             ), patch.object(
-                main_module, "build_report_period_comparison_rows", return_value=[]
+                reports_module, "build_report_period_comparison_rows", return_value=[]
             ), patch.object(
-                main_module, "get_channel_filter_choices", return_value=([], False)
+                reports_module, "get_channel_filter_choices", return_value=([], False)
             ), patch.object(
-                main_module.templates, "TemplateResponse", side_effect=fake_template_response
+                reports_module, "templates", SimpleNamespace(TemplateResponse=fake_template_response)
             ):
-                response = main_module.reports_page(  # type: ignore[arg-type]
+                response = reports_module.reports_page(  # type: ignore[arg-type]
                     request,
                     start=None,
                     end=None,
@@ -1113,16 +1110,16 @@ class TikTokRegressionTests(unittest.TestCase):
             )
             session.commit()
 
-            with patch.object(main_module, "require_role_response", return_value=None), patch.object(
-                main_module, "get_transactions", return_value=[]
+            with patch.object(reports_module, "require_role_response", return_value=None), patch.object(
+                reports_module, "get_transactions", return_value=[]
             ), patch.object(
-                main_module,
+                reports_module,
                 "build_transaction_summary",
                 return_value={"totals": {"net": 0.0}, "expense_categories": [], "channel_net": []},
             ), patch.object(
-                main_module, "get_shopify_reporting_rows", return_value=[]
+                reports_module, "get_shopify_reporting_rows", return_value=[]
             ), patch.object(
-                main_module,
+                reports_module,
                 "build_shopify_reporting_summary",
                 return_value={
                     "orders": 0,
@@ -1132,13 +1129,13 @@ class TikTokRegressionTests(unittest.TestCase):
                     "tax_unknown_orders": 0,
                 },
             ), patch.object(
-                main_module, "build_report_period_comparison_rows", return_value=[]
+                reports_module, "build_report_period_comparison_rows", return_value=[]
             ), patch.object(
-                main_module, "get_channel_filter_choices", return_value=([], False)
+                reports_module, "get_channel_filter_choices", return_value=([], False)
             ), patch.object(
-                main_module.templates, "TemplateResponse", side_effect=fake_template_response
+                reports_module, "templates", SimpleNamespace(TemplateResponse=fake_template_response)
             ):
-                response = main_module.reports_page(  # type: ignore[arg-type]
+                response = reports_module.reports_page(  # type: ignore[arg-type]
                     request,
                     start=None,
                     end=None,
@@ -1186,23 +1183,23 @@ class TikTokRegressionTests(unittest.TestCase):
             )
             session.commit()
 
-            with patch.object(main_module, "require_role_response", return_value=None), patch.object(
-                main_module,
+            with patch.object(dashboard_module, "require_role_response", return_value=None), patch.object(
+                dashboard_module,
                 "get_summary",
                 side_effect=[
                     {"rows": 0, "totals": {"net": 0.0}},
                     {"rows": 1, "totals": {"net": 1.0}},
                 ],
             ), patch.object(
-                main_module,
+                dashboard_module,
                 "build_dashboard_snapshot",
                 return_value={"today": {}},
             ), patch.object(
-                main_module, "get_parser_progress", return_value={"is_running": False}
+                dashboard_module, "get_parser_progress", return_value={"is_running": False}
             ), patch.object(
-                main_module.templates, "TemplateResponse", side_effect=fake_template_response
+                dashboard_module, "templates", SimpleNamespace(TemplateResponse=fake_template_response)
             ):
-                response = main_module.dashboard_page(request, session=session)
+                response = dashboard_module.dashboard_page(request, session=session)
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(captured["template_name"], "dashboard.html")
@@ -1341,10 +1338,12 @@ class TikTokRegressionTests(unittest.TestCase):
             def fake_collect_tiktok_orders_page_data(*args, **kwargs):
                 return {
                     "summary": {"orders": 1, "gross_revenue": 42.0, "net_revenue": 38.5},
+                    "total_count": 1,
                     "orders": [
                         {
                             "order": SimpleNamespace(tiktok_order_id="tt-page-1"),
                             "items_summary": "Mewtwo",
+                            "customer_label": "TestBuyer",
                         }
                     ],
                     "auth_row": auth_row,
@@ -1352,10 +1351,10 @@ class TikTokRegressionTests(unittest.TestCase):
                     "integration_state": {"is_pull_running": False},
                 }
 
-            with patch.object(main_module, "require_role_response", return_value=None), patch.object(
-                main_module.templates, "TemplateResponse", side_effect=fake_template_response
+            with patch.object(tiktok_orders_module, "require_role_response", return_value=None), patch.object(
+                tiktok_orders_module, "templates", SimpleNamespace(TemplateResponse=fake_template_response)
             ), patch.object(
-                main_module,
+                tiktok_orders_module,
                 "_collect_tiktok_orders_page_data",
                 side_effect=fake_collect_tiktok_orders_page_data,
                 create=True,
@@ -1364,7 +1363,7 @@ class TikTokRegressionTests(unittest.TestCase):
             ), patch.object(
                 main_module.settings, "tiktok_sync_limit", 100
             ):
-                response = main_module.tiktok_orders_page(  # type: ignore[arg-type]
+                response = tiktok_orders_module.tiktok_orders_page(  # type: ignore[arg-type]
                     request,
                     start=None,
                     end=None,
@@ -1432,10 +1431,12 @@ class TikTokRegressionTests(unittest.TestCase):
                 auth_row = main_module.ensure_tiktok_auth_row(session)
                 return {
                     "summary": {"orders": 1, "gross_revenue": 15.0, "net_revenue": 14.0},
+                    "total_count": 1,
                     "orders": [
                         {
                             "order": SimpleNamespace(tiktok_order_id="tt-page-2"),
                             "items_summary": "Charizard",
+                            "customer_label": "TestBuyer",
                         }
                     ],
                     "auth_row": auth_row,
@@ -1443,10 +1444,10 @@ class TikTokRegressionTests(unittest.TestCase):
                     "integration_state": {"is_pull_running": False},
                 }
 
-            with patch.object(main_module, "require_role_response", return_value=None), patch.object(
-                main_module.templates, "TemplateResponse", side_effect=fake_template_response
+            with patch.object(tiktok_orders_module, "require_role_response", return_value=None), patch.object(
+                tiktok_orders_module, "templates", SimpleNamespace(TemplateResponse=fake_template_response)
             ), patch.object(
-                main_module,
+                tiktok_orders_module,
                 "_collect_tiktok_orders_page_data",
                 side_effect=fake_collect_tiktok_orders_page_data,
                 create=True,
@@ -1467,7 +1468,7 @@ class TikTokRegressionTests(unittest.TestCase):
             ), patch.object(
                 main_module.settings, "tiktok_refresh_token", "refresh-token-1"
             ):
-                response = main_module.tiktok_orders_page(  # type: ignore[arg-type]
+                response = tiktok_orders_module.tiktok_orders_page(  # type: ignore[arg-type]
                     request,
                     start=None,
                     end=None,
@@ -1510,12 +1511,12 @@ class TikTokRegressionTests(unittest.TestCase):
             def start(self):
                 thread_capture["started"] = True
 
-        with patch.object(main_module, "require_role_response", return_value=None), patch.object(
-            main_module, "read_tiktok_integration_state", return_value={"is_pull_running": False}
+        with patch.object(tiktok_orders_module, "require_role_response", return_value=None), patch.object(
+            tiktok_orders_module, "read_tiktok_integration_state", return_value={"is_pull_running": False}
         ), patch.object(main_module.settings, "tiktok_sync_limit", 100), patch.object(
-            main_module.threading, "Thread", FakeThread
+            tiktok_orders_module, "threading", SimpleNamespace(Thread=FakeThread)
         ):
-            response = main_module.tiktok_orders_sync_form(  # type: ignore[arg-type]
+            response = tiktok_orders_module.tiktok_orders_sync_form(  # type: ignore[arg-type]
                 request,
                 since="2026-04-01",
                 limit="15",
@@ -1527,7 +1528,7 @@ class TikTokRegressionTests(unittest.TestCase):
             "/tiktok/orders?success=Started+TikTok+sync+orders+will+appear+shortly",
         )
         self.assertTrue(thread_capture["started"])
-        self.assertIs(thread_capture["target"], main_module.run_tiktok_pull_in_background)
+        self.assertIs(thread_capture["target"], tiktok_orders_module.run_tiktok_pull_in_background)
         self.assertEqual(
             thread_capture["kwargs"],
             {"since": "2026-04-01", "limit": 15, "trigger": "manual"},
@@ -1593,12 +1594,13 @@ class TikTokRegressionTests(unittest.TestCase):
             detail_calls=3,
         )
 
-        with patch.object(main_module, "managed_session", side_effect=fake_managed_session), patch.object(
-            main_module, "_refresh_tiktok_auth_if_needed", return_value=None
+        import app.shared as _shared_module
+        with patch.object(_shared_module, "managed_session", side_effect=fake_managed_session), patch.object(
+            _shared_module, "_refresh_tiktok_auth_if_needed", return_value=None
         ), patch.object(
-            main_module, "pull_tiktok_orders", return_value=fake_summary
+            _shared_module, "pull_tiktok_orders", return_value=fake_summary
         ) as pull_tiktok_orders_mock, patch.object(
-            main_module, "resolve_tiktok_shop_pull_base_url", return_value="https://open-api.tiktokglobalshop.com"
+            _shared_module, "resolve_tiktok_shop_pull_base_url", return_value="https://open-api.tiktokglobalshop.com"
         ), patch.object(main_module.settings, "tiktok_app_key", "app-key"), patch.object(
             main_module.settings, "tiktok_app_secret", "app-secret"
         ), patch.object(
@@ -1614,7 +1616,7 @@ class TikTokRegressionTests(unittest.TestCase):
         ), patch.object(
             main_module.settings, "tiktok_sync_lookback_hours", 24.0
         ):
-            result = main_module.run_tiktok_pull_cycle(
+            result = _shared_module.run_tiktok_pull_cycle(
                 runtime_name="test_tiktok_runtime",
                 limit=10,
                 trigger="manual",
@@ -1686,12 +1688,13 @@ class TikTokRegressionTests(unittest.TestCase):
             session.commit()
             return {"status": "updated", "auth_record": {"tiktok_shop_id": auth_row.tiktok_shop_id}}
 
-        with patch.object(main_module, "managed_session", side_effect=fake_managed_session), patch.object(
-            main_module, "_refresh_tiktok_auth_if_needed", side_effect=fake_refresh
+        import app.shared as _shared_module
+        with patch.object(_shared_module, "managed_session", side_effect=fake_managed_session), patch.object(
+            _shared_module, "_refresh_tiktok_auth_if_needed", side_effect=fake_refresh
         ), patch.object(
-            main_module, "pull_tiktok_orders", side_effect=fake_pull_tiktok_orders
+            _shared_module, "pull_tiktok_orders", side_effect=fake_pull_tiktok_orders
         ), patch.object(
-            main_module, "resolve_tiktok_shop_pull_base_url", return_value="https://open-api.tiktokglobalshop.com"
+            _shared_module, "resolve_tiktok_shop_pull_base_url", return_value="https://open-api.tiktokglobalshop.com"
         ), patch.object(main_module.settings, "tiktok_app_key", "app-key"), patch.object(
             main_module.settings, "tiktok_app_secret", "app-secret"
         ), patch.object(
@@ -1709,7 +1712,7 @@ class TikTokRegressionTests(unittest.TestCase):
         ), patch.object(
             main_module.settings, "tiktok_sync_lookback_hours", 24.0
         ):
-            result = main_module.run_tiktok_pull_cycle(
+            result = _shared_module.run_tiktok_pull_cycle(
                 runtime_name="test_tiktok_runtime",
                 limit=10,
                 trigger="manual",
@@ -1737,8 +1740,9 @@ class TikTokRegressionTests(unittest.TestCase):
 
             from starlette.requests import Request as _Request
             _req = _Request({"type": "http", "method": "GET", "path": "/tiktok/orders/poll", "headers": [], "scheme": "http", "server": ("testserver", 80)})
-            with patch("app.main.require_role_response", return_value=None):
-                payload = main_module.tiktok_orders_poll(request=_req, session=session)
+            from app.routers.tiktok_orders import tiktok_orders_poll as _tiktok_orders_poll
+            with patch("app.routers.tiktok_orders.require_role_response", return_value=None):
+                payload = _tiktok_orders_poll(request=_req, session=session)
 
         self.assertEqual(payload["total"], 1)
         self.assertEqual(payload["latest_updated_at"], updated_at.isoformat())
@@ -1760,8 +1764,9 @@ class TikTokRegressionTests(unittest.TestCase):
                 "detail_calls": 1,
             }
 
-        with patch.object(main_module, "run_tiktok_pull_cycle", side_effect=fake_run_tiktok_pull_cycle), patch.object(
-            main_module, "pull_tiktok_orders", object()
+        import app.shared as _shared_module
+        with patch.object(_shared_module, "run_tiktok_pull_cycle", side_effect=fake_run_tiktok_pull_cycle), patch.object(
+            _shared_module, "pull_tiktok_orders", object()
         ), patch.object(main_module.settings, "tiktok_sync_enabled", True), patch.object(
             main_module.settings, "tiktok_app_key", "app-key"
         ), patch.object(

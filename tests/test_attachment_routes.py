@@ -8,7 +8,8 @@ from unittest.mock import AsyncMock, patch
 from sqlmodel import Session, SQLModel, create_engine, select
 from starlette.requests import Request
 
-from app.main import attachment_asset, deal_detail_page, message_attachment_fallback
+from app.main import attachment_asset, message_attachment_fallback
+from app.routers.deals import deal_detail_page
 from app.models import AttachmentAsset, DiscordMessage, PARSE_PARSED, WatchedChannel, utcnow
 
 
@@ -180,8 +181,8 @@ class AttachmentRouteTests(unittest.TestCase):
         self.assertEqual(response.headers["location"], f"/attachments/{recovered_asset.id}")
 
     def test_deal_detail_page_inherits_stitched_child_attachment_urls(self) -> None:
-        with Session(self.engine) as session, patch("app.main.require_role_response", return_value=None), patch(
-            "app.main.get_watched_channels",
+        with Session(self.engine) as session, patch("app.routers.deals.require_role_response", return_value=None), patch(
+            "app.routers.deals.get_watched_channels",
             return_value=[WatchedChannel(channel_id="chan-1", channel_name="deals", is_enabled=True)],
         ):
             now = utcnow()

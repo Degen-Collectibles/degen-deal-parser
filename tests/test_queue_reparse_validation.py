@@ -11,14 +11,13 @@ from fastapi import HTTPException
 from sqlmodel import Session, SQLModel, create_engine, select
 from starlette.requests import Request
 
-from app.main import (
+from app.routers.admin_actions import (
     admin_parser_learned_rule_log_page,
     admin_parser_reparse_range,
-    admin_queue_state_counts,
-    bulk_reparse_filtered_messages_form,
-    build_debug_snapshot,
-    reparse_message_form,
 )
+from app.routers.channels_api import admin_queue_state_counts
+from app.routers.messages import bulk_reparse_filtered_messages_form, reparse_message_form
+from app.shared import build_debug_snapshot
 from app.models import (
     AttachmentAsset,
     DiscordMessage,
@@ -305,7 +304,7 @@ class QueueReparseValidationTests(unittest.TestCase):
             self.assertEqual(row.parse_status, PARSE_PENDING)
 
     def test_admin_range_reparse_blocks_reviewed_rows_without_force_confirmation(self) -> None:
-        with self.session() as session, patch("app.main.require_role_response", return_value=None):
+        with self.session() as session, patch("app.routers.admin_actions.require_role_response", return_value=None):
             with self.assertRaises(HTTPException) as exc:
                 admin_parser_reparse_range(
                     make_request("/admin/parser/reparse-range"),
@@ -384,7 +383,7 @@ class QueueReparseValidationTests(unittest.TestCase):
             self.assertEqual(list_recent_reparse_runs(session, limit=5)[0].run_id, run.run_id)
 
     def test_admin_learned_rule_log_page_shows_recent_events(self) -> None:
-        with self.session() as session, patch("app.main.require_role_response", return_value=None):
+        with self.session() as session, patch("app.routers.admin_actions.require_role_response", return_value=None):
             row = self.make_message(
                 discord_message_id="learned-rule-log-row",
                 content="sold charizard 45 cash",
@@ -443,7 +442,7 @@ class QueueReparseValidationTests(unittest.TestCase):
             )
             session.commit()
 
-            with patch("app.main.require_role_response", return_value=None):
+            with patch("app.routers.channels_api.require_role_response", return_value=None):
                 result = admin_queue_state_counts(
                     make_request("/admin/queue-state-counts"),
                     status=None,
@@ -645,7 +644,7 @@ class QueueReparseValidationTests(unittest.TestCase):
             self.assertGreaterEqual(len(snapshot["recent_worker_failures"]), 1)
 
     def test_bulk_requeue_filtered_messages_form_resets_matching_review_rows(self) -> None:
-        with self.session() as session, patch("app.main.require_role_response", return_value=None):
+        with self.session() as session, patch("app.routers.messages.require_role_response", return_value=None):
             matching = self.make_message(
                 discord_message_id="filtered-review-match",
                 channel_id="chan-review",
@@ -740,7 +739,7 @@ class QueueReparseValidationTests(unittest.TestCase):
             self.assertEqual(len(other_category_tx), 0)
 
     def test_retry_message_form_resets_attempts_and_removes_transaction_until_reparsed(self) -> None:
-        with self.session() as session, patch("app.main.require_role_response", return_value=None):
+        with self.session() as session, patch("app.routers.messages.require_role_response", return_value=None):
             reviewed_at = utcnow()
             row = self.make_message(
                 discord_message_id="retry-row",

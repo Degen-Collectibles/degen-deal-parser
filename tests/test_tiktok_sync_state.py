@@ -36,7 +36,7 @@ class TikTokSyncStateTests(unittest.TestCase):
     def test_update_state_persists_last_error(self):
         import app.main as main_module
 
-        with patch("app.main.managed_session", self._make_managed_session()):
+        with patch("app.shared.managed_session", self._make_managed_session()):
             main_module.update_tiktok_integration_state(last_error="boom")
 
         with Session(self.engine) as session:
@@ -48,7 +48,7 @@ class TikTokSyncStateTests(unittest.TestCase):
         import app.main as main_module
 
         now = _utcnow()
-        with patch("app.main.managed_session", self._make_managed_session()):
+        with patch("app.shared.managed_session", self._make_managed_session()):
             main_module.update_tiktok_integration_state(last_pull_at=now)
 
         with Session(self.engine) as session:
@@ -60,7 +60,7 @@ class TikTokSyncStateTests(unittest.TestCase):
         """Two calls should result in exactly one row, not two."""
         import app.main as main_module
 
-        with patch("app.main.managed_session", self._make_managed_session()):
+        with patch("app.shared.managed_session", self._make_managed_session()):
             main_module.update_tiktok_integration_state(last_error="first")
             main_module.update_tiktok_integration_state(last_error="second")
 
@@ -72,7 +72,7 @@ class TikTokSyncStateTests(unittest.TestCase):
     def test_is_pull_running_persisted(self):
         import app.main as main_module
 
-        with patch("app.main.managed_session", self._make_managed_session()):
+        with patch("app.shared.managed_session", self._make_managed_session()):
             main_module.update_tiktok_integration_state(is_pull_running=True)
 
         with Session(self.engine) as session:
@@ -91,11 +91,11 @@ class TikTokSyncStateTests(unittest.TestCase):
             session.merge(TikTokSyncState(id=1, last_error="saved_error"))
             session.commit()
 
-        # Reset in-memory state first
-        with main_module._tiktok_state_lock:
-            main_module._tiktok_state["last_error"] = None
+        import app.shared as shared_module
+        with shared_module._tiktok_state_lock:
+            shared_module._tiktok_state["last_error"] = None
 
-        with patch("app.main.managed_session", self._make_managed_session()):
+        with patch("app.shared.managed_session", self._make_managed_session()):
             main_module._load_tiktok_state_from_db()
 
         state = main_module.read_tiktok_integration_state()
@@ -109,7 +109,7 @@ class TikTokSyncStateTests(unittest.TestCase):
             session.merge(TikTokSyncState(id=1, is_pull_running=True))
             session.commit()
 
-        with patch("app.main.managed_session", self._make_managed_session()):
+        with patch("app.shared.managed_session", self._make_managed_session()):
             main_module._load_tiktok_state_from_db()
 
         state = main_module.read_tiktok_integration_state()
@@ -119,20 +119,20 @@ class TikTokSyncStateTests(unittest.TestCase):
         """If no DB row exists, in-memory state stays unchanged."""
         import app.main as main_module
 
-        with main_module._tiktok_state_lock:
-            main_module._tiktok_state["last_error"] = "preexisting"
+        import app.shared as shared_module
+        with shared_module._tiktok_state_lock:
+            shared_module._tiktok_state["last_error"] = "preexisting"
 
-        with patch("app.main.managed_session", self._make_managed_session()):
+        with patch("app.shared.managed_session", self._make_managed_session()):
             main_module._load_tiktok_state_from_db()
 
         state = main_module.read_tiktok_integration_state()
         self.assertEqual(state["last_error"], "preexisting")
 
     def tearDown(self):
-        # Reset in-memory state after each test to avoid cross-test contamination
-        import app.main as main_module
-        with main_module._tiktok_state_lock:
-            main_module._tiktok_state.update({
+        import app.shared as shared_module
+        with shared_module._tiktok_state_lock:
+            shared_module._tiktok_state.update({
                 "last_authorization_at": None,
                 "last_callback": None,
                 "last_webhook_at": None,

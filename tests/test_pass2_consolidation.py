@@ -10,6 +10,10 @@ from sqlmodel import Session, SQLModel, create_engine
 from starlette.requests import Request
 
 import app.main as main_module
+from app.routers.admin import admin_health_page, admin_debug_page
+from app.routers.dashboard import status_page, partner_page
+from app.routers.channels_api import get_message
+from app.routers.deals import deal_detail_page
 from app.models import DiscordMessage, PARSE_PARSED, WatchedChannel, utcnow
 
 
@@ -55,19 +59,19 @@ class Pass2ConsolidationTests(unittest.TestCase):
 
     def test_admin_health_redirects_to_status(self) -> None:
         with Session(self.engine) as session:
-            response = main_module.admin_health_page(make_request("/admin/health"), session=session)
+            response = admin_health_page(make_request("/admin/health"), session=session)
         self.assertEqual(response.status_code, 301)
         self.assertEqual(response.headers["location"], "/status")
 
     def test_admin_debug_redirects_to_status(self) -> None:
         with Session(self.engine) as session:
-            response = main_module.admin_debug_page(make_request("/admin/debug"), session=session)
+            response = admin_debug_page(make_request("/admin/debug"), session=session)
         self.assertEqual(response.status_code, 301)
         self.assertEqual(response.headers["location"], "/status")
 
     def test_status_page_contains_merged_sections_and_collapsed_debug_details(self) -> None:
-        with Session(self.engine) as session, patch("app.main.require_role_response", return_value=None):
-            response = main_module.status_page(
+        with Session(self.engine) as session, patch("app.routers.dashboard.require_role_response", return_value=None):
+            response = status_page(
                 make_request("/status", role="viewer"),
                 success=None,
                 error=None,
@@ -84,7 +88,7 @@ class Pass2ConsolidationTests(unittest.TestCase):
 
     def test_partner_redirects_to_dashboard(self) -> None:
         with Session(self.engine) as session:
-            response = main_module.partner_page(make_request("/partner"), session=session)
+            response = partner_page(make_request("/partner"), session=session)
         self.assertEqual(response.status_code, 301)
         self.assertEqual(response.headers["location"], "/dashboard")
 
@@ -121,21 +125,21 @@ class Pass2ConsolidationTests(unittest.TestCase):
             session.refresh(row)
 
             req = make_request(f"/messages/{row.id}")
-            with patch("app.main.require_role_response", return_value=None):
-                response = main_module.get_message(request=req, message_id=row.id, session=session)
+            with patch("app.routers.channels_api.require_role_response", return_value=None):
+                response = get_message(request=req, message_id=row.id, session=session)
 
         self.assertEqual(response.status_code, 301)
         self.assertEqual(response.headers["location"], f"/deals/{row.id}")
 
     def test_deal_detail_page_renders_technical_details_in_details_element(self) -> None:
-        with Session(self.engine) as session, patch("app.main.require_role_response", return_value=None), patch(
-            "app.main.get_watched_channels",
+        with Session(self.engine) as session, patch("app.routers.deals.require_role_response", return_value=None), patch(
+            "app.routers.deals.get_watched_channels",
             return_value=[WatchedChannel(channel_id="chan-1", channel_name="deals", is_enabled=True)],
         ), patch(
-            "app.main.get_correction_pattern_counts",
+            "app.routers.deals.get_correction_pattern_counts",
             return_value=[],
         ), patch(
-            "app.main.get_learning_signal",
+            "app.routers.deals.get_learning_signal",
             return_value={"promoted_rule": False, "exact_match": False, "similar_count": 0},
         ):
             row = DiscordMessage(
@@ -151,7 +155,7 @@ class Pass2ConsolidationTests(unittest.TestCase):
             session.commit()
             session.refresh(row)
 
-            response = main_module.deal_detail_page(
+            response = deal_detail_page(
                 message_id=row.id,
                 request=make_request(f"/deals/{row.id}", role="viewer"),
                 return_path="/deals",

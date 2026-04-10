@@ -8,7 +8,8 @@ from unittest.mock import patch
 from sqlmodel import Session, SQLModel, create_engine
 from starlette.requests import Request
 
-from app.main import edit_message_form, messages_table, review_table, reviewer_queue_page
+from app.routers.channels_api import edit_message_form
+from app.routers.messages import messages_table, review_table, reviewer_queue_page
 from app.models import DiscordMessage, PARSE_PARSED, utcnow
 
 
@@ -32,9 +33,9 @@ class TableExpenseCategoryTests(unittest.TestCase):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_messages_table_serializes_expense_category_in_row_data(self) -> None:
-        with Session(self.engine) as session, patch("app.main.require_role_response", return_value=None), patch(
-            "app.main.get_available_channel_choices", return_value=([], False)
-        ), patch("app.main.get_watched_channels", return_value=[]):
+        with Session(self.engine) as session, patch("app.routers.messages.require_role_response", return_value=None), patch(
+            "app.routers.messages.get_available_channel_choices", return_value=([], False)
+        ), patch("app.routers.messages.get_watched_channels", return_value=[]):
             row = DiscordMessage(
                 discord_message_id="row-1",
                 channel_id="chan-1",
@@ -69,9 +70,9 @@ class TableExpenseCategoryTests(unittest.TestCase):
         self.assertEqual(response.context["rows"][0]["expense_category"], "inventory")
 
     def test_messages_table_filters_by_expense_category(self) -> None:
-        with Session(self.engine) as session, patch("app.main.require_role_response", return_value=None), patch(
-            "app.main.get_available_channel_choices", return_value=([], False)
-        ), patch("app.main.get_watched_channels", return_value=[]):
+        with Session(self.engine) as session, patch("app.routers.messages.require_role_response", return_value=None), patch(
+            "app.routers.messages.get_available_channel_choices", return_value=([], False)
+        ), patch("app.routers.messages.get_watched_channels", return_value=[]):
             inventory_row = DiscordMessage(
                 discord_message_id="row-1",
                 channel_id="chan-1",
@@ -121,9 +122,9 @@ class TableExpenseCategoryTests(unittest.TestCase):
         self.assertIsNotNone(rows[0]["id"])
 
     def test_review_table_filters_by_expense_category(self) -> None:
-        with Session(self.engine) as session, patch("app.main.require_role_response", return_value=None), patch(
-            "app.main.get_available_channel_choices", return_value=([], False)
-        ), patch("app.main.get_watched_channels", return_value=[]):
+        with Session(self.engine) as session, patch("app.routers.messages.require_role_response", return_value=None), patch(
+            "app.routers.messages.get_available_channel_choices", return_value=([], False)
+        ), patch("app.routers.messages.get_watched_channels", return_value=[]):
             inventory_row = DiscordMessage(
                 discord_message_id="row-10",
                 channel_id="chan-1",
@@ -173,7 +174,7 @@ class TableExpenseCategoryTests(unittest.TestCase):
         self.assertEqual(rows[0]["expense_category"], "travel")
 
     def test_review_queue_filters_by_expense_category(self) -> None:
-        with Session(self.engine) as session, patch("app.main.require_role_response", return_value=None):
+        with Session(self.engine) as session, patch("app.routers.messages.require_role_response", return_value=None):
             travel_row = DiscordMessage(
                 discord_message_id="row-30",
                 channel_id="chan-1",
@@ -223,10 +224,10 @@ class TableExpenseCategoryTests(unittest.TestCase):
         self.assertEqual(rows[0]["expense_category"], "travel")
 
     def test_review_table_edit_persists_expense_category_and_keeps_filter(self) -> None:
-        with Session(self.engine) as session, patch("app.main.require_role_response", return_value=None), patch(
-            "app.main.compute_manual_financials", return_value=("expense", 12.5, 0.0, "inventory")
-        ) as compute_manual_financials, patch("app.main.save_review_correction") as save_review_correction, patch(
-            "app.main.sync_transaction_from_message"
+        with Session(self.engine) as session, patch("app.routers.channels_api.require_role_response", return_value=None), patch(
+            "app.routers.channels_api.compute_manual_financials", return_value=("expense", 12.5, 0.0, "inventory")
+        ) as compute_manual_financials, patch("app.routers.channels_api.save_review_correction") as save_review_correction, patch(
+            "app.routers.channels_api.sync_transaction_from_message"
         ) as sync_transaction_from_message:
             row = DiscordMessage(
                 discord_message_id="row-20",

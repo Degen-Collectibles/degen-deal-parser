@@ -11,6 +11,14 @@ from sqlmodel import Session, SQLModel, create_engine
 from starlette.requests import Request
 
 import app.main as main_module
+from app.shared import app_home_for_role, REPORT_SOURCE_ALL, FINANCE_WINDOW_MTD
+from app.routers.deals import deals_page, login_page
+from app.routers.dashboard import dashboard_page, partner_page, status_page
+from app.routers.messages import reviewer_queue_page, review_table, messages_table
+from app.routers.admin import admin_home_page, admin_debug_page, admin_health_page
+from app.routers.reports import reports_page, finance_page
+from app.routers.bookkeeping import bookkeeping_page
+from app.routers.shopify import shopify_orders_page
 
 
 def make_request(path: str, role: str = "admin") -> Request:
@@ -101,11 +109,11 @@ class NavigationValidationTests(unittest.TestCase):
         self.assertNotIn('href="/review-table"', source)
 
     def test_admin_role_home_redirects_to_dashboard(self) -> None:
-        self.assertEqual(main_module.app_home_for_role("admin"), "/dashboard")
-        self.assertEqual(main_module.app_home_for_role("owner"), "/dashboard")
+        self.assertEqual(app_home_for_role("admin"), "/dashboard")
+        self.assertEqual(app_home_for_role("owner"), "/dashboard")
 
-        with patch("app.main.get_request_user", return_value=SimpleNamespace(role="admin")):
-            response = main_module.login_page(make_request("/login"))
+        with patch("app.routers.deals.get_request_user", return_value=SimpleNamespace(role="admin")):
+            response = login_page(make_request("/login"))
             self.assertEqual(response.status_code, 303)
             self.assertEqual(response.headers.get("location"), "/dashboard")
 
@@ -185,11 +193,11 @@ class NavigationValidationTests(unittest.TestCase):
             ok_routes = [
                 (
                     "/dashboard",
-                    lambda request: main_module.dashboard_page(request, session=session),
+                    lambda request: dashboard_page(request, session=session),
                 ),
                 (
                     "/review",
-                    lambda request: main_module.reviewer_queue_page(
+                    lambda request: reviewer_queue_page(
                         request,
                         channel_id=None,
                         expense_category=None,
@@ -206,7 +214,7 @@ class NavigationValidationTests(unittest.TestCase):
                 ),
                 (
                     "/review-table",
-                    lambda request: main_module.review_table(
+                    lambda request: review_table(
                         request,
                         channel_id=None,
                         expense_category=None,
@@ -223,12 +231,12 @@ class NavigationValidationTests(unittest.TestCase):
                 ),
                 (
                     "/table",
-                    lambda request: main_module.messages_table(
+                    lambda request: messages_table(
                         request,
                         status=None,
                         channel_id=None,
                         expense_category=None,
-                        source=main_module.REPORT_SOURCE_ALL,
+                        source=REPORT_SOURCE_ALL,
                         after=None,
                         before=None,
                         sort_by="time",
@@ -242,19 +250,19 @@ class NavigationValidationTests(unittest.TestCase):
                 ),
                 (
                     "/status",
-                    lambda request: main_module.status_page(request, session=session),
+                    lambda request: status_page(request, session=session),
                 ),
                 (
                     "/admin",
-                    lambda request: main_module.admin_home_page(request, session=session),
+                    lambda request: admin_home_page(request, session=session),
                 ),
                 (
                     "/status",
-                    lambda request: main_module.status_page(request, session=session),
+                    lambda request: status_page(request, session=session),
                 ),
                 (
                     "/deals",
-                    lambda request: main_module.deals_page(
+                    lambda request: deals_page(
                         request,
                         channel_id=None,
                         entry_kind=None,
@@ -267,29 +275,29 @@ class NavigationValidationTests(unittest.TestCase):
                 ),
                 (
                     "/reports",
-                    lambda request: main_module.reports_page(
+                    lambda request: reports_page(
                         request,
                         start=None,
                         end=None,
                         channel_id=None,
                         entry_kind=None,
-                        source=main_module.REPORT_SOURCE_ALL,
+                        source=REPORT_SOURCE_ALL,
                         session=session,
                     ),
                 ),
                 (
                     "/finance",
-                    lambda request: main_module.finance_page(
+                    lambda request: finance_page(
                         request,
                         start=None,
                         end=None,
-                        window=main_module.FINANCE_WINDOW_MTD,
+                        window=FINANCE_WINDOW_MTD,
                         session=session,
                     ),
                 ),
                 (
                     "/bookkeeping",
-                    lambda request: main_module.bookkeeping_page(
+                    lambda request: bookkeeping_page(
                         request,
                         import_id=None,
                         success=None,
@@ -299,7 +307,7 @@ class NavigationValidationTests(unittest.TestCase):
                 ),
                 (
                     "/shopify/orders",
-                    lambda request: main_module.shopify_orders_page(
+                    lambda request: shopify_orders_page(
                         request,
                         start=None,
                         end=None,
@@ -318,25 +326,34 @@ class NavigationValidationTests(unittest.TestCase):
             redirect_routes = [
                 (
                     "/partner",
-                    lambda request: main_module.partner_page(request, session=session),
+                    lambda request: partner_page(request, session=session),
                     "/dashboard",
                 ),
                 (
                     "/admin/health",
-                    lambda request: main_module.admin_health_page(request, session=session),
+                    lambda request: admin_health_page(request, session=session),
                     "/status",
                 ),
                 (
                     "/admin/debug",
-                    lambda request: main_module.admin_debug_page(request, session=session),
+                    lambda request: admin_debug_page(request, session=session),
                     "/status",
                 ),
             ]
 
-            with patch("app.main.require_role_response", return_value=None), patch(
-                "app.main.get_available_channel_choices",
-                return_value=([], False),
-            ):
+            patches = [
+                patch("app.routers.dashboard.require_role_response", return_value=None),
+                patch("app.routers.messages.require_role_response", return_value=None),
+                patch("app.routers.messages.get_available_channel_choices", return_value=([], False)),
+                patch("app.routers.admin.require_role_response", return_value=None),
+                patch("app.routers.deals.require_role_response", return_value=None),
+                patch("app.routers.reports.require_role_response", return_value=None),
+                patch("app.routers.bookkeeping.require_role_response", return_value=None),
+                patch("app.routers.shopify.require_role_response", return_value=None),
+            ]
+            for p in patches:
+                p.start()
+            try:
                 for path, call in ok_routes:
                     response = call(make_request(path))
                     self.assertEqual(response.status_code, 200, path)
@@ -345,10 +362,13 @@ class NavigationValidationTests(unittest.TestCase):
                     response = call(make_request(path))
                     self.assertEqual(response.status_code, 301, path)
                     self.assertEqual(response.headers.get("location"), expected_location, path)
+            finally:
+                for p in patches:
+                    p.stop()
 
     def test_status_page_surfaces_background_task_failures(self) -> None:
-        with Session(self.engine) as session, patch("app.main.require_role_response", return_value=None), patch(
-            "app.main.read_background_task_state",
+        with Session(self.engine) as session, patch("app.routers.dashboard.require_role_response", return_value=None), patch(
+            "app.shared.read_background_task_state",
             return_value={
                 "failed_tasks": {
                     "tiktok-order-pull": {
@@ -357,18 +377,18 @@ class NavigationValidationTests(unittest.TestCase):
                 }
             },
         ):
-            response = main_module.status_page(make_request("/status"), session=session)
+            response = status_page(make_request("/status"), session=session)
             body = response.body.decode("utf-8")
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("tiktok order pull failed: simulated task failure", body.lower())
 
     def test_primary_review_page_exposes_reparse_and_ignore_workflow_copy(self) -> None:
-        with Session(self.engine) as session, patch("app.main.require_role_response", return_value=None), patch(
-            "app.main.get_available_channel_choices",
+        with Session(self.engine) as session, patch("app.routers.messages.require_role_response", return_value=None), patch(
+            "app.routers.messages.get_available_channel_choices",
             return_value=([], False),
         ):
-            response = main_module.reviewer_queue_page(
+            response = reviewer_queue_page(
                 make_request("/review"),
                 channel_id=None,
                 expense_category=None,
