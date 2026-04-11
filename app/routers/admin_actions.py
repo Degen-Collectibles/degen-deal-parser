@@ -13,7 +13,9 @@ from sqlmodel import Session, delete, select
 
 from ..shared import *  # noqa: F401,F403 -- shared helpers, constants, state
 from ..db import get_session, managed_session
-from ..discord_ingest import invalidate_available_channels_cache, list_available_discord_channels
+from ..backfill_requests import cancel_backfill_request
+from ..channels import normalize_channel_ids, upsert_watched_channel
+from ..discord_ingest import get_discord_client, invalidate_available_channels_cache, list_available_discord_channels
 
 router = APIRouter()
 
