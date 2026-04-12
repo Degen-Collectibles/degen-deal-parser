@@ -76,9 +76,10 @@
             color: var(--text-muted); font-weight: 600; }
 
         .section { background: var(--bg-card); border: 1px solid var(--border);
-            border-radius: var(--card-radius); padding: 0; margin-bottom: 24px; overflow: hidden; }
+            border-radius: var(--card-radius); padding: 0; margin-bottom: 24px;
+            overflow-x: auto; -webkit-overflow-scrolling: touch; }
 
-        .data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        .data-table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 700px; }
         .data-table th { text-align: left; font-size: 10px; text-transform: uppercase;
             letter-spacing: .08em; color: var(--text-muted); padding: 12px 14px;
             border-bottom: 1px solid var(--border); font-weight: 700; cursor: pointer;
@@ -131,12 +132,28 @@
         .money { font-variant-numeric: tabular-nums; }
 
         @media (max-width: 768px) {
-            .controls { flex-direction: column; align-items: stretch; }
+            body { padding: 12px 8px 40px; }
+            .page-header { gap: 10px; margin-bottom: 16px; }
+            .page-header h1 { font-size: 18px; }
+            .nav-links { margin-left: 0; width: 100%; justify-content: flex-start; flex-wrap: wrap; }
+            .controls { flex-direction: column; align-items: stretch; gap: 8px; }
             .search-box { margin-left: 0; }
             .search-box input { width: 100%; }
+            .kpi-row { grid-template-columns: repeat(3, 1fr); gap: 6px; }
+            .kpi-card { padding: 10px 8px; }
+            .kpi-value { font-size: 16px; }
+            .kpi-label { font-size: 9px; }
             .detail-grid { grid-template-columns: 1fr; }
-            .data-table { font-size: 11px; }
-            .data-table th, .data-table td { padding: 8px 8px; }
+            .data-table { font-size: 11px; min-width: 600px; }
+            .data-table th, .data-table td { padding: 8px 6px; }
+            .top-prods { display: none; }
+            .hide-mobile { display: none; }
+        }
+        @media (max-width: 480px) {
+            .page-header h1 { font-size: 16px; }
+            .kpi-row { grid-template-columns: repeat(2, 1fr); }
+            .data-table { font-size: 10px; min-width: 500px; }
+            .data-table th, .data-table td { padding: 6px 4px; }
         }
     </style>
 </head>
@@ -184,12 +201,12 @@
                     <th data-sort="name">Name <span class="sort-arrow">&#x25B2;</span></th>
                     <th data-sort="total_spent">Spent <span class="sort-arrow">&#x25B2;</span></th>
                     <th data-sort="order_count">Orders <span class="sort-arrow">&#x25B2;</span></th>
-                    <th data-sort="avg_order">AOV <span class="sort-arrow">&#x25B2;</span></th>
-                    <th data-sort="frequency_per_month">Freq/Mo <span class="sort-arrow">&#x25B2;</span></th>
+                    <th data-sort="avg_order" class="hide-mobile">AOV <span class="sort-arrow">&#x25B2;</span></th>
+                    <th data-sort="frequency_per_month" class="hide-mobile">Freq/Mo <span class="sort-arrow">&#x25B2;</span></th>
                     <th data-sort="last_order">Last Order <span class="sort-arrow">&#x25B2;</span></th>
                     <th data-sort="recency_bucket">Recency <span class="sort-arrow">&#x25B2;</span></th>
                     <th data-sort="spend_tier">Tier <span class="sort-arrow">&#x25B2;</span></th>
-                    <th>Top Products</th>
+                    <th class="hide-mobile">Top Products</th>
                 </tr>
             </thead>
             <tbody id="buyers-body"></tbody>
@@ -206,13 +223,13 @@
                     <th data-sort="title">Product <span class="sort-arrow">&#x25B2;</span></th>
                     <th data-sort="qty">Qty Sold <span class="sort-arrow">&#x25B2;</span></th>
                     <th data-sort="revenue">Revenue <span class="sort-arrow">&#x25B2;</span></th>
-                    <th data-sort="orders">Orders <span class="sort-arrow">&#x25B2;</span></th>
-                    <th data-sort="avg_price">Avg Price <span class="sort-arrow">&#x25B2;</span></th>
+                    <th data-sort="orders" class="hide-mobile">Orders <span class="sort-arrow">&#x25B2;</span></th>
+                    <th data-sort="avg_price" class="hide-mobile">Avg Price <span class="sort-arrow">&#x25B2;</span></th>
                     <th data-sort="days_since_last_sale">Last Sale <span class="sort-arrow">&#x25B2;</span></th>
-                    <th data-sort="avg_days_between_sales">Avg Gap <span class="sort-arrow">&#x25B2;</span></th>
+                    <th data-sort="avg_days_between_sales" class="hide-mobile">Avg Gap <span class="sort-arrow">&#x25B2;</span></th>
                     <th data-sort="trend">Trend <span class="sort-arrow">&#x25B2;</span></th>
                     <th data-sort="unique_buyers">Buyers <span class="sort-arrow">&#x25B2;</span></th>
-                    <th data-sort="catalog_status">Catalog <span class="sort-arrow">&#x25B2;</span></th>
+                    <th data-sort="catalog_status" class="hide-mobile">Catalog <span class="sort-arrow">&#x25B2;</span></th>
                 </tr>
             </thead>
             <tbody id="products-body"></tbody>
@@ -420,12 +437,12 @@
                 + '<td><strong>' + esc(b.name) + '</strong></td>'
                 + '<td class="money">' + fmt(b.total_spent) + '</td>'
                 + '<td>' + b.order_count + '</td>'
-                + '<td class="money">' + fmt(b.avg_order) + '</td>'
-                + '<td>' + (b.frequency_per_month || '—') + '</td>'
+                + '<td class="money hide-mobile">' + fmt(b.avg_order) + '</td>'
+                + '<td class="hide-mobile">' + (b.frequency_per_month || '—') + '</td>'
                 + '<td>' + fmtDate(b.last_order) + '</td>'
                 + '<td>' + recencyBadge(b.recency_bucket) + '</td>'
                 + '<td>' + tierBadge(b.spend_tier) + '</td>'
-                + '<td><div class="top-prods">' + topHtml + '</div></td>'
+                + '<td class="hide-mobile"><div class="top-prods">' + topHtml + '</div></td>'
                 + '</tr>'
                 + '<tr class="detail-row" id="detail-' + esc(b.buyer_key) + '"><td colspan="9" class="detail-cell"><div class="loading-msg">Loading details...</div></td></tr>';
         });
@@ -528,13 +545,13 @@
                 + '<td><strong>' + esc(p.title) + '</strong></td>'
                 + '<td>' + p.qty + '</td>'
                 + '<td class="money">' + fmt(p.revenue) + '</td>'
-                + '<td>' + p.orders + '</td>'
-                + '<td class="money">' + fmt(p.avg_price) + '</td>'
+                + '<td class="hide-mobile">' + p.orders + '</td>'
+                + '<td class="money hide-mobile">' + fmt(p.avg_price) + '</td>'
                 + '<td>' + fmtDays(p.days_since_last_sale) + '</td>'
-                + '<td>' + fmtDays(p.avg_days_between_sales) + '</td>'
+                + '<td class="hide-mobile">' + fmtDays(p.avg_days_between_sales) + '</td>'
                 + '<td>' + trendHtml(p.trend) + '</td>'
                 + '<td>' + p.unique_buyers + '</td>'
-                + '<td>' + catalogHtml(p.catalog_status) + '</td>'
+                + '<td class="hide-mobile">' + catalogHtml(p.catalog_status) + '</td>'
                 + '</tr>'
                 + '<tr class="detail-row" id="pdetail-' + esc(p.product_key) + '"><td colspan="10" class="detail-cell"><div class="loading-msg">Loading details...</div></td></tr>';
         });
