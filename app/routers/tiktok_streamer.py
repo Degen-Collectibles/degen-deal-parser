@@ -165,13 +165,14 @@ def _compute_buyer_lifetime_totals(session: Session) -> dict[str, float]:
         func.lower(func.trim(TikTokOrder.order_status)),
         "",
     )
+    buyer_name_expr = func.lower(func.trim(func.coalesce(TikTokOrder.customer_name, "guest")))
     rows = session.exec(
         select(
-            func.lower(func.trim(func.coalesce(TikTokOrder.customer_name, "guest"))),
+            buyer_name_expr,
             func.sum(func.coalesce(TikTokOrder.subtotal_price, TikTokOrder.total_price, 0.0)),
         )
         .where(status_col.in_(list(TIKTOK_PAID_STATUSES)))
-        .group_by(func.lower(func.trim(func.coalesce(TikTokOrder.customer_name, "guest"))))
+        .group_by(buyer_name_expr)
     ).all()
     agg = {(name or "guest"): float(total or 0) for name, total in rows}
 
