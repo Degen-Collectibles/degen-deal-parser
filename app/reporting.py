@@ -11,6 +11,14 @@ from zoneinfo import ZoneInfo
 
 import logging
 
+def _ensure_utc(dt: datetime | None) -> datetime | None:
+    """Return a timezone-aware (UTC) datetime regardless of input."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
 from .models import (
     DiscordMessage,
     expand_parse_status_filter_values,
@@ -1008,8 +1016,8 @@ def build_buyer_profiles(
                 "name": bname,
                 "total_spent": 0.0,
                 "order_count": 0,
-                "first_order": o.created_at,
-                "last_order": o.created_at,
+                "first_order": _ensure_utc(o.created_at),
+                "last_order": _ensure_utc(o.created_at),
                 "order_dates": [],
                 "product_counts": defaultdict(int),
             }
@@ -1017,12 +1025,13 @@ def build_buyer_profiles(
         gmv = float(o.subtotal_price if o.subtotal_price is not None else (o.total_price or 0))
         entry["total_spent"] += gmv
         entry["order_count"] += 1
-        if o.created_at:
-            if entry["first_order"] is None or o.created_at < entry["first_order"]:
-                entry["first_order"] = o.created_at
-            if entry["last_order"] is None or o.created_at > entry["last_order"]:
-                entry["last_order"] = o.created_at
-            entry["order_dates"].append(o.created_at)
+        ca = _ensure_utc(o.created_at)
+        if ca:
+            if entry["first_order"] is None or ca < entry["first_order"]:
+                entry["first_order"] = ca
+            if entry["last_order"] is None or ca > entry["last_order"]:
+                entry["last_order"] = ca
+            entry["order_dates"].append(ca)
 
         for raw in parse_line_items(o):
             ni = normalize_item(raw)
@@ -1159,11 +1168,12 @@ def build_product_velocity(session: Session, days: int = 90) -> list[dict]:
             entry["revenue"] += revenue
             entry["orders"] += 1
             entry["buyers"].add(bkey)
-            if o.created_at:
-                entry["sale_dates"].append(o.created_at)
-                if o.created_at >= cutoff_30:
+            ca = _ensure_utc(o.created_at)
+            if ca:
+                entry["sale_dates"].append(ca)
+                if ca >= cutoff_30:
                     entry["qty_last_30"] += qty
-                elif o.created_at >= cutoff_60:
+                elif ca >= cutoff_60:
                     entry["qty_prev_30"] += qty
 
     results = []
