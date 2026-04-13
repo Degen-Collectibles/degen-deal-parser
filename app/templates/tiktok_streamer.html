@@ -535,6 +535,7 @@
             text-transform: uppercase; letter-spacing: .12em;
             color: var(--text-muted); margin-bottom: 10px;
         }
+        .top-buyers-scroll { position: relative; }
         .top-buyers-strip {
             display: flex; gap: 10px;
             overflow-x: auto; scroll-snap-type: x mandatory;
@@ -543,6 +544,19 @@
             scrollbar-width: none; padding-bottom: 4px;
         }
         .top-buyers-strip::-webkit-scrollbar { display: none; }
+        .tb-arrow {
+            position: absolute; top: 50%; transform: translateY(-50%);
+            width: 32px; height: 32px; border-radius: 50%;
+            background: var(--bg-card); border: 1px solid var(--border);
+            color: var(--text); font-size: 16px; cursor: pointer;
+            display: flex; align-items: center; justify-content: center;
+            z-index: 2; transition: background .15s, border-color .15s, opacity .2s;
+            opacity: 0; pointer-events: none;
+        }
+        .tb-arrow:hover { background: var(--bg-card-hover); border-color: var(--border-glow); }
+        .tb-arrow.visible { opacity: 1; pointer-events: auto; }
+        .tb-arrow-left { left: -6px; }
+        .tb-arrow-right { right: -6px; }
         .tb-card {
             flex: 0 0 120px; scroll-snap-align: start;
             background: var(--bg-card); border: 1px solid var(--border);
@@ -576,23 +590,29 @@
             background: var(--bg-card); border: 1px solid var(--border);
             border-radius: 12px; padding: 14px; margin-top: 10px;
             font-size: 12px; animation: lbSlideDown .15s ease-out;
+            overflow-x: auto; -webkit-overflow-scrolling: touch;
         }
         @keyframes lbSlideDown { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
-        .lb-detail-panel table { width: 100%; border-collapse: collapse; }
+        .lb-detail-panel table { width: 100%; border-collapse: collapse; min-width: 420px; }
         .lb-detail-panel th {
             text-align: left; font-size: 9px; text-transform: uppercase;
             letter-spacing: .06em; color: var(--text-muted);
             padding: 4px 8px; border-bottom: 1px solid var(--border); font-weight: 700;
+            white-space: nowrap;
         }
         .lb-detail-panel td {
             padding: 6px 8px; border-bottom: 1px solid rgba(255,255,255,.04);
             color: var(--text-secondary); font-size: 11px;
         }
         .lb-detail-panel td.money { color: var(--green); font-weight: 700; }
-        .lb-detail-panel .items-col {
-            max-width: 250px; white-space: nowrap; overflow: hidden;
-            text-overflow: ellipsis;
+        .lb-item-row {
+            display: flex; align-items: center; gap: 6px; margin-bottom: 4px;
         }
+        .lb-item-img {
+            width: 28px; height: 28px; border-radius: 6px; object-fit: cover;
+            flex-shrink: 0; background: var(--bg-card-hover);
+        }
+        .lb-item-text { font-size: 11px; line-height: 1.3; }
 
         /* ---- Orders list ---- */
         .orders-list {
@@ -1665,7 +1685,11 @@
 
                 <div class="top-buyers" id="top-buyers" style="display:none;">
                     <div class="top-buyers-label">Top Buyers</div>
-                    <div class="top-buyers-strip" id="top-buyers-strip"></div>
+                    <div class="top-buyers-scroll">
+                        <button class="tb-arrow tb-arrow-left" id="tb-arrow-left" aria-label="Scroll left">&#x276E;</button>
+                        <div class="top-buyers-strip" id="top-buyers-strip"></div>
+                        <button class="tb-arrow tb-arrow-right" id="tb-arrow-right" aria-label="Scroll right">&#x276F;</button>
+                    </div>
                     <div id="tb-detail-panel"></div>
                 </div>
 
@@ -1914,6 +1938,8 @@
 
         var topBuyersWrap = document.getElementById('top-buyers');
         var topBuyersStrip = document.getElementById('top-buyers-strip');
+        var tbArrowLeft = document.getElementById('tb-arrow-left');
+        var tbArrowRight = document.getElementById('tb-arrow-right');
 
         /* ---- Utility ---- */
         function relativeTime(isoStr) {
@@ -1953,10 +1979,27 @@
             topSellersStrip.scrollBy({ left: 260, behavior: 'smooth' });
         });
 
+        function updateTbArrows() {
+            var s = topBuyersStrip;
+            var canScrollLeft = s.scrollLeft > 2;
+            var canScrollRight = s.scrollLeft + s.clientWidth < s.scrollWidth - 2;
+            tbArrowLeft.classList.toggle('visible', canScrollLeft);
+            tbArrowRight.classList.toggle('visible', canScrollRight);
+        }
+        topBuyersStrip.addEventListener('scroll', updateTbArrows);
+        tbArrowLeft.addEventListener('click', function() {
+            topBuyersStrip.scrollBy({ left: -260, behavior: 'smooth' });
+        });
+        tbArrowRight.addEventListener('click', function() {
+            topBuyersStrip.scrollBy({ left: 260, behavior: 'smooth' });
+        });
+
         var _activeSellers = [];
         var _activeBuyers = [];
         var _openSellerIdx = -1;
         var _openBuyerIdx = -1;
+        var _openSellerKey = null;
+        var _openBuyerKey = null;
         var tsDetailPanel = document.getElementById('ts-detail-panel');
         var tbDetailPanel = document.getElementById('tb-detail-panel');
 
@@ -1969,15 +2012,19 @@
 
         function renderTopSellers(sellers) {
             _activeSellers = sellers || [];
+            var prevKey = _openSellerKey;
             _openSellerIdx = -1;
             tsDetailPanel.innerHTML = '';
             if (!sellers || !sellers.length) {
                 topSellersWrap.style.display = 'none';
+                _openSellerKey = null;
                 return;
             }
             topSellersWrap.style.display = '';
             var html = '';
+            var reopenIdx = -1;
             sellers.forEach(function(p, i) {
+                if (prevKey && p.title === prevKey) reopenIdx = i;
                 var imgHTML = p.sku_image
                     ? '<img class="ts-img" src="' + escAttr(p.sku_image) + '" alt="" loading="lazy">'
                     : '<div class="ts-placeholder-img">&#x1F4E6;</div>';
@@ -1997,16 +2044,19 @@
                 });
             });
             requestAnimationFrame(updateTsArrows);
+            if (reopenIdx >= 0) toggleSellerDetail(reopenIdx);
         }
 
         function toggleSellerDetail(idx) {
             topSellersStrip.querySelectorAll('.ts-card').forEach(function(c) { c.classList.remove('active'); });
             if (_openSellerIdx === idx) {
                 _openSellerIdx = -1;
+                _openSellerKey = null;
                 tsDetailPanel.innerHTML = '';
                 return;
             }
             _openSellerIdx = idx;
+            _openSellerKey = _activeSellers[idx] ? _activeSellers[idx].title : null;
             topSellersStrip.querySelector('.ts-card[data-idx="' + idx + '"]').classList.add('active');
             var p = _activeSellers[idx];
             var buyers = p.buyers || [];
@@ -2026,15 +2076,19 @@
         /* ---- Top Buyers render ---- */
         function renderTopBuyers(buyers) {
             _activeBuyers = buyers || [];
+            var prevKey = _openBuyerKey;
             _openBuyerIdx = -1;
             tbDetailPanel.innerHTML = '';
             if (!buyers || !buyers.length) {
                 topBuyersWrap.style.display = 'none';
+                _openBuyerKey = null;
                 return;
             }
             topBuyersWrap.style.display = '';
             var html = '';
+            var reopenIdx = -1;
             buyers.forEach(function(b, i) {
+                if (prevKey && b.name === prevKey) reopenIdx = i;
                 html += '<div class="tb-card" data-idx="' + i + '">'
                     + '<div class="tb-rank">#' + (i + 1) + '</div>'
                     + '<div class="tb-name">' + esc(b.name) + '</div>'
@@ -2049,16 +2103,20 @@
                     toggleBuyerDetail(parseInt(card.getAttribute('data-idx')));
                 });
             });
+            requestAnimationFrame(updateTbArrows);
+            if (reopenIdx >= 0) toggleBuyerDetail(reopenIdx);
         }
 
         function toggleBuyerDetail(idx) {
             topBuyersStrip.querySelectorAll('.tb-card').forEach(function(c) { c.classList.remove('active'); });
             if (_openBuyerIdx === idx) {
                 _openBuyerIdx = -1;
+                _openBuyerKey = null;
                 tbDetailPanel.innerHTML = '';
                 return;
             }
             _openBuyerIdx = idx;
+            _openBuyerKey = _activeBuyers[idx] ? _activeBuyers[idx].name : null;
             topBuyersStrip.querySelector('.tb-card[data-idx="' + idx + '"]').classList.add('active');
             var b = _activeBuyers[idx];
             var orders = b.order_list || [];
@@ -2069,10 +2127,23 @@
             var html = '<div class="lb-detail-panel"><table><thead><tr>'
                 + '<th>Time</th><th>Order #</th><th>Items</th><th>Total</th></tr></thead><tbody>';
             orders.forEach(function(o) {
+                var itemsHtml = '';
+                var items = o.items || [];
+                if (typeof items === 'string') {
+                    itemsHtml = esc(items);
+                } else {
+                    items.forEach(function(it) {
+                        var imgTag = it.sku_image
+                            ? '<img class="lb-item-img" src="' + escAttr(it.sku_image) + '" alt="" loading="lazy">'
+                            : '';
+                        itemsHtml += '<div class="lb-item-row">' + imgTag
+                            + '<span class="lb-item-text">' + esc(it.title) + ' x' + it.qty + '</span></div>';
+                    });
+                }
                 html += '<tr>'
                     + '<td>' + fmtDetailDate(o.created_at) + '</td>'
                     + '<td>' + esc(o.order_number || '—') + '</td>'
-                    + '<td class="items-col" title="' + escAttr(o.items) + '">' + esc(o.items) + '</td>'
+                    + '<td>' + itemsHtml + '</td>'
                     + '<td class="money">$' + (o.total || 0).toFixed(2) + '</td>'
                     + '</tr>';
             });

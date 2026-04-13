@@ -239,7 +239,7 @@ def _streamer_session_gmv_uncached(session: Session) -> dict:
         if not isinstance(raw_items, list):
             raw_items = [raw_items] if isinstance(raw_items, dict) else []
 
-        order_items_parts: list[str] = []
+        order_items_detail: list[dict] = []
         for raw in raw_items:
             if not isinstance(raw, dict):
                 continue
@@ -273,7 +273,7 @@ def _streamer_session_gmv_uncached(session: Session) -> dict:
                 raw.get("sku_image") or raw.get("product_image") or raw.get("image_url") or ""
             ).strip() or None
 
-            order_items_parts.append(f"{title} x{qty}")
+            order_items_detail.append({"title": title, "qty": qty, "sku_image": sku_image})
 
             if key in product_agg:
                 product_agg[key]["qty"] += qty
@@ -297,7 +297,7 @@ def _streamer_session_gmv_uncached(session: Session) -> dict:
             customer_agg[buyer_key]["order_list"].append({
                 "order_number": o.order_number,
                 "total": round(order_gmv, 2),
-                "items": ", ".join(order_items_parts) if order_items_parts else "—",
+                "items": order_items_detail,
                 "created_at": o.created_at.isoformat() if o.created_at else None,
             })
 
@@ -356,7 +356,7 @@ def _streamer_session_gmv_uncached(session: Session) -> dict:
                 s_items = []
             if not isinstance(s_items, list):
                 s_items = [s_items] if isinstance(s_items, dict) else []
-            s_order_parts: list[str] = []
+            s_order_items: list[dict] = []
             for it in s_items:
                 if not isinstance(it, dict):
                     continue
@@ -381,7 +381,7 @@ def _streamer_session_gmv_uncached(session: Session) -> dict:
                             continue
                         break
                 s_img = str(it.get("sku_image") or it.get("product_image") or it.get("image_url") or "").strip() or None
-                s_order_parts.append(f"{s_title} x{s_qty}")
+                s_order_items.append({"title": s_title, "qty": s_qty, "sku_image": s_img})
                 if s_key in stream_product_agg:
                     stream_product_agg[s_key]["qty"] += s_qty
                     stream_product_agg[s_key]["revenue"] += round(s_qty * s_unit, 2)
@@ -401,7 +401,7 @@ def _streamer_session_gmv_uncached(session: Session) -> dict:
                 stream_customer_agg[buyer_key]["order_list"].append({
                     "order_number": o.order_number,
                     "total": round(o_gmv, 2),
-                    "items": ", ".join(s_order_parts) if s_order_parts else "—",
+                    "items": s_order_items,
                     "created_at": o.created_at.isoformat() if o.created_at else None,
                 })
 
