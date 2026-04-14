@@ -404,9 +404,20 @@ var PKScanner = (function() {
         try {
             var video = document.getElementById('video');
             var canvas = document.getElementById('canvas');
-            canvas.width = video.videoWidth || 1280;
-            canvas.height = video.videoHeight || 720;
-            canvas.getContext('2d').drawImage(video, 0, 0);
+            var vw = video.videoWidth || 1280;
+            var vh = video.videoHeight || 720;
+
+            // Crop to the guide rectangle area (68% width, 5:7 aspect ratio)
+            // This excludes neighboring cards from the OCR input.
+            var guideW = vw * 0.68;
+            var guideH = guideW * (7 / 5);
+            if (guideH > vh * 0.9) { guideH = vh * 0.9; guideW = guideH * (5 / 7); }
+            var sx = (vw - guideW) / 2;
+            var sy = (vh - guideH) / 2;
+
+            canvas.width = Math.round(guideW);
+            canvas.height = Math.round(guideH);
+            canvas.getContext('2d').drawImage(video, sx, sy, guideW, guideH, 0, 0, canvas.width, canvas.height);
             var b64 = canvas.toDataURL('image/jpeg', 0.92).split(',')[1];
 
             var resp = await fetch('/inventory/scan/pokemon/identify', {
