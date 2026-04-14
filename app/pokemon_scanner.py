@@ -274,9 +274,11 @@ _AI_EXTRACT_PROMPT = """You are a Pokemon card OCR interpreter. Given raw OCR te
 Rules:
 - card_name: The Pokemon's full name as printed (e.g. "Erika's Tangela", "Charizard ex"). Fix obvious OCR errors using your knowledge of real Pokemon card names.
 - collector_number: The collector number in "X/Y" format (e.g. "218/217"). This appears near the bottom of the card. Fix OCR digit misreads.
-- set_name: The set name or its abbreviation (e.g. "Ascended Heroes", "ASCEN", "Unified Minds"). If you see a short abbreviation like "ASC" or "SVI", expand it to the full set name if you can confidently identify it. Ignore regulation mark letters (single letters like J, H, G near the set code).
+- set_name: The set abbreviation as it appears in the OCR text, near the collector number at the bottom of the card. Return the RAW abbreviation (e.g. "ASCEN", "SVI", "TWI", "DWHTEN") — do NOT guess or expand to a full set name. Only return a full set name if the full name is clearly printed in the OCR text. If unsure, return the abbreviation exactly as seen. Ignore single regulation mark letters (J, H, G, etc.) that appear before the abbreviation.
 - hp_value: The HP as a string (e.g. "80", "230") or null if not visible.
 - variant_hints: Array of variant/rarity keywords found (e.g. ["FULL ART", "EX", "ILLUSTRATION RARE"]). Empty array if none.
+
+IMPORTANT: For set_name, accuracy matters more than helpfulness. A raw abbreviation like "DWHTEN" is better than a wrong guess like "Darkness Ablaze". The lookup system will match abbreviations to sets.
 
 Respond with JSON only. Do not include any explanation."""
 
@@ -760,14 +762,20 @@ async def lookup_candidates(fields: ExtractedFields, api_key: str = "") -> list[
                     candidates.append(_tcgdex_to_candidate(card))
 
         # Tier 1.5: TCGdex name search (has newer sets like Pocket/Ascended Heroes)
-        if not candidates and fields.card_name:
-            tier_reached = 2
+        # Always run when we have a name, even if Tier 1 returned results,
+        # so that name-matched candidates are in the scoring pool.
+        if fields.card_name:
+            tier_reached = max(tier_reached, 2)
             tcgdex_by_name = await _tcgdex_search_by_name(
                 client, fields.card_name, limit=10,
                 prefer_number=fields.collector_number,
             )
+            seen_ids = {c.id for c in candidates}
             for tc in tcgdex_by_name:
-                candidates.append(_tcgdex_to_candidate(tc))
+                cand = _tcgdex_to_candidate(tc)
+                if cand.id not in seen_ids:
+                    candidates.append(cand)
+                    seen_ids.add(cand.id)
 
         # Tier 1.6: TCGdex word-by-word fallback — OCR may mangle part of the
         # name (e.g. "dive Tangela" instead of "Erika's Tangela").  Try each
@@ -905,6 +913,12 @@ def score_candidates(
 
             name_score = similarity * SCORING_WEIGHTS["fuzzy_name_similarity"]
             breakdown["fuzzy_name_similarity"] = round(name_score, 1)
+
+            # Heavy penalty when OCR clearly extracted a name but the candidate
+            # is completely different (e.g. "Zweilous" vs "Staraptor").
+            # Prevents collector-number-only matches from reaching MEDIUM.
+            if similarity < 0.3 and not word_match and len(ext_lower) >= 4:
+                breakdown["name_mismatch_penalty"] = -35
 
         # Set consistency
         if fields.set_name and c.set_name:
