@@ -587,6 +587,38 @@ def _tcgdex_to_candidate(card: dict, source: str = "tcgdex") -> CandidateCard:
         set_name = ""
         full_number = local_id
 
+    # Extract pricing from TCGdex's built-in market data
+    market_price = None
+    tcgplayer_url = None
+    pricing = card.get("pricing") or {}
+
+    # Prefer TCGPlayer USD pricing
+    tcgp = pricing.get("tcgplayer")
+    if isinstance(tcgp, dict):
+        for variant_key in ("normal", "holo", "reverse"):
+            vdata = tcgp.get(variant_key)
+            if isinstance(vdata, dict):
+                mp = vdata.get("marketPrice")
+                if mp is not None:
+                    try:
+                        market_price = round(float(mp), 2)
+                    except (ValueError, TypeError):
+                        pass
+                    if market_price:
+                        break
+
+    # Fallback to Cardmarket EUR pricing (convert to approximate USD)
+    if not market_price:
+        cm = pricing.get("cardmarket")
+        if isinstance(cm, dict):
+            trend = cm.get("trend") or cm.get("avg")
+            if trend is not None:
+                try:
+                    eur_price = float(trend)
+                    market_price = round(eur_price * 1.10, 2)  # rough EUR->USD
+                except (ValueError, TypeError):
+                    pass
+
     return CandidateCard(
         id=card.get("id", ""),
         name=card.get("name", ""),
@@ -598,6 +630,8 @@ def _tcgdex_to_candidate(card: dict, source: str = "tcgdex") -> CandidateCard:
         rarity=card.get("rarity"),
         variant=card.get("variant"),
         source=source,
+        market_price=market_price,
+        tcgplayer_url=tcgplayer_url,
     )
 
 
