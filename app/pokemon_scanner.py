@@ -10,6 +10,7 @@ collector number, which uniquely identifies a card within a set.
 from __future__ import annotations
 
 import base64
+import collections
 import io
 import logging
 import re
@@ -117,6 +118,9 @@ VARIANT_KEYWORDS = [
 ]
 
 _tcgdex_sets_cache: list[dict] | None = None
+
+# In-memory ring buffer of recent scan results for debugging
+_scan_history: collections.deque[dict] = collections.deque(maxlen=25)
 
 
 # ---------------------------------------------------------------------------
@@ -867,9 +871,14 @@ async def run_pipeline(image_b64: str) -> dict[str, Any]:
         "stage_times_ms": {},
     }
 
+    def _early_return(r: ScanResult) -> dict:
+        d = asdict(r)
+        _save_to_history(d)
+        return d
+
     # --- Validate config ---
     if not settings.google_vision_api_key:
-        return asdict(ScanResult(
+        return _early_return(ScanResult(
             status="ERROR",
             error="Google Vision API key not configured (GOOGLE_VISION_API_KEY)",
             processing_time_ms=_elapsed(t_start),
@@ -880,7 +889,7 @@ async def run_pipeline(image_b64: str) -> dict[str, Any]:
     try:
         raw_bytes = base64.b64decode(image_b64)
     except Exception:
-        return asdict(ScanResult(
+        return _early_return(ScanResult(
             status="ERROR",
             error="Invalid base64 image data",
             processing_time_ms=_elapsed(t_start),
@@ -910,7 +919,7 @@ async def run_pipeline(image_b64: str) -> dict[str, Any]:
         debug_info["stage_times_ms"]["ocr_fallback"] = _elapsed(t_stage)
 
     if not fields.collector_number and not fields.card_name:
-        return asdict(ScanResult(
+        return _early_return(ScanResult(
             status="NO_MATCH",
             error="Could not extract card name or collector number from image. Try holding the card closer or improving lighting.",
             extracted_fields=asdict(fields),
@@ -925,7 +934,7 @@ async def run_pipeline(image_b64: str) -> dict[str, Any]:
     debug_info["stage_times_ms"]["lookup"] = _elapsed(t_stage)
 
     if not candidates:
-        return asdict(ScanResult(
+        return _early_return(ScanResult(
             status="NO_MATCH",
             error="No matching cards found in database",
             extracted_fields=asdict(fields),
@@ -996,7 +1005,40 @@ async def run_pipeline(image_b64: str) -> dict[str, Any]:
         result.status, top.name, top.score, len(scored), result.processing_time_ms,
     )
 
-    return asdict(result)
+    result_dict = asdict(result)
+    _save_to_history(result_dict)
+    return result_dict
+
+
+def _save_to_history(result: dict) -> None:
+    """Save a scan result to the in-memory history ring buffer."""
+    import datetime
+    entry = {
+        "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+        "status": result.get("status"),
+        "best_match_name": (result.get("best_match") or {}).get("name"),
+        "best_match_number": (result.get("best_match") or {}).get("number"),
+        "best_match_set": (result.get("best_match") or {}).get("set_name"),
+        "best_match_score": (result.get("best_match") or {}).get("score"),
+        "best_match_confidence": (result.get("best_match") or {}).get("confidence"),
+        "best_match_price": (result.get("best_match") or {}).get("market_price"),
+        "candidates_count": len(result.get("candidates") or []),
+        "processing_time_ms": result.get("processing_time_ms"),
+        "extracted_name": (result.get("extracted_fields") or {}).get("card_name"),
+        "extracted_number": (result.get("extracted_fields") or {}).get("collector_number"),
+        "extracted_set": (result.get("extracted_fields") or {}).get("set_name"),
+        "ocr_text": (result.get("debug") or {}).get("ocr_raw_text", ""),
+        "ocr_confidence": (result.get("debug") or {}).get("ocr_confidence"),
+        "disambiguation": result.get("disambiguation_method"),
+        "error": result.get("error"),
+        "debug": result.get("debug"),
+    }
+    _scan_history.appendleft(entry)
+
+
+def get_scan_history() -> list[dict]:
+    """Return the recent scan history (newest first)."""
+    return list(_scan_history)
 
 
 def _elapsed(start: float) -> float:

@@ -23,7 +23,7 @@ _templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 from .auth import has_role
 from .card_scanner import identify_card_from_image, lookup_card_image_and_price
 from .cert_lookup import lookup_cert
-from .pokemon_scanner import run_pipeline as run_pokemon_pipeline
+from .pokemon_scanner import run_pipeline as run_pokemon_pipeline, get_scan_history
 from .config import get_settings
 from .db import get_session
 from .inventory_barcode import (
@@ -675,6 +675,78 @@ async def inventory_scan_pokemon_identify(request: Request):
         status_code = 422
 
     return JSONResponse(result, status_code=status_code)
+
+
+@router.get("/inventory/scan/pokemon/history")
+async def inventory_scan_pokemon_history(request: Request):
+    """Return recent scan results as JSON for debugging."""
+    if denial := _require_viewer(request):
+        return denial
+    return JSONResponse(get_scan_history())
+
+
+@router.get("/inventory/scan/pokemon/debug", response_class=HTMLResponse)
+async def inventory_scan_pokemon_debug_page(request: Request):
+    """Live debug page showing recent scan history — open on desktop while scanning on phone."""
+    if denial := _require_viewer(request):
+        return denial
+    return HTMLResponse("""<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pokemon Scanner Debug Log</title>
+<style>
+  body{font-family:monospace;background:#1a1a2e;color:#e0e0e0;margin:0;padding:20px;}
+  h1{color:#f0c674;font-size:18px;margin:0 0 4px;}
+  .sub{color:#888;font-size:12px;margin-bottom:16px;}
+  .entry{background:#16213e;border:1px solid #333;border-radius:8px;padding:14px;margin-bottom:12px;}
+  .entry.MATCHED{border-left:4px solid #4caf50;}
+  .entry.AMBIGUOUS{border-left:4px solid #ff9800;}
+  .entry.NO_MATCH{border-left:4px solid #f44336;}
+  .entry.ERROR{border-left:4px solid #f44336;}
+  .ts{color:#888;font-size:11px;}
+  .status{font-weight:bold;font-size:13px;margin-bottom:6px;}
+  .status.MATCHED{color:#4caf50;} .status.AMBIGUOUS{color:#ff9800;}
+  .status.NO_MATCH{color:#f44336;} .status.ERROR{color:#f44336;}
+  .field{margin:3px 0;font-size:12px;line-height:1.5;}
+  .label{color:#f0c674;} .val{color:#e0e0e0;}
+  .ocr{background:#0d1117;padding:8px;border-radius:4px;white-space:pre-wrap;font-size:11px;
+       max-height:150px;overflow-y:auto;margin-top:6px;color:#aaa;border:1px solid #222;}
+  .empty{color:#666;text-align:center;padding:40px;font-size:14px;}
+  #auto{margin-bottom:12px;display:flex;align-items:center;gap:8px;font-size:12px;color:#888;}
+</style>
+</head><body>
+<h1>Pokemon Scanner Debug Log</h1>
+<div class="sub">Auto-refreshes every 3s. Open this on your desktop while scanning on your phone.</div>
+<div id="auto"><input type="checkbox" id="autoRefresh" checked> Auto-refresh
+  <button onclick="loadHistory()" style="margin-left:8px;padding:4px 10px;border-radius:4px;
+    border:1px solid #444;background:#16213e;color:#e0e0e0;cursor:pointer;">Refresh Now</button></div>
+<div id="log"></div>
+<script>
+function loadHistory(){
+  fetch('/inventory/scan/pokemon/history').then(r=>r.json()).then(data=>{
+    var el=document.getElementById('log');
+    if(!data.length){el.innerHTML='<div class="empty">No scans yet. Start scanning on your phone.</div>';return;}
+    el.innerHTML=data.map(function(e){
+      var s=e.status||'ERROR';
+      var h='<div class="entry '+s+'">';
+      h+='<div class="status '+s+'">'+s+'</div>';
+      h+='<div class="ts">'+e.timestamp+'  |  '+(e.processing_time_ms||0).toFixed(0)+'ms</div>';
+      if(e.error) h+='<div class="field"><span class="label">Error: </span>'+esc(e.error)+'</div>';
+      h+='<div class="field"><span class="label">Extracted: </span>name='+esc(e.extracted_name)+', number='+esc(e.extracted_number)+', set='+esc(e.extracted_set)+'</div>';
+      if(e.best_match_name) h+='<div class="field"><span class="label">Best Match: </span>'+esc(e.best_match_name)+' #'+esc(e.best_match_number)+' | '+esc(e.best_match_set)+' | score='+e.best_match_score+' ('+e.best_match_confidence+')' + (e.best_match_price?' | $'+Number(e.best_match_price).toFixed(2):'')+'</div>';
+      h+='<div class="field"><span class="label">Candidates: </span>'+e.candidates_count+'</div>';
+      if(e.disambiguation) h+='<div class="field"><span class="label">Disambiguation: </span>'+e.disambiguation+'</div>';
+      if(e.ocr_text) h+='<div class="field"><span class="label">OCR Text:</span><div class="ocr">'+esc(e.ocr_text)+'</div></div>';
+      h+='</div>';
+      return h;
+    }).join('');
+  }).catch(function(){});
+}
+function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+loadHistory();
+setInterval(function(){if(document.getElementById('autoRefresh').checked)loadHistory();},3000);
+</script>
+</body></html>""")
 
 
 # ---------------------------------------------------------------------------
