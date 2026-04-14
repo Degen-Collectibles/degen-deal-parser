@@ -23,6 +23,7 @@ _templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 from .auth import has_role
 from .card_scanner import identify_card_from_image, lookup_card_image_and_price
 from .cert_lookup import lookup_cert
+from .pokemon_scanner import run_pipeline as run_pokemon_pipeline
 from .config import get_settings
 from .db import get_session
 from .inventory_barcode import (
@@ -630,7 +631,54 @@ async def inventory_batch_review_page(request: Request):
 
 
 # ---------------------------------------------------------------------------
-# AI card identification (JSON API)
+# Pokemon card scanner (multi-stage pipeline)
+# ---------------------------------------------------------------------------
+
+@router.get("/inventory/scan/pokemon", response_class=HTMLResponse)
+async def inventory_scan_pokemon_page(request: Request):
+    if denial := _require_viewer(request):
+        return denial
+    return _templates.TemplateResponse(
+        request,
+        "inventory_scan_pokemon.html",
+        {"current_user": _current_user(request), "conditions": CONDITIONS},
+    )
+
+
+@router.post("/inventory/scan/pokemon/identify")
+async def inventory_scan_pokemon_identify(request: Request):
+    """
+    Run the full Pokemon card scanning pipeline on a base64 image.
+
+    Request body: {"image": "<base64 string>"}
+    Response: ScanResult JSON with best_match, candidates, extracted_fields, debug.
+    """
+    if denial := _require_viewer(request):
+        return denial
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+    base64_image = (body.get("image") or "").strip()
+    if not base64_image:
+        return JSONResponse({"error": "Missing image field"}, status_code=400)
+
+    if "," in base64_image:
+        base64_image = base64_image.split(",", 1)[1]
+
+    result = await run_pokemon_pipeline(base64_image)
+
+    status_code = 200
+    if result.get("status") == "ERROR":
+        status_code = 422
+
+    return JSONResponse(result, status_code=status_code)
+
+
+# ---------------------------------------------------------------------------
+# AI card identification (JSON API) — generic, kept for MTG/other games
 # ---------------------------------------------------------------------------
 
 @router.post("/inventory/scan/identify")
