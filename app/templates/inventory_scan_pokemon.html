@@ -352,6 +352,7 @@ var PKScanner = (function() {
                     facingMode: facingMode,
                     width: { ideal: 1080, min: 720 },
                     height: { ideal: 1920, min: 1280 },
+                    focusMode: { ideal: 'continuous' },
                 }
             });
             var video = document.getElementById('video');
@@ -556,7 +557,11 @@ var PKScanner = (function() {
         }
         debugEl.innerHTML = debugHtml;
 
-        panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        // Only scroll to results on desktop; on mobile the camera is at the
+        // top and scrolling away makes the user think the camera is moving.
+        if (window.innerWidth > 780) {
+            panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
     }
 
     function pickCandidate(idx) {
