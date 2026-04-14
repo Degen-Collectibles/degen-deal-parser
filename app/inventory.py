@@ -735,6 +735,7 @@ function loadHistory(){
       h+='<div class="field"><span class="label">Extracted: </span>name='+esc(e.extracted_name)+', number='+esc(e.extracted_number)+', set='+esc(e.extracted_set)+'</div>';
       if(e.best_match_name) h+='<div class="field"><span class="label">Best Match: </span>'+esc(e.best_match_name)+' #'+esc(e.best_match_number)+' | '+esc(e.best_match_set)+' | score='+e.best_match_score+' ('+e.best_match_confidence+')' + (e.best_match_price?' | $'+Number(e.best_match_price).toFixed(2):'')+'</div>';
       h+='<div class="field"><span class="label">Candidates: </span>'+e.candidates_count+'</div>';
+      if(e.extraction_method) h+='<div class="field"><span class="label">Extraction: </span>'+e.extraction_method+'</div>';
       if(e.disambiguation) h+='<div class="field"><span class="label">Disambiguation: </span>'+e.disambiguation+'</div>';
       if(e.ocr_text) h+='<div class="field"><span class="label">OCR Text:</span><div class="ocr">'+esc(e.ocr_text)+'</div></div>';
       h+='</div>';

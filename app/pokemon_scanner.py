@@ -18,6 +18,8 @@ import time
 from dataclasses import dataclass, field, asdict
 from typing import Any, Optional
 
+import json
+
 import httpx
 from openai import OpenAI
 
@@ -40,6 +42,7 @@ class ExtractedFields:
     hp_value: Optional[str] = None
     ocr_raw_text: str = ""
     ocr_confidence: float = 0.0
+    extraction_method: str = "regex"  # "ai" | "regex"
     extraction_warnings: list[str] = field(default_factory=list)
 
 
@@ -213,7 +216,18 @@ async def run_ocr(image_bytes: bytes, api_key: str) -> ExtractedFields:
         if conf_values:
             fields.ocr_confidence = sum(conf_values) / len(conf_values)
 
+    # Primary: AI-powered extraction (understands Pokemon card structure)
+    settings = get_settings()
+    ai_fields = _ai_extract_fields(raw_text, settings.openai_api_key)
+    if ai_fields:
+        ai_fields.ocr_raw_text = raw_text
+        ai_fields.ocr_confidence = fields.ocr_confidence
+        ai_fields.extraction_method = "ai"
+        return ai_fields
+
+    # Fallback: regex-based extraction
     _extract_fields_from_text(raw_text, fields)
+    fields.extraction_method = "regex"
     return fields
 
 
@@ -253,8 +267,68 @@ def _fix_digit_string(s: str) -> str:
     return "".join(result) if result else s
 
 
+_AI_EXTRACT_PROMPT = """You are a Pokemon card OCR interpreter. Given raw OCR text from a card photo, extract structured fields.
+
+Rules:
+- card_name: The Pokemon's full name as printed (e.g. "Erika's Tangela", "Charizard ex"). Fix obvious OCR errors using your knowledge of real Pokemon card names.
+- collector_number: The collector number in "X/Y" format (e.g. "218/217"). This appears near the bottom of the card. Fix OCR digit misreads.
+- set_name: The set name or its abbreviation (e.g. "Ascended Heroes", "ASCEN", "Unified Minds"). If you see a short abbreviation like "ASC" or "SVI", expand it to the full set name if you can confidently identify it. Ignore regulation mark letters (single letters like J, H, G near the set code).
+- hp_value: The HP as a string (e.g. "80", "230") or null if not visible.
+- variant_hints: Array of variant/rarity keywords found (e.g. ["FULL ART", "EX", "ILLUSTRATION RARE"]). Empty array if none.
+
+Respond with JSON only. Do not include any explanation."""
+
+
+def _ai_extract_fields(raw_text: str, openai_key: str) -> Optional[ExtractedFields]:
+    """Use OpenAI to interpret raw OCR text into structured card fields.
+
+    Returns populated ExtractedFields on success, None on failure.
+    """
+    if not openai_key or not raw_text.strip():
+        return None
+
+    try:
+        client = OpenAI(api_key=openai_key, timeout=10.0)
+        response = client.chat.completions.create(
+            model=VISION_MODEL,
+            messages=[
+                {"role": "system", "content": _AI_EXTRACT_PROMPT},
+                {"role": "user", "content": raw_text},
+            ],
+            response_format={"type": "json_object"},
+            max_tokens=300,
+            temperature=0.1,
+        )
+        raw_json = response.choices[0].message.content or "{}"
+        data = json.loads(raw_json)
+
+        fields = ExtractedFields()
+        fields.card_name = data.get("card_name") or None
+        fields.collector_number = data.get("collector_number") or None
+        fields.set_name = data.get("set_name") or None
+        fields.hp_value = data.get("hp_value") or None
+        fields.variant_hints = data.get("variant_hints") or []
+        fields.language = "English"
+        fields.ocr_raw_text = raw_text
+
+        if not fields.card_name and not fields.collector_number:
+            logger.info("[pokemon_scanner] AI extraction returned empty fields")
+            return None
+
+        logger.info(
+            "[pokemon_scanner] AI extracted: name=%s, number=%s, set=%s, hp=%s, variants=%s",
+            fields.card_name, fields.collector_number, fields.set_name,
+            fields.hp_value, fields.variant_hints,
+        )
+        return fields
+
+    except Exception as exc:
+        logger.warning("[pokemon_scanner] AI extraction failed: %s", exc)
+        return None
+
+
 def _extract_fields_from_text(raw_text: str, fields: ExtractedFields) -> None:
-    """Parse OCR raw text into structured ExtractedFields."""
+    """Parse OCR raw text into structured ExtractedFields (regex fallback)."""
     lines = [ln.strip() for ln in raw_text.strip().split("\n") if ln.strip()]
     text_upper = raw_text.upper()
 
@@ -1012,6 +1086,7 @@ async def run_pipeline(image_b64: str) -> dict[str, Any]:
     fields = await run_ocr(processed_bytes, settings.google_vision_api_key)
     debug_info["ocr_raw_text"] = fields.ocr_raw_text
     debug_info["ocr_confidence"] = fields.ocr_confidence
+    debug_info["extraction_method"] = fields.extraction_method
     debug_info["stage_times_ms"]["ocr"] = _elapsed(t_stage)
 
     # Fallback: if preprocessed image yielded nothing, try the raw image
@@ -1021,6 +1096,7 @@ async def run_pipeline(image_b64: str) -> dict[str, Any]:
         fields = await run_ocr(raw_bytes, settings.google_vision_api_key)
         debug_info["ocr_raw_text"] = fields.ocr_raw_text
         debug_info["ocr_confidence"] = fields.ocr_confidence
+        debug_info["extraction_method"] = fields.extraction_method
         debug_info["ocr_fallback"] = "raw_image"
         debug_info["stage_times_ms"]["ocr_fallback"] = _elapsed(t_stage)
 
@@ -1135,6 +1211,7 @@ def _save_to_history(result: dict) -> None:
         "extracted_set": (result.get("extracted_fields") or {}).get("set_name"),
         "ocr_text": (result.get("debug") or {}).get("ocr_raw_text", ""),
         "ocr_confidence": (result.get("debug") or {}).get("ocr_confidence"),
+        "extraction_method": (result.get("debug") or {}).get("extraction_method", "regex"),
         "disambiguation": result.get("disambiguation_method"),
         "error": result.get("error"),
         "debug": result.get("debug"),
