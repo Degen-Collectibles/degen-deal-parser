@@ -1,6 +1,6 @@
 # Project Status
 
-Last updated: 2026-04-11
+Last updated: 2026-04-14
 
 ## What Is This
 
@@ -47,9 +47,9 @@ As of April 2026, `app/main.py` was refactored from ~12,000 lines into a modular
 |---|---|---|
 | **App init** | `app/main.py` (~720 lines) | FastAPI app creation, middleware, static files, router includes |
 | **Shared helpers** | `app/shared.py` (~5,000 lines) | Background tasks, state management, polling loops, shared utilities |
-| **Route handlers** | `app/routers/` (16 modules) | One file per feature area |
-| **Core logic** | `app/*.py` (38 files total) | Models, parser, worker, ingestion, reporting, etc. |
-| **Templates** | `app/templates/` | Jinja2 HTML with inline JS/CSS |
+| **Route handlers** | `app/routers/` (16 modules) + `app/inventory.py` | One file per feature area |
+| **Core logic** | `app/*.py` (42+ files total) | Models, parser, worker, ingestion, reporting, inventory, etc. |
+| **Templates** | `app/templates/` (30+ files) | Jinja2 HTML with inline JS/CSS |
 | **Scripts** | `scripts/` (11 files) | Backfill, migration, scraping, backup utilities |
 | **Tests** | `tests/` (25 files) | 233 passing tests |
 
@@ -68,10 +68,11 @@ As of April 2026, `app/main.py` was refactored from ~12,000 lines into a modular
 | `reports.py` | `/reports`, `/finance`, `/pnl` | Financial reports |
 | `shopify.py` | `/shopify` | Shopify order sync, OAuth |
 | `stream_manager.py` | `/stream-manager` | Stream team management |
-| `tiktok_analytics.py` | `/tiktok/analytics` | Analytics charts, daily/stream data |
+| `tiktok_analytics.py` | `/tiktok/analytics`, `/tiktok/clients` | Analytics charts, client & product intelligence |
 | `tiktok_orders.py` | `/tiktok/orders` | Order listing, webhook, sync |
 | `tiktok_products.py` | `/tiktok/products` | Product management |
 | `tiktok_streamer.py` | `/tiktok/streamer` | Live streamer dashboard |
+| `inventory.py` (top-level) | `/inventory` | Inventory CRUD, scanning, labels, Shopify push |
 
 ### Key Backend Modules
 
@@ -90,6 +91,12 @@ As of April 2026, `app/main.py` was refactored from ~12,000 lines into a modular
 | `bookkeeping.py` | Bookkeeping sheet import + reconciliation |
 | `config.py` | All env vars and app settings |
 | `auth.py` | Role-based auth (admin, reviewer, viewer) |
+| `inventory.py` | Inventory routes — listing, CRUD, scanning, labels |
+| `inventory_barcode.py` | Barcode generation (DGN-XXXXXX format) |
+| `inventory_pricing.py` | Auto-pricing lookups (Scryfall, 130point) |
+| `inventory_shopify.py` | Shopify product sync, mark-sold-from-order |
+| `card_scanner.py` | AI-powered card identification from camera images |
+| `cert_lookup.py` | Grading cert number lookup (PSA, BGS, CGC, SGC) |
 
 ### Key Scripts
 
@@ -138,6 +145,16 @@ As of April 2026, `app/main.py` was refactored from ~12,000 lines into a modular
   - **VIP Buyer Alerts** — purple toast with lifetime spend badge (default $5,000+)
   - **Order Velocity Sparkline** — SVG per-minute order rate
   - **Post-Stream Summary Card** — auto-triggered overlay with full stream stats + copy-to-clipboard
+  - **Leaderboard Drilldowns** — click a top buyer to see their orders; click a top seller to see buyer breakdown. Duplicate line items merged with quantity display.
+  - **Stream Dividers** — visual separators between orders from different livestreams
+  - **Dynamic LIVE/OFFLINE Badge** — pulsing red when streaming, gray when offline
+  - **Collapsible Live Chat** — side panel (desktop) or bottom panel (mobile), persists open/closed state
+- **Client Intelligence** (`/tiktok/clients`):
+  - Buyer list with total spent, order count, streams, avg order, first/last seen, repeat badges
+  - Click-to-expand buyer drilldown with order details and product images
+  - Product list with revenue, qty, order count, avg price
+  - Click-to-expand product drilldown showing all buyers
+  - Mobile-friendly with responsive columns
 - **Analytics page** (`/tiktok/analytics`):
   - Daily GMV trend chart (7d/30d/60d/90d)
   - Stream session list with GMV, duration, revenue/hour, % change
@@ -150,6 +167,23 @@ As of April 2026, `app/main.py` was refactored from ~12,000 lines into a modular
   - Full order listing with date filters and livestream filter
 - Product sync and management
 - TikTok webhook with HMAC-SHA256 signature verification
+
+### Inventory Side
+- Inventory item management (singles and slabs) with `InventoryItem` model
+- Camera-based card identification via AI (`/inventory/scan`)
+- Slab cert number lookup (PSA, BGS, CGC, SGC)
+- Batch card scanning with review step
+- Auto-pricing from Scryfall, 130point, and other sources
+- DGN-XXXXXX barcode generation with Avery-compatible label printing
+- Shopify integration — push items to Shopify, auto-mark sold from incoming orders
+- Item status tracking (in_stock, listed, sold, returned, missing)
+
+### Stream Management
+- Multi-stream account support — tabbed schedule interface (e.g., "Main Stream", "Second Stream")
+- Team scheduling with AM/PM time display
+- Overnight shift support (shifts crossing midnight tagged as "next day")
+- Auto-detection of current streamer based on schedule + stream account
+- Hit tracker defaults to scheduled streamer for main account
 
 ### Infrastructure
 - Role-based auth (admin, reviewer, viewer)
@@ -174,9 +208,10 @@ As of April 2026, `app/main.py` was refactored from ~12,000 lines into a modular
 - **Buyer @username not available** — TikTok Shop API only returns `buyer_nickname` (display name) and `recipient_address.name` (shipping name), not the TikTok @handle. See "Planned Features" below.
 
 ### Nice to Have
-- No automated end-to-end tests for the streamer dashboard
+- No automated end-to-end tests for the streamer dashboard or inventory scanning
 - Chat panel connection depends on TikSync third-party service availability
-- README.md has some stale deployment info
+- Inventory auto-pricing sources could be expanded (currently Scryfall + 130point)
+- `app/templates/tiktok_streamer.html` is ~2,700 lines — CSS/JS should be extracted to separate assets
 
 ---
 
@@ -217,26 +252,26 @@ Future goal: make the platform multi-tenant SaaS. No work started yet.
 ## Recent Commits (Last 20)
 
 ```
+782dc9b Merge duplicate line items per order in buyer detail drilldown
+8a276b5 Fix leaderboard UX: add buyer scroll arrows, mobile-friendly detail panels with product images
+23e0e44 Add click-to-expand drilldowns on streamer leaderboard
+bb30f37 Make client intelligence page mobile-friendly with horizontal scroll and responsive columns
+1ca21fa Fix .00 revenue in product table - summary JSON uses unit_price not sale_price
+ecf4566 Fix naive vs aware datetime comparisons in client intelligence functions
+f14eb11 Pin Jinja2 to 3.1.5 to fix unhashable cache key bug in 3.1.6
+ec9229f Fix three data accuracy bugs found by Codex audit
+755b506 Add Client & Product Intelligence page at /tiktok/clients
+370c316 Simplify Log Hit modal: remove hit value, stream label, and extra fields
+6a86bc7 Fix PostgreSQL GROUP BY error in buyer lifetime query
+0b7113e Comprehensive security, performance, and code quality audit fixes
+950a2ed Fix missing imports in admin_actions.py causing 500 on channel add with backfill
 283ee22 Add automated PostgreSQL backup script with OneDrive upload via rclone
 4d5cef4 Refactor app/main.py into modular router architecture
-83470cd Fix em-dash character in run_hosted.ps1 causing PowerShell parse error
-0845b03 Fix deploy health check: retry for up to 120s instead of single 30s attempt
 7ac5dae Prevent server hangs: liveness watchdog, pool timeouts, statement timeout, backfill rate limit
 5f5d456 Add VIP buyer badges, chat viewer presence tracking, and join messages
-d706e42 Add firecrawl-py dependency for web scraping
-a503d87 Show current streamer name on streamer dashboard header
-0ed237a Add scrollable containers and show-more toggle to Top Buyers and Product Performance tables
-eceb587 Document TikTok webhook signature algorithm as do-not-modify in AGENTS.md
-3f51727 Update docs for streamer dashboard + analytics features
-ba37142 Add streamer dashboard + analytics features (8 total)
-87452d1 Fix TikTok webhook signature verification and re-enable strict mode
-483539d Capture all webhook headers and expand signature debug candidates
-f899d6d Fix streamer dashboard livestream dividers
-a196dc1 Fix missing hmac import in webhook debug code
-910a7d8 Auto-reload streamer dashboard on deploy via build version check
-2829ad0 Fix streamer dashboard not detecting active livestreams
-6ddd23e Revert TikTok webhook strict_signature to fix 3-day outage
-3ec27cf Add TikTok analytics page with Chart.js charts, stream selector, KPIs
+f3a3e17 Add multi-stream schedules, AM/PM times, overnight shift support
+98c0554 Add inventory management system with barcode generation and auto-pricing
+cc1ddeb Add card camera scanning and slab cert lookup features
 ```
 
 ---

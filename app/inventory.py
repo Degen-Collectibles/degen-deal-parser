@@ -133,9 +133,9 @@ async def inventory_list(
     ).all()
 
     return _templates.TemplateResponse(
+        request,
         "inventory.html",
         {
-            "request": request,
             "current_user": _current_user(request),
             "items": items,
             "total": total,
@@ -183,8 +183,9 @@ async def inventory_scan_page(request: Request):
     if denial := _require_viewer(request):
         return denial
     return _templates.TemplateResponse(
+        request,
         "inventory_scan.html",
-        {"request": request, "current_user": _current_user(request)},
+        {"current_user": _current_user(request)},
     )
 
 
@@ -216,8 +217,9 @@ async def inventory_labels(
 
     labels = label_context_for_items(items)
     return _templates.TemplateResponse(
+        request,
         "inventory_labels.html",
-        {"request": request, "current_user": _current_user(request), "labels": labels},
+        {"current_user": _current_user(request), "labels": labels},
     )
 
 
@@ -230,9 +232,9 @@ async def inventory_new_form(request: Request):
     if denial := _require_reviewer(request):
         return denial
     return _templates.TemplateResponse(
+        request,
         "inventory_new.html",
         {
-            "request": request,
             "current_user": _current_user(request),
             "games": GAMES,
             "conditions": CONDITIONS,
@@ -271,9 +273,9 @@ async def inventory_new_submit(
     card_name = card_name.strip()
     if not card_name:
         return _templates.TemplateResponse(
+            request,
             "inventory_new.html",
             {
-                "request": request,
                 "current_user": _current_user(request),
                 "games": GAMES,
                 "conditions": CONDITIONS,
@@ -391,9 +393,9 @@ async def inventory_item_detail(
     barcode_svg = render_barcode_svg(item.barcode)
 
     return _templates.TemplateResponse(
+        request,
         "inventory_item.html",
         {
-            "request": request,
             "current_user": _current_user(request),
             "item": item,
             "price_history": history,
@@ -589,8 +591,9 @@ async def inventory_scan_singles_page(request: Request):
     if denial := _require_viewer(request):
         return denial
     return _templates.TemplateResponse(
+        request,
         "inventory_scan_singles.html",
-        {"request": request, "current_user": _current_user(request)},
+        {"current_user": _current_user(request)},
     )
 
 
@@ -599,9 +602,9 @@ async def inventory_scan_slabs_page(request: Request):
     if denial := _require_viewer(request):
         return denial
     return _templates.TemplateResponse(
+        request,
         "inventory_scan_slabs.html",
         {
-            "request": request,
             "current_user": _current_user(request),
             "grading_companies": GRADING_COMPANIES,
         },
@@ -613,8 +616,9 @@ async def inventory_batch_review_page(request: Request):
     if denial := _require_viewer(request):
         return denial
     return _templates.TemplateResponse(
+        request,
         "inventory_batch_review.html",
-        {"request": request, "current_user": _current_user(request), "conditions": CONDITIONS},
+        {"current_user": _current_user(request), "conditions": CONDITIONS},
     )
 
 

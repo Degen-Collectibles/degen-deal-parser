@@ -79,9 +79,18 @@ TikTok side:
 - `/tiktok/orders` — order listing with livestream filter
 - `/tiktok/streamer` — live streamer dashboard (real-time orders, GMV, chat, goal bar, alerts)
 - `/tiktok/analytics` — stream analytics, buyer tracking, product performance, stream comparison
+- `/tiktok/clients` — client & product intelligence (buyer drilldowns, product drilldowns)
 - `/tiktok/streamer/config` — stream time config + GMV goal + alert thresholds
 
-Admin:
+Inventory:
+- `/inventory` — inventory listing with search, filter by type/status/game
+- `/inventory/new` — add new inventory item
+- `/inventory/scan` — camera-based card scanning (singles, slabs, batch)
+- `/inventory/labels` — print barcode labels (Avery-compatible)
+- `/inventory/{id}` — item detail with pricing, Shopify push, edit
+
+Operations:
+- `/stream-manager` — multi-stream schedule management with team assignments
 - `/admin/home` — admin dashboard
 - `/admin/debug` — system diagnostics
 - `/admin/users` — user management
@@ -189,10 +198,19 @@ Router agent (route handlers split from old main.py):
 - `app/routers/shopify.py` — `/shopify/orders`, TikTok OAuth callback
 - `app/routers/tiktok_orders.py` — `/tiktok/orders`, webhook, sync
 - `app/routers/tiktok_streamer.py` — `/tiktok/streamer`, poll, goal, config
-- `app/routers/tiktok_analytics.py` — `/tiktok/analytics` + API endpoints
+- `app/routers/tiktok_analytics.py` — `/tiktok/analytics`, `/tiktok/clients` + API endpoints
 - `app/routers/tiktok_products.py` — `/tiktok/products`
 - `app/routers/hits.py` — `/hits`, live hit tracking
 - `app/routers/stream_manager.py` — `/stream-manager`
+
+Inventory agent:
+- `app/inventory.py` — inventory CRUD routes, scanning, label generation, Shopify push
+- `app/inventory_barcode.py` — barcode generation (DGN-XXXXXX format)
+- `app/inventory_pricing.py` — auto-pricing lookups (Scryfall, 130point, etc.)
+- `app/inventory_shopify.py` — Shopify product sync, mark-sold-from-order
+- `app/card_scanner.py` — camera-based card identification via AI
+- `app/cert_lookup.py` — grading cert number lookup (PSA, BGS, CGC, SGC)
+- `app/templates/inventory*.html` — 8 inventory templates
 
 TikTok / Streamer agent:
 - `app/tiktok_ingest.py`
@@ -201,6 +219,7 @@ TikTok / Streamer agent:
 - `scripts/tiktok_backfill.py`
 - `app/templates/tiktok_streamer.html`
 - `app/templates/tiktok_analytics.html`
+- `app/templates/tiktok_clients.html`
 - `app/templates/tiktok_orders.html`
 
 Do not assign overlapping files to multiple agents at the same time.
@@ -337,11 +356,16 @@ Everything is working:
 | `app/tiktok_ingest.py` | OAuth token exchange, webhook parsing, order normalization |
 | `app/tiktok_auth_refresh.py` | Background token refresh logic |
 | `app/tiktok_live_chat.py` | TikSync WebSocket for live chat + room ID capture |
-| `app/models.py` | `TikTokOrder`, `TikTokAuth`, `TikTokProduct`, `AppSetting` models |
+| `app/models.py` | `TikTokOrder`, `TikTokAuth`, `TikTokProduct`, `AppSetting`, `InventoryItem`, `StreamAccount` models |
 | `app/reporting.py` | TikTok order reporting/summary functions, buyer insights, product performance |
-| `app/main.py` | All TikTok routes, streamer dashboard, analytics, background pollers |
-| `app/templates/tiktok_streamer.html` | Streamer dashboard (orders, GMV, chat, goal bar, sparkline, alerts, summary) |
+| `app/routers/tiktok_streamer.py` | Streamer dashboard routes, poll, goal, config |
+| `app/routers/tiktok_analytics.py` | Analytics + client intelligence routes |
+| `app/routers/tiktok_orders.py` | Order listing, webhook, sync |
+| `app/routers/stream_manager.py` | Multi-stream schedule management |
+| `app/inventory.py` | Inventory CRUD, scanning, labels, Shopify push |
+| `app/templates/tiktok_streamer.html` | Streamer dashboard (orders, GMV, chat, goal bar, sparkline, alerts, summary, drilldowns) |
 | `app/templates/tiktok_analytics.html` | Analytics page (charts, stream selector, buyers, products, comparison) |
+| `app/templates/tiktok_clients.html` | Client & product intelligence page (buyer/product drilldowns) |
 | `app/templates/tiktok_orders.html` | Order listing with livestream filter |
 | `TIKTOK_API.md` | Complete API reference for all endpoints |
 
@@ -396,6 +420,47 @@ The streamer dashboard (`/tiktok/streamer`) includes:
 - **VIP Buyer Alerts** — purple toast with "VIP Buyer!" label and lifetime spend badge when buyer's all-time spend exceeds threshold. `AppSetting` key `vip_buyer_threshold` (default $5,000). Each poll response includes `buyer_lifetime_spent` per order card.
 - **Order Velocity Sparkline** — SVG sparkline in the GMV hero showing per-minute order counts for the last 60 minutes, with a "X orders/min" rate label.
 - **Post-Stream Summary Card** — full-screen overlay triggered when `is_live` transitions from true to false. Shows GMV, orders, items, AOV, customers, orders/hr, top sellers/buyers. "Copy Summary" for pasting into Discord.
+- **Leaderboard Drilldowns** — click a top buyer to expand and see their individual orders; click a top seller to see buyer breakdown. Panels persist across poll refreshes. Duplicate line items within an order are merged and show quantity.
+- **Stream Dividers** — visual dividers between orders from different livestreams.
+- **Dynamic LIVE/OFFLINE Badge** — shows "LIVE" (red, pulsing) during streams and "OFFLINE" (gray) otherwise.
+- **Collapsible Live Chat** — side panel (desktop) or bottom panel (mobile), starts closed, persists state in localStorage.
+
+## Client & Product Intelligence
+
+The client intelligence page (`/tiktok/clients`) provides:
+
+- **Buyer List** — sortable table of all buyers with total spent, order count, streams attended, avg order, first/last seen. Repeat buyers get a cyan badge.
+- **Buyer Drilldown** — click a buyer to see all their orders with line items, product images, and merged duplicates.
+- **Product List** — sortable table of all products with revenue, qty sold, order count, avg price.
+- **Product Drilldown** — click a product to see all buyers who purchased it.
+- Mobile-friendly with horizontal scroll and responsive columns.
+
+## Inventory Management
+
+The inventory system (`/inventory`) provides:
+
+- **Item listing** — search, filter by type (single/slab), status, game, grading company
+- **Camera scanning** — AI-powered card identification via `app/card_scanner.py`; singles and slab scanning modes
+- **Slab cert lookup** — certificate number lookup for PSA, BGS, CGC, SGC via `app/cert_lookup.py`
+- **Batch review** — scan multiple cards, review AI identifications, confirm in batch
+- **Auto-pricing** — periodic price lookups from Scryfall, 130point, etc. via `app/inventory_pricing.py`
+- **Barcode generation** — DGN-XXXXXX format barcodes, Avery-compatible label printing
+- **Shopify integration** — push items to Shopify, auto-mark sold when Shopify order arrives
+- **Status tracking** — in_stock, listed, sold, returned, missing
+
+Models: `InventoryItem`, `PriceHistory` in `app/models.py`
+
+## Stream Manager
+
+The stream manager (`/stream-manager`) provides:
+
+- **Multi-stream accounts** — tabbed interface, one tab per `StreamAccount` (e.g., "Main Stream", "Second Stream")
+- **Default account** — first account is auto-created as default and linked to TikTok @degencollectibles
+- **Team scheduling** — assign streamers to time slots with date, start/end times
+- **AM/PM display** — times shown in 12-hour format
+- **Overnight shifts** — shifts crossing midnight (e.g., 6 PM — 6 AM) tagged as "next day"
+- **Current streamer resolution** — `get_current_streamer()` checks today's schedules plus yesterday's overnight shifts
+- **Hit tracker integration** — streamer dashboard defaults to whoever is scheduled for the main stream account
 
 ### AppSetting keys used by the dashboard
 
@@ -420,6 +485,8 @@ The analytics page (`/tiktok/analytics`) includes:
 - **Repeat Buyer Tracking** — sortable table of all buyers with total spent, order count, streams, avg order, first/last seen. Repeat buyers get a cyan badge. API: `GET /tiktok/analytics/api/buyers?days=90`
 - **Product Performance Ranking** — sortable table of products with revenue, qty, orders, avg price, and live% / non-live% split. API: `GET /tiktok/analytics/api/products?days=30`
 - **Stream-over-Stream Comparison** — side-by-side cards with delta pills (green/red % change). Supports "Pick Streams" and "Week vs Week" modes. API: `GET /tiktok/analytics/api/compare?stream_a=X&stream_b=Y` or `?mode=weekly`
+
+See also: **Client & Product Intelligence** section above for the dedicated `/tiktok/clients` drilldown page.
 
 ## Infrastructure: Machine A / Machine B
 

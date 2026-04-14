@@ -29,9 +29,14 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run_hosted.ps1
 
 **TikTok side:**
 - TikTok Shop order sync (API + webhooks)
-- Live streamer dashboard with real-time orders, GMV, chat, goal bar, high-value/VIP alerts, velocity sparkline, post-stream summary
+- Live streamer dashboard with real-time orders, GMV, chat, goal bar, high-value/VIP alerts, velocity sparkline, post-stream summary, leaderboard drilldowns
 - Stream analytics with buyer tracking, product performance, stream-over-stream comparison
+- Client & product intelligence with buyer/product drilldowns
 - Product management
+
+**Inventory:**
+- Card inventory management with barcode generation, camera scanning, slab cert lookup
+- Auto-pricing, Shopify integration, label printing
 
 ## Key Pages
 
@@ -44,7 +49,10 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run_hosted.ps1
 | `/tiktok/orders` | TikTok order listing |
 | `/tiktok/streamer` | Live streamer dashboard (orders, GMV, goal bar, alerts, sparkline) |
 | `/tiktok/analytics` | Stream analytics, buyer tracking, product performance, comparison |
+| `/tiktok/clients` | Client & product intelligence with drilldowns |
 | `/tiktok/streamer/config` | Stream time config + GMV goal + alert thresholds |
+| `/inventory` | Inventory management, scanning, labels |
+| `/stream-manager` | Multi-stream team scheduling |
 | `/admin/home` | Admin dashboard |
 | `/admin/debug` | System diagnostics |
 
