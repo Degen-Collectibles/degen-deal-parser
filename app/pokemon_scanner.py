@@ -59,6 +59,7 @@ class CandidateCard:
     variant: Optional[str] = None
     source: str = ""  # "tcgdex" | "pokemontcg"
     market_price: Optional[float] = None
+    tcgplayer_url: Optional[str] = None
 
 
 @dataclass
@@ -659,6 +660,7 @@ async def _pokemontcg_search(
             rarity=card.get("rarity"),
             source="pokemontcg",
             market_price=market_price,
+            tcgplayer_url=card.get("tcgplayer", {}).get("url"),
         ))
 
     return results
@@ -906,53 +908,79 @@ def score_candidates(
 # ---------------------------------------------------------------------------
 
 async def _enrich_price(candidate: ScoredCandidate, ptcg_key: str = "") -> None:
-    """If candidate has no market_price (e.g. from TCGdex), fetch from PokemonTCG."""
+    """If candidate has no market_price (e.g. from TCGdex), fetch from PokemonTCG.
+
+    Tries multiple query strategies since TCGdex and PokemonTCG use different
+    set IDs (e.g. TCGdex "me02.5" vs PokemonTCG "sv5").
+    """
     if candidate.market_price is not None:
         return
 
-    if not candidate.id and not candidate.name:
+    if not candidate.name:
         return
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         headers = {"X-Api-Key": ptcg_key} if ptcg_key else {}
-        q_parts = []
-        if candidate.name:
-            q_parts.append(f'name:"{candidate.name}"')
+
+        # Build queries in order of specificity
+        queries_to_try = []
+
+        # Try 1: name + number (skip set_id — TCGdex IDs don't match PokemonTCG)
         if candidate.number:
-            clean = candidate.number.split("/")[0]
-            q_parts.append(f'number:"{clean}"')
-        if candidate.set_id:
-            q_parts.append(f"set.id:{candidate.set_id}")
+            clean_num = candidate.number.split("/")[0]
+            queries_to_try.append(f'name:"{candidate.name}" number:"{clean_num}"')
 
-        if not q_parts:
-            return
+        # Try 2: name + set name (fuzzy, via set.name)
+        if candidate.set_name:
+            queries_to_try.append(f'name:"{candidate.name}" set.name:"{candidate.set_name}"')
 
-        params = {"q": " ".join(q_parts), "pageSize": "1"}
-        resp = await client.get(f"{POKEMONTCG_BASE}/cards", params=params, headers=headers)
-        if resp.status_code != 200:
-            return
+        # Try 3: name only (broadest)
+        queries_to_try.append(f'name:"{candidate.name}"')
 
-        cards = resp.json().get("data") or []
-        if not cards:
-            return
+        for query in queries_to_try:
+            params = {"q": query, "pageSize": "5", "orderBy": "-set.releaseDate"}
+            resp = await client.get(f"{POKEMONTCG_BASE}/cards", params=params, headers=headers)
+            if resp.status_code != 200:
+                continue
 
-        prices_wrap = cards[0].get("tcgplayer", {}).get("prices", {})
-        for price_type in ("normal", "holofoil", "reverseHolofoil"):
-            if price_type in prices_wrap:
-                mp = prices_wrap[price_type].get("market")
-                if mp is not None:
-                    try:
-                        candidate.market_price = round(float(mp), 2)
-                    except (ValueError, TypeError):
-                        pass
-                    if candidate.market_price:
+            cards = resp.json().get("data") or []
+            if not cards:
+                continue
+
+            # Pick the best card — prefer one whose number matches
+            best_card = cards[0]
+            if candidate.number:
+                clean_num = candidate.number.split("/")[0].lstrip("0")
+                for card in cards:
+                    if card.get("number", "").lstrip("0") == clean_num:
+                        best_card = card
                         break
 
-        # Also grab image if missing
-        if not candidate.image_url:
-            images = cards[0].get("images") or {}
-            candidate.image_url = images.get("large", "")
-            candidate.image_url_small = images.get("small", "")
+            prices_wrap = best_card.get("tcgplayer", {}).get("prices", {})
+            for price_type in ("normal", "holofoil", "reverseHolofoil", "1stEditionHolofoil"):
+                if price_type in prices_wrap:
+                    mp = prices_wrap[price_type].get("market")
+                    if mp is not None:
+                        try:
+                            candidate.market_price = round(float(mp), 2)
+                        except (ValueError, TypeError):
+                            pass
+                        if candidate.market_price:
+                            break
+
+            # Always grab TCGPlayer URL and images
+            tcgp_url = best_card.get("tcgplayer", {}).get("url")
+            if tcgp_url and not candidate.tcgplayer_url:
+                candidate.tcgplayer_url = tcgp_url
+
+            if not candidate.image_url:
+                images = best_card.get("images") or {}
+                candidate.image_url = images.get("large", "")
+                candidate.image_url_small = images.get("small", "")
+
+            if candidate.market_price:
+                return
+            # No price from this query — try next
 
 
 # ---------------------------------------------------------------------------
@@ -1131,11 +1159,11 @@ async def run_pipeline(image_b64: str) -> dict[str, Any]:
 
     # --- Price enrichment for top candidates ---
     t_stage = time.monotonic()
-    for sc in scored[:3]:
+    for sc in scored[:5]:
         try:
             await _enrich_price(sc, settings.pokemon_tcg_api_key)
         except Exception as exc:
-            logger.debug("[pokemon_scanner] Price enrichment failed: %s", exc)
+            logger.debug("[pokemon_scanner] Price enrichment failed for %s: %s", sc.name, exc)
     debug_info["stage_times_ms"]["price_enrich"] = _elapsed(t_stage)
 
     # --- Stage F: Disambiguation (if needed) ---

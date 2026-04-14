@@ -476,7 +476,15 @@ var PKScanner = (function() {
             html += '<div class="result-name">' + escHtml(m.name) + '</div>';
             html += '<div class="result-set">' + escHtml(m.set_name) + '</div>';
             html += '<div class="result-number">#' + escHtml(m.number) + (m.rarity ? ' &middot; ' + escHtml(m.rarity) : '') + '</div>';
-            html += '<div class="result-price">' + priceStr + '</div>';
+            if (m.market_price) {
+                html += '<div class="result-price">' + priceStr + '</div>';
+            } else {
+                var tcgpUrl = m.tcgplayer_url || ('https://www.tcgplayer.com/search/pokemon/product?q=' + encodeURIComponent(m.name + ' ' + m.set_name));
+                html += '<div class="result-price" style="font-size:13px;">';
+                html += '<span style="color:var(--muted);">No price data</span> ';
+                html += '<a href="' + escHtml(tcgpUrl) + '" target="_blank" rel="noopener" style="color:var(--blue);font-weight:700;font-size:12px;">Check TCGPlayer &rarr;</a>';
+                html += '</div>';
+            }
             html += '<div style="margin-top:8px;">';
             html += '<label style="font-size:11px;font-weight:600;color:var(--muted);display:block;margin-bottom:4px;">Variant / Finish:</label>';
             html += '<select id="variant-select" style="width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;font-size:12px;font-family:inherit;background:#fff;">';
@@ -518,7 +526,11 @@ var PKScanner = (function() {
                 html += '<div class="c-name">' + escHtml(c.name) + '</div>';
                 html += '<div class="c-set">' + escHtml(c.set_name) + ' #' + escHtml(c.number) + '</div>';
                 html += '<div class="c-score">Score: ' + c.score + '</div>';
-                if (c.market_price) html += '<div class="c-set" style="color:var(--green);font-weight:700;">$' + Number(c.market_price).toFixed(2) + '</div>';
+                if (c.market_price) {
+                    html += '<div class="c-set" style="color:var(--green);font-weight:700;">$' + Number(c.market_price).toFixed(2) + '</div>';
+                } else {
+                    html += '<div class="c-set" style="color:var(--muted);font-style:italic;">No price</div>';
+                }
                 html += '</div>';
             }
             html += '</div></div>';
