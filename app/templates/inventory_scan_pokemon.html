@@ -1361,8 +1361,8 @@ var PKScanner = (function() {
         existingBatchEls.forEach(function(el) { el.remove(); });
 
         for (var i = 0; i < batch.length; i++) {
-            // Skip items that originated from the queue — they're already rendered in-place
-            if (batch[i]._fromScanId !== undefined) continue;
+            // Skip items whose queue DOM element still exists
+            if (batch[i]._fromScanId !== undefined && document.querySelector('[data-scan-id="' + batch[i]._fromScanId + '"]')) continue;
 
             (function(idx, item) {
                 var el = document.createElement('div');
