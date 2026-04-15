@@ -1326,6 +1326,16 @@ async def _run_ximilar_pipeline(image_b64: str, api_token: str) -> dict[str, Any
         alt_distance = distances[i + 1] if (i + 1) < len(distances) else 0.6
         scored_list.append(_ximilar_to_scored(alt_data, alt_distance))
 
+    # Quick price + image enrichment for top candidates
+    t_stage = time.monotonic()
+    settings = get_settings()
+    for sc in scored_list[:3]:
+        try:
+            await _enrich_price(sc, settings.pokemon_tcg_api_key)
+        except Exception as exc:
+            logger.debug("[pokemon_scanner] Ximilar price enrichment failed for %s: %s", sc.name, exc)
+    debug_info["stage_times_ms"]["price_enrich"] = _elapsed(t_stage)
+
     # Determine status
     if best.confidence == "HIGH":
         status = "MATCHED"
