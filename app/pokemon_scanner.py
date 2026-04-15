@@ -1120,8 +1120,9 @@ async def _enrich_price_fast(candidate: ScoredCandidate, ptcg_key: str = "") -> 
 
                 matched_product = None
                 for prod in cached["products"]:
-                    prod_num = prod.get("number", "").split("/")[0].lstrip("0")
-                    prod_clean = prod.get("clean_name", "").lower()
+                    prod_num_raw = prod.get("number") or ""
+                    prod_num = prod_num_raw.split("/")[0].lstrip("0")
+                    prod_clean = (prod.get("clean_name") or "").lower()
 
                     if cand_num and prod_num == cand_num and cand_name_lower in prod_clean:
                         matched_product = prod
@@ -1130,7 +1131,8 @@ async def _enrich_price_fast(candidate: ScoredCandidate, ptcg_key: str = "") -> 
                 # Broader fallback: match by number only
                 if not matched_product and cand_num:
                     for prod in cached["products"]:
-                        prod_num = prod.get("number", "").split("/")[0].lstrip("0")
+                        prod_num_raw = prod.get("number") or ""
+                        prod_num = prod_num_raw.split("/")[0].lstrip("0")
                         if prod_num == cand_num:
                             matched_product = prod
                             break
@@ -1161,7 +1163,7 @@ async def _enrich_price_fast(candidate: ScoredCandidate, ptcg_key: str = "") -> 
                         return
 
         except Exception as exc:
-            logger.debug("[pokemon_scanner] TCGTracking price lookup failed: %s", exc)
+            logger.warning("[pokemon_scanner] TCGTracking price lookup failed: %s", exc)
 
         # --- Try 2: PokemonTCG API fallback ---
         try:
