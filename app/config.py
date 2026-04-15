@@ -164,6 +164,7 @@ class Settings(BaseSettings):
     inventory_price_refresh_interval_hours: float = Field(default=6.0, alias="INVENTORY_PRICE_REFRESH_INTERVAL_HOURS")
     inventory_price_stale_hours: float = Field(default=24.0, alias="INVENTORY_PRICE_STALE_HOURS")
     # Card scanning
+    ximilar_api_token: str = Field(default="", alias="XIMILAR_API_TOKEN")
     psa_api_key: str = Field(default="", alias="PSA_API_KEY")
     pokemon_tcg_api_key: str = Field(default="", alias="POKEMON_TCG_API_KEY")
     google_vision_api_key: str = Field(default="", alias="GOOGLE_VISION_API_KEY")

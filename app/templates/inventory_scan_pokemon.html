@@ -261,7 +261,7 @@
             <div class="card" style="margin-bottom:20px;">
                 <div class="card-header">
                     <div class="card-title">Pok&eacute;mon Card Scanner</div>
-                    <div class="card-sub">Align card within the guide, then capture. OCR + database lookup identifies the card.</div>
+                    <div class="card-sub">Align card within the guide, then capture. AI visual recognition identifies the card.</div>
                 </div>
 
                 <div class="camera-wrap" id="camera-wrap">
@@ -561,11 +561,26 @@ var PKScanner = (function() {
         var debugEl = document.getElementById('debug-content');
         var dbg = data.debug || {};
         var ef = data.extracted_fields || {};
-        var debugHtml = '<strong>OCR Text:</strong><br><pre style="white-space:pre-wrap;margin:4px 0 10px;">' + escHtml(dbg.ocr_raw_text || '(none)') + '</pre>';
-        debugHtml += '<strong>Extracted:</strong> name=' + escHtml(ef.card_name) + ', number=' + escHtml(ef.collector_number) + ', set=' + escHtml(ef.set_name) + '<br>';
-        debugHtml += '<strong>Variants:</strong> ' + escHtml((ef.variant_hints || []).join(', ') || '(none)') + '<br>';
-        debugHtml += '<strong>OCR Confidence:</strong> ' + ((ef.ocr_confidence || 0) * 100).toFixed(0) + '%<br>';
-        debugHtml += '<strong>Candidates before scoring:</strong> ' + (dbg.candidates_before_scoring || 0) + '<br>';
+        var isXimilar = dbg.engine === 'ximilar';
+        var debugHtml = '<strong>Engine:</strong> ' + escHtml(dbg.engine || 'legacy_ocr') + '<br>';
+
+        if (isXimilar) {
+            debugHtml += '<strong>Identified:</strong> name=' + escHtml(ef.card_name) + ', number=' + escHtml(ef.collector_number) + ', set=' + escHtml(ef.set_name) + '<br>';
+            debugHtml += '<strong>Tags:</strong> ' + escHtml((dbg.ximilar_tags || []).join(', ') || '(none)') + '<br>';
+            debugHtml += '<strong>Detection confidence:</strong> ' + ((dbg.ximilar_detection_prob || 0) * 100).toFixed(0) + '%<br>';
+            debugHtml += '<strong>Best distance:</strong> ' + (dbg.ximilar_best_distance || 0).toFixed(4) + '<br>';
+            if (dbg.ximilar_distances && dbg.ximilar_distances.length) {
+                debugHtml += '<strong>All distances:</strong> ' + dbg.ximilar_distances.map(function(d){return d.toFixed(4);}).join(', ') + '<br>';
+            }
+            debugHtml += '<strong>Full name:</strong> ' + escHtml(dbg.ximilar_full_name || '') + '<br>';
+        } else {
+            debugHtml += '<strong>OCR Text:</strong><br><pre style="white-space:pre-wrap;margin:4px 0 10px;">' + escHtml(dbg.ocr_raw_text || '(none)') + '</pre>';
+            debugHtml += '<strong>Extracted:</strong> name=' + escHtml(ef.card_name) + ', number=' + escHtml(ef.collector_number) + ', set=' + escHtml(ef.set_name) + '<br>';
+            debugHtml += '<strong>Variants:</strong> ' + escHtml((ef.variant_hints || []).join(', ') || '(none)') + '<br>';
+            debugHtml += '<strong>OCR Confidence:</strong> ' + ((ef.ocr_confidence || 0) * 100).toFixed(0) + '%<br>';
+            debugHtml += '<strong>Candidates before scoring:</strong> ' + (dbg.candidates_before_scoring || 0) + '<br>';
+        }
+
         debugHtml += '<strong>Processing time:</strong> ' + (data.processing_time_ms || 0).toFixed(0) + 'ms<br>';
         var stages = dbg.stage_times_ms || {};
         debugHtml += '<strong>Stage times:</strong> ';

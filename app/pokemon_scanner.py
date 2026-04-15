@@ -99,6 +99,7 @@ SCORING_WEIGHTS = {
 DISAMBIGUATION_THRESHOLD = 15
 VISION_MODEL = "gpt-4o-mini"
 
+XIMILAR_TCG_URL = "https://api.ximilar.com/collectibles/v2/tcg_id"
 GOOGLE_VISION_URL = "https://vision.googleapis.com/v1/images:annotate"
 TCGDEX_BASE = "https://api.tcgdex.net/v2/en"
 POKEMONTCG_BASE = "https://api.pokemontcg.io/v2"
@@ -1142,17 +1143,229 @@ async def disambiguate_with_vision(
 
 
 # ---------------------------------------------------------------------------
-# Stage G: Orchestrator
+# Ximilar pipeline (visual recognition — single API call)
+# ---------------------------------------------------------------------------
+
+def _ximilar_to_scored(card_data: dict, distance: float, source: str = "ximilar") -> ScoredCandidate:
+    """Map a Ximilar identification result to a ScoredCandidate."""
+    card_number = card_data.get("card_number", "")
+    out_of = card_data.get("out_of", "")
+    number_str = f"{card_number}/{out_of}" if card_number and out_of else (card_number or "")
+
+    links = card_data.get("links") or {}
+    tcgplayer_url = links.get("tcgplayer.com") or links.get("tcgplayer")
+
+    if distance <= 0.25:
+        score, confidence = 95.0, "HIGH"
+    elif distance <= 0.35:
+        score, confidence = 80.0, "HIGH"
+    elif distance <= 0.45:
+        score, confidence = 65.0, "MEDIUM"
+    elif distance <= 0.55:
+        score, confidence = 50.0, "MEDIUM"
+    else:
+        score, confidence = 30.0, "LOW"
+
+    return ScoredCandidate(
+        id=f"ximilar-{card_data.get('set_code', '')}-{card_number}",
+        name=card_data.get("name", ""),
+        number=number_str,
+        set_id=card_data.get("set_code", ""),
+        set_name=card_data.get("set", ""),
+        image_url="",
+        image_url_small="",
+        rarity=card_data.get("rarity"),
+        variant=None,
+        source=source,
+        market_price=None,
+        tcgplayer_url=tcgplayer_url,
+        available_variants=[],
+        score=score,
+        confidence=confidence,
+        score_breakdown={"ximilar_distance": round(distance, 4)},
+        match_reason=f"Visual match: {card_data.get('full_name', card_data.get('name', ''))}",
+    )
+
+
+async def _run_ximilar_pipeline(image_b64: str, api_token: str) -> dict[str, Any]:
+    """Run card identification via Ximilar's visual recognition API."""
+    t_start = time.monotonic()
+    debug_info: dict[str, Any] = {
+        "engine": "ximilar",
+        "stage_times_ms": {},
+    }
+
+    def _early(r: ScanResult) -> dict:
+        d = asdict(r)
+        _save_to_history(d)
+        return d
+
+    try:
+        raw_bytes = base64.b64decode(image_b64)
+    except Exception:
+        return _early(ScanResult(
+            status="ERROR",
+            error="Invalid base64 image data",
+            processing_time_ms=_elapsed(t_start),
+        ))
+
+    # Ximilar accepts raw base64 directly (no data URI prefix)
+    t_stage = time.monotonic()
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(
+            XIMILAR_TCG_URL,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Token {api_token}",
+            },
+            json={"records": [{"_base64": image_b64}]},
+        )
+    debug_info["stage_times_ms"]["ximilar_api"] = _elapsed(t_stage)
+    debug_info["ximilar_http_status"] = resp.status_code
+
+    if resp.status_code != 200:
+        logger.error("[pokemon_scanner] Ximilar HTTP %s: %s", resp.status_code, resp.text[:500])
+        return _early(ScanResult(
+            status="ERROR",
+            error=f"Ximilar API returned HTTP {resp.status_code}",
+            processing_time_ms=_elapsed(t_start),
+            debug=debug_info,
+        ))
+
+    data = resp.json()
+    records = data.get("records") or []
+    if not records:
+        return _early(ScanResult(
+            status="NO_MATCH",
+            error="Ximilar returned no records",
+            processing_time_ms=_elapsed(t_start),
+            debug=debug_info,
+        ))
+
+    record = records[0]
+    objects = record.get("_objects") or []
+
+    # Find the Card object (skip Slab Label objects)
+    card_obj = None
+    for obj in objects:
+        if obj.get("name") == "Card":
+            card_obj = obj
+            break
+
+    if not card_obj:
+        return _early(ScanResult(
+            status="NO_MATCH",
+            error="No card detected in image. Make sure the card is visible and well-lit.",
+            processing_time_ms=_elapsed(t_start),
+            debug=debug_info,
+        ))
+
+    identification = card_obj.get("_identification") or {}
+    best_data = identification.get("best_match")
+    alternatives = identification.get("alternatives") or []
+    distances = identification.get("distances") or []
+
+    # Extract tags for debug
+    tags = card_obj.get("_tags_simple") or []
+    debug_info["ximilar_tags"] = tags
+    debug_info["ximilar_detection_prob"] = card_obj.get("prob", 0)
+    debug_info["ximilar_distances"] = distances
+
+    if not best_data:
+        return _early(ScanResult(
+            status="NO_MATCH",
+            error="Card detected but could not be identified.",
+            processing_time_ms=_elapsed(t_start),
+            debug=debug_info,
+        ))
+
+    # Map to ScoredCandidate
+    best_distance = distances[0] if distances else 0.5
+    best = _ximilar_to_scored(best_data, best_distance)
+
+    # Build extracted_fields for display/debug compatibility
+    card_number = best_data.get("card_number", "")
+    out_of = best_data.get("out_of", "")
+    fields_dict = {
+        "card_name": best_data.get("name"),
+        "collector_number": f"{card_number}/{out_of}" if card_number and out_of else card_number,
+        "set_name": best_data.get("set"),
+        "language": None,
+        "variant_hints": [t for t in tags if t not in ("front", "Card/Trading Card Game")],
+        "hp_value": None,
+        "ocr_raw_text": "",
+        "ocr_confidence": 0.0,
+        "extraction_method": "ximilar",
+        "extraction_warnings": [],
+        "collector_number_raw": None,
+    }
+    debug_info["ximilar_full_name"] = best_data.get("full_name", "")
+    debug_info["ximilar_best_distance"] = best_distance
+
+    # Build alternatives as candidates
+    scored_list = [best]
+    for i, alt_data in enumerate(alternatives):
+        alt_distance = distances[i + 1] if (i + 1) < len(distances) else 0.6
+        scored_list.append(_ximilar_to_scored(alt_data, alt_distance))
+
+    # Determine status
+    if best.confidence == "HIGH":
+        status = "MATCHED"
+    elif len(scored_list) > 1 and best.score - scored_list[1].score < 15:
+        status = "AMBIGUOUS"
+    else:
+        status = "MATCHED" if best.score >= 50 else "AMBIGUOUS"
+
+    result = ScanResult(
+        status=status,
+        best_match=asdict(best),
+        candidates=[asdict(s) for s in scored_list[:10]],
+        extracted_fields=fields_dict,
+        disambiguation_method=None,
+        processing_time_ms=_elapsed(t_start),
+        debug=debug_info,
+    )
+
+    logger.info(
+        "[pokemon_scanner] Ximilar pipeline: status=%s, best=%s (dist=%.3f, score=%.0f), alternatives=%d, time=%.0fms",
+        result.status, best.name, best_distance, best.score,
+        len(alternatives), result.processing_time_ms,
+    )
+
+    result_dict = asdict(result)
+    _save_to_history(result_dict)
+    return result_dict
+
+
+# ---------------------------------------------------------------------------
+# Stage G: Orchestrator (dispatches to Ximilar or legacy OCR pipeline)
 # ---------------------------------------------------------------------------
 
 async def run_pipeline(image_b64: str) -> dict[str, Any]:
     """
-    Run the full 7-stage Pokemon card scanning pipeline.
-    Returns a ScanResult as a dict.
+    Run card scanning pipeline. Uses Ximilar visual recognition when
+    configured, falls back to legacy OCR pipeline otherwise.
+    """
+    settings = get_settings()
+
+    if settings.ximilar_api_token:
+        try:
+            return await _run_ximilar_pipeline(image_b64, settings.ximilar_api_token)
+        except Exception as exc:
+            logger.error("[pokemon_scanner] Ximilar pipeline failed, falling back to legacy: %s", exc)
+
+    return await _run_legacy_pipeline(image_b64)
+
+
+async def _run_legacy_pipeline(image_b64: str) -> dict[str, Any]:
+    """
+    Legacy 7-stage pipeline: OCR -> Lookup -> Score -> Disambiguate.
+    Used when Ximilar API token is not configured.
     """
     settings = get_settings()
     t_start = time.monotonic()
     debug_info: dict[str, Any] = {
+        "engine": "legacy_ocr",
         "preprocessing_applied": [],
         "ocr_raw_text": "",
         "query_tiers_attempted": 0,
@@ -1169,7 +1382,7 @@ async def run_pipeline(image_b64: str) -> dict[str, Any]:
     if not settings.google_vision_api_key:
         return _early_return(ScanResult(
             status="ERROR",
-            error="Google Vision API key not configured (GOOGLE_VISION_API_KEY)",
+            error="No scanning API configured. Set XIMILAR_API_TOKEN or GOOGLE_VISION_API_KEY.",
             processing_time_ms=_elapsed(t_start),
         ))
 
