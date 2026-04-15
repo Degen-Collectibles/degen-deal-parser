@@ -44,6 +44,20 @@ router = APIRouter()
 # Helpers (only used by streamer routes)
 # ---------------------------------------------------------------------------
 
+def _is_enriched_order(o: TikTokOrder) -> bool:
+    """Return True if the order has been enriched with full API data.
+
+    Webhook payloads arrive with only an order ID; the enrichment step
+    fills in prices and line items.  Before enrichment completes the row
+    has subtotal_price/total_price = None and line_items_json = '[]'.
+    Legitimate $0 orders (giveaways / ZERO_LOTTERY) will have real
+    line-item detail (700+ chars).
+    """
+    if o.subtotal_price or o.total_price:
+        return True
+    li = o.line_items_json or ""
+    return len(li) > 4
+
 def _build_streamer_order_card(order: TikTokOrder) -> dict:
     """Build a card-ready dict from a TikTokOrder, extracting sku_image from raw line items."""
     raw_items: list[dict] = []
@@ -495,7 +509,7 @@ def tiktok_streamer_page(
     orders = session.exec(
         select(TikTokOrder).order_by(TikTokOrder.created_at.desc()).limit(50)
     ).all()
-    orders = [o for o in orders if o.subtotal_price or o.total_price or o.line_items_json]
+    orders = [o for o in orders if _is_enriched_order(o)]
 
     cards = [_build_streamer_order_card(o) for o in orders]
     buyer_totals = _compute_buyer_lifetime_totals(session)
@@ -589,7 +603,7 @@ def tiktok_streamer_poll(
             pass
 
     orders = session.exec(query).all()
-    orders = [o for o in orders if o.subtotal_price or o.total_price or o.line_items_json]
+    orders = [o for o in orders if _is_enriched_order(o)]
     cards = [_build_streamer_order_card(o) for o in orders]
     if cards:
         buyer_totals = _compute_buyer_lifetime_totals(session)
