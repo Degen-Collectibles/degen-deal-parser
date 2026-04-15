@@ -696,7 +696,7 @@ var PKScanner = (function() {
 
             if (data.status === 'MATCHED' && data.best_match) {
                 entry.status = 'matched';
-                addToBatchFromCard(data.best_match, entry.id);
+                addToBatchFromCard(data.best_match, entry.id, data.detected_variant);
                 var m = data.best_match;
                 var tp = '';
                 var tvariants = m.available_variants || [];
@@ -721,7 +721,7 @@ var PKScanner = (function() {
                             if (prev && prev !== newName) {
                                 showToast('Updated: ' + newName);
                             }
-                            addToBatchFromCard(updated.best_match, queueEntry.id);
+                            addToBatchFromCard(updated.best_match, queueEntry.id, updated.detected_variant);
                         }
                         updateQueueItemEl(queueEntry);
                         renderBatch();
@@ -780,7 +780,10 @@ var PKScanner = (function() {
                 '</div>';
         } else if (entry.status === 'matched') {
             var m = entry.result.best_match;
-            var price = m.market_price ? ('$' + Number(m.market_price).toFixed(2)) : '';
+            var variants = m.available_variants || [];
+            var detectedV = entry.result.detected_variant || '';
+            var dp = _pickDisplayPrice(m, variants, detectedV);
+            var price = dp.value ? ('$' + dp.value.toFixed(2) + (dp.isTcgLow ? ' (L)' : '')) : '';
             var imgSrc = m.image_url_small || m.image_url || '';
             el.className = 'batch-item';
             var batchIdx = _findBatchIdx(entry.id);
@@ -791,16 +794,28 @@ var PKScanner = (function() {
                 var sel = c === 'NM' ? ' selected' : '';
                 return '<option value="' + c + '"' + sel + '>' + c + '</option>';
             }).join('');
+            var variantHtml = '';
+            if (variants.length >= 1) {
+                variantHtml = '<select class="batch-variant" data-batch-idx="' + batchIdx + '" style="font-size:10px;padding:2px 4px;border:1px solid var(--line);border-radius:4px;max-width:110px;background:#fff;">';
+                for (var vk = 0; vk < variants.length; vk++) {
+                    var vItem = variants[vk];
+                    var vSel = detectedV && vItem.name === detectedV ? ' selected' : '';
+                    variantHtml += '<option value="' + escHtml(vItem.name) + '" data-price="' + (vItem.price != null ? vItem.price : '') + '" data-low="' + (vItem.low_price != null ? vItem.low_price : '') + '"' + vSel + '>' + escHtml(vItem.name) + '</option>';
+                }
+                variantHtml += '</select>';
+            }
             el.innerHTML =
                 thumb +
                 '<div class="batch-info">' +
                     '<div class="batch-name">' + escHtml(m.name) + '</div>' +
-                    '<div class="batch-meta">' + escHtml(m.set_name || '') + (m.number ? ' #' + escHtml(m.number) : '') + (price ? ' &middot; ' + price : '') + '</div>' +
+                    '<div class="batch-meta">' + escHtml(m.set_name || '') + (m.number ? ' #' + escHtml(m.number) : '') + ' &middot; <span class="batch-price-label">' + price + '</span></div>' +
+                    (variantHtml ? '<div style="margin-top:2px;">' + variantHtml + '</div>' : '') +
                 '</div>' +
                 '<select class="batch-cond" data-batch-idx="' + batchIdx + '">' + condOptions + '</select>' +
                 '<button class="batch-del" data-batch-idx="' + batchIdx + '" title="Remove">&#x2715;</button>';
             var condSel = el.querySelector('.batch-cond');
             var delBtn = el.querySelector('.batch-del');
+            var varSel = el.querySelector('.batch-variant');
             if (condSel) condSel.addEventListener('change', function(e) {
                 setBatchCond(parseInt(e.target.dataset.batchIdx), e.target.value);
             });
@@ -808,6 +823,33 @@ var PKScanner = (function() {
                 var idx = parseInt(e.target.dataset.batchIdx);
                 removeBatchItem(idx);
                 el.remove();
+            });
+            if (varSel) varSel.addEventListener('change', function(e) {
+                var bi = parseInt(e.target.dataset.batchIdx);
+                var opt = e.target.options[e.target.selectedIndex];
+                var mp = opt.getAttribute('data-price');
+                var lp = opt.getAttribute('data-low');
+                var newPrice = null;
+                var isLow = false;
+                if (mp !== '' && mp !== null) { newPrice = parseFloat(mp); }
+                else if (lp !== '' && lp !== null) { newPrice = parseFloat(lp); isLow = true; }
+                if (batch[bi]) {
+                    batch[bi].auto_price = newPrice;
+                    batch[bi].variant = opt.value;
+                    var isFoil = opt.value.toLowerCase().indexOf('holo') >= 0;
+                    batch[bi].is_foil = isFoil;
+                    var notes = batch[bi].notes || '';
+                    notes = notes.replace(/ \| Price: TCG Low/g, '').replace(/ \| Variant: [^|]*/g, '');
+                    notes = (notes ? notes + ' | ' : '') + 'Variant: ' + opt.value;
+                    if (isLow) notes += ' | Price: TCG Low';
+                    batch[bi].notes = notes;
+                    saveBatch();
+                    updateBatchCounts();
+                }
+                var priceLabel = el.querySelector('.batch-price-label');
+                if (priceLabel) {
+                    priceLabel.textContent = newPrice ? ('$' + newPrice.toFixed(2) + (isLow ? ' (L)' : '')) : '';
+                }
             });
         } else if (entry.status === 'review') {
             var m = entry.result.best_match;
@@ -1181,9 +1223,29 @@ var PKScanner = (function() {
         }
     }
 
-    function addToBatchFromCard(card, scanId) {
+    function addToBatchFromCard(card, scanId, detectedVariant) {
         var variant = _getVariant();
         var vp = _getVariantPrice();
+
+        if (!variant && !vp && detectedVariant && card.available_variants) {
+            for (var av = 0; av < card.available_variants.length; av++) {
+                if (card.available_variants[av].name === detectedVariant) {
+                    variant = detectedVariant;
+                    var avItem = card.available_variants[av];
+                    if (avItem.price != null) vp = { value: avItem.price, isTcgLow: false };
+                    else if (avItem.low_price != null) vp = { value: avItem.low_price, isTcgLow: true };
+                    break;
+                }
+            }
+        }
+
+        if (!variant && !vp && card.available_variants && card.available_variants.length) {
+            var firstV = card.available_variants[0];
+            variant = firstV.name;
+            if (firstV.price != null) vp = { value: firstV.price, isTcgLow: false };
+            else if (firstV.low_price != null) vp = { value: firstV.low_price, isTcgLow: true };
+        }
+
         var isFoil = variant && variant.toLowerCase().indexOf('holo') >= 0;
         var notes = card.rarity ? ('Rarity: ' + card.rarity) : '';
         if (variant) notes = (notes ? notes + ' | ' : '') + 'Variant: ' + variant;
