@@ -2,11 +2,11 @@
 <html>
 <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
-    <title>Pokémon Card Scanner — Inventory</title>
+    <title>Pok&eacute;mon Card Scanner</title>
     <style>
         :root {
             --bg:#f4ebdf; --bg-deep:#ead8c0; --card:#fff9f2; --card-strong:#fffdf8;
@@ -19,325 +19,365 @@
         body {
             margin:0; font-family:"Inter",-apple-system,BlinkMacSystemFont,sans-serif;
             -webkit-font-smoothing:antialiased; color:var(--text);
-            background:radial-gradient(circle at top left,rgba(240,196,107,.26),transparent 24%),
-                radial-gradient(circle at 84% 10%,rgba(213,83,56,.10),transparent 18%),
-                linear-gradient(180deg,#fcf7f0 0%,var(--bg) 46%,var(--bg-deep) 100%);
-            min-height:100vh;
+            background:#0c0a08; overflow:hidden;
         }
         a { color:inherit; text-decoration:none; }
-        .page { max-width:1100px; margin:0 auto; padding:28px 20px 80px; }
+
+        /* ===== DESKTOP CHROME (hidden on mobile) ===== */
+        .desktop-chrome { display:none; }
         .back-link { color:var(--muted); font-size:13px; font-weight:600; margin-bottom:12px; display:inline-block; }
         .back-link:hover { color:var(--text); }
 
-        .scan-layout { display:grid; grid-template-columns:1fr 340px; gap:20px; align-items:start; }
-        @media(max-width:780px) { .scan-layout { grid-template-columns:1fr; } }
+        /* ===== SCANNER APP — mobile: fullscreen ===== */
+        .scanner-app { position:fixed; inset:0; z-index:20; }
 
-        .card {
-            background:linear-gradient(180deg,var(--card-strong),var(--card));
-            border:1px solid var(--line); border-radius:24px;
-            box-shadow:var(--shadow); overflow:hidden;
-        }
-        .card-header { padding:20px 22px 0; }
-        .card-title { font-size:17px; font-weight:800; margin:0 0 4px; letter-spacing:-.02em; }
-        .card-sub { font-size:12px; color:var(--muted); font-weight:500; margin:0 0 14px; }
-
-        /* Camera — portrait orientation for vertical card scanning */
-        .camera-wrap {
-            position:relative; width:100%; aspect-ratio:3/4;
-            background:#1a1208; overflow:hidden;
-        }
+        /* ===== CAMERA ===== */
+        .cam-viewport { position:absolute; inset:0; background:#0c0a08; overflow:hidden; }
         video { width:100%; height:100%; object-fit:cover; display:block; }
         canvas { display:none; }
 
-        .guide-overlay {
-            position:absolute; inset:0; pointer-events:none; display:flex;
-            align-items:center; justify-content:center;
-        }
-        .guide-rect {
-            width:68%; aspect-ratio:5/7; border:2px dashed rgba(255,255,255,.55);
-            border-radius:12px; position:relative;
-        }
-        .guide-label {
-            position:absolute; bottom:-24px; left:50%; transform:translateX(-50%);
-            font-size:11px; color:rgba(255,255,255,.6); font-weight:600; white-space:nowrap;
-        }
+        .guide-overlay { position:absolute; inset:0; pointer-events:none; display:flex; align-items:center; justify-content:center; }
+        .guide-rect { width:68%; aspect-ratio:5/7; border:2px dashed rgba(255,255,255,.4); border-radius:12px; position:relative; }
+        .guide-label { position:absolute; bottom:-24px; left:50%; transform:translateX(-50%); font-size:11px; color:rgba(255,255,255,.45); font-weight:600; white-space:nowrap; }
 
-        .camera-overlay {
-            position:absolute; inset:0; display:flex; flex-direction:column;
-            align-items:center; justify-content:center; gap:10px;
-        }
-        .camera-placeholder {
-            color:rgba(255,255,255,.4); text-align:center; font-size:13px; font-weight:600;
-        }
-        .capture-btn {
-            position:absolute; bottom:16px; left:50%; transform:translateX(-50%);
-            width:72px; height:72px; border-radius:50%;
-            border:4px solid #fff; background:rgba(255,255,255,.15);
-            cursor:pointer; transition:all .15s; display:flex; align-items:center; justify-content:center;
-            z-index:5;
-        }
-        .capture-btn:hover { background:rgba(255,255,255,.28); }
-        .capture-btn:active { transform:translateX(-50%) scale(.92); }
-        .capture-btn-inner {
-            width:52px; height:52px; border-radius:50%;
-            background:var(--accent); transition:background .15s;
-        }
-        .capture-btn:disabled .capture-btn-inner { background:rgba(255,255,255,.3); }
-        .capture-btn:disabled { cursor:not-allowed; }
+        .cam-placeholder { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; color:rgba(255,255,255,.4); text-align:center; font-size:14px; font-weight:600; z-index:5; }
+        .cam-ph-icon { font-size:42px; }
+        .btn-cam-start { margin-top:12px; padding:12px 28px; border-radius:14px; border:none; background:linear-gradient(180deg,var(--accent),var(--accent-strong)); color:#fff; font:inherit; font-size:15px; font-weight:800; cursor:pointer; transition:opacity .15s; }
+        .btn-cam-start:hover { opacity:.85; }
 
-        .flash-overlay {
-            position:absolute; inset:0; background:#fff; opacity:0; pointer-events:none;
-            transition:opacity .05s;
-        }
+        .flash-overlay { position:absolute; inset:0; background:#fff; opacity:0; pointer-events:none; transition:opacity .05s; z-index:8; }
         .flash-overlay.active { opacity:.7; }
 
-        /* Camera controls */
-        .camera-controls { padding:14px 22px 20px; display:flex; gap:10px; flex-wrap:wrap; }
-        .btn-outline {
-            appearance:none; border:1px solid var(--line); border-radius:12px;
-            padding:9px 14px; font:inherit; font-size:13px; font-weight:700;
-            background:linear-gradient(180deg,#fffdfa,#fff4e8);
-            color:var(--text); cursor:pointer; transition:all .15s;
+        /* ===== CAMERA FLOATING CONTROLS ===== */
+        .cam-float-ctrls { position:absolute; top:calc(56px + env(safe-area-inset-top,0px)); right:12px; display:flex; flex-direction:column; gap:8px; z-index:10; }
+        .cam-ctrl {
+            width:44px; height:44px; border-radius:50%; background:rgba(0,0,0,.4); color:#fff;
+            border:1px solid rgba(255,255,255,.12); cursor:pointer; font-size:20px;
+            display:inline-flex; align-items:center; justify-content:center;
+            backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px); transition:background .15s;
         }
-        .btn-outline:hover { background:#fff7ee; border-color:#c9b8a0; }
-        .btn-primary {
-            appearance:none; border:none; border-radius:12px;
-            padding:9px 16px; font:inherit; font-size:13px; font-weight:700;
-            background:linear-gradient(180deg,var(--accent),var(--accent-strong));
-            color:#fff; cursor:pointer; transition:all .15s;
-        }
-        .btn-primary:hover { opacity:.9; }
+        .cam-ctrl:hover { background:rgba(0,0,0,.6); }
 
-        /* Status bar */
-        .status-bar {
-            padding:10px 14px; font-size:13px; font-weight:700; display:none;
-            border-top:1px solid var(--line);
+        /* ===== CAPTURE BUTTON ===== */
+        .capture-btn {
+            position:fixed; bottom:76px; left:50%; transform:translateX(-50%);
+            width:72px; height:72px; border-radius:50%;
+            border:4px solid rgba(255,255,255,.9); background:rgba(255,255,255,.1);
+            cursor:pointer; z-index:40; display:flex; align-items:center; justify-content:center;
+            transition:all .15s; -webkit-tap-highlight-color:transparent;
         }
+        .capture-btn:active { transform:translateX(-50%) scale(.9); }
+        .capture-btn-inner { width:52px; height:52px; border-radius:50%; background:var(--accent); transition:background .15s; }
+        .capture-btn:disabled .capture-btn-inner { background:rgba(255,255,255,.2); }
+        .capture-btn:disabled { cursor:default; border-color:rgba(255,255,255,.3); }
+
+        /* ===== TOP BAR (mobile) ===== */
+        .top-bar {
+            position:fixed; top:0; left:0; right:0; z-index:55;
+            display:flex; align-items:center; gap:12px;
+            padding:calc(12px + env(safe-area-inset-top,0px)) 16px 10px;
+            background:linear-gradient(180deg,rgba(0,0,0,.5) 0%,rgba(0,0,0,.2) 70%,transparent 100%);
+            pointer-events:none;
+        }
+        .top-bar > * { pointer-events:auto; }
+        .top-bar-back {
+            display:flex; align-items:center; justify-content:center;
+            width:36px; height:36px; border-radius:50%;
+            background:rgba(0,0,0,.35); color:#fff; font-size:18px; text-decoration:none;
+            backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+            border:1px solid rgba(255,255,255,.1);
+        }
+        .top-bar-title { font-size:15px; font-weight:800; color:#fff; letter-spacing:-.01em; text-shadow:0 1px 4px rgba(0,0,0,.4); }
+
+        /* ===== STATUS BAR ===== */
+        .status-bar { position:fixed; left:16px; right:16px; bottom:160px; z-index:45; padding:10px 14px; font-size:13px; font-weight:700; border-radius:12px; display:none; box-shadow:0 4px 16px rgba(0,0,0,.3); }
         .status-bar.ok { background:var(--green-bg); color:var(--green); display:block; }
         .status-bar.warn { background:var(--yellow-bg); color:#7a5200; display:block; }
         .status-bar.err { background:var(--red-bg); color:#9d2f2b; display:block; }
         .status-bar.info { background:var(--blue-bg); color:var(--blue); display:block; }
 
-        /* Result panel */
-        .result-panel { padding:16px 22px 22px; display:none; }
-        .result-panel.visible { display:block; }
+        /* ===== DRAWER (bottom sheet) ===== */
+        .drawer {
+            position:fixed; bottom:0; left:0; right:0; height:85vh; z-index:50;
+            background:rgba(18,14,10,.97); border-radius:20px 20px 0 0;
+            backdrop-filter:blur(20px); -webkit-backdrop-filter:blur(20px);
+            display:flex; flex-direction:column; will-change:transform;
+        }
+        .drawer-handle { padding:10px 0 2px; text-align:center; cursor:grab; flex-shrink:0; -webkit-tap-highlight-color:transparent; }
+        .handle-bar { width:36px; height:4px; border-radius:2px; background:rgba(255,255,255,.2); margin:0 auto; }
+        .drawer-peek { display:flex; align-items:center; justify-content:space-between; padding:6px 20px 10px; flex-shrink:0; border-bottom:1px solid rgba(255,255,255,.08); }
+        .drawer-peek-info { display:flex; align-items:baseline; gap:10px; }
+        .drawer-count { font-size:14px; font-weight:800; color:#ede8e2; }
+        .drawer-total { font-size:14px; font-weight:800; color:#4ade80; }
+        .rapid-label { display:flex; align-items:center; gap:6px; font-size:12px; font-weight:600; color:rgba(255,255,255,.5); cursor:pointer; user-select:none; }
+        .rapid-label input { accent-color:var(--accent); }
+        .drawer-body { flex:1; overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch; }
+        .drawer-footer { flex-shrink:0; padding:12px 16px calc(12px + env(safe-area-inset-bottom,0px)); border-top:1px solid rgba(255,255,255,.08); display:flex; gap:10px; }
 
-        .result-match {
-            display:flex; gap:14px; padding:14px; border-radius:16px;
-            background:#fff; border:1px solid var(--line); margin-bottom:12px;
+        /* Batch list (dark theme on mobile) */
+        .batch-list { padding:10px 14px; display:flex; flex-direction:column; gap:8px; }
+        .batch-list:empty::after { content:"No cards scanned yet."; display:block; color:rgba(255,255,255,.3); font-size:13px; font-weight:500; text-align:center; padding:24px 0; }
+        .batch-item { display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:14px; background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.08); animation:item-in .25s ease both; }
+        .batch-thumb { width:40px; height:56px; border-radius:6px; object-fit:cover; background:rgba(255,255,255,.05); flex-shrink:0; border:1px solid rgba(255,255,255,.08); }
+        .batch-thumb-placeholder { width:40px; height:56px; border-radius:6px; background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.08); flex-shrink:0; display:flex; align-items:center; justify-content:center; font-size:18px; color:rgba(255,255,255,.3); }
+        .batch-info { flex:1; min-width:0; }
+        .batch-name { font-size:13px; font-weight:700; color:#ede8e2; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        .batch-meta { font-size:11px; color:rgba(255,255,255,.4); font-weight:500; margin-top:2px; }
+        .batch-cond { font-size:12px; font-weight:700; padding:3px 8px; border-radius:8px; border:1px solid rgba(255,255,255,.1); background:rgba(255,255,255,.08); cursor:pointer; font-family:inherit; color:#ede8e2; flex-shrink:0; }
+        .batch-del { appearance:none; border:none; background:none; cursor:pointer; font-size:16px; color:rgba(255,255,255,.3); padding:4px; flex-shrink:0; border-radius:6px; line-height:1; }
+        .batch-del:hover { color:var(--accent); background:rgba(213,83,56,.15); }
+
+        /* Queue items */
+        .batch-item.processing { opacity:.7; border-style:dashed; }
+        .batch-item.processing .batch-name { color:rgba(255,255,255,.5); }
+        .batch-item.queue-error { border-color:rgba(239,107,91,.3); background:rgba(239,107,91,.08); }
+        .batch-item.queue-error .batch-name { color:#ef6b5b; }
+        .queue-spinner { display:inline-block; width:14px; height:14px; border:2px solid rgba(255,255,255,.15); border-top-color:var(--accent); border-radius:50%; animation:spin .7s linear infinite; flex-shrink:0; }
+        .queue-badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:10px; font-weight:800; text-transform:uppercase; }
+        .queue-badge-processing { background:rgba(26,111,181,.15); color:#5bb8f5; }
+        .queue-badge-queued { background:rgba(255,255,255,.06); color:rgba(255,255,255,.4); }
+        .queue-badge-error { background:rgba(239,107,91,.12); color:#ef6b5b; }
+
+        /* Drawer buttons */
+        .btn-secondary { flex-shrink:0; appearance:none; border:1px solid rgba(255,255,255,.12); border-radius:12px; padding:12px 18px; font:inherit; font-size:13px; font-weight:700; background:rgba(255,255,255,.06); color:#ede8e2; cursor:pointer; transition:all .15s; }
+        .btn-secondary:hover { background:rgba(255,255,255,.1); }
+        .btn-secondary:disabled { opacity:.3; cursor:not-allowed; }
+        .btn-primary-lg { flex:1; appearance:none; border:none; border-radius:12px; padding:12px 18px; font:inherit; font-size:14px; font-weight:800; background:linear-gradient(180deg,var(--accent),var(--accent-strong)); color:#fff; cursor:pointer; transition:all .15s; }
+        .btn-primary-lg:hover { opacity:.9; }
+        .btn-primary-lg:disabled { opacity:.3; cursor:not-allowed; }
+
+        /* ===== RESULT SHEET (slide-up on mobile) ===== */
+        .result-sheet { position:fixed; bottom:0; left:0; right:0; z-index:70; pointer-events:none; }
+        .result-sheet.open { pointer-events:auto; }
+        .result-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.6); opacity:0; transition:opacity .3s; pointer-events:none; }
+        .result-sheet.open .result-backdrop { opacity:1; pointer-events:auto; }
+        .result-sheet-inner {
+            position:relative; background:var(--card-strong); border-radius:20px 20px 0 0;
+            max-height:80vh; overflow-y:auto; transform:translateY(100%);
+            transition:transform .3s cubic-bezier(.25,.46,.45,.94);
+            box-shadow:0 -10px 40px rgba(0,0,0,.3);
         }
-        .result-img {
-            width:80px; height:112px; border-radius:8px; object-fit:cover;
-            background:#f0e8dc; border:1px solid var(--line); flex-shrink:0;
-        }
+        .result-sheet.open .result-sheet-inner { transform:translateY(0); }
+        .result-handle { padding:10px 0 2px; text-align:center; cursor:pointer; }
+
+        /* Result content */
+        .result-panel { padding:8px 20px 22px; }
+        .result-match { display:flex; gap:14px; padding:14px; border-radius:16px; background:#fff; border:1px solid var(--line); margin-bottom:12px; }
+        .result-img { width:80px; height:112px; border-radius:8px; object-fit:cover; background:#f0e8dc; border:1px solid var(--line); flex-shrink:0; }
         .result-details { flex:1; min-width:0; }
-        .result-name { font-size:16px; font-weight:800; margin-bottom:2px; }
+        .result-name { font-size:16px; font-weight:800; margin-bottom:2px; color:var(--text); }
         .result-set { font-size:12px; color:var(--muted); font-weight:500; }
         .result-number { font-size:12px; color:var(--muted); font-weight:500; margin-top:2px; }
-        .result-price {
-            font-size:18px; font-weight:900; color:var(--green); margin-top:6px;
-        }
+        .result-price { font-size:18px; font-weight:900; color:var(--green); margin-top:6px; }
         .result-actions { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
 
-        /* Confidence badge */
-        .badge {
-            display:inline-block; padding:3px 10px; border-radius:999px;
-            font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.04em;
-        }
+        /* Badges */
+        .badge { display:inline-block; padding:3px 10px; border-radius:999px; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.04em; }
         .badge-high { background:var(--green-bg); color:var(--green); border:1px solid #a6e2bf; }
         .badge-medium { background:var(--yellow-bg); color:#7a5200; border:1px solid #f0cda0; }
         .badge-low { background:var(--red-bg); color:#9d2f2b; border:1px solid #efb8b4; }
 
-        /* Candidate grid */
-        .candidates-grid {
-            display:grid; grid-template-columns:repeat(auto-fill, minmax(120px, 1fr));
-            gap:10px; margin-top:12px;
-        }
-        .candidate-card {
-            cursor:pointer; padding:10px; border-radius:14px; text-align:center;
-            background:#fff; border:2px solid var(--line); transition:all .15s;
-        }
+        /* Candidates */
+        .candidates-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(100px,1fr)); gap:10px; margin-top:12px; }
+        .candidate-card { cursor:pointer; padding:10px; border-radius:14px; text-align:center; background:#fff; border:2px solid var(--line); transition:all .15s; }
         .candidate-card:hover { border-color:var(--accent); transform:translateY(-2px); }
         .candidate-card.selected { border-color:var(--accent); background:var(--red-bg); }
-        .candidate-card img {
-            width:100%; aspect-ratio:5/7; object-fit:cover; border-radius:8px;
-            background:#f0e8dc; margin-bottom:6px;
-        }
-        .candidate-card .c-name { font-size:11px; font-weight:700; line-height:1.3; }
+        .candidate-card img { width:100%; aspect-ratio:5/7; object-fit:cover; border-radius:8px; background:#f0e8dc; margin-bottom:6px; }
+        .candidate-card .c-name { font-size:11px; font-weight:700; line-height:1.3; color:var(--text); }
         .candidate-card .c-set { font-size:10px; color:var(--muted); }
-        .candidate-card .c-score {
-            font-size:10px; font-weight:700; color:var(--accent); margin-top:3px;
-        }
+        .candidate-card .c-score { font-size:10px; font-weight:700; color:var(--accent); margin-top:3px; }
 
-        /* Debug panel */
-        .debug-toggle {
-            font-size:12px; color:var(--muted); font-weight:600; cursor:pointer;
-            padding:8px 0; border:none; background:none; display:flex; align-items:center; gap:4px;
-        }
+        /* Debug */
+        .debug-toggle { font-size:12px; color:var(--muted); font-weight:600; cursor:pointer; padding:8px 0; border:none; background:none; display:flex; align-items:center; gap:4px; }
         .debug-toggle:hover { color:var(--text); }
-        .debug-content {
-            display:none; padding:10px; background:rgba(0,0,0,.03); border-radius:10px;
-            font-size:11px; line-height:1.6; font-family:monospace; color:var(--muted);
-            max-height:240px; overflow-y:auto; margin-top:6px; word-break:break-all;
-        }
+        .debug-content { display:none; padding:10px; background:rgba(0,0,0,.03); border-radius:10px; font-size:11px; line-height:1.6; font-family:monospace; color:var(--muted); max-height:240px; overflow-y:auto; margin-top:6px; word-break:break-all; }
         .debug-content.open { display:block; }
 
-        /* Batch sidebar */
-        .batch-header { padding:20px 22px 0; display:flex; align-items:center; justify-content:space-between; }
-        .batch-count {
-            display:inline-flex; align-items:center; padding:4px 10px;
-            border-radius:999px; font-size:12px; font-weight:800;
-            background:rgba(213,83,56,.1); color:var(--accent);
-        }
-        .batch-total {
-            font-size:14px; font-weight:800; color:var(--green); padding:4px 22px;
-        }
-        .batch-list { padding:12px 14px; max-height:480px; overflow-y:auto; display:flex; flex-direction:column; gap:8px; }
-        .batch-list:empty::after {
-            content:"No cards scanned yet."; display:block; color:var(--muted);
-            font-size:13px; font-weight:500; text-align:center; padding:20px 0;
-        }
-        .batch-item {
-            display:flex; align-items:center; gap:10px;
-            padding:10px 12px; border-radius:14px;
-            background:var(--card-strong); border:1px solid var(--line);
-            animation:item-in .25s ease both;
-        }
-        .batch-thumb {
-            width:40px; height:56px; border-radius:6px; object-fit:cover;
-            background:#f0e8dc; flex-shrink:0; border:1px solid var(--line);
-        }
-        .batch-thumb-placeholder {
-            width:40px; height:56px; border-radius:6px; background:#f0e8dc;
-            border:1px solid var(--line); flex-shrink:0; display:flex;
-            align-items:center; justify-content:center; font-size:18px; color:var(--muted);
-        }
-        .batch-info { flex:1; min-width:0; }
-        .batch-name { font-size:13px; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-        .batch-meta { font-size:11px; color:var(--muted); font-weight:500; margin-top:2px; }
-        .batch-cond {
-            font-size:12px; font-weight:700; padding:3px 8px; border-radius:8px;
-            border:1px solid var(--line); background:#fff; cursor:pointer;
-            font-family:inherit; color:var(--text); flex-shrink:0;
-        }
-        .batch-del {
-            appearance:none; border:none; background:none; cursor:pointer;
-            font-size:16px; color:var(--muted); padding:4px; flex-shrink:0;
-            border-radius:6px; line-height:1;
-        }
-        .batch-del:hover { color:var(--accent); background:var(--red-bg); }
-        .batch-footer { padding:14px 22px 22px; border-top:1px solid var(--line); display:flex; gap:10px; flex-wrap:wrap; }
-        .btn-done {
-            flex:1; appearance:none; border:none; border-radius:14px;
-            padding:14px; font:inherit; font-size:15px; font-weight:800;
-            background:linear-gradient(180deg,var(--accent),var(--accent-strong));
-            color:#fff; cursor:pointer; transition:all .15s;
-        }
-        .btn-done:hover { opacity:.9; }
-        .btn-done:disabled { opacity:.4; cursor:not-allowed; }
+        /* Buttons (result panel) */
+        .btn-primary { appearance:none; border:none; border-radius:12px; padding:9px 16px; font:inherit; font-size:13px; font-weight:700; background:linear-gradient(180deg,var(--accent),var(--accent-strong)); color:#fff; cursor:pointer; transition:all .15s; }
+        .btn-primary:hover { opacity:.9; }
+        .btn-outline { appearance:none; border:1px solid var(--line); border-radius:12px; padding:9px 14px; font:inherit; font-size:13px; font-weight:700; background:linear-gradient(180deg,#fffdfa,#fff4e8); color:var(--text); cursor:pointer; transition:all .15s; }
+        .btn-outline:hover { background:#fff7ee; border-color:#c9b8a0; }
 
-        .spinner { display:inline-block; width:18px; height:18px; border:2.5px solid rgba(255,255,255,.35); border-top-color:#fff; border-radius:50%; animation:spin .7s linear infinite; vertical-align:middle; margin-right:6px; }
+        /* ===== TOAST ===== */
+        .toast-container { position:fixed; bottom:160px; left:50%; transform:translateX(-50%); z-index:80; display:flex; flex-direction:column-reverse; gap:8px; align-items:center; pointer-events:none; }
+        .toast {
+            padding:10px 20px; border-radius:12px; background:rgba(0,0,0,.85); color:#fff;
+            font-size:13px; font-weight:700; white-space:nowrap; max-width:90vw;
+            overflow:hidden; text-overflow:ellipsis; box-shadow:0 4px 16px rgba(0,0,0,.4);
+            opacity:0; transform:translateY(10px) scale(.95); transition:all .25s ease;
+            backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px);
+        }
+        .toast.show { opacity:1; transform:translateY(0) scale(1); }
+        .toast.hide { opacity:0; transform:translateY(-10px) scale(.95); }
+
+        /* Spinner */
+        .spinner { display:inline-block; width:18px; height:18px; border:2.5px solid rgba(0,0,0,.15); border-top-color:currentColor; border-radius:50%; animation:spin .7s linear infinite; vertical-align:middle; margin-right:6px; }
         @keyframes spin { to { transform:rotate(360deg); } }
         @keyframes item-in { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:none} }
 
-        .cond-NM { background:#edf9f2; border-color:#a6e2bf; color:var(--green); }
-        .cond-LP { background:#f0f9ff; border-color:#93d5f5; color:#1d5c8a; }
-        .cond-MP { background:#fff5df; border-color:#f0cda0; color:#7a5200; }
-        .cond-HP { background:#fff0ef; border-color:#efb8b4; color:#9d2f2b; }
-        .cond-DMG { background:#f8f0f8; border-color:#d8b0d8; color:#6a286a; }
+        /* ============================================================
+           DESKTOP OVERRIDES (>780px)
+           ============================================================ */
+        @media(min-width:781px) {
+            body {
+                background:radial-gradient(circle at top left,rgba(240,196,107,.26),transparent 24%),
+                    radial-gradient(circle at 84% 10%,rgba(213,83,56,.10),transparent 18%),
+                    linear-gradient(180deg,#fcf7f0 0%,var(--bg) 46%,var(--bg-deep) 100%);
+                overflow:auto; min-height:100vh;
+            }
+            .desktop-chrome { display:block; max-width:1100px; margin:0 auto; padding:28px 20px 0; }
+            .top-bar { display:none; }
 
-        .hidden { display:none !important; }
+            .scanner-app {
+                position:static; display:grid;
+                grid-template-columns:1fr 340px; gap:20px; align-items:start;
+                max-width:1100px; margin:0 auto; padding:0 20px 80px;
+            }
+            .scanner-main {
+                grid-column:1; grid-row:1;
+                background:linear-gradient(180deg,var(--card-strong),var(--card));
+                border:1px solid var(--line); border-radius:24px;
+                box-shadow:var(--shadow); overflow:hidden;
+            }
+            .cam-viewport { position:relative; aspect-ratio:3/4; }
+            .capture-btn { position:absolute; bottom:16px; z-index:5; }
+            .capture-btn:active { transform:translateX(-50%) scale(.92); }
+            .cam-float-ctrls { top:12px; right:12px; }
+            .cam-ctrl { width:36px; height:36px; font-size:18px; }
 
-        /* Queue / processing items in batch */
-        .batch-item.processing { opacity:.7; border-style:dashed; }
-        .batch-item.processing .batch-name { color:var(--muted); }
-        .batch-item.queue-error { border-color:#efb8b4; background:var(--red-bg); }
-        .batch-item.queue-error .batch-name { color:#9d2f2b; }
-        .queue-spinner { display:inline-block; width:14px; height:14px; border:2px solid var(--line); border-top-color:var(--accent); border-radius:50%; animation:spin .7s linear infinite; flex-shrink:0; }
-        .queue-badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:10px; font-weight:800; text-transform:uppercase; }
-        .queue-badge-processing { background:var(--blue-bg); color:var(--blue); }
-        .queue-badge-queued { background:rgba(0,0,0,.05); color:var(--muted); }
-        .queue-badge-error { background:var(--red-bg); color:#9d2f2b; }
+            .status-bar { position:static; border-radius:0; box-shadow:none; border-top:1px solid var(--line); left:auto; right:auto; bottom:auto; }
+
+            /* Result sheet — static card below camera */
+            .result-sheet { position:static; pointer-events:auto; display:none; grid-column:1; grid-row:2; }
+            .result-sheet.open { display:block; }
+            .result-backdrop { display:none !important; }
+            .result-sheet-inner { transform:none; transition:none; max-height:none; border-radius:24px; border:1px solid var(--line); box-shadow:var(--shadow); overflow:visible; background:linear-gradient(180deg,var(--card-strong),var(--card)); }
+            .result-handle { display:none; }
+            .result-panel { padding:16px 22px 22px; }
+            .candidates-grid { grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); }
+
+            /* Drawer — static sidebar */
+            .drawer {
+                position:static; height:auto; grid-column:2; grid-row:1 / span 2;
+                background:linear-gradient(180deg,var(--card-strong),var(--card));
+                border:1px solid var(--line); border-radius:24px; box-shadow:var(--shadow);
+                backdrop-filter:none; -webkit-backdrop-filter:none; color:var(--text);
+                transform:none !important;
+            }
+            .drawer-handle { display:none; }
+            .drawer-peek { border-bottom:1px solid var(--line); padding:16px 22px 14px; }
+            .drawer-count { color:var(--accent); }
+            .drawer-total { color:var(--green); }
+            .rapid-label { color:var(--muted); }
+            .drawer-body { max-height:480px; }
+            .batch-list { padding:12px 14px; }
+            .batch-list:empty::after { color:var(--muted); }
+            .drawer-footer { border-top:1px solid var(--line); padding:14px 22px 22px; }
+
+            /* Batch items — light theme */
+            .batch-item { background:var(--card-strong); border-color:var(--line); }
+            .batch-thumb { background:#f0e8dc; border-color:var(--line); }
+            .batch-thumb-placeholder { background:#f0e8dc; border-color:var(--line); color:var(--muted); }
+            .batch-name { color:var(--text); }
+            .batch-meta { color:var(--muted); }
+            .batch-cond { background:#fff; border-color:var(--line); color:var(--text); }
+            .batch-del { color:var(--muted); }
+            .batch-del:hover { color:var(--accent); background:var(--red-bg); }
+            .batch-item.processing .batch-name { color:var(--muted); }
+            .batch-item.queue-error { border-color:#efb8b4; background:var(--red-bg); }
+            .batch-item.queue-error .batch-name { color:#9d2f2b; }
+            .queue-spinner { border-color:var(--line); border-top-color:var(--accent); }
+            .queue-badge-processing { background:var(--blue-bg); color:var(--blue); }
+            .queue-badge-queued { background:rgba(0,0,0,.05); color:var(--muted); }
+            .queue-badge-error { background:var(--red-bg); color:#9d2f2b; }
+
+            .btn-secondary { background:linear-gradient(180deg,#fffdfa,#fff4e8); border-color:var(--line); color:var(--text); }
+            .btn-secondary:hover { background:#fff7ee; border-color:#c9b8a0; }
+
+            .toast-container { bottom:80px; }
+        }
     </style>
     <link rel="stylesheet" href="/static/courtyard-theme.css?v=4">
 </head>
 <body>
-<div class="page">
+
+<!-- Desktop navigation (hidden on mobile) -->
+<div class="desktop-chrome">
     {% include "_workspace_nav.html" %}
     <a href="/inventory" class="back-link">&larr; Back to Inventory</a>
+</div>
 
-    <div class="scan-layout">
-        <!-- Left: Camera + Result -->
-        <div>
-            <div class="card" style="margin-bottom:20px;">
-                <div class="card-header">
-                    <div class="card-title">Pok&eacute;mon Card Scanner</div>
-                    <div class="card-sub">Align card within the guide, then capture. AI visual recognition identifies the card.</div>
-                </div>
-
-                <div class="camera-wrap" id="camera-wrap">
-                    <video id="video" autoplay playsinline muted></video>
-                    <canvas id="canvas"></canvas>
-                    <div class="guide-overlay" id="guide-overlay">
-                        <div class="guide-rect">
-                            <span class="guide-label">Align card here</span>
-                        </div>
-                    </div>
-                    <div id="camera-placeholder" class="camera-overlay">
-                        <div class="camera-placeholder">
-                            <div style="font-size:36px;margin-bottom:8px;">&#128247;</div>
-                            Tap &ldquo;Start Camera&rdquo; to begin
-                        </div>
-                    </div>
-                    <div class="flash-overlay" id="flash-overlay"></div>
-                    <button class="capture-btn" id="capture-btn" disabled title="Capture card">
-                        <div class="capture-btn-inner"></div>
-                    </button>
-                </div>
-
-                <div id="status-bar" class="status-bar"></div>
-
-                <div class="camera-controls">
-                    <button class="btn-outline" id="start-btn" onclick="PKScanner.startCamera()">Start Camera</button>
-                    <button class="btn-outline" id="flip-btn" class="hidden" onclick="PKScanner.flipCamera()">Flip &#8635;</button>
-                    <button class="btn-outline" id="stop-btn" class="hidden" onclick="PKScanner.stopCamera()">Stop</button>
-                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--muted);margin-left:auto;cursor:pointer;user-select:none;">
-                        <input type="checkbox" id="rapid-fire" style="accent-color:var(--accent);">
-                        Rapid Fire
-                    </label>
-                </div>
+<div class="scanner-app" id="scanner-app">
+    <!-- Camera section (left column on desktop) -->
+    <div class="scanner-main">
+        <div class="cam-viewport" id="cam-viewport">
+            <video id="video" autoplay playsinline muted></video>
+            <canvas id="canvas"></canvas>
+            <div class="guide-overlay" id="guide-overlay">
+                <div class="guide-rect"><span class="guide-label">Align card here</span></div>
             </div>
-
-            <!-- Result panel (shown after scan) -->
-            <div class="card" id="result-panel-card">
-                <div class="result-panel" id="result-panel">
-                    <div id="result-content"></div>
-
-                    <button class="debug-toggle" id="debug-toggle" onclick="PKScanner.toggleDebug()">
-                        <span id="debug-arrow">&#9654;</span> Debug Info
-                    </button>
-                    <div class="debug-content" id="debug-content"></div>
-                </div>
+            <div id="camera-placeholder" class="cam-placeholder">
+                <div class="cam-ph-icon">&#128247;</div>
+                <div>Tap below to start scanning</div>
+                <button class="btn-cam-start" id="start-btn" onclick="PKScanner.startCamera()">Start Camera</button>
             </div>
+            <div class="flash-overlay" id="flash-overlay"></div>
+            <div class="cam-float-ctrls">
+                <button class="cam-ctrl" id="flip-btn" onclick="PKScanner.flipCamera()" title="Flip camera">&#x21BB;</button>
+                <button class="cam-ctrl" id="stop-btn" onclick="PKScanner.stopCamera()" title="Stop camera">&#x2715;</button>
+            </div>
+            <button class="capture-btn" id="capture-btn" disabled title="Capture card">
+                <div class="capture-btn-inner"></div>
+            </button>
         </div>
+        <div id="status-bar" class="status-bar"></div>
+    </div>
 
-        <!-- Right: Batch sidebar -->
-        <div class="card">
-            <div class="batch-header">
-                <div>
-                    <div class="card-title">Scanned Batch</div>
-                    <div class="card-sub">Cards identified and queued for inventory.</div>
-                </div>
-                <span class="batch-count" id="batch-count">0 cards</span>
-            </div>
-            <div class="batch-total" id="batch-total"></div>
-            <div id="batch-list" class="batch-list"></div>
-            <div class="batch-footer">
-                <button class="btn-outline" onclick="PKScanner.clearBatch()" id="clear-btn" disabled>Clear</button>
-                <button class="btn-done" id="done-btn" onclick="PKScanner.goReview()" disabled>Review Batch &rarr;</button>
+    <!-- Result sheet (mobile: slide-up overlay; desktop: card below camera) -->
+    <div class="result-sheet" id="result-sheet">
+        <div class="result-backdrop" onclick="PKScanner.retake()"></div>
+        <div class="result-sheet-inner">
+            <div class="result-handle" onclick="PKScanner.retake()"><div class="handle-bar"></div></div>
+            <div class="result-panel" id="result-panel">
+                <div id="result-content"></div>
+                <button class="debug-toggle" onclick="PKScanner.toggleDebug()">
+                    <span id="debug-arrow">&#9654;</span> Debug Info
+                </button>
+                <div class="debug-content" id="debug-content"></div>
             </div>
         </div>
     </div>
+
+    <!-- Batch drawer (mobile: bottom sheet; desktop: sidebar) -->
+    <div class="drawer" id="drawer">
+        <div class="drawer-handle" id="drawer-handle"><div class="handle-bar"></div></div>
+        <div class="drawer-peek" id="drawer-peek">
+            <div class="drawer-peek-info">
+                <span class="drawer-count" id="batch-count">0 cards</span>
+                <span class="drawer-total" id="batch-total"></span>
+            </div>
+            <label class="rapid-label">
+                <input type="checkbox" id="rapid-fire"><span>Rapid Fire</span>
+            </label>
+        </div>
+        <div class="drawer-body" id="drawer-body">
+            <div id="batch-list" class="batch-list"></div>
+        </div>
+        <div class="drawer-footer">
+            <button class="btn-secondary" id="clear-btn" onclick="PKScanner.clearBatch()" disabled>Clear</button>
+            <button class="btn-primary-lg" id="done-btn" onclick="PKScanner.goReview()" disabled>Review Batch &rarr;</button>
+        </div>
+    </div>
+
+    <!-- Mobile top bar -->
+    <div class="top-bar">
+        <a class="top-bar-back" href="/inventory">&larr;</a>
+        <span class="top-bar-title">Pok&eacute;mon Scanner</span>
+    </div>
+
+    <!-- Toast notifications -->
+    <div class="toast-container" id="toast-container"></div>
 </div>
 
 <script>
@@ -348,7 +388,6 @@ var PKScanner = (function() {
     var facingMode = 'environment';
     var lastResult = null;
 
-    // Rapid-fire queue
     var scanQueue = [];
     var nextScanId = 0;
     var activeRequests = 0;
@@ -357,6 +396,8 @@ var PKScanner = (function() {
     function escHtml(str) {
         return String(str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
     }
+
+    function isMobile() { return window.innerWidth <= 780; }
 
     function isRapidFire() {
         return document.getElementById('rapid-fire').checked;
@@ -404,7 +445,7 @@ var PKScanner = (function() {
     }
 
     // ------------------------------------------------------------------
-    // Image capture (shared by both modes)
+    // Image capture
     // ------------------------------------------------------------------
     function captureImage() {
         var video = document.getElementById('video');
@@ -433,7 +474,7 @@ var PKScanner = (function() {
     }
 
     // ------------------------------------------------------------------
-    // Capture handler — dispatches to rapid-fire or sequential
+    // Capture dispatch
     // ------------------------------------------------------------------
     var sequentialLock = false;
 
@@ -445,7 +486,6 @@ var PKScanner = (function() {
         }
     });
 
-    // --- Sequential mode (original behavior) ---
     async function captureSequential() {
         if (sequentialLock) return;
         sequentialLock = true;
@@ -470,11 +510,11 @@ var PKScanner = (function() {
             } else if (data.status === 'NO_MATCH') {
                 showStatus('No matching card found. Try again or adjust angle.', 'warn');
             } else if (data.status === 'AMBIGUOUS') {
-                showStatus('Multiple matches found — pick the correct card below.', 'warn');
+                showStatus('Multiple matches found \u2014 pick the correct card below.', 'warn');
             } else {
                 var best = data.best_match;
                 var price = best.market_price ? ('$' + Number(best.market_price).toFixed(2)) : '';
-                showStatus('Matched: ' + best.name + (price ? ' — ' + price : ''), 'ok');
+                showStatus('Matched: ' + best.name + (price ? ' \u2014 ' + price : ''), 'ok');
             }
             showResult(data);
         } catch(e) {
@@ -485,7 +525,6 @@ var PKScanner = (function() {
         btn.disabled = !stream;
     }
 
-    // --- Rapid-fire mode ---
     function captureRapidFire() {
         flashEffect();
 
@@ -504,10 +543,7 @@ var PKScanner = (function() {
 
         var next = null;
         for (var i = 0; i < scanQueue.length; i++) {
-            if (scanQueue[i].status === 'queued') {
-                next = scanQueue[i];
-                break;
-            }
+            if (scanQueue[i].status === 'queued') { next = scanQueue[i]; break; }
         }
         if (!next) return;
 
@@ -531,8 +567,12 @@ var PKScanner = (function() {
             if (data.status === 'MATCHED' && data.best_match) {
                 entry.status = 'matched';
                 addToBatchFromCard(data.best_match);
+                var m = data.best_match;
+                var tp = m.market_price ? (' \u2014 $' + Number(m.market_price).toFixed(2)) : '';
+                showToast('\u2713 ' + m.name + tp);
             } else if (data.status === 'AMBIGUOUS' && data.best_match) {
                 entry.status = 'review';
+                showToast('\u26A0 ' + data.best_match.name + ' \u2014 needs review');
             } else {
                 entry.status = 'error';
                 entry.errorMsg = data.error || 'No match found';
@@ -557,7 +597,7 @@ var PKScanner = (function() {
     }
 
     // ------------------------------------------------------------------
-    // Queue UI rendering
+    // Queue UI
     // ------------------------------------------------------------------
     function renderQueueItem(entry) {
         var list = document.getElementById('batch-list');
@@ -604,7 +644,7 @@ var PKScanner = (function() {
                 '<span class="badge badge-high" style="flex-shrink:0;">&#10003;</span>';
         } else if (entry.status === 'review') {
             var m = entry.result.best_match;
-            var scanId = entry.id;
+            var sid = entry.id;
             el.className = 'batch-item';
             el.innerHTML =
                 '<div class="batch-thumb-placeholder" style="background:var(--yellow-bg);border-color:#f0cda0;">&#9888;</div>' +
@@ -612,18 +652,18 @@ var PKScanner = (function() {
                     '<div class="batch-name">' + escHtml(m.name) + ' ?</div>' +
                     '<div class="batch-meta">Needs review &middot; ' + escHtml(m.set_name || '') + '</div>' +
                 '</div>' +
-                '<button class="btn-outline" style="padding:4px 10px;font-size:11px;" onclick="PKScanner.reviewQueueItem(' + scanId + ')">Review</button>' +
-                '<button class="batch-del" onclick="PKScanner.removeQueueItem(' + scanId + ')" title="Remove">&#x2715;</button>';
+                '<button class="btn-outline" style="padding:4px 10px;font-size:11px;" onclick="PKScanner.reviewQueueItem(' + sid + ')">Review</button>' +
+                '<button class="batch-del" onclick="PKScanner.removeQueueItem(' + sid + ')" title="Remove">&#x2715;</button>';
         } else if (entry.status === 'error') {
             el.className = 'batch-item queue-error';
-            var scanId = entry.id;
+            var sid = entry.id;
             el.innerHTML =
-                '<div class="batch-thumb-placeholder" style="background:var(--red-bg);border-color:#efb8b4;color:#9d2f2b;">&#x2715;</div>' +
+                '<div class="batch-thumb-placeholder" style="background:rgba(239,107,91,.12);border-color:rgba(239,107,91,.3);color:#ef6b5b;">&#x2715;</div>' +
                 '<div class="batch-info">' +
                     '<div class="batch-name">' + escHtml(entry.errorMsg || 'Failed') + '</div>' +
                     '<div class="batch-meta"><span class="queue-badge queue-badge-error">Error</span></div>' +
                 '</div>' +
-                '<button class="batch-del" onclick="PKScanner.removeQueueItem(' + scanId + ')" title="Remove">&#x2715;</button>';
+                '<button class="batch-del" onclick="PKScanner.removeQueueItem(' + sid + ')" title="Remove">&#x2715;</button>';
         }
     }
 
@@ -658,11 +698,8 @@ var PKScanner = (function() {
             if (scanQueue[i].id === scanId) { entry = scanQueue[i]; break; }
         }
         if (!entry || !entry.result) return;
-
         lastResult = entry.result;
         showResult(entry.result);
-
-        entry._reviewed = true;
     }
 
     function removeQueueItem(scanId) {
@@ -673,12 +710,12 @@ var PKScanner = (function() {
     }
 
     // ------------------------------------------------------------------
-    // Result display (used by sequential mode and queue review)
+    // Result display
     // ------------------------------------------------------------------
     function showResult(data) {
-        var panel = document.getElementById('result-panel');
+        var sheet = document.getElementById('result-sheet');
         var content = document.getElementById('result-content');
-        panel.classList.add('visible');
+        sheet.classList.add('open');
 
         var html = '';
 
@@ -716,15 +753,13 @@ var PKScanner = (function() {
                     var vPrice = v.price ? ' \u2014 $' + Number(v.price).toFixed(2) : '';
                     html += '<option value="' + escHtml(v.name) + '" data-price="' + (v.price || '') + '">' + escHtml(v.name) + vPrice + '</option>';
                 }
-                html += '</select>';
-                html += '</div>';
+                html += '</select></div>';
             }
             html += '<div class="result-actions">';
             html += '<button class="btn-primary" onclick="PKScanner.addBestMatch()">Add to Batch</button>';
             html += '<button class="btn-outline" onclick="PKScanner.retake()">Retake</button>';
             html += '</div>';
             html += '</div></div>';
-
             html += '<div style="font-size:12px;color:var(--muted);font-weight:500;margin-bottom:4px;">' + escHtml(m.match_reason) + '</div>';
         }
 
@@ -733,8 +768,7 @@ var PKScanner = (function() {
             html += '<div style="margin-top:16px;background:var(--yellow-bg);border-radius:12px;padding:14px;">';
             html += '<div style="font-size:13px;font-weight:700;margin-bottom:8px;">';
             html += data.status === 'AMBIGUOUS' ? '&#9888; Pick the correct card:' : '&#128260; Wrong match? Pick the correct version:';
-            html += '</div>';
-            html += '<div class="candidates-grid">';
+            html += '</div><div class="candidates-grid">';
             for (var i = 0; i < Math.min(candidates.length, 8); i++) {
                 var c = candidates[i];
                 var ci = c.image_url_small || c.image_url || '';
@@ -764,7 +798,6 @@ var PKScanner = (function() {
 
         content.innerHTML = html;
 
-        // Debug info
         var debugEl = document.getElementById('debug-content');
         var dbg = data.debug || {};
         var ef = data.extracted_fields || {};
@@ -803,8 +836,9 @@ var PKScanner = (function() {
         }
         debugEl.innerHTML = debugHtml;
 
-        if (window.innerWidth > 780) {
-            panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        if (!isMobile()) {
+            var panel = document.getElementById('result-panel');
+            if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         }
     }
 
@@ -828,7 +862,7 @@ var PKScanner = (function() {
     }
 
     function retake() {
-        document.getElementById('result-panel').classList.remove('visible');
+        document.getElementById('result-sheet').classList.remove('open');
         document.getElementById('debug-content').classList.remove('open');
         document.getElementById('debug-arrow').innerHTML = '&#9654;';
         lastResult = null;
@@ -935,13 +969,11 @@ var PKScanner = (function() {
         for (var t = 0; t < batch.length; t++) {
             if (batch[t].auto_price) totalPrice += Number(batch[t].auto_price);
         }
-        totalEl.textContent = batch.length ? ('Batch Total: $' + totalPrice.toFixed(2)) : '';
+        totalEl.textContent = batch.length ? ('$' + totalPrice.toFixed(2)) : '';
     }
 
     function renderBatch() {
         var list = document.getElementById('batch-list');
-
-        // Remove existing non-queue items (keep queue items at top)
         var existingBatchEls = list.querySelectorAll('.batch-item:not([data-scan-id])');
         existingBatchEls.forEach(function(el) { el.remove(); });
 
@@ -992,6 +1024,132 @@ var PKScanner = (function() {
     }
 
     // ------------------------------------------------------------------
+    // Toast notifications
+    // ------------------------------------------------------------------
+    function showToast(text, duration) {
+        duration = duration || 2500;
+        var container = document.getElementById('toast-container');
+        var toast = document.createElement('div');
+        toast.className = 'toast';
+        toast.textContent = text;
+        container.appendChild(toast);
+        requestAnimationFrame(function() {
+            requestAnimationFrame(function() { toast.classList.add('show'); });
+        });
+        setTimeout(function() {
+            toast.classList.remove('show');
+            toast.classList.add('hide');
+            setTimeout(function() { if (toast.parentNode) toast.remove(); }, 300);
+        }, duration);
+    }
+
+    // ------------------------------------------------------------------
+    // Drawer touch controller (mobile only)
+    // ------------------------------------------------------------------
+    var Drawer = {
+        el: null,
+        handleEl: null,
+        peekEl: null,
+        dragging: false,
+        startY: 0,
+        startTranslate: 0,
+        currentTranslate: 0,
+        state: 'collapsed',
+        COLLAPSED: 0,
+        HALF: 0,
+        FULL: 0,
+
+        init: function() {
+            this.el = document.getElementById('drawer');
+            this.handleEl = document.getElementById('drawer-handle');
+            this.peekEl = document.getElementById('drawer-peek');
+            if (!this.el || !this.handleEl || !isMobile()) return;
+
+            this.calcSnaps();
+            this.setTranslate(this.COLLAPSED, false);
+
+            var self = this;
+            var dragZone = this.handleEl;
+
+            dragZone.addEventListener('touchstart', function(e) { self.onStart(e); }, { passive: true });
+            this.peekEl.addEventListener('touchstart', function(e) { self.onStart(e); }, { passive: true });
+            document.addEventListener('touchmove', function(e) { self.onMove(e); }, { passive: false });
+            document.addEventListener('touchend', function(e) { self.onEnd(e); });
+
+            this.handleEl.addEventListener('click', function() {
+                if (self.state === 'collapsed') self.snapTo('half');
+                else self.snapTo('collapsed');
+            });
+            this.peekEl.addEventListener('click', function(e) {
+                if (e.target.tagName === 'INPUT' || e.target.tagName === 'LABEL' || e.target.closest('.rapid-label')) return;
+                if (self.state === 'collapsed') self.snapTo('half');
+                else self.snapTo('collapsed');
+            });
+
+            window.addEventListener('resize', function() { self.calcSnaps(); self.snapTo(self.state); });
+        },
+
+        calcSnaps: function() {
+            var h = this.el.offsetHeight || window.innerHeight * 0.85;
+            var peek = 56;
+            this.COLLAPSED = h - peek;
+            this.HALF = h * 0.55;
+            this.FULL = 0;
+        },
+
+        setTranslate: function(y, animate) {
+            this.currentTranslate = y;
+            if (animate) {
+                this.el.style.transition = 'transform .3s cubic-bezier(.25,.46,.45,.94)';
+            }
+            this.el.style.transform = 'translateY(' + y + 'px)';
+            if (animate) {
+                var self = this;
+                setTimeout(function() { self.el.style.transition = ''; }, 310);
+            }
+        },
+
+        snapTo: function(state) {
+            this.state = state;
+            var target = state === 'full' ? this.FULL : (state === 'half' ? this.HALF : this.COLLAPSED);
+            this.setTranslate(target, true);
+        },
+
+        onStart: function(e) {
+            this.dragging = true;
+            this.startY = e.touches[0].clientY;
+            this.startTranslate = this.currentTranslate;
+            this.el.style.transition = '';
+        },
+
+        onMove: function(e) {
+            if (!this.dragging) return;
+            var dy = e.touches[0].clientY - this.startY;
+            var newY = Math.max(this.FULL, Math.min(this.COLLAPSED, this.startTranslate + dy));
+            this.currentTranslate = newY;
+            this.el.style.transform = 'translateY(' + newY + 'px)';
+            e.preventDefault();
+        },
+
+        onEnd: function() {
+            if (!this.dragging) return;
+            this.dragging = false;
+            var snaps = [
+                { s: 'collapsed', y: this.COLLAPSED },
+                { s: 'half', y: this.HALF },
+                { s: 'full', y: this.FULL },
+            ];
+            var closest = snaps[0];
+            for (var i = 1; i < snaps.length; i++) {
+                if (Math.abs(this.currentTranslate - snaps[i].y) < Math.abs(this.currentTranslate - closest.y)) {
+                    closest = snaps[i];
+                }
+            }
+            this.snapTo(closest.s);
+        }
+    };
+
+    // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
     function showStatus(msg, cls) {
@@ -1008,10 +1166,20 @@ var PKScanner = (function() {
         arrow.innerHTML = el.classList.contains('open') ? '&#9660;' : '&#9654;';
     }
 
+    // ------------------------------------------------------------------
+    // Init
+    // ------------------------------------------------------------------
     renderBatch();
 
     document.getElementById('flip-btn').style.display = 'none';
     document.getElementById('stop-btn').style.display = 'none';
+
+    Drawer.init();
+
+    if (isMobile()) {
+        document.getElementById('rapid-fire').checked = true;
+        startCamera();
+    }
 
     return {
         startCamera: startCamera,
