@@ -1065,10 +1065,13 @@ async def _enrich_price(candidate: ScoredCandidate, ptcg_key: str = "") -> None:
             # No price from this query — try next
 
 
-async def _enrich_price_fast(candidate: ScoredCandidate, ptcg_key: str = "") -> None:
-    """Fast price lookup for Ximilar results -- single query, short timeout.
+EUR_TO_USD = 1.10
 
-    Ximilar gives us exact name + set + number, so one precise query suffices.
+async def _enrich_price_fast(candidate: ScoredCandidate, ptcg_key: str = "") -> None:
+    """Fast price lookup for Ximilar results.
+
+    Tries TCGdex first (has pricing for newer sets like Ascended Heroes),
+    then falls back to PokemonTCG API.
     """
     if candidate.market_price is not None:
         return
@@ -1076,9 +1079,58 @@ async def _enrich_price_fast(candidate: ScoredCandidate, ptcg_key: str = "") -> 
         return
 
     async with httpx.AsyncClient(timeout=5.0) as client:
+        # --- Try 1: TCGdex (has newer set pricing via Cardmarket/TCGPlayer) ---
+        try:
+            tcgdex_cards = await _tcgdex_search_by_name(
+                client, candidate.name, limit=5,
+                prefer_number=candidate.number,
+            )
+            for tc in tcgdex_cards:
+                tc_num = tc.get("localId", "")
+                cand_num = candidate.number.split("/")[0] if candidate.number else ""
+                if cand_num and str(tc_num) != str(cand_num).lstrip("0"):
+                    continue
+
+                # Fetch full card with pricing
+                card_id = tc.get("id", "")
+                if not card_id:
+                    continue
+                detail_resp = await client.get(f"{TCGDEX_BASE}/cards/{card_id}")
+                if detail_resp.status_code != 200:
+                    continue
+                detail = detail_resp.json()
+                pricing = detail.get("pricing") or {}
+
+                # Prefer TCGPlayer USD pricing
+                tcgp = pricing.get("tcgplayer") or {}
+                for variant_key in ("normal", "holo", "reverse"):
+                    if tcgp.get(variant_key) is not None:
+                        candidate.market_price = round(float(tcgp[variant_key]), 2)
+                        break
+
+                # Fall back to Cardmarket EUR -> USD conversion
+                if candidate.market_price is None:
+                    cm = pricing.get("cardmarket") or {}
+                    for eur_key in ("trend", "avg", "avg1"):
+                        val = cm.get(eur_key)
+                        if val is not None and float(val) > 0:
+                            candidate.market_price = round(float(val) * EUR_TO_USD, 2)
+                            break
+
+                # Grab image from TCGdex
+                if not candidate.image_url:
+                    candidate.image_url = detail.get("image", "") + "/high.webp" if detail.get("image") else ""
+                    candidate.image_url_small = detail.get("image", "") + "/low.webp" if detail.get("image") else ""
+
+                if candidate.market_price:
+                    return
+                break
+        except Exception as exc:
+            logger.debug("[pokemon_scanner] TCGdex price lookup failed: %s", exc)
+
+        # --- Try 2: PokemonTCG API ---
         headers = {"X-Api-Key": ptcg_key} if ptcg_key else {}
 
-        # Single precise query: name + set name + number
         parts = [f'name:"{candidate.name}"']
         if candidate.set_name:
             parts.append(f'set.name:"{candidate.set_name}"')
@@ -1087,56 +1139,54 @@ async def _enrich_price_fast(candidate: ScoredCandidate, ptcg_key: str = "") -> 
             parts.append(f'number:"{clean_num}"')
         query = " ".join(parts)
 
-        resp = await client.get(
-            f"{POKEMONTCG_BASE}/cards",
-            params={"q": query, "pageSize": "3", "orderBy": "-set.releaseDate"},
-            headers=headers,
-        )
-        if resp.status_code != 200:
-            return
-
-        cards = resp.json().get("data") or []
-        if not cards:
-            # Fallback: name only (handles new sets not yet in PokemonTCG)
-            resp2 = await client.get(
+        try:
+            resp = await client.get(
                 f"{POKEMONTCG_BASE}/cards",
-                params={"q": f'name:"{candidate.name}"', "pageSize": "3", "orderBy": "-set.releaseDate"},
+                params={"q": query, "pageSize": "3", "orderBy": "-set.releaseDate"},
                 headers=headers,
             )
-            if resp2.status_code == 200:
-                cards = resp2.json().get("data") or []
+            cards = resp.json().get("data") or [] if resp.status_code == 200 else []
 
-        if not cards:
-            return
+            if not cards:
+                resp2 = await client.get(
+                    f"{POKEMONTCG_BASE}/cards",
+                    params={"q": f'name:"{candidate.name}"', "pageSize": "3", "orderBy": "-set.releaseDate"},
+                    headers=headers,
+                )
+                if resp2.status_code == 200:
+                    cards = resp2.json().get("data") or []
 
-        best_card = cards[0]
-        if candidate.number:
-            clean_num = candidate.number.split("/")[0].lstrip("0")
-            for card in cards:
-                if card.get("number", "").lstrip("0") == clean_num:
-                    best_card = card
-                    break
+            if cards:
+                best_card = cards[0]
+                if candidate.number:
+                    clean_num = candidate.number.split("/")[0].lstrip("0")
+                    for card in cards:
+                        if card.get("number", "").lstrip("0") == clean_num:
+                            best_card = card
+                            break
 
-        prices_wrap = best_card.get("tcgplayer", {}).get("prices", {})
-        for price_type in ("normal", "holofoil", "reverseHolofoil", "1stEditionHolofoil"):
-            if price_type in prices_wrap:
-                mp = prices_wrap[price_type].get("market")
-                if mp is not None:
-                    try:
-                        candidate.market_price = round(float(mp), 2)
-                    except (ValueError, TypeError):
-                        pass
-                    if candidate.market_price:
-                        break
+                prices_wrap = best_card.get("tcgplayer", {}).get("prices", {})
+                for price_type in ("normal", "holofoil", "reverseHolofoil", "1stEditionHolofoil"):
+                    if price_type in prices_wrap:
+                        mp = prices_wrap[price_type].get("market")
+                        if mp is not None:
+                            try:
+                                candidate.market_price = round(float(mp), 2)
+                            except (ValueError, TypeError):
+                                pass
+                            if candidate.market_price:
+                                break
 
-        tcgp_url = best_card.get("tcgplayer", {}).get("url")
-        if tcgp_url and not candidate.tcgplayer_url:
-            candidate.tcgplayer_url = tcgp_url
+                tcgp_url = best_card.get("tcgplayer", {}).get("url")
+                if tcgp_url and not candidate.tcgplayer_url:
+                    candidate.tcgplayer_url = tcgp_url
 
-        if not candidate.image_url:
-            images = best_card.get("images") or {}
-            candidate.image_url = images.get("large", "")
-            candidate.image_url_small = images.get("small", "")
+                if not candidate.image_url:
+                    images = best_card.get("images") or {}
+                    candidate.image_url = images.get("large", "")
+                    candidate.image_url_small = images.get("small", "")
+        except Exception as exc:
+            logger.debug("[pokemon_scanner] PokemonTCG price lookup failed: %s", exc)
 
 
 # ---------------------------------------------------------------------------
