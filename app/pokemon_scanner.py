@@ -1065,96 +1065,118 @@ async def _enrich_price(candidate: ScoredCandidate, ptcg_key: str = "") -> None:
             # No price from this query — try next
 
 
-EUR_TO_USD = 1.10
+TCGTRACKING_BASE = "https://tcgtracking.com/tcgapi/v1"
+TCGTRACKING_POKEMON_CAT = "3"
+
+# Cache: set_name (lowercase) -> {set_id, products, pricing}
+_tcgtracking_cache: dict[str, dict] = {}
+
 
 async def _enrich_price_fast(candidate: ScoredCandidate, ptcg_key: str = "") -> None:
-    """Fast price lookup for Ximilar results.
+    """Fast price lookup using TCGTracking.com (real TCGPlayer prices, no auth).
 
-    Tries TCGdex first (has pricing for newer sets like Ascended Heroes),
-    then falls back to PokemonTCG API.
+    Strategy: search for set -> match product by number -> get TCGPlayer price.
+    Falls back to PokemonTCG API if TCGTracking fails.
     """
     if candidate.market_price is not None:
         return
-    if not candidate.name:
+    if not candidate.name or not candidate.set_name:
         return
 
     async with httpx.AsyncClient(timeout=5.0) as client:
-        # --- Try 1: TCGdex (has newer set pricing via Cardmarket/TCGPlayer) ---
+        # --- Try 1: TCGTracking (TCGPlayer prices, free, fast) ---
         try:
-            tcgdex_cards = await _tcgdex_search_by_name(
-                client, candidate.name, limit=5,
-                prefer_number=candidate.number,
-            )
-            for tc in tcgdex_cards:
-                tc_num = tc.get("localId", "")
-                cand_num = candidate.number.split("/")[0] if candidate.number else ""
-                if cand_num and str(tc_num) != str(cand_num).lstrip("0"):
-                    continue
+            set_key = candidate.set_name.lower()
+            cached = _tcgtracking_cache.get(set_key)
 
-                # Fetch full card with pricing
-                card_id = tc.get("id", "")
-                if not card_id:
-                    continue
-                detail_resp = await client.get(f"{TCGDEX_BASE}/cards/{card_id}")
-                if detail_resp.status_code != 200:
-                    continue
-                detail = detail_resp.json()
-                pricing = detail.get("pricing") or {}
+            if not cached:
+                # Search for the set
+                search_resp = await client.get(
+                    f"{TCGTRACKING_BASE}/{TCGTRACKING_POKEMON_CAT}/search",
+                    params={"q": candidate.set_name},
+                )
+                if search_resp.status_code == 200:
+                    sets = search_resp.json().get("sets") or []
+                    if sets:
+                        set_info = sets[0]
+                        set_id = set_info["id"]
 
-                # Prefer TCGPlayer USD pricing
-                tcgp = pricing.get("tcgplayer") or {}
-                for variant_key in ("normal", "holo", "reverse"):
-                    if tcgp.get(variant_key) is not None:
-                        candidate.market_price = round(float(tcgp[variant_key]), 2)
+                        # Fetch products + pricing in parallel
+                        import asyncio
+                        prod_resp, price_resp = await asyncio.gather(
+                            client.get(f"{TCGTRACKING_BASE}/{TCGTRACKING_POKEMON_CAT}/sets/{set_id}"),
+                            client.get(f"{TCGTRACKING_BASE}/{TCGTRACKING_POKEMON_CAT}/sets/{set_id}/pricing"),
+                        )
+
+                        products = prod_resp.json().get("products", []) if prod_resp.status_code == 200 else []
+                        pricing = price_resp.json().get("prices", {}) if price_resp.status_code == 200 else {}
+
+                        cached = {"set_id": set_id, "products": products, "pricing": pricing}
+                        _tcgtracking_cache[set_key] = cached
+
+            if cached and cached["products"]:
+                cand_num = candidate.number.split("/")[0].lstrip("0") if candidate.number else ""
+                cand_name_lower = candidate.name.lower().replace("'", "").replace("\u2019", "")
+
+                matched_product = None
+                for prod in cached["products"]:
+                    prod_num = prod.get("number", "").split("/")[0].lstrip("0")
+                    prod_clean = prod.get("clean_name", "").lower()
+
+                    if cand_num and prod_num == cand_num and cand_name_lower in prod_clean:
+                        matched_product = prod
                         break
 
-                # Fall back to Cardmarket EUR -> USD conversion
-                if candidate.market_price is None:
-                    cm = pricing.get("cardmarket") or {}
-                    for eur_key in ("trend", "avg", "avg1"):
-                        val = cm.get(eur_key)
-                        if val is not None and float(val) > 0:
-                            candidate.market_price = round(float(val) * EUR_TO_USD, 2)
+                # Broader fallback: match by number only
+                if not matched_product and cand_num:
+                    for prod in cached["products"]:
+                        prod_num = prod.get("number", "").split("/")[0].lstrip("0")
+                        if prod_num == cand_num:
+                            matched_product = prod
                             break
 
-                # Grab image from TCGdex
-                if not candidate.image_url:
-                    candidate.image_url = detail.get("image", "") + "/high.webp" if detail.get("image") else ""
-                    candidate.image_url_small = detail.get("image", "") + "/low.webp" if detail.get("image") else ""
+                if matched_product:
+                    prod_id = str(matched_product["id"])
+                    prod_prices = cached["pricing"].get(prod_id, {}).get("tcg", {})
 
-                if candidate.market_price:
-                    return
-                break
+                    for subtype in prod_prices.values():
+                        mp = subtype.get("market")
+                        if mp is not None:
+                            candidate.market_price = round(float(mp), 2)
+                            break
+
+                    if not candidate.tcgplayer_url and matched_product.get("tcgplayer_url"):
+                        candidate.tcgplayer_url = matched_product["tcgplayer_url"]
+
+                    if not candidate.image_url and matched_product.get("image_url"):
+                        base_img = matched_product["image_url"].replace("_200w.jpg", "")
+                        candidate.image_url = base_img + "_400w.jpg"
+                        candidate.image_url_small = matched_product["image_url"]
+
+                    if candidate.market_price:
+                        logger.info(
+                            "[pokemon_scanner] TCGTracking price: %s = $%.2f",
+                            candidate.name, candidate.market_price,
+                        )
+                        return
+
         except Exception as exc:
-            logger.debug("[pokemon_scanner] TCGdex price lookup failed: %s", exc)
+            logger.debug("[pokemon_scanner] TCGTracking price lookup failed: %s", exc)
 
-        # --- Try 2: PokemonTCG API ---
-        headers = {"X-Api-Key": ptcg_key} if ptcg_key else {}
-
-        parts = [f'name:"{candidate.name}"']
-        if candidate.set_name:
-            parts.append(f'set.name:"{candidate.set_name}"')
-        if candidate.number:
-            clean_num = candidate.number.split("/")[0]
-            parts.append(f'number:"{clean_num}"')
-        query = " ".join(parts)
-
+        # --- Try 2: PokemonTCG API fallback ---
         try:
+            headers = {"X-Api-Key": ptcg_key} if ptcg_key else {}
+            parts = [f'name:"{candidate.name}"']
+            if candidate.set_name:
+                parts.append(f'set.name:"{candidate.set_name}"')
+            query = " ".join(parts)
+
             resp = await client.get(
                 f"{POKEMONTCG_BASE}/cards",
                 params={"q": query, "pageSize": "3", "orderBy": "-set.releaseDate"},
                 headers=headers,
             )
             cards = resp.json().get("data") or [] if resp.status_code == 200 else []
-
-            if not cards:
-                resp2 = await client.get(
-                    f"{POKEMONTCG_BASE}/cards",
-                    params={"q": f'name:"{candidate.name}"', "pageSize": "3", "orderBy": "-set.releaseDate"},
-                    headers=headers,
-                )
-                if resp2.status_code == 200:
-                    cards = resp2.json().get("data") or []
 
             if cards:
                 best_card = cards[0]
