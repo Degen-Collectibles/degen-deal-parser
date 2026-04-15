@@ -1728,6 +1728,18 @@ def _merge_results(
             merged["debug"]["dual_engine_note"] = "Ximilar HIGH, legacy weak — trusting Ximilar"
         elif x_score >= 50 and l_score < 50:
             merged["debug"]["dual_engine_note"] = "Ximilar decent, legacy unreliable — trusting Ximilar"
+        elif l_score >= 70 and x_score < 50:
+            # Legacy OCR is strong, Ximilar is weak — swap to legacy's result
+            logger.info(
+                "[pokemon_scanner] Trusting legacy over weak Ximilar: %s (%.0f) > %s (%.0f)",
+                lbest.get("name"), l_score, xbest.get("name"), x_score,
+            )
+            merged["best_match"] = lbest
+            merged["extracted_fields"] = legacy.get("extracted_fields") or merged.get("extracted_fields")
+            merged["status"] = "MATCHED" if l_score >= 80 else "AMBIGUOUS"
+            merged["debug"]["dual_engine_note"] = (
+                f"Legacy strong ({l_score:.0f}), Ximilar weak ({x_score:.0f}) — trusting OCR"
+            )
         else:
             merged["status"] = "AMBIGUOUS"
 
