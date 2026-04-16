@@ -1918,7 +1918,10 @@ var PKScanner = (function() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ query: query, category_id: selectedCategoryId })
         })
-        .then(function(r) { return r.json(); })
+        .then(function(r) {
+            if (!r.ok) return r.text().then(function(t) { throw new Error('Server error ' + r.status + ': ' + t.slice(0, 200)); });
+            return r.json();
+        })
         .then(function(data) {
             _searchCandidates = data.candidates || [];
             if (!_searchCandidates.length) {

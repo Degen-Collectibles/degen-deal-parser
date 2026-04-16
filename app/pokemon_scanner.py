@@ -1977,7 +1977,7 @@ async def text_search_cards(query: str, category_id: str = "3") -> dict[str, Any
         return asdict(ScanResult(status="NO_MATCH", error="Could not parse search query"))
 
     settings = get_settings()
-    ptcg_key = settings.pokemontcg_api_key or ""
+    ptcg_key = settings.pokemon_tcg_api_key or ""
 
     candidates = await lookup_candidates(fields, api_key=ptcg_key)
     if not candidates:
