@@ -416,6 +416,7 @@
 var PKScanner = (function() {
     var CONDITIONS = {{ conditions | tojson }};
     var batch = JSON.parse(localStorage.getItem('scan_batch') || '[]');
+    for (var _bi = 0; _bi < batch.length; _bi++) { delete batch[_bi]._fromScanId; }
     var stream = null;
     var facingMode = 'environment';
     var lastResult = null;
