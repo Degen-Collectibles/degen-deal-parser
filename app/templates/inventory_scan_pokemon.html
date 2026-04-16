@@ -719,23 +719,31 @@ var PKScanner = (function() {
                         if (updated.best_match) {
                             var prev = queueEntry._prevBestName || '';
                             var newName = updated.best_match.name || '';
-                            if (prev && prev !== newName) {
+                            var cardChanged = prev && prev !== newName;
+                            if (cardChanged) {
                                 showToast('Updated: ' + newName);
                             }
                             var existingIdx = _findBatchIdx(queueEntry.id);
                             if (existingIdx >= 0) {
                                 var um = updated.best_match;
-                                var uv = um.available_variants || [];
-                                var udv = updated.detected_variant || '';
-                                var udp = _pickDisplayPrice(um, uv, udv);
-                                batch[existingIdx].card_name = um.name || um.card_name || '';
-                                batch[existingIdx].set_name = um.set_name || '';
-                                batch[existingIdx].card_number = um.number || um.card_number || '';
-                                batch[existingIdx].image_url = um.image_url || '';
-                                batch[existingIdx].auto_price = udp.value;
-                                batch[existingIdx]._available_variants = uv;
-                                if (udv) batch[existingIdx].variant = udv;
-                                batch[existingIdx].is_foil = (batch[existingIdx].variant || '').toLowerCase().indexOf('holo') >= 0;
+                                if (cardChanged) {
+                                    var uv = um.available_variants || [];
+                                    var udv = updated.detected_variant || '';
+                                    var udp = _pickDisplayPrice(um, uv, udv);
+                                    batch[existingIdx].card_name = um.name || um.card_name || '';
+                                    batch[existingIdx].set_name = um.set_name || '';
+                                    batch[existingIdx].card_number = um.number || um.card_number || '';
+                                    batch[existingIdx].image_url = um.image_url || '';
+                                    batch[existingIdx].auto_price = udp.value;
+                                    batch[existingIdx]._available_variants = uv;
+                                    if (udv) batch[existingIdx].variant = udv;
+                                    batch[existingIdx].is_foil = (batch[existingIdx].variant || '').toLowerCase().indexOf('holo') >= 0;
+                                } else {
+                                    var uv = um.available_variants || [];
+                                    if (uv.length && (!batch[existingIdx]._available_variants || !batch[existingIdx]._available_variants.length)) {
+                                        batch[existingIdx]._available_variants = uv;
+                                    }
+                                }
                                 saveBatch();
                             } else {
                                 addToBatchFromCard(updated.best_match, queueEntry.id, updated.detected_variant);
@@ -800,20 +808,32 @@ var PKScanner = (function() {
             var m = entry.result.best_match;
             var variants = m.available_variants || [];
             var detectedV = entry.result.detected_variant || '';
-            var dp = _pickDisplayPrice(m, variants, detectedV);
-            var price = dp.value ? ('$' + dp.value.toFixed(2) + (dp.isTcgLow ? ' (L)' : '')) : '';
             var imgSrc = m.image_url_small || m.image_url || '';
             el.className = 'batch-item';
             var batchIdx = _findBatchIdx(entry.id);
+            var batchItem = batch[batchIdx];
+            var currentCond = batchItem ? batchItem.condition : 'NM';
+            var selectedV = (batchItem && batchItem.variant) || detectedV;
+            var batchVariants = (batchItem && batchItem._available_variants && batchItem._available_variants.length) ? batchItem._available_variants : variants;
+            var dp;
+            var matchedVariant = null;
+            for (var _vi = 0; _vi < batchVariants.length; _vi++) {
+                if (batchVariants[_vi].name === selectedV) { matchedVariant = batchVariants[_vi]; break; }
+            }
+            if (matchedVariant && matchedVariant.conditions) {
+                dp = _resolveConditionPrice(matchedVariant, currentCond);
+            } else {
+                dp = _pickDisplayPrice(m, batchVariants, detectedV);
+            }
+            var price = dp.value ? ('$' + dp.value.toFixed(2) + (dp.isTcgLow ? ' (L)' : '')) : '';
             var thumb = imgSrc
                 ? '<img class="batch-thumb" src="' + escHtml(imgSrc) + '" alt="" loading="lazy" onerror="this.style.display=\'none\'">'
                 : '<div class="batch-thumb-placeholder">&#127183;</div>';
             var condOptions = CONDITIONS.map(function(c) {
-                var sel = (batch[batchIdx] && batch[batchIdx].condition === c) ? ' selected' : (c === 'NM' ? ' selected' : '');
+                var sel = (batchItem && batchItem.condition === c) ? ' selected' : (c === 'NM' ? ' selected' : '');
                 return '<option value="' + c + '"' + sel + '>' + c + '</option>';
             }).join('');
-            var selectedV = (batch[batchIdx] && batch[batchIdx].variant) || detectedV;
-            var variantHtml = _buildBatchVariantHtml(variants, selectedV, batchIdx);
+            var variantHtml = _buildBatchVariantHtml(batchVariants, selectedV, batchIdx);
             el.innerHTML =
                 thumb +
                 '<div class="batch-info">' +
