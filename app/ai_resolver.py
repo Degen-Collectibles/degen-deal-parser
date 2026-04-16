@@ -27,6 +27,7 @@ stitch, and never modifies rows that have already been human-reviewed.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 from dataclasses import dataclass
@@ -46,6 +47,7 @@ from .db import managed_session
 from .models import (
     PARSE_PARSED,
     PARSE_REVIEW_REQUIRED,
+    AttachmentAsset,
     DiscordMessage,
     ReviewCorrection,
     normalize_parse_status,
@@ -142,15 +144,83 @@ def _row_image_urls(row: DiscordMessage) -> list[str]:
     return [url for url in attachments if isinstance(url, str) and is_image_url(url)]
 
 
+def _stable_url_key(url: str) -> str:
+    """Strip volatile query-string signing so cached Discord URLs still match.
+
+    Discord CDN URLs contain ephemeral ``?ex=...&is=...&hm=...`` signatures
+    that Discord rotates periodically. The part before ``?`` (host + path +
+    attachment id + filename) stays stable, so we key the cache lookup by
+    that.
+    """
+    return (url or "").split("?", 1)[0].strip()
+
+
+def _encode_cached_image(
+    session: Session, message_id: int, url: str
+) -> str | None:
+    """Return a base64 data URL for a cached attachment, or None if not cached.
+
+    Bedrock-hosted Claude (via NVIDIA) does NOT accept URL content sources
+    and returns HTTP 400 "URL content sources are not yet supported for
+    this model" when we pass a raw Discord URL. Instead we look up the
+    attachment bytes in AttachmentAsset (populated at ingest time) and
+    send them inline as a base64 data URL.
+
+    Match is done on the stable portion of the URL (see _stable_url_key)
+    so rows whose live Discord URL has been re-signed since caching still
+    find their asset.
+    """
+    target_key = _stable_url_key(url)
+    if not target_key:
+        return None
+
+    candidates = session.exec(
+        select(AttachmentAsset)
+        .where(AttachmentAsset.message_id == message_id)
+        .where(AttachmentAsset.is_image == True)  # noqa: E712
+    ).all()
+
+    asset: AttachmentAsset | None = None
+    for candidate in candidates:
+        if _stable_url_key(candidate.source_url) == target_key:
+            asset = candidate
+            break
+
+    if asset is None or not asset.data:
+        return None
+    content_type = (asset.content_type or "").strip() or "image/jpeg"
+    try:
+        encoded = base64.b64encode(asset.data).decode("ascii")
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(
+            "ai_resolver: failed to base64-encode cached image (msg=%s, url=%s): %s",
+            message_id,
+            url,
+            exc,
+        )
+        return None
+    return f"data:{content_type};base64,{encoded}"
+
+
 def _collect_context_images(
+    session: Session,
     primary: DiscordMessage,
     siblings_before: list[DiscordMessage],
     siblings_after: list[DiscordMessage],
 ) -> list[tuple[str, str]]:
+    """Gather image inputs for the resolver as (data_url, source_label) tuples.
+
+    Only images cached in AttachmentAsset are included. Discord URLs
+    expire and are also rejected by the Bedrock-hosted model; relying on
+    the cache keeps the resolver both portable and robust.
+    """
     images: list[tuple[str, str]] = []
 
     for url in _row_image_urls(primary)[:MAX_PRIMARY_IMAGES]:
-        images.append((url, f"primary row id={primary.id}"))
+        data_url = _encode_cached_image(session, primary.id, url)
+        if data_url is None:
+            continue
+        images.append((data_url, f"primary row id={primary.id}"))
 
     remaining = MAX_SIBLING_IMAGES
     for row in siblings_before + siblings_after:
@@ -159,15 +229,20 @@ def _collect_context_images(
         sibling_urls = _row_image_urls(row)
         if not sibling_urls:
             continue
-        # Take only the first image per sibling so one image-heavy row
-        # doesn't starve the budget.
-        images.append(
-            (
-                sibling_urls[0],
-                f"sibling row id={row.id} at {row.created_at.isoformat() if row.created_at else 'unknown'}",
+        # Take only the first cached image per sibling so one image-heavy
+        # row doesn't starve the budget.
+        for url in sibling_urls:
+            data_url = _encode_cached_image(session, row.id, url)
+            if data_url is None:
+                continue
+            images.append(
+                (
+                    data_url,
+                    f"sibling row id={row.id} at {row.created_at.isoformat() if row.created_at else 'unknown'}",
+                )
             )
-        )
-        remaining -= 1
+            remaining -= 1
+            break
 
     return images
 
@@ -242,7 +317,7 @@ def _build_context(session: Session, row: DiscordMessage) -> ResolverContext:
 
     siblings_before_list = list(siblings_before)
     siblings_after_list = list(siblings_after)
-    images = _collect_context_images(row, siblings_before_list, siblings_after_list)
+    images = _collect_context_images(session, row, siblings_before_list, siblings_after_list)
 
     return ResolverContext(
         primary=row,
@@ -268,9 +343,13 @@ def _build_prompt(context: ResolverContext) -> str:
         "correction_hints": context.correction_hints,
     }
     if context.images:
+        # Only include the label in the text prompt. The actual image
+        # bytes are attached via multipart image_url blocks below, so
+        # echoing a base64 data URL into the text payload would waste
+        # tokens (and make logs unreadable).
         payload["attached_images"] = [
-            {"index": idx, "source": label, "url": url}
-            for idx, (url, label) in enumerate(context.images, start=1)
+            {"index": idx, "source": label}
+            for idx, (_url, label) in enumerate(context.images, start=1)
         ]
 
     lines = [
