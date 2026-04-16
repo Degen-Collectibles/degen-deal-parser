@@ -955,11 +955,22 @@ var PKScanner = (function() {
                     pollValidation(data.scan_id, function(updated) {
                         queueEntry.result = updated;
                         if (updated.best_match) {
-                            var prev = queueEntry._prevBestName || '';
-                            var newName = updated.best_match.name || '';
-                            var cardChanged = prev && prev !== newName;
+                            // Compare (name, number) rather than just name. Reprints
+                            // like Aerodactyl #1/62 Fossil vs #16/62 Fossil share a
+                            // name but are different cards with different variants,
+                            // conditions, and pricing — treating them as "same card"
+                            // left the batch item stuck on Ximilar's initial guess
+                            // while the UI transiently rendered the validated card.
+                            function _sig(bm) {
+                                var n = (bm && bm.name) || '';
+                                var num = (bm && bm.number) || '';
+                                return (n + '|' + num).toLowerCase();
+                            }
+                            var prevSig = queueEntry._prevBestSig || '';
+                            var newSig = _sig(updated.best_match);
+                            var cardChanged = prevSig && prevSig !== newSig;
                             if (cardChanged) {
-                                showToast('Updated: ' + newName);
+                                showToast('Updated: ' + (updated.best_match.name || ''));
                             }
                             var existingIdx = _findBatchIdx(queueEntry.id);
                             if (existingIdx >= 0) {
@@ -990,7 +1001,10 @@ var PKScanner = (function() {
                         updateQueueItemEl(queueEntry);
                         renderBatch();
                     });
-                    queueEntry._prevBestName = (data.best_match || {}).name || '';
+                    queueEntry._prevBestSig = (function() {
+                        var bm = data.best_match || {};
+                        return ((bm.name || '') + '|' + (bm.number || '')).toLowerCase();
+                    })();
                 })(entry);
             }
 
