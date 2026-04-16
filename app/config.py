@@ -116,6 +116,17 @@ class Settings(BaseSettings):
     auto_promote_min_confidence: float = Field(default=0.85, alias="AUTO_PROMOTE_MIN_CONFIDENCE")
     auto_promote_interval_minutes: float = Field(default=30.0, alias="AUTO_PROMOTE_INTERVAL_MINUTES")
 
+    # AI review-resolver agent: a background loop that scans
+    # review_required rows and asks a heavy model to resolve them using
+    # author history, nearby siblings, and prior corrections as context.
+    ai_resolver_enabled: bool = Field(default=True, alias="AI_RESOLVER_ENABLED")
+    ai_resolver_interval_minutes: float = Field(default=10.0, alias="AI_RESOLVER_INTERVAL_MINUTES")
+    ai_resolver_batch_size: int = Field(default=25, alias="AI_RESOLVER_BATCH_SIZE")
+    ai_resolver_min_age_minutes: int = Field(default=5, alias="AI_RESOLVER_MIN_AGE_MINUTES")
+    ai_resolver_auto_confidence: float = Field(default=0.95, alias="AI_RESOLVER_AUTO_CONFIDENCE")
+    ai_resolver_max_context_messages: int = Field(default=10, alias="AI_RESOLVER_MAX_CONTEXT_MESSAGES")
+    ai_resolver_max_correction_hints: int = Field(default=5, alias="AI_RESOLVER_MAX_CORRECTION_HINTS")
+
     tiktok_token_refresh_enabled: bool = Field(default=True, alias="TIKTOK_TOKEN_REFRESH_ENABLED")
     tiktok_token_refresh_interval_minutes: float = Field(
         default=30.0,

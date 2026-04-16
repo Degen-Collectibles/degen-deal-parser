@@ -131,6 +131,47 @@
                     </div>
                 </div>
 
+                {% if message["ai_resolver_reasoning"] %}
+                <div class="card">
+                    <h2>AI review resolver</h2>
+                    <div class="small" style="margin-bottom:12px;">
+                        A dedicated agent analyzed this row using nearby messages, author history, and prior corrections.
+                        {% if message["ai_resolver_reasoning"].get("resolution") == "auto_resolve" %}
+                        It auto-resolved the row at confidence
+                        <strong>{{ "%.2f"|format(message["ai_resolver_reasoning"].get("confidence") or 0.0) }}</strong>.
+                        {% else %}
+                        It flagged this row as needing human review (confidence
+                        <strong>{{ "%.2f"|format(message["ai_resolver_reasoning"].get("confidence") or 0.0) }}</strong>).
+                        {% endif %}
+                    </div>
+                    <div class="detail-grid">
+                        <div class="detail-card" style="grid-column: span 2;">
+                            <div class="label">Reasoning</div>
+                            <div>{{ message["ai_resolver_reasoning"].get("reasoning") or "—" }}</div>
+                        </div>
+                        {% if message["ai_resolver_reasoning"].get("proposed_parse") %}
+                        <div class="detail-card" style="grid-column: span 2;">
+                            <div class="label">Proposed parse</div>
+                            <div>
+                                type=<strong>{{ message["ai_resolver_reasoning"]["proposed_parse"].get("parsed_type") or "—" }}</strong>
+                                | amount={{ message["ai_resolver_reasoning"]["proposed_parse"].get("parsed_amount") if message["ai_resolver_reasoning"]["proposed_parse"].get("parsed_amount") is not none else "—" }}
+                                | payment={{ message["ai_resolver_reasoning"]["proposed_parse"].get("parsed_payment_method") or "—" }}
+                                | cash_direction={{ message["ai_resolver_reasoning"]["proposed_parse"].get("parsed_cash_direction") or "—" }}
+                            </div>
+                        </div>
+                        {% endif %}
+                        <div class="detail-card">
+                            <div class="label">Model</div>
+                            <div>{{ message["ai_resolver_reasoning"].get("model") or "—" }}</div>
+                        </div>
+                        <div class="detail-card">
+                            <div class="label">Resolved at</div>
+                            <div>{{ message["ai_resolver_reasoning"].get("resolved_at") or "—" }}</div>
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+
                 {% if message["parse_disagreement"] %}
                 <div class="card">
                     <h2>Rule vs AI disagreement</h2>

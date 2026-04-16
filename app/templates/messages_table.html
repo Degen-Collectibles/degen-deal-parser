@@ -618,6 +618,7 @@
                                     <td class="status-col">
                                         <span class="status-pill status-{{ row['status'] }}">{{ (row["status"] or "")|replace("_", " ") }}</span>
                                         {% if row["parse_disagreement"] %}<span class="status-pill" style="background:#fef3c7;color:#92400e;" title="Rule and AI parsers disagreed on: {{ ', '.join(row['parse_disagreement'].get('fields', [])) }}">rule/ai split</span>{% endif %}
+                                        {% if row["ai_resolver_reasoning"] and row["ai_resolver_reasoning"].get("resolution") == "auto_resolve" %}<span class="status-pill" style="background:#dcfce7;color:#166534;" title="{{ row['ai_resolver_reasoning'].get('reasoning', '')[:200] }}">ai-resolved</span>{% elif row["ai_resolver_reasoning"] %}<span class="status-pill" style="background:#e0e7ff;color:#3730a3;" title="{{ row['ai_resolver_reasoning'].get('reasoning', '')[:200] }}">ai-analyzed</span>{% endif %}
                                     </td>
                                     <td class="kind-col review-cell">
                                         {% if is_review_page %}

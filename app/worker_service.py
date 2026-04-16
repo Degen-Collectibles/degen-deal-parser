@@ -3,6 +3,7 @@ import signal
 import socket
 import threading
 
+from .ai_resolver import ai_review_resolver_loop
 from .backfill_requests import backfill_request_loop, requeue_interrupted_backfill_requests
 from .config import get_settings
 from .db import init_db, managed_session
@@ -61,6 +62,8 @@ def worker_runtime_details() -> dict:
         "discord_status": discord_runtime_state.get("status"),
         "discord_error": discord_runtime_state.get("error"),
         "parser_worker_enabled": settings.parser_worker_enabled,
+        "ai_resolver_enabled": settings.ai_resolver_enabled,
+        "ai_resolver_interval_minutes": settings.ai_resolver_interval_minutes,
         "discord_ingest_enabled": settings.discord_ingest_enabled,
         "periodic_stitch_audit_enabled": settings.periodic_stitch_audit_enabled,
         "periodic_stitch_audit_interval_minutes": settings.periodic_stitch_audit_interval_minutes,
@@ -96,6 +99,9 @@ def _recreate_task(task_name: str, stop_event: asyncio.Event) -> asyncio.Task | 
         "parser-worker": lambda: asyncio.create_task(parser_loop(stop_event), name="parser-worker"),
         "tiktok-token-refresh": lambda: asyncio.create_task(
             periodic_tiktok_token_refresh_loop(stop_event), name="tiktok-token-refresh"
+        ),
+        "ai-review-resolver": lambda: asyncio.create_task(
+            ai_review_resolver_loop(stop_event), name="ai-review-resolver"
         ),
     }
     factory = factories.get(task_name)
@@ -174,6 +180,13 @@ async def run_worker_service() -> None:
         )
     if settings.parser_worker_enabled:
         background_tasks.append(asyncio.create_task(parser_loop(stop_event), name="parser-worker"))
+    if settings.parser_worker_enabled and settings.ai_resolver_enabled:
+        background_tasks.append(
+            asyncio.create_task(
+                ai_review_resolver_loop(stop_event),
+                name="ai-review-resolver",
+            )
+        )
     if settings.tiktok_token_refresh_enabled:
         background_tasks.append(
             asyncio.create_task(
