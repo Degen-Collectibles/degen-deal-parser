@@ -534,10 +534,12 @@ async def _tcgdex_lookup_by_set_and_number(
 async def _tcgdex_search_by_name(
     client: httpx.AsyncClient, name: str, limit: int = 10,
     prefer_number: Optional[str] = None,
+    prefer_set: Optional[str] = None,
 ) -> list[dict]:
     """
     Search TCGdex by card name, fetching full details for top results.
     If prefer_number is given, prioritize results whose localId matches.
+    If prefer_set is given, prioritize results whose set name is similar.
     """
     resp = await client.get(f"{TCGDEX_BASE}/cards", params={"name": name})
     if resp.status_code != 200:
@@ -547,15 +549,27 @@ async def _tcgdex_search_by_name(
     if not isinstance(results, list):
         return []
 
-    # If we have a collector number, prioritize matching results
-    if prefer_number:
-        num_prefix = prefer_number.split("/")[0].lstrip("0") if "/" in prefer_number else prefer_number.lstrip("0")
-        # Sort: exact number matches first, then the rest
-        def sort_key(card: dict) -> int:
-            lid = (card.get("localId") or "").lstrip("0")
-            if lid == num_prefix:
-                return 0
-            return 1
+    # Sort results by relevance: prefer matching set, then matching number
+    if prefer_number or prefer_set:
+        num_prefix = ""
+        if prefer_number:
+            num_prefix = prefer_number.split("/")[0].lstrip("0") if "/" in prefer_number else prefer_number.lstrip("0")
+        set_lower = (prefer_set or "").lower()
+
+        def sort_key(card: dict) -> tuple[int, int]:
+            set_score = 1
+            num_score = 1
+            if set_lower:
+                card_set = (card.get("name", "") or "").lower()
+                card_id = (card.get("id", "") or "").lower()
+                if set_lower in card_id or set_lower in card_set:
+                    set_score = 0
+            if num_prefix:
+                lid = (card.get("localId") or "").lstrip("0")
+                if lid == num_prefix:
+                    num_score = 0
+            return (set_score, num_score)
+
         results.sort(key=sort_key)
 
     # Fetch full card details for up to `limit` results
@@ -671,6 +685,7 @@ async def _pokemontcg_search(
     client: httpx.AsyncClient,
     name: Optional[str] = None,
     number: Optional[str] = None,
+    set_name: Optional[str] = None,
     api_key: str = "",
     limit: int = 10,
 ) -> list[CandidateCard]:
@@ -685,6 +700,9 @@ async def _pokemontcg_search(
     if number:
         clean_num = number.split("/")[0] if "/" in number else number
         q_parts.append(f'number:"{clean_num}"')
+    if set_name:
+        clean_set = re.sub(r'\s+Set$', '', set_name, flags=re.IGNORECASE).strip()
+        q_parts.append(f'set.name:"{clean_set}*"')
 
     if not q_parts:
         return []
@@ -778,6 +796,7 @@ async def lookup_candidates(fields: ExtractedFields, api_key: str = "") -> list[
             tcgdex_by_name = await _tcgdex_search_by_name(
                 client, fields.card_name, limit=10,
                 prefer_number=fields.collector_number,
+                prefer_set=fields.set_name,
             )
             seen_ids = {c.id for c in candidates}
             for tc in tcgdex_by_name:
@@ -785,6 +804,20 @@ async def lookup_candidates(fields: ExtractedFields, api_key: str = "") -> list[
                 if cand.id not in seen_ids:
                     candidates.append(cand)
                     seen_ids.add(cand.id)
+
+        # Tier 1.7: When set_name is available, run a PokemonTCG search filtered
+        # by set so the target card is guaranteed in the pool even if TCGdex
+        # didn't return it in its first N results.
+        if fields.card_name and fields.set_name:
+            set_filtered = await _pokemontcg_search(
+                client, name=fields.card_name, set_name=fields.set_name,
+                api_key=ptcg_key, limit=5,
+            )
+            seen_ids = {c.id for c in candidates}
+            for c in set_filtered:
+                if c.id not in seen_ids:
+                    candidates.append(c)
+                    seen_ids.add(c.id)
 
         # Tier 1.6: TCGdex word-by-word fallback — OCR may mangle part of the
         # name (e.g. "dive Tangela" instead of "Erika's Tangela").  Try each
@@ -1986,6 +2019,27 @@ async def text_search_cards(query: str, category_id: str = "3") -> dict[str, Any
     ptcg_key = settings.pokemon_tcg_api_key or ""
 
     candidates = await lookup_candidates(fields, api_key=ptcg_key)
+
+    # Supplement with a broad PokemonTCG name search so cards missing from
+    # TCGdex (or without images there) still appear with reliable images.
+    if fields.card_name:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            ptcg_extra = await _pokemontcg_search(
+                client, name=fields.card_name, api_key=ptcg_key, limit=10,
+            )
+        existing = {}
+        for c in candidates:
+            existing[(c.name.lower(), c.number.split("/")[0] if c.number else "")] = c
+        for pc in ptcg_extra:
+            key = (pc.name.lower(), pc.number.split("/")[0] if pc.number else "")
+            existing_card = existing.get(key)
+            if existing_card is None:
+                candidates.append(pc)
+                existing[key] = pc
+            elif not existing_card.image_url and pc.image_url:
+                existing_card.image_url = pc.image_url
+                existing_card.image_url_small = pc.image_url_small
+
     if not candidates:
         return asdict(ScanResult(
             status="NO_MATCH",
