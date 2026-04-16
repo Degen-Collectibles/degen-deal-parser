@@ -22,7 +22,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Any, Optional
 
 import httpx
-from .ai_client import get_ai_client, get_model, has_ai_key
+from .ai_client import get_ai_client, get_fast_model, get_model, has_ai_key
 from .config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -1930,9 +1930,10 @@ def _parse_search_query(query: str) -> ExtractedFields:
 
     if has_ai_key():
         try:
-            client = get_ai_client(timeout=8.0)
+            client = get_ai_client()
+            fast_model = get_fast_model()
             response = client.chat.completions.create(
-                model=VISION_MODEL,
+                model=fast_model,
                 messages=[
                     {"role": "system", "content": _TEXT_SEARCH_PARSE_PROMPT},
                     {"role": "user", "content": query},

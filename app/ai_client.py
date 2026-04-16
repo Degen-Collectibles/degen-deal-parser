@@ -59,6 +59,14 @@ def get_model(*, default: str = "gpt-5-nano") -> str:
     return default
 
 
+def get_fast_model(*, default: str = "gpt-5-nano") -> str:
+    """Return a fast/cheap model for lightweight tasks (query parsing, etc.)."""
+    s = get_settings()
+    if _provider() == "nvidia":
+        return s.nvidia_fast_model or "aws/anthropic/bedrock-claude-haiku-4-5"
+    return default
+
+
 def is_nvidia() -> bool:
     return _provider() == "nvidia"
 
