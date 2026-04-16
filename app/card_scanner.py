@@ -65,7 +65,7 @@ async def identify_card_from_image(base64_image: str) -> dict[str, Any]:
     if not has_ai_key():
         return {"error": "AI API key not configured", "confidence": 0.0}
 
-    client = get_ai_client(timeout=30.0)
+    client = get_ai_client().with_options(timeout=30.0)
     try:
         response = client.chat.completions.create(
             model=VISION_MODEL,

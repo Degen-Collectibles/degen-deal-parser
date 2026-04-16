@@ -489,7 +489,15 @@
 <script>
 var PKScanner = (function() {
     var CONDITIONS = {{ conditions | tojson }};
-    var batch = JSON.parse(localStorage.getItem('scan_batch') || '[]');
+    var batch;
+    try {
+        batch = JSON.parse(localStorage.getItem('scan_batch') || '[]');
+        if (!Array.isArray(batch)) batch = [];
+    } catch (e) {
+        console.warn('[scan] Corrupted scan_batch in localStorage; resetting:', e);
+        try { localStorage.removeItem('scan_batch'); } catch (e2) {}
+        batch = [];
+    }
     for (var _bi = 0; _bi < batch.length; _bi++) { delete batch[_bi]._fromScanId; }
     var stream = null;
     var facingMode = 'environment';
@@ -531,10 +539,16 @@ var PKScanner = (function() {
         var selectors = [selMobile, selDesktop].filter(Boolean);
 
         fetch('/inventory/scan/pokemon/categories')
-            .then(function(r) { return r.json(); })
+            .then(function(r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            })
             .then(function(data) {
                 var cats = data.categories || [];
-                if (!cats.length) return;
+                if (!cats.length) {
+                    _warnStatusBar('Category list was empty; using selected category only.');
+                    return;
+                }
                 selectors.forEach(function(sel) {
                     sel.innerHTML = '';
                     cats.forEach(function(c) {
@@ -550,7 +564,10 @@ var PKScanner = (function() {
                     selectors.forEach(function(sel) { sel.value = selectedCategoryId; });
                 }
             })
-            .catch(function() {});
+            .catch(function(err) {
+                console.warn('[scan] loadCategories failed:', err);
+                _warnStatusBar('Could not load category list (' + (err && err.message ? err.message : 'network error') + '). Scanner will use the currently selected category.');
+            });
 
         function onCategoryChange(e) {
             selectedCategoryId = e.target.value;
@@ -562,6 +579,14 @@ var PKScanner = (function() {
 
     function escHtml(str) {
         return String(str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    function _warnStatusBar(msg) {
+        var bar = document.getElementById('status-bar');
+        if (bar) {
+            bar.textContent = msg;
+            bar.classList.add('status-warn');
+        }
     }
 
     function _pickDisplayPrice(match, variants, detectedVariant) {
@@ -592,7 +617,10 @@ var PKScanner = (function() {
         function poll() {
             attempts++;
             fetch('/inventory/scan/pokemon/validate/' + scanId)
-                .then(function(r) { return r.json(); })
+                .then(function(r) {
+                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                    return r.json();
+                })
                 .then(function(data) {
                     if (data.validation_status === 'pending' && attempts < maxAttempts) {
                         setTimeout(poll, interval);
@@ -600,10 +628,21 @@ var PKScanner = (function() {
                     }
                     if (data.validation_status === 'validated' && onUpdate) {
                         onUpdate(data);
+                        return;
+                    }
+                    if (data.validation_status === 'error') {
+                        console.warn('[scan] Background validation error for', scanId, data.error);
+                        showToast('\u26A0 Background validation failed' + (data.error ? ': ' + data.error : ''), 3000);
+                        if (onUpdate) onUpdate(data);
+                        return;
                     }
                 })
-                .catch(function() {
-                    if (attempts < maxAttempts) setTimeout(poll, interval);
+                .catch(function(err) {
+                    if (attempts < maxAttempts) {
+                        setTimeout(poll, interval);
+                    } else {
+                        console.warn('[scan] pollValidation gave up for', scanId, err);
+                    }
                 });
         }
         setTimeout(poll, interval);
@@ -785,7 +824,14 @@ var PKScanner = (function() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ image: entry.b64, category_id: selectedCategoryId })
         })
-        .then(function(resp) { return resp.json(); })
+        .then(function(resp) {
+            if (!resp.ok) {
+                return resp.text().then(function(t) {
+                    throw new Error('Server ' + resp.status + ': ' + t.slice(0, 200));
+                });
+            }
+            return resp.json();
+        })
         .then(function(data) {
             entry.result = data;
             entry.b64 = null;
@@ -2049,12 +2095,17 @@ var PKScanner = (function() {
         var resolved = { value: null, isTcgLow: false };
         if (varSel) {
             var opt = varSel.options[varSel.selectedIndex];
-            var condsRaw = opt ? opt.getAttribute('data-conditions') : null;
-            var varObj = { price: parseFloat(opt.getAttribute('data-price')) || null, low_price: parseFloat(opt.getAttribute('data-low')) || null };
-            if (condsRaw) {
-                try { varObj.conditions = JSON.parse(condsRaw); } catch(e) {}
+            if (opt) {
+                var condsRaw = opt.getAttribute('data-conditions');
+                var varObj = {
+                    price: parseFloat(opt.getAttribute('data-price')) || null,
+                    low_price: parseFloat(opt.getAttribute('data-low')) || null
+                };
+                if (condsRaw) {
+                    try { varObj.conditions = JSON.parse(condsRaw); } catch(e) {}
+                }
+                resolved = _resolveConditionPrice(varObj, condition);
             }
-            resolved = _resolveConditionPrice(varObj, condition);
         }
         if (!resolved.value) resolved = _pickDisplayPrice(c, variants, null);
 

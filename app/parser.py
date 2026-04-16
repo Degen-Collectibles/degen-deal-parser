@@ -1349,7 +1349,7 @@ def parse_deal_with_ai(
             "image_url": {"url": url, "detail": "auto"},
         })
 
-    client = get_ai_client(timeout=60.0)
+    client = get_ai_client().with_options(timeout=60.0)
 
     if is_nvidia():
         response = client.chat.completions.create(

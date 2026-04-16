@@ -28,9 +28,18 @@ def _provider() -> str:
     return (s.ai_provider or "openai").strip().lower()
 
 
+_DEFAULT_AI_TIMEOUT = 60.0
+
+
 @lru_cache(maxsize=1)
-def get_ai_client(*, timeout: float = 60.0) -> OpenAI:
-    """Return a configured OpenAI client for the active provider."""
+def get_ai_client() -> OpenAI:
+    """Return a configured OpenAI client for the active provider.
+
+    The client is cached for the lifetime of the process. Callers that need a
+    different request timeout should use ``get_ai_client().with_options(timeout=X)``
+    rather than creating a new client — ``lru_cache`` keyed on timeout caused
+    thrashing when different call sites passed different values.
+    """
     s = get_settings()
     provider = _provider()
 
@@ -40,14 +49,14 @@ def get_ai_client(*, timeout: float = 60.0) -> OpenAI:
         return OpenAI(
             api_key=s.nvidia_api_key,
             base_url=s.nvidia_base_url,
-            timeout=timeout,
+            timeout=_DEFAULT_AI_TIMEOUT,
         )
 
     if not s.openai_api_key:
         logger.warning("[ai] OpenAI provider selected but OPENAI_API_KEY is empty")
     return OpenAI(
         api_key=s.openai_api_key,
-        timeout=timeout,
+        timeout=_DEFAULT_AI_TIMEOUT,
     )
 
 

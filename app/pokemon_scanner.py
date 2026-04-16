@@ -135,6 +135,32 @@ _scan_history: collections.deque[dict] = collections.deque(maxlen=25)
 # Background OCR validation: scan_id -> (timestamp, updated_result_or_None)
 _pending_validations: dict[str, tuple[float, dict | None]] = {}
 _VALIDATION_TTL = 300  # expire pending validations after 5 minutes
+_VALIDATION_MAX = 200  # hard cap to prevent unbounded growth under rapid scanning
+
+
+def _insert_pending_validation(scan_id: str, entry: tuple[float, dict | None]) -> None:
+    """Insert into _pending_validations with TTL cleanup and hard-cap eviction."""
+    _cleanup_stale_validations()
+    if len(_pending_validations) >= _VALIDATION_MAX:
+        # Evict the oldest entry (smallest timestamp) to stay under cap.
+        try:
+            oldest_key = min(_pending_validations, key=lambda k: _pending_validations[k][0])
+            _pending_validations.pop(oldest_key, None)
+            logger.warning(
+                "[pokemon_scanner] _pending_validations hit cap=%d; evicted %s",
+                _VALIDATION_MAX, oldest_key,
+            )
+        except ValueError:
+            pass
+    _pending_validations[scan_id] = entry
+
+
+def _cleanup_stale_validations() -> None:
+    """Remove expired entries to prevent unbounded memory growth."""
+    now = time.monotonic()
+    stale = [k for k, (ts, _) in _pending_validations.items() if now - ts > _VALIDATION_TTL]
+    for k in stale:
+        _pending_validations.pop(k, None)
 
 # Confidence thresholds for the tiered pipeline
 XIMILAR_CONFIDENCE_HIGH = 0.85   # ≥ this → accept Ximilar, skip OCR
@@ -252,8 +278,7 @@ async def run_ocr(image_bytes: bytes, api_key: str) -> ExtractedFields:
             fields.ocr_confidence = sum(conf_values) / len(conf_values)
 
     # Primary: AI-powered extraction (understands Pokemon card structure)
-    settings = get_settings()
-    ai_fields = _ai_extract_fields(raw_text, settings.openai_api_key)
+    ai_fields = _ai_extract_fields(raw_text)
     if ai_fields:
         ai_fields.ocr_raw_text = raw_text
         ai_fields.ocr_confidence = fields.ocr_confidence
@@ -316,7 +341,7 @@ IMPORTANT: For set_name, accuracy matters more than helpfulness. A raw abbreviat
 Respond with JSON only. Do not include any explanation."""
 
 
-def _ai_extract_fields(raw_text: str, openai_key: str) -> Optional[ExtractedFields]:
+def _ai_extract_fields(raw_text: str) -> Optional[ExtractedFields]:
     """Use AI to interpret raw OCR text into structured card fields.
 
     Returns populated ExtractedFields on success, None on failure.
@@ -325,7 +350,7 @@ def _ai_extract_fields(raw_text: str, openai_key: str) -> Optional[ExtractedFiel
         return None
 
     try:
-        client = get_ai_client(timeout=10.0)
+        client = get_ai_client().with_options(timeout=10.0)
         response = client.chat.completions.create(
             model=VISION_MODEL,
             messages=[
@@ -738,6 +763,10 @@ async def _pokemontcg_search(
 
     resp = await client.get(f"{POKEMONTCG_BASE}/cards", params=params, headers=headers)
     if resp.status_code != 200:
+        logger.warning(
+            "[pokemon_scanner] PokemonTCG HTTP %s for %s (params=%r): %s",
+            resp.status_code, f"{POKEMONTCG_BASE}/cards", params, resp.text[:200],
+        )
         return []
 
     data = resp.json()
@@ -814,6 +843,10 @@ async def _scryfall_search(
     try:
         resp = await client.get(f"{SCRYFALL_BASE}/cards/search", params=params)
         if resp.status_code != 200:
+            logger.warning(
+                "[pokemon_scanner] Scryfall HTTP %s for %s (params=%r): %s",
+                resp.status_code, f"{SCRYFALL_BASE}/cards/search", params, resp.text[:200],
+            )
             return []
         data = resp.json().get("data") or []
     except Exception as exc:
@@ -867,6 +900,10 @@ async def _ygoprodeck_search(
     try:
         resp = await client.get(f"{YGOPRODECK_BASE}/cardinfo.php", params=params)
         if resp.status_code != 200:
+            logger.warning(
+                "[pokemon_scanner] YGOPRODeck HTTP %s for %s (params=%r): %s",
+                resp.status_code, f"{YGOPRODECK_BASE}/cardinfo.php", params, resp.text[:200],
+            )
             return []
         data = resp.json().get("data") or []
     except Exception as exc:
@@ -946,6 +983,10 @@ async def _optcg_search(
     try:
         resp = await client.get(f"{OPTCG_BASE}/sets/filtered/", params=params)
         if resp.status_code != 200:
+            logger.warning(
+                "[pokemon_scanner] OPTCG HTTP %s for %s (params=%r): %s",
+                resp.status_code, f"{OPTCG_BASE}/sets/filtered/", params, resp.text[:200],
+            )
             return []
         data = resp.json()
         if not isinstance(data, list):
@@ -1007,12 +1048,14 @@ async def _lorcast_search(
     if number:
         q_parts.append(f"number:{number}")
 
+    lorcast_params = {"q": " ".join(q_parts), "unique": "prints"}
     try:
-        resp = await client.get(
-            f"{LORCAST_BASE}/cards/search",
-            params={"q": " ".join(q_parts), "unique": "prints"},
-        )
+        resp = await client.get(f"{LORCAST_BASE}/cards/search", params=lorcast_params)
         if resp.status_code != 200:
+            logger.warning(
+                "[pokemon_scanner] Lorcast HTTP %s for %s (params=%r): %s",
+                resp.status_code, f"{LORCAST_BASE}/cards/search", lorcast_params, resp.text[:200],
+            )
             return []
         data = resp.json().get("results") or []
     except Exception as exc:
@@ -1073,24 +1116,39 @@ async def _tcgtracking_product_search(
     if not set_name:
         return []
 
+    search_url = f"{TCGTRACKING_BASE}/{category_id}/search"
+    search_params = {"q": set_name}
     try:
-        search_resp = await client.get(
-            f"{TCGTRACKING_BASE}/{category_id}/search",
-            params={"q": set_name},
-        )
+        search_resp = await client.get(search_url, params=search_params)
         if search_resp.status_code != 200:
+            logger.warning(
+                "[pokemon_scanner] TCGTracking set search HTTP %s for %s (params=%r): %s",
+                search_resp.status_code, search_url, search_params, search_resp.text[:200],
+            )
             return []
         sets = search_resp.json().get("sets") or []
         if not sets:
+            logger.info(
+                "[pokemon_scanner] TCGTracking set search returned 0 sets for category=%s q=%r",
+                category_id, set_name,
+            )
             return []
 
         set_id = sets[0]["id"]
-        prod_resp = await client.get(f"{TCGTRACKING_BASE}/{category_id}/sets/{set_id}")
+        prod_url = f"{TCGTRACKING_BASE}/{category_id}/sets/{set_id}"
+        prod_resp = await client.get(prod_url)
         if prod_resp.status_code != 200:
+            logger.warning(
+                "[pokemon_scanner] TCGTracking products HTTP %s for %s: %s",
+                prod_resp.status_code, prod_url, prod_resp.text[:200],
+            )
             return []
         products = prod_resp.json().get("products") or []
     except Exception as exc:
-        logger.warning("[pokemon_scanner] TCGTracking product search failed: %s", exc)
+        logger.warning(
+            "[pokemon_scanner] TCGTracking product search failed for category=%s set=%r: %s",
+            category_id, set_name, exc,
+        )
         return []
 
     name_lower = (name or "").lower()
@@ -1517,6 +1575,18 @@ _PREFERRED_CAT_ORDER = [
 
 # Cache: set_name (lowercase) -> {set_id, products, pricing}
 _tcgtracking_cache: dict[str, dict] = {}
+_TCGTRACKING_CACHE_MAX = 64
+
+
+def _cache_tcgtracking(set_key: str, cached: dict) -> None:
+    """Insert into _tcgtracking_cache with FIFO eviction when over cap."""
+    if set_key not in _tcgtracking_cache and len(_tcgtracking_cache) >= _TCGTRACKING_CACHE_MAX:
+        try:
+            oldest = next(iter(_tcgtracking_cache))
+            _tcgtracking_cache.pop(oldest, None)
+        except StopIteration:
+            pass
+    _tcgtracking_cache[set_key] = cached
 
 # Cache for TCGTracking categories (fetched once per server lifetime)
 _tcg_categories_cache: list[dict] | None = None
@@ -1617,7 +1687,7 @@ async def _enrich_price_fast(
                     skus = sku_resp.json().get("products", {}) if sku_resp.status_code == 200 else {}
 
                     cached = {"set_id": set_id, "cat_id": cat_id, "products": products, "pricing": pricing, "skus": skus}
-                    _tcgtracking_cache[set_key] = cached
+                    _cache_tcgtracking(set_key, cached)
                     break
 
             if cached and cached["products"]:
@@ -1863,7 +1933,7 @@ async def disambiguate_with_vision(
     })
 
     try:
-        client = get_ai_client(timeout=30.0)
+        client = get_ai_client().with_options(timeout=30.0)
         response = client.chat.completions.create(
             model=VISION_MODEL,
             messages=[{"role": "user", "content": content_parts}],
@@ -2161,8 +2231,8 @@ async def _run_ximilar_pipeline(
     effective_cat = _detect_category_from_ximilar(tags, best.set_name)
     if effective_cat and effective_cat != category_id:
         logger.info(
-            "[pokemon_scanner] Auto-detected category %s from Ximilar (user selected %s)",
-            effective_cat, category_id,
+            "[pokemon_scanner] Auto-detected category %s from Ximilar (user selected %s) — tags=%r set_name=%r",
+            effective_cat, category_id, tags, best.set_name,
         )
         category_id = effective_cat
     debug_info["effective_category_id"] = category_id
@@ -2427,7 +2497,7 @@ async def _background_ocr_validate(
         merged["validation_status"] = "validated"
 
         _save_to_history(merged)
-        _pending_validations[scan_id] = (time.monotonic(), merged)
+        _insert_pending_validation(scan_id, (time.monotonic(), merged))
 
         logger.info(
             "[pokemon_scanner] Background OCR validation complete for scan_id=%s: status=%s",
@@ -2435,7 +2505,10 @@ async def _background_ocr_validate(
         )
     except Exception as exc:
         logger.error("[pokemon_scanner] Background OCR validation failed for scan_id=%s: %s", scan_id, exc)
-        _pending_validations[scan_id] = (time.monotonic(), {"validation_status": "error", "error": str(exc)})
+        _insert_pending_validation(
+            scan_id,
+            (time.monotonic(), {"validation_status": "error", "error": str(exc)}),
+        )
 
 
 _TEXT_SEARCH_PARSE_PROMPT = """You are a TCG card search query parser. The user will give you a free-text search query for a trading card game card. Extract structured fields from it.
@@ -2671,7 +2744,7 @@ async def run_pipeline(image_b64: str, category_id: str = "3") -> dict[str, Any]
         ximilar_result.setdefault("debug", {})["pipeline_tier"] = "medium_confidence"
         ximilar_result.setdefault("debug", {})["engines_used"] = ["ximilar"]
 
-        _pending_validations[scan_id] = (time.monotonic(), None)  # sentinel: OCR in progress
+        _insert_pending_validation(scan_id, (time.monotonic(), None))  # sentinel: OCR in progress
 
         import copy
         ximilar_copy = copy.deepcopy(ximilar_result)
@@ -2710,14 +2783,6 @@ def get_validation_result(scan_id: str) -> dict | None:
         return {"validation_status": "pending", "scan_id": scan_id}
     _pending_validations.pop(scan_id, None)
     return result
-
-
-def _cleanup_stale_validations() -> None:
-    """Remove expired entries to prevent unbounded memory growth."""
-    now = time.monotonic()
-    stale = [k for k, (ts, _) in _pending_validations.items() if now - ts > _VALIDATION_TTL]
-    for k in stale:
-        _pending_validations.pop(k, None)
 
 
 async def _run_legacy_pipeline(image_b64: str, category_id: str = "3") -> dict[str, Any]:
