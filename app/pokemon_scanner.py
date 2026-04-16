@@ -1231,25 +1231,50 @@ async def _enrich_price_fast(
                     break
 
             if cached and cached["products"]:
-                cand_num = candidate.number.split("/")[0].lstrip("0") if candidate.number else ""
+                cand_num_raw = (candidate.number or "").split("/")[0].strip()
                 cand_name_lower = candidate.name.lower().replace("'", "").replace("\u2019", "")
+
+                def _nums_match(a: str, b: str) -> bool:
+                    """Flexible number comparison for all card games."""
+                    if not a or not b:
+                        return False
+                    if a == b:
+                        return True
+                    a_stripped = a.lstrip("0")
+                    b_stripped = b.lstrip("0")
+                    if a_stripped and a_stripped == b_stripped:
+                        return True
+                    if a_stripped.endswith(b_stripped) or b_stripped.endswith(a_stripped):
+                        return True
+                    a_digits = re.sub(r"[^0-9]", "", a)
+                    b_digits = re.sub(r"[^0-9]", "", b)
+                    if a_digits and a_digits == b_digits and len(a_digits) >= 2:
+                        return True
+                    return False
 
                 matched_product = None
                 for prod in cached["products"]:
-                    prod_num_raw = prod.get("number") or ""
-                    prod_num = prod_num_raw.split("/")[0].lstrip("0")
+                    prod_num_raw = (prod.get("number") or "").split("/")[0].strip()
                     prod_clean = (prod.get("clean_name") or "").lower()
 
-                    if cand_num and prod_num == cand_num and cand_name_lower in prod_clean:
+                    if cand_num_raw and _nums_match(cand_num_raw, prod_num_raw) and cand_name_lower in prod_clean:
                         matched_product = prod
                         break
 
-                # Broader fallback: match by number only
-                if not matched_product and cand_num:
+                # Fallback 1: match by number only
+                if not matched_product and cand_num_raw:
                     for prod in cached["products"]:
-                        prod_num_raw = prod.get("number") or ""
-                        prod_num = prod_num_raw.split("/")[0].lstrip("0")
-                        if prod_num == cand_num:
+                        prod_num_raw = (prod.get("number") or "").split("/")[0].strip()
+                        if _nums_match(cand_num_raw, prod_num_raw):
+                            matched_product = prod
+                            break
+
+                # Fallback 2: match by name only (handles cases where
+                # number formats are completely different across sources)
+                if not matched_product and cand_name_lower:
+                    for prod in cached["products"]:
+                        prod_clean = (prod.get("clean_name") or "").lower()
+                        if cand_name_lower == prod_clean or (len(cand_name_lower) >= 5 and cand_name_lower in prod_clean):
                             matched_product = prod
                             break
 
