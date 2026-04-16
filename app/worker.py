@@ -1676,8 +1676,11 @@ def should_force_stitch(base_row: DiscordMessage, candidate_rows: list[DiscordMe
     first_text = normalize_text(first_row.content)
     second_text = normalize_text(second_row.content)
 
-    image_then_text = has_images(first_row) and len(first_text) <= 20 and is_explicit_buy_sell_text(second_text)
-    text_then_image = has_images(second_row) and len(second_text) <= 20 and is_explicit_buy_sell_text(first_text)
+    def _has_deal_text(text: str) -> bool:
+        return is_explicit_buy_sell_text(text) or is_trade_fragment_text(text) or is_payment_only_text(text)
+
+    image_then_text = has_images(first_row) and len(first_text) <= 20 and _has_deal_text(second_text)
+    text_then_image = has_images(second_row) and len(second_text) <= 20 and _has_deal_text(first_text)
 
     if image_then_text or text_then_image:
         if not has_large_gap(sorted_rows, max_gap_seconds=45):

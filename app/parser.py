@@ -156,10 +156,16 @@ def parse_trade_hint(message_text: str) -> Dict[str, Any] | None:
         return None
 
     payment_match = re.search(
-        r"(?:plus|\+)\s*(\d+(?:\.\d{1,2})?)\s*(zelle|venmo|paypal|cash|card|tap)?",
+        r"(?:plus|\+|&)\s*\$?\s*(\d+(?:\.\d{1,2})?)\s*(zelle|venmo|paypal|cash|card|tap)?",
         lower,
         re.I,
     )
+    if not payment_match:
+        payment_match = re.search(
+            r"\$\s*(\d+(?:\.\d{1,2})?)\s*(zelle|venmo|paypal|cash|card|tap)?",
+            lower,
+            re.I,
+        )
 
     amount = None
     payment = "unknown"
@@ -182,8 +188,8 @@ def parse_trade_hint(message_text: str) -> Dict[str, Any] | None:
         else:
             payment = payment_raw or "unknown"
 
-        # Your store convention:
-        # "plus 50 zelle" during a trade means the store receives $50
+        # Store convention: "plus 50 zelle", "+ 50", "& $100" during a trade
+        # means the store receives that amount
         cash_direction = "to_store"
 
     items_in = []
@@ -225,6 +231,18 @@ def parse_trade_hint(message_text: str) -> Dict[str, Any] | None:
         items_in.append("graded guard")
     if "graded guard out" in lower:
         items_out.append("graded guard")
+    if re.search(r"\betb(?:s)?\s+out\b", lower):
+        items_out.append("etb")
+    if re.search(r"\betb(?:s)?\s+in\b", lower):
+        items_in.append("etb")
+    if re.search(r"\bbox(?:es)?\s+out\b", lower):
+        items_out.append("booster boxes")
+    if re.search(r"\bbox(?:es)?\s+in\b", lower):
+        items_in.append("booster boxes")
+    if re.search(r"\bbundle(?:s)?\s+out\b", lower):
+        items_out.append("bundles")
+    if re.search(r"\bbundle(?:s)?\s+in\b", lower):
+        items_in.append("bundles")
 
     category = "mixed"
     if items_in == ["slabs"] and not items_out:
