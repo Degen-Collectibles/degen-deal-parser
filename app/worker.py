@@ -36,6 +36,7 @@ from .models import (
     expand_parse_status_filter_values,
     normalize_parse_status,
 )
+from .ai_client import get_model
 from .parser import parse_message, TimedOutRowError
 from .reparse_runs import safe_record_reparse_run_outcome
 from .runtime_logging import structured_log_line
@@ -808,7 +809,7 @@ async def process_once():
                 ParseAttempt(
                     message_id=row.id,
                     attempt_number=row.parse_attempts,
-                    model_used="gpt-5-nano",
+                    model_used=get_model(),
                 )
             )
 

@@ -2,8 +2,10 @@
 Centralized AI client factory.
 
 Supports two providers controlled by AI_PROVIDER env var:
-  - "openai"  (default) — uses OPENAI_API_KEY, models like gpt-5-nano
-  - "nvidia"  — uses NVIDIA_API_KEY + NVIDIA_BASE_URL, OpenAI-compatible endpoint
+  - "nvidia" (default) — uses NVIDIA_API_KEY + NVIDIA_BASE_URL, OpenAI-compatible
+    endpoint. Default heavy model is Claude Opus 4.6 via AWS Bedrock; default
+    fast model is Claude Haiku 4.5.
+  - "openai"  — uses OPENAI_API_KEY, models like gpt-5-nano
 
 Both providers use the ``openai`` Python SDK; NVIDIA's inference hub exposes
 an OpenAI-compatible ``chat.completions`` API.

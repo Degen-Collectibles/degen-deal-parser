@@ -12,12 +12,30 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 MODEL = get_model(default="gpt-5-nano")
+# Public list prices per 1M tokens. NVIDIA-hosted Claude models are priced
+# per Anthropic's Bedrock list rates; NVIDIA inference credits may differ.
+# Adjust values here if your billing source differs.
 MODEL_PRICING_PER_MILLION = {
     "gpt-5-nano": {
         "input": 0.05,
         "cached_input": 0.005,
         "output": 0.40,
-    }
+    },
+    "aws/anthropic/bedrock-claude-opus-4-7": {
+        "input": 15.00,
+        "cached_input": 1.50,
+        "output": 75.00,
+    },
+    "aws/anthropic/bedrock-claude-opus-4-6": {
+        "input": 15.00,
+        "cached_input": 1.50,
+        "output": 75.00,
+    },
+    "aws/anthropic/claude-haiku-4-5-v1": {
+        "input": 1.00,
+        "cached_input": 0.10,
+        "output": 5.00,
+    },
 }
 
 api_semaphore = asyncio.Semaphore(3)
@@ -34,7 +52,7 @@ def estimate_usage_cost_usd(
     cached_input_tokens: int = 0,
     output_tokens: int = 0,
 ) -> float:
-    pricing = MODEL_PRICING_PER_MILLION.get(model, MODEL_PRICING_PER_MILLION.get("gpt-5-nano"))
+    pricing = MODEL_PRICING_PER_MILLION.get(model) or MODEL_PRICING_PER_MILLION.get(MODEL) or MODEL_PRICING_PER_MILLION["gpt-5-nano"]
     billable_input_tokens = max(input_tokens - cached_input_tokens, 0)
     cost = (
         (billable_input_tokens / 1_000_000) * pricing["input"] +
