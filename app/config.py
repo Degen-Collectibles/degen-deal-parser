@@ -187,7 +187,6 @@ class Settings(BaseSettings):
     ximilar_api_token: str = Field(default="", alias="XIMILAR_API_TOKEN")
     psa_api_key: str = Field(default="", alias="PSA_API_KEY")
     pokemon_tcg_api_key: str = Field(default="", alias="POKEMON_TCG_API_KEY")
-    google_vision_api_key: str = Field(default="", alias="GOOGLE_VISION_API_KEY")
 
     # Firecrawl (web scraping)
     firecrawl_api_key: str = Field(default="", alias="FIRECRAWL_API_KEY")

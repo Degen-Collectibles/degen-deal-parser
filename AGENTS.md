@@ -213,7 +213,7 @@ Inventory agent:
 - `app/inventory_pricing.py` — auto-pricing lookups (Scryfall, 130point, etc.)
 - `app/inventory_shopify.py` — Shopify product sync, mark-sold-from-order
 - `app/card_scanner.py` — legacy camera-based card identification via AI
-- `app/pokemon_scanner.py` — multi-TCG card scanner (camera + text search) with confidence-tiered Ximilar + AI/OCR pipeline, per-TCG card lookup, and TCGTracking price enrichment
+- `app/pokemon_scanner.py` — multi-TCG card scanner (camera + text search) with confidence-tiered Ximilar + vision-model ensemble (Claude Opus), optional Gemini tiebreaker on disagreement, per-TCG card lookup, and TCGTracking price enrichment
 - `app/ai_client.py` — AI provider factory (OpenAI / NVIDIA), `get_model()` for vision and `get_fast_model()` for lightweight tasks
 - `app/cert_lookup.py` — grading cert number lookup (PSA, BGS, CGC, SGC)
 - `app/templates/inventory*.html` — 8+ inventory templates including `inventory_scan_pokemon.html` (Degen Eye scanner)
@@ -462,13 +462,15 @@ The Degen Eye scanner (`/inventory/scan/pokemon`, despite the URL it supports al
 
 ### Pipeline
 
-1. **Image scanning** — confidence-tiered pipeline:
-   - **Ximilar Collectibles API** runs first (visual recognition, fast)
-   - If Ximilar confidence >= 0.85 → accept immediately, skip OCR
-   - If Ximilar confidence 0.60-0.84 → return Ximilar optimistically, validate via legacy OCR/AI in background (poll via `scan_id`)
-   - If Ximilar confidence < 0.60 → wait for OCR + AI disambiguation, merge, return
+1. **Image scanning** — confidence-tiered ensemble:
+   - **Ximilar Collectibles API** runs first (visual recognition, fast ~2-4s)
+   - If Ximilar confidence >= 0.85 → accept immediately, no second engine (HIGH tier)
+   - If Ximilar confidence 0.60-0.84 → return Ximilar optimistically, run the vision model (`_run_vision_pipeline` → Claude Opus 4.6 via NVIDIA) in background and merge once it returns (poll via `scan_id`) (MEDIUM tier)
+   - If Ximilar confidence < 0.60 → wait for `_run_vision_pipeline` synchronously, merge, return (LOW tier)
+   - When Ximilar and the vision model disagree on `(name, number)` and a tiebreaker is configured, `_run_tiebreaker` asks Gemini 3.1 Pro (also via NVIDIA) for a third opinion and the result is decided by 2-of-3 majority. `debug.tiebreaker_used` / `debug.tiebreaker_winner` on the response show whether the ensemble fired and which engine it sided with.
+   - The vision model's output anchors a single precise database lookup via `_lookup_candidates_by_category`; there is no fuzzy OCR waterfall anymore.
 2. **Text search** (`text_search_cards`) — free-text query parsing + per-TCG card lookup
-3. **Scoring** (`score_candidates`) — Levenshtein name match + collector number + set consistency, banded HIGH/MEDIUM/LOW
+3. **Scoring** — vision path marks HIGH when the DB confirms the exact `(name, number)` and MEDIUM otherwise. Text-search path keeps the Levenshtein-based `score_candidates` (name + collector number + set consistency, banded HIGH/MEDIUM/LOW).
 4. **Price enrichment** (`_enrich_price_fast`) — TCGTracking lookup for variants + condition pricing for the top 8 candidates
 
 ### Multi-TCG Card Lookup (text search routing)
@@ -497,7 +499,7 @@ Mobile-first scanner with:
 
 ### Important rules
 
-- **AI provider** — `app/ai_client.py` switches between OpenAI and NVIDIA Inference Hub via `AI_PROVIDER` env var. `get_model()` returns the heavy model (Opus / `gpt-5-nano`) for vision; `get_fast_model()` returns Haiku / nano for lightweight text parsing.
+- **AI provider** — `app/ai_client.py` switches between OpenAI and NVIDIA Inference Hub via `AI_PROVIDER` env var. `get_model()` returns the heavy vision model (Claude Opus 4.6 / `gpt-5-nano`) used by the vision pipeline; `get_fast_model()` returns Haiku / nano for lightweight text parsing; `get_tiebreaker_model()` returns the ensemble tiebreaker (Gemini 3.1 Pro via `NVIDIA_TIEBREAKER_MODEL`, default `gcp/google/gemini-3.1-pro-preview`). Tiebreaker shares the NVIDIA endpoint — no separate key needed.
 - **Settings attribute name is `pokemon_tcg_api_key`** (snake_case with underscore between `pokemon` and `tcg`), NOT `pokemontcg_api_key`. The original `text_search_cards` had a typo here that crashed the endpoint.
 - **YGOPRODeck `num` parameter requires `offset`** to be paired with it, otherwise returns 400 "You cannot use only one of 'offset' or 'num'".
 - **PokemonTCG set search** uses wildcard suffix and strips trailing "Set" because PokemonTCG names the original Base Set as just "Base", not "Base Set".

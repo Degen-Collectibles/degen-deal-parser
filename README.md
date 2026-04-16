@@ -78,8 +78,9 @@ AI_PROVIDER=openai                 # or "nvidia"
 # If AI_PROVIDER=nvidia:
 NVIDIA_API_KEY=<nvidia inference hub key>
 NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1
-NVIDIA_MODEL=aws/anthropic/bedrock-claude-opus-4-6     # heavy model for vision / disambiguation
-NVIDIA_FAST_MODEL=aws/anthropic/claude-haiku-4-5-v1    # fast model for query parsing
+NVIDIA_MODEL=aws/anthropic/bedrock-claude-opus-4-6     # heavy model (vision identification)
+NVIDIA_FAST_MODEL=aws/anthropic/claude-haiku-4-5-v1    # fast model (text query parsing)
+NVIDIA_TIEBREAKER_MODEL=gcp/google/gemini-3.1-pro-preview  # ensemble tiebreaker, only called when Ximilar + vision disagree
 ```
 
 Card scanner (optional — only needed for Degen Eye `/inventory/scan/pokemon`):
