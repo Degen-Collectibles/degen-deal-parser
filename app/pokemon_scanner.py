@@ -556,13 +556,14 @@ async def _tcgdex_search_by_name(
             num_prefix = prefer_number.split("/")[0].lstrip("0") if "/" in prefer_number else prefer_number.lstrip("0")
         set_lower = (prefer_set or "").lower()
 
+        set_words = [w for w in set_lower.split() if len(w) >= 3] if set_lower else []
+
         def sort_key(card: dict) -> tuple[int, int]:
             set_score = 1
             num_score = 1
-            if set_lower:
-                card_set = (card.get("name", "") or "").lower()
+            if set_words:
                 card_id = (card.get("id", "") or "").lower()
-                if set_lower in card_id or set_lower in card_set:
+                if any(w in card_id for w in set_words):
                     set_score = 0
             if num_prefix:
                 lid = (card.get("localId") or "").lstrip("0")
@@ -1951,7 +1952,8 @@ Return JSON with:
 - "set_name": the set name if mentioned (e.g. "Base Set", "Evolving Skies"), or null
 - "collector_number": the collector number if mentioned (e.g. "4/102", "25"), or null
 
-Only extract what is explicitly stated. Do not guess or infer missing fields."""
+Only extract what is explicitly stated. Do not guess or infer missing fields.
+Respond with ONLY valid JSON. No markdown fences, no explanation."""
 
 
 def _parse_search_query(query: str) -> ExtractedFields:
@@ -1971,11 +1973,15 @@ def _parse_search_query(query: str) -> ExtractedFields:
                     {"role": "system", "content": _TEXT_SEARCH_PARSE_PROMPT},
                     {"role": "user", "content": query},
                 ],
-                response_format={"type": "json_object"},
                 max_tokens=200,
                 temperature=0.0,
             )
-            data = json.loads(response.choices[0].message.content or "{}")
+            raw = (response.choices[0].message.content or "").strip()
+            # Strip markdown fences if the model wraps JSON in ```
+            if raw.startswith("```"):
+                raw = re.sub(r"^```(?:json)?\s*", "", raw)
+                raw = re.sub(r"\s*```$", "", raw)
+            data = json.loads(raw)
             ai_name = data.get("card_name") or None
             ai_set = data.get("set_name") or None
             ai_number = data.get("collector_number") or None
@@ -2014,6 +2020,30 @@ async def text_search_cards(query: str, category_id: str = "3") -> dict[str, Any
     fields = _parse_search_query(query.strip())
     if not fields.card_name and not fields.collector_number:
         return asdict(ScanResult(status="NO_MATCH", error="Could not parse search query"))
+
+    # If the parser didn't extract a set_name, try to match against known sets
+    if not fields.set_name and fields.card_name:
+        tcgdex_sets = await _fetch_tcgdex_sets()
+        set_names = sorted(
+            [(s.get("name", ""), s.get("id", "")) for s in tcgdex_sets if s.get("name")],
+            key=lambda x: len(x[0]),
+            reverse=True,
+        )
+        query_lower = fields.card_name.lower()
+        for sname, _sid in set_names:
+            sname_lower = sname.lower()
+            if len(sname_lower) < 3:
+                continue
+            if query_lower.endswith(sname_lower):
+                remainder = query_lower[: -len(sname_lower)].strip()
+                if remainder:
+                    fields.card_name = remainder.strip().title()
+                    fields.set_name = sname
+                    logger.info(
+                        "[pokemon_scanner] Heuristic set extraction: name=%s, set=%s",
+                        fields.card_name, fields.set_name,
+                    )
+                    break
 
     settings = get_settings()
     ptcg_key = settings.pokemon_tcg_api_key or ""
