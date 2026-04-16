@@ -1977,17 +1977,18 @@ var PKScanner = (function() {
         var variantHtml = '';
         if (variants.length) {
             variantHtml = '<div style="margin-top:8px;"><label style="font-size:11px;font-weight:600;color:var(--muted);display:block;margin-bottom:4px;">Variant:</label>';
-            variantHtml += '<select id="search-variant" style="width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;font-size:12px;font-family:inherit;background:#fff;">';
+            variantHtml += '<select id="search-variant" onchange="PKScanner._updateSearchPrice()" style="width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;font-size:12px;font-family:inherit;background:#fff;">';
             for (var vi = 0; vi < variants.length; vi++) {
                 var v = variants[vi];
+                var condsAttr = v.conditions ? ' data-conditions="' + escHtml(JSON.stringify(v.conditions)) + '"' : '';
                 var vl = v.price != null ? ' \u2014 $' + Number(v.price).toFixed(2) : (v.low_price != null ? ' \u2014 $' + Number(v.low_price).toFixed(2) + ' (TCG Low)' : '');
-                variantHtml += '<option value="' + escHtml(v.name) + '">' + escHtml(v.name) + vl + '</option>';
+                variantHtml += '<option value="' + escHtml(v.name) + '" data-price="' + (v.price != null ? v.price : '') + '" data-low="' + (v.low_price != null ? v.low_price : '') + '"' + condsAttr + '>' + escHtml(v.name) + vl + '</option>';
             }
             variantHtml += '</select></div>';
         }
 
         var condHtml = '<div style="margin-top:8px;"><label style="font-size:11px;font-weight:600;color:var(--muted);display:block;margin-bottom:4px;">Condition:</label>';
-        condHtml += '<select id="search-condition" style="width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;font-size:12px;font-family:inherit;background:#fff;">';
+        condHtml += '<select id="search-condition" onchange="PKScanner._updateSearchPrice()" style="width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;font-size:12px;font-family:inherit;background:#fff;">';
         for (var ci = 0; ci < CONDITIONS.length; ci++) {
             condHtml += '<option value="' + CONDITIONS[ci] + '"' + (CONDITIONS[ci] === 'NM' ? ' selected' : '') + '>' + CONDITIONS[ci] + '</option>';
         }
@@ -2008,6 +2009,32 @@ var PKScanner = (function() {
                         '<button class="btn-primary" onclick="PKScanner.confirmSearchSelection()">' + btnLabel + '</button>' +
                     '</div>' +
                 '</div>';
+        }
+    }
+
+    function _updateSearchPrice() {
+        if (_searchSelectedIdx < 0 || !_searchCandidates[_searchSelectedIdx]) return;
+        var c = _searchCandidates[_searchSelectedIdx];
+        var variants = c.available_variants || [];
+        var varSel = document.getElementById('search-variant');
+        var condSel = document.getElementById('search-condition');
+        var condition = condSel ? condSel.value : 'NM';
+
+        var resolved = { value: null, isTcgLow: false };
+        if (varSel) {
+            var opt = varSel.options[varSel.selectedIndex];
+            var condsRaw = opt ? opt.getAttribute('data-conditions') : null;
+            var varObj = { price: parseFloat(opt.getAttribute('data-price')) || null, low_price: parseFloat(opt.getAttribute('data-low')) || null };
+            if (condsRaw) {
+                try { varObj.conditions = JSON.parse(condsRaw); } catch(e) {}
+            }
+            resolved = _resolveConditionPrice(varObj, condition);
+        }
+        if (!resolved.value) resolved = _pickDisplayPrice(c, variants, null);
+
+        var priceEl = document.querySelector('#search-detail .detail-price');
+        if (priceEl) {
+            priceEl.textContent = resolved.value ? '$' + resolved.value.toFixed(2) + (resolved.isTcgLow ? ' (TCG Low)' : '') : 'No price';
         }
     }
 
@@ -2103,6 +2130,7 @@ var PKScanner = (function() {
         selectSearchCandidate: selectSearchCandidate,
         confirmSearchSelection: confirmSearchSelection,
         closeSearchSheet: closeSearchSheet,
+        _updateSearchPrice: _updateSearchPrice,
     };
 })();
 </script>
