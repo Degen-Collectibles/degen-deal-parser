@@ -44,6 +44,42 @@ settings = get_settings()
 router = APIRouter()
 
 
+# TikTok Shop webhook envelope "type" values. Unlike most platforms, TikTok
+# sends the event type as an integer inside the JSON body (envelope.type) --
+# not in an HTTP header. All subscribed types flow through the single
+# registered callback URL, so this handler sees everything (order changes,
+# package updates, settlement notifications, seller deauthorization, etc.).
+#
+# Only a subset actually carries an order identifier in data.order_id.
+# Everything else must be acknowledged with 200 OK, otherwise TikTok retries
+# aggressively and we get burst storms of "missing order identifier" logs.
+TIKTOK_WEBHOOK_TYPE_NAMES: dict[int, str] = {
+    1: "ORDER_STATUS_CHANGE",
+    2: "REVERSE_ORDER_STATUS_CHANGE",
+    3: "RECIPIENT_ADDRESS_UPDATE",
+    4: "PACKAGE_UPDATE",
+    5: "CANCELLATION_STATUS_CHANGE",
+    6: "NEW_SETTLED_DEDUCTION",
+    7: "SELLER_DEAUTHORIZATION",
+    8: "PRODUCT_CHANGE",
+    9: "PRODUCT_CATEGORY_CHANGED",
+    10: "PRODUCT_STATUS_CHANGED",
+    11: "PRODUCT_AUDIT_STATUS_CHANGE",
+    12: "SETTLEMENT_INFO",
+    13: "PRODUCT_INVENTORY_UPDATE",
+    14: "PROMOTION_STATUS_UPDATE",
+    15: "RETURN_REFUND_UPDATE",
+    16: "OPEN_PLATFORM_AUTHORIZED",
+    17: "CHAT_MESSAGE",
+    18: "SHIPPING_INFO_UPDATE",
+    21: "ORDER_FULFILLMENT_UPDATE",
+}
+
+# Types we actually persist as TikTokOrder rows. Everything else is
+# acknowledged but not written (we log it so we can see it in the audit trail).
+TIKTOK_ORDER_WEBHOOK_TYPES: frozenset[int] = frozenset({1, 2, 3, 5, 21})
+
+
 # ---------------------------------------------------------------------------
 # Helper functions (only used by routes in this module)
 # ---------------------------------------------------------------------------
@@ -274,8 +310,43 @@ async def tiktok_orders_webhook(request: Request):
             )
         )
 
+    envelope_type_raw = payload.get("type") if isinstance(payload, dict) else None
+    try:
+        envelope_type = int(envelope_type_raw) if envelope_type_raw is not None else None
+    except (TypeError, ValueError):
+        envelope_type = None
+
+    event_type_name = TIKTOK_WEBHOOK_TYPE_NAMES.get(
+        envelope_type,
+        f"type_{envelope_type}" if envelope_type is not None else "unknown",
+    )
+    if topic == "unknown":
+        topic = event_type_name
+
+    # Order identifier may live under envelope.data.order_id (real TikTok
+    # webhooks), at the top level (legacy flat payloads / tests), or inside
+    # a list like data.order_list. Detect any of these so we only attempt
+    # an order upsert when something sensible is present.
+    def _has_order_id(obj) -> bool:
+        if not isinstance(obj, dict):
+            return False
+        if str(obj.get("order_id") or "").strip():
+            return True
+        for list_key in ("order_list", "orders"):
+            lst = obj.get(list_key)
+            if isinstance(lst, list):
+                for item in lst:
+                    if isinstance(item, dict) and str(item.get("order_id") or "").strip():
+                        return True
+        return False
+
+    inner_data = payload.get("data") if isinstance(payload, dict) else None
+    has_order_identifier = _has_order_id(payload) or _has_order_id(inner_data)
+    is_order_type = envelope_type in TIKTOK_ORDER_WEBHOOK_TYPES or has_order_identifier
+
     order_upsert_status = ""
-    if isinstance(payload, dict):
+    order_record: dict = {}
+    if isinstance(payload, dict) and is_order_type:
         try:
             def persist_tiktok_order(session: Session):
                 return upsert_tiktok_order_from_payload(
@@ -289,13 +360,34 @@ async def tiktok_orders_webhook(request: Request):
 
             order_upsert_status, order_record = await asyncio.to_thread(run_write_with_retry, persist_tiktok_order)
         except Exception as exc:
+            # If the payload looked like an order type but the upsert couldn't
+            # find an order id (malformed / unexpected shape), ack with 200 so
+            # TikTok does not retry-storm us. Real DB errors still return 500.
+            err_text = str(exc)
+            if "missing an order identifier" in err_text:
+                print(
+                    structured_log_line(
+                        runtime=runtime_name,
+                        action="tiktok.webhook.non_order_payload_skipped",
+                        success=True,
+                        topic=topic,
+                        event_type=envelope_type,
+                        event_type_name=event_type_name,
+                        request_path=str(request.url.path),
+                        body_sha256=body_hash,
+                        error=err_text,
+                    )
+                )
+                return Response(status_code=200)
             print(
                 structured_log_line(
                     runtime=runtime_name,
                     action="tiktok.webhook.order_upsert_failed",
                     success=False,
-                    error=str(exc),
+                    error=err_text,
                     topic=topic,
+                    event_type=envelope_type,
+                    event_type_name=event_type_name,
                     request_path=str(request.url.path),
                     body_sha256=body_hash,
                 )
@@ -308,6 +400,8 @@ async def tiktok_orders_webhook(request: Request):
                     action="tiktok.webhook.order_upserted",
                     success=True,
                     topic=topic,
+                    event_type=envelope_type,
+                    event_type_name=event_type_name,
                     order_status=order_upsert_status,
                     tiktok_order_id=order_record.get("tiktok_order_id"),
                     shop_id=order_record.get("shop_id"),
@@ -315,8 +409,22 @@ async def tiktok_orders_webhook(request: Request):
             )
             enrich_order_id = (order_record.get("tiktok_order_id") or "").strip()
             _start_tiktok_webhook_enrichment(enrich_order_id)
-    else:
-        order_record = {}
+    elif isinstance(payload, dict):
+        # Non-order webhook type (package update, settlement, seller deauth,
+        # product change, etc). Acknowledge so TikTok stops retrying.
+        print(
+            structured_log_line(
+                runtime=runtime_name,
+                action="tiktok.webhook.non_order_received",
+                success=True,
+                topic=topic,
+                event_type=envelope_type,
+                event_type_name=event_type_name,
+                request_path=str(request.url.path),
+                body_sha256=body_hash,
+                payload=summarize_tiktok_payload(payload),
+            )
+        )
 
     webhook_summary = {
         "received_at": utcnow().isoformat(),
@@ -337,6 +445,8 @@ async def tiktok_orders_webhook(request: Request):
             action="tiktok.webhook.received",
             success=True,
             topic=topic,
+            event_type=envelope_type,
+            event_type_name=event_type_name,
             request_path=str(request.url.path),
             body_sha256=body_hash,
             payload=summarize_tiktok_payload(payload),
