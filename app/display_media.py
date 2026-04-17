@@ -22,6 +22,34 @@ IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"]
 VISION_IMAGE_MAX_BYTES = 4_500_000
 
 
+def sniff_image_mime_type(data: bytes) -> str | None:
+    """Return the true MIME type of an image by inspecting its magic bytes.
+
+    Bedrock validates that the declared MIME type matches the actual
+    bytes: "The image was specified using the image/jpeg media type,
+    but the image appears to be a image/png image" -> HTTP 400. The
+    content_type stored on AttachmentAsset comes from Discord CDN
+    headers or a filename-based guess, which is sometimes wrong (e.g.
+    a PNG renamed with a .jpg extension).
+
+    Returns None if the bytes don't match any recognized image header.
+    """
+    if not data or len(data) < 12:
+        return None
+    head = data[:16]
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if head.startswith(b"GIF87a") or head.startswith(b"GIF89a"):
+        return "image/gif"
+    if head.startswith(b"RIFF") and head[8:12] == b"WEBP":
+        return "image/webp"
+    if head.startswith(b"BM"):
+        return "image/bmp"
+    return None
+
+
 def stable_attachment_url_key(url: str) -> str:
     """Strip volatile query-string signing so cached Discord URLs still match.
 
@@ -109,13 +137,26 @@ def encode_bytes_as_vision_data_url(
     """Return a ``data:<mime>;base64,<payload>`` URL suitable for vision APIs.
 
     Automatically shrinks the input so the payload fits under ``max_bytes``
-    before encoding. Returns ``None`` if the image is missing, cannot be
-    compressed, or encoding fails.
+    before encoding. The MIME type in the returned data URL is derived
+    from the actual bytes (magic-byte sniff), not the caller-supplied
+    ``content_type``, because Bedrock validates the declared MIME
+    against the bytes and a mismatch returns HTTP 400.
+
+    Returns ``None`` if the image is missing, cannot be compressed, or
+    encoding fails.
     """
     shrunk = shrink_image_to_limit(data, content_type, max_bytes=max_bytes)
     if shrunk is None:
         return None
     image_bytes, resolved_content_type = shrunk
+
+    # If we passed through the original bytes without re-encoding, the
+    # caller-supplied content_type may be wrong. Always trust the magic
+    # bytes when we can read them.
+    sniffed = sniff_image_mime_type(image_bytes)
+    if sniffed:
+        resolved_content_type = sniffed
+
     try:
         encoded = base64.b64encode(image_bytes).decode("ascii")
     except Exception as exc:  # pragma: no cover - defensive
