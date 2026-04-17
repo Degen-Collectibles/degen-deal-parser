@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     # LOW/MEDIUM-confidence scan, so there is no per-scan cost when scans go
     # smoothly. Shares the NVIDIA endpoint; no separate API key required.
     nvidia_tiebreaker_model: str = Field(default="gcp/google/gemini-3.1-pro-preview", alias="NVIDIA_TIEBREAKER_MODEL")
+    # Used by Balanced scanner mode — runs in parallel with Haiku (via
+    # NVIDIA_FAST_MODEL) for a 3-way majority vote on non-HIGH Ximilar scans.
+    nvidia_gemini_flash_model: str = Field(default="gcp/google/gemini-3-flash-preview", alias="NVIDIA_GEMINI_FLASH_MODEL")
     discord_channel_ids: str = Field(default="", alias="DISCORD_CHANNEL_IDS")
     discord_ingest_enabled: bool = Field(default=True, alias="DISCORD_INGEST_ENABLED")
     parser_worker_enabled: bool = Field(default=True, alias="PARSER_WORKER_ENABLED")

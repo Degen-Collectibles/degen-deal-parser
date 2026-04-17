@@ -460,18 +460,45 @@ Models: `InventoryItem`, `PriceHistory` in `app/models.py`
 
 The Degen Eye scanner (`/degen_eye`) is implemented in `app/pokemon_scanner.py`. It powers both camera-based and text-based card identification across multiple trading card games (Pokemon, Magic, Yu-Gi-Oh, One Piece, Lorcana, Dragon Ball, etc.). The Python module and the `inventory_scan_pokemon.html` template kept their Pokemon-era names for backward compatibility with git history; only the public URL was renamed.
 
-### Pipeline
+### Scanner Modes
+
+The frontend exposes a mode selector (top bar, persisted in `localStorage.degen_eye_mode`, default **`balanced`**). `run_pipeline(image_b64, category_id, mode)` dispatches:
+
+| Mode | Engines | Typical latency | AI calls per scan |
+|---|---|---|---|
+| `fast` | Ximilar only | 2-4s | 0 |
+| `balanced` (default) | Ximilar (always) + Claude Haiku + Gemini 3 Flash (parallel, only on non-HIGH) | 2-4s perceived (optimistic Ximilar return); ensemble completes ~2-4s later in background | 0 on HIGH, 2 in parallel on non-HIGH |
+| `accurate` | Ximilar (always) + Claude Opus 4.7 + Gemini 3.1 Pro (tiebreaker on disagreement) | 2-4s perceived on HIGH/MEDIUM; 5-8s on LOW | 0-3 depending on tier |
+
+### Pipeline (Accurate mode — existing sequential flow)
 
 1. **Image scanning** — confidence-tiered ensemble:
    - **Ximilar Collectibles API** runs first (visual recognition, fast ~2-4s)
    - If Ximilar confidence >= 0.85 → accept immediately, no second engine (HIGH tier)
-   - If Ximilar confidence 0.60-0.84 → return Ximilar optimistically, run the vision model (`_run_vision_pipeline` → Claude Opus 4.6 via NVIDIA) in background and merge once it returns (poll via `scan_id`) (MEDIUM tier)
+   - If Ximilar confidence 0.60-0.84 → return Ximilar optimistically, run the vision model (`_run_vision_pipeline` → Claude Opus 4.7 via NVIDIA) in background and merge once it returns (poll via `scan_id`) (MEDIUM tier)
    - If Ximilar confidence < 0.60 → wait for `_run_vision_pipeline` synchronously, merge, return (LOW tier)
-   - When Ximilar and the vision model disagree on `(name, number)` and a tiebreaker is configured, `_run_tiebreaker` asks Gemini 3.1 Pro (also via NVIDIA) for a third opinion and the result is decided by 2-of-3 majority. `debug.tiebreaker_used` / `debug.tiebreaker_winner` on the response show whether the ensemble fired and which engine it sided with.
+   - When Ximilar and the vision model disagree on `(name, full X/Y number)` and a tiebreaker is configured, `_run_tiebreaker` asks Gemini 3.1 Pro (also via NVIDIA) for a third opinion and the result is decided by 2-of-3 majority. `debug.tiebreaker_used` / `debug.tiebreaker_winner` on the response show whether the ensemble fired and which engine it sided with.
    - The vision model's output anchors a single precise database lookup via `_lookup_candidates_by_category`; there is no fuzzy OCR waterfall anymore.
-2. **Text search** (`text_search_cards`) — free-text query parsing + per-TCG card lookup
-3. **Scoring** — vision path marks HIGH when the DB confirms the exact `(name, number)` and MEDIUM otherwise. Text-search path keeps the Levenshtein-based `score_candidates` (name + collector number + set consistency, banded HIGH/MEDIUM/LOW).
+2. **Text search** (`text_search_cards`) — free-text query parsing + per-TCG card lookup (mode-independent)
+3. **Scoring** — vision path marks HIGH when the DB confirms the exact `(name, full X/Y number)` and MEDIUM otherwise. Text-search path keeps the Levenshtein-based `score_candidates` (name + collector number + set consistency, banded HIGH/MEDIUM/LOW).
 4. **Price enrichment** (`_enrich_price_fast`) — TCGTracking lookup for variants + condition pricing for the top 8 candidates
+
+### Pipeline (Balanced mode — parallel ensemble, default)
+
+1. **Ximilar runs first**. If HIGH (≥0.85) → return immediately, skip AI calls entirely.
+2. **Non-HIGH** → return Ximilar's result optimistically (same `scan_id` + `/validate/{scan_id}` polling pattern as Accurate MEDIUM tier) and fire `_background_balanced_validate`.
+3. **Background task** runs `_run_vision_pipeline` twice in parallel via `asyncio.gather` — once with Claude Haiku 4.5 (`engine_label="vision_haiku"`), once with Gemini 3 Flash (`engine_label="vision_gemini_flash"`).
+4. **`_vote_three_way`** tallies `(name, X/Y)` signatures from the up-to-three voters (Ximilar + 2 AIs, each contributes only if it returned a MATCHED/AMBIGUOUS with a best_match):
+   - All voters agree → winner = Ximilar (richer metadata), HIGH, MATCHED
+   - 2-of-3 agree → winner = one of the agreeing pair (preference: Ximilar if in pair, else whichever AI), MATCHED
+   - All disagree / only 1 voter → winner = `"none"`, AMBIGUOUS with all candidates
+5. `_assemble_balanced_result` clones the winning engine's result as the base and stamps `debug.ensemble_votes` + `debug.mode="balanced"` onto the final payload.
+
+`debug.pipeline_tier` surfaces the path taken (`balanced_high_confidence`, `balanced_parallel`, `balanced_parallel_validated`, `balanced_no_ximilar`, `balanced_ximilar_failed`, `balanced_no_ai_key`).
+
+### Pipeline (Fast mode)
+
+Just runs `_run_ximilar_pipeline` and returns whatever it produces — even at LOW confidence. No vision calls, no `validation_pending`, no polling. `debug.pipeline_tier = "fast_ximilar_only"`.
 
 ### Multi-TCG Card Lookup (text search routing)
 

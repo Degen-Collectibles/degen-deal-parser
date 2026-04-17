@@ -123,3 +123,23 @@ def has_tiebreaker_key() -> bool:
     """
     s = get_settings()
     return is_nvidia() and bool(s.nvidia_api_key)
+
+
+# ---------------------------------------------------------------------------
+# Balanced mode ensemble (Ximilar + Haiku + Gemini Flash, 3-way majority vote)
+# ---------------------------------------------------------------------------
+
+def get_haiku_model() -> str:
+    """Alias for :func:`get_fast_model` used at ensemble call sites for clarity.
+
+    The two functions share the same underlying setting (``NVIDIA_FAST_MODEL``);
+    keeping a distinct name at the scanner call site makes the ensemble log
+    lines self-describing.
+    """
+    return get_fast_model()
+
+
+def get_gemini_flash_model() -> str:
+    """Return the model id used as the Gemini Flash vote in Balanced mode."""
+    s = get_settings()
+    return s.nvidia_gemini_flash_model or "gcp/google/gemini-3-flash-preview"

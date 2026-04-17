@@ -181,7 +181,11 @@ As of April 2026, `app/main.py` was refactored from ~12,000 lines into a modular
 - Item status tracking (in_stock, listed, sold, returned, missing)
 
 ### Degen Eye Multi-TCG Scanner (`/degen_eye`)
-- **Confidence-tiered image pipeline** — Ximilar Collectibles API first; if confidence >= 0.85, return immediately; otherwise merge with legacy OCR + AI vision disambiguation
+- **Three selectable modes** (user-selectable via the top-bar dropdown, persisted in `localStorage.degen_eye_mode`):
+  - **Fast** — Ximilar only. Returns whatever it sees (even at LOW confidence). Cheapest, quickest. 0 AI calls.
+  - **Balanced** (default) — Ximilar first; HIGH (≥0.85) short-circuits. Otherwise returns Ximilar optimistically and fires Claude Haiku + Gemini 3 Flash in parallel in the background. 3-way majority vote resolves: all-agree → HIGH MATCHED; 2-of-3 → MATCHED (UI swaps if the winner isn't Ximilar); all-disagree → AMBIGUOUS with all three candidates. Ensemble only fires on non-HIGH scans so most cards skip AI entirely.
+  - **Accurate** — Existing sequential flow. Ximilar first; HIGH skips AI; MEDIUM backgrounds a single Claude Opus 4.7 call; LOW blocks on Opus then runs a Gemini Pro tiebreaker on disagreement.
+- **Confidence-tiered image pipeline** — Ximilar Collectibles API first; tier selection depends on mode (above)
 - **Auto-detects card game** from Ximilar tags (Pokemon, Magic, Yu-Gi-Oh, One Piece, Lorcana, Dragon Ball, etc.) for correct pricing category
 - **Manual card addition via text search** — `POST /degen_eye/text-search` parses free-text queries (AI + heuristic fallback) and returns ranked candidates with images and prices
 - **Multi-TCG text search routing** — queries route to dedicated card-name APIs by TCGTracking category:
@@ -329,9 +333,10 @@ AI_PROVIDER=openai     # or "nvidia"
 # If using NVIDIA Inference Hub:
 NVIDIA_API_KEY
 NVIDIA_BASE_URL=https://inference-api.nvidia.com/v1    # inference-api, NOT integrate.api — integrate 404s on multimodal payloads
-NVIDIA_MODEL=aws/anthropic/bedrock-claude-opus-4-7     # heavy (vision identification; multimodal)
-NVIDIA_FAST_MODEL=aws/anthropic/claude-haiku-4-5-v1    # fast (query parsing)
-NVIDIA_TIEBREAKER_MODEL=gcp/google/gemini-3.1-pro-preview  # ensemble tiebreaker (only fires on Ximilar+vision disagreement)
+NVIDIA_MODEL=aws/anthropic/bedrock-claude-opus-4-7     # heavy (Accurate-mode vision identification)
+NVIDIA_FAST_MODEL=aws/anthropic/claude-haiku-4-5-v1    # fast (query parsing; Balanced-mode vote A)
+NVIDIA_TIEBREAKER_MODEL=gcp/google/gemini-3.1-pro-preview  # Accurate-mode tiebreaker on disagreement
+NVIDIA_GEMINI_FLASH_MODEL=gcp/google/gemini-3-flash-preview  # Balanced-mode vote B (parallel with Haiku)
 ```
 
 See `app/config.py` for the complete list of all settings.

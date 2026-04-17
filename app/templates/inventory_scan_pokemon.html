@@ -126,6 +126,31 @@
         }
         .category-select-desktop:focus { outline:none; border-color:var(--accent,#d55338); }
 
+        /* Mode selector reuses the category-select styling but with its own
+           max-width and margin so the two live comfortably on mobile. */
+        .mode-select {
+            margin-left:6px; padding:5px 24px 5px 8px; font-size:12px; font-weight:700;
+            color:#fff; background:rgba(0,0,0,.4); border:1px solid rgba(255,255,255,.2);
+            border-radius:8px; backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+            appearance:none; -webkit-appearance:none;
+            background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='white'/%3E%3C/svg%3E");
+            background-repeat:no-repeat; background-position:right 8px center; background-size:10px 6px;
+            cursor:pointer; max-width:120px;
+            text-transform:uppercase; letter-spacing:.04em;
+        }
+        .mode-select:focus { outline:none; border-color:rgba(255,255,255,.4); }
+        .mode-select option { background:#1a1a2e; color:#fff; }
+        .mode-select-desktop {
+            padding:6px 28px 6px 10px; font-size:12px; font-weight:700;
+            color:var(--text,#333); background:var(--bg,#fff); border:1px solid var(--border,#ddd);
+            border-radius:8px; appearance:none; -webkit-appearance:none;
+            background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23666'/%3E%3C/svg%3E");
+            background-repeat:no-repeat; background-position:right 8px center; background-size:10px 6px;
+            cursor:pointer;
+            text-transform:uppercase; letter-spacing:.04em;
+        }
+        .mode-select-desktop:focus { outline:none; border-color:var(--accent,#d55338); }
+
         /* ===== STATUS BAR ===== */
         .status-bar { position:fixed; left:16px; right:16px; bottom:160px; z-index:45; padding:10px 14px; font-size:13px; font-weight:700; border-radius:12px; display:none; box-shadow:0 4px 16px rgba(0,0,0,.3); }
         .status-bar.ok { background:var(--green-bg); color:var(--green); display:block; }
@@ -398,6 +423,11 @@
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
         <a href="/inventory" class="back-link" style="margin-bottom:0">&larr; Back to Inventory</a>
         <select id="category-select-desktop" class="category-select-desktop" aria-label="Card game category"></select>
+        <select id="mode-select-desktop" class="mode-select-desktop" aria-label="Scanner mode">
+            <option value="fast">Fast</option>
+            <option value="balanced" selected>Balanced</option>
+            <option value="accurate">Accurate</option>
+        </select>
     </div>
 </div>
 
@@ -498,6 +528,11 @@
         <select id="category-select" class="category-select" aria-label="Card game category">
             <option value="3">Pokemon</option>
         </select>
+        <select id="mode-select" class="mode-select" aria-label="Scanner mode">
+            <option value="fast">Fast</option>
+            <option value="balanced" selected>Balanced</option>
+            <option value="accurate">Accurate</option>
+        </select>
     </div>
 
     <!-- Toast notifications -->
@@ -528,6 +563,41 @@ var PKScanner = (function() {
     var reviewingScanId = null;
     var selectedCandidateIdx = null;
     var selectedCategoryId = localStorage.getItem('degen_eye_category') || '3';
+
+    // Scanner mode — one of "fast" / "balanced" / "accurate". Default Balanced
+    // to match the Python orchestrator default. Validated against a hard list
+    // because localStorage can contain stale values from earlier versions.
+    var VALID_MODES = ['fast', 'balanced', 'accurate'];
+    var selectedMode = localStorage.getItem('degen_eye_mode') || 'balanced';
+    if (VALID_MODES.indexOf(selectedMode) < 0) selectedMode = 'balanced';
+
+    function _syncModeSelectors() {
+        var modeMobile = document.getElementById('mode-select');
+        var modeDesktop = document.getElementById('mode-select-desktop');
+        [modeMobile, modeDesktop].forEach(function(sel) {
+            if (sel) sel.value = selectedMode;
+        });
+        // Expose as a data attribute on <body> so CSS can hide/show
+        // mode-specific affordances (e.g. the verifying badge in Fast mode).
+        try { document.body.setAttribute('data-scan-mode', selectedMode); } catch (e) {}
+    }
+
+    function setupModeSelectors() {
+        var modeMobile = document.getElementById('mode-select');
+        var modeDesktop = document.getElementById('mode-select-desktop');
+        var selectors = [modeMobile, modeDesktop].filter(Boolean);
+        _syncModeSelectors();
+
+        selectors.forEach(function(sel) {
+            sel.addEventListener('change', function(e) {
+                var v = (e.target.value || '').toLowerCase();
+                if (VALID_MODES.indexOf(v) < 0) return;
+                selectedMode = v;
+                localStorage.setItem('degen_eye_mode', selectedMode);
+                _syncModeSelectors();
+            });
+        });
+    }
 
     // Mirror of app/pokemon_scanner.py's _CATEGORY_TO_GAME. Used only as a
     // fallback when the backend response doesn't include a canonical game.
@@ -849,7 +919,7 @@ var PKScanner = (function() {
             var resp = await fetch('/degen_eye/identify', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ image: b64, category_id: selectedCategoryId })
+                body: JSON.stringify({ image: b64, category_id: selectedCategoryId, mode: selectedMode })
             });
             var data = await resp.json();
             lastResult = data;
@@ -918,7 +988,7 @@ var PKScanner = (function() {
         fetch('/degen_eye/identify', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ image: entry.b64, category_id: selectedCategoryId })
+            body: JSON.stringify({ image: entry.b64, category_id: selectedCategoryId, mode: selectedMode })
         })
         .then(function(resp) {
             if (!resp.ok) {
@@ -2290,6 +2360,7 @@ var PKScanner = (function() {
 
     Drawer.init();
     loadCategories();
+    setupModeSelectors();
     setupTapToFocus();
 
     if (isMobile()) {

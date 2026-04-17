@@ -25,6 +25,8 @@ import httpx
 from .ai_client import (
     get_ai_client,
     get_fast_model,
+    get_gemini_flash_model,
+    get_haiku_model,
     get_model,
     get_tiebreaker_client,
     get_tiebreaker_model,
@@ -1818,22 +1820,35 @@ _VISION_GAME_TO_CATEGORY: dict[str, str] = {
 }
 
 
-async def _run_vision_pipeline(image_b64: str, category_id: str = "3") -> dict[str, Any]:
+async def _run_vision_pipeline(
+    image_b64: str,
+    category_id: str = "3",
+    *,
+    model_name: Optional[str] = None,
+    engine_label: str = "vision",
+) -> dict[str, Any]:
     """Identify a card directly via a vision-capable chat model.
 
     Replaces the OCR + field-extraction + disambiguation waterfall with a
     single call. The model returns structured fields that anchor a precise
     database lookup via ``_lookup_candidates_by_category``; no fuzzy scoring.
 
+    Args:
+        model_name: Override the model id. Defaults to ``get_model()`` (Claude
+            Opus 4.7 today). Balanced mode passes Haiku / Gemini Flash ids here
+            so the same pipeline can run for the ensemble vote.
+        engine_label: Tag stamped into ``debug.engine`` and the history entry.
+            Lets the debug page distinguish Opus vs Haiku vs Gemini Flash.
+
     Returns a ScanResult dict shaped the same as ``_run_ximilar_pipeline`` so
     the orchestrator, frontend, and history page stay compatible.
     """
     t_start = time.monotonic()
     debug_info: dict[str, Any] = {
-        "engine": "vision",
-        "extraction_method": "vision",
+        "engine": engine_label,
+        "extraction_method": engine_label,
         "stage_times_ms": {},
-        "engines_used": ["vision"],
+        "engines_used": [engine_label],
     }
 
     def _early(r: ScanResult) -> dict:
@@ -1881,7 +1896,7 @@ async def _run_vision_pipeline(image_b64: str, category_id: str = "3") -> dict[s
 
     # Vision model call
     t_stage = time.monotonic()
-    model_name = get_model()
+    model_name = model_name or get_model()
     debug_info["model"] = model_name
     try:
         client = get_ai_client().with_options(timeout=30.0)
@@ -2409,6 +2424,364 @@ async def _background_vision_validate(
         )
 
 
+# ---------------------------------------------------------------------------
+# Stage F5: Balanced-mode ensemble — Ximilar + Haiku + Gemini Flash in parallel
+# with 3-way majority voting. Used by run_pipeline when mode="balanced".
+# ---------------------------------------------------------------------------
+
+def _vote_three_way(
+    ximilar: Optional[dict],
+    vision_a: Optional[dict],
+    vision_b: Optional[dict],
+) -> tuple[str, dict]:
+    """Decide the winner of a Ximilar + two-AI ensemble scan.
+
+    Engines with a missing ``best_match`` or non-matched status don't vote.
+    Returns ``(winner_label, summary)`` where winner is one of:
+        - ``"ximilar"``     — Ximilar's result wins (on full agreement or
+          because Ximilar is part of any 2-of-3 majority; Ximilar is
+          preferred because it carries richer variant/tcgplayer metadata).
+        - ``"vision_a"``    — Haiku's result wins (part of a 2-of-3 majority
+          that excluded Ximilar).
+        - ``"vision_b"``    — Gemini Flash's result wins (same).
+        - ``"none"``        — no majority: all disagree, or only one engine
+          voted. Caller surfaces AMBIGUOUS with all candidates.
+
+    Equality uses ``_best_match_tuple`` which now preserves the full ``X/Y``
+    collector number (fix from commit ``c368c47``) so different printings of
+    the same card name no longer tuple-equal.
+    """
+    engines = [("ximilar", ximilar), ("vision_a", vision_a), ("vision_b", vision_b)]
+    voters: list[tuple[str, tuple[str, str]]] = []
+    for label, result in engines:
+        if not result or result.get("status") in ("ERROR", "NO_MATCH"):
+            continue
+        sig = _best_match_tuple(result)
+        if sig == ("", ""):
+            continue
+        voters.append((label, sig))
+
+    summary: dict[str, Any] = {
+        "ximilar": _best_match_tuple(ximilar),
+        "vision_a": _best_match_tuple(vision_a),
+        "vision_b": _best_match_tuple(vision_b),
+        "voter_count": len(voters),
+    }
+
+    if not voters:
+        summary["reason"] = "no engine produced a usable best_match"
+        return ("none", summary)
+    if len(voters) == 1:
+        # A single voter isn't a majority by itself — surface as AMBIGUOUS so
+        # the user confirms rather than trusting one engine blindly.
+        summary["reason"] = f"only {voters[0][0]} voted"
+        return ("none", summary)
+
+    # Tally signatures
+    tally: dict[tuple[str, str], list[str]] = {}
+    for label, sig in voters:
+        tally.setdefault(sig, []).append(label)
+
+    # Full agreement (all voters share one signature)
+    if len(tally) == 1:
+        summary["reason"] = "all voters agree"
+        return ("ximilar" if "ximilar" in voters[0][1:] or any(
+            lbl == "ximilar" for lbl, _ in voters
+        ) else voters[0][0], summary)
+
+    # 2-of-3: find the signature with the most votes
+    best_sig, best_labels = max(tally.items(), key=lambda kv: len(kv[1]))
+    if len(best_labels) >= 2:
+        # Prefer Ximilar within the winning group for its richer metadata.
+        winner = "ximilar" if "ximilar" in best_labels else best_labels[0]
+        summary["reason"] = f"{len(best_labels)}-of-{len(voters)} majority"
+        return (winner, summary)
+
+    # No pair agreed — all distinct
+    summary["reason"] = "all voters disagree"
+    return ("none", summary)
+
+
+def _assemble_balanced_result(
+    winner: str,
+    vote_summary: dict,
+    ximilar_result: Optional[dict],
+    haiku_result: Optional[dict],
+    gemini_result: Optional[dict],
+) -> dict:
+    """Build the final ScanResult dict from an ensemble vote outcome.
+
+    - Winner ``"ximilar"`` (full agreement or majority including Ximilar):
+      clone Ximilar's result, promote to HIGH, MATCHED.
+    - Winner ``"vision_a"`` / ``"vision_b"``: clone that engine's result as
+      the best_match (so DB-confirmed name/number/set is authoritative), and
+      append Ximilar's top candidate to the candidates list for transparency.
+    - Winner ``"none"``: AMBIGUOUS, candidates array contains each engine's
+      top match so the reviewer can pick.
+    """
+    def _ensure_debug(d: dict) -> dict:
+        d.setdefault("debug", {})
+        return d
+
+    def _clone(result: Optional[dict]) -> dict:
+        import copy as _c
+        return _c.deepcopy(result) if result else {}
+
+    if winner == "ximilar" and ximilar_result:
+        merged = _ensure_debug(_clone(ximilar_result))
+        if merged.get("best_match"):
+            merged["best_match"]["confidence"] = "HIGH"
+            merged["best_match"]["score"] = max(
+                float(merged["best_match"].get("score") or 0), 95.0,
+            )
+        merged["status"] = "MATCHED"
+        merged["disambiguation_method"] = "balanced_ensemble"
+        return merged
+
+    if winner in ("vision_a", "vision_b"):
+        source = haiku_result if winner == "vision_a" else gemini_result
+        merged = _ensure_debug(_clone(source))
+        if merged.get("best_match"):
+            merged["best_match"]["confidence"] = "HIGH"
+            merged["best_match"]["score"] = max(
+                float(merged["best_match"].get("score") or 0), 95.0,
+            )
+        merged["status"] = "MATCHED"
+        merged["disambiguation_method"] = "balanced_ensemble"
+        # Include Ximilar's top as an alternative candidate for transparency,
+        # deduped by normalized signature.
+        if ximilar_result and (ximilar_result.get("best_match") or {}).get("name"):
+            existing = {
+                (_norm_name((c or {}).get("name")), _norm_number((c or {}).get("number")))
+                for c in (merged.get("candidates") or [])
+            }
+            x_best = ximilar_result.get("best_match") or {}
+            x_sig = (_norm_name(x_best.get("name")), _norm_number(x_best.get("number")))
+            if x_sig not in existing and x_sig != ("", ""):
+                cands = list(merged.get("candidates") or [])
+                cands.append(x_best)
+                merged["candidates"] = cands[:10]
+        return merged
+
+    # winner == "none" — AMBIGUOUS
+    base = ximilar_result or haiku_result or gemini_result or {}
+    merged = _ensure_debug(_clone(base))
+    merged["status"] = "AMBIGUOUS"
+    merged["disambiguation_method"] = "balanced_ensemble"
+    combined: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for src in (ximilar_result, haiku_result, gemini_result):
+        if not src:
+            continue
+        for c in ((src.get("candidates") or [])[:3] + [src.get("best_match")]):
+            if not c:
+                continue
+            sig = (_norm_name(c.get("name")), _norm_number(c.get("number")))
+            if sig == ("", "") or sig in seen:
+                continue
+            seen.add(sig)
+            combined.append(c)
+    if combined:
+        merged["candidates"] = combined[:10]
+    return merged
+
+
+async def _run_balanced_pipeline(image_b64: str, category_id: str) -> dict[str, Any]:
+    """Ximilar-first ensemble: HIGH → return immediately; otherwise return
+    Ximilar optimistically while Haiku + Gemini Flash run in parallel for a
+    3-way majority-vote validation in the background.
+
+    The optimistic return uses the same ``scan_id`` +
+    ``_insert_pending_validation`` pattern as Accurate-mode MEDIUM tier, so
+    the existing frontend polling at ``/degen_eye/validate/{scan_id}`` just
+    works. Ensemble votes are stamped onto ``debug.ensemble_votes`` for the
+    debug page.
+    """
+    settings = get_settings()
+    has_ximilar = bool(settings.ximilar_api_token)
+    has_vision = has_ai_key()
+
+    # No Ximilar → parallel 2-of-2 vote between Haiku and Gemini Flash
+    if not has_ximilar:
+        if not has_vision:
+            return asdict(ScanResult(
+                status="ERROR",
+                error="Balanced mode needs either XIMILAR_API_TOKEN or an AI provider key",
+            ))
+        haiku_task = _run_vision_pipeline(
+            image_b64, category_id,
+            model_name=get_haiku_model(), engine_label="vision_haiku",
+        )
+        gemini_task = _run_vision_pipeline(
+            image_b64, category_id,
+            model_name=get_gemini_flash_model(), engine_label="vision_gemini_flash",
+        )
+        results = await asyncio.gather(haiku_task, gemini_task, return_exceptions=True)
+        haiku_result = results[0] if not isinstance(results[0], Exception) else None
+        gemini_result = results[1] if not isinstance(results[1], Exception) else None
+        winner, summary = _vote_three_way(None, haiku_result, gemini_result)
+        merged = _assemble_balanced_result(winner, summary, None, haiku_result, gemini_result)
+        merged.setdefault("debug", {})["mode"] = "balanced"
+        merged["debug"]["pipeline_tier"] = "balanced_no_ximilar"
+        merged["debug"]["ensemble_votes"] = summary
+        merged["debug"]["engines_used"] = ["vision_haiku", "vision_gemini_flash"]
+        merged["debug"].setdefault("tiebreaker_used", False)
+        merged["debug"].setdefault("tiebreaker_winner", None)
+        return merged
+
+    # Run Ximilar first (fast: 2-4s)
+    try:
+        ximilar_result = await _run_ximilar_pipeline(
+            image_b64, settings.ximilar_api_token, category_id,
+        )
+    except Exception as exc:
+        logger.error("[pokemon_scanner] Balanced: Ximilar pipeline failed: %s", exc)
+        if not has_vision:
+            return asdict(ScanResult(
+                status="ERROR",
+                error=f"Ximilar failed and no AI key available: {exc}",
+            ))
+        # Fall back to the 2-AI parallel vote
+        haiku_task = _run_vision_pipeline(
+            image_b64, category_id,
+            model_name=get_haiku_model(), engine_label="vision_haiku",
+        )
+        gemini_task = _run_vision_pipeline(
+            image_b64, category_id,
+            model_name=get_gemini_flash_model(), engine_label="vision_gemini_flash",
+        )
+        results = await asyncio.gather(haiku_task, gemini_task, return_exceptions=True)
+        haiku_result = results[0] if not isinstance(results[0], Exception) else None
+        gemini_result = results[1] if not isinstance(results[1], Exception) else None
+        winner, summary = _vote_three_way(None, haiku_result, gemini_result)
+        merged = _assemble_balanced_result(winner, summary, None, haiku_result, gemini_result)
+        merged.setdefault("debug", {})["mode"] = "balanced"
+        merged["debug"]["pipeline_tier"] = "balanced_ximilar_failed"
+        merged["debug"]["ensemble_votes"] = summary
+        merged["debug"]["engines_used"] = ["vision_haiku", "vision_gemini_flash"]
+        merged["debug"].setdefault("tiebreaker_used", False)
+        merged["debug"].setdefault("tiebreaker_winner", None)
+        return merged
+
+    # No AI → just return Ximilar as-is (effectively Fast mode)
+    if not has_vision:
+        ximilar_result.setdefault("debug", {})["mode"] = "balanced"
+        ximilar_result["debug"]["pipeline_tier"] = "balanced_no_ai_key"
+        ximilar_result["debug"]["engines_used"] = ["ximilar"]
+        ximilar_result["debug"].setdefault("tiebreaker_used", False)
+        ximilar_result["debug"].setdefault("tiebreaker_winner", None)
+        return ximilar_result
+
+    confidence = _ximilar_confidence(ximilar_result)
+    x_status = ximilar_result.get("status", "ERROR")
+    scan_id = str(uuid.uuid4())
+
+    # HIGH → accept immediately, skip AI calls entirely
+    if confidence >= XIMILAR_CONFIDENCE_HIGH and x_status not in ("ERROR", "NO_MATCH"):
+        logger.info(
+            "[pokemon_scanner] Balanced HIGH (%.2f) — accepting Ximilar, skipping ensemble, category=%s",
+            confidence, category_id,
+        )
+        ximilar_result["scan_id"] = scan_id
+        ximilar_result.setdefault("debug", {})["mode"] = "balanced"
+        ximilar_result["debug"]["pipeline_tier"] = "balanced_high_confidence"
+        ximilar_result["debug"]["engines_used"] = ["ximilar"]
+        ximilar_result["debug"]["tiebreaker_used"] = False
+        ximilar_result["debug"]["tiebreaker_winner"] = None
+        return ximilar_result
+
+    # Non-HIGH → return Ximilar optimistically, fire parallel ensemble in bg
+    logger.info(
+        "[pokemon_scanner] Balanced non-HIGH (%.2f, status=%s) — optimistic return + parallel Haiku+Gemini-Flash, category=%s",
+        confidence, x_status, category_id,
+    )
+    ximilar_result["scan_id"] = scan_id
+    ximilar_result["validation_pending"] = True
+    ximilar_result.setdefault("debug", {})["mode"] = "balanced"
+    ximilar_result["debug"]["pipeline_tier"] = "balanced_parallel"
+    ximilar_result["debug"]["engines_used"] = ["ximilar"]
+    ximilar_result["debug"].setdefault("tiebreaker_used", False)
+    ximilar_result["debug"].setdefault("tiebreaker_winner", None)
+
+    _insert_pending_validation(scan_id, (time.monotonic(), None))
+
+    import copy as _copy
+    ximilar_copy = _copy.deepcopy(ximilar_result)
+    asyncio.create_task(_background_balanced_validate(
+        scan_id, image_b64, ximilar_copy, category_id,
+    ))
+
+    return ximilar_result
+
+
+async def _background_balanced_validate(
+    scan_id: str,
+    image_b64: str,
+    ximilar_result: dict,
+    category_id: str,
+) -> None:
+    """Run Haiku and Gemini Flash in parallel, then vote with Ximilar."""
+    try:
+        haiku_task = _run_vision_pipeline(
+            image_b64, category_id,
+            model_name=get_haiku_model(), engine_label="vision_haiku",
+        )
+        gemini_task = _run_vision_pipeline(
+            image_b64, category_id,
+            model_name=get_gemini_flash_model(), engine_label="vision_gemini_flash",
+        )
+        results = await asyncio.gather(haiku_task, gemini_task, return_exceptions=True)
+        haiku_result = results[0] if not isinstance(results[0], Exception) else None
+        gemini_result = results[1] if not isinstance(results[1], Exception) else None
+
+        if isinstance(results[0], Exception):
+            logger.error(
+                "[pokemon_scanner] Balanced: Haiku call failed for scan_id=%s: %s",
+                scan_id, results[0],
+            )
+        if isinstance(results[1], Exception):
+            logger.error(
+                "[pokemon_scanner] Balanced: Gemini Flash call failed for scan_id=%s: %s",
+                scan_id, results[1],
+            )
+
+        winner, summary = _vote_three_way(ximilar_result, haiku_result, gemini_result)
+        merged = _assemble_balanced_result(
+            winner, summary, ximilar_result, haiku_result, gemini_result,
+        )
+        merged["scan_id"] = scan_id
+        merged["validation_status"] = "validated"
+        merged.setdefault("debug", {})["mode"] = "balanced"
+        merged["debug"]["pipeline_tier"] = "balanced_parallel_validated"
+        merged["debug"]["ensemble_votes"] = summary
+        merged["debug"]["engines_used"] = [
+            "ximilar", "vision_haiku", "vision_gemini_flash",
+        ]
+        merged["debug"].setdefault("tiebreaker_used", False)
+        merged["debug"].setdefault("tiebreaker_winner", None)
+
+        logger.info(
+            "[pokemon_scanner] Balanced vote for scan_id=%s — winner=%s, votes=%s",
+            scan_id, winner, {
+                "ximilar": summary.get("ximilar"),
+                "vision_a_haiku": summary.get("vision_a"),
+                "vision_b_gemini_flash": summary.get("vision_b"),
+            },
+        )
+
+        _save_to_history(merged)
+        _insert_pending_validation(scan_id, (time.monotonic(), merged))
+    except Exception as exc:
+        logger.error(
+            "[pokemon_scanner] Balanced background validate failed for scan_id=%s: %s",
+            scan_id, exc,
+        )
+        _insert_pending_validation(
+            scan_id,
+            (time.monotonic(), {"validation_status": "error", "error": str(exc)}),
+        )
+
+
 _TEXT_SEARCH_PARSE_PROMPT = """You are a TCG card search query parser. The user will give you a free-text search query for a trading card game card. Extract structured fields from it.
 
 Return JSON with:
@@ -2565,9 +2938,89 @@ async def text_search_cards(query: str, category_id: str = "3") -> dict[str, Any
     return result_dict
 
 
-async def run_pipeline(image_b64: str, category_id: str = "3") -> dict[str, Any]:
+def _stamp_game_for(result: dict, category_id: str) -> dict:
+    """Ensure every orchestrator return path has a canonical ``game`` field."""
+    if result.get("game"):
+        return result
+    effective = (result.get("debug") or {}).get("effective_category_id") or category_id
+    result["game"] = _game_for_category(effective)
+    return result
+
+
+_VALID_SCAN_MODES = ("fast", "balanced", "accurate")
+
+
+async def run_pipeline(
+    image_b64: str,
+    category_id: str = "3",
+    mode: str = "balanced",
+) -> dict[str, Any]:
+    """Dispatch to the requested scanner mode.
+
+    - ``fast``: Ximilar only, no validation. Lowest cost / latency.
+    - ``balanced`` (default): Ximilar first; HIGH short-circuits; otherwise
+      return Ximilar optimistically and fire Haiku + Gemini Flash in parallel
+      in the background, resolved by a 3-way majority vote.
+    - ``accurate``: existing sequential-with-tiebreaker flow — Ximilar first,
+      MEDIUM backgrounds a single Opus call, LOW blocks on Opus then falls
+      through a Gemini Pro tiebreaker on disagreement.
+
+    ``category_id`` controls price enrichment (which TCGTracking category to
+    search).
     """
-    Confidence-tiered card scanning pipeline.
+    mode = (mode or "balanced").strip().lower()
+    if mode not in _VALID_SCAN_MODES:
+        logger.info("[pokemon_scanner] Unknown scan mode=%r, falling back to balanced", mode)
+        mode = "balanced"
+
+    if mode == "fast":
+        return await _run_fast_pipeline(image_b64, category_id)
+    if mode == "balanced":
+        result = await _run_balanced_pipeline(image_b64, category_id)
+        result.setdefault("debug", {})["mode"] = "balanced"
+        return _stamp_game_for(result, category_id)
+
+    # mode == "accurate" — existing flow preserved below
+    result = await _run_accurate_pipeline(image_b64, category_id)
+    result.setdefault("debug", {})["mode"] = "accurate"
+    return _stamp_game_for(result, category_id)
+
+
+async def _run_fast_pipeline(image_b64: str, category_id: str) -> dict[str, Any]:
+    """Ximilar-only path. Returns Ximilar's result even at LOW confidence."""
+    settings = get_settings()
+    if not settings.ximilar_api_token:
+        # No Ximilar token — Fast mode can't do anything useful
+        return _stamp_game_for(asdict(ScanResult(
+            status="ERROR",
+            error="Fast mode requires XIMILAR_API_TOKEN",
+        )), category_id)
+
+    try:
+        result = await _run_ximilar_pipeline(
+            image_b64, settings.ximilar_api_token, category_id,
+        )
+    except Exception as exc:
+        logger.error("[pokemon_scanner] Fast: Ximilar pipeline failed: %s", exc)
+        return _stamp_game_for(asdict(ScanResult(
+            status="ERROR",
+            error=f"Ximilar pipeline failed: {exc}",
+            processing_time_ms=0,
+        )), category_id)
+
+    result.setdefault("debug", {})["mode"] = "fast"
+    result["debug"]["pipeline_tier"] = "fast_ximilar_only"
+    result["debug"]["engines_used"] = ["ximilar"]
+    result["debug"].setdefault("tiebreaker_used", False)
+    result["debug"].setdefault("tiebreaker_winner", None)
+    # Fast mode never enters the validation-polling path.
+    result.pop("validation_pending", None)
+    return _stamp_game_for(result, category_id)
+
+
+async def _run_accurate_pipeline(image_b64: str, category_id: str) -> dict[str, Any]:
+    """
+    Sequential Ximilar + Opus vision + Gemini Pro tiebreaker flow.
 
     With Ximilar configured:
       - Ximilar confidence >= 0.85: accept immediately, no vision call
@@ -2575,26 +3028,14 @@ async def run_pipeline(image_b64: str, category_id: str = "3") -> dict[str, Any]
         trigger vision validation in background (poll via scan_id)
       - Ximilar confidence < 0.60: wait for vision pipeline, merge, return
 
-    Falls back to whichever single engine is available. When Ximilar is not
-    configured and an AI key is present, the vision pipeline runs on its own.
-    ``category_id`` controls price enrichment (which TCGTracking category to
-    search).
+    Falls back to whichever single engine is available.
     """
     settings = get_settings()
     has_ximilar = bool(settings.ximilar_api_token)
     has_vision = has_ai_key()
 
     def _stamp_game(result: dict) -> dict:
-        """Ensure every orchestrator return path has a canonical ``game`` field.
-
-        Uses ``debug.effective_category_id`` when Ximilar auto-detected a
-        different category, else the caller's ``category_id``.
-        """
-        if result.get("game"):
-            return result
-        effective = (result.get("debug") or {}).get("effective_category_id") or category_id
-        result["game"] = _game_for_category(effective)
-        return result
+        return _stamp_game_for(result, category_id)
 
     # No Ximilar → vision only (if available)
     if not has_ximilar:

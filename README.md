@@ -37,7 +37,10 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run_hosted.ps1
 **Inventory:**
 - Card inventory management with barcode generation, camera scanning, slab cert lookup
 - Auto-pricing, Shopify integration, label printing
-- **Degen Eye multi-TCG scanner** (`/degen_eye`) — camera + text-based card search across Pokemon, Magic, Yu-Gi-Oh, One Piece, Lorcana, Dragon Ball, etc. Uses Ximilar visual recognition plus dedicated per-TCG card APIs (Scryfall, YGOPRODeck, OPTCG, Lorcast, TCGdex, PokemonTCG) with TCGTracking for variant + condition-level pricing
+- **Degen Eye multi-TCG scanner** (`/degen_eye`) — camera + text-based card search across Pokemon, Magic, Yu-Gi-Oh, One Piece, Lorcana, Dragon Ball, etc. Uses Ximilar visual recognition plus dedicated per-TCG card APIs (Scryfall, YGOPRODeck, OPTCG, Lorcast, TCGdex, PokemonTCG) with TCGTracking for variant + condition-level pricing. Selectable **Fast / Balanced / Accurate** scanner mode:
+  - **Fast**: Ximilar only (2-4s, 0 AI calls)
+  - **Balanced** (default): Ximilar first; HIGH short-circuits; otherwise Haiku + Gemini Flash run in parallel in the background, 3-way majority vote
+  - **Accurate**: Ximilar first; HIGH short-circuits; MEDIUM backgrounds a single Opus call; LOW blocks on Opus + Gemini Pro tiebreaker on disagreement
 
 ## Key Pages
 
@@ -78,9 +81,10 @@ AI_PROVIDER=openai                 # or "nvidia"
 # If AI_PROVIDER=nvidia:
 NVIDIA_API_KEY=<nvidia inference hub key>
 NVIDIA_BASE_URL=https://inference-api.nvidia.com/v1     # inference-api, NOT integrate.api — integrate accepts text but 404s on multimodal
-NVIDIA_MODEL=aws/anthropic/bedrock-claude-opus-4-7      # heavy model (vision identification; must be multimodal-capable)
-NVIDIA_FAST_MODEL=aws/anthropic/claude-haiku-4-5-v1    # fast model (text query parsing)
-NVIDIA_TIEBREAKER_MODEL=gcp/google/gemini-3.1-pro-preview  # ensemble tiebreaker, only called when Ximilar + vision disagree
+NVIDIA_MODEL=aws/anthropic/bedrock-claude-opus-4-7      # heavy model (vision identification, Accurate mode)
+NVIDIA_FAST_MODEL=aws/anthropic/claude-haiku-4-5-v1    # fast model (text query parsing, Balanced mode vote A)
+NVIDIA_TIEBREAKER_MODEL=gcp/google/gemini-3.1-pro-preview  # Accurate mode tiebreaker on Ximilar+Opus disagreement
+NVIDIA_GEMINI_FLASH_MODEL=gcp/google/gemini-3-flash-preview  # Balanced mode vote B (parallel with Haiku)
 ```
 
 Card scanner (optional — only needed for Degen Eye `/degen_eye`):

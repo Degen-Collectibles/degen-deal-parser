@@ -678,8 +678,9 @@ async def inventory_scan_pokemon_identify(request: Request):
         base64_image = base64_image.split(",", 1)[1]
 
     category_id = (body.get("category_id") or "3").strip()
+    mode = (body.get("mode") or "balanced").strip().lower()
 
-    result = await run_pokemon_pipeline(base64_image, category_id=category_id)
+    result = await run_pokemon_pipeline(base64_image, category_id=category_id, mode=mode)
 
     status_code = 200
     if result.get("status") == "ERROR":
