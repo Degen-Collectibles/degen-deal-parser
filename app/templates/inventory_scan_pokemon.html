@@ -176,12 +176,15 @@
             backdrop-filter:blur(20px); -webkit-backdrop-filter:blur(20px);
             display:flex; flex-direction:column; will-change:transform; overflow:hidden;
         }
-        .drawer-handle { padding:10px 0 2px; text-align:center; cursor:grab; flex-shrink:0; -webkit-tap-highlight-color:transparent; }
-        .handle-bar { width:36px; height:4px; border-radius:2px; background:rgba(255,255,255,.2); margin:0 auto; }
-        .drawer-peek { display:flex; align-items:center; justify-content:space-between; padding:6px 20px 10px; flex-shrink:0; border-bottom:1px solid rgba(255,255,255,.08); }
-        .drawer-peek-info { display:flex; align-items:baseline; gap:10px; }
+        .drawer-handle { padding:16px 0 8px; text-align:center; cursor:grab; flex-shrink:0; -webkit-tap-highlight-color:transparent; touch-action:none; }
+        .drawer-handle:active { cursor:grabbing; }
+        .handle-bar { width:48px; height:5px; border-radius:3px; background:rgba(255,255,255,.35); margin:0 auto; transition:background .15s ease; }
+        .drawer-handle:active .handle-bar, .drawer-handle:hover .handle-bar { background:rgba(255,255,255,.55); }
+        .drawer-peek { display:flex; align-items:center; justify-content:space-between; padding:6px 20px 10px; flex-shrink:0; border-bottom:1px solid rgba(255,255,255,.08); touch-action:none; }
+        .drawer-peek-info { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
         .drawer-count { font-size:14px; font-weight:800; color:#ede8e2; }
         .drawer-total { font-size:14px; font-weight:800; color:#4ade80; }
+        .drawer-offer-total { font-size:13px; font-weight:800; color:var(--accent,#f59e0b); }
         .rapid-label { display:flex; align-items:center; gap:6px; font-size:12px; font-weight:600; color:rgba(255,255,255,.5); cursor:pointer; user-select:none; }
         .rapid-label input { accent-color:var(--accent); }
         .drawer-body { flex:1; min-height:0; overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch; touch-action:pan-y; }
@@ -352,6 +355,7 @@
             .drawer-peek { border-bottom:1px solid var(--line); padding:16px 22px 14px; }
             .drawer-count { color:var(--accent); }
             .drawer-total { color:var(--green); }
+            .drawer-offer-total { color:var(--accent-strong,var(--accent)); }
             .rapid-label { color:var(--muted); }
             .drawer-body { max-height:480px; }
             .batch-list { padding:12px 14px; }
@@ -619,6 +623,7 @@
             <div class="drawer-peek-info">
                 <span class="drawer-count" id="batch-count">0 cards</span>
                 <span class="drawer-total" id="batch-total"></span>
+                <span class="drawer-offer-total" id="batch-offer-total"></span>
             </div>
             <button class="manual-add-btn" onclick="PKScanner.openSearchSheet('add')" title="Add card manually">+</button>
             <label class="rapid-label">
@@ -942,6 +947,8 @@ var PKScanner = (function() {
                 editRow.textContent = label + ' offer: —';
             }
         }
+        // Keep the drawer peek's Cash/Trade total in sync.
+        try { updateBatchCounts(); } catch (e) {}
     }
 
     function _syncBuyCalcUI() {
@@ -2348,6 +2355,7 @@ var PKScanner = (function() {
     function updateBatchCounts() {
         var countEl = document.getElementById('batch-count');
         var totalEl = document.getElementById('batch-total');
+        var offerTotalEl = document.getElementById('batch-offer-total');
         var doneBtn = document.getElementById('done-btn');
         var clearBtn = document.getElementById('clear-btn');
 
@@ -2361,10 +2369,25 @@ var PKScanner = (function() {
         clearBtn.disabled = !batch.length && !scanQueue.length;
 
         var totalPrice = 0;
+        var totalOffer = 0;
+        var priced = 0;
         for (var t = 0; t < batch.length; t++) {
-            if (batch[t].auto_price) totalPrice += Number(batch[t].auto_price);
+            var p = Number(batch[t].auto_price);
+            if (p > 0 && isFinite(p)) {
+                totalPrice += p;
+                var o = _computeOffer(p);
+                if (o) { totalOffer += o.rounded; priced++; }
+            }
         }
         totalEl.textContent = batch.length ? ('$' + totalPrice.toFixed(2)) : '';
+        if (offerTotalEl) {
+            if (batch.length && priced > 0) {
+                var modeLabel = buyMode === 'trade' ? 'Trade' : 'Cash';
+                offerTotalEl.textContent = modeLabel + ' total: $' + totalOffer.toFixed(2);
+            } else {
+                offerTotalEl.textContent = '';
+            }
+        }
     }
 
     function _resolveConditionPrice(variant, condition) {
@@ -2561,27 +2584,47 @@ var PKScanner = (function() {
             this.el = document.getElementById('drawer');
             this.handleEl = document.getElementById('drawer-handle');
             this.peekEl = document.getElementById('drawer-peek');
+            this.bodyEl = document.getElementById('drawer-body');
             if (!this.el || !this.handleEl || !isMobile()) return;
 
             this.calcSnaps();
             this.setTranslate(this.COLLAPSED, false);
 
             var self = this;
-            var dragZone = this.handleEl;
 
-            dragZone.addEventListener('touchstart', function(e) { self.onStart(e); }, { passive: true });
-            this.peekEl.addEventListener('touchstart', function(e) { self.onStart(e); }, { passive: true });
+            this.handleEl.addEventListener('touchstart', function(e) { self.onStart(e); }, { passive: true });
+            this.peekEl.addEventListener('touchstart', function(e) {
+                // Don't start a drag if the touch is on an interactive control in the peek
+                // (Cash/Trade toggle buttons, pct input, rapid-add checkbox, etc.).
+                if (e.target.closest('input, select, button, label, .rapid-label, .buy-mode-btn, #buy-mode-toggle, #buy-pct-input')) return;
+                self.onStart(e);
+            }, { passive: true });
+            // Allow dragging from the body too, but only when the body is scrolled to the very top
+            // (so we don't hijack normal list scrolling). This gives the user an easy way to pull
+            // the drawer down from FULL when the handle is hard to hit.
+            if (this.bodyEl) {
+                this.bodyEl.addEventListener('touchstart', function(e) {
+                    if (self.state !== 'full') return;
+                    if (self.bodyEl.scrollTop > 0) return;
+                    if (e.target.closest('input, select, button, label, .batch-item')) return;
+                    self.onStart(e);
+                    self._fromBody = true;
+                }, { passive: true });
+            }
             document.addEventListener('touchmove', function(e) { self.onMove(e); }, { passive: false });
             document.addEventListener('touchend', function(e) { self.onEnd(e); });
 
+            // Click-to-step: full -> half -> collapsed -> half (cycle down then back up)
             this.handleEl.addEventListener('click', function() {
-                if (self.state === 'collapsed') self.snapTo('half');
-                else self.snapTo('collapsed');
+                if (self.state === 'full') self.snapTo('half');
+                else if (self.state === 'half') self.snapTo('collapsed');
+                else self.snapTo('half');
             });
             this.peekEl.addEventListener('click', function(e) {
-                if (e.target.tagName === 'INPUT' || e.target.tagName === 'LABEL' || e.target.closest('.rapid-label')) return;
-                if (self.state === 'collapsed') self.snapTo('half');
-                else self.snapTo('collapsed');
+                if (e.target.closest('input, select, button, label, .rapid-label, .buy-mode-btn, #buy-mode-toggle, #buy-pct-input')) return;
+                if (self.state === 'full') self.snapTo('half');
+                else if (self.state === 'half') self.snapTo('collapsed');
+                else self.snapTo('half');
             });
 
             window.addEventListener('resize', function() { self.calcSnaps(); self.snapTo(self.state); });
@@ -2617,12 +2660,23 @@ var PKScanner = (function() {
             this.dragging = true;
             this.startY = e.touches[0].clientY;
             this.startTranslate = this.currentTranslate;
+            this.movedFar = false;
             this.el.style.transition = '';
         },
 
         onMove: function(e) {
             if (!this.dragging) return;
             var dy = e.touches[0].clientY - this.startY;
+            // If the drag originated in the drawer-body at FULL and the user is dragging UP,
+            // bail out so the inner list can take over scrolling.
+            if (this._fromBody && dy < -4) {
+                this.dragging = false;
+                this._fromBody = false;
+                // snap back to full to cancel any tiny movement
+                this.setTranslate(this.FULL, true);
+                return;
+            }
+            if (Math.abs(dy) > 6) this.movedFar = true;
             var newY = Math.max(this.FULL, Math.min(this.COLLAPSED, this.startTranslate + dy));
             this.currentTranslate = newY;
             this.el.style.transform = 'translateY(' + newY + 'px)';
@@ -2632,6 +2686,15 @@ var PKScanner = (function() {
         onEnd: function() {
             if (!this.dragging) return;
             this.dragging = false;
+            this._fromBody = false;
+            // If the user barely moved, treat it as a tap — don't auto-snap to the nearest
+            // pixel-wise position (which can feel stuck). Let the click handler decide.
+            if (!this.movedFar) {
+                // restore to last known state
+                var cur = this.state === 'full' ? this.FULL : (this.state === 'half' ? this.HALF : this.COLLAPSED);
+                this.setTranslate(cur, true);
+                return;
+            }
             var snaps = [
                 { s: 'collapsed', y: this.COLLAPSED },
                 { s: 'half', y: this.HALF },
