@@ -458,6 +458,7 @@ app.add_middleware(
     SessionMiddleware,
     secret_key=settings.session_secret,
     session_cookie=settings.session_cookie_name,
+    max_age=settings.session_max_age_seconds,
     https_only=settings.session_https_only,
     same_site=settings.session_same_site,
     domain=settings.effective_session_domain or None,

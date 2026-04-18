@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     session_https_only: bool = Field(default=False, alias="SESSION_HTTPS_ONLY")
     session_same_site: str = Field(default="strict", alias="SESSION_SAME_SITE")
     session_domain: str = Field(default="", alias="SESSION_DOMAIN")
+    # 30 days — keeps iOS PWA launches logged in across Safari cookie sweeps.
+    session_max_age_seconds: int = Field(default=30 * 24 * 60 * 60, alias="SESSION_MAX_AGE_SECONDS")
     log_to_file: bool = Field(default=True, alias="LOG_TO_FILE")
     log_dir: str = Field(default="logs", alias="LOG_DIR")
 
