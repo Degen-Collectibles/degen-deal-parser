@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import collections
+import hashlib
 import io
 import json
 import logging
@@ -123,6 +124,61 @@ _scan_history: collections.deque[dict] = collections.deque(maxlen=25)
 _pending_validations: dict[str, tuple[float, dict | None]] = {}
 _VALIDATION_TTL = 300  # expire pending validations after 5 minutes
 _VALIDATION_MAX = 200  # hard cap to prevent unbounded growth under rapid scanning
+
+# Image-hash -> (timestamp, result) cache. Keyed by (mode, category_id, sha256)
+# so identical re-scans (employee tests, accidental double-taps at the show)
+# skip the full Ximilar + AI fan-out. Only completed results are cached — we
+# never cache optimistic/"validation_pending" entries, since those still have
+# a background ensemble in flight and re-serving them would break the poll.
+_scan_result_cache: dict[tuple[str, str, str], tuple[float, dict]] = {}
+_SCAN_CACHE_TTL = 300  # 5 minutes
+_SCAN_CACHE_MAX = 100
+
+# Bounded concurrency across all external engine calls (Ximilar / Claude /
+# Gemini). Protects our API budgets under bursty scanning — rip-and-ship
+# streams and show days can issue many scans in parallel, and un-throttled
+# fan-out has spiked quota usage before.
+_EXTERNAL_API_SEMAPHORE: asyncio.Semaphore | None = None
+_EXTERNAL_API_CONCURRENCY = 6
+
+
+def _get_external_api_semaphore() -> asyncio.Semaphore:
+    # Lazily constructed so it binds to the running event loop, not import-time.
+    global _EXTERNAL_API_SEMAPHORE
+    if _EXTERNAL_API_SEMAPHORE is None:
+        _EXTERNAL_API_SEMAPHORE = asyncio.Semaphore(_EXTERNAL_API_CONCURRENCY)
+    return _EXTERNAL_API_SEMAPHORE
+
+
+def _hash_image(image_b64: str) -> str:
+    return hashlib.sha256(image_b64.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _scan_cache_get(key: tuple[str, str, str]) -> dict | None:
+    entry = _scan_result_cache.get(key)
+    if entry is None:
+        return None
+    ts, result = entry
+    if time.monotonic() - ts > _SCAN_CACHE_TTL:
+        _scan_result_cache.pop(key, None)
+        return None
+    return result
+
+
+def _scan_cache_put(key: tuple[str, str, str], result: dict) -> None:
+    # Never cache in-flight / optimistic results — the poll endpoint still
+    # needs to drive the scan_id through the real _pending_validations map.
+    if result.get("validation_pending"):
+        return
+    if result.get("status") in (None, "ERROR"):
+        return
+    if len(_scan_result_cache) >= _SCAN_CACHE_MAX:
+        try:
+            oldest = min(_scan_result_cache, key=lambda k: _scan_result_cache[k][0])
+            _scan_result_cache.pop(oldest, None)
+        except ValueError:
+            pass
+    _scan_result_cache[key] = (time.monotonic(), result)
 
 
 def _insert_pending_validation(scan_id: str, entry: tuple[float, dict | None]) -> None:
@@ -1622,15 +1678,16 @@ async def _run_ximilar_pipeline(
     debug_info["image_size_kb"] = round(len(send_b64) * 3 / 4 / 1024, 1)
 
     t_stage = time.monotonic()
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.post(
-            XIMILAR_TCG_URL,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Token {api_token}",
-            },
-            json={"records": [{"_base64": send_b64}]},
-        )
+    async with _get_external_api_semaphore():
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                XIMILAR_TCG_URL,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Token {api_token}",
+                },
+                json={"records": [{"_base64": send_b64}]},
+            )
     debug_info["stage_times_ms"]["ximilar_api"] = _elapsed(t_stage)
     debug_info["ximilar_http_status"] = resp.status_code
 
@@ -1899,22 +1956,23 @@ async def _run_vision_pipeline(
     model_name = model_name or get_model()
     debug_info["model"] = model_name
     try:
-        client = get_ai_client().with_options(timeout=30.0)
-        # temperature is deliberately omitted — Claude Opus 4.7 deprecated the
-        # parameter and 400s when it's present. Defaults are already near-zero
-        # for identification workloads.
-        response = client.chat.completions.create(
-            model=model_name,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": _VISION_IDENTIFY_PROMPT},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{send_b64}"}},
-                ],
-            }],
-            max_tokens=400,
-        )
-        raw = response.choices[0].message.content or ""
+        async with _get_external_api_semaphore():
+            client = get_ai_client().with_options(timeout=30.0)
+            # temperature is deliberately omitted — Claude Opus 4.7 deprecated the
+            # parameter and 400s when it's present. Defaults are already near-zero
+            # for identification workloads.
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": _VISION_IDENTIFY_PROMPT},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{send_b64}"}},
+                    ],
+                }],
+                max_tokens=400,
+            )
+            raw = response.choices[0].message.content or ""
     except Exception as exc:
         logger.error("[pokemon_scanner] Vision model call failed (model=%s): %s", model_name, exc)
         debug_info["stage_times_ms"]["vision_call"] = _elapsed(t_stage)
@@ -2196,22 +2254,23 @@ async def _run_tiebreaker(
         send_b64 = image_b64
 
     try:
-        client = get_tiebreaker_client().with_options(timeout=30.0)
-        # See _run_vision_pipeline: temperature omitted for Claude Opus 4.7
-        # compatibility. Other tiebreaker targets (e.g., Gemini) accept
-        # temperature but there's no behavioral reason to set it.
-        response = client.chat.completions.create(
-            model=model_name,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": _VISION_IDENTIFY_PROMPT},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{send_b64}"}},
-                ],
-            }],
-            max_tokens=400,
-        )
-        raw = response.choices[0].message.content or ""
+        async with _get_external_api_semaphore():
+            client = get_tiebreaker_client().with_options(timeout=30.0)
+            # See _run_vision_pipeline: temperature omitted for Claude Opus 4.7
+            # compatibility. Other tiebreaker targets (e.g., Gemini) accept
+            # temperature but there's no behavioral reason to set it.
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": _VISION_IDENTIFY_PROMPT},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{send_b64}"}},
+                    ],
+                }],
+                max_tokens=400,
+            )
+            raw = response.choices[0].message.content or ""
     except Exception as exc:
         logger.error("[pokemon_scanner] Tiebreaker call failed (model=%s): %s", model_name, exc)
         return None
@@ -2973,17 +3032,28 @@ async def run_pipeline(
         logger.info("[pokemon_scanner] Unknown scan mode=%r, falling back to balanced", mode)
         mode = "balanced"
 
+    cache_key = (mode, category_id, _hash_image(image_b64))
+    cached = _scan_cache_get(cache_key)
+    if cached is not None:
+        import copy as _copy
+        hit = _copy.deepcopy(cached)
+        hit.setdefault("debug", {})["cache_hit"] = True
+        return hit
+
     if mode == "fast":
-        return await _run_fast_pipeline(image_b64, category_id)
-    if mode == "balanced":
+        result = await _run_fast_pipeline(image_b64, category_id)
+    elif mode == "balanced":
         result = await _run_balanced_pipeline(image_b64, category_id)
         result.setdefault("debug", {})["mode"] = "balanced"
-        return _stamp_game_for(result, category_id)
+        result = _stamp_game_for(result, category_id)
+    else:
+        # mode == "accurate"
+        result = await _run_accurate_pipeline(image_b64, category_id)
+        result.setdefault("debug", {})["mode"] = "accurate"
+        result = _stamp_game_for(result, category_id)
 
-    # mode == "accurate" — existing flow preserved below
-    result = await _run_accurate_pipeline(image_b64, category_id)
-    result.setdefault("debug", {})["mode"] = "accurate"
-    return _stamp_game_for(result, category_id)
+    _scan_cache_put(cache_key, result)
+    return result
 
 
 async def _run_fast_pipeline(image_b64: str, category_id: str) -> dict[str, Any]:
@@ -3134,13 +3204,16 @@ async def _run_accurate_pipeline(image_b64: str, category_id: str) -> dict[str, 
         return _stamp_game(merged)
 
 
-def get_validation_result(scan_id: str) -> dict | None:
+def get_validation_result(scan_id: str, ack: bool = False) -> dict | None:
     """Check if a background OCR validation has completed.
 
-    Returns:
-      - None if scan_id is unknown
-      - {"validation_status": "pending"} if OCR is still running
-      - The full merged result dict if validation is complete
+    Non-destructive by default: completed results stay in the cache until TTL
+    cleanup or an explicit ack. Previously the first successful poll popped
+    the entry, so any legitimate re-read (retry, second consumer, poll-race
+    on reconnect) returned 404 and lost the result.
+
+    Args:
+      ack: if True, remove the entry after returning a completed result.
     """
     _cleanup_stale_validations()
     if scan_id not in _pending_validations:
@@ -3148,7 +3221,8 @@ def get_validation_result(scan_id: str) -> dict | None:
     ts, result = _pending_validations[scan_id]
     if result is None:
         return {"validation_status": "pending", "scan_id": scan_id}
-    _pending_validations.pop(scan_id, None)
+    if ack:
+        _pending_validations.pop(scan_id, None)
     return result
 
 

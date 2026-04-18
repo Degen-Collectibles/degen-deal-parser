@@ -70,15 +70,12 @@ Degen Deal Parser is a ~35.8K LOC FastAPI app (56 Python modules in `app/`, 16 r
   - `tests/test_zweilous_scoring.py`, `tests/test_auto_promote.py`
 - **Owns:** camera/text card ID across Pokemon/MTG/YGO/OP/Lorcana/DBZ, confidence-tiered ensemble, TCGTracking price enrichment, inventory CRUD, barcode labels, auto-pricing.
 - **Known audit debt:**
-  - **Correctness M5** — `get_validation_result` pops cached result after first read → legitimate re-polls miss.
-  - **Performance H4** — scanner has no image/query cache; identical rips pay full Ximilar + AI cost each time.
-  - **Performance H7** — external-API fan-out has no rate-limit throttle.
+  - ~~**Correctness M5**~~ — FIXED: `get_validation_result` is now non-destructive (entries live until TTL or explicit `ack=True`).
+  - ~~**Performance H4**~~ — FIXED: image-hash→scan-result cache (5min TTL, 100-entry cap) at `run_pipeline` entry; pending/error results excluded.
+  - ~~**Performance H7**~~ — FIXED: module-level `asyncio.Semaphore(6)` gates Ximilar + vision + tiebreaker calls.
   - **Performance L5** — inventory pricing is synchronous per item.
 - **Top follow-ups:**
-  1. Add image-hash→scan-result cache (5min TTL) — **Forge** — 2h, **high ROI** on AI spend.
-  2. Make `get_validation_result` non-destructive (leave cached copy for N seconds) — **Forge** — 30m, medium.
-  3. Throttle Ximilar/Claude/Gemini fan-out with a semaphore — **Forge** — 1h, medium.
-  4. Split `pokemon_scanner.py` into `scanner_pipeline.py` / `scanner_lookup.py` / `scanner_pricing.py` — **Atlas plan → Forge** — 6h, medium ROI (maintainability only).
+  1. Split `pokemon_scanner.py` into `scanner_pipeline.py` / `scanner_lookup.py` / `scanner_pricing.py` — **Atlas plan → Forge** — 6h, medium ROI (maintainability only).
 
 ---
 
