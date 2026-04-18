@@ -3,6 +3,37 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 
 Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Starting redeploy..."
 
+# --- Write deploy stamp (monitor correlates restarts within window to this) ---
+# Contains: UTC ISO timestamp, current git HEAD, current git branch.
+# Monitors should treat any app/worker restart within ~180s after this stamp
+# as an expected deploy, not a crash.
+try {
+    $logsDir = Join-Path $repoRoot "logs"
+    if (-not (Test-Path $logsDir)) {
+        New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
+    }
+    $stampPath = Join-Path $logsDir "deploy.stamp"
+    $utcNow = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+    Push-Location $repoRoot
+    $gitSha = (& git rev-parse HEAD 2>$null) -join ""
+    $gitBranch = (& git rev-parse --abbrev-ref HEAD 2>$null) -join ""
+    Pop-Location
+    if (-not $gitSha) { $gitSha = "unknown" }
+    if (-not $gitBranch) { $gitBranch = "unknown" }
+    $stamp = [pscustomobject]@{
+        timestamp_utc = $utcNow
+        git_sha       = $gitSha.Trim()
+        git_branch    = $gitBranch.Trim()
+        host          = $env:COMPUTERNAME
+        user          = $env:USERNAME
+        reason        = "redeploy.ps1"
+    } | ConvertTo-Json -Compress
+    Set-Content -Path $stampPath -Value $stamp -Encoding utf8 -Force
+    Write-Host "Wrote deploy stamp: $stampPath ($gitSha)"
+} catch {
+    Write-Host "WARN: failed to write deploy stamp: $_"
+}
+
 # --- Stop scheduled task first (kills its process tree) ---
 $task = Get-ScheduledTask -TaskName "DegenParser" -ErrorAction SilentlyContinue
 if ($task -and $task.State -ne 'Ready') {
