@@ -2079,19 +2079,39 @@ async def _run_vision_pipeline(
     # Ampharos #1/64 Neo Revelation) above the one vision actually saw
     # (Ampharos #1/127 Platinum) when the vision-supplied set_name doesn't
     # resolve cleanly in TCGdex.
+    #
+    # Set name is included in the ranking so that when two candidates tie on
+    # name+number (same Pokemon reprinted across sets), the one whose set
+    # matches the vision-extracted set wins. This is what prevents the
+    # thumbnail from showing the wrong printing of the right card (e.g. a
+    # 2003 EX Aerodactyl ex image when scanning a modern Aerodactyl ex).
     want_full_num = _norm_number(fields.collector_number) if fields.collector_number else ""
     want_name = _norm_name(fields.card_name)
+    want_set = _norm_set(fields.set_name)
 
-    def _candidate_rank(c: CandidateCard) -> tuple[int, int, int]:
+    def _candidate_rank(c: CandidateCard) -> tuple[int, int, int, int, int]:
         cand_num = _norm_number(c.number)
         cand_name = _norm_name(c.name)
+        cand_set = _norm_set(c.set_name)
         # Higher tuple wins when reverse-sorted.
         full_num_match = 1 if (want_full_num and "/" in want_full_num and cand_num == want_full_num) else 0
         num_core_match = 1 if (
             want_full_num and cand_num.split("/")[0] == want_full_num.split("/")[0]
         ) else 0
         name_match = 1 if (want_name and cand_name == want_name) else 0
-        return (full_num_match, name_match, num_core_match)
+        # Set signal: 2 = exact normalized match, 1 = substring in either
+        # direction (handles "151" <-> "Scarlet & Violet: 151" style drift
+        # between vision output and DB set names), 0 = no info / no overlap.
+        if want_set and cand_set:
+            if cand_set == want_set:
+                set_match = 2
+            elif want_set in cand_set or cand_set in want_set:
+                set_match = 1
+            else:
+                set_match = 0
+        else:
+            set_match = 0
+        return (full_num_match, name_match, set_match, num_core_match, 0)
 
     candidates = sorted(candidates, key=_candidate_rank, reverse=True)
 
@@ -2189,6 +2209,32 @@ async def _run_vision_pipeline(
 
 def _norm_name(s: Optional[str]) -> str:
     return (s or "").strip().lower()
+
+
+def _norm_set(s: Optional[str]) -> str:
+    """Normalize a set name for cross-source comparison.
+
+    Vision, TCGdex, PokemonTCG, TCGTracking, and Scryfall all spell set
+    names slightly differently ("Scarlet & Violet: 151" vs "151" vs
+    "Scarlet & Violet—151"). Lowercase, drop punctuation and common
+    prefixes/noise so substring matching is meaningful.
+    """
+    s = (s or "").strip().lower()
+    if not s:
+        return ""
+    # Drop common prefixes used by PokemonTCG / TCGdex that visuals don't include
+    for prefix in ("scarlet & violet: ", "scarlet & violet—", "scarlet and violet: ",
+                   "sword & shield: ", "sword and shield: ",
+                   "sun & moon: ", "sun and moon: ",
+                   "xy: ", "x y: ",
+                   "black & white: ", "black and white: "):
+        if s.startswith(prefix):
+            s = s[len(prefix):]
+            break
+    # Normalize punctuation and whitespace
+    import re as _re
+    s = _re.sub(r"[^a-z0-9]+", " ", s).strip()
+    return " ".join(s.split())
 
 
 def _norm_number(s: Optional[str]) -> str:
