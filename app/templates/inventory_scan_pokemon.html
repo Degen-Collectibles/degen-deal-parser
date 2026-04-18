@@ -1087,12 +1087,20 @@ var PKScanner = (function() {
 
     function pollValidation(scanId, onUpdate) {
         var attempts = 0;
-        // Cap at ~10 seconds — at a card show, never let the "Verifying..."
-        // badge get stuck. 7 attempts × 1500ms = 10.5s.
-        var maxAttempts = 7;
+        // Poll up to ~25s so slow OCR still lands for the employee.
+        // After 10s we hide any visible "Verifying…" state (see
+        // hideVerifyingBadges()) so it never looks stuck at the card show,
+        // but we keep polling silently so the result still upgrades if it
+        // finishes in the 10–25s window.
+        var maxAttempts = 17;        // 17 × 1500ms ≈ 25.5s
+        var visibleUntil = 7;        // 7 × 1500ms ≈ 10.5s (matches prior feel)
         var interval = 1500;
         function poll() {
             attempts++;
+            if (attempts === visibleUntil + 1) {
+                // Past the visible window — drop any spinner so UI looks settled.
+                try { hideVerifyingBadges(scanId); } catch (e) {}
+            }
             fetch('/degen_eye/validate/' + scanId)
                 .then(function(r) {
                     if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -1109,7 +1117,9 @@ var PKScanner = (function() {
                     }
                     if (data.validation_status === 'error') {
                         console.warn('[scan] Background validation error for', scanId, data.error);
-                        showToast('\u26A0 Background validation failed' + (data.error ? ': ' + data.error : ''), 3000);
+                        if (attempts <= visibleUntil) {
+                            showToast('\u26A0 Background validation failed' + (data.error ? ': ' + data.error : ''), 3000);
+                        }
                         if (onUpdate) onUpdate(data);
                         return;
                     }
@@ -1123,6 +1133,15 @@ var PKScanner = (function() {
                 });
         }
         setTimeout(poll, interval);
+    }
+
+    function hideVerifyingBadges(/* scanId */) {
+        // Remove any "Verifying" badge from the DOM. Keeps the UI from
+        // looking frozen while pollValidation continues silently.
+        var nodes = document.querySelectorAll('.badge-validating');
+        for (var i = 0; i < nodes.length; i++) {
+            nodes[i].parentNode && nodes[i].parentNode.removeChild(nodes[i]);
+        }
     }
 
     function isMobile() { return window.innerWidth <= 780; }

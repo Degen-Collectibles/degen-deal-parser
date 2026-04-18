@@ -59,6 +59,9 @@ router = APIRouter()
 settings = get_settings()
 logger = logging.getLogger(__name__)
 
+# Rate-limit bucket for /degen_eye/client_log: {username: [timestamps]}
+_CLIENT_LOG_RATE: dict[str, list[float]] = {}
+
 PAGE_SIZE = 50
 
 
@@ -693,11 +696,24 @@ async def inventory_scan_pokemon_identify(request: Request):
 
 @router.post("/degen_eye/client_log")
 async def inventory_scan_pokemon_client_log(request: Request):
-    """Append a client-side error report for post-mortem analysis."""
+    """Append a client-side error report for post-mortem analysis.
+
+    Hardened against abuse:
+    - 8 KB payload cap (rejects with 413)
+    - per-user rate limit: 30 entries / 5 min
+    - log file rotation at 5 MB → .log.1 (1 generation kept)
+    - disk errors return 500 (no silent failures)
+    """
     if denial := _require_viewer(request):
         return denial
+
+    # Cap payload before parsing JSON.
+    raw = await request.body()
+    if len(raw) > 8 * 1024:
+        return JSONResponse({"error": "payload too large"}, status_code=413)
+
     try:
-        body = await request.json()
+        body = json.loads(raw) if raw else {}
     except Exception:
         return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
@@ -706,21 +722,46 @@ async def inventory_scan_pokemon_client_log(request: Request):
 
     user = _get_user(request)
     username = user.username if user else "anonymous"
+
+    # Simple in-memory rate limit per user. Module-level dict keyed by
+    # username → deque of recent timestamps; trim to last 5 min and reject if
+    # more than 30 entries in the window.
+    now_ts = datetime.now(timezone.utc).timestamp()
+    window_start = now_ts - 300.0  # 5 minutes
+    bucket = _CLIENT_LOG_RATE.setdefault(username, [])
+    # Drop old entries
+    bucket[:] = [t for t in bucket if t >= window_start]
+    if len(bucket) >= 30:
+        return JSONResponse(
+            {"error": "rate limit — try again later"}, status_code=429
+        )
+    bucket.append(now_ts)
+
     entry = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "user": username,
-        "ua": request.headers.get("user-agent", ""),
+        "ua": (request.headers.get("user-agent", "") or "")[:512],
         "ip": request.client.host if request.client else "",
         **{k: v for k, v in body.items() if k not in ("ts", "user", "ua", "ip")},
     }
 
     log_dir = Path(__file__).resolve().parent.parent / "logs"
+    log_path = log_dir / "degen_eye_client.log"
+    rotated_path = log_dir / "degen_eye_client.log.1"
     try:
         log_dir.mkdir(exist_ok=True)
-        with open(log_dir / "degen_eye_client.log", "a") as f:
+        # Rotate if current file > 5 MB.
+        if log_path.exists() and log_path.stat().st_size > 5 * 1024 * 1024:
+            if rotated_path.exists():
+                rotated_path.unlink()
+            log_path.rename(rotated_path)
+        with open(log_path, "a") as f:
             f.write(json.dumps(entry, default=str) + "\n")
     except Exception as exc:
-        logger.warning("degen_eye client_log write failed: %s", exc)
+        logger.exception("degen_eye client_log write failed: %s", exc)
+        return JSONResponse(
+            {"error": "log write failed"}, status_code=500
+        )
 
     return JSONResponse({"ok": True})
 
