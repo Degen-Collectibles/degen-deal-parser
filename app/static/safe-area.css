@@ -1,0 +1,21 @@
+/* Safe-area insets for iOS PWA standalone mode. */
+/* Loaded early so it overrides body defaults. */
+
+@supports (padding: env(safe-area-inset-top)) {
+  html {
+    /* no change at the root — let body carry it */
+  }
+
+  body {
+    padding-top: env(safe-area-inset-top) !important;
+    padding-bottom: env(safe-area-inset-bottom) !important;
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+
+  /* If there's a fixed bottom nav, it owns the bottom safe area.
+     The body gets bottom padding for content-length, not for safe-area. */
+  body:has(.mobile-bottom-nav) {
+    padding-bottom: 0 !important;
+  }
+}
