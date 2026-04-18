@@ -2191,6 +2191,7 @@ var PKScanner = (function() {
             is_foil: isFoil,
             variant: variant,
             notes: notes,
+            tcgplayer_url: card.tcgplayer_url || null,
             _available_variants: card.available_variants || [],
         };
         if (scanId !== undefined) item._fromScanId = scanId;
@@ -2626,6 +2627,7 @@ var PKScanner = (function() {
             '<div class="edit-field"><label>Price</label><input id="edit-price" type="number" step="0.01" value="' + (item.auto_price || '') + '"></div>' +
             variantOpts +
             '<div class="edit-field"><label>Condition</label><select id="edit-condition">' + condOpts + '</select></div>' +
+            '<a class="tcgplayer-link" href="' + escHtml(tcgplayerUrlFor({ tcgplayer_url: item.tcgplayer_url, name: item.card_name, set_name: item.set_name })) + '" target="_blank" rel="noopener" style="margin-top:6px;">View on TCGplayer &rarr;</a>' +
             '<div class="overlay-actions">' +
                 '<button class="btn-outline" onclick="PKScanner.openSearchSheet(\'replace\',' + batchIdx + ')">Search Different Card</button>' +
                 '<button class="btn-primary" onclick="PKScanner.saveEditSheet()">Save</button>' +
