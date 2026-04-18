@@ -534,7 +534,7 @@
 
     <!-- Mobile top bar -->
     <div class="top-bar">
-        <a class="top-bar-back" href="/inventory">&larr;</a>
+        <a class="top-bar-back" href="/inventory" onclick="if(document.referrer && history.length>1){history.back();return false;}">&larr;</a>
         <span class="top-bar-title">Degen Eye</span>
         <select id="category-select" class="category-select" aria-label="Card game category">
             <option value="3">Pokemon</option>
