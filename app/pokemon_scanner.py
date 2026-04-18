@@ -537,29 +537,85 @@ async def _scryfall_search(
     number: Optional[str] = None,
     limit: int = 10,
 ) -> list[CandidateCard]:
-    """Search Scryfall for Magic: The Gathering cards."""
+    """Search Scryfall for Magic: The Gathering cards.
+
+    Scryfall's search syntax requires:
+      - the card name wrapped in `!"..."` for an exact match (unquoted tokens
+        are fulltext-matched across name/type/oracle, which spuriously fails);
+      - `e:<code>` or `e:"<full set name>"` for set filters — we try both.
+
+    Strategy (waterfall — stops at the first hit):
+      1. exact name + set + number       (tight — pinpoint)
+      2. exact name + number             (all prints at that number)
+      3. exact name                      (all prints)
+      4. fuzzy fallback via `/cards/named?fuzzy=`
+    """
     if not name:
         return []
-    q_parts = [name]
-    if set_name:
-        q_parts.append(f"set:{set_name}")
-    if number:
-        clean_num = number.split("/")[0] if "/" in number else number
-        q_parts.append(f"number:{clean_num}")
 
-    params = {"q": " ".join(q_parts), "unique": "prints", "order": "released", "dir": "desc"}
-    try:
-        resp = await client.get(f"{SCRYFALL_BASE}/cards/search", params=params)
-        if resp.status_code != 200:
+    def _q_name(n: str) -> str:
+        # Drop stray double-quotes so we don't break the query ourselves.
+        return f'!"{n.replace(chr(34), "")}"'
+
+    def _q_set(s: str) -> str:
+        # Use the most permissive form — quoted full name works when Scryfall
+        # recognizes it; otherwise this naturally returns 0 and we fall back.
+        return f'e:"{s}"' if " " in s else f"e:{s}"
+
+    clean_num = ""
+    if number:
+        clean_num = number.split("/")[0].strip() if "/" in number else number.strip()
+
+    attempts: list[list[str]] = []
+    if set_name and clean_num:
+        attempts.append([_q_name(name), _q_set(set_name), f"cn:{clean_num}"])
+    if clean_num:
+        attempts.append([_q_name(name), f"cn:{clean_num}"])
+    if set_name:
+        attempts.append([_q_name(name), _q_set(set_name)])
+    attempts.append([_q_name(name)])
+
+    data: list[dict] = []
+    for parts in attempts:
+        params = {
+            "q": " ".join(parts),
+            "unique": "prints",
+            "order": "released",
+            "dir": "desc",
+        }
+        try:
+            resp = await client.get(f"{SCRYFALL_BASE}/cards/search", params=params)
+        except Exception as exc:
+            logger.warning("[pokemon_scanner] Scryfall search failed: %s", exc)
+            continue
+        if resp.status_code == 200:
+            data = resp.json().get("data") or []
+            if data:
+                break
+        elif resp.status_code == 404:
+            # Scryfall returns 404 on "no matches" — just try the next attempt.
+            continue
+        else:
             logger.warning(
                 "[pokemon_scanner] Scryfall HTTP %s for %s (params=%r): %s",
-                resp.status_code, f"{SCRYFALL_BASE}/cards/search", params, resp.text[:200],
+                resp.status_code,
+                f"{SCRYFALL_BASE}/cards/search",
+                params,
+                resp.text[:200],
             )
-            return []
-        data = resp.json().get("data") or []
-    except Exception as exc:
-        logger.warning("[pokemon_scanner] Scryfall search failed: %s", exc)
-        return []
+
+    # Last-ditch: fuzzy name match. Returns a single card (or 404). Helpful
+    # when the visual pipeline OCR'd a misspelling of the name.
+    if not data:
+        try:
+            resp = await client.get(
+                f"{SCRYFALL_BASE}/cards/named",
+                params={"fuzzy": name},
+            )
+            if resp.status_code == 200:
+                data = [resp.json()]
+        except Exception as exc:
+            logger.debug("[pokemon_scanner] Scryfall fuzzy fallback failed: %s", exc)
 
     results: list[CandidateCard] = []
     for card in data[:limit]:
@@ -679,29 +735,110 @@ async def _optcg_search(
     client: httpx.AsyncClient,
     name: Optional[str] = None,
     set_name: Optional[str] = None,
+    number: Optional[str] = None,
     limit: int = 10,
 ) -> list[CandidateCard]:
-    """Search OPTCG API for One Piece Card Game cards."""
+    """Search OPTCG API for One Piece Card Game cards.
+
+    The OPTCG API is picky:
+      - ``set_name`` must match their canonical set label or you get HTTP 404
+        ("Card was not found in the set card name view!"). We try with the
+        set filter first, then retry without it.
+      - Their card names are stored without spaces around punctuation
+        (``Monkey.D.Luffy``, not ``Monkey D. Luffy``). A longer/prettier
+        name from OCR or GPT-Vision returns 0 rows, so we try a few
+        normalizations (dots collapsed to spaces, last token alone) before
+        giving up.
+      - Collector numbers are stored as ``card_set_id`` (``OP01-003``), so we
+        optionally post-filter by that when available.
+    """
     if not name:
         return []
-    params: dict[str, str] = {"card_name": name}
-    if set_name:
-        params["set_name"] = set_name
 
-    try:
-        resp = await client.get(f"{OPTCG_BASE}/sets/filtered/", params=params)
-        if resp.status_code != 200:
-            logger.warning(
-                "[pokemon_scanner] OPTCG HTTP %s for %s (params=%r): %s",
-                resp.status_code, f"{OPTCG_BASE}/sets/filtered/", params, resp.text[:200],
-            )
-            return []
-        data = resp.json()
-        if not isinstance(data, list):
-            data = data.get("data") or data.get("results") or []
-    except Exception as exc:
-        logger.warning("[pokemon_scanner] OPTCG search failed: %s", exc)
+    # Generate name variants from most-specific to fallback.
+    name_variants: list[str] = []
+
+    def _add(v: str) -> None:
+        v = v.strip()
+        if v and v not in name_variants:
+            name_variants.append(v)
+
+    _add(name)
+    # "Monkey D. Luffy" -> "Monkey.D.Luffy" (how OPTCG stores names).
+    _add(re.sub(r"\s+", "", name.replace(" ", "")) if "." in name else name)
+    _add(re.sub(r"\s*\.\s*", ".", name))
+    # Last token fallback (e.g. "Monkey D. Luffy" -> "Luffy").
+    tokens = [t for t in re.split(r"[\s\.]+", name) if len(t) >= 3]
+    if tokens:
+        _add(tokens[-1])
+
+    # Normalize the collector number to the expected "OPxx-yyy" form so we
+    # can post-filter results.
+    target_id = ""
+    if number:
+        n = number.upper().strip()
+        n = n.replace(" ", "")
+        if re.match(r"^[A-Z]{2,4}\d+-\d+$", n):
+            target_id = n
+        else:
+            # Just digits? We can't reconstruct the set prefix reliably —
+            # leave it blank and let name/set filtering carry the match.
+            pass
+
+    data: list[dict] = []
+    tried: list[tuple[str, Optional[str]]] = []
+
+    for variant in name_variants:
+        for use_set in (True, False):
+            if use_set and not set_name:
+                continue
+            params: dict[str, str] = {"card_name": variant}
+            if use_set:
+                params["set_name"] = set_name  # type: ignore[assignment]
+            tried.append((variant, set_name if use_set else None))
+            try:
+                resp = await client.get(
+                    f"{OPTCG_BASE}/sets/filtered/", params=params,
+                )
+            except Exception as exc:
+                logger.warning("[pokemon_scanner] OPTCG search failed: %s", exc)
+                continue
+            if resp.status_code != 200:
+                # 404 just means that particular filter didn't match; move on.
+                if resp.status_code != 404:
+                    logger.warning(
+                        "[pokemon_scanner] OPTCG HTTP %s for %s (params=%r): %s",
+                        resp.status_code,
+                        f"{OPTCG_BASE}/sets/filtered/",
+                        params,
+                        resp.text[:200],
+                    )
+                continue
+            try:
+                payload = resp.json()
+            except Exception:
+                continue
+            if isinstance(payload, list):
+                data = payload
+            else:
+                data = payload.get("data") or payload.get("results") or []
+            if data:
+                break
+        if data:
+            break
+
+    if not data:
+        logger.info(
+            "[pokemon_scanner] OPTCG no matches for name=%r set=%r (tried %s)",
+            name, set_name, tried,
+        )
         return []
+
+    # If we know the exact collector number, prefer exact matches first.
+    if target_id:
+        exact = [c for c in data if (c.get("card_set_id") or "") == target_id]
+        if exact:
+            data = exact + [c for c in data if c not in exact]
 
     results: list[CandidateCard] = []
     seen: set[str] = set()
@@ -907,6 +1044,7 @@ async def _lookup_candidates_by_category(
         if category_id == "68":
             return await _optcg_search(
                 client, name=fields.card_name, set_name=fields.set_name,
+                number=fields.collector_number,
             )
         if category_id == "71":
             return await _lorcast_search(
