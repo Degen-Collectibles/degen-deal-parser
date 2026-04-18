@@ -1022,6 +1022,140 @@ async def _tcgtracking_product_search(
     return results
 
 
+async def _riftbound_search(
+    client: httpx.AsyncClient,
+    name: Optional[str] = None,
+    set_name: Optional[str] = None,
+    number: Optional[str] = None,
+    limit: int = 10,
+) -> list[CandidateCard]:
+    """Search TCGTracking for Riftbound (Riot's League of Legends TCG).
+
+    Riftbound is TCGTracking category_id 89 (``Riftbound: League of Legends
+    Trading Card Game``). There's no first-party public card API yet, but
+    TCGTracking ships full set + product data straight from TCGPlayer, which
+    gives us cards, images, collector numbers, and live prices in one hop.
+
+    Strategy:
+      1. If the caller gave a set hint, search by that (most accurate).
+      2. Otherwise crawl every Riftbound set and filter products by name
+         (Riftbound has ~5 sets right now, so this is cheap). Useful when
+         GPT-Vision guesses ``riftbound`` but can't read the small set
+         marker in the corner.
+
+    Also matches on collector number within each set — Riftbound prints
+    numbers as ``NNN/TTT`` (``001/024`` in Origins: Proving Grounds), which
+    both the card face and TCGTracking use verbatim.
+    """
+    if not name:
+        return []
+
+    category_id = "89"
+    name_lower = name.lower().strip()
+    target_num = (number or "").split("/")[0].strip().lstrip("0")
+
+    async def _search_set(set_id: int, set_display: str) -> list[CandidateCard]:
+        prod_url = f"{TCGTRACKING_BASE}/{category_id}/sets/{set_id}"
+        try:
+            resp = await client.get(prod_url)
+            if resp.status_code != 200:
+                return []
+            products = resp.json().get("products") or []
+        except Exception as exc:
+            logger.warning(
+                "[pokemon_scanner] Riftbound products fetch failed (%s): %s",
+                set_id, exc,
+            )
+            return []
+
+        out: list[CandidateCard] = []
+        for prod in products:
+            clean = (prod.get("clean_name") or prod.get("name") or "").lower()
+            prod_num_raw = (prod.get("number") or "").split("/")[0].strip().lstrip("0")
+
+            name_hit = bool(name_lower) and name_lower in clean
+            num_hit = bool(target_num) and target_num == prod_num_raw
+            if not (name_hit or num_hit):
+                continue
+
+            img_raw = prod.get("image_url") or ""
+            img_large = (
+                img_raw.replace("_200w.jpg", "_400w.jpg") if img_raw else ""
+            )
+            out.append(CandidateCard(
+                id=str(prod.get("id", "")),
+                name=prod.get("clean_name") or prod.get("name", ""),
+                number=prod.get("number") or "",
+                set_id=str(set_id),
+                set_name=set_display,
+                image_url=img_large,
+                image_url_small=img_raw,
+                source="tcgtracking_riftbound",
+                tcgplayer_url=prod.get("tcgplayer_url"),
+            ))
+        return out
+
+    # 1) Named-set lookup
+    if set_name:
+        search_url = f"{TCGTRACKING_BASE}/{category_id}/search"
+        try:
+            search_resp = await client.get(search_url, params={"q": set_name})
+            if search_resp.status_code == 200:
+                sets = search_resp.json().get("sets") or []
+                if sets:
+                    hits = await _search_set(sets[0]["id"], sets[0].get("name", ""))
+                    if hits:
+                        # Put exact-number matches first for scoring.
+                        if target_num:
+                            hits.sort(
+                                key=lambda c: (
+                                    0
+                                    if (c.number or "").split("/")[0].strip().lstrip("0")
+                                    == target_num
+                                    else 1
+                                )
+                            )
+                        return hits[:limit]
+        except Exception as exc:
+            logger.warning(
+                "[pokemon_scanner] Riftbound set lookup failed for %r: %s",
+                set_name, exc,
+            )
+
+    # 2) Cross-set fallback — fetch all Riftbound sets + scan each.
+    try:
+        all_resp = await client.get(
+            f"{TCGTRACKING_BASE}/{category_id}/search",
+            params={"q": "riftbound"},
+        )
+        if all_resp.status_code != 200:
+            return []
+        all_sets = all_resp.json().get("sets") or []
+    except Exception as exc:
+        logger.warning("[pokemon_scanner] Riftbound all-set list failed: %s", exc)
+        return []
+
+    # Newer sets first — that's where the hot cards are at a card show.
+    all_sets.sort(key=lambda s: s.get("published_on", ""), reverse=True)
+
+    aggregated: list[CandidateCard] = []
+    for s in all_sets:
+        hits = await _search_set(s["id"], s.get("name", ""))
+        aggregated.extend(hits)
+        if len(aggregated) >= limit:
+            break
+
+    if target_num:
+        aggregated.sort(
+            key=lambda c: (
+                0
+                if (c.number or "").split("/")[0].strip().lstrip("0") == target_num
+                else 1
+            )
+        )
+    return aggregated[:limit]
+
+
 async def _lookup_candidates_by_category(
     fields: ExtractedFields, category_id: str, ptcg_key: str = "",
 ) -> list[CandidateCard]:
@@ -1048,6 +1182,11 @@ async def _lookup_candidates_by_category(
             )
         if category_id == "71":
             return await _lorcast_search(
+                client, name=fields.card_name, set_name=fields.set_name,
+                number=fields.collector_number,
+            )
+        if category_id == "89":
+            return await _riftbound_search(
                 client, name=fields.card_name, set_name=fields.set_name,
                 number=fields.collector_number,
             )
@@ -1326,11 +1465,26 @@ def score_candidates(
 TCGTRACKING_BASE = "https://tcgtracking.com/tcgapi/v1"
 TCGTRACKING_POKEMON_CATS = ["3", "85"]  # 3 = Pokemon, 85 = Pokemon Japan
 
+# Minimal manual category fallback: if the TCGTracking category list ever
+# goes down or drops a game, we still want the scanner UI to offer the
+# TCGs our scanner actively supports. Keep this list in sync with
+# _lookup_candidates_by_category's dedicated branches.
+_MANUAL_CATEGORY_FALLBACK: list[dict] = [
+    {"id": "3", "name": "Pokemon"},
+    {"id": "85", "name": "Pokemon Japan"},
+    {"id": "68", "name": "One Piece Card Game"},
+    {"id": "89", "name": "Riftbound: League of Legends Trading Card Game"},
+    {"id": "1", "name": "Magic: The Gathering"},
+    {"id": "2", "name": "YuGiOh"},
+    {"id": "71", "name": "Disney Lorcana"},
+]
+
 # Preferred category ordering for the frontend selector
 _PREFERRED_CAT_ORDER = [
     "3",   # Pokemon
     "85",  # Pokemon Japan
     "68",  # One Piece Card Game
+    "89",  # Riftbound (League of Legends TCG)
     "80",  # Dragon Ball Super Fusion World
     "27",  # Dragon Ball Super CCG
     "23",  # Dragon Ball Z TCG
@@ -1369,19 +1523,26 @@ async def fetch_tcg_categories() -> list[dict]:
             resp = await client.get(f"{TCGTRACKING_BASE}/categories")
             if resp.status_code != 200:
                 logger.warning("[pokemon_scanner] Failed to fetch TCGTracking categories: %s", resp.status_code)
-                return []
+                return list(_MANUAL_CATEGORY_FALLBACK)
             raw_cats = resp.json().get("categories") or resp.json().get("data") or []
             if isinstance(resp.json(), list):
                 raw_cats = resp.json()
     except Exception as exc:
         logger.error("[pokemon_scanner] Error fetching TCGTracking categories: %s", exc)
-        return []
+        return list(_MANUAL_CATEGORY_FALLBACK)
 
     cat_map = {}
     for cat in raw_cats:
         cat_id = str(cat.get("id", ""))
         name = cat.get("display_name") or cat.get("name") or ""
         cat_map[cat_id] = {"id": cat_id, "name": name}
+
+    # Belt-and-suspenders: make sure every game we actively support shows up
+    # in the dropdown even if TCGTracking ever drops it from their category
+    # list. Without this, a Riftbound outage on their side would make
+    # Riftbound disappear from the scanner UI despite our code supporting it.
+    for fallback in _MANUAL_CATEGORY_FALLBACK:
+        cat_map.setdefault(fallback["id"], fallback)
 
     ordered: list[dict] = []
     seen = set()
@@ -1730,6 +1891,10 @@ _XIMILAR_TAG_TO_CATEGORY: dict[str, str] = {
     "digimon": "57",
     "weiss schwarz": "19",
     "union arena": "82",
+    "riftbound": "89",
+    "league of legends tcg": "89",
+    "league of legends trading card game": "89",
+    "lol tcg": "89",
 }
 
 
@@ -1750,6 +1915,7 @@ _CATEGORY_TO_GAME: dict[str, str] = {
     "80": "Dragon Ball",
     "82": "Union Arena",
     "85": "Pokemon",
+    "89": "Riftbound",
 }
 
 
@@ -1989,13 +2155,15 @@ def _ximilar_confidence(result: dict) -> float:
 _VISION_IDENTIFY_PROMPT = (
     "You are identifying a trading card from a photo. "
     "Return JSON with exactly these fields:\n"
-    "  game (one of: pokemon, magic, yugioh, onepiece, lorcana, dragonball, other)\n"
+    "  game (one of: pokemon, magic, yugioh, onepiece, lorcana, riftbound, dragonball, other)\n"
     "  card_name (the card name exactly as printed, including variant suffixes like \"ex\", \"VMAX\", \"V\")\n"
     "  set_name (the full set name if visible — do not guess)\n"
     "  collector_number (in \"X/Y\" format if both are visible, else just \"X\", else null)\n"
     "  variant_hint (e.g., \"Full Art\", \"Reverse Holo\", \"1st Edition\", or null)\n"
     "  language (e.g., \"English\", \"Japanese\")\n"
     "  confidence (0.0-1.0 — how certain you are)\n"
+    "Note: \"riftbound\" is Riot's League of Legends Trading Card Game — "
+    "look for the Riftbound logo or League of Legends branding.\n"
     "Return only JSON. No markdown fences. No explanation.\n"
     "If you cannot identify the card, return {\"confidence\": 0.0}."
 )
@@ -2010,6 +2178,7 @@ _VISION_GAME_TO_CATEGORY: dict[str, str] = {
     "yugioh": "2",
     "onepiece": "68",
     "lorcana": "71",
+    "riftbound": "89",
     "dragonball": "27",
     # "other" intentionally absent
 }
