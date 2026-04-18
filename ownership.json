@@ -1,0 +1,1242 @@
+{
+  "generated_by": "Atlas",
+  "generated_at": "2026-04-17",
+  "source_repo": "degen-deal-parser",
+  "routing_heuristics": [
+    {
+      "when": "Bug fix with clear repro + known file",
+      "route_to": "Forge",
+      "why": "Direct edit + PR"
+    },
+    {
+      "when": "\"Why did X happen in prod?\" / log grep",
+      "route_to": "Scout",
+      "why": "Fast log/DB investigation, no writes"
+    },
+    {
+      "when": "Data question (\"how many X this week?\")",
+      "route_to": "Scout",
+      "why": "Quick read-only SQL"
+    },
+    {
+      "when": "Pre-merge security/correctness review",
+      "route_to": "Echo",
+      "why": "Skeptical eye before deploy"
+    },
+    {
+      "when": "Post-incident audit",
+      "route_to": "Echo",
+      "why": "Writes critique, not patches"
+    },
+    {
+      "when": "\"Should we build X?\" / design tradeoff",
+      "route_to": "Atlas",
+      "why": "Spec + tradeoffs"
+    },
+    {
+      "when": "Cross-cutting refactor (>3 files, >1 area)",
+      "route_to": "Atlas → Forge",
+      "why": "Plan first, then build"
+    },
+    {
+      "when": "Live watch (\"ping me when X happens\")",
+      "route_to": "Beacon",
+      "why": "Long-running monitor"
+    },
+    {
+      "when": "Cron/scheduled job",
+      "route_to": "Beacon",
+      "why": "Owns recurring"
+    },
+    {
+      "when": "Customer-facing / business scope call",
+      "route_to": "Main (Jeffrey)",
+      "why": "Owner decides"
+    },
+    {
+      "when": "Anything touching `shared.py`",
+      "route_to": "Atlas → Forge → Echo",
+      "why": "5K LOC god-module; plan, build, review"
+    },
+    {
+      "when": "Anything touching parser/stitcher",
+      "route_to": "Forge → Echo",
+      "why": "Determinism is a stated invariant"
+    },
+    {
+      "when": "Anything touching auth/webhook signing",
+      "route_to": "Forge → Echo",
+      "why": "Security-sensitive; second pair of eyes mandatory"
+    }
+  ],
+  "areas": [
+    {
+      "id": "parser-ingestion",
+      "number": 1,
+      "name": "Parser & Ingestion (Discord → Transactions)",
+      "primary": "forge",
+      "secondary": "echo",
+      "loc": 7100,
+      "file_globs": [
+        "app/parser.py",
+        "app/worker.py",
+        "app/discord_ingest.py",
+        "app/reparse.py",
+        "app/reparse_runs.py",
+        "app/corrections.py",
+        "app/attachment_storage.py",
+        "app/attachment_repair.py",
+        "app/display_media.py",
+        "tests/test_discord_ingest.py",
+        "tests/test_parser_store_rules.py",
+        "tests/test_correction_*.py",
+        "tests/test_queue_reparse_validation.py",
+        "tests/test_pass2_consolidation.py",
+        "tests/test_recent_stitch_audit.py"
+      ],
+      "file_keywords": [
+        "attachment",
+        "audit",
+        "consolidation",
+        "correction",
+        "corrections",
+        "discord",
+        "display",
+        "fallback",
+        "force",
+        "heuristics",
+        "ingest",
+        "ingestion",
+        "media",
+        "parser",
+        "pass2",
+        "queue",
+        "recent",
+        "repair",
+        "reparse",
+        "rules",
+        "runs",
+        "stitch",
+        "stitching",
+        "storage",
+        "store",
+        "test",
+        "validation",
+        "worker"
+      ],
+      "summary": "rule-first parser, AI fallback, stitching heuristics, force-stitch patterns, reparse pipeline, correction-learning, Discord message ingest + attachment capture, message-state queue machine.",
+      "why": "deterministic logic, golden-file-testable, lots of incremental rule work. Why Echo secondary: AGENTS.md §\"Core Principles\" mandates determinism and immutable audit log — every change to this stack is a potential audit-trail break.",
+      "debt": [
+        {
+          "id": "C1",
+          "severity": "critical",
+          "description": "`discord_ingest.py:513-523` mutates `DiscordMessage.content` on Discord edit. Violates AGENTS.md invariant #1 (immutable audit log).",
+          "ref": "CORR-C1"
+        },
+        {
+          "id": "H1",
+          "severity": "high",
+          "description": "AI parser calls have no `temperature=0` or seed → reparse produces different answers on ambiguous messages.",
+          "ref": "CORR-H1"
+        },
+        {
+          "id": "H2",
+          "severity": "high",
+          "description": "stitched `group_id = uuid.uuid4()` → reparse changes the group_id; breaks replayability.",
+          "ref": "CORR-H2"
+        },
+        {
+          "id": "H5",
+          "severity": "high",
+          "description": "worker `except` branch commits partial state on SQLite.",
+          "ref": "CORR-H5"
+        },
+        {
+          "id": "M1",
+          "severity": "medium",
+          "description": "stitch candidate ordering non-deterministic on tied `created_at`.",
+          "ref": "CORR-M1"
+        },
+        {
+          "id": "M2",
+          "severity": "medium",
+          "description": "reparse not concurrency-safe with live worker.",
+          "ref": "CORR-M2"
+        }
+      ],
+      "follow_ups": [
+        {
+          "title": "Stop mutating `DiscordMessage` on edit",
+          "persona": "forge",
+          "estimate": "3h",
+          "priority": "high"
+        },
+        {
+          "title": "`temperature=0` + deterministic seed on AI parser call",
+          "persona": "forge",
+          "estimate": "1h",
+          "priority": "high"
+        },
+        {
+          "title": "Derive `group_id` from sorted member message IDs (stable hash)",
+          "persona": "forge",
+          "estimate": "1h",
+          "priority": "high"
+        },
+        {
+          "title": "Stable tiebreaker on stitch candidate sort (use `id` after `created_at`)",
+          "persona": "forge",
+          "estimate": "30m",
+          "priority": "medium"
+        },
+        {
+          "title": "Add reparse lock / \"pause worker during reparse\"",
+          "persona": "atlas",
+          "estimate": "4h",
+          "priority": "medium"
+        }
+      ]
+    },
+    {
+      "id": "scanner-inventory",
+      "number": 2,
+      "name": "Scanner & Inventory (Degen Eye + card CRUD)",
+      "primary": "forge",
+      "secondary": "scout",
+      "loc": 6100,
+      "file_globs": [
+        "app/pokemon_scanner.py",
+        "app/card_scanner.py",
+        "app/ai_resolver.py",
+        "app/cert_lookup.py",
+        "app/ai_client.py",
+        "app/inventory.py",
+        "app/inventory_pricing.py",
+        "app/inventory_barcode.py",
+        "app/templates/inventory*.html",
+        "inventory_scan_pokemon.html",
+        "tests/test_zweilous_scoring.py",
+        "tests/test_auto_promote.py"
+      ],
+      "file_keywords": [
+        "across",
+        "auto",
+        "barcode",
+        "camera",
+        "card",
+        "cert",
+        "client",
+        "confidence",
+        "inventory",
+        "lookup",
+        "lorcana",
+        "pokemon",
+        "pricing",
+        "promote",
+        "resolver",
+        "scan",
+        "scanner",
+        "scoring",
+        "test",
+        "tiered",
+        "zweilous"
+      ],
+      "summary": "camera/text card ID across Pokemon/MTG/YGO/OP/Lorcana/DBZ, confidence-tiered ensemble, TCGTracking price enrichment, inventory CRUD, barcode labels, auto-pricing.",
+      "why": "",
+      "debt": [
+        {
+          "id": "M5",
+          "severity": "medium",
+          "description": "`get_validation_result` pops cached result after first read → legitimate re-polls miss.",
+          "ref": "CORR-M5"
+        },
+        {
+          "id": "H4",
+          "severity": "high",
+          "description": "scanner has no image/query cache; identical rips pay full Ximilar + AI cost each time.",
+          "ref": "PERF-H4"
+        },
+        {
+          "id": "H7",
+          "severity": "high",
+          "description": "external-API fan-out has no rate-limit throttle.",
+          "ref": "PERF-H7"
+        },
+        {
+          "id": "L5",
+          "severity": "low",
+          "description": "inventory pricing is synchronous per item.",
+          "ref": "PERF-L5"
+        }
+      ],
+      "follow_ups": [
+        {
+          "title": "Add image-hash→scan-result cache (5min TTL)",
+          "persona": "forge",
+          "estimate": "2h",
+          "priority": "high"
+        },
+        {
+          "title": "Make `get_validation_result` non-destructive (leave cached copy for N seconds)",
+          "persona": "forge",
+          "estimate": "30m",
+          "priority": "medium"
+        },
+        {
+          "title": "Throttle Ximilar/Claude/Gemini fan-out with a semaphore",
+          "persona": "forge",
+          "estimate": "1h",
+          "priority": "medium"
+        },
+        {
+          "title": "Split `pokemon_scanner.py` into `scanner_pipeline.py` / `scanner_lookup.py` / `scanner_pricing.py`",
+          "persona": "atlas",
+          "estimate": "6h",
+          "priority": "medium"
+        }
+      ]
+    },
+    {
+      "id": "tiktok-integration",
+      "number": 3,
+      "name": "TikTok Integration (orders, webhook, ingest, auth, chat, products)",
+      "primary": "forge",
+      "secondary": "echo",
+      "loc": 7000,
+      "file_globs": [
+        "app/tiktok_ingest.py",
+        "app/tiktok_auth_refresh.py",
+        "app/tiktok_live_chat.py",
+        "app/routers/tiktok_orders.py",
+        "app/routers/tiktok_products.py",
+        "app/routers/tiktok_analytics.py",
+        "app/routers/tiktok_streamer.py",
+        "app/routers/stream_manager.py",
+        "scripts/tiktok_backfill.py",
+        "app/templates/tiktok_*.html",
+        "tests/test_tiktok_*.py"
+      ],
+      "file_keywords": [
+        "analytics",
+        "auth",
+        "backfill",
+        "chat",
+        "creator",
+        "ingest",
+        "integration",
+        "live",
+        "manager",
+        "oauth",
+        "order",
+        "orders",
+        "products",
+        "refresh",
+        "stream",
+        "streamer",
+        "test",
+        "tiktok",
+        "token",
+        "tokens"
+      ],
+      "summary": "OAuth (Shop + Creator tokens), token auto-refresh, order sync (backfill + poll + webhook), webhook signature verification, live chat capture, analytics aggregation, product CRUD, streamer dashboard backend.",
+      "why": "",
+      "debt": [
+        {
+          "id": "C3",
+          "severity": "critical",
+          "description": "webhook handler logs dump headers (`tiktok_orders.py:266`).",
+          "ref": "SECU-C3"
+        },
+        {
+          "id": "H2",
+          "severity": "high",
+          "description": "TikTok webhook has no replay/nonce protection; timestamp window check swallows parse errors.",
+          "ref": "SECU-H2"
+        },
+        {
+          "id": "H3",
+          "severity": "high",
+          "description": "token refresh has no retry, no jitter, no \"auth is dead\" alert.",
+          "ref": "RELI-H3"
+        },
+        {
+          "id": "H4",
+          "severity": "high",
+          "description": "webhook returns 500 on DB error but no durable queue.",
+          "ref": "RELI-H4"
+        },
+        {
+          "id": "M8",
+          "severity": "medium",
+          "description": "webhook enrichment can swallow auth-death.",
+          "ref": "RELI-M8"
+        },
+        {
+          "id": "C1",
+          "severity": "critical",
+          "description": "`TikTokOrder.updated_at` unindexed → every streamer poll table-scans.",
+          "ref": "PERF-C1"
+        },
+        {
+          "id": "C3",
+          "severity": "critical",
+          "description": "backfill scripts commit per row.",
+          "ref": "PERF-C3"
+        },
+        {
+          "id": "H2",
+          "severity": "high",
+          "description": "every poll re-fires `COUNT()` + `MAX(updated_at)`.",
+          "ref": "PERF-H2"
+        },
+        {
+          "id": "M6",
+          "severity": "medium",
+          "description": "`load_paid_tiktok_orders` filters status in Python, not SQL.",
+          "ref": "PERF-M6"
+        },
+        {
+          "id": "C2",
+          "severity": "critical",
+          "description": "TikTok order upsert overwrites complete data with partial webhook payloads (AGENTS.md explicitly says \"webhook payloads are incomplete — always fetch full details\").",
+          "ref": "CORR-C2"
+        },
+        {
+          "id": "H3",
+          "severity": "high",
+          "description": "no stable `buyer_user_id`; aggregation keys by lowercased display name → collisions.",
+          "ref": "CORR-H3"
+        }
+      ],
+      "follow_ups": [
+        {
+          "title": "Add `idx_tiktok_orders_updated_at` (Postgres + SQLite migration dicts)",
+          "persona": "forge",
+          "estimate": "30m",
+          "priority": "high"
+        },
+        {
+          "title": "Don't clobber complete order rows with partial webhook payloads",
+          "persona": "forge",
+          "estimate": "2h",
+          "priority": "high"
+        },
+        {
+          "title": "Redact `Authorization` and signature headers before logging",
+          "persona": "forge",
+          "estimate": "30m",
+          "priority": "high"
+        },
+        {
+          "title": "Add stable `buyer_user_id` (or hash of TikTok user numeric id)",
+          "persona": "atlas",
+          "estimate": "4h",
+          "priority": "high"
+        },
+        {
+          "title": "Batch commits in backfill (1 txn per N rows)",
+          "persona": "forge",
+          "estimate": "1h",
+          "priority": "medium"
+        },
+        {
+          "title": "Alert when \"last successful refresh\" age > token TTL/2",
+          "persona": "forge",
+          "estimate": "1h",
+          "priority": "medium"
+        }
+      ]
+    },
+    {
+      "id": "streamer-dashboard-live-stream-ops",
+      "number": 4,
+      "name": "Streamer Dashboard & Live-Stream Ops",
+      "primary": "forge",
+      "secondary": "main",
+      "loc": 2500,
+      "file_globs": [
+        "app/routers/tiktok_streamer.py",
+        "app/routers/stream_manager.py",
+        "app/routers/hits.py",
+        "app/templates/tiktok_streamer.html",
+        "stream_manager.html",
+        "hits*.html"
+      ],
+      "file_keywords": [
+        "alerts",
+        "dashboard",
+        "drilldowns",
+        "hits",
+        "live",
+        "manager",
+        "sparkline",
+        "stream",
+        "streamer",
+        "summary",
+        "tiktok"
+      ],
+      "summary": "live dashboard UX (GMV goal bar, VIP alerts, sparkline, chat, post-stream summary, drilldowns), stream schedule + streamer resolution, hit tracker.",
+      "why": "",
+      "debt": [
+        {
+          "id": "C4",
+          "severity": "critical",
+          "description": "`_GMV_CACHE_TTL_SECONDS = 10` equals the poll interval → cache is a no-op + stampede.",
+          "ref": "PERF-C4"
+        },
+        {
+          "id": "H1",
+          "severity": "high",
+          "description": "`get_current_streamer` recomputed every poll, no cache.",
+          "ref": "PERF-H1"
+        },
+        {
+          "id": "H3",
+          "severity": "high",
+          "description": "`_compute_order_velocity` has no cache.",
+          "ref": "PERF-H3"
+        },
+        {
+          "id": "M2",
+          "severity": "medium",
+          "description": "top-sellers/top-buyers rebuild `innerHTML` every 10s.",
+          "ref": "PERF-M2"
+        },
+        {
+          "id": "M5",
+          "severity": "medium",
+          "description": "`_get_app_setting` is a DB round-trip on every poll.",
+          "ref": "PERF-M5"
+        },
+        {
+          "id": "M8",
+          "severity": "medium",
+          "description": "stream-manager destructive actions gated only at \"viewer\" level.",
+          "ref": "SECU-M8"
+        },
+        {
+          "id": "M9",
+          "severity": "medium",
+          "description": "`/hits/{hit_id}/delete` only requires \"viewer\".",
+          "ref": "SECU-M9"
+        }
+      ],
+      "follow_ups": [
+        {
+          "title": "Raise GMV cache TTL to 60s (or add stampede guard)",
+          "persona": "forge",
+          "estimate": "30m",
+          "priority": "high"
+        },
+        {
+          "title": "Cache `get_current_streamer` for 30s",
+          "persona": "forge",
+          "estimate": "30m",
+          "priority": "high"
+        },
+        {
+          "title": "Raise role gate on stream-manager + hit-delete to `admin`",
+          "persona": "forge",
+          "estimate": "30m",
+          "priority": "high"
+        },
+        {
+          "title": "Diff-patch leaderboards instead of full `innerHTML` swap",
+          "persona": "forge",
+          "estimate": "3h",
+          "priority": "medium"
+        }
+      ]
+    },
+    {
+      "id": "shopify-integration",
+      "number": 5,
+      "name": "Shopify Integration",
+      "primary": "forge",
+      "secondary": "echo",
+      "loc": 2200,
+      "file_globs": [
+        "app/shopify_ingest.py",
+        "app/inventory_shopify.py",
+        "app/routers/shopify.py",
+        "app/backfill_requests.py",
+        "scripts/shopify_backfill.py",
+        "scripts/shopify_register_webhooks.py",
+        "tests/test_shopify_ingest.py"
+      ],
+      "file_keywords": [
+        "backfill",
+        "ingest",
+        "integration",
+        "inventory",
+        "order",
+        "product",
+        "register",
+        "requests",
+        "shopify",
+        "test",
+        "webhook",
+        "webhooks"
+      ],
+      "summary": "Shopify product sync, webhook ingest, mark-sold-from-order flow, backfill requests.",
+      "why": "",
+      "debt": [
+        {
+          "id": "H4",
+          "severity": "high",
+          "description": "`mark_inventory_sold_from_shopify_order` silently skips SKUs that don't match local barcodes and ignores line-item quantity.",
+          "ref": "CORR-H4"
+        },
+        {
+          "id": "M5",
+          "severity": "medium",
+          "description": "Shopify webhook has no replay protection / timestamp window.",
+          "ref": "SECU-M5"
+        }
+      ],
+      "follow_ups": [
+        {
+          "title": "Log (and surface in ops log) every SKU-miss in `mark_inventory_sold_from_shopify_order`",
+          "persona": "forge",
+          "estimate": "1h",
+          "priority": "high"
+        },
+        {
+          "title": "Respect line-item `quantity` when marking sold",
+          "persona": "forge",
+          "estimate": "1h",
+          "priority": "high"
+        },
+        {
+          "title": "Add Shopify webhook timestamp window + replay cache",
+          "persona": "forge",
+          "estimate": "2h",
+          "priority": "medium"
+        }
+      ]
+    },
+    {
+      "id": "reporting-financials-bookkeeping",
+      "number": 6,
+      "name": "Reporting, Financials & Bookkeeping",
+      "primary": "forge",
+      "secondary": "echo",
+      "loc": 3900,
+      "file_globs": [
+        "app/reporting.py",
+        "app/financials.py",
+        "app/transactions.py",
+        "app/bookkeeping.py",
+        "app/routers/reports.py",
+        "app/routers/bookkeeping.py",
+        "app/routers/dashboard.py",
+        "app/templates/reports.html",
+        "bookkeeping.html",
+        "finance.html",
+        "dashboard.html",
+        "tests/test_bookkeeping.py",
+        "tests/test_tiktok_reporting.py"
+      ],
+      "file_keywords": [
+        "bookkeeping",
+        "dashboard",
+        "finance",
+        "financial",
+        "financials",
+        "normalized",
+        "reporting",
+        "reports",
+        "test",
+        "tiktok",
+        "transaction",
+        "transactionitem",
+        "transactions"
+      ],
+      "summary": "P&L, financial reports, normalized `Transaction`/`TransactionItem` sync, bookkeeping sheet import + reconciliation, partner sheets.",
+      "why": "",
+      "debt": [
+        {
+          "id": "C2",
+          "severity": "critical",
+          "description": "buyer/product drilldowns scan ALL orders all-time on every click.",
+          "ref": "PERF-C2"
+        },
+        {
+          "id": "M1",
+          "severity": "medium",
+          "description": "no normalized `line_items` table; every analytics feature JSON-parses in Python.",
+          "ref": "PERF-M1"
+        },
+        {
+          "id": "L6",
+          "severity": "low",
+          "description": "reports cache keys have no version tag.",
+          "ref": "PERF-L6"
+        },
+        {
+          "id": "M3",
+          "severity": "medium",
+          "description": "float accumulation in financial summaries.",
+          "ref": "CORR-M3"
+        },
+        {
+          "id": "M4",
+          "severity": "medium",
+          "description": "multi-currency not validated (`TikTokOrder.currency` exists but reporting doesn't enforce).",
+          "ref": "CORR-M4"
+        },
+        {
+          "id": "M10",
+          "severity": "medium",
+          "description": "CSV/JSON exports include PII, no redaction option.",
+          "ref": "SECU-M10"
+        }
+      ],
+      "follow_ups": [
+        {
+          "title": "Bound drilldown queries to last 90d (or paginate)",
+          "persona": "forge",
+          "estimate": "2h",
+          "priority": "high"
+        },
+        {
+          "title": "Normalize `line_items` into a table",
+          "persona": "atlas",
+          "estimate": "8h",
+          "priority": "high"
+        },
+        {
+          "title": "Switch money math to `Decimal` at boundaries",
+          "persona": "atlas",
+          "estimate": "6h",
+          "priority": "medium"
+        },
+        {
+          "title": "Assert single-currency or group-by currency in TikTok reporting",
+          "persona": "forge",
+          "estimate": "2h",
+          "priority": "medium"
+        }
+      ]
+    },
+    {
+      "id": "auth-security",
+      "number": 7,
+      "name": "Auth & Security",
+      "primary": "forge",
+      "secondary": "echo",
+      "loc": 170,
+      "file_globs": [
+        "app/auth.py",
+        "app/routers/deals.py"
+      ],
+      "file_keywords": [
+        "auth",
+        "cookie",
+        "deals",
+        "hashing",
+        "lifecycle",
+        "password",
+        "pbkdf",
+        "security",
+        "session"
+      ],
+      "summary": "PBKDF2 password hashing, session cookie lifecycle, role gates, login flow.",
+      "why": "",
+      "debt": [
+        {
+          "id": "C2",
+          "severity": "critical",
+          "description": "auth.py:38-40 falls back to using `session_secret` as salt when user row has no `password_salt`. Leaked session secret + stale row = trivial crack.",
+          "ref": "SECU-C2"
+        },
+        {
+          "id": "H1",
+          "severity": "high",
+          "description": "no rate limiting on login brute force.",
+          "ref": "SECU-H1"
+        },
+        {
+          "id": "H3",
+          "severity": "high",
+          "description": "session cookies not enforced HTTPS-only (operator must set `SESSION_HTTPS_ONLY=true`).",
+          "ref": "SECU-H3"
+        },
+        {
+          "id": "H6",
+          "severity": "high",
+          "description": "OAuth `state` has no user/IP binding.",
+          "ref": "SECU-H6"
+        },
+        {
+          "id": "M1",
+          "severity": "medium",
+          "description": "PBKDF2 iteration count 200k below OWASP 2024 (600k).",
+          "ref": "SECU-M1"
+        },
+        {
+          "id": "M2",
+          "severity": "medium",
+          "description": "no CSRF tokens on state-changing POSTs.",
+          "ref": "SECU-M2"
+        }
+      ],
+      "follow_ups": [
+        {
+          "title": "Remove salt fallback entirely; force reset on rows without salt",
+          "persona": "forge",
+          "estimate": "2h",
+          "priority": "high"
+        },
+        {
+          "title": "Add login rate limit (fail2ban-style, Redis or in-mem)",
+          "persona": "forge",
+          "estimate": "3h",
+          "priority": "high"
+        },
+        {
+          "title": "Force `SESSION_HTTPS_ONLY=true` in code (not env default) for non-dev",
+          "persona": "forge",
+          "estimate": "30m",
+          "priority": "high"
+        },
+        {
+          "title": "Bump PBKDF2 to 600k + rehash on next login",
+          "persona": "forge",
+          "estimate": "2h",
+          "priority": "medium"
+        }
+      ]
+    },
+    {
+      "id": "db-infra-core-app",
+      "number": 8,
+      "name": "DB, Infra & Core App",
+      "primary": "atlas",
+      "secondary": "echo",
+      "loc": 7700,
+      "file_globs": [
+        "app/main.py",
+        "/health",
+        "app/shared.py",
+        "app/db.py",
+        "app/cache.py",
+        "app/models.py",
+        "app/config.py",
+        "app/schemas.py",
+        "tests/test_cache.py",
+        "tests/test_runtime_split_status.py"
+      ],
+      "file_keywords": [
+        "cache",
+        "config",
+        "core",
+        "engine",
+        "health",
+        "infra",
+        "main",
+        "middleware",
+        "migrations",
+        "models",
+        "runtime",
+        "schema",
+        "schemas",
+        "selection",
+        "shared",
+        "split",
+        "stack",
+        "status",
+        "test"
+      ],
+      "summary": "app boot, middleware stack, DB engine selection, schema migrations (dual-engine additive), shared helpers, background task orchestration (`track_background_task`).",
+      "why": "",
+      "debt": [
+        {
+          "id": "C1",
+          "severity": "critical",
+          "description": "`/health` returns HTTP 200 even when DB is dead (`main.py:687`). Watchdog is blind.",
+          "ref": "RELI-C1"
+        },
+        {
+          "id": "C2",
+          "severity": "critical",
+          "description": "web-process background tasks don't auto-restart (`shared.py:1937`).",
+          "ref": "RELI-C2"
+        },
+        {
+          "id": "H1",
+          "severity": "high",
+          "description": "dual-DB migration maps drift silently (SQLITE_ vs POSTGRES_ADDITIVE_MIGRATIONS).",
+          "ref": "RELI-H1"
+        },
+        {
+          "id": "M4",
+          "severity": "medium",
+          "description": "worker respawn has no exponential backoff.",
+          "ref": "RELI-M4"
+        },
+        {
+          "id": "M5",
+          "severity": "medium",
+          "description": "DB circuit breaker window very short.",
+          "ref": "RELI-M5"
+        },
+        {
+          "id": "M6",
+          "severity": "medium",
+          "description": "`init_db` runs migrations at every web-process startup (no advisory lock).",
+          "ref": "RELI-M6"
+        },
+        {
+          "id": "M4",
+          "severity": "medium",
+          "description": "missing composite indexes.",
+          "ref": "PERF-M4"
+        },
+        {
+          "id": "H6",
+          "severity": "high",
+          "description": "`app/cache.py` is unbounded → memory leak.",
+          "ref": "PERF-H6"
+        },
+        {
+          "id": "H5",
+          "severity": "high",
+          "description": "worker `except` branch commits partial state on SQLite.",
+          "ref": "CORR-H5"
+        }
+      ],
+      "follow_ups": [
+        {
+          "title": "`/health` returns 503 when DB dead",
+          "persona": "forge",
+          "estimate": "30m",
+          "priority": "high"
+        },
+        {
+          "title": "Respawn supervisor for web background tasks (steal pattern from `worker_service.py`)",
+          "persona": "atlas",
+          "estimate": "4h",
+          "priority": "high"
+        },
+        {
+          "title": "Migration-drift detector at startup (compare `SQLModel.metadata` to `information_schema`)",
+          "persona": "atlas",
+          "estimate": "6h",
+          "priority": "high"
+        },
+        {
+          "title": "Bound `app/cache.py` with max-entries + LRU",
+          "persona": "forge",
+          "estimate": "1h",
+          "priority": "high"
+        },
+        {
+          "title": "Do NOT attempt `shared.py` refactor without an Atlas plan first",
+          "persona": "atlas",
+          "estimate": "—",
+          "priority": "medium"
+        }
+      ]
+    },
+    {
+      "id": "observability-runtime-monitoring",
+      "number": 9,
+      "name": "Observability & Runtime Monitoring",
+      "primary": "forge",
+      "secondary": "scout",
+      "loc": 968,
+      "file_globs": [
+        "app/runtime_logging.py",
+        "app/runtime_monitor.py",
+        "app/ops_log.py",
+        "tests/test_ops_log.py",
+        "tests/test_runtime_split_status.py"
+      ],
+      "file_keywords": [
+        "heartbeat",
+        "log",
+        "logging",
+        "monitor",
+        "monitoring",
+        "observability",
+        "operationslog",
+        "ops",
+        "runtime",
+        "split",
+        "status",
+        "stdout",
+        "table",
+        "test"
+      ],
+      "summary": "stdout + file logging, `OperationsLog` table, runtime heartbeat, stuck-message detection.",
+      "why": "",
+      "debt": [
+        {
+          "id": "M3",
+          "severity": "medium",
+          "description": "`OperationsLog` / `ParseAttempt` have no retention policy.",
+          "ref": "RELI-M3"
+        },
+        {
+          "id": "M7",
+          "severity": "medium",
+          "description": "parser loop hammers logs during DB outage.",
+          "ref": "RELI-M7"
+        },
+        {
+          "id": "L1",
+          "severity": "low",
+          "description": "`print()` over stdout is the main channel.",
+          "ref": "RELI-L1"
+        },
+        {
+          "id": "L6",
+          "severity": "low",
+          "description": "runtime_logging logs everything without redaction (auth tokens, webhook bodies).",
+          "ref": "SECU-L6"
+        }
+      ],
+      "follow_ups": [
+        {
+          "title": "Nightly cleanup job: trim OperationsLog > 30d",
+          "persona": "forge",
+          "estimate": "2h",
+          "priority": "medium"
+        },
+        {
+          "title": "Back off parser loop logging during DB outage (1 log per minute, not per failure)",
+          "persona": "forge",
+          "estimate": "1h",
+          "priority": "medium"
+        },
+        {
+          "title": "Redact `Authorization`, `Cookie`, `X-TT-Signature` in request-body logs",
+          "persona": "forge",
+          "estimate": "2h",
+          "priority": "high"
+        }
+      ]
+    },
+    {
+      "id": "deploy-ops",
+      "number": 10,
+      "name": "Deploy & Ops",
+      "primary": "forge",
+      "secondary": "echo",
+      "loc": 3400,
+      "file_globs": [
+        "scripts/run_hosted.ps1",
+        "run_hosted_web.ps1",
+        "run_hosted_worker.ps1",
+        "run_local_*.ps1",
+        "scripts/backup_pg.ps1",
+        "scripts/redeploy.ps1",
+        "scripts/migrate_*.py",
+        ".github/workflows/deploy.yml",
+        "test.yml",
+        "render.yaml"
+      ],
+      "file_keywords": [
+        "backup",
+        "backups",
+        "deploy",
+        "hosted",
+        "local",
+        "machine",
+        "migrate",
+        "pipeline",
+        "redeploy",
+        "render",
+        "run",
+        "supervisor",
+        "test",
+        "watchdog",
+        "web",
+        "worker"
+      ],
+      "summary": "Machine B supervisor, watchdog, backups, deploy pipeline (GitHub Actions → Machine B via `git pull`), local dev scripts, SQLite/Postgres migration scripts.",
+      "why": "",
+      "debt": [
+        {
+          "id": "C1",
+          "severity": "critical",
+          "description": "production Postgres creds (`degen:degen42069`) in `AGENTS.md`, `PROJECT_STATUS.md`, `scripts/run_local_web_pg.ps1`. Repo read = DB ownership.",
+          "ref": "SECU-C1"
+        },
+        {
+          "id": "C4",
+          "severity": "critical",
+          "description": "`.env.local` with dev `SESSION_SECRET` committed.",
+          "ref": "SECU-C4"
+        },
+        {
+          "id": "H7",
+          "severity": "high",
+          "description": "unpinned deps in `requirements.txt`.",
+          "ref": "SECU-H7"
+        },
+        {
+          "id": "C3",
+          "severity": "critical",
+          "description": "no deploy rollback, no test gate before deploy.",
+          "ref": "RELI-C3"
+        },
+        {
+          "id": "C4",
+          "severity": "critical",
+          "description": "`backup_pg.ps1` unsafe prune (no \"keep at least N\"); no restore test.",
+          "ref": "RELI-C4"
+        },
+        {
+          "id": "H2",
+          "severity": "high",
+          "description": "watchdog exits after 20 cumulative restarts (not rolling window).",
+          "ref": "RELI-H2"
+        },
+        {
+          "id": "H5",
+          "severity": "high",
+          "description": "Cloudflare tunnel has no managed fallback / monitoring.",
+          "ref": "RELI-H5"
+        }
+      ],
+      "follow_ups": [
+        {
+          "title": "Rotate DB creds + purge from `AGENTS.md` / `PROJECT_STATUS.md` / `run_local_web_pg.ps1` + load from env",
+          "persona": "forge",
+          "estimate": "2h",
+          "priority": "high"
+        },
+        {
+          "title": "Remove `.env.local` from repo + `.gitignore` + rotate secret",
+          "persona": "forge",
+          "estimate": "30m",
+          "priority": "high"
+        },
+        {
+          "title": "`deploy.yml` depends on `test.yml` green",
+          "persona": "forge",
+          "estimate": "1h",
+          "priority": "high"
+        },
+        {
+          "title": "Capture pre-pull SHA and `reset --hard` on health-check fail",
+          "persona": "atlas",
+          "estimate": "4h",
+          "priority": "high"
+        },
+        {
+          "title": "Rolling-window restart counter in watchdog + exponential backoff",
+          "persona": "forge",
+          "estimate": "3h",
+          "priority": "high"
+        },
+        {
+          "title": "Pin `requirements.txt`",
+          "persona": "forge",
+          "estimate": "1h",
+          "priority": "medium"
+        },
+        {
+          "title": "`backup_pg.ps1` prune: never delete if <N backups remain",
+          "persona": "forge",
+          "estimate": "1h",
+          "priority": "high"
+        }
+      ]
+    },
+    {
+      "id": "frontend-templates",
+      "number": 11,
+      "name": "Frontend / Templates (cross-cutting)",
+      "primary": "forge",
+      "secondary": "main",
+      "loc": 44,
+      "file_globs": [
+        "app/templates/*.html"
+      ],
+      "file_keywords": [
+        "complex",
+        "frontend",
+        "small",
+        "streamer",
+        "surfaces",
+        "templates",
+        "tiktok"
+      ],
+      "summary": "all UX surfaces. Most templates are small; the complex ones are `tiktok_streamer.html`, `tiktok_analytics.html`, `tiktok_clients.html`, `inventory_scan_pokemon.html`, `messages_table.html`, `review_queue.html`, `stream_manager.html`.",
+      "why": "",
+      "debt": [],
+      "follow_ups": [
+        {
+          "title": "Audit templates for `| safe` usage / unescaped interpolation (pairs with Echo's XSS review)",
+          "persona": "echo",
+          "estimate": "2h",
+          "priority": "medium"
+        },
+        {
+          "title": "Cache-bust static assets with build SHA (Performance L2 adjacent)",
+          "persona": "forge",
+          "estimate": "1h",
+          "priority": "low"
+        }
+      ]
+    },
+    {
+      "id": "tests-qa",
+      "number": 12,
+      "name": "Tests / QA",
+      "primary": "forge",
+      "secondary": "echo",
+      "loc": 7781,
+      "file_globs": [
+        "tests/test_*.py",
+        "test_tiktok_reporting.py",
+        "test_queue_reparse_validation.py",
+        "test_attachment_repair_audit.py",
+        "test_navigation.py"
+      ],
+      "file_keywords": [
+        "attachment",
+        "audit",
+        "files",
+        "golden",
+        "integration",
+        "navigation",
+        "parser",
+        "queue",
+        "repair",
+        "reparse",
+        "reporting",
+        "test",
+        "tests",
+        "tiktok",
+        "validation"
+      ],
+      "summary": "unit + integration tests, parser golden files, TikTok reporting assertions, navigation smoke tests.",
+      "why": "",
+      "debt": [],
+      "follow_ups": [
+        {
+          "title": "Make `test.yml` a required check before `deploy.yml` runs",
+          "persona": "forge",
+          "estimate": "—",
+          "priority": "medium"
+        },
+        {
+          "title": "Add golden-file test that freezes parser output for N canonical messages",
+          "persona": "forge",
+          "estimate": "3h",
+          "priority": "high"
+        },
+        {
+          "title": "Pre-merge coverage report diff",
+          "persona": "atlas",
+          "estimate": "4h",
+          "priority": "medium"
+        }
+      ]
+    }
+  ]
+}
