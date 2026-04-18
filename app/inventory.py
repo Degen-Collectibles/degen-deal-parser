@@ -6,8 +6,10 @@ push-to-shopify) require 'reviewer' or above.
 """
 from __future__ import annotations
 
+import json
 import logging
 import math
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -687,6 +689,40 @@ async def inventory_scan_pokemon_identify(request: Request):
         status_code = 422
 
     return JSONResponse(result, status_code=status_code)
+
+
+@router.post("/degen_eye/client_log")
+async def inventory_scan_pokemon_client_log(request: Request):
+    """Append a client-side error report for post-mortem analysis."""
+    if denial := _require_viewer(request):
+        return denial
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+    if not isinstance(body, dict):
+        body = {"raw": body}
+
+    user = _get_user(request)
+    username = user.username if user else "anonymous"
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "user": username,
+        "ua": request.headers.get("user-agent", ""),
+        "ip": request.client.host if request.client else "",
+        **{k: v for k, v in body.items() if k not in ("ts", "user", "ua", "ip")},
+    }
+
+    log_dir = Path(__file__).resolve().parent.parent / "logs"
+    try:
+        log_dir.mkdir(exist_ok=True)
+        with open(log_dir / "degen_eye_client.log", "a") as f:
+            f.write(json.dumps(entry, default=str) + "\n")
+    except Exception as exc:
+        logger.warning("degen_eye client_log write failed: %s", exc)
+
+    return JSONResponse({"ok": True})
 
 
 @router.post("/degen_eye/text-search")

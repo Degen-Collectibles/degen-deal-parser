@@ -377,6 +377,126 @@
             .toast-container { bottom:80px; }
         }
 
+        /* ===== BUY CALCULATOR BAR ===== */
+        .buy-calc-bar {
+            position:fixed; left:0; right:0;
+            top:calc(56px + env(safe-area-inset-top,0px));
+            z-index:54;
+            display:flex; align-items:center; gap:8px;
+            padding:6px 12px;
+            background:linear-gradient(180deg,rgba(0,0,0,.55) 0%,rgba(0,0,0,.35) 100%);
+            backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px);
+            font-size:12px; color:#fff; font-weight:600;
+        }
+        .buy-mode-toggle {
+            display:inline-flex; border-radius:999px; overflow:hidden;
+            background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.18); padding:2px;
+        }
+        .buy-mode-btn {
+            appearance:none; border:none; background:transparent; color:rgba(255,255,255,.65);
+            font:inherit; font-size:12px; font-weight:800; padding:6px 14px; min-height:32px;
+            cursor:pointer; border-radius:999px; letter-spacing:.04em; text-transform:uppercase;
+        }
+        .buy-mode-btn.active {
+            background:linear-gradient(180deg,var(--accent),var(--accent-strong));
+            color:#fff; box-shadow:0 1px 4px rgba(0,0,0,.3);
+        }
+        .buy-pct-input {
+            width:56px; min-height:32px; padding:4px 6px; border-radius:8px;
+            border:1px solid rgba(255,255,255,.25); background:rgba(0,0,0,.35);
+            color:#fff; font:inherit; font-size:13px; font-weight:800; text-align:center;
+        }
+        .buy-pct-input:focus { outline:none; border-color:rgba(255,255,255,.55); }
+        .buy-calc-label { font-size:11px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; opacity:.75; }
+
+        /* ===== OFFLINE / RETRY BANNERS ===== */
+        .offline-banner {
+            position:fixed; left:0; right:0;
+            top:calc(56px + env(safe-area-inset-top,0px) + 48px);
+            z-index:58; padding:10px 14px; text-align:center;
+            background:#9d2f2b; color:#fff; font-size:13px; font-weight:800;
+            box-shadow:0 2px 10px rgba(0,0,0,.3);
+        }
+        .retry-banner {
+            position:fixed; left:12px; right:12px;
+            top:calc(56px + env(safe-area-inset-top,0px) + 52px);
+            z-index:59; padding:12px 14px; border-radius:12px;
+            background:#9d2f2b; color:#fff; font-size:14px; font-weight:800;
+            display:flex; align-items:center; justify-content:space-between; gap:12px;
+            box-shadow:0 4px 20px rgba(0,0,0,.4); cursor:pointer;
+            min-height:44px; animation:item-in .25s ease;
+        }
+        .retry-banner-dismiss {
+            display:inline-flex; align-items:center; justify-content:center;
+            width:32px; height:32px; border-radius:50%;
+            background:rgba(255,255,255,.18); font-size:18px; font-weight:400; cursor:pointer;
+        }
+
+        /* ===== RESULT OFFER ===== */
+        .result-offer {
+            margin-top:6px; padding:10px 12px; border-radius:12px;
+            background:linear-gradient(180deg,#fffdf5,#fff5e8);
+            border:1.5px solid #f0cda0;
+        }
+        .result-offer-label { font-size:11px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; color:var(--muted); }
+        .result-offer-amount { font-size:26px; font-weight:900; color:var(--accent-strong); line-height:1.1; margin-top:2px; }
+        .result-offer-none { font-size:14px; font-weight:700; color:var(--muted); margin-top:2px; font-style:italic; }
+        .result-offer-formula { font-size:11px; color:var(--muted); font-weight:500; margin-top:3px; }
+
+        /* ===== TCGPLAYER LINK ===== */
+        .tcgplayer-link {
+            display:inline-flex; align-items:center; justify-content:center;
+            min-height:44px; padding:10px 16px;
+            border-radius:12px; background:#1a6fb5; color:#fff !important;
+            font-size:13px; font-weight:800; text-decoration:none;
+            box-shadow:0 2px 6px rgba(26,111,181,.25);
+        }
+        .tcgplayer-link:hover { opacity:.9; }
+        .tcgplayer-link-sm {
+            display:block; margin-top:4px; padding:6px 4px;
+            font-size:10px; font-weight:700; color:var(--blue);
+            text-align:center; border-top:1px solid var(--line);
+        }
+
+        /* ===== CAMERA HELP OVERLAY ===== */
+        .camera-help-overlay {
+            position:fixed; inset:0; z-index:90;
+            background:rgba(0,0,0,.85); color:#fff;
+            display:flex; align-items:center; justify-content:center; padding:24px;
+        }
+        .camera-help-content {
+            max-width:360px; background:rgba(30,20,16,.95); padding:22px 20px;
+            border-radius:16px; border:1px solid rgba(255,255,255,.1);
+            text-align:center; font-size:14px; line-height:1.5;
+        }
+        .camera-help-content h3 { margin:0 0 10px; font-size:17px; }
+        .camera-help-content ol { text-align:left; margin:12px 0; padding-left:22px; }
+        .camera-help-content li { margin-bottom:6px; }
+        .camera-help-close {
+            margin-top:14px; padding:10px 22px; border-radius:10px; border:none;
+            background:var(--accent); color:#fff; font:inherit; font-weight:800; cursor:pointer;
+        }
+
+        /* Offer + candidate styles */
+        .candidate-tcg {
+            display:block; margin-top:4px; font-size:10px; font-weight:800; color:var(--blue);
+        }
+
+        @media(min-width:781px) {
+            .buy-calc-bar {
+                position:static; background:linear-gradient(180deg,var(--card-strong),var(--card));
+                border:1px solid var(--line); border-radius:16px;
+                padding:12px 18px; margin-bottom:14px; color:var(--text);
+                backdrop-filter:none; -webkit-backdrop-filter:none;
+            }
+            .buy-calc-label { color:var(--muted); }
+            .buy-pct-input { background:#fff; color:var(--text); border-color:var(--line); }
+            .buy-mode-toggle { background:#fff; border-color:var(--line); }
+            .buy-mode-btn { color:var(--muted); }
+            .offline-banner { top:20px; left:20px; right:20px; border-radius:12px; }
+            .retry-banner { top:20px; }
+        }
+
         /* ===== EDIT / SEARCH SHEETS ===== */
         .edit-overlay { position:fixed; inset:0; z-index:80; display:none; }
         .edit-overlay.open { display:flex; flex-direction:column; }
@@ -546,6 +666,43 @@
         </select>
     </div>
 
+    <!-- Buy calculator bar -->
+    <div class="buy-calc-bar" id="buy-calc-bar">
+        <div class="buy-mode-toggle" id="buy-mode-toggle" role="group" aria-label="Buy mode">
+            <button type="button" class="buy-mode-btn" data-buy-mode="cash">Cash</button>
+            <button type="button" class="buy-mode-btn" data-buy-mode="trade">Trade</button>
+        </div>
+        <span class="buy-calc-label" id="buy-calc-label">Cash %</span>
+        <input type="number" id="buy-pct-input" class="buy-pct-input" min="1" max="200" step="1" inputmode="numeric" aria-label="Buy percentage">
+    </div>
+
+    <!-- Offline banner -->
+    <div class="offline-banner" id="offline-banner" style="display:none;">
+        You're offline &mdash; scans paused
+    </div>
+
+    <!-- Retry banner -->
+    <div class="retry-banner" id="retry-banner" style="display:none;" onclick="PKScanner.retryLastScan()">
+        <span>Scan failed &mdash; tap to retry</span>
+        <span class="retry-banner-dismiss" onclick="event.stopPropagation();PKScanner.dismissRetry();" aria-label="Dismiss">&times;</span>
+    </div>
+
+    <!-- Camera permission help overlay -->
+    <div class="camera-help-overlay" id="camera-help-overlay" style="display:none;">
+        <div class="camera-help-content">
+            <h3>Camera access needed</h3>
+            <div id="camera-help-body">
+                <p>Degen Eye needs your camera to scan cards.</p>
+                <ol>
+                    <li><strong>iPhone (Safari):</strong> Settings &rarr; Safari &rarr; Camera &rarr; Allow.</li>
+                    <li><strong>Android (Chrome):</strong> tap the lock icon &rarr; Permissions &rarr; Camera &rarr; Allow.</li>
+                    <li>Return to this tab and tap Start Camera again.</li>
+                </ol>
+            </div>
+            <button type="button" class="camera-help-close" onclick="PKScanner.closeCameraHelp()">Got it</button>
+        </div>
+    </div>
+
     <!-- Toast notifications -->
     <div class="toast-container" id="toast-container"></div>
 </div>
@@ -688,6 +845,225 @@ var PKScanner = (function() {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Buy calculator (Cash / Trade % of market)
+    // ------------------------------------------------------------------
+    var buyMode = (localStorage.getItem('degen_eye_buy_mode') === 'trade') ? 'trade' : 'cash';
+    var buyCashPct = parseFloat(localStorage.getItem('degen_eye_buy_cash_pct'));
+    if (!(buyCashPct > 0 && buyCashPct <= 200)) buyCashPct = 75;
+    var buyTradePct = parseFloat(localStorage.getItem('degen_eye_buy_trade_pct'));
+    if (!(buyTradePct > 0 && buyTradePct <= 200)) buyTradePct = 80;
+
+    function _currentBuyPct() { return buyMode === 'trade' ? buyTradePct : buyCashPct; }
+
+    function _roundOffer(raw) {
+        if (raw == null || !isFinite(raw)) return null;
+        // Round DOWN to the nearest $0.25. Card-shop instinct.
+        var rounded = Math.floor(raw * 4) / 4;
+        if (rounded < 0) rounded = 0;
+        return rounded;
+    }
+
+    function _computeOffer(priceValue) {
+        if (priceValue == null || !isFinite(priceValue) || priceValue <= 0) return null;
+        var pct = _currentBuyPct();
+        var raw = priceValue * (pct / 100);
+        return { raw: raw, rounded: _roundOffer(raw), pct: pct };
+    }
+
+    function _buyCalcMarketPrice() {
+        // Single source of truth for "what price does the offer come off of":
+        // prefer the variant+condition price the user sees, fall back to the
+        // best_match's default price the same way the initial render does.
+        var vp = _getVariantPrice();
+        if (vp && vp.value != null) return vp.value;
+        if (lastResult && lastResult.best_match) {
+            var m = lastResult.best_match;
+            var dp = _pickDisplayPrice(m, m.available_variants || [], lastResult.detected_variant);
+            return dp.value;
+        }
+        return null;
+    }
+
+    function _updateOfferDisplay() {
+        var el = document.getElementById('result-offer');
+        if (!el) return;
+        var mkt = _buyCalcMarketPrice();
+        var offer = _computeOffer(mkt);
+        var modeLabel = buyMode === 'trade' ? 'Trade' : 'Cash';
+        if (!offer) {
+            el.innerHTML =
+                '<div class="result-offer-label">' + modeLabel + ' Offer</div>' +
+                '<div class="result-offer-none">No offer &mdash; needs manual pricing</div>';
+            return;
+        }
+        el.innerHTML =
+            '<div class="result-offer-label">' + modeLabel + ' Offer</div>' +
+            '<div class="result-offer-amount">$' + offer.rounded.toFixed(2) + '</div>' +
+            '<div class="result-offer-formula">' + offer.pct + '% of $' + mkt.toFixed(2) + ' (market), rounded to $0.25</div>';
+    }
+
+    function _syncBuyCalcUI() {
+        var input = document.getElementById('buy-pct-input');
+        var label = document.getElementById('buy-calc-label');
+        if (input) input.value = _currentBuyPct();
+        if (label) label.textContent = (buyMode === 'trade' ? 'Trade %' : 'Cash %');
+        var btns = document.querySelectorAll('#buy-mode-toggle .buy-mode-btn');
+        for (var i = 0; i < btns.length; i++) {
+            btns[i].classList.toggle('active', btns[i].getAttribute('data-buy-mode') === buyMode);
+        }
+    }
+
+    function setupBuyCalc() {
+        _syncBuyCalcUI();
+        var btns = document.querySelectorAll('#buy-mode-toggle .buy-mode-btn');
+        for (var i = 0; i < btns.length; i++) {
+            btns[i].addEventListener('click', function(e) {
+                var m = e.currentTarget.getAttribute('data-buy-mode');
+                if (m !== 'cash' && m !== 'trade') return;
+                buyMode = m;
+                try { localStorage.setItem('degen_eye_buy_mode', buyMode); } catch (_) {}
+                _syncBuyCalcUI();
+                _updateOfferDisplay();
+            });
+        }
+        var input = document.getElementById('buy-pct-input');
+        if (input) {
+            function commit() {
+                var v = parseFloat(input.value);
+                if (!(v > 0 && v <= 200)) { _syncBuyCalcUI(); return; }
+                if (buyMode === 'trade') {
+                    buyTradePct = v;
+                    try { localStorage.setItem('degen_eye_buy_trade_pct', String(v)); } catch (_) {}
+                } else {
+                    buyCashPct = v;
+                    try { localStorage.setItem('degen_eye_buy_cash_pct', String(v)); } catch (_) {}
+                }
+                _updateOfferDisplay();
+            }
+            input.addEventListener('change', commit);
+            input.addEventListener('blur', commit);
+            input.addEventListener('input', function() {
+                // Live update while the user types.
+                var v = parseFloat(input.value);
+                if (v > 0 && v <= 200) {
+                    if (buyMode === 'trade') buyTradePct = v; else buyCashPct = v;
+                    _updateOfferDisplay();
+                }
+            });
+        }
+    }
+
+    function tcgplayerUrlFor(card) {
+        if (!card) return '';
+        if (card.tcgplayer_url) return card.tcgplayer_url;
+        var q = ((card.name || card.card_name || '') + ' ' + (card.set_name || '')).trim();
+        return 'https://www.tcgplayer.com/search/pokemon/product?q=' + encodeURIComponent(q);
+    }
+
+    // ------------------------------------------------------------------
+    // Client-side error logging for post-mortem
+    // ------------------------------------------------------------------
+    function logClientError(event, extra) {
+        try {
+            var payload = {
+                event: String(event || 'unknown'),
+                url: location.pathname,
+                time: new Date().toISOString(),
+            };
+            if (extra && typeof extra === 'object') {
+                for (var k in extra) { if (Object.prototype.hasOwnProperty.call(extra, k)) payload[k] = extra[k]; }
+            }
+            // Best-effort; never throw, never block.
+            fetch('/degen_eye/client_log', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+                keepalive: true,
+            }).catch(function() {});
+        } catch (_) { /* ignore */ }
+    }
+
+    // ------------------------------------------------------------------
+    // Offline / retry banners
+    // ------------------------------------------------------------------
+    var _lastFailedCapture = null; // { b64, category, mode }
+    function showRetryBanner() {
+        var el = document.getElementById('retry-banner');
+        if (el) el.style.display = '';
+    }
+    function hideRetryBanner() {
+        var el = document.getElementById('retry-banner');
+        if (el) el.style.display = 'none';
+    }
+    function dismissRetry() {
+        _lastFailedCapture = null;
+        hideRetryBanner();
+    }
+    function retryLastScan() {
+        if (!_lastFailedCapture) { hideRetryBanner(); return; }
+        var cap = _lastFailedCapture;
+        _lastFailedCapture = null;
+        hideRetryBanner();
+        if (cap.mode === 'sequential') {
+            _runIdentify(cap.b64, 'sequential', null);
+        } else if (cap.mode === 'rapid' && cap.entry) {
+            cap.entry.status = 'queued';
+            updateQueueItemEl(cap.entry);
+            updateQueueStatus();
+            processQueue();
+        }
+    }
+
+    function _updateOnlineBanner() {
+        var el = document.getElementById('offline-banner');
+        if (!el) return;
+        el.style.display = navigator.onLine === false ? '' : 'none';
+    }
+    function setupOnlineDetection() {
+        _updateOnlineBanner();
+        window.addEventListener('online', _updateOnlineBanner);
+        window.addEventListener('offline', function() {
+            _updateOnlineBanner();
+            showStatus('You\u2019re offline \u2014 scans paused', 'err');
+        });
+    }
+
+    function setupVisibilityResume() {
+        document.addEventListener('visibilitychange', function() {
+            if (document.visibilityState !== 'visible') return;
+            // If we had a live stream that died (another app grabbed camera,
+            // tab backgrounded), the video tracks end. Re-acquire transparently.
+            if (stream) {
+                var tracks = stream.getVideoTracks();
+                var alive = tracks.some(function(t) { return t.readyState === 'live' && !t.muted; });
+                if (!alive) {
+                    try { stream.getTracks().forEach(function(t) { t.stop(); }); } catch (_) {}
+                    stream = null;
+                    startCamera();
+                }
+            } else {
+                var video = document.getElementById('video');
+                if (video && !video.srcObject && isMobile()) {
+                    // Mobile auto-starts camera on load; if we're visible and
+                    // have no stream, try to recover.
+                    startCamera();
+                }
+            }
+            _updateOnlineBanner();
+        });
+    }
+
+    function closeCameraHelp() {
+        var el = document.getElementById('camera-help-overlay');
+        if (el) el.style.display = 'none';
+    }
+    function openCameraHelp(errName) {
+        var el = document.getElementById('camera-help-overlay');
+        if (el) el.style.display = '';
+        logClientError('camera_permission_denied', { errName: errName || '' });
+    }
+
     function _pickDisplayPrice(match, variants, detectedVariant) {
         if (detectedVariant && variants.length) {
             for (var i = 0; i < variants.length; i++) {
@@ -711,7 +1087,9 @@ var PKScanner = (function() {
 
     function pollValidation(scanId, onUpdate) {
         var attempts = 0;
-        var maxAttempts = 30;
+        // Cap at ~10 seconds — at a card show, never let the "Verifying..."
+        // badge get stuck. 7 attempts × 1500ms = 10.5s.
+        var maxAttempts = 7;
         var interval = 1500;
         function poll() {
             attempts++;
@@ -758,6 +1136,9 @@ var PKScanner = (function() {
     // ------------------------------------------------------------------
     async function startCamera() {
         try {
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                throw new Error('Camera API unavailable in this browser');
+            }
             // Landscape constraints match the sensor's native orientation so
             // Safari/Chrome don't rotate every frame. The <video> + CSS crop
             // to fit the portrait viewport, identical to how Camera.app does it.
@@ -779,7 +1160,17 @@ var PKScanner = (function() {
             document.getElementById('flip-btn').style.display = '';
             document.getElementById('stop-btn').style.display = '';
         } catch(e) {
-            showStatus('Camera access denied: ' + e.message, 'err');
+            var name = (e && e.name) || '';
+            if (name === 'NotAllowedError' || name === 'SecurityError' || /permission/i.test(e.message || '')) {
+                openCameraHelp(name);
+                showStatus('Camera access denied. Check the help above for fixing this.', 'err');
+            } else if (name === 'NotFoundError' || name === 'OverconstrainedError') {
+                showStatus('No camera found on this device.', 'err');
+                logClientError('camera_not_found', { errName: name, msg: e.message || '' });
+            } else {
+                showStatus('Camera error: ' + (e.message || name || 'unknown'), 'err');
+                logClientError('camera_start_error', { errName: name, msg: e.message || '' });
+            }
         }
     }
 
@@ -906,7 +1297,19 @@ var PKScanner = (function() {
     // ------------------------------------------------------------------
     var sequentialLock = false;
 
+    var _captureBtnLock = false;
     document.getElementById('capture-btn').addEventListener('click', function() {
+        // 500ms double-tap guard — prevents accidental double-scans that
+        // waste pipeline calls at a card show.
+        if (_captureBtnLock) return;
+        _captureBtnLock = true;
+        var btn = document.getElementById('capture-btn');
+        btn.disabled = true;
+        setTimeout(function() {
+            _captureBtnLock = false;
+            // Respect the stream/sequentialLock state when re-enabling.
+            if (!sequentialLock) btn.disabled = !stream;
+        }, 500);
         if (isRapidFire()) {
             captureRapidFire();
         } else {
@@ -921,22 +1324,57 @@ var PKScanner = (function() {
         selectedCandidateIdx = null;
         var btn = document.getElementById('capture-btn');
         btn.disabled = true;
+        hideRetryBanner();
 
         flashEffect();
         showStatus('<span class="spinner"></span> Scanning card...', 'info');
 
+        var b64 = null;
+        var slowTimer = null;
         try {
-            var b64 = captureImage();
+            b64 = captureImage();
+        } catch (e) {
+            showStatus('Capture failed: ' + (e.message || e), 'err');
+            logClientError('capture_image_error', { msg: e.message || String(e) });
+            sequentialLock = false;
+            btn.disabled = !stream;
+            return;
+        }
+
+        // "Still working..." progress after 3s so employees don't think it froze.
+        var slowStart = Date.now();
+        slowTimer = setInterval(function() {
+            var secs = Math.round((Date.now() - slowStart) / 1000);
+            if (secs >= 3) {
+                showStatus('<span class="spinner"></span> Still working\u2026 (' + secs + 's)', 'info');
+            }
+        }, 1000);
+
+        try {
+            // 20s client-side timeout. AbortController is widely supported on
+            // every browser we target at the show.
+            var ctrl = null;
+            var timer = null;
+            if (typeof AbortController === 'function') {
+                ctrl = new AbortController();
+                timer = setTimeout(function() { ctrl.abort(); }, 20000);
+            }
             var resp = await fetch('/degen_eye/identify', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ image: b64, category_id: selectedCategoryId, mode: selectedMode })
+                body: JSON.stringify({ image: b64, category_id: selectedCategoryId, mode: selectedMode }),
+                signal: ctrl ? ctrl.signal : undefined,
             });
+            if (timer) clearTimeout(timer);
+            if (!resp.ok && resp.status >= 500) {
+                throw new Error('Server ' + resp.status);
+            }
             var data = await resp.json();
             lastResult = data;
 
             if (data.status === 'ERROR') {
                 showStatus(data.error || 'Pipeline error', 'err');
+                logClientError('pipeline_error', { error: data.error || '', status: 'ERROR' });
             } else if (data.status === 'NO_MATCH') {
                 showStatus('No matching card found. Try again or adjust angle.', 'warn');
             } else if (data.status === 'AMBIGUOUS') {
@@ -961,9 +1399,54 @@ var PKScanner = (function() {
                 });
             }
         } catch(e) {
-            showStatus('Error: ' + e.message, 'err');
+            var msg = (e && e.name === 'AbortError') ? 'Request timed out' : (e.message || 'Network error');
+            showStatus(msg + ' \u2014 tap the red banner to retry.', 'err');
+            _lastFailedCapture = { mode: 'sequential', b64: b64 };
+            showRetryBanner();
+            logClientError('identify_error', {
+                msg: msg,
+                online: navigator.onLine,
+                errName: (e && e.name) || '',
+            });
+        } finally {
+            if (slowTimer) clearInterval(slowTimer);
         }
 
+        sequentialLock = false;
+        btn.disabled = !stream;
+    }
+
+    // Re-identify path used by the retry banner for a sequential scan.
+    async function _runIdentify(b64, mode, entry) {
+        if (mode !== 'sequential') return;
+        var btn = document.getElementById('capture-btn');
+        if (sequentialLock) return;
+        sequentialLock = true;
+        btn.disabled = true;
+        showStatus('<span class="spinner"></span> Retrying scan\u2026', 'info');
+        try {
+            var resp = await fetch('/degen_eye/identify', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ image: b64, category_id: selectedCategoryId, mode: selectedMode })
+            });
+            if (!resp.ok && resp.status >= 500) throw new Error('Server ' + resp.status);
+            var data = await resp.json();
+            lastResult = data;
+            showStatus(data.best_match ? ('Matched: ' + data.best_match.name) : (data.error || 'No match'), data.best_match ? 'ok' : 'warn');
+            showResult(data);
+            if (data.validation_pending && data.scan_id) {
+                pollValidation(data.scan_id, function(updated) {
+                    lastResult = updated;
+                    showResult(updated);
+                });
+            }
+        } catch (e) {
+            showStatus('Retry failed: ' + (e.message || e), 'err');
+            _lastFailedCapture = { mode: 'sequential', b64: b64 };
+            showRetryBanner();
+            logClientError('identify_retry_error', { msg: e.message || String(e) });
+        }
         sequentialLock = false;
         btn.disabled = !stream;
     }
@@ -975,6 +1458,21 @@ var PKScanner = (function() {
         var scanId = nextScanId++;
         var entry = { id: scanId, b64: b64, status: 'queued', result: null };
         scanQueue.push(entry);
+
+        // Long-session memory guard: cap in-memory history at 50 finished
+        // entries. Never evict queued/processing/error entries — those are
+        // either about to run or waiting on retry.
+        if (scanQueue.length > 50) {
+            for (var i = 0; i < scanQueue.length && scanQueue.length > 50; i++) {
+                var s = scanQueue[i].status;
+                if (s === 'matched' || s === 'review') {
+                    var removed = scanQueue.splice(i, 1)[0];
+                    var el = document.querySelector('[data-scan-id="' + removed.id + '"]');
+                    if (el) el.remove();
+                    i--;
+                }
+            }
+        }
 
         renderQueueItem(entry);
         updateQueueStatus();
@@ -1097,10 +1595,15 @@ var PKScanner = (function() {
         .catch(function(err) {
             entry.status = 'error';
             entry.errorMsg = err.message || 'Network error';
-            entry.b64 = null;
+            // Keep b64 around so the user can retry this specific entry.
             activeRequests--;
             updateQueueItemEl(entry);
             updateQueueStatus();
+            logClientError('rapid_identify_error', {
+                msg: entry.errorMsg,
+                online: navigator.onLine,
+                errName: (err && err.name) || '',
+            });
             processQueue();
         });
 
@@ -1325,8 +1828,10 @@ var PKScanner = (function() {
                 }
                 html += '</select></div>';
             }
+            html += '<div class="result-offer" id="result-offer"></div>';
             html += '<div class="result-actions">';
             html += '<button class="btn-primary" onclick="PKScanner.addBestMatch()">Add to Batch</button>';
+            html += '<a class="tcgplayer-link" href="' + escHtml(tcgplayerUrlFor(m)) + '" target="_blank" rel="noopener">View on TCGplayer &rarr;</a>';
             html += '<button class="btn-outline" onclick="PKScanner.retake()">Retake</button>';
             html += '</div>';
             html += '</div></div>';
@@ -1357,6 +1862,7 @@ var PKScanner = (function() {
                 } else {
                     html += '<div class="c-price c-price-none">No price</div>';
                 }
+                html += '<a class="tcgplayer-link-sm" href="' + escHtml(tcgplayerUrlFor(c)) + '" target="_blank" rel="noopener" onclick="event.stopPropagation();">TCGplayer &rarr;</a>';
                 html += '</div>';
             }
             html += '</div></div>';
@@ -1371,6 +1877,7 @@ var PKScanner = (function() {
         }
 
         content.innerHTML = html;
+        _updateOfferDisplay();
 
         var debugEl = document.getElementById('debug-content');
         var dbg = data.debug || {};
@@ -1600,6 +2107,7 @@ var PKScanner = (function() {
         } else if (priceEl) {
             priceEl.innerHTML = '<span style="color:var(--muted);">No price data</span>';
         }
+        _updateOfferDisplay();
     }
 
     function onVariantChange() {
@@ -2372,6 +2880,9 @@ var PKScanner = (function() {
     Drawer.init();
     loadCategories();
     setupModeSelectors();
+    setupBuyCalc();
+    setupOnlineDetection();
+    setupVisibilityResume();
     setupTapToFocus();
 
     if (isMobile()) {
@@ -2388,6 +2899,9 @@ var PKScanner = (function() {
         onVariantChange: onVariantChange,
         onResultConditionChange: onResultConditionChange,
         retake: retake,
+        retryLastScan: retryLastScan,
+        dismissRetry: dismissRetry,
+        closeCameraHelp: closeCameraHelp,
         clearBatch: clearBatch,
         goReview: goReview,
         toggleDebug: toggleDebug,
