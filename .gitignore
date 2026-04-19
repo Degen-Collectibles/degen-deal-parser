@@ -34,3 +34,4 @@ Thumbs.db
 
 # Temp test artifacts
 tests/.tmp_*/
+.forge-scratch/
