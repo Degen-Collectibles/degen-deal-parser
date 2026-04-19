@@ -158,6 +158,19 @@ CASES = [
     ("Lorcana — Elsa", "71", {
         "card_name": "Elsa",
     }, False, None),
+    # Set-name normalization: vision drifts — test that candidates still come
+    # back when the set name doesn't exactly match the catalog string.
+    ("One Piece — Luffy set-drift 'OP01 Romance Dawn'", "68", {
+        "card_name": "Monkey D. Luffy",
+        "set_name": "OP01 Romance Dawn",
+        "collector_number": "OP01-003",
+    }, True, "Romance Dawn"),
+    # Set drift: vision says "The First Chapter" but Lorcast needs set code; test
+    # that the name-only fallback still surfaces Elsa candidates (was 0 before fix).
+    ("Lorcana — Elsa set-drift 'The First Chapter'", "71", {
+        "card_name": "Elsa",
+        "set_name": "The First Chapter",
+    }, False, None),
     # Regression for Pokemon — real pipeline's scorer picks the right set,
     # so we just need the right set to be *among* the candidates.
     ("Pokemon — Pikachu 25 S&V:151", "3", {

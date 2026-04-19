@@ -788,14 +788,22 @@ async def _optcg_search(
     data: list[dict] = []
     tried: list[tuple[str, Optional[str]]] = []
 
+    # Build set_name variants to try: raw vision string, normalized (strips
+    # "OP01" set-code prefixes that vision sometimes includes), then None.
+    set_variants: list[Optional[str]] = []
+    if set_name:
+        set_variants.append(set_name)
+        normed_set = _norm_set(set_name).title()
+        if normed_set and normed_set != set_name:
+            set_variants.append(normed_set)
+    set_variants.append(None)
+
     for variant in name_variants:
-        for use_set in (True, False):
-            if use_set and not set_name:
-                continue
+        for sv in set_variants:
             params: dict[str, str] = {"card_name": variant}
-            if use_set:
-                params["set_name"] = set_name  # type: ignore[assignment]
-            tried.append((variant, set_name if use_set else None))
+            if sv:
+                params["set_name"] = sv
+            tried.append((variant, sv))
             try:
                 resp = await client.get(
                     f"{OPTCG_BASE}/sets/filtered/", params=params,
@@ -887,25 +895,46 @@ async def _lorcast_search(
     """Search Lorcast for Disney Lorcana cards."""
     if not name:
         return []
-    q_parts = [name]
-    if set_name:
-        q_parts.append(f"set:{set_name}")
-    if number:
-        q_parts.append(f"number:{number}")
 
-    lorcast_params = {"q": " ".join(q_parts), "unique": "prints"}
-    try:
-        resp = await client.get(f"{LORCAST_BASE}/cards/search", params=lorcast_params)
-        if resp.status_code != 200:
-            logger.warning(
-                "[pokemon_scanner] Lorcast HTTP %s for %s (params=%r): %s",
-                resp.status_code, f"{LORCAST_BASE}/cards/search", lorcast_params, resp.text[:200],
-            )
-            return []
-        data = resp.json().get("results") or []
-    except Exception as exc:
-        logger.warning("[pokemon_scanner] Lorcast search failed: %s", exc)
-        return []
+    # Build query variants: with set filter (raw then normalized), then
+    # name-only fallback. The Lorcast `set:` filter needs their catalog's
+    # exact set code/name; vision output drifts, so we always fall back to a
+    # name-only query so we get at least some candidates for _candidate_rank.
+    query_variants: list[list[str]] = []
+    if set_name:
+        q_with_set = [name, f"set:{set_name}"]
+        if number:
+            q_with_set.append(f"number:{number}")
+        query_variants.append(q_with_set)
+        norm = _norm_set(set_name).title()
+        if norm and norm != set_name:
+            q_norm = [name, f"set:{norm}"]
+            if number:
+                q_norm.append(f"number:{number}")
+            query_variants.append(q_norm)
+    q_fallback = [name]
+    if number:
+        q_fallback.append(f"number:{number}")
+    query_variants.append(q_fallback)
+
+    data: list[dict] = []
+    for q_parts in query_variants:
+        lorcast_params = {"q": " ".join(q_parts), "unique": "prints"}
+        try:
+            resp = await client.get(f"{LORCAST_BASE}/cards/search", params=lorcast_params)
+            if resp.status_code != 200:
+                logger.warning(
+                    "[pokemon_scanner] Lorcast HTTP %s for %s (params=%r): %s",
+                    resp.status_code, f"{LORCAST_BASE}/cards/search", lorcast_params,
+                    resp.text[:200],
+                )
+                continue
+            data = resp.json().get("results") or []
+            if data:
+                break
+        except Exception as exc:
+            logger.warning("[pokemon_scanner] Lorcast search failed: %s", exc)
+            continue
 
     results: list[CandidateCard] = []
     for card in data[:limit]:
@@ -2536,12 +2565,17 @@ def _norm_set(s: Optional[str]) -> str:
                    "sword & shield: ", "sword and shield: ",
                    "sun & moon: ", "sun and moon: ",
                    "xy: ", "x y: ",
-                   "black & white: ", "black and white: "):
+                   "black & white: ", "black and white: ",
+                   "one piece card game: ", "one piece: ",
+                   "disney lorcana: ", "lorcana: "):
         if s.startswith(prefix):
             s = s[len(prefix):]
             break
-    # Normalize punctuation and whitespace
+    # Strip leading OPTCG set codes ("op01 ", "op-01 ") that vision sometimes
+    # includes before the human-readable set name ("OP01 Romance Dawn").
     import re as _re
+    s = _re.sub(r"^op[\s-]?\d{2}[\s-]?", "", s)
+    # Normalize punctuation and whitespace
     s = _re.sub(r"[^a-z0-9]+", " ", s).strip()
     return " ".join(s.split())
 
