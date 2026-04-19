@@ -315,7 +315,7 @@ def parse_trade_hint(message_text: str) -> Dict[str, Any] | None:
 
 
 def extract_payment_amount_method(text: str) -> tuple[float | None, str | None]:
-    lower = normalize_message_part(text).lower()
+    lower = _normalize_amount_text(normalize_message_part(text).lower())
     if not lower:
         return None, None
 
@@ -376,13 +376,46 @@ def normalize_payment_method(payment_method: str) -> str:
     return "card" if payment_method in {"tap", "cc", "dc"} else payment_method
 
 
+def _normalize_amount_text(text: str) -> str:
+    """Normalize number tokens so the amount regex works on shorthand input.
+
+    Applied at the start of every amount extractor. Two transformations:
+
+    1. Strip thousand-separator commas. ``$11,050`` -> ``$11050``.
+       Without this, ``\\d+`` stops at the comma and we keep only
+       ``050`` (= 50), which is how ``$11,050 bought 13 cases`` got
+       parsed as ``$50``.
+
+    2. Expand ``k`` and ``M`` suffixes to their full integers.
+       ``6k`` -> ``6000``, ``1.5k`` -> ``1500``, ``2M`` -> ``2000000``.
+       Without this, ``Give company 6k cash`` was parsed as ``$6``.
+
+    The regex-based extractors downstream are left unchanged, so the
+    only new surface area is this pre-processing pass.
+    """
+    if not text:
+        return text
+    # Collapse thousand-separator commas. Two passes handle $1,250,000
+    # and other multi-group numbers.
+    normalized = re.sub(r"(\d),(\d{3})\b", r"\1\2", text)
+    normalized = re.sub(r"(\d),(\d{3})\b", r"\1\2", normalized)
+
+    def _expand(m: re.Match) -> str:
+        num = float(m.group(1))
+        multiplier = 1000 if m.group(2).lower() == "k" else 1_000_000
+        result = num * multiplier
+        return str(int(result)) if result == int(result) else f"{result:.2f}"
+
+    return re.sub(r"(\d+(?:\.\d+)?)([km])\b", _expand, normalized, flags=re.I)
+
+
 def is_payment_method_only_message_text(text: str) -> bool:
     lower = normalize_message_part(text).lower()
     return bool(re.fullmatch(r"(zelle|venmo|paypal|cash|card|tap|cc|dc)", lower, re.I))
 
 
 def extract_payment_segments(text: str) -> list[tuple[float, str]]:
-    lower = normalize_message_part(text).lower()
+    lower = _normalize_amount_text(normalize_message_part(text).lower())
     if not lower:
         return []
 
@@ -423,7 +456,7 @@ def has_grade_context_before(text: str, number_start: int) -> bool:
 
 
 def extract_unlabeled_amount(text: str) -> float | None:
-    lower = normalize_message_part(text).lower()
+    lower = _normalize_amount_text(normalize_message_part(text).lower())
     if not lower:
         return None
 
@@ -864,9 +897,18 @@ def looks_like_date_marker(message_text: str) -> bool:
 
 
 def looks_like_internal_cash_transfer(message_text: str) -> bool:
-    if has_reimbursement_buy_signal(message_text):
-        return False
+    """True when the message describes an internal money flow (not a transaction).
 
+    Internal transfers are things like "Give company 6k cash (owe me)" --
+    an employee or owner lending money to the business. The company's
+    balance sheet changes (cash in, loan payable) but this is NOT a
+    sell/buy/trade and must not appear in revenue/expense reporting.
+
+    Important: an explicit "give/gave/loan <X> company cash" pattern
+    WINS over any "owe me" reimbursement signal. "Owe me" in this
+    context means "the company owes me that loan back later," not
+    "the store still owes me reimbursement for inventory I bought".
+    """
     lower = normalize_detector_text(message_text).lower()
     if not lower:
         return False
@@ -879,9 +921,20 @@ def looks_like_internal_cash_transfer(message_text: str) -> bool:
         rf"\b{transfer_terms}\b.*\b{company_terms}\b.*\b\d[\dk,\.]*\s*(cash|zelle|venmo|paypal|cc|dc|card)?\b.*\b{loan_terms}\b",
         rf"\b{company_terms}\b.*\b\d[\dk,\.]*\s*(cash|zelle|venmo|paypal|cc|dc|card)?\b.*\b{loan_terms}\b",
         rf"\b{transfer_terms}\b.*\b{company_terms}\b.*\b\d[\dk,\.]*\s*(cash|zelle|venmo|paypal|cc|dc|card)?\b",
+        # Supports the "Put 3k cash into the company" ordering where
+        # the amount precedes the company term.
+        rf"\b{transfer_terms}\b.*\b\d[\dk,\.]*\s*(cash|zelle|venmo|paypal|cc|dc|card)\b.*\b(?:in|into|to)\b\s+(?:the\s+)?{company_terms}\b",
         rf"\b{loan_terms}\b.*\b{company_terms}\b",
     ]
-    return any(re.search(pattern, lower, re.I) for pattern in patterns)
+    if any(re.search(pattern, lower, re.I) for pattern in patterns):
+        return True
+
+    # If none of the explicit transfer patterns fired, fall back to
+    # treating "owe me" as a reimbursement signal (store bought
+    # inventory and owes the logger back). That is NOT an internal
+    # transfer, so we return False here too -- but only after confirming
+    # no transfer pattern matched.
+    return False
 
 
 def _detect_conversational_noise(lower: str, image_urls: List[str] | None = None) -> str | None:
