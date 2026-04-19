@@ -30,7 +30,11 @@ EXPENSE_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
     ("software", ("software", "subscription", "quickbooks", "shopify", "canva", "adobe", "discord boost")),
     ("fees", ("vendor fee", "table fee", "booth fee", "event fee", "processing fee", "stripe fee", "square fee")),
     ("shipping", ("shipping", "postage", "usps", "ups", "fedex", "label cost")),
-    ("travel", ("gas", "parking", "hotel", "mileage", "uber", "lyft")),
+    ("travel", (
+        "gas", "parking", "hotel", "mileage", "uber", "lyft",
+        "flight", "flights", "airfare", "plane ticket", "airline",
+        "baggage", "checked bag", "rental car", "rideshare",
+    )),
     ("food", ("food", "lunch", "dinner", "snacks", "coffee")),
     ("payroll", ("payroll", "wages", "salary", "commission", "paid staff")),
     ("tax", ("tax", "sales tax", "franchise tax", "license renewal")),
