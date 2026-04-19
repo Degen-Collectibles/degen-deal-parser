@@ -3194,67 +3194,318 @@ async def _background_balanced_validate(
         )
 
 
-_TEXT_SEARCH_PARSE_PROMPT = """You are a TCG card search query parser. The user will give you a free-text search query for a trading card game card. Extract structured fields from it.
+# ---------------------------------------------------------------------------
+# Text search — free-text query parsing
+#
+# The parser feeds _lookup_candidates_by_category, which requires structured
+# fields (card_name, set_name, collector_number). Real users type things like
+# "charizard 151" or "moonbreon" — not "Charizard from Scarlet & Violet: 151".
+# We close that gap with:
+#   (a) a small nickname dictionary (app/data/pokemon_nicknames.json) for chase
+#       cards that collectors always ask for by nickname,
+#   (b) per-game set alias dicts ("151" -> "Scarlet & Violet: 151",
+#       "4ed" -> "Fourth Edition"),
+#   (c) a regex for set-specific collector numbers (OP01-003 etc.),
+#   (d) an AI parser upgraded with few-shot examples.
+# The heuristic is the reliable path — AI augments it when the key works.
+# ---------------------------------------------------------------------------
+
+_TEXT_SEARCH_PARSE_PROMPT = """You are a TCG card search query parser. Users type short queries for trading-card-game cards (Pokemon, Magic: the Gathering, One Piece, etc.). Extract structured fields.
 
 Return JSON with:
-- "card_name": the card/character name (e.g. "Charizard", "Pikachu VMAX")
-- "set_name": the set name if mentioned (e.g. "Base Set", "Evolving Skies"), or null
-- "collector_number": the collector number if mentioned (e.g. "4/102", "25"), or null
+- "card_name": the card/character name (e.g. "Charizard", "Pikachu VMAX", "Lightning Bolt")
+- "set_name": the full, canonical set name if mentioned, else null
+- "collector_number": the collector number if mentioned (e.g. "4/102", "25", "OP01-003"), else null
 
-Only extract what is explicitly stated. Do not guess or infer missing fields.
+Resolve Pokemon set aliases and community nicknames to canonical names:
+- "151" -> "Scarlet & Violet: 151"
+- "fossil" -> "Fossil"
+- "base set" / "base" -> "Base Set"
+- "evolving skies" -> "Evolving Skies"
+- "lost origin" -> "Lost Origin"
+- "silver tempest" -> "Silver Tempest"
+- "crown zenith" -> "Crown Zenith"
+- "obsidian flames" -> "Obsidian Flames"
+- "paldean fates" -> "Paldean Fates"
+- "hidden fates" -> "Hidden Fates"
+- "brilliant stars" -> "Brilliant Stars"
+- "astral radiance" -> "Astral Radiance"
+- "paradox rift" -> "Paradox Rift"
+- "temporal forces" -> "Temporal Forces"
+- "twilight masquerade" -> "Twilight Masquerade"
+- "stellar crown" -> "Stellar Crown"
+- "shrouded fable" -> "Shrouded Fable"
+- "surging sparks" -> "Surging Sparks"
+- "prismatic evolutions" / "prismatic" -> "Prismatic Evolutions"
+- "darkness ablaze" -> "Darkness Ablaze"
+- "vivid voltage" -> "Vivid Voltage"
+- "pokemon go" / "go" -> "Pokemon Go"
+- "moonbreon" -> card_name "Umbreon VMAX", set_name "Evolving Skies"
+- "rainbow rayquaza" -> card_name "Rayquaza VMAX", set_name "Evolving Skies"
+- "giratina v alt art" / "giratina alt" -> card_name "Giratina V", set_name "Lost Origin"
+- "palkia origin alt" -> card_name "Origin Forme Palkia V", set_name "Astral Radiance"
+- "shining charizard" -> card_name "Shining Charizard", set_name "Neo Destiny"
+
+Magic set codes:
+- "4ed" / "4th" -> "Fourth Edition"
+- "lea" -> "Limited Edition Alpha"
+- "leb" -> "Limited Edition Beta"
+- "dmu" -> "Dominaria United"
+
+Handle set-first and card-first orderings:
+- "charizard 151" -> {"card_name": "Charizard", "set_name": "Scarlet & Violet: 151"}
+- "151 zapdos" -> {"card_name": "Zapdos", "set_name": "Scarlet & Violet: 151"}
+- "base set charizard" -> {"card_name": "Charizard", "set_name": "Base Set"}
+
+Examples:
+Q: "charizard 151"   -> {"card_name":"Charizard","set_name":"Scarlet & Violet: 151","collector_number":null}
+Q: "pikachu 25"      -> {"card_name":"Pikachu","set_name":null,"collector_number":"25"}
+Q: "dragonite fossil"-> {"card_name":"Dragonite","set_name":"Fossil","collector_number":null}
+Q: "base set charizard" -> {"card_name":"Charizard","set_name":"Base Set","collector_number":null}
+Q: "mew ex 151"      -> {"card_name":"Mew ex","set_name":"Scarlet & Violet: 151","collector_number":null}
+Q: "moonbreon"       -> {"card_name":"Umbreon VMAX","set_name":"Evolving Skies","collector_number":null}
+Q: "charizard vmax 20/189" -> {"card_name":"Charizard VMAX","set_name":null,"collector_number":"20/189"}
+Q: "lightning bolt 4ed"-> {"card_name":"Lightning Bolt","set_name":"Fourth Edition","collector_number":null}
+Q: "luffy op01-001"  -> {"card_name":"Luffy","set_name":null,"collector_number":"OP01-001"}
+
 Respond with ONLY valid JSON. No markdown fences, no explanation."""
 
 
-def _parse_search_query(query: str) -> ExtractedFields:
-    """Parse a free-text card search query into structured fields.
+# Pokemon set aliases — lowercase alias -> canonical set_name. Order of keys
+# doesn't matter; we match longest-first at parse time.
+_POKEMON_SET_ALIASES: dict[str, str] = {
+    # PokemonTCG / TCGdex both index this set as simply "151" — using the
+    # SV-prefixed form breaks set-filtered lookups.
+    "151": "151",
+    "sv 151": "151",
+    "scarlet & violet 151": "151",
+    "fossil": "Fossil",
+    "base set": "Base Set",
+    "jungle": "Jungle",
+    "team rocket": "Team Rocket",
+    "gym heroes": "Gym Heroes",
+    "gym challenge": "Gym Challenge",
+    "neo genesis": "Neo Genesis",
+    "neo destiny": "Neo Destiny",
+    "neo revelation": "Neo Revelation",
+    "neo discovery": "Neo Discovery",
+    "evolving skies": "Evolving Skies",
+    "lost origin": "Lost Origin",
+    "silver tempest": "Silver Tempest",
+    "crown zenith": "Crown Zenith",
+    "brilliant stars": "Brilliant Stars",
+    "astral radiance": "Astral Radiance",
+    "obsidian flames": "Obsidian Flames",
+    "paldea evolved": "Paldea Evolved",
+    "paldean fates": "Paldean Fates",
+    "hidden fates": "Hidden Fates",
+    "paradox rift": "Paradox Rift",
+    "temporal forces": "Temporal Forces",
+    "twilight masquerade": "Twilight Masquerade",
+    "stellar crown": "Stellar Crown",
+    "shrouded fable": "Shrouded Fable",
+    "surging sparks": "Surging Sparks",
+    "prismatic evolutions": "Prismatic Evolutions",
+    "prismatic": "Prismatic Evolutions",
+    "darkness ablaze": "Darkness Ablaze",
+    "vivid voltage": "Vivid Voltage",
+    "fusion strike": "Fusion Strike",
+    "chilling reign": "Chilling Reign",
+    "battle styles": "Battle Styles",
+    "rebel clash": "Rebel Clash",
+    "champions path": "Champion's Path",
+    "champion's path": "Champion's Path",
+    "shining fates": "Shining Fates",
+    "celebrations": "Celebrations",
+    "pokemon go": "Pokemon Go",
+    "paradise dragona": "Paradise Dragona",
+}
 
-    Uses AI when available, falls back to simple heuristic parsing.
+# Magic set aliases (category_id=1)
+_MTG_SET_ALIASES: dict[str, str] = {
+    "4ed": "Fourth Edition",
+    "4th": "Fourth Edition",
+    "3ed": "Revised Edition",
+    "rev": "Revised Edition",
+    "revised": "Revised Edition",
+    "lea": "Limited Edition Alpha",
+    "alpha": "Limited Edition Alpha",
+    "leb": "Limited Edition Beta",
+    "beta": "Limited Edition Beta",
+    "unl": "Unlimited Edition",
+    "unlimited": "Unlimited Edition",
+    "dmu": "Dominaria United",
+    "mh2": "Modern Horizons 2",
+    "mh3": "Modern Horizons 3",
+    "neo": "Kamigawa: Neon Dynasty",
+    "znr": "Zendikar Rising",
+}
+
+
+_POKEMON_NICKNAMES_CACHE: Optional[list[dict]] = None
+
+
+def _load_pokemon_nicknames() -> list[dict]:
+    """Load community-nickname -> fields map from app/data/pokemon_nicknames.json.
+
+    Returned list is a flat list of {"alias": str, "card_name": str,
+    "set_name": str | None, "collector_number": str | None}, pre-lowercased
+    on ``alias``. Failures (missing file, bad JSON) are logged once and cached
+    as an empty list — the parser degrades gracefully.
+    """
+    global _POKEMON_NICKNAMES_CACHE
+    if _POKEMON_NICKNAMES_CACHE is not None:
+        return _POKEMON_NICKNAMES_CACHE
+    import os
+    path = os.path.join(os.path.dirname(__file__), "data", "pokemon_nicknames.json")
+    entries: list[dict] = []
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        for e in data.get("nicknames", []) or []:
+            for alias in e.get("aliases", []) or []:
+                entries.append({
+                    "alias": alias.strip().lower(),
+                    "card_name": e.get("card_name"),
+                    "set_name": e.get("set_name"),
+                    "collector_number": e.get("collector_number"),
+                })
+        # Longest-first so "moonbreon alt" beats "moonbreon"
+        entries.sort(key=lambda x: len(x["alias"]), reverse=True)
+    except FileNotFoundError:
+        logger.info("[pokemon_scanner] nicknames file missing at %s", path)
+    except Exception as exc:
+        logger.warning("[pokemon_scanner] failed to load nicknames: %s", exc)
+    _POKEMON_NICKNAMES_CACHE = entries
+    return entries
+
+
+def _heuristic_parse_query(query: str, category_id: str) -> ExtractedFields:
+    """Parse query without calling AI. Handles nicknames, set aliases, and
+    several collector-number formats. Safe to call alone or as a fallback.
     """
     fields = ExtractedFields()
+    q = query.strip()
+    if not q:
+        return fields
+    q_norm = re.sub(r"\s+", " ", q.lower())
 
-    if has_ai_key():
-        try:
-            client = get_ai_client()
-            fast_model = get_fast_model()
-            response = client.chat.completions.create(
-                model=fast_model,
-                messages=[
-                    {"role": "system", "content": _TEXT_SEARCH_PARSE_PROMPT},
-                    {"role": "user", "content": query},
-                ],
-                max_tokens=200,
-            )
-            raw = response.choices[0].message.content or ""
-            data = _loads_ai_json(raw)
-            if data is None:
-                logger.warning("[pokemon_scanner] Text search parse returned non-JSON: %s", raw[:200])
-                raise ValueError("non-JSON AI response")
-            ai_name = data.get("card_name") or None
-            ai_set = data.get("set_name") or None
-            ai_number = data.get("collector_number") or None
-            if ai_name or ai_number:
-                fields.card_name = ai_name
-                fields.set_name = ai_set
-                fields.collector_number = ai_number
-                fields.extraction_method = "ai"
+    # Nickname dictionary (Pokemon only — the file is Pokemon-specific).
+    if category_id in ("3", "85"):
+        for entry in _load_pokemon_nicknames():
+            alias = entry["alias"]
+            if alias and alias in q_norm:
+                fields.card_name = entry.get("card_name")
+                fields.set_name = entry.get("set_name")
+                fields.collector_number = entry.get("collector_number")
+                fields.extraction_method = "nickname"
                 logger.info(
-                    "[pokemon_scanner] Text search parsed: name=%s, set=%s, number=%s",
-                    fields.card_name, fields.set_name, fields.collector_number,
+                    "[pokemon_scanner] Nickname match %r -> name=%s set=%s num=%s",
+                    alias, fields.card_name, fields.set_name, fields.collector_number,
                 )
                 return fields
-            logger.warning("[pokemon_scanner] AI returned empty fields for query '%s', falling back to heuristic", query)
-        except Exception as exc:
-            logger.warning("[pokemon_scanner] AI query parse failed, using heuristic: %s", exc)
 
-    # Heuristic fallback: look for number patterns, treat rest as card name
-    number_match = re.search(r"(\d{1,4})\s*/\s*(\d{1,4})", query)
-    if number_match:
-        fields.collector_number = number_match.group(0)
-        query = query[:number_match.start()] + query[number_match.end():]
+    # Full "X/Y" collector number
+    m = re.search(r"\b(\d{1,4})\s*/\s*(\d{1,4})\b", q)
+    if m:
+        fields.collector_number = f"{m.group(1)}/{m.group(2)}"
+        q = (q[:m.start()] + q[m.end():]).strip()
+        q_norm = re.sub(r"\s+", " ", q.lower())
 
-    fields.card_name = query.strip() or None
-    fields.extraction_method = "heuristic"
+    # Set-specific collector numbers like "OP01-003", "ST01-001"
+    if not fields.collector_number:
+        m2 = re.search(r"\b([a-z]{2,4})\s*-?\s*(\d{2,3})\s*-\s*(\d{2,4})\b", q, flags=re.I)
+        if m2:
+            fields.collector_number = f"{m2.group(1).upper()}{m2.group(2)}-{m2.group(3)}"
+            q = (q[:m2.start()] + q[m2.end():]).strip()
+            q_norm = re.sub(r"\s+", " ", q.lower())
+
+    # Set alias match — longest-first so "neo destiny" beats "neo".
+    alias_dict = _POKEMON_SET_ALIASES if category_id in ("3", "85") else (
+        _MTG_SET_ALIASES if category_id == "1" else {}
+    )
+    if alias_dict and not fields.set_name:
+        for alias in sorted(alias_dict.keys(), key=len, reverse=True):
+            # Word-boundary match so "151" doesn't eat "a1510".
+            pat = r"(?:^|\s)" + re.escape(alias) + r"(?=\s|$)"
+            m3 = re.search(pat, q_norm)
+            if m3:
+                fields.set_name = alias_dict[alias]
+                # Strip the alias token from the query
+                span_start = m3.start()
+                # Advance past optional leading whitespace captured by (?:^|\s)
+                while span_start < len(q) and q[span_start].isspace():
+                    span_start += 1
+                q = (q[:span_start] + q[span_start + len(alias):]).strip()
+                q = re.sub(r"\s{2,}", " ", q)
+                q_norm = q.lower()
+                break
+
+    # Bare number (no denominator) — only if we have something left as a name.
+    if not fields.collector_number:
+        m4 = re.search(r"\b(\d{1,3})\b", q)
+        if m4 and re.sub(r"\d+", "", q).strip():
+            fields.collector_number = m4.group(1)
+            q = (q[:m4.start()] + q[m4.end():]).strip()
+
+    # Whatever remains is the card name.
+    q = re.sub(r"\s{2,}", " ", q).strip(" -,:;")
+    fields.card_name = q or None
+    fields.extraction_method = fields.extraction_method or "heuristic"
     return fields
+
+
+def _parse_search_query(query: str, category_id: str = "3") -> ExtractedFields:
+    """Parse a free-text card search query into structured fields.
+
+    Strategy: run the heuristic first (fast, deterministic, covers nicknames
+    and set aliases). Then ask the AI as an augmentation — if the AI parse
+    is clearly richer (fills in a set or number the heuristic missed), merge
+    those hints in. This makes behavior predictable when the AI is down.
+    """
+    heur = _heuristic_parse_query(query, category_id)
+
+    if not has_ai_key():
+        return heur
+
+    try:
+        client = get_ai_client()
+        fast_model = get_fast_model()
+        response = client.chat.completions.create(
+            model=fast_model,
+            messages=[
+                {"role": "system", "content": _TEXT_SEARCH_PARSE_PROMPT},
+                {"role": "user", "content": query},
+            ],
+            max_tokens=200,
+        )
+        raw = response.choices[0].message.content or ""
+        data = _loads_ai_json(raw)
+        if data is None:
+            logger.warning("[pokemon_scanner] Text search parse returned non-JSON: %s", raw[:200])
+            return heur
+        ai_name = data.get("card_name") or None
+        ai_set = data.get("set_name") or None
+        ai_number = data.get("collector_number") or None
+        if not (ai_name or ai_number):
+            return heur
+        # If heuristic came from the nickname dict, trust it over AI.
+        if heur.extraction_method == "nickname":
+            return heur
+        merged = ExtractedFields(
+            card_name=ai_name or heur.card_name,
+            set_name=ai_set or heur.set_name,
+            collector_number=ai_number or heur.collector_number,
+            extraction_method="ai",
+        )
+        logger.info(
+            "[pokemon_scanner] Text search parsed (ai): name=%s, set=%s, number=%s",
+            merged.card_name, merged.set_name, merged.collector_number,
+        )
+        return merged
+    except Exception as exc:
+        logger.warning("[pokemon_scanner] AI query parse failed, using heuristic: %s", exc)
+        return heur
 
 
 async def text_search_cards(query: str, category_id: str = "3") -> dict[str, Any]:
@@ -3266,7 +3517,7 @@ async def text_search_cards(query: str, category_id: str = "3") -> dict[str, Any
     if not query or not query.strip():
         return {**asdict(ScanResult(status="ERROR", error="Empty search query")), "game": game}
 
-    fields = _parse_search_query(query.strip())
+    fields = _parse_search_query(query.strip(), category_id=category_id)
     if not fields.card_name and not fields.collector_number:
         return {**asdict(ScanResult(status="NO_MATCH", error="Could not parse search query")), "game": game}
 
@@ -3328,6 +3579,31 @@ async def text_search_cards(query: str, category_id: str = "3") -> dict[str, Any
         )), "game": game}
 
     scored = score_candidates(candidates, fields)
+
+    # Set-aware rerank: score_candidates uses Levenshtein for set similarity,
+    # which is noisy when the parsed set is "151" and the DB set is
+    # "Scarlet & Violet: 151". Apply _norm_set substring match as a
+    # tiebreaker so the correct printing beats a same-named card from a
+    # random older set (e.g. Dragonite #4 Fossil over McDonald's promos).
+    if fields.set_name:
+        want_set = _norm_set(fields.set_name)
+        want_name = _norm_name(fields.card_name)
+
+        def _set_rerank_key(c):
+            cand_set = _norm_set(c.set_name)
+            if want_set and cand_set:
+                if cand_set == want_set:
+                    set_bonus = 2
+                elif want_set in cand_set or cand_set in want_set:
+                    set_bonus = 1
+                else:
+                    set_bonus = 0
+            else:
+                set_bonus = 0
+            name_match = 1 if (want_name and _norm_name(c.name) == want_name) else 0
+            return (set_bonus, name_match, c.score)
+
+        scored = sorted(scored, key=_set_rerank_key, reverse=True)
 
     top_n = scored[:8]
     await asyncio.gather(
