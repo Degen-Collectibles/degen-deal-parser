@@ -5,6 +5,7 @@
     <!-- PWA -->
     <link rel="manifest" href="/static/manifest.webmanifest">
     <meta name="theme-color" content="#C8102E">
+    <meta name="permissions-policy" content="camera=*">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-title" content="Degen">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -1205,9 +1206,42 @@ var PKScanner = (function() {
     // Camera
     // ------------------------------------------------------------------
     async function startCamera() {
+        // Reuse a still-live stream from the previous mount (avoids redundant
+        // getUserMedia calls that flash the camera indicator and may re-prompt).
+        var existing = window.__degenEyeCameraStream;
+        if (existing && existing.getVideoTracks().some(function(t) { return t.readyState === 'live'; })) {
+            if (window.__degenEyeCameraFacing === facingMode) {
+                stream = existing;
+                var video = document.getElementById('video');
+                video.srcObject = stream;
+                document.getElementById('camera-placeholder').style.display = 'none';
+                document.getElementById('capture-btn').disabled = false;
+                document.getElementById('start-btn').style.display = 'none';
+                document.getElementById('flip-btn').style.display = '';
+                document.getElementById('stop-btn').style.display = '';
+                return;
+            }
+            // Facing mode changed — tear down old stream and re-acquire.
+            existing.getTracks().forEach(function(t) { t.stop(); });
+            window.__degenEyeCameraStream = null;
+        }
         try {
             if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
                 throw new Error('Camera API unavailable in this browser');
+            }
+            // Short-circuit permission re-prompt on browsers that support Permissions API.
+            // Safari < iOS 16 doesn't support {name:'camera'} — the catch swallows it.
+            if (navigator.permissions && navigator.permissions.query) {
+                try {
+                    var perm = await navigator.permissions.query({ name: 'camera' });
+                    if (perm.state === 'denied') {
+                        openCameraHelp('NotAllowedError');
+                        showStatus('Camera access denied. Enable it in browser settings.', 'err');
+                        return;
+                    }
+                    // perm.state === 'granted' or 'prompt' — proceed to getUserMedia.
+                    // On 'granted' the browser will NOT re-prompt the user.
+                } catch (_) { /* unsupported descriptor — fall through */ }
             }
             // Landscape constraints match the sensor's native orientation so
             // Safari/Chrome don't rotate every frame. The <video> + CSS crop
@@ -1222,6 +1256,8 @@ var PKScanner = (function() {
                     frameRate: { ideal: 30, max: 30 },
                 }
             });
+            window.__degenEyeCameraStream = stream;
+            window.__degenEyeCameraFacing = facingMode;
             var video = document.getElementById('video');
             video.srcObject = stream;
             document.getElementById('camera-placeholder').style.display = 'none';
@@ -1245,7 +1281,11 @@ var PKScanner = (function() {
     }
 
     function stopCamera() {
-        if (stream) { stream.getTracks().forEach(function(t) { t.stop(); }); stream = null; }
+        if (stream) {
+            stream.getTracks().forEach(function(t) { t.stop(); });
+            stream = null;
+            window.__degenEyeCameraStream = null;
+        }
         document.getElementById('video').srcObject = null;
         document.getElementById('camera-placeholder').style.display = '';
         document.getElementById('capture-btn').disabled = true;
@@ -1256,7 +1296,7 @@ var PKScanner = (function() {
 
     async function flipCamera() {
         facingMode = facingMode === 'environment' ? 'user' : 'environment';
-        stopCamera();
+        // startCamera handles teardown when facingMode differs from the cached stream.
         await startCamera();
     }
 

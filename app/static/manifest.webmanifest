@@ -33,5 +33,7 @@
       "type": "image/png",
       "purpose": "maskable"
     }
-  ]
+  ],
+  "permissions": ["camera"],
+  "launch_handler": { "client_mode": "focus-existing" }
 }
