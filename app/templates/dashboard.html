@@ -25,7 +25,7 @@
     {% set is_reviewer = user_role in ("reviewer", "admin") %}
 
     <div class="page">
-        {% include "_workspace_nav.html" %}
+        {% include "_linear_sidebar.html" %}
 
         {% if is_reviewer and parser_progress["local_runtime"]["needs_attention"] %}
         <div class="db-alert">
