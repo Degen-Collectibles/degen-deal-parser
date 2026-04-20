@@ -1,0 +1,16 @@
+{# Mobile-only sticky top bar. Included automatically via _linear_sidebar.html. Hidden on desktop via CSS. #}
+<div class="linear-mobile-topbar" id="linear-mobile-topbar">
+    <button class="linear-hamburger" id="linear-hamburger" type="button"
+            aria-label="Open navigation" aria-expanded="false" aria-controls="linear-sidebar">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="3" y1="6" x2="21" y2="6"/>
+            <line x1="3" y1="12" x2="21" y2="12"/>
+            <line x1="3" y1="18" x2="21" y2="18"/>
+        </svg>
+    </button>
+    <a href="/dashboard" class="linear-mobile-brand" aria-label="Degen dashboard">
+        <img class="linear-sidebar-logo" src="/static/degen-logo.png" alt="">
+        <span class="linear-sidebar-brand-text">Degen</span>
+    </a>
+</div>

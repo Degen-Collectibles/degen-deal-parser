@@ -277,8 +277,116 @@ a { color: inherit; text-decoration: none; }
     .linear-sidebar-item { justify-content: center; padding: 8px 6px; }
     .linear-sidebar-user { justify-content: center; padding: 6px; }
 }
+/* ── Mobile drawer defaults (hidden until JS opens them) ── */
+.linear-mobile-topbar  { display: none; }
+.linear-drawer-backdrop { display: none; }
+.linear-drawer-close   { display: none; }
+
 @media (max-width: 767.98px) {
-    .linear-sidebar { display: none; }
+    /* Sidebar becomes a slide-in drawer */
+    .linear-sidebar {
+        display: flex;
+        position: fixed;
+        top: 0;
+        left: 0;
+        bottom: 0;
+        width: 80vw;
+        max-width: 280px;
+        padding-top: max(14px, env(safe-area-inset-top, 14px));
+        transform: translateX(-100%);
+        transition: transform 220ms ease;
+        z-index: 200;
+    }
+    body.linear-drawer-open .linear-sidebar { transform: translateX(0); }
+    body.linear-drawer-open { overflow: hidden; }
+
+    /* Dimmed backdrop */
+    .linear-drawer-backdrop {
+        display: block;
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.6);
+        backdrop-filter: blur(2px);
+        -webkit-backdrop-filter: blur(2px);
+        z-index: 199;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 220ms ease;
+    }
+    body.linear-drawer-open .linear-drawer-backdrop {
+        opacity: 1;
+        pointer-events: auto;
+    }
+
+    /* Close button — visible only inside the drawer on mobile */
+    .linear-drawer-close {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 28px;
+        height: 28px;
+        border-radius: 6px;
+        border: 1px solid transparent;
+        background: transparent;
+        color: var(--lx-muted);
+        cursor: pointer;
+        flex-shrink: 0;
+        -webkit-tap-highlight-color: transparent;
+    }
+    .linear-drawer-close:hover {
+        background: var(--lx-s1);
+        color: var(--lx-text);
+        border-color: var(--lx-br);
+    }
+
+    /* Hide desktop-only collapse toggle inside the drawer */
+    .linear-sidebar-collapse { display: none; }
+
+    /* Sticky mobile top bar */
+    .linear-mobile-topbar {
+        display: flex;
+        align-items: center;
+        position: sticky;
+        top: 0;
+        z-index: 100;
+        gap: 10px;
+        padding: max(10px, env(safe-area-inset-top, 10px)) 12px 10px;
+        background: #0b0c0e;
+        border-bottom: 1px solid var(--lx-br);
+        -webkit-tap-highlight-color: transparent;
+    }
+
+    /* Hamburger button */
+    .linear-hamburger {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 40px;
+        height: 40px;
+        border-radius: 8px;
+        border: 1px solid transparent;
+        background: transparent;
+        color: var(--lx-text);
+        cursor: pointer;
+        flex-shrink: 0;
+        -webkit-tap-highlight-color: transparent;
+    }
+    .linear-hamburger:hover, .linear-hamburger:focus-visible {
+        background: var(--lx-s1);
+        border-color: var(--lx-br);
+        outline: none;
+    }
+
+    /* Brand link inside mobile topbar */
+    .linear-mobile-brand {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--lx-text);
+        text-decoration: none;
+        min-width: 0;
+    }
+    .linear-mobile-brand .linear-sidebar-brand-text { font-size: 14px; font-weight: 700; }
 }
 
 /* Collapsed state (user toggle on desktop) */

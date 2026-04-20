@@ -1,4 +1,7 @@
-{# Linear-style left sidebar. Fixed on desktop, icon-only on medium, hidden on mobile. #}
+{# Linear-style left sidebar. Fixed on desktop, icon-only on medium, slide-in drawer on mobile. #}
+{% include '_linear_topbar_mobile.html' %}
+{# Backdrop overlay — shown on mobile when drawer is open #}
+<div class="linear-drawer-backdrop" id="linear-drawer-backdrop" aria-hidden="true"></div>
 {% set _ls_path = request.url.path %}
 {% set _ls_role = current_user.role if current_user else "viewer" %}
 {% set _ls_is_admin = _ls_role == "admin" %}
@@ -9,12 +12,15 @@
     <span class="linear-sidebar-label">{{ label }}</span>
 </a>
 {%- endmacro %}
-<aside class="linear-sidebar" aria-label="Primary">
+<aside class="linear-sidebar" id="linear-sidebar" aria-label="Primary">
     <div class="linear-sidebar-head">
         <a class="linear-sidebar-brand" href="/dashboard" aria-label="Degen dashboard">
             <img class="linear-sidebar-logo" src="/static/degen-logo.png" alt="">
             <span class="linear-sidebar-brand-text">Degen</span>
         </a>
+        <button class="linear-drawer-close" id="linear-drawer-close" type="button" aria-label="Close navigation">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
         <button class="linear-sidebar-collapse" type="button" aria-label="Toggle sidebar" title="Toggle sidebar">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M3 12h12M3 18h18"/></svg>
         </button>
@@ -90,8 +96,8 @@
 <script>
 (function () {
     var KEY = 'degen.ui.sidebarCollapsed';
-    var aside = document.currentScript.previousElementSibling;
-    if (!aside || !aside.classList || !aside.classList.contains('linear-sidebar')) return;
+    var aside = document.getElementById('linear-sidebar');
+    if (!aside) return;
     try {
         if (localStorage.getItem(KEY) === '1') document.documentElement.classList.add('linear-sidebar-collapsed');
     } catch (e) {}
@@ -102,3 +108,4 @@
     });
 })();
 </script>
+<script src="/static/linear-drawer.js"></script>
