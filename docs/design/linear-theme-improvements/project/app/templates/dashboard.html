@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <link rel="manifest" href="/static/manifest.webmanifest">
+    <meta name="theme-color" content="#08090a">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="Degen">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="mobile-web-app-capable" content="yes">
+    <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon-180.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/icon-192.png">
+    <link rel="icon" type="image/png" sizes="512x512" href="/static/icons/icon-512.png">
+    <link rel="stylesheet" href="/static/safe-area.css?v=2026042020">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <title>{{ title }}</title>
+    <link rel="stylesheet" href="/static/linear.css?v=2026042011">
+</head>
+<body>
+    {% set user_role = current_user.role if current_user else "viewer" %}
+    {% set is_admin = user_role == "admin" %}
+    {% set is_reviewer = user_role in ("reviewer", "admin") %}
+
+    <div class="page">
+        {% include "_linear_sidebar.html" %}
+
+        {% if is_reviewer and parser_progress["local_runtime"]["needs_attention"] %}
+        <div class="db-alert">
+            <div>&#9888; System updates look delayed &mdash; new Discord messages may not be arriving yet</div>
+            <a href="/status">Check Status &rarr;</a>
+        </div>
+        {% endif %}
+
+        <!-- ══ HERO: 4 primary stat cards ════════════════════════════════ -->
+        <div class="db-hero">
+
+            <!-- 1 · Revenue today -->
+            <article class="db-card">
+                <div class="db-ch">
+                    <h3>Revenue today</h3>
+                    <span class="db-ch-meta">{{ dashboard_snapshot["today_label"] }}</span>
+                </div>
+                <div class="db-big">{{ dashboard_snapshot["today"]["revenue"]["total_display"] }}</div>
+                <div class="db-bk">
+                    <div class="db-bk-row">
+                        <span class="db-bk-lbl">Discord</span>
+                        <span class="db-bk-val">{{ dashboard_snapshot["today"]["revenue"]["discord_total_display"] }}<span class="db-bk-cnt">· {{ dashboard_snapshot["today"]["rows"] }} deals</span></span>
+                    </div>
+                    <div class="db-bk-row">
+                        <span class="db-bk-lbl">TikTok Shop</span>
+                        <span class="db-bk-val">{{ dashboard_snapshot["today"]["revenue"]["tiktok_total_display"] }}<span class="db-bk-cnt">· {{ dashboard_snapshot["today"]["tiktok"]["paid_order_count"] }} orders</span></span>
+                    </div>
+                    <div class="db-bk-row">
+                        <span class="db-bk-lbl">Shopify</span>
+                        <span class="db-bk-val">{{ dashboard_snapshot["today"]["revenue"]["shopify_total_display"] }}<span class="db-bk-cnt">· {{ dashboard_snapshot["today"]["shopify"]["order_count"] }} orders</span></span>
+                    </div>
+                </div>
+            </article>
+
+            <!-- 2 · Purchases today -->
+            <article class="db-card">
+                <div class="db-ch">
+                    <h3>Purchases today</h3>
+                    <span class="db-ch-meta">{{ dashboard_snapshot["today"]["buy_count"] + dashboard_snapshot["today"]["trade_count"] + dashboard_snapshot["today"]["expense_count"] }} items</span>
+                </div>
+                <div class="db-big">{{ dashboard_snapshot["today"]["purchases"]["total_display"] }}</div>
+                <div class="db-bk">
+                    <div class="db-bk-row">
+                        <span class="db-bk-lbl">Buys</span>
+                        <span class="db-bk-val">{{ dashboard_snapshot["today"]["purchases"]["buys_display"] }}</span>
+                    </div>
+                    <div class="db-bk-row">
+                        <span class="db-bk-lbl">Trade out</span>
+                        <span class="db-bk-val">{{ dashboard_snapshot["today"]["purchases"]["trade_out_display"] }}</span>
+                    </div>
+                    <div class="db-bk-row">
+                        <span class="db-bk-lbl">Expenses</span>
+                        <span class="db-bk-val">{{ dashboard_snapshot["today"]["purchases"]["expenses_display"] }}</span>
+                    </div>
+                    {% if dashboard_snapshot["today"]["purchases"]["has_shopify_refunds"] %}
+                    <div class="db-bk-row">
+                        <span class="db-bk-lbl">Shopify refunds</span>
+                        <span class="db-bk-val">{{ dashboard_snapshot["today"]["purchases"]["shopify_refunds_display"] }}</span>
+                    </div>
+                    {% endif %}
+                </div>
+            </article>
+
+            <!-- 3 · Needs attention -->
+            <article class="db-card">
+                <div class="db-ch">
+                    <h3>Needs attention</h3>
+                    {% if is_reviewer %}
+                    <span class="db-ch-meta">{{ review_summary["needs_review"] }} in queue</span>
+                    {% endif %}
+                </div>
+                <ul class="db-attn">
+                    {% if is_reviewer %}
+                    <li><a class="db-attn-row" href="/review">
+                        <span class="db-attn-lbl">Review queue</span>
+                        <span class="db-badge{% if review_summary["needs_review"] > 0 %} db-badge-warn{% endif %}">{{ review_summary["needs_review"] }}</span>
+                    </a></li>
+                    {% endif %}
+                    <li><a class="db-attn-row" href="/table">
+                        <span class="db-attn-lbl">Queue backlog</span>
+                        <span class="db-badge">{{ parser_progress["queued"] + parser_progress["processing"] }}</span>
+                    </a></li>
+                    <li><a class="db-attn-row" href="/deals">
+                        <span class="db-attn-lbl">Deals today</span>
+                        <span class="db-badge">{{ dashboard_snapshot["today"]["rows"] }}</span>
+                    </a></li>
+                    <li><a class="db-attn-row" href="/status">
+                        <span class="db-attn-lbl">System</span>
+                        <span class="db-badge">{{ parser_progress["local_runtime"]["label"] }}</span>
+                    </a></li>
+                    {% if is_reviewer %}
+                    <li><a class="db-attn-row" href="/review">
+                        <span class="db-attn-lbl">Reviewed today</span>
+                        <span class="db-badge">{{ dashboard_snapshot["today"]["reviewed_today_count"] }}</span>
+                    </a></li>
+                    {% endif %}
+                </ul>
+            </article>
+
+            <!-- 4 · Stream status -->
+            <article class="db-card">
+                <div class="db-ch">
+                    <h3>Stream</h3>
+                    {% if stream_status["active"] %}
+                    <span class="db-live-pill"><span class="db-dot"></span>Live</span>
+                    {% else %}
+                    <span class="db-off-pill">Offline</span>
+                    {% endif %}
+                </div>
+                {% if stream_status["active"] %}
+                    {% if stream_status["title"] %}
+                    <div class="db-stream-ttl">{{ stream_status["title"] }}</div>
+                    {% endif %}
+                    <dl class="db-sdl">
+                        {% if stream_status["started_mins"] is not none %}
+                        <div>
+                            <dt>Started</dt>
+                            <dd>{% set sm = stream_status["started_mins"] %}{% if sm < 60 %}{{ sm }}m ago{% else %}{{ sm // 60 }}h {% if sm % 60 %}{{ sm % 60 }}m {% endif %}ago{% endif %}</dd>
+                        </div>
+                        {% endif %}
+                        {% if stream_status["last_order_mins"] is not none %}
+                        <div>
+                            <dt>Last TikTok order</dt>
+                            <dd>{% set lm = stream_status["last_order_mins"] %}{% if lm < 60 %}{{ lm }}m ago{% else %}{{ lm // 60 }}h {% if lm % 60 %}{{ lm % 60 }}m {% endif %}ago{% endif %}</dd>
+                        </div>
+                        {% endif %}
+                        <div>
+                            <dt>TikTok orders today</dt>
+                            <dd>{{ dashboard_snapshot["today"]["tiktok"]["paid_order_count"] }}</dd>
+                        </div>
+                    </dl>
+                {% else %}
+                    {% if stream_status["ended_mins"] is not none %}
+                    <p class="db-offline-msg">Last stream ended {% set em = stream_status["ended_mins"] %}{% if em < 60 %}{{ em }}m ago{% else %}{{ em // 60 }}h {% if em % 60 %}{{ em % 60 }}m {% endif %}ago{% endif %}</p>
+                    {% else %}
+                    <p class="db-offline-msg">No active stream</p>
+                    {% endif %}
+                    {% if dashboard_snapshot["today"]["tiktok"]["paid_order_count"] > 0 %}
+                    <dl class="db-sdl" style="margin-top:12px;">
+                        <div>
+                            <dt>TikTok orders today</dt>
+                            <dd>{{ dashboard_snapshot["today"]["tiktok"]["paid_order_count"] }}</dd>
+                        </div>
+                        <div>
+                            <dt>Net revenue</dt>
+                            <dd>{{ dashboard_snapshot["today"]["tiktok"]["net_display"] }}</dd>
+                        </div>
+                    </dl>
+                    {% endif %}
+                {% endif %}
+            </article>
+
+        </div><!-- .db-hero -->
+
+        <!-- ══ MORE: everything else, collapsible ════════════════════════ -->
+        <div class="db-more">
+            <div class="db-more-head">
+                <p class="db-more-lbl">More</p>
+                <div class="db-more-line"></div>
+            </div>
+
+            <div class="db-grid2">
+
+                <!-- Quick access -->
+                <details class="db-panel">
+                    <summary>Quick access</summary>
+                    <div class="db-pbody">
+                        <div class="db-wsg">
+                            {% if not is_reviewer %}
+                            <a class="db-wsc" href="/tiktok/streamer">
+                                <span class="db-wsk">Go live</span>
+                                <span class="db-wst">Streamer</span>
+                                <span class="db-wsm">Live orders &amp; chat</span>
+                            </a>
+                            <a class="db-wsc" href="/stream-manager">
+                                <span class="db-wsk">Schedule</span>
+                                <span class="db-wst">Stream Manager</span>
+                                <span class="db-wsm">Scheduling &amp; setup</span>
+                            </a>
+                            {% endif %}
+                            {% if is_reviewer %}
+                            <a class="db-wsc" href="/review">
+                                <span class="db-wsk">Primary workflow</span>
+                                <span class="db-wst">Review Queue</span>
+                                <span class="db-wsm">{{ review_summary["needs_review"] }} waiting</span>
+                            </a>
+                            {% endif %}
+                            <a class="db-wsc" href="/degen_eye">
+                                <span class="db-wsk">Card scanner</span>
+                                <span class="db-wst">Degen Eye</span>
+                                <span class="db-wsm">All major TCGs</span>
+                            </a>
+                            <a class="db-wsc" href="/deals">
+                                <span class="db-wsk">Browse ledger</span>
+                                <span class="db-wst">Deals</span>
+                                <span class="db-wsm">{{ dashboard_snapshot["today"]["rows"] }} confirmed today</span>
+                            </a>
+                            <a class="db-wsc" href="/reports">
+                                <span class="db-wsk">Financial view</span>
+                                <span class="db-wst">Reports</span>
+                                <span class="db-wsm">{{ dashboard_snapshot["today"]["revenue"]["total_display"] }} today</span>
+                            </a>
+                            <a class="db-wsc" href="/shopify/orders">
+                                <span class="db-wsk">Online shop</span>
+                                <span class="db-wst">Shopify Orders</span>
+                                <span class="db-wsm">{{ dashboard_snapshot["today"]["shopify"]["order_count"] }} today</span>
+                            </a>
+                            <a class="db-wsc" href="/tiktok/orders">
+                                <span class="db-wsk">TikTok Shop</span>
+                                <span class="db-wst">TikTok Orders</span>
+                                <span class="db-wsm">{{ dashboard_snapshot["today"]["tiktok"]["paid_order_count"] }} today</span>
+                            </a>
+                            {% if is_reviewer %}
+                            <a class="db-wsc" href="/status">
+                                <span class="db-wsk">Operations</span>
+                                <span class="db-wst">System Status</span>
+                                <span class="db-wsm">{{ parser_progress["queued"] + parser_progress["processing"] }} in flight</span>
+                            </a>
+                            {% if is_admin %}
+                            <a class="db-wsc" href="/admin">
+                                <span class="db-wsk">Operators</span>
+                                <span class="db-wst">Admin</span>
+                                <span class="db-wsm">Advanced controls</span>
+                            </a>
+                            <a class="db-wsc" href="/bookkeeping">
+                                <span class="db-wsk">Finance</span>
+                                <span class="db-wst">Bookkeeping</span>
+                                <span class="db-wsm">Reconciliation</span>
+                            </a>
+                            <a class="db-wsc" href="/tiktok/streamer">
+                                <span class="db-wsk">Go live</span>
+                                <span class="db-wst">Streamer Dashboard</span>
+                                <span class="db-wsm">Live orders &amp; chat</span>
+                            </a>
+                            <a class="db-wsc" href="/stream-manager">
+                                <span class="db-wsk">Schedule</span>
+                                <span class="db-wst">Stream Manager</span>
+                                <span class="db-wsm">Scheduling &amp; setup</span>
+                            </a>
+                            {% endif %}
+                            {% endif %}
+                        </div>
+                    </div>
+                </details>
+
+                <!-- Today at a glance -->
+                <details class="db-panel">
+                    <summary>Today at a glance</summary>
+                    <div class="db-pbody">
+                        <p class="db-sublbl">Deal breakdown</p>
+                        <div class="db-pills">
+                            <span class="db-pill">{{ dashboard_snapshot["today"]["sales_count"] }} sales</span>
+                            <span class="db-pill">{{ dashboard_snapshot["today"]["buy_count"] }} buys</span>
+                            <span class="db-pill">{{ dashboard_snapshot["today"]["trade_count"] }} trades</span>
+                            <span class="db-pill">{{ dashboard_snapshot["today"]["expense_count"] }} expenses</span>
+                        </div>
+                        <p class="db-sublbl" style="margin-top:14px;">Trade cash</p>
+                        <div style="font-size:13px;color:var(--db-text);">
+                            {{ dashboard_snapshot["today"]["trade_in_display"] }} in &nbsp;/&nbsp; {{ dashboard_snapshot["today"]["trade_out_display"] }} out
+                        </div>
+                        <p class="db-sublbl" style="margin-top:14px;">Payment mix</p>
+                        <div class="db-pills">
+                            {% for row in dashboard_snapshot["payment_mix"] %}
+                            <span class="db-pill">{{ row["label"] }} {{ row["value"] }}</span>
+                            {% else %}
+                            <span style="font-size:12px;color:var(--db-dim);">No data yet.</span>
+                            {% endfor %}
+                        </div>
+                        <p class="db-sublbl" style="margin-top:14px;">Category mix</p>
+                        <div class="db-pills">
+                            {% for row in dashboard_snapshot["category_mix"] %}
+                            <span class="db-pill">{{ row["label"] }} {{ row["value"] }}</span>
+                            {% else %}
+                            <span style="font-size:12px;color:var(--db-dim);">No data yet.</span>
+                            {% endfor %}
+                        </div>
+                        {% if is_reviewer %}
+                        <p class="db-sublbl" style="margin-top:14px;">Review</p>
+                        <div class="db-bk" style="margin-top:0;">
+                            <div class="db-bk-row" style="padding-top:0;border-top:none;">
+                                <span class="db-bk-lbl">Needs review</span>
+                                <span class="db-bk-val">{{ review_summary["needs_review"] }}</span>
+                            </div>
+                            <div class="db-bk-row">
+                                <span class="db-bk-lbl">Reviewed today</span>
+                                <span class="db-bk-val">{{ dashboard_snapshot["today"]["reviewed_today_count"] }}</span>
+                            </div>
+                            <div class="db-bk-row">
+                                <span class="db-bk-lbl">In-flight rows</span>
+                                <span class="db-bk-val">{{ parser_progress["queued"] + parser_progress["processing"] }}</span>
+                            </div>
+                        </div>
+                        {% endif %}
+                    </div>
+                </details>
+
+                {% if dashboard_snapshot["top_channels"]|length >= 2 %}
+                <!-- Top channels -->
+                <details class="db-panel">
+                    <summary>Top active channels</summary>
+                    <div class="db-pbody">
+                        {% for row in dashboard_snapshot["top_channels"] %}
+                        <div class="db-ch-row">
+                            <div>
+                                <div class="db-ch-nm">{{ row["channel_name"] }}</div>
+                                <div class="db-ch-cnt">{{ row["deal_count"] }} deal{{ "" if row["deal_count"] == 1 else "s" }}</div>
+                            </div>
+                            <div style="text-align:right;">
+                                <div class="db-ch-net">{{ row["net_display"] }}</div>
+                                <div class="db-ch-io">{{ row["money_in_display"] }} in / {{ row["money_out_display"] }} out</div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </details>
+                {% endif %}
+
+                <!-- Recent Discord deals -->
+                <details class="db-panel">
+                    <summary>Recent Discord deals</summary>
+                    <div class="db-pbody">
+                        <div class="db-list">
+                            {% for row in recent_deals %}
+                            <a class="db-li" href="/deals/{{ row['id'] }}">
+                                <div class="db-li-l">
+                                    <div class="db-li-title">{{ row["channel"] or row["channel_id"] }}</div>
+                                    <div class="db-li-sub">{{ row["time"] }} &middot; {{ row["entry_kind"] or "unknown" }}{% if row["payment_display"] %} &middot; {{ row["payment_display"] }}{% endif %}</div>
+                                    <div class="db-li-sub" style="margin-top:2px;">{{ (row["message"] or "(image-only)")[:80] }}</div>
+                                </div>
+                                <div class="db-li-r">
+                                    {% if row["amount_display"] %}<div class="db-li-amt">{{ row["amount_display"] }}</div>{% endif %}
+                                </div>
+                            </a>
+                            {% else %}
+                            <div class="db-empty">No recent Discord deals yet.</div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </details>
+
+                <!-- Shopify orders -->
+                <details class="db-panel">
+                    <summary>Shopify orders</summary>
+                    <div class="db-pbody">
+                        {% if not shopify_connected %}
+                        <div class="db-empty">{{ shopify_message }}</div>
+                        {% elif shopify_orders %}
+                        <div class="db-list">
+                            {% for order in shopify_orders %}
+                            <div class="db-li">
+                                <div class="db-li-l">
+                                    <div class="db-li-title">#{{ order["order_number"] }} &mdash; {{ order["customer_name"] }}</div>
+                                    <div class="db-li-sub">{{ order["created_at"] }}</div>
+                                    <span class="db-tag">{{ order["fulfillment_label"] }}</span>
+                                </div>
+                                <div class="db-li-r">
+                                    <div class="db-li-amt">{{ order["total_price"] | money }}</div>
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <div class="db-empty">No Shopify orders yet.</div>
+                        {% endif %}
+                    </div>
+                </details>
+
+                <!-- TikTok orders -->
+                <details class="db-panel">
+                    <summary>Recent TikTok orders</summary>
+                    <div class="db-pbody">
+                        <div style="font-size:12px;color:var(--db-dim);margin-bottom:10px;">
+                            {{ dashboard_snapshot["today"]["tiktok"]["order_count"] }} rows today &middot; {{ dashboard_snapshot["today"]["tiktok"]["net_display"] }} net from revenue-counted orders
+                        </div>
+                        {% if tiktok_orders %}
+                        <div class="db-list">
+                            {% for order in tiktok_orders %}
+                            <a class="db-li" href="/tiktok/orders?search={{ order['order_number'] }}">
+                                <div class="db-li-l">
+                                    <div class="db-li-title">#{{ order["order_number"] }} &mdash; {{ order["customer_name"] }}</div>
+                                    <div class="db-li-sub">{{ order["created_at"] }}</div>
+                                    <span class="db-tag">{{ order["fulfillment_label"] }}</span>
+                                </div>
+                                <div class="db-li-r">
+                                    <div class="db-li-amt">${{ "%.2f"|format(order["total_price"]) }}</div>
+                                </div>
+                            </a>
+                            {% endfor %}
+                        </div>
+                        {% elif tiktok_connected %}
+                        <div class="db-empty">No revenue-counted TikTok orders yet today.</div>
+                        {% else %}
+                        <div class="db-empty">{{ tiktok_message }}</div>
+                        {% endif %}
+                    </div>
+                </details>
+
+                {% if is_admin and recent_promotions %}
+                <!-- Auto-promoted patterns (admin only) -->
+                <details class="db-panel">
+                    <summary>Auto-promoted patterns</summary>
+                    <div class="db-pbody">
+                        <div class="db-list">
+                            {% for row in recent_promotions %}
+                            <div class="db-li" style="display:block;">
+                                <div class="db-li-title" style="font-family:monospace;font-size:12px;">{{ row["normalized_text"] }}</div>
+                                <div class="db-li-sub">{{ row["promoted_at"] | pacific_datetime(include_zone=False) if row["promoted_at"] else "" }}</div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </details>
+                {% endif %}
+
+                <!-- Quick search -->
+                <details class="db-panel">
+                    <summary>Quick search</summary>
+                    <div class="db-pbody">
+                        <form class="db-srch" method="get" action="/deals">
+                            <input type="date" name="after" aria-label="After date">
+                            <input type="date" name="before" aria-label="Before date">
+                            <button class="db-srch-btn" type="submit">Search deals</button>
+                        </form>
+                    </div>
+                </details>
+
+                {% if is_reviewer %}
+                <!-- Recent reviewed deals -->
+                <details class="db-panel">
+                    <summary>Recent reviewed deals</summary>
+                    <div class="db-pbody">
+                        {% for row in recent_reviewed %}
+                        <div class="db-rev">
+                            <div class="db-rev-nm">{{ row["channel"] or row["channel_id"] }}</div>
+                            <div class="db-rev-meta">
+                                {{ row["time"] }} &middot; {{ row["entry_kind"] or "unknown" }}
+                                {% if row["amount_display"] %} &middot; {{ row["amount_display"] }}{% endif %}
+                                {% if row["reviewed_by"] %} &middot; reviewed by {{ row["reviewed_by"] }}{% endif %}
+                            </div>
+                            <div class="db-rev-msg">{{ row["message"] or "(image-only message)" }}</div>
+                        </div>
+                        {% else %}
+                        <div class="db-empty">No reviewed deals yet.</div>
+                        {% endfor %}
+                        <div style="margin-top:10px;">
+                            <a href="/review" style="font-size:12px;font-weight:600;color:var(--db-red);">View all &rarr;</a>
+                        </div>
+                    </div>
+                </details>
+                {% endif %}
+
+                {% if is_reviewer %}
+                <!-- System detail (What Needs Attention expanded) -->
+                <details class="db-panel">
+                    <summary>System activity</summary>
+                    <div class="db-pbody">
+                        <div class="db-bk" style="margin-top:0;">
+                            <div class="db-bk-row" style="padding-top:0;border-top:none;">
+                                <span class="db-bk-lbl">Runtime</span>
+                                <span class="db-bk-val">{{ parser_progress["local_runtime"]["label"] }}{% if parser_progress["local_runtime"]["host_name"] %} on {{ parser_progress["local_runtime"]["host_name"] }}{% endif %}</span>
+                            </div>
+                            <div class="db-bk-row">
+                                <span class="db-bk-lbl">Discord</span>
+                                <span class="db-bk-val">{{ parser_progress["local_runtime"]["details"].get("discord_status", "unknown") }}</span>
+                            </div>
+                            <div class="db-bk-row">
+                                <span class="db-bk-lbl">Queued rows</span>
+                                <span class="db-bk-val">{{ parser_progress["queued"] }}</span>
+                            </div>
+                            <div class="db-bk-row">
+                                <span class="db-bk-lbl">Processing now</span>
+                                <span class="db-bk-val">{{ parser_progress["processing"] }}</span>
+                            </div>
+                            <div class="db-bk-row">
+                                <span class="db-bk-lbl">Messages today</span>
+                                <span class="db-bk-val">{{ dashboard_snapshot["today"]["recent_ingested_count"] }}</span>
+                            </div>
+                        </div>
+                        <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;">
+                            <a href="/status" style="font-size:12px;font-weight:600;color:var(--db-red);">Status page &rarr;</a>
+                            {% if is_admin %}
+                            <a href="/admin" style="font-size:12px;font-weight:600;color:var(--db-muted);">Admin &rarr;</a>
+                            {% endif %}
+                        </div>
+                    </div>
+                </details>
+                {% endif %}
+
+            </div><!-- .db-grid2 -->
+        </div><!-- .db-more -->
+    </div><!-- .page -->
+
+    {% include '_mobile_bottom_nav.html' %}
+
+    <script>
+        (function () {
+            if (window.innerWidth >= 768) {
+                document.querySelectorAll('details.db-panel').forEach(function (el) {
+                    el.setAttribute('open', '');
+                });
+            }
+        })();
+    </script>
+</body>
+</html>

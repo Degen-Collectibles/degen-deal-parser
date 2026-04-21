@@ -1,0 +1,912 @@
+<!DOCTYPE html><html lang="en"><head>
+
+
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Degen Collectibles — Design Wireframes</title>
+<link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;600;700&amp;family=Caveat+Brush&amp;display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --ink: #1a1a1a;
+    --ink2: #444;
+    --ink3: #888;
+    --paper: #f7f5f0;
+    --card: #ffffff;
+    --line: #d5cfc4;
+    --accent: #e05c1a;
+    --gold: #d4a032;
+    --green: #3a9e6a;
+    --blue: #2e6fd4;
+    --sketch-r: 3px;
+  }
+  html, body { height: 100%; background: var(--paper); color: var(--ink); font-family: 'Caveat', cursive; }
+
+  /* ── header ── */
+  .top-bar {
+    padding: 14px 24px 0;
+    display: flex; align-items: center; gap: 16px;
+    border-bottom: 2px solid var(--ink);
+  }
+  .top-bar h1 { font-size: 22px; font-weight: 700; flex: 1; }
+  .top-bar .sub { font-size: 15px; color: var(--ink3); }
+
+  /* ── tabs ── */
+  .tab-row { display: flex; gap: 4px; padding: 0 24px; border-bottom: 2px solid var(--ink); background: var(--paper); position: sticky; top: 0; z-index: 10; }
+  .tab { padding: 10px 18px; font-family: 'Caveat', cursive; font-size: 17px; font-weight: 600; cursor: pointer; border: none; background: none; border-bottom: 3px solid transparent; color: var(--ink3); transition: all .15s; }
+  .tab.active { color: var(--ink); border-bottom-color: var(--accent); }
+
+  /* ── canvas ── */
+  .canvas { display: none; padding: 28px 24px 60px; gap: 36px; flex-wrap: wrap; }
+  .canvas.active { display: flex; }
+
+  /* ── direction label ── */
+  .dir-label { width: 100%; font-size: 20px; font-weight: 700; color: var(--accent); border-bottom: 1.5px dashed var(--accent); padding-bottom: 6px; margin-bottom: 4px; }
+  .dir-sub { font-size: 15px; color: var(--ink3); margin-bottom: 20px; width: 100%; }
+
+  /* ── screen groups ── */
+  .screens { display: flex; gap: 28px; flex-wrap: wrap; width: 100%; align-items: flex-start; }
+
+  /* ── phone frame ── */
+  .phone { width: 200px; flex-shrink: 0; }
+  .phone-label { text-align: center; font-size: 14px; color: var(--ink3); margin-bottom: 8px; }
+  .phone-shell {
+    width: 200px; background: var(--ink); border-radius: 28px; padding: 10px 8px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.22);
+  }
+  .phone-notch { width: 60px; height: 8px; background: #000; border-radius: 4px; margin: 0 auto 8px; }
+  .phone-screen { background: #0a0c10; border-radius: 18px; overflow: hidden; min-height: 340px; }
+
+  /* ── desktop frame ── */
+  .desktop { flex: 1; min-width: 320px; }
+  .desktop-label { font-size: 14px; color: var(--ink3); margin-bottom: 8px; }
+  .desktop-shell {
+    background: #fff; border: 2px solid var(--ink); border-radius: 10px;
+    overflow: hidden; box-shadow: 4px 5px 0 var(--ink);
+  }
+  .desktop-titlebar { background: var(--ink); height: 26px; display: flex; align-items: center; padding: 0 10px; gap: 6px; }
+  .desktop-dot { width: 8px; height: 8px; border-radius: 50%; background: #555; }
+  .desktop-dot.r { background: #e05c1a; }
+
+  /* ── sketch elements ── */
+  .sk-row { display: flex; align-items: center; gap: 6px; }
+  .sk-rect { background: rgba(255,255,255,.08); border: 1.5px solid rgba(255,255,255,.18); border-radius: var(--sketch-r); }
+  .sk-rect.accent { background: rgba(224,92,26,.22); border-color: rgba(224,92,26,.5); }
+  .sk-rect.gold { background: rgba(212,160,50,.2); border-color: rgba(212,160,50,.45); }
+  .sk-rect.green { background: rgba(58,158,106,.2); border-color: rgba(58,158,106,.45); }
+  .sk-rect.blue { background: rgba(46,111,212,.2); border-color: rgba(46,111,212,.45); }
+  .sk-rect.light { background: rgba(255,255,255,.15); border-color: rgba(255,255,255,.28); }
+  .sk-line { height: 6px; border-radius: 3px; background: rgba(255,255,255,.12); }
+  .sk-line.w30 { width: 30%; }
+  .sk-line.w50 { width: 50%; }
+  .sk-line.w70 { width: 70%; }
+  .sk-line.w90 { width: 90%; }
+  .sk-line.w100 { width: 100%; }
+  .sk-line.accent { background: rgba(224,92,26,.5); }
+  .sk-line.gold { background: rgba(212,160,50,.45); }
+  .sk-line.muted { background: rgba(255,255,255,.07); }
+  .sk-txt { font-family: 'Caveat', cursive; font-size: 11px; color: rgba(255,255,255,.55); }
+  .sk-txt.bright { color: rgba(255,255,255,.85); font-size: 13px; font-weight: 600; }
+  .sk-txt.big { font-size: 22px; font-weight: 700; color: #fff; letter-spacing: -.02em; }
+  .sk-txt.huge { font-size: 36px; font-weight: 700; color: #fff; letter-spacing: -.04em; line-height: 1; }
+  .sk-txt.accent { color: #ff7a3d; }
+  .sk-txt.gold { color: #d4a032; }
+  .sk-txt.green { color: #3a9e6a; }
+  .sk-txt.muted { color: rgba(255,255,255,.35); font-size: 10px; }
+
+  /* annotation callout */
+  .ann { font-family: 'Caveat', cursive; font-size: 13px; color: var(--accent); background: rgba(224,92,26,.07); border: 1.5px dashed rgba(224,92,26,.4); border-radius: 6px; padding: 4px 8px; display: inline-block; }
+
+  /* desktop wireframe elements (light bg) */
+  .dsk-rect { background: #f2eeea; border: 1.5px solid var(--line); border-radius: 4px; }
+  .dsk-rect.accent { background: rgba(224,92,26,.08); border-color: rgba(224,92,26,.3); }
+  .dsk-rect.dark { background: #1a1f27; border-color: #2a3040; }
+  .dsk-line { height: 6px; border-radius: 3px; background: #ddd; }
+  .dsk-line.w30 { width: 30%; }
+  .dsk-line.w50 { width: 50%; }
+  .dsk-line.w60 { width: 60%; }
+  .dsk-line.w80 { width: 80%; }
+  .dsk-line.accent { background: rgba(224,92,26,.5); }
+  .dsk-txt { font-family: 'Caveat', cursive; }
+  .dsk-txt.label { font-size: 10px; color: var(--ink3); text-transform: uppercase; letter-spacing: .05em; }
+  .dsk-txt.big { font-size: 22px; font-weight: 700; }
+  .dsk-txt.sm { font-size: 12px; color: var(--ink2); }
+  .dsk-txt.muted { font-size: 11px; color: var(--ink3); }
+  .dsk-txt.title { font-size: 16px; font-weight: 700; }
+  .dsk-sep { border: none; border-top: 1.5px solid var(--line); }
+
+  /* annotation arrows */
+  .callout-wrap { position: relative; }
+  .callout { position: absolute; font-family: 'Caveat', cursive; font-size: 13px; color: var(--accent); white-space: nowrap; }
+
+  /* row dividers */
+  .divider { width: 100%; border: none; border-top: 1.5px dashed var(--line); margin: 4px 0; }
+</style>
+</head>
+<body data-cc-id="cc-1" style="cursor: crosshair; font-family: Tahoma;">
+
+<div class="top-bar">
+  <h1>🃏 Degen Collectibles — Design Directions</h1>
+  <span class="sub">Wireframes · April 2026</span>
+</div>
+
+<div class="tab-row">
+  <button class="tab" onclick="switchTab('A')">A · Big Number First</button>
+  <button class="tab" onclick="switchTab('B')">B · Feed + Stats Rail</button>
+  <button class="tab active" onclick="switchTab('C')">C · Power Density</button>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════ TAB A -->
+<div class="canvas" id="tab-A">
+  <div class="dir-label">Direction A — "Big Number First"</div>
+  <div class="dir-sub">Mobile-first. Every screen leads with the single most important number, huge. Ruthless info hierarchy. Bottom tab bar replaces sidebar on mobile. Deal cards stripped to essentials.</div>
+
+  <div class="screens">
+
+    <!-- MOBILE DASHBOARD -->
+    <div class="phone">
+      <div class="phone-label">Dashboard · mobile</div>
+      <div class="phone-shell">
+        <div class="phone-notch"></div>
+        <div class="phone-screen" style="padding: 10px 10px 0;">
+          <!-- status bar -->
+          <div style="display:flex;justify-content:space-between;margin-bottom:8px;">
+            <span class="sk-txt muted">9:41</span>
+            <span class="sk-txt muted">●●● ▲</span>
+          </div>
+          <!-- greeting + date -->
+          <div class="sk-txt muted" style="margin-bottom:2px;">Sun Apr 20</div>
+          <div class="sk-txt bright" style="margin-bottom:12px;">Today's Snapshot</div>
+
+          <!-- BIG number hero -->
+          <div style="background:linear-gradient(135deg,rgba(224,92,26,.2),rgba(212,160,50,.1));border:1.5px solid rgba(224,92,26,.35);border-radius:12px;padding:14px 12px;margin-bottom:10px;">
+            <div class="sk-txt muted" style="margin-bottom:4px;">Revenue today</div>
+            <div class="sk-txt huge accent">$4,820</div>
+            <div style="margin-top:6px;display:flex;gap:6px;">
+              <span class="sk-txt muted">Discord $3,200</span>
+              <span class="sk-txt muted">·</span>
+              <span class="sk-txt muted">TikTok $1,620</span>
+            </div>
+          </div>
+
+          <!-- 2-col mini stats -->
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px;">
+            <div class="sk-rect" style="padding:8px;">
+              <div class="sk-txt muted">Purchases</div>
+              <div class="sk-txt big">$2,140</div>
+            </div>
+            <div class="sk-rect" style="padding:8px;">
+              <div class="sk-txt muted">Net P&amp;L</div>
+              <div class="sk-txt big green">+$2,680</div>
+            </div>
+          </div>
+
+          <!-- attention items — minimal -->
+          <div style="margin-bottom:10px;">
+            <div class="sk-txt muted" style="margin-bottom:6px;">Action needed</div>
+            <div style="display:flex;flex-direction:column;gap:4px;">
+              <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 8px;background:rgba(255,255,255,.06);border-radius:7px;">
+                <span class="sk-txt bright">Review queue</span>
+                <span style="background:rgba(224,92,26,.7);color:#fff;font-size:11px;padding:2px 7px;border-radius:99px;font-family:'Caveat',cursive;">7</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 8px;background:rgba(255,255,255,.06);border-radius:7px;">
+                <span class="sk-txt bright">Queue backlog</span>
+                <span class="sk-txt muted">0</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- bottom nav -->
+          <div style="background:#0f1218;border-top:1px solid rgba(255,255,255,.1);margin:0 -10px;padding:8px 6px 4px;display:grid;grid-template-columns:repeat(5,1fr);gap:2px;">
+            <div style="text-align:center;">
+              <div style="font-size:16px;">🏠</div>
+              <div class="sk-txt accent" style="font-size:9px;">Home</div>
+            </div>
+            <div style="text-align:center;">
+              <div style="font-size:16px;">🏷</div>
+              <div class="sk-txt muted" style="font-size:9px;">Deals</div>
+            </div>
+            <div style="text-align:center;">
+              <div style="font-size:16px;">✅</div>
+              <div class="sk-txt muted" style="font-size:9px;">Review</div>
+            </div>
+            <div style="text-align:center;">
+              <div style="font-size:16px;">📦</div>
+              <div class="sk-txt muted" style="font-size:9px;">Inventory</div>
+            </div>
+            <div style="text-align:center;">
+              <div style="font-size:16px;">⚡</div>
+              <div class="sk-txt muted" style="font-size:9px;">Hits</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- MOBILE DEALS -->
+    <div class="phone">
+      <div class="phone-label">Deals list · mobile</div>
+      <div class="phone-shell">
+        <div class="phone-notch"></div>
+        <div class="phone-screen" style="padding:10px;">
+          <!-- filter strip — chips only, no big form -->
+          <div class="sk-txt bright" style="margin-bottom:8px;">Deals</div>
+          <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:10px;">
+            <span style="background:rgba(224,92,26,.2);border:1px solid rgba(224,92,26,.4);border-radius:99px;padding:3px 9px;font-family:'Caveat',cursive;font-size:12px;color:#ff7a3d;">All kinds</span>
+            <span style="background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.15);border-radius:99px;padding:3px 9px;font-family:'Caveat',cursive;font-size:12px;color:rgba(255,255,255,.55);">Today</span>
+            <span style="background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.15);border-radius:99px;padding:3px 9px;font-family:'Caveat',cursive;font-size:12px;color:rgba(255,255,255,.55);">All channels</span>
+            <span style="background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.15);border-radius:99px;padding:3px 9px;font-family:'Caveat',cursive;font-size:12px;color:rgba(255,255,255,.55);">⚙</span>
+          </div>
+          <!-- compact summary row -->
+          <div style="display:flex;gap:6px;margin-bottom:10px;">
+            <div style="flex:1;background:rgba(255,255,255,.05);border-radius:8px;padding:6px 8px;text-align:center;">
+              <div class="sk-txt muted">Sales</div>
+              <div class="sk-txt bright">$3,200</div>
+            </div>
+            <div style="flex:1;background:rgba(255,255,255,.05);border-radius:8px;padding:6px 8px;text-align:center;">
+              <div class="sk-txt muted">Buys</div>
+              <div class="sk-txt bright">$1,400</div>
+            </div>
+            <div style="flex:1;background:rgba(58,158,106,.12);border:1px solid rgba(58,158,106,.3);border-radius:8px;padding:6px 8px;text-align:center;">
+              <div class="sk-txt muted">Net</div>
+              <div class="sk-txt bright green">+$1,800</div>
+            </div>
+          </div>
+          <!-- deal cards — image + amount prominent -->
+          <div style="display:flex;flex-direction:column;gap:6px;">
+            <!-- card 1 -->
+            <div style="background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:10px;padding:8px;display:flex;gap:8px;align-items:flex-start;">
+              <div style="width:38px;height:38px;background:rgba(255,255,255,.1);border-radius:6px;flex-shrink:0;display:flex;align-items:center;justify-content:center;"><span style="font-size:9px;color:rgba(255,255,255,.3);font-family:'Caveat',cursive;">img</span></div>
+              <div style="flex:1;min-width:0;">
+                <div style="display:flex;justify-content:space-between;margin-bottom:2px;">
+                  <span class="sk-txt muted">buying-channel · 2m ago</span>
+                  <span style="background:rgba(58,158,106,.2);border:1px solid rgba(58,158,106,.4);border-radius:99px;padding:1px 7px;font-family:'Caveat',cursive;font-size:11px;color:#3a9e6a;">sale</span>
+                </div>
+                <div class="sk-txt bright" style="font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Charizard VMAX gold · PSA 10</div>
+                <div style="display:flex;justify-content:space-between;margin-top:3px;">
+                  <span class="sk-txt muted">jmanballa</span>
+                  <span class="sk-txt accent" style="font-size:14px;font-weight:700;">$420</span>
+                </div>
+              </div>
+            </div>
+            <!-- card 2 -->
+            <div style="background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:10px;padding:8px;display:flex;gap:8px;align-items:flex-start;">
+              <div style="width:38px;height:38px;background:rgba(255,255,255,.1);border-radius:6px;flex-shrink:0;display:flex;align-items:center;justify-content:center;"><span style="font-size:9px;color:rgba(255,255,255,.3);font-family:'Caveat',cursive;">img</span></div>
+              <div style="flex:1;min-width:0;">
+                <div style="display:flex;justify-content:space-between;margin-bottom:2px;">
+                  <span class="sk-txt muted">buying-channel · 14m ago</span>
+                  <span style="background:rgba(46,111,212,.2);border:1px solid rgba(46,111,212,.4);border-radius:99px;padding:1px 7px;font-family:'Caveat',cursive;font-size:11px;color:#6a9ee8;">buy</span>
+                </div>
+                <div class="sk-txt bright" style="font-size:12px;">Blastoise Base Set · Ungraded</div>
+                <div style="display:flex;justify-content:space-between;margin-top:3px;">
+                  <span class="sk-txt muted">partner_22</span>
+                  <span class="sk-txt gold" style="font-size:14px;font-weight:700;">$85</span>
+                </div>
+              </div>
+            </div>
+            <!-- card 3 placeholder -->
+            <div style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.07);border-radius:10px;padding:8px;display:flex;gap:8px;align-items:flex-start;">
+              <div style="width:38px;height:38px;background:rgba(255,255,255,.06);border-radius:6px;flex-shrink:0;"></div>
+              <div style="flex:1;"><div class="sk-line w70" style="margin-bottom:5px;"></div><div class="sk-line w90" style="margin-bottom:5px;"></div><div class="sk-line w50"></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- DESKTOP DASHBOARD sketch -->
+    <div class="desktop">
+      <div class="desktop-label">Dashboard · desktop</div>
+      <div class="desktop-shell">
+        <div class="desktop-titlebar">
+          <div class="desktop-dot r"></div><div class="desktop-dot"></div><div class="desktop-dot"></div>
+          <span style="font-family:'Caveat',cursive;font-size:12px;color:#888;margin-left:8px;">degen.app/dashboard</span>
+        </div>
+        <div style="display:flex;background:#0a0c10;min-height:360px;">
+          <!-- sidebar -->
+          <div style="width:52px;background:#080a0d;border-right:1px solid rgba(255,255,255,.08);padding:10px 6px;display:flex;flex-direction:column;gap:8px;align-items:center;">
+            <div style="width:28px;height:28px;background:rgba(224,92,26,.3);border-radius:6px;"></div>
+            <div style="width:22px;height:22px;background:rgba(255,255,255,.12);border-radius:4px;"></div>
+            <div style="width:22px;height:22px;background:rgba(255,255,255,.12);border-radius:4px;"></div>
+            <div style="width:22px;height:22px;background:rgba(255,255,255,.12);border-radius:4px;"></div>
+            <div style="width:22px;height:22px;background:rgba(255,255,255,.12);border-radius:4px;"></div>
+            <div style="width:22px;height:22px;background:rgba(255,255,255,.12);border-radius:4px;"></div>
+          </div>
+          <!-- content -->
+          <div style="flex:1;padding:16px 14px;overflow:hidden;">
+            <div class="sk-txt muted" style="margin-bottom:2px;">Sunday Apr 20</div>
+            <div class="sk-txt bright" style="margin-bottom:14px;">Today's Snapshot</div>
+
+            <!-- 4 stat cards in a row -->
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px;">
+              <div style="background:rgba(224,92,26,.12);border:1px solid rgba(224,92,26,.3);border-radius:8px;padding:10px;border-top: 2px solid #e05c1a;">
+                <div class="sk-txt muted">Revenue</div>
+                <div style="font-family:'Caveat',cursive;font-size:24px;font-weight:700;color:#ff7a3d;">$4,820</div>
+                <div class="sk-line w70 accent" style="margin-top:5px;"></div>
+              </div>
+              <div style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:8px;padding:10px;border-top:2px solid rgba(255,255,255,.18);">
+                <div class="sk-txt muted">Purchases</div>
+                <div style="font-family:'Caveat',cursive;font-size:24px;font-weight:700;color:#fff;">$2,140</div>
+                <div class="sk-line w50" style="margin-top:5px;"></div>
+              </div>
+              <div style="background:rgba(58,158,106,.1);border:1px solid rgba(58,158,106,.3);border-radius:8px;padding:10px;border-top:2px solid rgba(58,158,106,.6);">
+                <div class="sk-txt muted">Net P&amp;L</div>
+                <div style="font-family:'Caveat',cursive;font-size:24px;font-weight:700;color:#3a9e6a;">+$2,680</div>
+                <div class="sk-line w80 green" style="margin-top:5px;"></div>
+              </div>
+              <div style="background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:10px;">
+                <div class="sk-txt muted">Attention</div>
+                <div style="font-family:'Caveat',cursive;font-size:24px;font-weight:700;color:#fff;">7</div>
+                <div class="sk-line w30" style="margin-top:5px;"></div>
+              </div>
+            </div>
+
+            <!-- recent deals + sidebar -->
+            <div style="display:grid;grid-template-columns:1fr 140px;gap:8px;">
+              <div>
+                <div class="sk-txt muted" style="margin-bottom:6px;">Recent deals</div>
+                <div style="display:flex;flex-direction:column;gap:4px;">
+                  <div style="background:rgba(255,255,255,.05);border-radius:6px;padding:7px 8px;display:flex;align-items:center;gap:8px;">
+                    <div style="width:24px;height:24px;background:rgba(255,255,255,.1);border-radius:4px;flex-shrink:0;"></div>
+                    <div style="flex:1;"><div class="sk-line w80" style="margin-bottom:3px;"></div><div class="sk-line w50 muted"></div></div>
+                    <span style="font-family:'Caveat',cursive;font-size:14px;color:#ff7a3d;font-weight:700;">$420</span>
+                  </div>
+                  <div style="background:rgba(255,255,255,.04);border-radius:6px;padding:7px 8px;display:flex;align-items:center;gap:8px;">
+                    <div style="width:24px;height:24px;background:rgba(255,255,255,.08);border-radius:4px;flex-shrink:0;"></div>
+                    <div style="flex:1;"><div class="sk-line w70" style="margin-bottom:3px;"></div><div class="sk-line w40 muted"></div></div>
+                    <span style="font-family:'Caveat',cursive;font-size:14px;color:#d4a032;font-weight:700;">$85</span>
+                  </div>
+                  <div style="background:rgba(255,255,255,.03);border-radius:6px;padding:7px 8px;display:flex;align-items:center;gap:8px;">
+                    <div style="width:24px;height:24px;background:rgba(255,255,255,.06);border-radius:4px;flex-shrink:0;"></div>
+                    <div style="flex:1;"><div class="sk-line w60" style="margin-bottom:3px;"></div><div class="sk-line w35 muted"></div></div>
+                    <span style="font-family:'Caveat',cursive;font-size:14px;color:rgba(255,255,255,.5);font-weight:700;">$60</span>
+                  </div>
+                </div>
+              </div>
+              <div>
+                <div class="sk-txt muted" style="margin-bottom:6px;">Action</div>
+                <div style="display:flex;flex-direction:column;gap:4px;">
+                  <div style="background:rgba(224,92,26,.15);border:1px solid rgba(224,92,26,.3);border-radius:6px;padding:6px 8px;display:flex;justify-content:space-between;align-items:center;">
+                    <span class="sk-txt bright" style="font-size:11px;">Review</span>
+                    <span style="background:#e05c1a;color:#fff;font-size:11px;padding:1px 6px;border-radius:99px;font-family:'Caveat',cursive;">7</span>
+                  </div>
+                  <div style="background:rgba(255,255,255,.05);border-radius:6px;padding:6px 8px;display:flex;justify-content:space-between;align-items:center;">
+                    <span class="sk-txt bright" style="font-size:11px;">Backlog</span>
+                    <span class="sk-txt muted" style="font-size:11px;">0</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- annotation -->
+      <div style="margin-top:12px;display:flex;flex-wrap:wrap;gap:8px;">
+        <span class="ann">↑ Revenue leads — always biggest number</span>
+        <span class="ann">Sidebar icon-only on desktop (slim)</span>
+        <span class="ann">Color-coded: orange=revenue, green=profit</span>
+        <span class="ann">Mobile: bottom tab bar, no sidebar</span>
+        <span class="ann">Deals: chips replace full filter form</span>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════ TAB B -->
+<div class="canvas" id="tab-B">
+  <div class="dir-label">Direction B — "Feed + Stats Rail"</div>
+  <div class="dir-sub">Activity feed is the primary surface — deals scroll chronologically. Persistent stats strip pins key numbers. Desktop: right rail always shows today's totals. Mobile: stats collapse into a swipeable top strip.</div>
+
+  <div class="screens">
+
+    <!-- MOBILE DASHBOARD -->
+    <div class="phone">
+      <div class="phone-label">Dashboard · mobile</div>
+      <div class="phone-shell">
+        <div class="phone-notch"></div>
+        <div class="phone-screen" style="padding:10px 10px 0;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+            <div class="sk-txt bright">Degen</div>
+            <div style="width:22px;height:22px;background:rgba(224,92,26,.3);border-radius:99px;"></div>
+          </div>
+
+          <!-- horizontal scrolling stats strip -->
+          <div style="margin:0 -10px;padding:0 10px;overflow:hidden;margin-bottom:10px;">
+            <div class="sk-txt muted" style="font-size:10px;margin-bottom:5px;">TODAY · APR 20</div>
+            <div style="display:flex;gap:8px;overflow:hidden;">
+              <div style="flex-shrink:0;background:rgba(224,92,26,.15);border:1px solid rgba(224,92,26,.3);border-radius:8px;padding:7px 10px;min-width:80px;">
+                <div class="sk-txt muted">Revenue</div>
+                <div class="sk-txt big accent">$4,820</div>
+              </div>
+              <div style="flex-shrink:0;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:7px 10px;min-width:80px;">
+                <div class="sk-txt muted">Buys</div>
+                <div class="sk-txt big">$2,140</div>
+              </div>
+              <div style="flex-shrink:0;background:rgba(58,158,106,.1);border:1px solid rgba(58,158,106,.25);border-radius:8px;padding:7px 10px;min-width:80px;">
+                <div class="sk-txt muted">Net</div>
+                <div class="sk-txt big green">+$2.6k</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- section: today's feed -->
+          <div class="sk-txt muted" style="margin-bottom:6px;font-size:11px;">RECENT ACTIVITY</div>
+          <div style="display:flex;flex-direction:column;gap:1px;">
+            <!-- feed item 1 -->
+            <div style="padding:8px;background:rgba(255,255,255,.04);border-radius:8px;margin-bottom:4px;">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+                <div>
+                  <span style="background:rgba(58,158,106,.2);border-radius:99px;padding:1px 7px;font-family:'Caveat',cursive;font-size:10px;color:#3a9e6a;margin-right:4px;">SALE</span>
+                  <span class="sk-txt muted">2m ago · buying-ch</span>
+                </div>
+                <span class="sk-txt accent" style="font-size:16px;font-weight:700;">$420</span>
+              </div>
+              <div class="sk-txt bright" style="font-size:12px;margin-top:3px;">Charizard VMAX gold PSA 10</div>
+            </div>
+            <!-- feed item 2 -->
+            <div style="padding:8px;background:rgba(255,255,255,.03);border-radius:8px;margin-bottom:4px;">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+                <div>
+                  <span style="background:rgba(46,111,212,.2);border-radius:99px;padding:1px 7px;font-family:'Caveat',cursive;font-size:10px;color:#6a9ee8;margin-right:4px;">BUY</span>
+                  <span class="sk-txt muted">14m ago · buying-ch</span>
+                </div>
+                <span class="sk-txt gold" style="font-size:16px;font-weight:700;">$85</span>
+              </div>
+              <div class="sk-txt bright" style="font-size:12px;margin-top:3px;">Blastoise Base Set ungraded</div>
+            </div>
+            <!-- feed item 3 -->
+            <div style="padding:8px;background:rgba(255,255,255,.02);border-radius:8px;margin-bottom:4px;">
+              <div style="display:flex;justify-content:space-between;">
+                <div><span class="sk-txt muted" style="font-size:10px;">⚠ needs review</span></div>
+                <span class="sk-txt muted" style="font-size:16px;">$?</span>
+              </div>
+              <div class="sk-line w70" style="margin-top:5px;"></div>
+            </div>
+          </div>
+
+          <!-- bottom nav -->
+          <div style="background:#0f1218;border-top:1px solid rgba(255,255,255,.08);margin:8px -10px 0;padding:7px 6px 3px;display:grid;grid-template-columns:repeat(5,1fr);">
+            <div style="text-align:center;"><div style="font-size:15px;">🏠</div><div class="sk-txt accent" style="font-size:9px;">Home</div></div>
+            <div style="text-align:center;"><div style="font-size:15px;">🏷</div><div class="sk-txt muted" style="font-size:9px;">Deals</div></div>
+            <div style="text-align:center;"><div style="font-size:15px;">✅</div><div class="sk-txt muted" style="font-size:9px;">Review</div></div>
+            <div style="text-align:center;"><div style="font-size:15px;">📦</div><div class="sk-txt muted" style="font-size:9px;">Inventory</div></div>
+            <div style="text-align:center;"><div style="font-size:15px;">•••</div><div class="sk-txt muted" style="font-size:9px;">More</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- MOBILE DEALS — feed view -->
+    <div class="phone">
+      <div class="phone-label">Deals · mobile (feed)</div>
+      <div class="phone-shell">
+        <div class="phone-notch"></div>
+        <div class="phone-screen" style="padding:10px 10px 0;">
+          <!-- top -->
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <span class="sk-txt bright">Deals</span>
+            <div style="display:flex;gap:5px;">
+              <span style="font-family:'Caveat',cursive;font-size:11px;color:rgba(255,255,255,.4);background:rgba(255,255,255,.07);border-radius:6px;padding:2px 7px;">Filter</span>
+              <span style="font-family:'Caveat',cursive;font-size:11px;color:rgba(255,255,255,.4);background:rgba(255,255,255,.07);border-radius:6px;padding:2px 7px;">Sort</span>
+            </div>
+          </div>
+
+          <!-- active filters as chips -->
+          <div style="display:flex;gap:4px;margin-bottom:8px;flex-wrap:wrap;">
+            <span style="background:rgba(224,92,26,.15);border:1px solid rgba(224,92,26,.3);border-radius:99px;padding:2px 8px;font-family:'Caveat',cursive;font-size:11px;color:#ff7a3d;">Today ✕</span>
+            <span style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:99px;padding:2px 8px;font-family:'Caveat',cursive;font-size:11px;color:rgba(255,255,255,.5);">All kinds</span>
+          </div>
+
+          <!-- summary mini row -->
+          <div style="background:rgba(255,255,255,.04);border-radius:8px;padding:7px 10px;display:flex;justify-content:space-around;margin-bottom:10px;">
+            <div style="text-align:center;"><div class="sk-txt muted" style="font-size:10px;">SALES</div><div style="font-family:'Caveat',cursive;font-size:14px;font-weight:700;color:#ff7a3d;">$3.2k</div></div>
+            <div style="width:1px;background:rgba(255,255,255,.1);"></div>
+            <div style="text-align:center;"><div class="sk-txt muted" style="font-size:10px;">BUYS</div><div style="font-family:'Caveat',cursive;font-size:14px;font-weight:700;color:#fff;">$1.4k</div></div>
+            <div style="width:1px;background:rgba(255,255,255,.1);"></div>
+            <div style="text-align:center;"><div class="sk-txt muted" style="font-size:10px;">NET</div><div style="font-family:'Caveat',cursive;font-size:14px;font-weight:700;color:#3a9e6a;">+$1.8k</div></div>
+          </div>
+
+          <!-- grouped by date label -->
+          <div class="sk-txt muted" style="font-size:10px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px;">Earlier today</div>
+
+          <!-- feed items — image on left, amount big on right -->
+          <div style="display:flex;flex-direction:column;gap:5px;">
+            <div style="background:rgba(255,255,255,.05);border-left:2px solid #3a9e6a;border-radius:0 8px 8px 0;padding:7px 8px;display:flex;align-items:center;gap:7px;">
+              <div style="width:32px;height:32px;background:rgba(255,255,255,.1);border-radius:5px;flex-shrink:0;"></div>
+              <div style="flex:1;min-width:0;">
+                <div class="sk-txt bright" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Charizard VMAX PSA 10</div>
+                <div class="sk-txt muted" style="font-size:10px;">buying-channel · sale</div>
+              </div>
+              <div style="text-align:right;flex-shrink:0;">
+                <div style="font-family:'Caveat',cursive;font-size:17px;font-weight:700;color:#3a9e6a;">$420</div>
+              </div>
+            </div>
+            <div style="background:rgba(255,255,255,.04);border-left:2px solid #6a9ee8;border-radius:0 8px 8px 0;padding:7px 8px;display:flex;align-items:center;gap:7px;">
+              <div style="width:32px;height:32px;background:rgba(255,255,255,.08);border-radius:5px;flex-shrink:0;"></div>
+              <div style="flex:1;min-width:0;">
+                <div class="sk-txt bright" style="font-size:11px;">Blastoise base ungraded</div>
+                <div class="sk-txt muted" style="font-size:10px;">buying-channel · buy</div>
+              </div>
+              <div style="text-align:right;flex-shrink:0;">
+                <div style="font-family:'Caveat',cursive;font-size:17px;font-weight:700;color:#6a9ee8;">$85</div>
+              </div>
+            </div>
+            <div style="background:rgba(255,255,255,.03);border-left:2px solid rgba(255,255,255,.15);border-radius:0 8px 8px 0;padding:7px 8px;display:flex;align-items:center;gap:7px;">
+              <div style="width:32px;height:32px;background:rgba(255,255,255,.05);border-radius:5px;flex-shrink:0;"></div>
+              <div style="flex:1;"><div class="sk-line w80" style="margin-bottom:4px;"></div><div class="sk-line w50 muted"></div></div>
+              <div style="font-family:'Caveat',cursive;font-size:17px;color:rgba(255,255,255,.25);">$—</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- DESKTOP — feed + rail -->
+    <div class="desktop">
+      <div class="desktop-label">Dashboard · desktop (feed + right rail)</div>
+      <div class="desktop-shell">
+        <div class="desktop-titlebar">
+          <div class="desktop-dot r"></div><div class="desktop-dot"></div><div class="desktop-dot"></div>
+        </div>
+        <div style="display:flex;background:#0a0c10;min-height:360px;">
+          <!-- sidebar expanded -->
+          <div style="width:130px;background:#080a0d;border-right:1px solid rgba(255,255,255,.08);padding:10px 8px;flex-shrink:0;">
+            <div style="display:flex;align-items:center;gap:6px;margin-bottom:14px;">
+              <div style="width:20px;height:20px;background:rgba(224,92,26,.4);border-radius:5px;"></div>
+              <span style="font-family:'Caveat',cursive;font-size:14px;font-weight:700;color:#fff;">Degen</span>
+            </div>
+            <div style="font-family:'Caveat',cursive;font-size:9px;color:rgba(255,255,255,.35);text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px;">Workspace</div>
+            <div style="display:flex;flex-direction:column;gap:2px;margin-bottom:10px;">
+              <div style="background:rgba(224,92,26,.15);border:1px solid rgba(224,92,26,.25);border-radius:5px;padding:5px 7px;"><span style="font-family:'Caveat',cursive;font-size:12px;color:#ff7a3d;">Dashboard</span></div>
+              <div style="padding:5px 7px;"><span class="sk-txt muted" style="font-size:12px;">Review</span></div>
+              <div style="padding:5px 7px;"><span class="sk-txt muted" style="font-size:12px;">Deals</span></div>
+            </div>
+            <div style="font-family:'Caveat',cursive;font-size:9px;color:rgba(255,255,255,.35);text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px;">Ops</div>
+            <div style="display:flex;flex-direction:column;gap:2px;">
+              <div style="padding:5px 7px;"><span class="sk-txt muted" style="font-size:12px;">Finance</span></div>
+              <div style="padding:5px 7px;"><span class="sk-txt muted" style="font-size:12px;">Reports</span></div>
+              <div style="padding:5px 7px;"><span class="sk-txt muted" style="font-size:12px;">Inventory</span></div>
+              <div style="padding:5px 7px;"><span class="sk-txt muted" style="font-size:12px;">Live Hits</span></div>
+            </div>
+          </div>
+          <!-- main feed -->
+          <div style="flex:1;padding:14px;overflow:hidden;">
+            <div class="sk-txt bright" style="margin-bottom:12px;">Activity Feed</div>
+            <div style="display:flex;flex-direction:column;gap:4px;">
+              <div style="background:rgba(255,255,255,.05);border-left:2px solid #3a9e6a;border-radius:0 7px 7px 0;padding:7px 10px;display:flex;align-items:center;gap:10px;">
+                <div style="width:28px;height:28px;background:rgba(255,255,255,.1);border-radius:5px;flex-shrink:0;"></div>
+                <div style="flex:1;"><div class="sk-line w80" style="margin-bottom:3px;"></div><div class="sk-line w50 muted"></div></div>
+                <span style="font-family:'Caveat',cursive;font-size:16px;font-weight:700;color:#3a9e6a;">$420</span>
+                <span style="font-family:'Caveat',cursive;font-size:10px;color:rgba(255,255,255,.35);">2m</span>
+              </div>
+              <div style="background:rgba(255,255,255,.04);border-left:2px solid #6a9ee8;border-radius:0 7px 7px 0;padding:7px 10px;display:flex;align-items:center;gap:10px;">
+                <div style="width:28px;height:28px;background:rgba(255,255,255,.08);border-radius:5px;flex-shrink:0;"></div>
+                <div style="flex:1;"><div class="sk-line w65" style="margin-bottom:3px;"></div><div class="sk-line w40 muted"></div></div>
+                <span style="font-family:'Caveat',cursive;font-size:16px;font-weight:700;color:#6a9ee8;">$85</span>
+                <span style="font-family:'Caveat',cursive;font-size:10px;color:rgba(255,255,255,.35);">14m</span>
+              </div>
+              <div style="background:rgba(255,255,255,.03);border-left:2px solid rgba(255,255,255,.15);border-radius:0 7px 7px 0;padding:7px 10px;display:flex;align-items:center;gap:10px;">
+                <div style="width:28px;height:28px;background:rgba(255,255,255,.05);border-radius:5px;flex-shrink:0;"></div>
+                <div style="flex:1;"><div class="sk-line w55" style="margin-bottom:3px;"></div><div class="sk-line w35 muted"></div></div>
+                <span style="font-family:'Caveat',cursive;font-size:16px;font-weight:700;color:rgba(255,255,255,.3);">$60</span>
+                <span style="font-family:'Caveat',cursive;font-size:10px;color:rgba(255,255,255,.35);">32m</span>
+              </div>
+            </div>
+          </div>
+          <!-- right rail -->
+          <div style="width:110px;background:#080e14;border-left:1px solid rgba(255,255,255,.08);padding:12px 10px;flex-shrink:0;">
+            <div class="sk-txt muted" style="font-size:10px;margin-bottom:10px;">TODAY</div>
+            <div style="display:flex;flex-direction:column;gap:10px;">
+              <div>
+                <div class="sk-txt muted" style="font-size:10px;">Revenue</div>
+                <div style="font-family:'Caveat',cursive;font-size:18px;font-weight:700;color:#ff7a3d;">$4,820</div>
+              </div>
+              <div>
+                <div class="sk-txt muted" style="font-size:10px;">Purchases</div>
+                <div style="font-family:'Caveat',cursive;font-size:18px;font-weight:700;color:#fff;">$2,140</div>
+              </div>
+              <div>
+                <div class="sk-txt muted" style="font-size:10px;">Net P&amp;L</div>
+                <div style="font-family:'Caveat',cursive;font-size:18px;font-weight:700;color:#3a9e6a;">+$2.6k</div>
+              </div>
+              <hr style="border:none;border-top:1px solid rgba(255,255,255,.1);">
+              <div>
+                <div class="sk-txt muted" style="font-size:10px;">Review</div>
+                <div style="font-family:'Caveat',cursive;font-size:18px;font-weight:700;color:#e05c1a;">7</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div style="margin-top:12px;display:flex;flex-wrap:wrap;gap:8px;">
+        <span class="ann">Left border color = deal type (green=sale, blue=buy)</span>
+        <span class="ann">Right rail: always-visible today's numbers</span>
+        <span class="ann">Sidebar expanded on desktop, bottom nav mobile</span>
+        <span class="ann">Deals grouped by date in feed</span>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════ TAB C -->
+<div class="canvas active" id="tab-C">
+  <div class="dir-label">Direction C — "Power Density"</div>
+  <div class="dir-sub">Built for speed. Dense but highly organized. Tables get color-coded amounts, sticky headers, alternating rows. Dashboard is compact — all key numbers above the fold. A global search bar replaces slow navigation.</div>
+
+  <div class="screens">
+
+    <!-- MOBILE DASHBOARD -->
+    <div class="phone">
+      <div class="phone-label">Dashboard · mobile</div>
+      <div class="phone-shell">
+        <div class="phone-notch"></div>
+        <div class="phone-screen" style="padding:10px 10px 0;">
+          <!-- search bar at top -->
+          <div style="background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);border-radius:8px;padding:7px 10px;margin-bottom:10px;display:flex;align-items:center;gap:6px;">
+            <span style="font-size:12px;color:rgba(255,255,255,.35);">🔍</span>
+            <span class="sk-txt muted" style="font-size:12px;">Search deals, items, channels…</span>
+          </div>
+
+          <!-- stats 2x2 grid, tight -->
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-bottom:8px;">
+            <div style="background:rgba(224,92,26,.12);border:1px solid rgba(224,92,26,.3);border-radius:8px;padding:8px;border-top:2px solid #e05c1a;">
+              <div class="sk-txt muted" style="font-size:10px;">Revenue</div>
+              <div style="font-family:'Caveat',cursive;font-size:20px;font-weight:700;color:#ff7a3d;line-height:1.1;">$4,820</div>
+              <div class="sk-txt muted" style="font-size:10px;">Discord $3.2k · TikTok $1.6k</div>
+            </div>
+            <div style="background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:8px;">
+              <div class="sk-txt muted" style="font-size:10px;">Purchases</div>
+              <div style="font-family:'Caveat',cursive;font-size:20px;font-weight:700;color:#fff;line-height:1.1;">$2,140</div>
+              <div class="sk-txt muted" style="font-size:10px;">Buys · Trades · Exp.</div>
+            </div>
+            <div style="background:rgba(58,158,106,.1);border:1px solid rgba(58,158,106,.25);border-radius:8px;padding:8px;border-top:2px solid rgba(58,158,106,.6);">
+              <div class="sk-txt muted" style="font-size:10px;">Net P&amp;L</div>
+              <div style="font-family:'Caveat',cursive;font-size:20px;font-weight:700;color:#3a9e6a;line-height:1.1;">+$2,680</div>
+              <div class="sk-txt muted" style="font-size:10px;">margin 56%</div>
+            </div>
+            <div style="background:rgba(255,180,0,.08);border:1px solid rgba(255,180,0,.2);border-radius:8px;padding:8px;">
+              <div class="sk-txt muted" style="font-size:10px;">Attention</div>
+              <div style="font-family:'Caveat',cursive;font-size:20px;font-weight:700;color:#e05c1a;line-height:1.1;">7</div>
+              <div class="sk-txt muted" style="font-size:10px;">in review queue</div>
+            </div>
+          </div>
+
+          <!-- mini table: recent deals -->
+          <div class="sk-txt muted" style="font-size:10px;margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em;">Recent Deals</div>
+          <div style="background:rgba(255,255,255,.04);border-radius:8px;overflow:hidden;border:1px solid rgba(255,255,255,.08);">
+            <div style="display:grid;grid-template-columns:1fr auto auto;padding:4px 8px;background:rgba(255,255,255,.06);gap:8px;">
+              <span class="sk-txt muted" style="font-size:9px;">ITEM</span>
+              <span class="sk-txt muted" style="font-size:9px;">KIND</span>
+              <span class="sk-txt muted" style="font-size:9px;">AMT</span>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr auto auto;padding:5px 8px;gap:8px;border-top:1px solid rgba(255,255,255,.05);">
+              <span class="sk-txt bright" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Charizard VMAX</span>
+              <span style="font-family:'Caveat',cursive;font-size:10px;color:#3a9e6a;">sale</span>
+              <span style="font-family:'Caveat',cursive;font-size:12px;font-weight:700;color:#ff7a3d;">$420</span>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr auto auto;padding:5px 8px;gap:8px;border-top:1px solid rgba(255,255,255,.04);background:rgba(255,255,255,.02);">
+              <span class="sk-txt bright" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Blastoise Base</span>
+              <span style="font-family:'Caveat',cursive;font-size:10px;color:#6a9ee8;">buy</span>
+              <span style="font-family:'Caveat',cursive;font-size:12px;font-weight:700;color:#d4a032;">$85</span>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr auto auto;padding:5px 8px;gap:8px;border-top:1px solid rgba(255,255,255,.04);">
+              <span class="sk-txt muted" style="font-size:11px;">Needs review…</span>
+              <span style="font-family:'Caveat',cursive;font-size:10px;color:rgba(255,100,28,.6);">?</span>
+              <span style="font-family:'Caveat',cursive;font-size:12px;font-weight:700;color:rgba(255,255,255,.3);">$—</span>
+            </div>
+          </div>
+
+          <!-- bottom nav -->
+          <div style="background:#0f1218;border-top:1px solid rgba(255,255,255,.08);margin:8px -10px 0;padding:7px 6px 3px;display:grid;grid-template-columns:repeat(5,1fr);">
+            <div style="text-align:center;"><div style="font-size:14px;">🏠</div><div class="sk-txt accent" style="font-size:9px;">Home</div></div>
+            <div style="text-align:center;"><div style="font-size:14px;">🏷</div><div class="sk-txt muted" style="font-size:9px;">Deals</div></div>
+            <div style="text-align:center;"><div style="font-size:14px;">✅</div><div class="sk-txt muted" style="font-size:9px;">Review</div></div>
+            <div style="text-align:center;"><div style="font-size:14px;">📦</div><div class="sk-txt muted" style="font-size:9px;">Inv.</div></div>
+            <div style="text-align:center;"><div style="font-size:14px;">•••</div><div class="sk-txt muted" style="font-size:9px;">More</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- MOBILE DEALS — dense table -->
+    <div class="phone">
+      <div class="phone-label">Deals · mobile (dense table)</div>
+      <div class="phone-shell">
+        <div class="phone-notch"></div>
+        <div class="phone-screen" style="padding:10px 10px 0;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <span class="sk-txt bright">Deals</span>
+            <div style="display:flex;gap:4px;">
+              <span style="background:rgba(255,255,255,.07);border-radius:6px;padding:3px 8px;font-family:'Caveat',cursive;font-size:11px;color:rgba(255,255,255,.45);">Filter ▾</span>
+              <span style="background:rgba(255,255,255,.07);border-radius:6px;padding:3px 8px;font-family:'Caveat',cursive;font-size:11px;color:rgba(255,255,255,.45);">🔍</span>
+            </div>
+          </div>
+
+          <!-- tab switcher kind -->
+          <div style="display:flex;gap:2px;background:rgba(255,255,255,.05);border-radius:8px;padding:2px;margin-bottom:8px;">
+            <div style="flex:1;text-align:center;background:#e05c1a;border-radius:6px;padding:4px;"><span style="font-family:'Caveat',cursive;font-size:12px;color:#fff;">All</span></div>
+            <div style="flex:1;text-align:center;padding:4px;"><span style="font-family:'Caveat',cursive;font-size:12px;color:rgba(255,255,255,.45);">Sales</span></div>
+            <div style="flex:1;text-align:center;padding:4px;"><span style="font-family:'Caveat',cursive;font-size:12px;color:rgba(255,255,255,.45);">Buys</span></div>
+            <div style="flex:1;text-align:center;padding:4px;"><span style="font-family:'Caveat',cursive;font-size:12px;color:rgba(255,255,255,.45);">Other</span></div>
+          </div>
+
+          <!-- totals -->
+          <div style="display:flex;gap:4px;margin-bottom:8px;">
+            <div style="flex:1;text-align:center;padding:5px 4px;background:rgba(255,255,255,.04);border-radius:6px;">
+              <div class="sk-txt muted" style="font-size:9px;">SALES</div>
+              <div style="font-family:'Caveat',cursive;font-size:13px;font-weight:700;color:#ff7a3d;">$3,200</div>
+            </div>
+            <div style="flex:1;text-align:center;padding:5px 4px;background:rgba(255,255,255,.04);border-radius:6px;">
+              <div class="sk-txt muted" style="font-size:9px;">BUYS</div>
+              <div style="font-family:'Caveat',cursive;font-size:13px;font-weight:700;color:#fff;">$1,400</div>
+            </div>
+            <div style="flex:1;text-align:center;padding:5px 4px;background:rgba(58,158,106,.1);border-radius:6px;">
+              <div class="sk-txt muted" style="font-size:9px;">NET</div>
+              <div style="font-family:'Caveat',cursive;font-size:13px;font-weight:700;color:#3a9e6a;">+$1.8k</div>
+            </div>
+          </div>
+
+          <!-- dense table -->
+          <div style="border:1px solid rgba(255,255,255,.1);border-radius:8px;overflow:hidden;">
+            <!-- header -->
+            <div style="display:grid;grid-template-columns:auto 1fr auto auto;gap:6px;padding:4px 8px;background:rgba(255,255,255,.07);">
+              <span class="sk-txt muted" style="font-size:9px;"></span>
+              <span class="sk-txt muted" style="font-size:9px;">ITEM</span>
+              <span class="sk-txt muted" style="font-size:9px;">TYPE</span>
+              <span class="sk-txt muted" style="font-size:9px;">AMT</span>
+            </div>
+            <!-- rows -->
+            <div style="display:grid;grid-template-columns:auto 1fr auto auto;gap:6px;padding:5px 8px;border-top:1px solid rgba(255,255,255,.05);align-items:center;">
+              <div style="width:26px;height:26px;background:rgba(255,255,255,.1);border-radius:4px;"></div>
+              <span class="sk-txt bright" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Charizard VMAX gold PSA 10</span>
+              <span style="font-family:'Caveat',cursive;font-size:10px;color:#3a9e6a;white-space:nowrap;">SALE</span>
+              <span style="font-family:'Caveat',cursive;font-size:13px;font-weight:700;color:#ff7a3d;white-space:nowrap;">$420</span>
+            </div>
+            <div style="display:grid;grid-template-columns:auto 1fr auto auto;gap:6px;padding:5px 8px;border-top:1px solid rgba(255,255,255,.04);align-items:center;background:rgba(255,255,255,.015);">
+              <div style="width:26px;height:26px;background:rgba(255,255,255,.07);border-radius:4px;"></div>
+              <span class="sk-txt bright" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Blastoise Base ungraded</span>
+              <span style="font-family:'Caveat',cursive;font-size:10px;color:#6a9ee8;white-space:nowrap;">BUY</span>
+              <span style="font-family:'Caveat',cursive;font-size:13px;font-weight:700;color:#d4a032;white-space:nowrap;">$85</span>
+            </div>
+            <div style="display:grid;grid-template-columns:auto 1fr auto auto;gap:6px;padding:5px 8px;border-top:1px solid rgba(255,255,255,.04);align-items:center;">
+              <div style="width:26px;height:26px;background:rgba(255,255,255,.05);border-radius:4px;"></div>
+              <span class="sk-txt muted" style="font-size:11px;">Unknown · needs review</span>
+              <span style="font-family:'Caveat',cursive;font-size:10px;color:#e05c1a;white-space:nowrap;">?</span>
+              <span style="font-family:'Caveat',cursive;font-size:13px;font-weight:700;color:rgba(255,255,255,.25);white-space:nowrap;">$—</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- DESKTOP — command bar + dense table -->
+    <div class="desktop">
+      <div class="desktop-label">Deals · desktop (dense table + command bar)</div>
+      <div class="desktop-shell">
+        <div class="desktop-titlebar">
+          <div class="desktop-dot r"></div><div class="desktop-dot"></div><div class="desktop-dot"></div>
+        </div>
+        <div style="display:flex;background:#0a0c10;min-height:360px;">
+          <!-- slim sidebar -->
+          <div style="width:52px;background:#080a0d;border-right:1px solid rgba(255,255,255,.08);padding:10px 6px;display:flex;flex-direction:column;gap:8px;align-items:center;">
+            <div style="width:26px;height:26px;background:rgba(224,92,26,.4);border-radius:6px;"></div>
+            <div style="width:20px;height:20px;background:rgba(224,92,26,.25);border-radius:4px;"></div>
+            <div style="width:20px;height:20px;background:rgba(255,255,255,.12);border-radius:4px;"></div>
+            <div style="width:20px;height:20px;background:rgba(255,255,255,.12);border-radius:4px;"></div>
+            <div style="width:20px;height:20px;background:rgba(255,255,255,.12);border-radius:4px;"></div>
+            <div style="width:20px;height:20px;background:rgba(255,255,255,.12);border-radius:4px;"></div>
+          </div>
+          <!-- main content -->
+          <div style="flex:1;padding:12px 14px;overflow:hidden;">
+            <!-- command/search bar -->
+            <div style="background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);border-radius:8px;padding:7px 12px;margin-bottom:12px;display:flex;align-items:center;gap:8px;">
+              <span style="font-size:13px;color:rgba(255,255,255,.35);">🔍</span>
+              <span class="sk-txt muted">Search deals, jump to page… <span style="font-size:11px;background:rgba(255,255,255,.1);padding:1px 5px;border-radius:3px;">⌘K</span></span>
+            </div>
+
+            <!-- page header + filter tabs -->
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+              <div style="font-family:'Caveat',cursive;font-size:18px;font-weight:700;color:#fff;">Deals</div>
+              <div style="display:flex;gap:3px;background:rgba(255,255,255,.05);border-radius:6px;padding:2px;">
+                <span style="background:#e05c1a;border-radius:4px;padding:3px 10px;font-family:'Caveat',cursive;font-size:12px;color:#fff;">All</span>
+                <span style="padding:3px 10px;font-family:'Caveat',cursive;font-size:12px;color:rgba(255,255,255,.45);">Sales</span>
+                <span style="padding:3px 10px;font-family:'Caveat',cursive;font-size:12px;color:rgba(255,255,255,.45);">Buys</span>
+                <span style="padding:3px 10px;font-family:'Caveat',cursive;font-size:12px;color:rgba(255,255,255,.45);">Other</span>
+              </div>
+              <div style="display:flex;gap:5px;">
+                <span style="font-family:'Caveat',cursive;font-size:12px;color:rgba(255,255,255,.4);background:rgba(255,255,255,.07);border-radius:6px;padding:4px 10px;">Today ✕</span>
+                <span style="font-family:'Caveat',cursive;font-size:12px;color:rgba(255,255,255,.4);background:rgba(255,255,255,.07);border-radius:6px;padding:4px 10px;">+ Filter</span>
+              </div>
+            </div>
+
+            <!-- summary strip -->
+            <div style="display:flex;gap:6px;margin-bottom:10px;">
+              <div style="background:rgba(224,92,26,.1);border:1px solid rgba(224,92,26,.25);border-radius:6px;padding:5px 10px;display:flex;gap:8px;align-items:baseline;">
+                <span class="sk-txt muted" style="font-size:10px;">SALES</span>
+                <span style="font-family:'Caveat',cursive;font-size:16px;font-weight:700;color:#ff7a3d;">$3,200</span>
+              </div>
+              <div style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.1);border-radius:6px;padding:5px 10px;display:flex;gap:8px;align-items:baseline;">
+                <span class="sk-txt muted" style="font-size:10px;">BUYS</span>
+                <span style="font-family:'Caveat',cursive;font-size:16px;font-weight:700;color:#fff;">$1,400</span>
+              </div>
+              <div style="background:rgba(58,158,106,.1);border:1px solid rgba(58,158,106,.25);border-radius:6px;padding:5px 10px;display:flex;gap:8px;align-items:baseline;">
+                <span class="sk-txt muted" style="font-size:10px;">NET</span>
+                <span style="font-family:'Caveat',cursive;font-size:16px;font-weight:700;color:#3a9e6a;">+$1,800</span>
+              </div>
+            </div>
+
+            <!-- dense table -->
+            <div style="border:1px solid rgba(255,255,255,.1);border-radius:8px;overflow:hidden;">
+              <div style="display:grid;grid-template-columns:28px 1fr 80px 60px 60px 60px;gap:0;background:rgba(255,255,255,.07);">
+                <div style="padding:5px 6px;"></div>
+                <div style="padding:5px 6px;"><span class="sk-txt muted" style="font-size:10px;">ITEM / MESSAGE</span></div>
+                <div style="padding:5px 6px;"><span class="sk-txt muted" style="font-size:10px;">CHANNEL</span></div>
+                <div style="padding:5px 6px;"><span class="sk-txt muted" style="font-size:10px;">KIND</span></div>
+                <div style="padding:5px 6px;"><span class="sk-txt muted" style="font-size:10px;">AMT</span></div>
+                <div style="padding:5px 6px;"><span class="sk-txt muted" style="font-size:10px;">BK</span></div>
+              </div>
+              <!-- row 1 -->
+              <div style="display:grid;grid-template-columns:28px 1fr 80px 60px 60px 60px;gap:0;border-top:1px solid rgba(255,255,255,.06);align-items:center;">
+                <div style="padding:5px 6px;"><div style="width:20px;height:20px;background:rgba(255,255,255,.1);border-radius:3px;"></div></div>
+                <div style="padding:5px 6px;"><span class="sk-txt bright" style="font-size:11px;">Charizard VMAX gold · PSA 10 · jmanballa</span></div>
+                <div style="padding:5px 6px;"><span class="sk-txt muted" style="font-size:11px;">buying-ch</span></div>
+                <div style="padding:5px 6px;"><span style="background:rgba(58,158,106,.2);color:#3a9e6a;border-radius:4px;padding:2px 6px;font-family:'Caveat',cursive;font-size:10px;">SALE</span></div>
+                <div style="padding:5px 6px;"><span style="font-family:'Caveat',cursive;font-size:13px;font-weight:700;color:#ff7a3d;">$420</span></div>
+                <div style="padding:5px 6px;"><span style="font-family:'Caveat',cursive;font-size:10px;color:#3a9e6a;">✓ ok</span></div>
+              </div>
+              <!-- row 2 alt -->
+              <div style="display:grid;grid-template-columns:28px 1fr 80px 60px 60px 60px;gap:0;border-top:1px solid rgba(255,255,255,.04);background:rgba(255,255,255,.015);align-items:center;">
+                <div style="padding:5px 6px;"><div style="width:20px;height:20px;background:rgba(255,255,255,.08);border-radius:3px;"></div></div>
+                <div style="padding:5px 6px;"><span class="sk-txt bright" style="font-size:11px;">Blastoise Base Set · Ungraded · partner_22</span></div>
+                <div style="padding:5px 6px;"><span class="sk-txt muted" style="font-size:11px;">buying-ch</span></div>
+                <div style="padding:5px 6px;"><span style="background:rgba(46,111,212,.2);color:#6a9ee8;border-radius:4px;padding:2px 6px;font-family:'Caveat',cursive;font-size:10px;">BUY</span></div>
+                <div style="padding:5px 6px;"><span style="font-family:'Caveat',cursive;font-size:13px;font-weight:700;color:#d4a032;">$85</span></div>
+                <div style="padding:5px 6px;"><span style="font-family:'Caveat',cursive;font-size:10px;color:#d4a032;">partial</span></div>
+              </div>
+              <!-- row 3 -->
+              <div style="display:grid;grid-template-columns:28px 1fr 80px 60px 60px 60px;gap:0;border-top:1px solid rgba(255,255,255,.04);align-items:center;">
+                <div style="padding:5px 6px;"><div style="width:20px;height:20px;background:rgba(255,255,255,.05);border-radius:3px;"></div></div>
+                <div style="padding:5px 6px;"><span class="sk-txt muted" style="font-size:11px;">Image-only message — needs review</span></div>
+                <div style="padding:5px 6px;"><span class="sk-txt muted" style="font-size:11px;">buying-ch</span></div>
+                <div style="padding:5px 6px;"><span style="background:rgba(224,92,26,.15);color:#e05c1a;border-radius:4px;padding:2px 6px;font-family:'Caveat',cursive;font-size:10px;">?</span></div>
+                <div style="padding:5px 6px;"><span style="font-family:'Caveat',cursive;font-size:13px;color:rgba(255,255,255,.3);">$—</span></div>
+                <div style="padding:5px 6px;"><span style="font-family:'Caveat',cursive;font-size:10px;color:rgba(255,255,255,.3);">—</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div style="margin-top:12px;display:flex;flex-wrap:wrap;gap:8px;">
+        <span class="ann">⌘K command bar = fast navigation</span>
+        <span class="ann">Kind tabs replace full filter form</span>
+        <span class="ann">Color-coded amounts: orange=sale, gold=buy</span>
+        <span class="ann">Alternating rows + compact spacing</span>
+        <span class="ann">BK status visible inline</span>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+function switchTab(id) {
+  document.querySelectorAll('.canvas').forEach(c => c.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('tab-' + id).classList.add('active');
+  event.target.classList.add('active');
+  localStorage.setItem('degen-wf-tab', id);
+}
+// restore
+const saved = localStorage.getItem('degen-wf-tab');
+if (saved) {
+  const btn = [...document.querySelectorAll('.tab')].find(t => t.textContent.startsWith(saved));
+  if (btn) { btn.click(); }
+}
+</script>
+
+
+
+</body></html>

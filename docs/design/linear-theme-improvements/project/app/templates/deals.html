@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <link rel="manifest" href="/static/manifest.webmanifest">
+    <meta name="theme-color" content="#08090a">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="Degen">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="mobile-web-app-capable" content="yes">
+    <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon-180.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/icon-192.png">
+    <link rel="icon" type="image/png" sizes="512x512" href="/static/icons/icon-512.png">
+    <link rel="stylesheet" href="/static/safe-area.css?v=2026042020">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <title>{{ title }}</title>
+    <link rel="stylesheet" href="/static/linear.css?v=2026042011">
+</head>
+<body>
+    <div class="lx-page">
+        {% include "_linear_sidebar.html" %}
+
+        <div class="lx-page-head">
+            <div class="lx-head-row">
+                <div>
+                    <p class="lx-eyebrow">Partner Deal Ledger</p>
+                    <h1 class="lx-h1">{{ title }}</h1>
+                    <p class="lx-subtitle">Browse parsed deals and financial summaries across the Discord channels you currently watch.</p>
+                </div>
+                <div class="lx-head-actions">
+                    <a class="lx-btn" href="/dashboard">Dashboard</a>
+                    <a class="lx-btn" href="/reports">Reports</a>
+                    {% if current_user and current_user.role in ["admin","reviewer"] %}
+                    <a class="lx-btn" href="/review">Review Queue</a>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+        <div class="lx-card">
+            <div class="lx-sh" style="margin-bottom:14px;">
+                <h2 class="lx-sh-title">Filter The Ledger</h2>
+                <span class="lx-sh-meta">Narrow by channel, kind, or date range</span>
+            </div>
+            <form method="get" action="/deals" class="lx-filters">
+                <label class="lx-label">Channel
+                    <select class="lx-select" name="channel_id">
+                        <option value="">All watched channels</option>
+                        {% for ch in channels %}
+                        <option value="{{ ch['channel_id'] }}" {% if selected_channel_id == ch['channel_id'] %}selected{% endif %}>{{ ch["channel_name"] }}</option>
+                        {% endfor %}
+                    </select>
+                </label>
+                <label class="lx-label">Financial Kind
+                    <select class="lx-select" name="entry_kind">
+                        <option value="">All</option>
+                        <option value="sale" {% if selected_entry_kind == "sale" %}selected{% endif %}>sale</option>
+                        <option value="buy" {% if selected_entry_kind == "buy" %}selected{% endif %}>buy</option>
+                        <option value="trade" {% if selected_entry_kind == "trade" %}selected{% endif %}>trade</option>
+                        <option value="expense" {% if selected_entry_kind == "expense" %}selected{% endif %}>expense</option>
+                        <option value="unknown" {% if selected_entry_kind == "unknown" %}selected{% endif %}>unknown</option>
+                    </select>
+                </label>
+                <label class="lx-label">After
+                    <input class="lx-input" type="date" name="after" value="{{ selected_after }}">
+                </label>
+                <label class="lx-label">Before
+                    <input class="lx-input" type="date" name="before" value="{{ selected_before }}">
+                </label>
+                <label class="lx-label">Rows
+                    <select class="lx-select" name="limit">
+                        {% for option in [10,25,50,100] %}
+                        <option value="{{ option }}" {% if selected_limit == option %}selected{% endif %}>{{ option }}</option>
+                        {% endfor %}
+                    </select>
+                </label>
+                <div style="display:flex;align-items:flex-end;">
+                    <button type="submit" class="lx-btn" style="width:100%;">Apply Filters</button>
+                </div>
+            </form>
+            <div class="lx-scope-strip">
+                <span class="lx-note">{{ selected_entry_kind if selected_entry_kind else "All deal kinds" }}{% if selected_channel_id %} · one channel{% else %} · watched channels{% endif %}</span>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                    <span class="lx-pill">{{ summary["rows"] }} rows</span>
+                    <span class="lx-pill">Page {{ pagination["page"] }} of {{ pagination["total_pages"] }}</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="lx-metrics">
+            <div class="lx-metric">
+                <div class="lx-metric-lbl">Rows</div>
+                <div class="lx-metric-val">{{ summary["rows"] }}</div>
+            </div>
+            <div class="lx-metric">
+                <div class="lx-metric-lbl">Sales</div>
+                <div class="lx-metric-val">{{ summary["totals"].get("sales", 0) | money }}</div>
+            </div>
+            <div class="lx-metric">
+                <div class="lx-metric-lbl">Buys</div>
+                <div class="lx-metric-val">{{ summary["totals"].get("buys", 0) | money }}</div>
+            </div>
+            <div class="lx-metric">
+                <div class="lx-metric-lbl">Expenses</div>
+                <div class="lx-metric-val">{{ summary["totals"].get("expenses", 0) | money }}</div>
+            </div>
+            <div class="lx-metric">
+                <div class="lx-metric-lbl">Net</div>
+                <div class="lx-metric-val">{{ summary["totals"].get("net", 0) | money }}</div>
+            </div>
+        </div>
+
+        <div class="lx-sh" style="margin-bottom:14px;">
+            <h2 class="lx-sh-title">Recent Deals</h2>
+            <span class="lx-sh-meta">Message context left · financials right</span>
+        </div>
+
+        <div class="lx-deal-list">
+            {% for row in rows %}
+            <a class="lx-deal-card" href="/deals/{{ row['id'] }}?channel_id={{ selected_channel_id }}&entry_kind={{ selected_entry_kind }}&after={{ selected_after }}&before={{ selected_before }}&page={{ pagination['page'] }}&limit={{ selected_limit }}">
+                <div>
+                    {% if row["first_image_url"] %}
+                    <img class="lx-thumb" src="{{ row['first_thumb_url'] or row['first_image_url'] }}" alt="deal image" loading="lazy">
+                    {% else %}
+                    <div class="lx-thumb-ph">No image</div>
+                    {% endif %}
+                </div>
+                <div>
+                    <div class="lx-deal-channel">{{ row["channel"] or row["channel_id"] }}</div>
+                    <div class="lx-deal-meta">
+                        <span>{{ row["time"] }}</span>
+                        <span class="lx-pill">{{ row["entry_kind"] or "unknown" }}</span>
+                        {% if row["bookkeeping"]["status"] == "matched" %}<span class="lx-pill lx-pill-ok">bk matched</span>{% elif row["bookkeeping"]["status"] == "partial" %}<span class="lx-pill lx-pill-warn">bk partial</span>{% endif %}
+                        {% if row["author"] %}<span>{{ row["author"] }}</span>{% endif %}
+                    </div>
+                    <div class="lx-deal-msg">{{ row["message"] or "(image-only message)" }}</div>
+                </div>
+                <div class="lx-fin-grid">
+                    <div class="lx-fin-row">
+                        <div class="lx-fin-lbl">Amount</div>
+                        <div class="lx-fin-val">{{ row["amount_display"] or "—" }}</div>
+                    </div>
+                    <div class="lx-fin-row">
+                        <div class="lx-fin-lbl">Payment</div>
+                        <div class="lx-fin-val">{{ row["payment_display"] or "—" }}</div>
+                    </div>
+                    <div class="lx-fin-row">
+                        <div class="lx-fin-lbl">Category</div>
+                        <div class="lx-fin-val">{{ row["category"] or row["expense_category"] or "—" }}</div>
+                    </div>
+                    <div class="lx-fin-row">
+                        <div class="lx-fin-lbl">Money In / Out</div>
+                        <div class="lx-fin-val">{{ row["money_in"] | money }} / {{ row["money_out"] | money }}</div>
+                    </div>
+                </div>
+            </a>
+            {% else %}
+            <div class="lx-card">
+                <p class="lx-note">No watched-channel deals match the current filters.</p>
+            </div>
+            {% endfor %}
+        </div>
+
+        <div class="lx-card">
+            <div class="lx-pagination">
+                <div>
+                    {% if pagination["has_previous"] %}
+                    <a class="lx-btn" href="/deals?channel_id={{ selected_channel_id }}&entry_kind={{ selected_entry_kind }}&after={{ selected_after }}&before={{ selected_before }}&page={{ pagination['previous_page'] }}&limit={{ selected_limit }}">Previous</a>
+                    {% endif %}
+                </div>
+                <span class="lx-pag-info">Page {{ pagination["page"] }} of {{ pagination["total_pages"] }}</span>
+                <div>
+                    {% if pagination["has_next"] %}
+                    <a class="lx-btn" href="/deals?channel_id={{ selected_channel_id }}&entry_kind={{ selected_entry_kind }}&after={{ selected_after }}&before={{ selected_before }}&page={{ pagination['next_page'] }}&limit={{ selected_limit }}">Next</a>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+    {% include '_mobile_bottom_nav.html' %}
+</body>
+</html>

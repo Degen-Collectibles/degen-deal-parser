@@ -1,0 +1,811 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Degen Eye — UI Wireframes</title>
+<link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;600;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --lx-bg:    #08090a;
+  --lx-s1:    #111214;
+  --lx-s2:    #17181c;
+  --lx-br:    rgba(255,255,255,.07);
+  --lx-br2:   rgba(255,255,255,.13);
+  --lx-text:  #e4e4e7;
+  --lx-muted: #8b8f98;
+  --lx-dim:   #52566d;
+  --lx-red:   #ef4444;
+  --lx-live:  #22c55e;
+  --cx-orange: #ff6a1c;
+  --cx-gold:   #ebc67a;
+  --cx-green:  #93d6a7;
+}
+html, body { min-height: 100%; background: #0e0f11; color: var(--lx-text); font-family: 'Inter', system-ui, sans-serif; }
+
+.topbar { display: flex; align-items: center; gap: 14px; padding: 12px 24px; background: #0b0c0e; border-bottom: 1px solid var(--lx-br); position: sticky; top: 0; z-index: 20; }
+.topbar-title { font-size: 14px; font-weight: 700; flex: 1; letter-spacing: -.01em; }
+.topbar-sub { font-size: 12px; color: var(--lx-dim); font-family: 'Caveat', cursive; }
+
+.tabs { display: flex; gap: 2px; padding: 10px 24px 0; background: #0b0c0e; border-bottom: 1px solid var(--lx-br); position: sticky; top: 49px; z-index: 19; }
+.tab { padding: 8px 16px; font-size: 13px; font-weight: 600; cursor: pointer; border: none; background: none; border-bottom: 2px solid transparent; color: var(--lx-muted); transition: all .12s; font-family: 'Inter', sans-serif; }
+.tab.active { color: var(--lx-text); border-bottom-color: var(--cx-orange); }
+
+.canvas { display: none; padding: 28px 24px 80px; }
+.canvas.active { display: block; }
+
+.dir-label { font-family: 'Caveat', cursive; font-size: 22px; font-weight: 700; color: var(--cx-orange); margin-bottom: 4px; }
+.dir-sub { font-size: 13px; color: var(--lx-muted); max-width: 620px; line-height: 1.5; margin-bottom: 24px; }
+
+.screens { display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-start; }
+
+/* Phone */
+.phone { flex-shrink: 0; }
+.phone-lbl { font-family: 'Caveat', cursive; font-size: 14px; color: var(--lx-muted); text-align: center; margin-bottom: 8px; }
+.phone-outer { width: 220px; background: #1a1a1a; border-radius: 34px; padding: 12px 10px; box-shadow: 0 0 0 1px rgba(255,255,255,.06), 0 16px 40px rgba(0,0,0,.5); }
+.phone-notch { width: 64px; height: 7px; background: #111; border-radius: 4px; margin: 0 auto 8px; }
+.phone-screen { background: var(--lx-bg); border-radius: 22px; overflow: hidden; }
+
+/* Annotations */
+.anns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; max-width: 220px; }
+.ann { font-family: 'Caveat', cursive; font-size: 12px; color: var(--cx-orange); background: rgba(255,106,28,.08); border: 1px dashed rgba(255,106,28,.3); border-radius: 5px; padding: 3px 8px; }
+.ann.green { color: var(--cx-green); background: rgba(147,214,167,.06); border-color: rgba(147,214,167,.25); }
+.ann.gold { color: var(--cx-gold); background: rgba(235,198,122,.06); border-color: rgba(235,198,122,.25); }
+
+/* Common sketch atoms */
+.sk-line { height: 7px; border-radius: 3px; background: rgba(255,255,255,.08); }
+.sk-line.bright { background: rgba(255,255,255,.22); }
+.sk-line.orange { background: rgba(255,106,28,.5); }
+.sk-line.green { background: rgba(147,214,167,.4); }
+.sk-line.gold { background: rgba(235,198,122,.4); }
+.sk-line.dim { background: rgba(255,255,255,.04); }
+.sk-pill { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 5px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; white-space: nowrap; }
+.sk-pill.nm { background: rgba(147,214,167,.15); color: var(--cx-green); border: 1px solid rgba(147,214,167,.3); }
+.sk-pill.lp { background: rgba(235,198,122,.12); color: var(--cx-gold); border: 1px solid rgba(235,198,122,.28); }
+.sk-pill.orange { background: rgba(255,106,28,.12); color: var(--cx-orange); border: 1px solid rgba(255,106,28,.3); }
+.sk-pill.neutral { background: rgba(255,255,255,.07); color: var(--lx-muted); border: 1px solid var(--lx-br); }
+.sk-sep { border: none; border-top: 1px solid var(--lx-br); margin: 8px 0; }
+
+/* Bottom nav */
+.bnav { background: #0b0c0e; border-top: 1px solid var(--lx-br); padding: 8px 4px 6px; display: grid; }
+.bnav-item { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+.bnav-icon { width: 24px; height: 24px; border-radius: 6px; background: var(--lx-s2); display: flex; align-items: center; justify-content: center; }
+.bnav-lbl { height: 7px; width: 26px; border-radius: 2px; background: rgba(255,255,255,.07); }
+
+/* Viewfinder */
+.viewfinder { position: relative; overflow: hidden; }
+.vf-corner { position: absolute; width: 20px; height: 20px; border-color: var(--cx-orange); border-style: solid; opacity: .9; }
+.vf-corner.tl { top: 8px; left: 8px; border-width: 2px 0 0 2px; border-radius: 2px 0 0 0; }
+.vf-corner.tr { top: 8px; right: 8px; border-width: 2px 2px 0 0; border-radius: 0 2px 0 0; }
+.vf-corner.bl { bottom: 8px; left: 8px; border-width: 0 0 2px 2px; border-radius: 0 0 0 2px; }
+.vf-corner.br { bottom: 8px; right: 8px; border-width: 0 2px 2px 0; border-radius: 0 0 2px 0; }
+
+/* Confidence bar */
+.conf-bar { height: 5px; border-radius: 3px; background: var(--lx-s2); overflow: hidden; }
+.conf-fill { height: 100%; border-radius: 3px; }
+
+/* Result card row */
+.result-row { display: flex; justify-content: space-between; align-items: center; padding: 5px 0; border-top: 1px solid var(--lx-br); font-size: 11px; }
+.result-row:first-child { border-top: none; padding-top: 0; }
+.result-lbl { color: var(--lx-muted); }
+.result-val { color: var(--lx-text); font-weight: 600; }
+
+/* Section header for groups of phones */
+.group-hd { font-family: 'Caveat', cursive; font-size: 16px; font-weight: 700; color: var(--lx-text); margin: 28px 0 16px; width: 100%; border-bottom: 1px dashed var(--lx-br); padding-bottom: 6px; }
+
+/* Action button sketch */
+.sk-btn { display: inline-flex; align-items: center; justify-content: center; border-radius: 8px; font-size: 12px; font-weight: 700; }
+.sk-btn.primary { background: var(--cx-orange); color: #fff; }
+.sk-btn.secondary { background: var(--lx-s2); border: 1px solid var(--lx-br); color: var(--lx-muted); }
+.sk-btn.green { background: rgba(147,214,167,.15); border: 1px solid rgba(147,214,167,.3); color: var(--cx-green); }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-title">👁 Degen Eye — /degen_eye UI Wireframes</div>
+  <span class="topbar-sub">Card scanning · AI identification · market price</span>
+</div>
+
+<div class="tabs">
+  <button class="tab active" onclick="switchTab('A',this)">A · Full-screen Camera</button>
+  <button class="tab" onclick="switchTab('B',this)">B · Split View</button>
+  <button class="tab" onclick="switchTab('C',this)">C · Step Wizard</button>
+</div>
+
+<!-- ═══════════════════ TAB A: Full-screen camera -->
+<div class="canvas active" id="tab-A">
+  <div class="dir-label">A — Full-screen Camera + Bottom Sheet</div>
+  <div class="dir-sub">Camera fills the entire screen — maximum real-estate for framing the card. Corner brackets guide placement. After scan, results slide up as a bottom sheet over the still frame. Quick actions right on the sheet.</div>
+
+  <div class="screens">
+
+    <!-- State 1: Ready -->
+    <div class="phone">
+      <div class="phone-lbl">1 · Ready to scan</div>
+      <div class="phone-outer">
+        <div class="phone-notch"></div>
+        <div class="phone-screen">
+          <!-- full-screen camera -->
+          <div class="viewfinder" style="height:420px;background:linear-gradient(160deg,#1a1d22,#0d1014);display:flex;flex-direction:column;justify-content:space-between;padding:12px;">
+            <!-- top bar overlay -->
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+              <div style="background:rgba(0,0,0,.5);backdrop-filter:blur(6px);border-radius:8px;padding:5px 10px;display:flex;align-items:center;gap:6px;">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgba(255,106,28,.9)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                <span style="font-size:11px;font-weight:700;color:#fff;">Degen Eye</span>
+              </div>
+              <div style="background:rgba(0,0,0,.5);backdrop-filter:blur(6px);border-radius:8px;padding:5px 10px;">
+                <span style="font-size:11px;color:rgba(255,255,255,.7);">History</span>
+              </div>
+            </div>
+
+            <!-- scan target area -->
+            <div style="flex:1;display:flex;align-items:center;justify-content:center;">
+              <div style="width:140px;height:190px;position:relative;">
+                <!-- card placeholder -->
+                <div style="width:140px;height:190px;background:rgba(255,255,255,.04);border-radius:6px;"></div>
+                <!-- corners -->
+                <div class="vf-corner tl"></div>
+                <div class="vf-corner tr"></div>
+                <div class="vf-corner bl"></div>
+                <div class="vf-corner br"></div>
+                <!-- scan line animation suggestion -->
+                <div style="position:absolute;top:40%;left:4px;right:4px;height:1.5px;background:linear-gradient(90deg,transparent,rgba(255,106,28,.6),transparent);border-radius:1px;"></div>
+              </div>
+            </div>
+
+            <!-- hint text -->
+            <div style="text-align:center;margin-bottom:8px;">
+              <span style="font-size:11px;color:rgba(255,255,255,.5);background:rgba(0,0,0,.4);padding:4px 10px;border-radius:99px;backdrop-filter:blur(4px);">Hold card steady in frame</span>
+            </div>
+
+            <!-- capture button row -->
+            <div style="display:flex;align-items:center;justify-content:center;gap:20px;padding-bottom:8px;">
+              <!-- gallery -->
+              <div style="width:36px;height:36px;background:rgba(255,255,255,.1);border-radius:8px;border:1px solid rgba(255,255,255,.15);"></div>
+              <!-- shutter -->
+              <div style="width:58px;height:58px;border-radius:50%;background:rgba(255,106,28,.15);border:2px solid var(--cx-orange);display:flex;align-items:center;justify-content:center;">
+                <div style="width:42px;height:42px;border-radius:50%;background:var(--cx-orange);"></div>
+              </div>
+              <!-- flash toggle -->
+              <div style="width:36px;height:36px;background:rgba(255,255,255,.1);border-radius:8px;border:1px solid rgba(255,255,255,.15);display:flex;align-items:center;justify-content:center;">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,.6)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+              </div>
+            </div>
+          </div>
+          <!-- bottom nav -->
+          <div class="bnav" style="grid-template-columns:repeat(5,1fr);">
+            <div class="bnav-item"><div class="bnav-icon"></div><div class="bnav-lbl"></div></div>
+            <div class="bnav-item"><div class="bnav-icon"></div><div class="bnav-lbl"></div></div>
+            <div class="bnav-item">
+              <div style="width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,var(--cx-orange),#c44a00);display:flex;align-items:center;justify-content:center;margin-top:-12px;border:2px solid #1a1a1a;">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </div>
+              <div class="bnav-lbl" style="background:rgba(255,106,28,.5);"></div>
+            </div>
+            <div class="bnav-item"><div class="bnav-icon"></div><div class="bnav-lbl"></div></div>
+            <div class="bnav-item"><div class="bnav-icon"></div><div class="bnav-lbl"></div></div>
+          </div>
+        </div>
+      </div>
+      <div class="anns">
+        <span class="ann">Full viewport camera — max framing</span>
+        <span class="ann">Orange brackets = scan target</span>
+        <span class="ann">Scan line = AI analyzing</span>
+      </div>
+    </div>
+
+    <!-- State 2: Processing -->
+    <div class="phone">
+      <div class="phone-lbl">2 · AI processing</div>
+      <div class="phone-outer">
+        <div class="phone-notch"></div>
+        <div class="phone-screen">
+          <div class="viewfinder" style="height:420px;background:linear-gradient(160deg,#1a1d22,#0d1014);display:flex;flex-direction:column;justify-content:center;align-items:center;padding:20px;">
+            <!-- frozen card frame -->
+            <div style="width:140px;height:190px;position:relative;margin-bottom:20px;">
+              <div style="width:140px;height:190px;background:rgba(255,255,255,.06);border-radius:6px;border:1px solid rgba(255,255,255,.1);"></div>
+              <!-- pulsing orange overlay -->
+              <div style="position:absolute;inset:0;border-radius:6px;border:2px solid rgba(255,106,28,.6);"></div>
+              <div class="vf-corner tl" style="border-color:rgba(255,106,28,.9);"></div>
+              <div class="vf-corner tr" style="border-color:rgba(255,106,28,.9);"></div>
+              <div class="vf-corner bl" style="border-color:rgba(255,106,28,.9);"></div>
+              <div class="vf-corner br" style="border-color:rgba(255,106,28,.9);"></div>
+            </div>
+            <!-- processing pill -->
+            <div style="background:rgba(0,0,0,.7);backdrop-filter:blur(8px);border:1px solid rgba(255,106,28,.3);border-radius:99px;padding:8px 16px;display:flex;align-items:center;gap:8px;">
+              <div style="width:8px;height:8px;border-radius:50%;background:var(--cx-orange);"></div>
+              <span style="font-size:12px;font-weight:700;color:#fff;">Identifying card…</span>
+            </div>
+            <div style="margin-top:10px;font-size:11px;color:rgba(255,255,255,.35);">Checking Pokemon TCG · Scryfall</div>
+          </div>
+          <div class="bnav" style="grid-template-columns:repeat(5,1fr);">
+            <div class="bnav-item"><div class="bnav-icon"></div><div class="bnav-lbl"></div></div>
+            <div class="bnav-item"><div class="bnav-icon"></div><div class="bnav-lbl"></div></div>
+            <div class="bnav-item"><div style="width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,var(--cx-orange),#c44a00);display:flex;align-items:center;justify-content:center;margin-top:-12px;border:2px solid #1a1a1a;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></div><div class="bnav-lbl" style="background:rgba(255,106,28,.5);"></div></div>
+            <div class="bnav-item"><div class="bnav-icon"></div><div class="bnav-lbl"></div></div>
+            <div class="bnav-item"><div class="bnav-icon"></div><div class="bnav-lbl"></div></div>
+          </div>
+        </div>
+      </div>
+      <div class="anns"><span class="ann">Frame freezes on capture</span><span class="ann">Source checked live</span></div>
+    </div>
+
+    <!-- State 3: Result sheet -->
+    <div class="phone">
+      <div class="phone-lbl">3 · Result (bottom sheet)</div>
+      <div class="phone-outer">
+        <div class="phone-notch"></div>
+        <div class="phone-screen">
+          <div style="position:relative;height:420px;background:linear-gradient(160deg,#1a1d22,#0d1014);overflow:hidden;">
+            <!-- frozen bg -->
+            <div style="width:140px;height:190px;position:absolute;top:24px;left:50%;transform:translateX(-50%);background:rgba(255,255,255,.05);border-radius:6px;border:1px solid rgba(147,214,167,.4);"></div>
+            <div style="position:absolute;top:24px;left:50%;transform:translateX(-50%);width:140px;text-align:center;margin-top:196px;">
+              <div style="display:inline-flex;align-items:center;gap:4px;background:rgba(147,214,167,.15);border:1px solid rgba(147,214,167,.3);border-radius:99px;padding:3px 10px;">
+                <div style="width:6px;height:6px;border-radius:50%;background:var(--cx-green);"></div>
+                <span style="font-size:10px;font-weight:700;color:var(--cx-green);">Identified</span>
+              </div>
+            </div>
+
+            <!-- bottom sheet -->
+            <div style="position:absolute;bottom:0;left:0;right:0;background:#0b0c0e;border-top:1px solid var(--lx-br);border-radius:20px 20px 0 0;padding:12px 14px 10px;">
+              <!-- drag handle -->
+              <div style="width:32px;height:3px;background:rgba(255,255,255,.15);border-radius:99px;margin:0 auto 12px;"></div>
+
+              <!-- card identity -->
+              <div style="display:flex;gap:10px;align-items:flex-start;margin-bottom:10px;">
+                <!-- stock image placeholder -->
+                <div style="width:42px;height:58px;background:var(--lx-s2);border:1px solid var(--lx-br);border-radius:5px;flex-shrink:0;display:flex;align-items:center;justify-content:center;"><span style="font-size:8px;color:var(--lx-dim);">img</span></div>
+                <div style="flex:1;min-width:0;">
+                  <div style="font-size:13px;font-weight:700;color:var(--lx-text);line-height:1.2;margin-bottom:3px;">Charizard VMAX</div>
+                  <div style="font-size:11px;color:var(--lx-muted);margin-bottom:5px;">Brilliant Stars · 017/172 · Pokémon</div>
+                  <div style="display:flex;gap:4px;flex-wrap:wrap;">
+                    <span class="sk-pill nm">NM</span>
+                    <span class="sk-pill orange">Holo</span>
+                    <span class="sk-pill neutral">EN</span>
+                  </div>
+                </div>
+                <!-- price -->
+                <div style="text-align:right;flex-shrink:0;">
+                  <div style="font-size:18px;font-weight:800;color:var(--cx-orange);font-variant-numeric:tabular-nums;letter-spacing:-.02em;">$42.00</div>
+                  <div style="font-size:9px;color:var(--lx-dim);">TCGPlayer raw</div>
+                </div>
+              </div>
+
+              <!-- confidence bar -->
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+                <span style="font-size:10px;color:var(--lx-dim);white-space:nowrap;">Confidence</span>
+                <div class="conf-bar" style="flex:1;">
+                  <div class="conf-fill" style="width:91%;background:linear-gradient(90deg,var(--cx-green),rgba(147,214,167,.6));"></div>
+                </div>
+                <span style="font-size:10px;font-weight:700;color:var(--cx-green);">0.91</span>
+              </div>
+
+              <hr class="sk-sep">
+
+              <!-- actions -->
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px;">
+                <button style="padding:9px;border-radius:8px;background:var(--cx-orange);border:none;font-size:12px;font-weight:700;color:#fff;width:100%;">Add to Inventory</button>
+                <button style="padding:9px;border-radius:8px;background:var(--lx-s2);border:1px solid var(--lx-br);font-size:12px;font-weight:700;color:var(--lx-text);width:100%;">Log as Deal</button>
+              </div>
+              <button style="width:100%;padding:8px;border-radius:8px;background:transparent;border:1px solid var(--lx-br);font-size:12px;font-weight:600;color:var(--lx-muted);">Scan Another</button>
+            </div>
+          </div>
+          <div class="bnav" style="grid-template-columns:repeat(5,1fr);">
+            <div class="bnav-item"><div class="bnav-icon"></div><div class="bnav-lbl"></div></div>
+            <div class="bnav-item"><div class="bnav-icon"></div><div class="bnav-lbl"></div></div>
+            <div class="bnav-item"><div style="width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,var(--cx-orange),#c44a00);display:flex;align-items:center;justify-content:center;margin-top:-12px;border:2px solid #1a1a1a;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></div><div class="bnav-lbl" style="background:rgba(255,106,28,.5);"></div></div>
+            <div class="bnav-item"><div class="bnav-icon"></div><div class="bnav-lbl"></div></div>
+            <div class="bnav-item"><div class="bnav-icon"></div><div class="bnav-lbl"></div></div>
+          </div>
+        </div>
+      </div>
+      <div class="anns">
+        <span class="ann">Stock image from PokemonTCG/Scryfall API</span>
+        <span class="ann green">Confidence bar = ai_confidence field</span>
+        <span class="ann">Primary: Add to Inventory</span>
+        <span class="ann">Secondary: Log as Deal</span>
+      </div>
+    </div>
+
+    <!-- State 4: Low confidence -->
+    <div class="phone">
+      <div class="phone-lbl">4 · Low confidence</div>
+      <div class="phone-outer">
+        <div class="phone-notch"></div>
+        <div class="phone-screen">
+          <div style="position:relative;height:420px;background:linear-gradient(160deg,#1a1d22,#0d1014);overflow:hidden;">
+            <div style="width:140px;height:190px;position:absolute;top:24px;left:50%;transform:translateX(-50%);background:rgba(255,255,255,.04);border-radius:6px;border:1px solid rgba(239,68,68,.3);"></div>
+            <!-- bottom sheet -->
+            <div style="position:absolute;bottom:0;left:0;right:0;background:#0b0c0e;border-top:1px solid var(--lx-br);border-radius:20px 20px 0 0;padding:12px 14px 10px;">
+              <div style="width:32px;height:3px;background:rgba(255,255,255,.15);border-radius:99px;margin:0 auto 12px;"></div>
+
+              <!-- low confidence warning -->
+              <div style="background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.2);border-radius:8px;padding:8px 10px;margin-bottom:10px;display:flex;gap:8px;align-items:flex-start;">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;margin-top:1px;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                <div>
+                  <div style="font-size:11px;font-weight:700;color:#ef4444;margin-bottom:2px;">Low confidence — verify manually</div>
+                  <div style="font-size:10px;color:var(--lx-muted);">Card may be obscured or at an angle</div>
+                </div>
+              </div>
+
+              <div style="display:flex;gap:10px;align-items:flex-start;margin-bottom:10px;">
+                <div style="width:42px;height:58px;background:var(--lx-s2);border:1px solid var(--lx-br);border-radius:5px;flex-shrink:0;"></div>
+                <div style="flex:1;">
+                  <div style="font-size:13px;font-weight:700;color:var(--lx-text);margin-bottom:3px;">Pikachu V</div>
+                  <div style="font-size:11px;color:var(--lx-muted);margin-bottom:5px;">Vivid Voltage · ? · Pokémon</div>
+                  <div style="display:flex;gap:4px;"><span class="sk-pill lp">LP?</span><span class="sk-pill neutral">EN</span></div>
+                </div>
+                <div style="text-align:right;flex-shrink:0;">
+                  <div style="font-size:16px;font-weight:800;color:var(--lx-muted);">$8.00?</div>
+                  <div style="font-size:9px;color:var(--lx-dim);">uncertain</div>
+                </div>
+              </div>
+
+              <!-- low confidence bar -->
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+                <span style="font-size:10px;color:var(--lx-dim);white-space:nowrap;">Confidence</span>
+                <div class="conf-bar" style="flex:1;"><div class="conf-fill" style="width:38%;background:linear-gradient(90deg,#ef4444,rgba(239,68,68,.5));"></div></div>
+                <span style="font-size:10px;font-weight:700;color:#ef4444;">0.38</span>
+              </div>
+
+              <hr class="sk-sep">
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:6px;">
+                <button style="padding:9px;border-radius:8px;background:var(--lx-s2);border:1px solid var(--lx-br);font-size:12px;font-weight:700;color:var(--lx-text);width:100%;">Edit & Save</button>
+                <button style="padding:9px;border-radius:8px;background:var(--cx-orange);border:none;font-size:12px;font-weight:700;color:#fff;width:100%;">Retry Scan</button>
+              </div>
+              <button style="width:100%;padding:8px;border-radius:8px;background:transparent;border:1px solid var(--lx-br);font-size:12px;font-weight:600;color:var(--lx-muted);">Discard</button>
+            </div>
+          </div>
+          <div class="bnav" style="grid-template-columns:repeat(5,1fr);">
+            <div class="bnav-item"><div class="bnav-icon"></div><div class="bnav-lbl"></div></div>
+            <div class="bnav-item"><div class="bnav-icon"></div><div class="bnav-lbl"></div></div>
+            <div class="bnav-item"><div style="width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,var(--cx-orange),#c44a00);display:flex;align-items:center;justify-content:center;margin-top:-12px;border:2px solid #1a1a1a;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></div><div class="bnav-lbl" style="background:rgba(255,106,28,.5);"></div></div>
+            <div class="bnav-item"><div class="bnav-icon"></div><div class="bnav-lbl"></div></div>
+            <div class="bnav-item"><div class="bnav-icon"></div><div class="bnav-lbl"></div></div>
+          </div>
+        </div>
+      </div>
+      <div class="anns">
+        <span class="ann">Red bar when confidence &lt; 0.5</span>
+        <span class="ann">Edit &amp; Save lets user correct fields</span>
+        <span class="ann">Retry is primary action</span>
+      </div>
+    </div>
+
+    <!-- State 5: Scan history -->
+    <div class="phone">
+      <div class="phone-lbl">5 · Scan history</div>
+      <div class="phone-outer">
+        <div class="phone-notch"></div>
+        <div class="phone-screen" style="background:var(--lx-bg);padding:10px;">
+          <!-- top -->
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+            <div style="display:flex;align-items:center;gap:6px;">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgba(255,106,28,.9)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              <span style="font-size:13px;font-weight:700;color:var(--lx-text);">Scan History</span>
+            </div>
+            <div style="background:var(--cx-orange);border-radius:7px;padding:5px 10px;font-size:11px;font-weight:700;color:#fff;">+ Scan</div>
+          </div>
+          <!-- session summary -->
+          <div style="display:flex;gap:5px;margin-bottom:10px;">
+            <div style="flex:1;background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:7px;padding:6px 8px;text-align:center;">
+              <div style="font-size:9px;color:var(--lx-dim);text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px;">Today</div>
+              <div style="font-size:16px;font-weight:700;color:var(--lx-text);">12</div>
+            </div>
+            <div style="flex:1;background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:7px;padding:6px 8px;text-align:center;">
+              <div style="font-size:9px;color:var(--lx-dim);text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px;">Value</div>
+              <div style="font-size:16px;font-weight:700;color:var(--cx-orange);">$284</div>
+            </div>
+            <div style="flex:1;background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:7px;padding:6px 8px;text-align:center;">
+              <div style="font-size:9px;color:var(--lx-dim);text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px;">Added</div>
+              <div style="font-size:16px;font-weight:700;color:var(--cx-green);">8</div>
+            </div>
+          </div>
+          <!-- scan list -->
+          <div style="display:flex;flex-direction:column;gap:5px;">
+            <div style="display:flex;align-items:center;gap:8px;background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:8px;padding:7px 8px;">
+              <div style="width:30px;height:42px;background:var(--lx-s2);border:1px solid var(--lx-br);border-radius:4px;flex-shrink:0;"></div>
+              <div style="flex:1;min-width:0;">
+                <div style="font-size:12px;font-weight:600;color:var(--lx-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Charizard VMAX</div>
+                <div style="font-size:10px;color:var(--lx-muted);">Brilliant Stars · NM · Holo</div>
+                <div style="display:flex;align-items:center;gap:4px;margin-top:2px;"><div style="width:30px;height:3px;border-radius:2px;background:var(--cx-green);"></div><span style="font-size:9px;color:var(--lx-dim);">0.91</span></div>
+              </div>
+              <div style="text-align:right;flex-shrink:0;">
+                <div style="font-size:13px;font-weight:700;color:var(--cx-orange);">$42</div>
+                <div style="font-size:9px;color:var(--lx-live);">✓ added</div>
+              </div>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:8px;padding:7px 8px;">
+              <div style="width:30px;height:42px;background:var(--lx-s2);border:1px solid var(--lx-br);border-radius:4px;flex-shrink:0;"></div>
+              <div style="flex:1;min-width:0;">
+                <div style="font-size:12px;font-weight:600;color:var(--lx-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Pikachu V</div>
+                <div style="font-size:10px;color:var(--lx-muted);">Vivid Voltage · LP</div>
+                <div style="display:flex;align-items:center;gap:4px;margin-top:2px;"><div style="width:12px;height:3px;border-radius:2px;background:#ef4444;"></div><span style="font-size:9px;color:var(--lx-dim);">0.38</span></div>
+              </div>
+              <div style="text-align:right;flex-shrink:0;">
+                <div style="font-size:13px;font-weight:700;color:var(--lx-muted);">$8?</div>
+                <div style="font-size:9px;color:#ef4444;">review</div>
+              </div>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:8px;padding:7px 8px;opacity:.6;">
+              <div style="width:30px;height:42px;background:var(--lx-s2);border:1px solid var(--lx-br);border-radius:4px;flex-shrink:0;"></div>
+              <div style="flex:1;"><div class="sk-line w80 bright" style="margin-bottom:4px;"></div><div class="sk-line w50"></div></div>
+              <div style="font-size:13px;font-weight:700;color:var(--lx-muted);">$18</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="anns">
+        <span class="ann gold">Session total value visible immediately</span>
+        <span class="ann">Mini confidence bar per scan</span>
+        <span class="ann">"review" = low confidence flags</span>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ═══════════════════ TAB B: Split View -->
+<div class="canvas" id="tab-B">
+  <div class="dir-label">B — Split View (Camera top · Results bottom)</div>
+  <div class="dir-sub">Screen is divided: camera in the top ~45%, results panel pinned below. No sheet animation — results appear immediately in place. Good for bright environments where you need to see the card and data simultaneously. Also shows a "batch mode" for scanning multiple cards quickly.</div>
+
+  <div class="screens">
+
+    <!-- Ready -->
+    <div class="phone">
+      <div class="phone-lbl">1 · Ready</div>
+      <div class="phone-outer">
+        <div class="phone-notch"></div>
+        <div class="phone-screen">
+          <!-- camera half -->
+          <div class="viewfinder" style="height:180px;background:linear-gradient(160deg,#1a1d22,#0d1014);display:flex;align-items:center;justify-content:center;">
+            <div style="width:90px;height:126px;position:relative;">
+              <div style="width:90px;height:126px;background:rgba(255,255,255,.04);border-radius:4px;"></div>
+              <div class="vf-corner tl" style="width:14px;height:14px;"></div><div class="vf-corner tr" style="width:14px;height:14px;"></div><div class="vf-corner bl" style="width:14px;height:14px;"></div><div class="vf-corner br" style="width:14px;height:14px;"></div>
+            </div>
+            <!-- capture btn overlay -->
+            <div style="position:absolute;bottom:8px;right:10px;width:36px;height:36px;border-radius:50%;background:rgba(255,106,28,.2);border:2px solid var(--cx-orange);display:flex;align-items:center;justify-content:center;">
+              <div style="width:24px;height:24px;border-radius:50%;background:var(--cx-orange);"></div>
+            </div>
+          </div>
+          <!-- results panel -->
+          <div style="background:var(--lx-bg);padding:10px;min-height:210px;">
+            <div style="display:flex;align-items:center;justify-content:center;height:100px;flex-direction:column;gap:8px;">
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="rgba(255,106,28,.3)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              <span style="font-size:12px;color:var(--lx-dim);">Point at a card to identify</span>
+            </div>
+          </div>
+          <div class="bnav" style="grid-template-columns:repeat(5,1fr);">
+            <div class="bnav-item"><div class="bnav-icon"></div><div class="bnav-lbl"></div></div>
+            <div class="bnav-item"><div class="bnav-icon"></div><div class="bnav-lbl"></div></div>
+            <div class="bnav-item"><div style="width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,var(--cx-orange),#c44a00);display:flex;align-items:center;justify-content:center;margin-top:-12px;border:2px solid #1a1a1a;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></div><div class="bnav-lbl" style="background:rgba(255,106,28,.5);"></div></div>
+            <div class="bnav-item"><div class="bnav-icon"></div><div class="bnav-lbl"></div></div>
+            <div class="bnav-item"><div class="bnav-icon"></div><div class="bnav-lbl"></div></div>
+          </div>
+        </div>
+      </div>
+      <div class="anns"><span class="ann">Top = camera, bottom = results</span><span class="ann">No animation needed</span></div>
+    </div>
+
+    <!-- Result -->
+    <div class="phone">
+      <div class="phone-lbl">2 · Result</div>
+      <div class="phone-outer">
+        <div class="phone-notch"></div>
+        <div class="phone-screen">
+          <!-- camera half with captured card -->
+          <div class="viewfinder" style="height:180px;background:linear-gradient(160deg,#1a1d22,#0d1014);display:flex;align-items:center;justify-content:center;">
+            <div style="width:90px;height:126px;position:relative;">
+              <div style="width:90px;height:126px;background:rgba(255,255,255,.06);border-radius:4px;border:1.5px solid rgba(147,214,167,.5);"></div>
+              <div class="vf-corner tl" style="width:14px;height:14px;border-color:var(--cx-green);"></div><div class="vf-corner tr" style="width:14px;height:14px;border-color:var(--cx-green);"></div><div class="vf-corner bl" style="width:14px;height:14px;border-color:var(--cx-green);"></div><div class="vf-corner br" style="width:14px;height:14px;border-color:var(--cx-green);"></div>
+            </div>
+          </div>
+          <!-- results panel -->
+          <div style="background:var(--lx-bg);padding:10px;">
+            <div style="display:flex;gap:8px;margin-bottom:8px;align-items:flex-start;">
+              <div style="width:38px;height:52px;background:var(--lx-s2);border:1px solid var(--lx-br);border-radius:4px;flex-shrink:0;"></div>
+              <div style="flex:1;">
+                <div style="font-size:12px;font-weight:700;color:var(--lx-text);margin-bottom:2px;">Charizard VMAX</div>
+                <div style="font-size:10px;color:var(--lx-muted);margin-bottom:4px;">Brilliant Stars · 017/172</div>
+                <div style="display:flex;gap:3px;"><span class="sk-pill nm" style="font-size:9px;">NM</span><span class="sk-pill orange" style="font-size:9px;">Holo</span></div>
+              </div>
+              <div style="font-size:17px;font-weight:800;color:var(--cx-orange);font-variant-numeric:tabular-nums;flex-shrink:0;">$42</div>
+            </div>
+            <!-- confidence -->
+            <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;">
+              <span style="font-size:9px;color:var(--lx-dim);">Conf.</span>
+              <div class="conf-bar" style="flex:1;height:4px;"><div class="conf-fill" style="width:91%;background:var(--cx-green);"></div></div>
+              <span style="font-size:9px;font-weight:700;color:var(--cx-green);">0.91</span>
+            </div>
+            <hr class="sk-sep">
+            <!-- actions -->
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-bottom:5px;">
+              <button style="padding:8px;border-radius:7px;background:var(--cx-orange);border:none;font-size:11px;font-weight:700;color:#fff;width:100%;">Add to Inventory</button>
+              <button style="padding:8px;border-radius:7px;background:var(--lx-s2);border:1px solid var(--lx-br);font-size:11px;font-weight:600;color:var(--lx-text);width:100%;">Log as Deal</button>
+            </div>
+            <button style="width:100%;padding:6px;border-radius:7px;background:transparent;border:1px solid var(--lx-br);font-size:11px;color:var(--lx-muted);">Scan Another →</button>
+          </div>
+          <div class="bnav" style="grid-template-columns:repeat(5,1fr);">
+            <div class="bnav-item"><div class="bnav-icon"></div><div class="bnav-lbl"></div></div>
+            <div class="bnav-item"><div class="bnav-icon"></div><div class="bnav-lbl"></div></div>
+            <div class="bnav-item"><div style="width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,var(--cx-orange),#c44a00);display:flex;align-items:center;justify-content:center;margin-top:-12px;border:2px solid #1a1a1a;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></div><div class="bnav-lbl" style="background:rgba(255,106,28,.5);"></div></div>
+            <div class="bnav-item"><div class="bnav-icon"></div><div class="bnav-lbl"></div></div>
+            <div class="bnav-item"><div class="bnav-icon"></div><div class="bnav-lbl"></div></div>
+          </div>
+        </div>
+      </div>
+      <div class="anns"><span class="ann green">Green corners = success</span><span class="ann">Results appear in-place instantly</span></div>
+    </div>
+
+    <!-- Batch mode -->
+    <div class="phone">
+      <div class="phone-lbl">3 · Batch mode</div>
+      <div class="phone-outer">
+        <div class="phone-notch"></div>
+        <div class="phone-screen">
+          <div class="viewfinder" style="height:160px;background:linear-gradient(160deg,#1a1d22,#0d1014);display:flex;align-items:center;justify-content:center;padding:8px;">
+            <div style="width:80px;height:112px;position:relative;">
+              <div style="width:80px;height:112px;background:rgba(255,255,255,.04);border-radius:4px;"></div>
+              <div class="vf-corner tl" style="width:12px;height:12px;"></div><div class="vf-corner tr" style="width:12px;height:12px;"></div><div class="vf-corner bl" style="width:12px;height:12px;"></div><div class="vf-corner br" style="width:12px;height:12px;"></div>
+            </div>
+            <div style="position:absolute;top:8px;right:8px;background:rgba(0,0,0,.6);border:1px solid var(--cx-orange);border-radius:6px;padding:3px 8px;display:flex;align-items:center;gap:5px;">
+              <div style="width:6px;height:6px;border-radius:50%;background:var(--cx-orange);"></div>
+              <span style="font-size:10px;font-weight:700;color:var(--cx-orange);">BATCH · 5 scanned</span>
+            </div>
+          </div>
+          <!-- compact batch results -->
+          <div style="background:var(--lx-bg);padding:8px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+              <span style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--lx-dim);">This session</span>
+              <span style="font-size:11px;font-weight:700;color:var(--cx-orange);">$187 total</span>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:3px;">
+              <div style="display:flex;justify-content:space-between;align-items:center;background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:6px;padding:5px 8px;">
+                <div style="flex:1;min-width:0;"><span style="font-size:11px;color:var(--lx-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block;">Charizard VMAX</span><span style="font-size:9px;color:var(--lx-muted);">NM · Holo</span></div>
+                <span style="font-size:12px;font-weight:700;color:var(--cx-orange);margin-left:8px;flex-shrink:0;">$42</span>
+                <span style="font-size:9px;color:var(--lx-live);margin-left:6px;flex-shrink:0;">✓</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center;background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:6px;padding:5px 8px;">
+                <div style="flex:1;min-width:0;"><span style="font-size:11px;color:var(--lx-text);">Pikachu V</span><span style="font-size:9px;color:var(--lx-muted);display:block;">LP</span></div>
+                <span style="font-size:12px;font-weight:700;color:var(--lx-muted);margin-left:8px;flex-shrink:0;">$8?</span>
+                <span style="font-size:9px;color:#ef4444;margin-left:6px;flex-shrink:0;">!</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center;background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:6px;padding:5px 8px;">
+                <div style="flex:1;min-width:0;"><span style="font-size:11px;color:var(--lx-text);">Blastoise EX</span><span style="font-size:9px;color:var(--lx-muted);display:block;">NM</span></div>
+                <span style="font-size:12px;font-weight:700;color:var(--cx-orange);margin-left:8px;flex-shrink:0;">$28</span>
+                <span style="font-size:9px;color:var(--lx-live);margin-left:6px;flex-shrink:0;">✓</span>
+              </div>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-top:6px;">
+              <button style="padding:8px;border-radius:7px;background:var(--cx-orange);border:none;font-size:11px;font-weight:700;color:#fff;">Add All (4)</button>
+              <button style="padding:8px;border-radius:7px;background:var(--lx-s2);border:1px solid var(--lx-br);font-size:11px;font-weight:600;color:var(--lx-text);">Review (1)</button>
+            </div>
+          </div>
+          <div class="bnav" style="grid-template-columns:repeat(5,1fr);">
+            <div class="bnav-item"><div class="bnav-icon"></div><div class="bnav-lbl"></div></div>
+            <div class="bnav-item"><div class="bnav-icon"></div><div class="bnav-lbl"></div></div>
+            <div class="bnav-item"><div style="width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,var(--cx-orange),#c44a00);display:flex;align-items:center;justify-content:center;margin-top:-12px;border:2px solid #1a1a1a;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></div><div class="bnav-lbl" style="background:rgba(255,106,28,.5);"></div></div>
+            <div class="bnav-item"><div class="bnav-icon"></div><div class="bnav-lbl"></div></div>
+            <div class="bnav-item"><div class="bnav-icon"></div><div class="bnav-lbl"></div></div>
+          </div>
+        </div>
+      </div>
+      <div class="anns">
+        <span class="ann gold">Batch mode = scan many, commit once</span>
+        <span class="ann">"Add All" sends to inventory in bulk</span>
+        <span class="ann">"Review (1)" = flag low-confidence ones</span>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ═══════════════════ TAB C: Step Wizard -->
+<div class="canvas" id="tab-C">
+  <div class="dir-label">C — Step Wizard (Capture → Identify → Act)</div>
+  <div class="dir-sub">Each step is a distinct full-screen state. Clear progress, no visual overlap. Best for users new to the feature or when scanning graded slabs where extra detail fields (grade, slab company) are needed. Includes an "Edit result" step before committing.</div>
+
+  <div class="screens">
+
+    <!-- Step 1 -->
+    <div class="phone">
+      <div class="phone-lbl">Step 1 · Capture</div>
+      <div class="phone-outer">
+        <div class="phone-notch"></div>
+        <div class="phone-screen">
+          <div class="viewfinder" style="height:380px;background:linear-gradient(160deg,#1a1d22,#0d1014);display:flex;flex-direction:column;justify-content:space-between;padding:10px;">
+            <!-- progress -->
+            <div style="display:flex;align-items:center;gap:6px;justify-content:center;">
+              <div style="width:20px;height:3px;border-radius:2px;background:var(--cx-orange);"></div>
+              <div style="width:20px;height:3px;border-radius:2px;background:rgba(255,255,255,.15);"></div>
+              <div style="width:20px;height:3px;border-radius:2px;background:rgba(255,255,255,.15);"></div>
+              <span style="font-size:10px;color:rgba(255,255,255,.4);margin-left:4px;">1 of 3</span>
+            </div>
+            <!-- viewfinder center -->
+            <div style="flex:1;display:flex;align-items:center;justify-content:center;">
+              <div style="width:130px;height:180px;position:relative;">
+                <div style="width:130px;height:180px;background:rgba(255,255,255,.04);border-radius:5px;"></div>
+                <div class="vf-corner tl"></div><div class="vf-corner tr"></div><div class="vf-corner bl"></div><div class="vf-corner br"></div>
+              </div>
+            </div>
+            <!-- mode selector -->
+            <div style="display:flex;gap:6px;justify-content:center;margin-bottom:8px;">
+              <div style="background:var(--cx-orange);border-radius:99px;padding:4px 12px;font-size:10px;font-weight:700;color:#fff;">Raw Card</div>
+              <div style="background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.15);border-radius:99px;padding:4px 12px;font-size:10px;font-weight:600;color:rgba(255,255,255,.5);">Graded Slab</div>
+              <div style="background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.15);border-radius:99px;padding:4px 12px;font-size:10px;font-weight:600;color:rgba(255,255,255,.5);">Barcode</div>
+            </div>
+            <!-- shutter -->
+            <div style="display:flex;align-items:center;justify-content:center;padding-bottom:8px;">
+              <div style="width:54px;height:54px;border-radius:50%;background:rgba(255,106,28,.2);border:2px solid var(--cx-orange);display:flex;align-items:center;justify-content:center;">
+                <div style="width:40px;height:40px;border-radius:50%;background:var(--cx-orange);"></div>
+              </div>
+            </div>
+          </div>
+          <div class="bnav" style="grid-template-columns:repeat(5,1fr);">
+            <div class="bnav-item"><div class="bnav-icon"></div><div class="bnav-lbl"></div></div><div class="bnav-item"><div class="bnav-icon"></div><div class="bnav-lbl"></div></div>
+            <div class="bnav-item"><div style="width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,var(--cx-orange),#c44a00);display:flex;align-items:center;justify-content:center;margin-top:-12px;border:2px solid #1a1a1a;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></div><div class="bnav-lbl" style="background:rgba(255,106,28,.5);"></div></div>
+            <div class="bnav-item"><div class="bnav-icon"></div><div class="bnav-lbl"></div></div><div class="bnav-item"><div class="bnav-icon"></div><div class="bnav-lbl"></div></div>
+          </div>
+        </div>
+      </div>
+      <div class="anns"><span class="ann">Mode toggle: raw / slab / barcode</span><span class="ann">Progress dots = 1 of 3 steps</span></div>
+    </div>
+
+    <!-- Step 2: Result + edit -->
+    <div class="phone">
+      <div class="phone-lbl">Step 2 · Verify result</div>
+      <div class="phone-outer">
+        <div class="phone-notch"></div>
+        <div class="phone-screen" style="background:var(--lx-bg);padding:10px;">
+          <!-- progress -->
+          <div style="display:flex;align-items:center;gap:6px;justify-content:center;margin-bottom:10px;">
+            <div style="width:20px;height:3px;border-radius:2px;background:rgba(255,106,28,.3);"></div>
+            <div style="width:20px;height:3px;border-radius:2px;background:var(--cx-orange);"></div>
+            <div style="width:20px;height:3px;border-radius:2px;background:rgba(255,255,255,.15);"></div>
+            <span style="font-size:10px;color:rgba(255,255,255,.4);margin-left:4px;">2 of 3</span>
+          </div>
+          <!-- card result -->
+          <div style="display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;">
+            <div style="width:52px;height:72px;background:var(--lx-s2);border:1px solid var(--lx-br);border-radius:5px;flex-shrink:0;"></div>
+            <div style="flex:1;">
+              <div style="font-size:13px;font-weight:700;color:var(--lx-text);margin-bottom:2px;">Charizard VMAX</div>
+              <div style="font-size:11px;color:var(--lx-muted);margin-bottom:6px;">Brilliant Stars · 017/172</div>
+              <div style="display:flex;gap:4px;flex-wrap:wrap;">
+                <span class="sk-pill nm">NM</span>
+                <span class="sk-pill orange">Holo</span>
+                <span class="sk-pill neutral">Pokemon · EN</span>
+              </div>
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+            <span style="font-size:10px;color:var(--lx-dim);">Confidence</span>
+            <div class="conf-bar" style="flex:1;height:4px;"><div class="conf-fill" style="width:91%;background:var(--cx-green);"></div></div>
+            <span style="font-size:10px;font-weight:700;color:var(--cx-green);">0.91</span>
+          </div>
+          <!-- editable fields -->
+          <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--lx-dim);margin-bottom:6px;">Correct if needed</div>
+          <div style="display:flex;flex-direction:column;gap:5px;margin-bottom:12px;">
+            <div style="background:var(--lx-s2);border:1px solid var(--lx-br);border-radius:7px;padding:8px 10px;display:flex;justify-content:space-between;align-items:center;">
+              <span style="font-size:11px;color:var(--lx-muted);">Condition</span>
+              <span style="font-size:11px;font-weight:700;color:var(--lx-text);">NM ▾</span>
+            </div>
+            <div style="background:var(--lx-s2);border:1px solid var(--lx-br);border-radius:7px;padding:8px 10px;display:flex;justify-content:space-between;align-items:center;">
+              <span style="font-size:11px;color:var(--lx-muted);">Market price</span>
+              <span style="font-size:11px;font-weight:700;color:var(--cx-orange);">$42.00 ✎</span>
+            </div>
+            <div style="background:var(--lx-s2);border:1px solid var(--lx-br);border-radius:7px;padding:8px 10px;display:flex;justify-content:space-between;align-items:center;">
+              <span style="font-size:11px;color:var(--lx-muted);">Is foil</span>
+              <div style="width:30px;height:16px;border-radius:8px;background:var(--cx-orange);position:relative;"><div style="position:absolute;right:2px;top:2px;width:12px;height:12px;border-radius:50%;background:#fff;"></div></div>
+            </div>
+          </div>
+          <button style="width:100%;padding:10px;border-radius:8px;background:var(--cx-orange);border:none;font-size:13px;font-weight:700;color:#fff;">Confirm & Continue →</button>
+        </div>
+      </div>
+      <div class="anns"><span class="ann">Inline edit before committing</span><span class="ann gold">Condition, price, foil all editable</span></div>
+    </div>
+
+    <!-- Step 3: Action -->
+    <div class="phone">
+      <div class="phone-lbl">Step 3 · Choose action</div>
+      <div class="phone-outer">
+        <div class="phone-notch"></div>
+        <div class="phone-screen" style="background:var(--lx-bg);padding:10px;">
+          <!-- progress -->
+          <div style="display:flex;align-items:center;gap:6px;justify-content:center;margin-bottom:10px;">
+            <div style="width:20px;height:3px;border-radius:2px;background:rgba(255,106,28,.3);"></div>
+            <div style="width:20px;height:3px;border-radius:2px;background:rgba(255,106,28,.3);"></div>
+            <div style="width:20px;height:3px;border-radius:2px;background:var(--cx-orange);"></div>
+            <span style="font-size:10px;color:rgba(255,255,255,.4);margin-left:4px;">3 of 3</span>
+          </div>
+          <!-- confirmed card summary -->
+          <div style="background:var(--lx-s1);border:1px solid rgba(147,214,167,.2);border-radius:10px;padding:10px;margin-bottom:12px;display:flex;gap:8px;align-items:center;">
+            <div style="width:36px;height:50px;background:var(--lx-s2);border:1px solid var(--lx-br);border-radius:4px;flex-shrink:0;"></div>
+            <div style="flex:1;">
+              <div style="font-size:12px;font-weight:700;color:var(--lx-text);">Charizard VMAX</div>
+              <div style="font-size:10px;color:var(--lx-muted);">NM · Holo · Brilliant Stars</div>
+            </div>
+            <div style="font-size:18px;font-weight:800;color:var(--cx-orange);">$42</div>
+          </div>
+          <!-- action cards -->
+          <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--lx-dim);margin-bottom:8px;">What do you want to do?</div>
+          <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:8px;">
+            <div style="background:rgba(255,106,28,.08);border:1.5px solid rgba(255,106,28,.3);border-radius:10px;padding:10px 12px;display:flex;align-items:center;gap:10px;">
+              <div style="width:28px;height:28px;background:rgba(255,106,28,.2);border-radius:6px;flex-shrink:0;display:flex;align-items:center;justify-content:center;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgba(255,106,28,.9)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8l-9-5-9 5v8l9 5 9-5z"/></svg></div>
+              <div style="flex:1;">
+                <div style="font-size:12px;font-weight:700;color:var(--lx-text);">Add to Inventory</div>
+                <div style="font-size:10px;color:var(--lx-muted);">Creates an inventory item</div>
+              </div>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--lx-dim)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+            </div>
+            <div style="background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:10px;padding:10px 12px;display:flex;align-items:center;gap:10px;">
+              <div style="width:28px;height:28px;background:var(--lx-s2);border-radius:6px;flex-shrink:0;display:flex;align-items:center;justify-content:center;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--lx-muted)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41L13.42 20.58a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><circle cx="7" cy="7" r="1.5"/></svg></div>
+              <div style="flex:1;">
+                <div style="font-size:12px;font-weight:700;color:var(--lx-text);">Log as Deal</div>
+                <div style="font-size:10px;color:var(--lx-muted);">Records in the deal ledger</div>
+              </div>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--lx-dim)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+            </div>
+            <div style="background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:10px;padding:10px 12px;display:flex;align-items:center;gap:10px;">
+              <div style="width:28px;height:28px;background:var(--lx-s2);border-radius:6px;flex-shrink:0;display:flex;align-items:center;justify-content:center;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--lx-muted)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg></div>
+              <div style="flex:1;">
+                <div style="font-size:12px;font-weight:700;color:var(--lx-text);">Just Save Scan</div>
+                <div style="font-size:10px;color:var(--lx-muted);">Keeps in history only</div>
+              </div>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--lx-dim)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+            </div>
+          </div>
+          <button style="width:100%;padding:8px;border-radius:8px;background:transparent;border:1px solid var(--lx-br);font-size:12px;font-weight:600;color:var(--lx-muted);">← Back</button>
+        </div>
+      </div>
+      <div class="anns">
+        <span class="ann">3 clear actions — no ambiguity</span>
+        <span class="ann green">Inventory / Deal / Just save</span>
+        <span class="ann">Graded slab mode adds PSA/BGS fields in step 2</span>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Fields reference -->
+  <div style="margin-top:32px;max-width:500px;">
+    <div style="font-family:'Caveat',cursive;font-size:16px;font-weight:700;color:var(--lx-text);margin-bottom:14px;">Data returned from AI · shown in result</div>
+    <div style="background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:10px;overflow:hidden;">
+      <div style="display:grid;grid-template-columns:1fr 1fr;background:var(--lx-s2);padding:6px 14px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--lx-dim);">
+        <div>Field (card_scanner.py)</div><div>Shown as</div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;padding:6px 14px;border-top:1px solid var(--lx-br);font-size:11px;"><span style="color:var(--lx-muted);">card_name</span><span style="color:var(--lx-text);">Card title (large)</span></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;padding:6px 14px;border-top:1px solid var(--lx-br);font-size:11px;background:rgba(255,255,255,.015);"><span style="color:var(--lx-muted);">set_name · card_number</span><span style="color:var(--lx-text);">Subtitle</span></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;padding:6px 14px;border-top:1px solid var(--lx-br);font-size:11px;"><span style="color:var(--lx-muted);">condition</span><span style="color:var(--cx-green);">NM/LP/MP/HP/DMG pill</span></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;padding:6px 14px;border-top:1px solid var(--lx-br);font-size:11px;background:rgba(255,255,255,.015);"><span style="color:var(--lx-muted);">is_foil</span><span style="color:var(--cx-orange);">Holo pill</span></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;padding:6px 14px;border-top:1px solid var(--lx-br);font-size:11px;"><span style="color:var(--lx-muted);">confidence</span><span style="color:var(--lx-text);">Progress bar 0–1</span></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;padding:6px 14px;border-top:1px solid var(--lx-br);font-size:11px;background:rgba(255,255,255,.015);"><span style="color:var(--lx-muted);">market_price</span><span style="color:var(--cx-orange);">Price (large, orange)</span></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;padding:6px 14px;border-top:1px solid var(--lx-br);font-size:11px;"><span style="color:var(--lx-muted);">image_url</span><span style="color:var(--lx-text);">Stock card thumbnail</span></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;padding:6px 14px;border-top:1px solid var(--lx-br);font-size:11px;background:rgba(255,255,255,.015);"><span style="color:var(--lx-muted);">game</span><span style="color:var(--lx-text);">Pokemon / MTG / Sports</span></div>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;">
+      <span style="font-family:'Caveat',cursive;font-size:12px;color:var(--cx-green);background:rgba(147,214,167,.06);border:1px dashed rgba(147,214,167,.25);border-radius:5px;padding:3px 8px;">confidence ≥ 0.7 → green bar, proceed normally</span>
+      <span style="font-family:'Caveat',cursive;font-size:12px;color:var(--cx-gold);background:rgba(235,198,122,.06);border:1px dashed rgba(235,198,122,.25);border-radius:5px;padding:3px 8px;">0.5–0.7 → gold bar, soft warning</span>
+      <span style="font-family:'Caveat',cursive;font-size:12px;color:#ef4444;background:rgba(239,68,68,.06);border:1px dashed rgba(239,68,68,.25);border-radius:5px;padding:3px 8px;">< 0.5 → red bar, retry/edit required</span>
+    </div>
+  </div>
+</div>
+
+<script>
+function switchTab(id, btn) {
+  document.querySelectorAll('.canvas').forEach(c => c.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('tab-' + id).classList.add('active');
+  btn.classList.add('active');
+  localStorage.setItem('degen-eye-tab', id);
+}
+const saved = localStorage.getItem('degen-eye-tab');
+if (saved) {
+  const btn = [...document.querySelectorAll('.tab')].find(t => t.textContent.trim().startsWith(saved));
+  if (btn) btn.click();
+}
+</script>
+</body>
+</html>

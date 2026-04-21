@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <link rel="manifest" href="/static/manifest.webmanifest">
+    <meta name="theme-color" content="#08090a">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="Degen">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="mobile-web-app-capable" content="yes">
+    <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon-180.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/icon-192.png">
+    <link rel="icon" type="image/png" sizes="512x512" href="/static/icons/icon-512.png">
+    <link rel="stylesheet" href="/static/safe-area.css?v=2026042020">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <title>{{ title }}</title>
+    <link rel="stylesheet" href="/static/linear.css?v=2026042011">
+</head>
+<body>
+    {% include "_linear_sidebar.html" %}
+    <div class="lx-page">
+        <div class="lx-topbar">
+            <div class="lx-topbar-l">
+                <a class="lx-btn" href="{{ back_url }}">&#8592; Back to Deals</a>
+            </div>
+        </div>
+
+        {% if success %}<div class="lx-banner lx-banner-ok">{{ success }}</div>{% endif %}
+        {% if error %}<div class="lx-banner lx-banner-err">{{ error }}</div>{% endif %}
+
+        <div class="lx-page-head">
+            <p class="lx-eyebrow">Deal Detail</p>
+            <h1 class="lx-h1">{{ title }}</h1>
+            <p class="lx-subtitle">{{ deal["channel"] or deal["channel_id"] }} &middot; {{ deal["author"] or "" }} &middot; {{ deal["time"] }}</p>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px;">
+                <span class="lx-pill">{{ deal["entry_kind"] or "unknown" }}</span>
+                {% if deal["payment_display"] %}<span class="lx-pill">{{ deal["payment_display"] }}</span>{% endif %}
+                {% if deal["category"] or deal["expense_category"] %}<span class="lx-pill">{{ deal["category"] or deal["expense_category"] }}</span>{% endif %}
+            </div>
+        </div>
+
+        <div class="lx-layout-2">
+            <div class="lx-card" style="margin-bottom:0;">
+                <div class="lx-media">
+                    {% if deal["attachment_urls"] %}
+                        {% for url in deal["attachment_urls"] %}
+                        <a href="{{ url }}" target="_blank" rel="noopener noreferrer"><img src="{{ url }}" alt="deal attachment"></a>
+                        {% endfor %}
+                    {% elif deal["nearby_image"] %}
+                    <p class="lx-note">No image saved on this confirmed deal, but a nearby same-author image was found {{ deal["nearby_image"]["delta_seconds"] }}s away.</p>
+                    <a href="{{ deal['nearby_image']['image_url'] }}" target="_blank" rel="noopener noreferrer"><img src="{{ deal['nearby_image']['image_url'] }}" alt="nearby deal attachment"></a>
+                    {% else %}
+                    <p class="lx-note">No attachment images on this deal.</p>
+                    {% endif %}
+                </div>
+                <div class="lx-msg-box">{{ deal["message"] or "(image-only message)" }}</div>
+                {% if deal["grouped_messages"] %}
+                <div class="lx-group-box">
+                    <div class="lx-group-head">Grouped Context</div>
+                    {% for grouped in deal["grouped_messages"] %}
+                    <div class="lx-group-item">
+                        <div class="lx-group-meta">{{ grouped["time"] }}{% if grouped["has_image"] %} &middot; image{% endif %}{% if grouped["is_self"] %} &middot; this row{% endif %}</div>
+                        <div>{{ grouped["message"] or "(image-only message)" }}</div>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% endif %}
+            </div>
+
+            <div class="lx-sticky-col">
+                <div class="lx-card" style="margin-bottom:0;">
+                    <div class="lx-stat"><div class="lx-stat-lbl">Amount</div><div class="lx-stat-val">{{ deal["amount_display"] or "—" }}</div></div>
+                    <div class="lx-stat"><div class="lx-stat-lbl">Money In</div><div class="lx-stat-val">{{ deal["money_in"] | money }}</div></div>
+                    <div class="lx-stat"><div class="lx-stat-lbl">Money Out</div><div class="lx-stat-val">{{ deal["money_out"] | money }}</div></div>
+                    <div class="lx-stat"><div class="lx-stat-lbl">Payment</div><div class="lx-stat-val">{{ deal["payment_display"] or "—" }}</div></div>
+                    <div class="lx-stat"><div class="lx-stat-lbl">Trade Summary</div><div class="lx-stat-val">{{ deal["trade_summary"] or "—" }}</div></div>
+                    <div class="lx-stat"><div class="lx-stat-lbl">Notes</div><div class="lx-stat-val">{{ deal["notes"] or "—" }}</div></div>
+                    <div class="lx-stat"><div class="lx-stat-lbl">Bookkeeping</div><div class="lx-stat-val">{{ deal["bookkeeping"]["label"] if deal["bookkeeping"] else "Unmatched" }}</div></div>
+                    {% if deal["nearby_image"] %}
+                    <div class="lx-stat"><div class="lx-stat-lbl">Image Audit</div><div class="lx-stat-val">Possible missing image: nearby same-author image {{ deal["nearby_image"]["delta_seconds"] }}s away.</div></div>
+                    {% endif %}
+                    {% if deal["reviewed_by"] or deal["reviewed_at"] %}
+                    <div class="lx-stat"><div class="lx-stat-lbl">Reviewed</div><div class="lx-stat-val">{% if deal["reviewed_by"] %}{{ deal["reviewed_by"] }}{% endif %}{% if deal["reviewed_at"] %}{% if deal["reviewed_by"] %} on {% endif %}{{ deal["reviewed_at"] }}{% endif %}</div></div>
+                    {% endif %}
+                    {% if deal["image_summary"] %}
+                    <div class="lx-stat"><div class="lx-stat-lbl">Image Summary</div><div class="lx-stat-val">{{ deal["image_summary"] }}</div></div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+        <details class="lx-details">
+            <summary>Technical Details (Operator)</summary>
+            <div class="lx-details-body">
+                <p class="lx-note" style="margin-bottom:14px;">Operator-only parser context and correction controls.</p>
+
+                <div class="lx-detail-grid">
+                    <div class="lx-detail-card"><div class="lx-detail-lbl">Parse Status</div><div class="lx-detail-val">{{ (deal["parse_status"] or "unknown")|replace("_", " ") }}</div></div>
+                    <div class="lx-detail-card"><div class="lx-detail-lbl">Review Flow</div><div class="lx-detail-val">{{ "review required" if deal["needs_review"] else "approved flow" }}</div></div>
+                    <div class="lx-detail-card"><div class="lx-detail-lbl">Deleted</div><div class="lx-detail-val">{{ "yes" if deal["is_deleted"] else "no" }}</div></div>
+                    <div class="lx-detail-card"><div class="lx-detail-lbl">Confidence</div><div class="lx-detail-val">{{ deal["confidence"] if deal["confidence"] is not none else "" }}</div></div>
+                    <div class="lx-detail-card"><div class="lx-detail-lbl">Attempts</div><div class="lx-detail-val">{{ deal["parse_attempts"] }}</div></div>
+                    <div class="lx-detail-card"><div class="lx-detail-lbl">Payment Method</div><div class="lx-detail-val">{{ deal["payment_method"] or "" }}</div></div>
+                    <div class="lx-detail-card"><div class="lx-detail-lbl">Cash Direction</div><div class="lx-detail-val">{{ deal["cash_direction"] or "" }}</div></div>
+                    <div class="lx-detail-card"><div class="lx-detail-lbl">Category</div><div class="lx-detail-val">{{ deal["category"] or "" }}</div></div>
+                    <div class="lx-detail-card"><div class="lx-detail-lbl">Expense Category</div><div class="lx-detail-val">{{ deal["expense_category"] or "" }}</div></div>
+                    <div class="lx-detail-card"><div class="lx-detail-lbl">Items In</div><div class="lx-detail-val">{{ ", ".join(deal["items_in"]) if deal["items_in"] else "" }}</div></div>
+                    <div class="lx-detail-card"><div class="lx-detail-lbl">Items Out</div><div class="lx-detail-val">{{ ", ".join(deal["items_out"]) if deal["items_out"] else "" }}</div></div>
+                    <div class="lx-detail-card"><div class="lx-detail-lbl">Item Names</div><div class="lx-detail-val">{{ ", ".join(deal["item_names"]) if deal["item_names"] else "" }}</div></div>
+                    <div class="lx-detail-card"><div class="lx-detail-lbl">Trade Summary</div><div class="lx-detail-val">{{ deal["trade_summary"] or "" }}</div></div>
+                    <div class="lx-detail-card"><div class="lx-detail-lbl">Image Summary</div><div class="lx-detail-val">{{ deal["image_summary"] or "" }}</div></div>
+                    <div class="lx-detail-card"><div class="lx-detail-lbl">Last Error</div><div class="lx-detail-val">{{ deal["last_error"] or "" }}</div></div>
+                    <div class="lx-detail-card"><div class="lx-detail-lbl">Discord Message ID</div><div class="lx-detail-val">{{ deal["discord_message_id"] or "" }}</div></div>
+                    <div class="lx-detail-card"><div class="lx-detail-lbl">Channel ID</div><div class="lx-detail-val">{{ deal["channel_id"] or "" }}</div></div>
+                </div>
+
+                {% if correction_patterns %}
+                <div class="lx-card" style="margin-top:6px;margin-bottom:14px;">
+                    <div class="lx-sh" style="margin-bottom:10px;">
+                        <h3 class="lx-sh-title">Correction Memory</h3>
+                    </div>
+                    <p class="lx-note" style="margin-bottom:12px;">
+                        {% if learning_signal["promoted_rule"] %}This deal already matches a promoted rule pattern.{% elif learning_signal["exact_match"] %}This deal already has an exact correction-memory match.{% elif learning_signal["similar_count"] %}This deal has {{ learning_signal["similar_count"] }} similar correction pattern(s) the parser can use as hints.{% else %}No learned correction patterns match this deal yet.{% endif %}
+                    </p>
+                    <div class="lx-detail-grid">
+                        {% for pattern in correction_patterns %}
+                        <div class="lx-detail-card">
+                            <div class="lx-detail-lbl">Pattern</div>
+                            <div class="lx-detail-val" style="font-family:monospace;font-size:12px;">{{ pattern["normalized_text"] }}</div>
+                            <p class="lx-note" style="margin-top:6px;">
+                                count={{ pattern["count"] }}
+                                {% if pattern["deal_type"] %}&middot; type={{ pattern["deal_type"] }}{% endif %}
+                                {% if pattern["payment_method"] %}&middot; payment={{ pattern["payment_method"] }}{% endif %}
+                                {% if pattern["cash_direction"] %}&middot; cash={{ pattern["cash_direction"] }}{% endif %}
+                                {% if pattern["correction_source"] == "promoted_rule" %}&middot; promoted rule{% endif %}
+                            </p>
+                            {% if pattern["count"] >= 2 and pattern["correction_source"] != "promoted_rule" %}
+                            <form method="post" action="/admin/corrections/promote-form" style="margin-top:10px;">
+                                <input type="hidden" name="normalized_text" value="{{ pattern['normalized_text'] }}">
+                                <input type="hidden" name="return_to" value="{{ request.url }}">
+                                <button type="submit" class="lx-btn">Promote to Rule</button>
+                            </form>
+                            {% endif %}
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% endif %}
+
+                <div class="lx-card" style="margin-bottom:0;">
+                    <div class="lx-sh" style="margin-bottom:12px;">
+                        <h3 class="lx-sh-title">Edit Parsed Values</h3>
+                    </div>
+                    <p class="lx-note" style="margin-bottom:14px;">Use this full form when inline review fields are not enough and you need to correct item flow or parser detail.</p>
+                    <form method="post" action="/messages/{{ deal['id'] }}/edit-form" id="edit-form">
+                        <input type="hidden" name="return_path" value="/deals/{{ deal['id'] }}">
+                        <input type="hidden" name="stay_on_detail" value="true">
+                        <input type="hidden" name="status" value="{{ selected_status }}">
+                        <input type="hidden" name="channel_id" value="{{ selected_channel_id }}">
+                        <input type="hidden" name="filter_expense_category" value="{{ selected_expense_category }}">
+                        <input type="hidden" name="after" value="{{ selected_after }}">
+                        <input type="hidden" name="before" value="{{ selected_before }}">
+                        <input type="hidden" name="sort_by" value="{{ selected_sort_by }}">
+                        <input type="hidden" name="sort_dir" value="{{ selected_sort_dir }}">
+                        <input type="hidden" name="page" value="{{ selected_page }}">
+                        <input type="hidden" name="limit" value="{{ selected_limit }}">
+
+                        <div class="lx-edit-grid">
+                            <label class="lx-label">Status
+                                <select class="lx-select" name="parse_status">{% for option in parse_status_options %}<option value="{{ option }}" {% if deal["parse_status"] == option %}selected{% endif %}>{{ option|replace("_", " ") }}</option>{% endfor %}</select>
+                            </label>
+                            <label class="lx-label">Review Required
+                                <div class="lx-checkbox-row"><input type="checkbox" name="needs_review" value="true" {% if deal["needs_review"] %}checked{% endif %}> Keep this row in review flow</div>
+                            </label>
+                            <label class="lx-label">Parsed Type
+                                <select class="lx-select" name="deal_type">{% for option in deal_type_options %}<option value="{{ option }}" {% if (deal["deal_type"] or "") == option %}selected{% endif %}>{{ option or "blank" }}</option>{% endfor %}</select>
+                            </label>
+                            <label class="lx-label">Financial Kind
+                                <select class="lx-select" name="entry_kind">{% for option in entry_kind_options %}<option value="{{ option }}" {% if (deal["entry_kind"] or "") == option %}selected{% endif %}>{{ option or "auto" }}</option>{% endfor %}</select>
+                            </label>
+                            <label class="lx-label">Amount
+                                <input class="lx-input" type="text" name="amount" value="{{ deal['amount'] if deal['amount'] is not none else '' }}">
+                            </label>
+                            <label class="lx-label">Confidence
+                                <input class="lx-input" type="text" name="confidence" value="{{ deal['confidence'] if deal['confidence'] is not none else '' }}">
+                            </label>
+                            <label class="lx-label">Payment Method
+                                <select class="lx-select" name="payment_method">{% for option in payment_method_options %}<option value="{{ option }}" {% if (deal["payment_method"] or "") == option %}selected{% endif %}>{{ option or "blank" }}</option>{% endfor %}</select>
+                            </label>
+                            <label class="lx-label">Cash Direction
+                                <select class="lx-select" name="cash_direction">{% for option in cash_direction_options %}<option value="{{ option }}" {% if (deal["cash_direction"] or "") == option %}selected{% endif %}>{{ option or "blank" }}</option>{% endfor %}</select>
+                            </label>
+                            <label class="lx-label">Category
+                                <select class="lx-select" name="category">{% for option in category_options %}<option value="{{ option }}" {% if (deal["category"] or "") == option %}selected{% endif %}>{{ option or "blank" }}</option>{% endfor %}</select>
+                            </label>
+                            <label class="lx-label">Expense Category
+                                <input class="lx-input" type="text" name="expense_category" value="{{ deal['expense_category'] or '' }}" placeholder="leave blank for auto">
+                            </label>
+                            <label class="lx-label lx-field-wide">Notes
+                                <textarea class="lx-textarea" name="notes">{{ deal["notes"] or "" }}</textarea>
+                            </label>
+                            <label class="lx-label lx-field-wide">Trade Summary
+                                <textarea class="lx-textarea" name="trade_summary">{{ deal["trade_summary"] or "" }}</textarea>
+                            </label>
+                            <label class="lx-label lx-field-wide">Item Names
+                                <textarea class="lx-textarea" name="item_names_text">{{ "\n".join(deal["item_names"]) if deal["item_names"] else "" }}</textarea>
+                            </label>
+                            <label class="lx-label lx-field-wide">Items In
+                                <textarea class="lx-textarea" name="items_in_text">{{ "\n".join(deal["items_in"]) if deal["items_in"] else "" }}</textarea>
+                            </label>
+                            <label class="lx-label lx-field-wide">Items Out
+                                <textarea class="lx-textarea" name="items_out_text">{{ "\n".join(deal["items_out"]) if deal["items_out"] else "" }}</textarea>
+                            </label>
+                        </div>
+
+                        <div class="lx-action-row" style="margin-top:16px;">
+                            <button type="submit" class="lx-btn lx-btn-primary">Save Changes</button>
+                            <a href="{{ back_url }}" class="lx-btn">Back to Deals</a>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </details>
+    </div>
+    {% include '_mobile_bottom_nav.html' %}
+</body>
+</html>

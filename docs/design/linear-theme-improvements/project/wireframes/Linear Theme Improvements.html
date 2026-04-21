@@ -1,0 +1,1212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Degen — Linear Theme Improvements</title>
+<link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;600;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+/* ── Reset ── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* ── Linear tokens (faithfully copied) ── */
+:root {
+  --lx-bg:    #08090a;
+  --lx-s1:    #111214;
+  --lx-s2:    #17181c;
+  --lx-br:    rgba(255,255,255,.07);
+  --lx-br2:   rgba(255,255,255,.13);
+  --lx-text:  #e4e4e7;
+  --lx-muted: #8b8f98;
+  --lx-dim:   #52566d;
+  --lx-red:   #ef4444;
+  --lx-live:  #22c55e;
+  /* courtyard accent */
+  --cx-orange: #ff6a1c;
+  --cx-gold:   #ebc67a;
+  --cx-green:  #93d6a7;
+}
+
+html, body { height: 100%; background: #0e0f11; color: var(--lx-text); font-family: 'Inter', system-ui, sans-serif; }
+
+/* ── Chrome ── */
+.topbar {
+  display: flex; align-items: center; gap: 14px;
+  padding: 12px 24px;
+  background: #0b0c0e;
+  border-bottom: 1px solid var(--lx-br);
+  position: sticky; top: 0; z-index: 20;
+}
+.topbar-title { font-size: 14px; font-weight: 700; flex: 1; letter-spacing: -.01em; }
+.topbar-sub { font-size: 12px; color: var(--lx-dim); font-family: 'Caveat', cursive; }
+
+.tabs { display: flex; gap: 2px; padding: 10px 24px 0; background: #0b0c0e; border-bottom: 1px solid var(--lx-br); position: sticky; top: 49px; z-index: 19; }
+.tab { padding: 8px 16px; font-size: 13px; font-weight: 600; cursor: pointer; border: none; background: none; border-bottom: 2px solid transparent; color: var(--lx-muted); transition: all .12s; font-family: 'Inter', sans-serif; }
+.tab.active { color: var(--lx-text); border-bottom-color: var(--cx-orange); }
+
+/* ── Canvas ── */
+.canvas { display: none; padding: 28px 24px 80px; }
+.canvas.active { display: block; }
+
+/* ── Direction header ── */
+.dir-hd { margin-bottom: 24px; }
+.dir-label { font-family: 'Caveat', cursive; font-size: 22px; font-weight: 700; color: var(--cx-orange); margin-bottom: 4px; }
+.dir-sub { font-size: 13px; color: var(--lx-muted); max-width: 660px; line-height: 1.5; }
+
+/* ── Screen layout ── */
+.screens { display: flex; gap: 28px; flex-wrap: wrap; align-items: flex-start; }
+
+/* ── Phone frame ── */
+.phone { width: 220px; flex-shrink: 0; }
+.screen-lbl { font-family: 'Caveat', cursive; font-size: 14px; color: var(--lx-muted); text-align: center; margin-bottom: 8px; }
+.phone-outer {
+  width: 220px; background: #1a1a1a; border-radius: 34px; padding: 12px 10px;
+  box-shadow: 0 0 0 1px rgba(255,255,255,.06), 0 16px 40px rgba(0,0,0,.5);
+}
+.phone-notch { width: 64px; height: 7px; background: #111; border-radius: 4px; margin: 0 auto 8px; }
+.phone-screen { background: var(--lx-bg); border-radius: 22px; overflow: hidden; }
+
+/* ── Desktop frame ── */
+.desktop { flex: 1; min-width: 360px; }
+.desktop-outer {
+  background: var(--lx-s1); border: 1px solid var(--lx-br); border-radius: 10px;
+  overflow: hidden; box-shadow: 0 8px 32px rgba(0,0,0,.4);
+}
+.desktop-bar { background: #0b0c0e; height: 28px; display: flex; align-items: center; padding: 0 10px; gap: 6px; border-bottom: 1px solid var(--lx-br); }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: rgba(255,255,255,.15); }
+.dot.orange { background: var(--cx-orange); opacity: .7; }
+.url-bar { flex: 1; height: 16px; background: var(--lx-s2); border-radius: 4px; margin: 0 8px; }
+
+/* ── Annotation pills ── */
+.anns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.ann { font-family: 'Caveat', cursive; font-size: 13px; color: var(--cx-orange); background: rgba(255,106,28,.08); border: 1px dashed rgba(255,106,28,.3); border-radius: 5px; padding: 3px 9px; }
+.ann.green { color: var(--cx-green); background: rgba(147,214,167,.06); border-color: rgba(147,214,167,.25); }
+.ann.gold { color: var(--cx-gold); background: rgba(235,198,122,.06); border-color: rgba(235,198,122,.25); }
+
+/* ════════════════════════════════════════════════════════════════
+   SKETCH COMPONENTS — using actual lx-* / db-* class names for fidelity
+   ═══════════════════════════════════════════════════════════════ */
+
+/* sidebar sketch */
+.sk-sidebar {
+  width: 46px; background: #0b0c0e; border-right: 1px solid var(--lx-br);
+  display: flex; flex-direction: column; align-items: center;
+  padding: 10px 6px; gap: 8px; flex-shrink: 0;
+}
+.sk-sidebar.wide {
+  width: 128px; align-items: flex-start; padding: 10px 8px;
+}
+.sk-logo { width: 26px; height: 26px; background: var(--lx-s2); border: 1px solid var(--lx-br); border-radius: 7px; margin-bottom: 6px; flex-shrink: 0; }
+.sk-nav-item { height: 28px; border-radius: 6px; display: flex; align-items: center; gap: 8px; padding: 0 8px; width: 100%; }
+.sk-nav-item.active { background: var(--lx-s2); }
+.sk-nav-icon { width: 18px; height: 18px; border-radius: 3px; background: rgba(255,255,255,.1); flex-shrink: 0; }
+.sk-nav-icon.orange { background: rgba(255,106,28,.3); }
+.sk-nav-lbl { height: 8px; background: rgba(255,255,255,.12); border-radius: 2px; flex: 1; }
+.sk-nav-lbl.active { background: rgba(255,255,255,.25); }
+
+/* page content shell */
+.sk-page { flex: 1; padding: 14px; overflow: hidden; background: var(--lx-bg); }
+.sk-page-sm { padding: 10px; }
+
+/* db-card sketch */
+.sk-db-card {
+  background: var(--lx-s1); border: 1px solid var(--lx-br);
+  border-radius: 10px; padding: 14px 16px;
+}
+.sk-db-card.accent-top { border-top: 2px solid var(--cx-orange); }
+.sk-db-card.green-top { border-top: 2px solid var(--cx-green); }
+.sk-db-card.gold-top { border-top: 2px solid var(--cx-gold); }
+
+/* lx-metric sketch */
+.sk-metric {
+  background: var(--lx-s1); border: 1px solid var(--lx-br);
+  border-radius: 10px; padding: 12px 14px;
+}
+
+/* text rows */
+.sk-lbl { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--lx-muted); margin-bottom: 6px; }
+.sk-lbl.dim { color: var(--lx-dim); }
+.sk-num { font-size: 28px; font-weight: 700; letter-spacing: -.025em; color: var(--lx-text); font-variant-numeric: tabular-nums; line-height: 1; }
+.sk-num.lg { font-size: 36px; }
+.sk-num.sm { font-size: 18px; }
+.sk-num.orange { color: var(--cx-orange); }
+.sk-num.green { color: var(--cx-green); }
+.sk-num.gold { color: var(--cx-gold); }
+.sk-num.red { color: var(--lx-red); }
+
+/* line placeholders */
+.sk-line { height: 7px; border-radius: 3px; background: rgba(255,255,255,.08); }
+.sk-line.bright { background: rgba(255,255,255,.18); }
+.sk-line.orange { background: rgba(255,106,28,.4); }
+.sk-line.green { background: rgba(147,214,167,.35); }
+.sk-line.gold { background: rgba(235,198,122,.35); }
+.sk-line.dim { background: rgba(255,255,255,.04); }
+.sk-line.w20 { width: 20%; }
+.sk-line.w30 { width: 30%; }
+.sk-line.w40 { width: 40%; }
+.sk-line.w50 { width: 50%; }
+.sk-line.w60 { width: 60%; }
+.sk-line.w70 { width: 70%; }
+.sk-line.w80 { width: 80%; }
+.sk-line.w90 { width: 90%; }
+.sk-line.w100 { width: 100%; }
+
+/* divider */
+.sk-sep { border: none; border-top: 1px solid var(--lx-br); margin: 8px 0; }
+
+/* pill badges */
+.sk-pill { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 5px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; white-space: nowrap; }
+.sk-pill.neutral { background: rgba(255,255,255,.06); color: var(--lx-muted); border: 1px solid var(--lx-br); }
+.sk-pill.sale { background: rgba(147,214,167,.12); color: var(--cx-green); border: 1px solid rgba(147,214,167,.25); }
+.sk-pill.buy { background: rgba(96,165,250,.12); color: #60a5fa; border: 1px solid rgba(96,165,250,.25); }
+.sk-pill.expense { background: rgba(251,191,36,.12); color: #fbbf24; border: 1px solid rgba(251,191,36,.25); }
+.sk-pill.unknown { background: rgba(239,68,68,.12); color: var(--lx-red); border: 1px solid rgba(239,68,68,.25); }
+.sk-pill.warn { background: rgba(239,68,68,.12); color: #fca5a5; border: 1px solid rgba(239,68,68,.25); }
+
+/* badge */
+.sk-badge { font-size: 11px; font-weight: 600; background: var(--lx-s2); border: 1px solid var(--lx-br); border-radius: 5px; padding: 2px 8px; color: var(--lx-dim); font-variant-numeric: tabular-nums; }
+.sk-badge.warn { color: #fca5a5; border-color: rgba(239,68,68,.28); background: rgba(239,68,68,.12); }
+.sk-badge.live { color: var(--lx-live); border-color: rgba(34,197,94,.22); background: rgba(34,197,94,.1); }
+
+/* db-bk-row style rows */
+.sk-bk { display: flex; justify-content: space-between; align-items: center; padding: 5px 0; border-top: 1px solid var(--lx-br); font-size: 11px; }
+.sk-bk:first-child { border-top: none; padding-top: 0; }
+.sk-bk-l { color: var(--lx-muted); }
+.sk-bk-r { color: var(--lx-text); font-weight: 600; font-variant-numeric: tabular-nums; display: flex; align-items: center; gap: 5px; }
+
+/* table rows */
+.sk-tr { display: grid; align-items: center; border-top: 1px solid var(--lx-br); font-size: 11px; }
+.sk-tr:first-child { border-top: none; }
+.sk-tr.alt { background: rgba(255,255,255,.015); }
+.sk-th { display: grid; align-items: center; background: var(--lx-s2); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--lx-dim); }
+.sk-td { padding: 6px 8px; color: var(--lx-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sk-td.muted { color: var(--lx-muted); }
+.sk-td.dim { color: var(--lx-dim); }
+.sk-td.orange { color: var(--cx-orange); font-weight: 700; font-variant-numeric: tabular-nums; }
+.sk-td.green { color: var(--cx-green); font-weight: 700; font-variant-numeric: tabular-nums; }
+.sk-td.gold { color: var(--cx-gold); font-weight: 700; font-variant-numeric: tabular-nums; }
+.sk-td.red { color: var(--lx-red); font-weight: 700; }
+
+/* thumb */
+.sk-thumb { width: 28px; height: 28px; background: var(--lx-s2); border: 1px solid var(--lx-br); border-radius: 4px; flex-shrink: 0; }
+.sk-thumb.sm { width: 20px; height: 20px; }
+
+/* deal card row */
+.sk-deal-card {
+  background: var(--lx-s1); border: 1px solid var(--lx-br); border-radius: 10px;
+  padding: 10px 12px; display: flex; gap: 10px; align-items: flex-start;
+  transition: border-color .12s;
+}
+.sk-deal-card + .sk-deal-card { margin-top: 6px; }
+
+/* search / filter bar */
+.sk-searchbar {
+  background: var(--lx-s2); border: 1px solid var(--lx-br); border-radius: 8px;
+  padding: 8px 12px; display: flex; align-items: center; gap: 8px;
+  font-size: 12px; color: var(--lx-dim);
+}
+.sk-searchbar-icon { width: 14px; height: 14px; border-radius: 50%; border: 1.5px solid var(--lx-dim); flex-shrink: 0; }
+
+/* bottom nav */
+.sk-bottom-nav {
+  display: grid; background: #0b0c0e; border-top: 1px solid var(--lx-br);
+  padding: 8px 4px max(8px, 4px);
+}
+.sk-bnav-item { display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 3px; }
+.sk-bnav-icon { width: 22px; height: 22px; border-radius: 5px; background: rgba(255,255,255,.08); }
+.sk-bnav-icon.active { background: rgba(255,106,28,.25); }
+.sk-bnav-lbl { height: 6px; width: 24px; border-radius: 2px; background: rgba(255,255,255,.07); }
+.sk-bnav-lbl.active { background: rgba(255,106,28,.5); }
+
+/* mobile topbar */
+.sk-topbar { background: #0b0c0e; border-bottom: 1px solid var(--lx-br); padding: 10px 12px; display: flex; align-items: center; gap: 10px; }
+.sk-hamburger { width: 26px; height: 26px; border-radius: 6px; background: var(--lx-s2); display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 3px; flex-shrink: 0; }
+.sk-hamburger span { width: 14px; height: 1.5px; background: var(--lx-muted); border-radius: 1px; }
+.sk-brand-pill { height: 8px; width: 48px; background: rgba(255,255,255,.18); border-radius: 2px; }
+
+/* tag strip */
+.sk-chip-strip { display: flex; gap: 5px; flex-wrap: wrap; }
+.sk-chip { display: inline-flex; align-items: center; height: 26px; padding: 0 10px; border-radius: 6px; font-size: 11px; font-weight: 600; white-space: nowrap; background: var(--lx-s2); border: 1px solid var(--lx-br); color: var(--lx-muted); }
+.sk-chip.active { background: rgba(255,106,28,.12); border-color: rgba(255,106,28,.3); color: var(--cx-orange); }
+
+/* section label */
+.sk-section-lbl { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--lx-dim); margin-bottom: 7px; }
+
+/* compare row */
+.compare-row { display: flex; gap: 20px; margin-bottom: 32px; flex-wrap: wrap; }
+.compare-col { flex: 1; min-width: 260px; }
+.compare-label { font-family: 'Caveat', cursive; font-size: 15px; margin-bottom: 10px; color: var(--lx-muted); }
+.compare-label.before::before { content: "Before  "; color: var(--lx-dim); }
+.compare-label.after::before { content: "✦ After  "; color: var(--cx-orange); }
+
+/* ── Tweaks panel ── */
+#tweaks-panel {
+  display: none; position: fixed; bottom: 20px; right: 20px;
+  background: var(--lx-s1); border: 1px solid var(--lx-br2);
+  border-radius: 12px; padding: 16px; width: 200px; z-index: 100;
+  box-shadow: 0 8px 32px rgba(0,0,0,.5);
+  font-size: 13px; color: var(--lx-text);
+}
+#tweaks-panel h4 { font-size: 12px; font-weight: 700; margin-bottom: 12px; color: var(--lx-muted); text-transform: uppercase; letter-spacing: .06em; }
+.tw-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; font-size: 12px; }
+.tw-row label { color: var(--lx-muted); }
+.tw-toggle { width: 32px; height: 18px; border-radius: 9px; background: var(--lx-s2); border: 1px solid var(--lx-br); cursor: pointer; position: relative; transition: background .12s; }
+.tw-toggle.on { background: var(--cx-orange); border-color: var(--cx-orange); }
+.tw-thumb { width: 12px; height: 12px; border-radius: 50%; background: #fff; position: absolute; top: 2px; left: 2px; transition: left .12s; }
+.tw-toggle.on .tw-thumb { left: 16px; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-title">🃏 Degen — Linear Theme Improvements</div>
+  <span class="topbar-sub">Wireframes within your existing design system</span>
+</div>
+
+<div class="tabs">
+  <button class="tab active" onclick="switchTab('A',this)">A · Dashboard Hierarchy</button>
+  <button class="tab" onclick="switchTab('B',this)">B · Deals Table</button>
+  <button class="tab" onclick="switchTab('C',this)">C · Mobile Nav</button>
+</div>
+
+<!-- ═══════════════════════════════════════ TAB A: Dashboard Hierarchy -->
+<div class="canvas active" id="tab-A">
+  <div class="dir-hd">
+    <div class="dir-label">A — Dashboard: Clearer Hierarchy</div>
+    <div class="dir-sub">Same <code>db-*</code> card components, same dark palette — but the revenue card gets an accent-top treatment, key numbers are larger, and the breakdown rows are visually de-emphasised so they don't compete. Three layout variants.</div>
+  </div>
+
+  <!-- VARIANT 1: accent top border on lead card -->
+  <div class="compare-row" style="margin-bottom: 8px;">
+    <div style="font-family:'Caveat',cursive;font-size:16px;font-weight:700;color:var(--lx-text);margin-bottom:12px;width:100%;">Variant 1 — Accent border on lead stat · before vs after</div>
+  </div>
+  <div class="compare-row">
+    <!-- BEFORE -->
+    <div class="compare-col">
+      <div class="compare-label before">Revenue card (current)</div>
+      <div class="desktop-outer">
+        <div class="desktop-bar"><div class="dot orange"></div><div class="dot"></div><div class="dot"></div><div class="url-bar"></div></div>
+        <div style="display:flex;background:var(--lx-bg);">
+          <div class="sk-sidebar">
+            <div class="sk-logo"></div>
+            <div class="sk-nav-item active"><div class="sk-nav-icon orange"></div></div>
+            <div class="sk-nav-item"><div class="sk-nav-icon"></div></div>
+            <div class="sk-nav-item"><div class="sk-nav-icon"></div></div>
+            <div class="sk-nav-item"><div class="sk-nav-icon"></div></div>
+            <div class="sk-nav-item"><div class="sk-nav-icon"></div></div>
+          </div>
+          <div class="sk-page">
+            <!-- 4 identical cards, no hierarchy -->
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px;">
+              <div class="sk-db-card">
+                <div class="sk-lbl">Revenue today</div>
+                <div class="sk-num">$4,820</div>
+                <hr class="sk-sep">
+                <div class="sk-bk"><span class="sk-bk-l">Discord</span><span class="sk-bk-r">$3,200</span></div>
+                <div class="sk-bk"><span class="sk-bk-l">TikTok</span><span class="sk-bk-r">$1,620</span></div>
+              </div>
+              <div class="sk-db-card">
+                <div class="sk-lbl">Purchases today</div>
+                <div class="sk-num">$2,140</div>
+                <hr class="sk-sep">
+                <div class="sk-bk"><span class="sk-bk-l">Buys</span><span class="sk-bk-r">$1,800</span></div>
+                <div class="sk-bk"><span class="sk-bk-l">Expenses</span><span class="sk-bk-r">$340</span></div>
+              </div>
+              <div class="sk-db-card">
+                <div class="sk-lbl">Needs attention</div>
+                <div class="sk-num">7</div>
+                <hr class="sk-sep">
+                <div class="sk-bk"><span class="sk-bk-l">Review queue</span><span class="sk-bk-r"><span class="sk-badge warn">7</span></span></div>
+                <div class="sk-bk"><span class="sk-bk-l">Backlog</span><span class="sk-bk-r"><span class="sk-badge">0</span></span></div>
+              </div>
+              <div class="sk-db-card">
+                <div class="sk-lbl">Live stream</div>
+                <div class="sk-num" style="font-size:14px;margin-top:4px;color:var(--lx-dim);">offline</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="anns"><span class="ann">All 4 cards look equal weight</span><span class="ann">$4,820 doesn't stand out</span></div>
+    </div>
+
+    <!-- AFTER -->
+    <div class="compare-col">
+      <div class="compare-label after">Revenue card (improved)</div>
+      <div class="desktop-outer">
+        <div class="desktop-bar"><div class="dot orange"></div><div class="dot"></div><div class="dot"></div><div class="url-bar"></div></div>
+        <div style="display:flex;background:var(--lx-bg);">
+          <div class="sk-sidebar">
+            <div class="sk-logo"></div>
+            <div class="sk-nav-item active"><div class="sk-nav-icon orange"></div></div>
+            <div class="sk-nav-item"><div class="sk-nav-icon"></div></div>
+            <div class="sk-nav-item"><div class="sk-nav-icon"></div></div>
+            <div class="sk-nav-item"><div class="sk-nav-icon"></div></div>
+            <div class="sk-nav-item"><div class="sk-nav-icon"></div></div>
+          </div>
+          <div class="sk-page">
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px;">
+              <!-- Lead card: accent-top, larger number, orange tint -->
+              <div class="sk-db-card accent-top" style="background:rgba(255,106,28,.04);">
+                <div class="sk-lbl" style="color:var(--cx-orange);">Revenue today</div>
+                <div class="sk-num lg orange">$4,820</div>
+                <hr class="sk-sep">
+                <div class="sk-bk"><span class="sk-bk-l">Discord</span><span class="sk-bk-r">$3,200</span></div>
+                <div class="sk-bk"><span class="sk-bk-l">TikTok</span><span class="sk-bk-r">$1,620</span></div>
+              </div>
+              <!-- Purchases: standard but clear -->
+              <div class="sk-db-card">
+                <div class="sk-lbl">Purchases today</div>
+                <div class="sk-num">$2,140</div>
+                <hr class="sk-sep">
+                <div class="sk-bk"><span class="sk-bk-l">Buys</span><span class="sk-bk-r">$1,800</span></div>
+                <div class="sk-bk"><span class="sk-bk-l">Expenses</span><span class="sk-bk-r">$340</span></div>
+              </div>
+              <!-- Net P&L: green top (new card, currently missing) -->
+              <div class="sk-db-card green-top" style="background:rgba(147,214,167,.03);">
+                <div class="sk-lbl" style="color:var(--cx-green);">Net P&L today</div>
+                <div class="sk-num green">+$2,680</div>
+                <hr class="sk-sep">
+                <div class="sk-bk"><span class="sk-bk-l" style="font-size:10px;">margin</span><span class="sk-bk-r" style="color:var(--cx-green);">56%</span></div>
+              </div>
+              <!-- Attention: warn styling -->
+              <div class="sk-db-card">
+                <div class="sk-lbl">Needs attention</div>
+                <div class="sk-num" style="color:#fca5a5;">7</div>
+                <hr class="sk-sep">
+                <div class="sk-bk"><span class="sk-bk-l">Review queue</span><span class="sk-bk-r"><span class="sk-badge warn">7</span></span></div>
+                <div class="sk-bk"><span class="sk-bk-l">Backlog</span><span class="sk-bk-r"><span class="sk-badge">0</span></span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="anns">
+        <span class="ann">Orange top-border = primary metric</span>
+        <span class="ann">Green top-border = positive outcome</span>
+        <span class="ann">Net P&L card added (derived, not new data)</span>
+        <span class="ann">36px num on lead vs 28px on others</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- VARIANT 2: Mobile dashboard -->
+  <div style="font-family:'Caveat',cursive;font-size:16px;font-weight:700;color:var(--lx-text);margin-bottom:16px;">Variant 2 — Mobile dashboard (2×2 stats grid)</div>
+  <div class="screens">
+    <div class="phone">
+      <div class="screen-lbl">Current mobile</div>
+      <div class="phone-outer">
+        <div class="phone-notch"></div>
+        <div class="phone-screen" style="padding:10px;">
+          <div class="sk-topbar" style="margin:-10px -10px 10px;padding:8px 10px;">
+            <div class="sk-hamburger"><span></span><span></span><span></span></div>
+            <div class="sk-brand-pill"></div>
+          </div>
+          <!-- 4 cards stacked — too tall -->
+          <div style="display:flex;flex-direction:column;gap:6px;">
+            <div class="sk-db-card">
+              <div class="sk-lbl">Revenue today</div>
+              <div class="sk-num" style="font-size:22px;">$4,820</div>
+              <hr class="sk-sep">
+              <div class="sk-bk"><span class="sk-bk-l">Discord</span><span class="sk-bk-r">$3,200</span></div>
+              <div class="sk-bk"><span class="sk-bk-l">TikTok</span><span class="sk-bk-r">$1,620</span></div>
+              <div class="sk-bk"><span class="sk-bk-l">Shopify</span><span class="sk-bk-r">$0</span></div>
+            </div>
+            <div class="sk-db-card">
+              <div class="sk-lbl">Purchases today</div>
+              <div class="sk-num" style="font-size:22px;">$2,140</div>
+              <hr class="sk-sep">
+              <div class="sk-bk"><span class="sk-bk-l">Buys</span><span class="sk-bk-r">$1,800</span></div>
+              <div class="sk-bk"><span class="sk-bk-l">Expenses</span><span class="sk-bk-r">$340</span></div>
+            </div>
+            <div style="font-family:'Caveat',cursive;font-size:12px;color:var(--lx-dim);text-align:center;padding:4px;">↓ scroll for more…</div>
+          </div>
+        </div>
+      </div>
+      <div class="anns"><span class="ann">Cards stacked = lots of scrolling</span><span class="ann">Key number hidden mid-scroll</span></div>
+    </div>
+
+    <div class="phone">
+      <div class="screen-lbl">Improved mobile</div>
+      <div class="phone-outer">
+        <div class="phone-notch"></div>
+        <div class="phone-screen" style="padding:10px;">
+          <div class="sk-topbar" style="margin:-10px -10px 10px;padding:8px 10px;">
+            <div class="sk-hamburger"><span></span><span></span><span></span></div>
+            <div class="sk-brand-pill"></div>
+          </div>
+          <!-- lead card full-width, accent -->
+          <div class="sk-db-card accent-top" style="background:rgba(255,106,28,.04);margin-bottom:6px;">
+            <div class="sk-lbl" style="color:var(--cx-orange);">Revenue today</div>
+            <div class="sk-num lg orange">$4,820</div>
+            <div style="display:flex;gap:10px;margin-top:6px;">
+              <div style="font-size:11px;color:var(--lx-muted);">Discord <span style="color:var(--lx-text);font-weight:600;">$3,200</span></div>
+              <div style="font-size:11px;color:var(--lx-muted);">TikTok <span style="color:var(--lx-text);font-weight:600;">$1,620</span></div>
+            </div>
+          </div>
+          <!-- 2x2 grid for secondary stats -->
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px;">
+            <div class="sk-metric">
+              <div class="sk-lbl dim">Purchases</div>
+              <div class="sk-num sm">$2,140</div>
+            </div>
+            <div class="sk-metric" style="border-top:2px solid var(--cx-green);background:rgba(147,214,167,.03);">
+              <div class="sk-lbl dim" style="color:var(--cx-green);">Net P&L</div>
+              <div class="sk-num sm green">+$2,680</div>
+            </div>
+            <div class="sk-metric">
+              <div class="sk-lbl dim">Review</div>
+              <div class="sk-num sm" style="color:#fca5a5;">7</div>
+            </div>
+            <div class="sk-metric">
+              <div class="sk-lbl dim">Deals</div>
+              <div class="sk-num sm">24</div>
+            </div>
+          </div>
+          <!-- recent list teaser -->
+          <div class="sk-section-lbl">Recent deals</div>
+          <div style="display:flex;flex-direction:column;gap:4px;">
+            <div style="display:flex;align-items:center;gap:8px;padding:7px 10px;background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:8px;">
+              <div class="sk-thumb sm"></div>
+              <div style="flex:1;"><div class="sk-line w80 bright" style="margin-bottom:3px;"></div><div class="sk-line w50 dim"></div></div>
+              <span style="font-size:13px;font-weight:700;color:var(--cx-orange);font-variant-numeric:tabular-nums;">$420</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;padding:7px 10px;background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:8px;">
+              <div class="sk-thumb sm"></div>
+              <div style="flex:1;"><div class="sk-line w60 bright" style="margin-bottom:3px;"></div><div class="sk-line w40 dim"></div></div>
+              <span style="font-size:13px;font-weight:700;color:var(--cx-gold);font-variant-numeric:tabular-nums;">$85</span>
+            </div>
+          </div>
+
+          <!-- bottom nav -->
+          <div class="sk-bottom-nav" style="grid-template-columns:repeat(5,1fr);margin:8px -10px 0;">
+            <div class="sk-bnav-item"><div class="sk-bnav-icon active"></div><div class="sk-bnav-lbl active"></div></div>
+            <div class="sk-bnav-item"><div class="sk-bnav-icon"></div><div class="sk-bnav-lbl"></div></div>
+            <div class="sk-bnav-item"><div class="sk-bnav-icon"></div><div class="sk-bnav-lbl"></div></div>
+            <div class="sk-bnav-item"><div class="sk-bnav-icon"></div><div class="sk-bnav-lbl"></div></div>
+            <div class="sk-bnav-item"><div class="sk-bnav-icon"></div><div class="sk-bnav-lbl"></div></div>
+          </div>
+        </div>
+      </div>
+      <div class="anns">
+        <span class="ann">Lead card full-width = revenue is hero</span>
+        <span class="ann green">2×2 grid shows 4 stats without scroll</span>
+        <span class="ann">Recent deals teaser below</span>
+        <span class="ann">Bottom nav for key sections</span>
+      </div>
+    </div>
+
+    <!-- DESKTOP VARIANT 3 -->
+    <div class="desktop" style="min-width:320px;">
+      <div class="screen-lbl" style="text-align:left;margin-bottom:8px;">Variant 3 — Desktop: P&L as 5th card</div>
+      <div class="desktop-outer">
+        <div class="desktop-bar"><div class="dot orange"></div><div class="dot"></div><div class="dot"></div><div class="url-bar"></div></div>
+        <div style="display:flex;background:var(--lx-bg);">
+          <div class="sk-sidebar wide">
+            <div style="display:flex;align-items:center;gap:7px;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--lx-br);width:100%;">
+              <div class="sk-logo"></div>
+              <div class="sk-line w60 bright" style="height:9px;"></div>
+            </div>
+            <div class="sk-section-lbl">Workspace</div>
+            <div class="sk-nav-item active" style="margin-bottom:2px;"><div class="sk-nav-icon orange"></div><div class="sk-nav-lbl active"></div></div>
+            <div class="sk-nav-item" style="margin-bottom:2px;"><div class="sk-nav-icon"></div><div class="sk-nav-lbl"></div></div>
+            <div class="sk-nav-item" style="margin-bottom:10px;"><div class="sk-nav-icon"></div><div class="sk-nav-lbl"></div></div>
+            <div class="sk-section-lbl">Ops</div>
+            <div class="sk-nav-item" style="margin-bottom:2px;"><div class="sk-nav-icon"></div><div class="sk-nav-lbl"></div></div>
+            <div class="sk-nav-item" style="margin-bottom:2px;"><div class="sk-nav-icon"></div><div class="sk-nav-lbl"></div></div>
+            <div class="sk-nav-item" style="margin-bottom:2px;"><div class="sk-nav-icon"></div><div class="sk-nav-lbl"></div></div>
+          </div>
+          <div class="sk-page">
+            <!-- 5-col stats: revenue, purchases, net p&l, margin, attention -->
+            <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:7px;margin-bottom:12px;">
+              <div class="sk-db-card accent-top" style="background:rgba(255,106,28,.04);">
+                <div class="sk-lbl" style="color:var(--cx-orange);">Revenue</div>
+                <div class="sk-num orange" style="font-size:26px;">$4,820</div>
+                <hr class="sk-sep">
+                <div class="sk-bk" style="font-size:10px;"><span class="sk-bk-l">Discord</span><span class="sk-bk-r">$3.2k</span></div>
+                <div class="sk-bk" style="font-size:10px;"><span class="sk-bk-l">TikTok</span><span class="sk-bk-r">$1.6k</span></div>
+              </div>
+              <div class="sk-db-card">
+                <div class="sk-lbl">Purchases</div>
+                <div class="sk-num" style="font-size:26px;">$2,140</div>
+                <hr class="sk-sep">
+                <div class="sk-bk" style="font-size:10px;"><span class="sk-bk-l">Buys</span><span class="sk-bk-r">$1.8k</span></div>
+                <div class="sk-bk" style="font-size:10px;"><span class="sk-bk-l">Exp.</span><span class="sk-bk-r">$340</span></div>
+              </div>
+              <div class="sk-db-card green-top" style="background:rgba(147,214,167,.03);">
+                <div class="sk-lbl" style="color:var(--cx-green);">Net P&L</div>
+                <div class="sk-num green" style="font-size:26px;">+$2,680</div>
+                <hr class="sk-sep">
+                <div class="sk-bk" style="font-size:10px;"><span class="sk-bk-l">Margin</span><span class="sk-bk-r" style="color:var(--cx-green);">56%</span></div>
+              </div>
+              <div class="sk-db-card gold-top" style="background:rgba(235,198,122,.02);">
+                <div class="sk-lbl" style="color:var(--cx-gold);">Deals today</div>
+                <div class="sk-num gold" style="font-size:26px;">24</div>
+                <hr class="sk-sep">
+                <div class="sk-bk" style="font-size:10px;"><span class="sk-bk-l">Sales</span><span class="sk-bk-r">18</span></div>
+                <div class="sk-bk" style="font-size:10px;"><span class="sk-bk-l">Buys</span><span class="sk-bk-r">6</span></div>
+              </div>
+              <div class="sk-db-card">
+                <div class="sk-lbl">Attention</div>
+                <div class="sk-num" style="font-size:26px;color:#fca5a5;">7</div>
+                <hr class="sk-sep">
+                <div class="sk-bk" style="font-size:10px;"><span class="sk-bk-l">Review</span><span class="sk-bk-r"><span class="sk-badge warn" style="font-size:10px;">7</span></span></div>
+                <div class="sk-bk" style="font-size:10px;"><span class="sk-bk-l">Backlog</span><span class="sk-bk-r"><span class="sk-badge" style="font-size:10px;">0</span></span></div>
+              </div>
+            </div>
+            <!-- deals teaser list -->
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+              <span class="sk-section-lbl" style="margin:0;">Recent Deals</span>
+              <span style="font-size:11px;color:var(--lx-dim);">View all →</span>
+            </div>
+            <div style="background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:10px;overflow:hidden;">
+              <div class="sk-th" style="grid-template-columns:28px 1fr 72px 56px 56px;padding:6px 10px;">
+                <div></div>
+                <div style="padding:0;">Item / message</div>
+                <div>Channel</div>
+                <div>Kind</div>
+                <div style="text-align:right;">Amount</div>
+              </div>
+              <div class="sk-tr" style="grid-template-columns:28px 1fr 72px 56px 56px;padding:0 10px;">
+                <div class="sk-td"><div class="sk-thumb sm"></div></div>
+                <div class="sk-td">Charizard VMAX gold · PSA 10</div>
+                <div class="sk-td muted">buying-ch</div>
+                <div class="sk-td"><span class="sk-pill sale">sale</span></div>
+                <div class="sk-td orange" style="text-align:right;">$420</div>
+              </div>
+              <div class="sk-tr alt" style="grid-template-columns:28px 1fr 72px 56px 56px;padding:0 10px;">
+                <div class="sk-td"><div class="sk-thumb sm"></div></div>
+                <div class="sk-td">Blastoise Base Set · ungraded</div>
+                <div class="sk-td muted">buying-ch</div>
+                <div class="sk-td"><span class="sk-pill buy">buy</span></div>
+                <div class="sk-td gold" style="text-align:right;">$85</div>
+              </div>
+              <div class="sk-tr" style="grid-template-columns:28px 1fr 72px 56px 56px;padding:0 10px;">
+                <div class="sk-td"><div class="sk-thumb sm" style="opacity:.4;"></div></div>
+                <div class="sk-td dim">Image-only · needs review</div>
+                <div class="sk-td dim">buying-ch</div>
+                <div class="sk-td"><span class="sk-pill unknown">?</span></div>
+                <div class="sk-td dim" style="text-align:right;">—</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="anns">
+        <span class="ann">5-card row: revenue · purchases · p&l · deals · attention</span>
+        <span class="ann green">Color-coded top borders guide the eye instantly</span>
+        <span class="ann gold">Recent deals inline on dashboard = fewer clicks</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════ TAB B: Deals Table -->
+<div class="canvas" id="tab-B">
+  <div class="dir-hd">
+    <div class="dir-label">B — Deals: Scannable Table</div>
+    <div class="dir-sub">The deals page has too much filter form above the fold. Three ideas: collapsed filter form, kind-tab switcher replacing the select, and color-coded amount column so you can scan money at a glance.</div>
+  </div>
+
+  <div class="compare-row">
+    <!-- BEFORE desktop -->
+    <div class="compare-col">
+      <div class="compare-label before">Deals page (current)</div>
+      <div class="desktop-outer">
+        <div class="desktop-bar"><div class="dot orange"></div><div class="dot"></div><div class="dot"></div><div class="url-bar"></div></div>
+        <div style="display:flex;background:var(--lx-bg);">
+          <div class="sk-sidebar"><div class="sk-logo"></div><div class="sk-nav-item"><div class="sk-nav-icon"></div></div><div class="sk-nav-item"><div class="sk-nav-icon"></div></div><div class="sk-nav-item active"><div class="sk-nav-icon orange"></div></div></div>
+          <div class="sk-page">
+            <!-- big filter card takes up half the screen -->
+            <div style="background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:12px;padding:14px;margin-bottom:10px;">
+              <div style="font-size:12px;font-weight:700;color:var(--lx-text);margin-bottom:10px;">Filter The Ledger</div>
+              <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:8px;">
+                <div style="background:var(--lx-s2);border:1px solid var(--lx-br);border-radius:8px;height:34px;"></div>
+                <div style="background:var(--lx-s2);border:1px solid var(--lx-br);border-radius:8px;height:34px;"></div>
+                <div style="background:var(--lx-s2);border:1px solid var(--lx-br);border-radius:8px;height:34px;"></div>
+                <div style="background:var(--lx-s2);border:1px solid var(--lx-br);border-radius:8px;height:34px;"></div>
+                <div style="background:var(--lx-s2);border:1px solid var(--lx-br);border-radius:8px;height:34px;"></div>
+              </div>
+              <div style="display:flex;justify-content:space-between;background:var(--lx-s2);border:1px solid var(--lx-br);border-radius:8px;padding:6px 10px;">
+                <div class="sk-line w30" style="height:6px;align-self:center;"></div>
+                <div style="display:flex;gap:5px;"><div style="background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:5px;padding:2px 8px;font-size:10px;color:var(--lx-dim);">rows</div><div style="background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:5px;padding:2px 8px;font-size:10px;color:var(--lx-dim);">page</div></div>
+              </div>
+            </div>
+            <!-- 5 metrics -->
+            <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-bottom:10px;">
+              <div class="sk-metric"><div class="sk-lbl">Rows</div><div class="sk-num" style="font-size:18px;">82</div></div>
+              <div class="sk-metric"><div class="sk-lbl">Sales</div><div class="sk-num" style="font-size:18px;">$3.2k</div></div>
+              <div class="sk-metric"><div class="sk-lbl">Buys</div><div class="sk-num" style="font-size:18px;">$1.4k</div></div>
+              <div class="sk-metric"><div class="sk-lbl">Expenses</div><div class="sk-num" style="font-size:18px;">$340</div></div>
+              <div class="sk-metric"><div class="sk-lbl">Net</div><div class="sk-num" style="font-size:18px;">$1.4k</div></div>
+            </div>
+            <!-- deal cards (current style) -->
+            <div style="font-size:11px;font-weight:700;color:var(--lx-text);margin-bottom:8px;">Recent Deals</div>
+            <div style="display:flex;flex-direction:column;gap:6px;">
+              <div style="background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:10px;padding:10px;display:flex;gap:8px;">
+                <div class="sk-thumb"></div>
+                <div style="flex:1;"><div class="sk-line w80 bright" style="margin-bottom:4px;"></div><div style="display:flex;gap:4px;margin-bottom:4px;"><div class="sk-line w30"></div><div class="sk-line w20"></div></div><div class="sk-line w90 dim"></div></div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:10px;color:var(--lx-dim);width:130px;">
+                  <span>Amount</span><span>$420</span>
+                  <span>Payment</span><span>Cash</span>
+                  <span>Category</span><span>pokemon</span>
+                  <span>In/Out</span><span>$420/$0</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="anns"><span class="ann">Filter card = ~40% of viewport gone</span><span class="ann">5 metrics + filter before any deals</span><span class="ann">Amount not color-coded, hard to scan</span></div>
+    </div>
+
+    <!-- AFTER desktop -->
+    <div class="compare-col">
+      <div class="compare-label after">Deals page (improved)</div>
+      <div class="desktop-outer">
+        <div class="desktop-bar"><div class="dot orange"></div><div class="dot"></div><div class="dot"></div><div class="url-bar"></div></div>
+        <div style="display:flex;background:var(--lx-bg);">
+          <div class="sk-sidebar"><div class="sk-logo"></div><div class="sk-nav-item"><div class="sk-nav-icon"></div></div><div class="sk-nav-item"><div class="sk-nav-icon"></div></div><div class="sk-nav-item active"><div class="sk-nav-icon orange"></div></div></div>
+          <div class="sk-page">
+            <!-- compact top bar: kind tabs + filter button -->
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;">
+              <div style="display:flex;gap:2px;background:var(--lx-s2);border:1px solid var(--lx-br);border-radius:8px;padding:2px;">
+                <div style="background:rgba(255,106,28,.18);border:1px solid rgba(255,106,28,.3);border-radius:6px;padding:4px 12px;font-size:11px;font-weight:700;color:var(--cx-orange);">All</div>
+                <div style="padding:4px 12px;font-size:11px;font-weight:600;color:var(--lx-dim);">Sales</div>
+                <div style="padding:4px 12px;font-size:11px;font-weight:600;color:var(--lx-dim);">Buys</div>
+                <div style="padding:4px 12px;font-size:11px;font-weight:600;color:var(--lx-dim);">Expenses</div>
+                <div style="padding:4px 12px;font-size:11px;font-weight:600;color:var(--lx-dim);">Other</div>
+              </div>
+              <div style="display:flex;gap:5px;align-items:center;">
+                <!-- active filter chips -->
+                <div class="sk-chip active">Today ✕</div>
+                <div class="sk-chip active">buying-channel ✕</div>
+                <div style="background:var(--lx-s2);border:1px solid var(--lx-br);border-radius:6px;padding:4px 10px;font-size:11px;font-weight:600;color:var(--lx-muted);">+ Filter</div>
+              </div>
+            </div>
+
+            <!-- compact summary inline -->
+            <div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;">
+              <div style="background:rgba(255,106,28,.08);border:1px solid rgba(255,106,28,.2);border-radius:7px;padding:5px 12px;display:flex;gap:8px;align-items:baseline;">
+                <span style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--cx-orange);">Sales</span>
+                <span style="font-size:16px;font-weight:700;color:var(--cx-orange);font-variant-numeric:tabular-nums;">$3,200</span>
+              </div>
+              <div style="background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:7px;padding:5px 12px;display:flex;gap:8px;align-items:baseline;">
+                <span style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--lx-dim);">Buys</span>
+                <span style="font-size:16px;font-weight:700;color:var(--lx-text);font-variant-numeric:tabular-nums;">$1,400</span>
+              </div>
+              <div style="background:rgba(147,214,167,.06);border:1px solid rgba(147,214,167,.2);border-radius:7px;padding:5px 12px;display:flex;gap:8px;align-items:baseline;">
+                <span style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--cx-green);">Net</span>
+                <span style="font-size:16px;font-weight:700;color:var(--cx-green);font-variant-numeric:tabular-nums;">+$1,800</span>
+              </div>
+              <div style="background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:7px;padding:5px 12px;display:flex;gap:8px;align-items:baseline;">
+                <span style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--lx-dim);">Rows</span>
+                <span style="font-size:16px;font-weight:700;color:var(--lx-text);font-variant-numeric:tabular-nums;">82</span>
+              </div>
+            </div>
+
+            <!-- proper table — color-coded amounts -->
+            <div style="background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:10px;overflow:hidden;">
+              <div class="sk-th" style="grid-template-columns:28px 1fr 80px 60px 72px 52px;padding:6px 10px;">
+                <div></div>
+                <div>Item / message</div>
+                <div>Channel</div>
+                <div>Kind</div>
+                <div style="text-align:right;">Amount</div>
+                <div style="text-align:center;">BK</div>
+              </div>
+              <div class="sk-tr" style="grid-template-columns:28px 1fr 80px 60px 72px 52px;padding:0 10px;">
+                <div class="sk-td"><div class="sk-thumb sm"></div></div>
+                <div class="sk-td" style="font-size:12px;">Charizard VMAX gold · PSA 10 · jmanballa</div>
+                <div class="sk-td muted" style="font-size:11px;">buying-ch</div>
+                <div class="sk-td"><span class="sk-pill sale">sale</span></div>
+                <div class="sk-td orange" style="text-align:right;font-size:13px;">$420</div>
+                <div class="sk-td" style="text-align:center;"><span style="font-size:10px;color:var(--lx-live);">✓</span></div>
+              </div>
+              <div class="sk-tr alt" style="grid-template-columns:28px 1fr 80px 60px 72px 52px;padding:0 10px;">
+                <div class="sk-td"><div class="sk-thumb sm"></div></div>
+                <div class="sk-td" style="font-size:12px;">Blastoise Base Set · ungraded · partner_22</div>
+                <div class="sk-td muted" style="font-size:11px;">buying-ch</div>
+                <div class="sk-td"><span class="sk-pill buy">buy</span></div>
+                <div class="sk-td gold" style="text-align:right;font-size:13px;">$85</div>
+                <div class="sk-td" style="text-align:center;"><span style="font-size:10px;color:#fbbf24;">~</span></div>
+              </div>
+              <div class="sk-tr" style="grid-template-columns:28px 1fr 80px 60px 72px 52px;padding:0 10px;">
+                <div class="sk-td"><div class="sk-thumb sm" style="opacity:.3;"></div></div>
+                <div class="sk-td dim" style="font-size:12px;">Image-only · needs review</div>
+                <div class="sk-td dim" style="font-size:11px;">buying-ch</div>
+                <div class="sk-td"><span class="sk-pill unknown">?</span></div>
+                <div class="sk-td dim" style="text-align:right;font-size:13px;">—</div>
+                <div class="sk-td" style="text-align:center;"><span style="font-size:10px;color:var(--lx-dim);">—</span></div>
+              </div>
+              <div class="sk-tr alt" style="grid-template-columns:28px 1fr 80px 60px 72px 52px;padding:0 10px;">
+                <div class="sk-td"><div class="sk-thumb sm"></div></div>
+                <div class="sk-td" style="font-size:12px;">Pokemon Booster Box 36pk · expense</div>
+                <div class="sk-td muted" style="font-size:11px;">buying-ch</div>
+                <div class="sk-td"><span class="sk-pill expense">expense</span></div>
+                <div class="sk-td red" style="text-align:right;font-size:13px;">$180</div>
+                <div class="sk-td" style="text-align:center;"><span style="font-size:10px;color:var(--lx-live);">✓</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="anns">
+        <span class="ann">Kind tabs = instant filter, no form needed</span>
+        <span class="ann">Active filters as dismissible chips</span>
+        <span class="ann green">Summary strip inline — not a separate card</span>
+        <span class="ann orange">Amounts color-coded by kind</span>
+        <span class="ann gold">BK status as icon column — scannable</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Mobile deals comparison -->
+  <div style="font-family:'Caveat',cursive;font-size:16px;font-weight:700;color:var(--lx-text);margin:20px 0 16px;">Mobile Deals — before vs after</div>
+  <div class="screens">
+    <div class="phone">
+      <div class="screen-lbl">Current mobile deals</div>
+      <div class="phone-outer">
+        <div class="phone-notch"></div>
+        <div class="phone-screen" style="padding:10px;">
+          <div class="sk-topbar" style="margin:-10px -10px 10px;padding:8px 10px;">
+            <div class="sk-hamburger"><span></span><span></span><span></span></div>
+            <div class="sk-brand-pill"></div>
+          </div>
+          <!-- huge filter form stacked -->
+          <div style="background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:10px;padding:10px;margin-bottom:8px;">
+            <div style="font-size:11px;font-weight:700;color:var(--lx-text);margin-bottom:8px;">Filter The Ledger</div>
+            <div style="display:flex;flex-direction:column;gap:6px;">
+              <div style="background:var(--lx-s2);border:1px solid var(--lx-br);border-radius:8px;height:32px;"></div>
+              <div style="background:var(--lx-s2);border:1px solid var(--lx-br);border-radius:8px;height:32px;"></div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
+                <div style="background:var(--lx-s2);border:1px solid var(--lx-br);border-radius:8px;height:32px;"></div>
+                <div style="background:var(--lx-s2);border:1px solid var(--lx-br);border-radius:8px;height:32px;"></div>
+              </div>
+              <div style="background:rgba(255,106,28,.15);border:1px solid rgba(255,106,28,.3);border-radius:8px;height:36px;display:flex;align-items:center;justify-content:center;"><span style="font-size:11px;font-weight:700;color:var(--cx-orange);">Apply Filters</span></div>
+            </div>
+          </div>
+          <div style="font-family:'Caveat',cursive;font-size:12px;color:var(--lx-dim);text-align:center;">↓ deals below fold</div>
+        </div>
+      </div>
+      <div class="anns"><span class="ann">Filter form = entire screen</span><span class="ann">Deals are below the fold</span></div>
+    </div>
+
+    <div class="phone">
+      <div class="screen-lbl">Improved mobile deals</div>
+      <div class="phone-outer">
+        <div class="phone-notch"></div>
+        <div class="phone-screen" style="padding:10px;">
+          <div class="sk-topbar" style="margin:-10px -10px 10px;padding:8px 10px;">
+            <div class="sk-hamburger"><span></span><span></span><span></span></div>
+            <div class="sk-brand-pill"></div>
+            <div style="margin-left:auto;background:var(--lx-s2);border:1px solid var(--lx-br);border-radius:6px;padding:3px 8px;font-size:11px;font-weight:600;color:var(--lx-muted);">Filter</div>
+          </div>
+          <!-- kind tab switcher -->
+          <div style="display:flex;gap:2px;background:var(--lx-s2);border:1px solid var(--lx-br);border-radius:8px;padding:2px;margin-bottom:8px;">
+            <div style="flex:1;text-align:center;background:rgba(255,106,28,.18);border:1px solid rgba(255,106,28,.3);border-radius:6px;padding:5px 0;font-size:11px;font-weight:700;color:var(--cx-orange);">All</div>
+            <div style="flex:1;text-align:center;padding:5px 0;font-size:11px;font-weight:600;color:var(--lx-dim);">Sales</div>
+            <div style="flex:1;text-align:center;padding:5px 0;font-size:11px;font-weight:600;color:var(--lx-dim);">Buys</div>
+            <div style="flex:1;text-align:center;padding:5px 0;font-size:11px;font-weight:600;color:var(--lx-dim);">Other</div>
+          </div>
+          <!-- mini summary strip -->
+          <div style="display:flex;gap:4px;margin-bottom:10px;">
+            <div style="flex:1;background:rgba(255,106,28,.08);border:1px solid rgba(255,106,28,.2);border-radius:7px;padding:5px 8px;text-align:center;">
+              <div style="font-size:9px;font-weight:700;text-transform:uppercase;color:var(--cx-orange);letter-spacing:.04em;">Sales</div>
+              <div style="font-size:14px;font-weight:700;color:var(--cx-orange);font-variant-numeric:tabular-nums;">$3.2k</div>
+            </div>
+            <div style="flex:1;background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:7px;padding:5px 8px;text-align:center;">
+              <div style="font-size:9px;font-weight:700;text-transform:uppercase;color:var(--lx-dim);letter-spacing:.04em;">Buys</div>
+              <div style="font-size:14px;font-weight:700;color:var(--lx-text);font-variant-numeric:tabular-nums;">$1.4k</div>
+            </div>
+            <div style="flex:1;background:rgba(147,214,167,.06);border:1px solid rgba(147,214,167,.2);border-radius:7px;padding:5px 8px;text-align:center;">
+              <div style="font-size:9px;font-weight:700;text-transform:uppercase;color:var(--cx-green);letter-spacing:.04em;">Net</div>
+              <div style="font-size:14px;font-weight:700;color:var(--cx-green);font-variant-numeric:tabular-nums;">+$1.8k</div>
+            </div>
+          </div>
+          <!-- deal rows — compact, amount prominent -->
+          <div style="background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:10px;overflow:hidden;">
+            <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--lx-br);">
+              <div class="sk-thumb sm"></div>
+              <div style="flex:1;min-width:0;">
+                <div style="font-size:12px;font-weight:500;color:var(--lx-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Charizard VMAX gold PSA 10</div>
+                <div style="display:flex;gap:5px;margin-top:2px;align-items:center;">
+                  <span class="sk-pill sale" style="font-size:9px;padding:1px 6px;">sale</span>
+                  <span style="font-size:10px;color:var(--lx-dim);">buying-ch · 2m</span>
+                </div>
+              </div>
+              <div style="font-size:15px;font-weight:700;color:var(--cx-orange);font-variant-numeric:tabular-nums;flex-shrink:0;">$420</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--lx-br);background:rgba(255,255,255,.015);">
+              <div class="sk-thumb sm"></div>
+              <div style="flex:1;min-width:0;">
+                <div style="font-size:12px;font-weight:500;color:var(--lx-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Blastoise Base Set ungraded</div>
+                <div style="display:flex;gap:5px;margin-top:2px;align-items:center;">
+                  <span class="sk-pill buy" style="font-size:9px;padding:1px 6px;">buy</span>
+                  <span style="font-size:10px;color:var(--lx-dim);">buying-ch · 14m</span>
+                </div>
+              </div>
+              <div style="font-size:15px;font-weight:700;color:var(--cx-gold);font-variant-numeric:tabular-nums;flex-shrink:0;">$85</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;">
+              <div class="sk-thumb sm" style="opacity:.3;"></div>
+              <div style="flex:1;min-width:0;">
+                <div style="font-size:12px;color:var(--lx-dim);">Needs review</div>
+                <div style="display:flex;gap:5px;margin-top:2px;align-items:center;">
+                  <span class="sk-pill unknown" style="font-size:9px;padding:1px 6px;">?</span>
+                  <span style="font-size:10px;color:var(--lx-dim);">buying-ch · 28m</span>
+                </div>
+              </div>
+              <div style="font-size:15px;font-weight:700;color:var(--lx-dim);flex-shrink:0;">—</div>
+            </div>
+          </div>
+          <!-- bottom nav -->
+          <div class="sk-bottom-nav" style="grid-template-columns:repeat(5,1fr);margin:8px -10px 0;">
+            <div class="sk-bnav-item"><div class="sk-bnav-icon"></div><div class="sk-bnav-lbl"></div></div>
+            <div class="sk-bnav-item"><div class="sk-bnav-icon active"></div><div class="sk-bnav-lbl active"></div></div>
+            <div class="sk-bnav-item"><div class="sk-bnav-icon"></div><div class="sk-bnav-lbl"></div></div>
+            <div class="sk-bnav-item"><div class="sk-bnav-icon"></div><div class="sk-bnav-lbl"></div></div>
+            <div class="sk-bnav-item"><div class="sk-bnav-icon"></div><div class="sk-bnav-lbl"></div></div>
+          </div>
+        </div>
+      </div>
+      <div class="anns">
+        <span class="ann">Deals visible immediately — no scroll</span>
+        <span class="ann green">Summary fits in one strip</span>
+        <span class="ann">Filter = one button (opens sheet)</span>
+        <span class="ann orange">Amount right-aligned, color-coded</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════ TAB C: Mobile Nav -->
+<div class="canvas" id="tab-C">
+  <div class="dir-hd">
+    <div class="dir-label">C — Mobile Navigation</div>
+    <div class="dir-sub">Bottom nav: <strong>Home · Deals · Degen Eye · Streamer · More</strong>. Degen Eye lives in the center — elevated as the primary action. Three nav layout variants, then 5 icon concepts for the Eye button.</div>
+  </div>
+
+  <div class="screens" style="gap:20px;align-items:flex-start;">
+
+    <!-- NAV OPTION 1: Home · Deals · Eye (FAB) · Streamer · More -->
+    <div class="phone">
+      <div class="screen-lbl">Option 1 — Eye as raised FAB</div>
+      <div class="phone-outer">
+        <div class="phone-notch"></div>
+        <div class="phone-screen">
+          <div style="padding:10px;min-height:270px;background:var(--lx-bg);">
+            <div style="height:8px;background:var(--lx-s1);border-radius:4px;margin-bottom:8px;"></div>
+            <div style="height:100px;background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:8px;border-top:2px solid var(--cx-orange);margin-bottom:6px;"></div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
+              <div style="height:55px;background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:8px;border-top:2px solid var(--cx-green);"></div>
+              <div style="height:55px;background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:8px;"></div>
+            </div>
+          </div>
+          <!-- bottom nav with raised center FAB -->
+          <div style="background:#0b0c0e;border-top:1px solid var(--lx-br);padding:6px 4px 6px;display:grid;grid-template-columns:repeat(5,1fr);position:relative;">
+            <!-- Home -->
+            <div style="display:flex;flex-direction:column;align-items:center;gap:3px;">
+              <div style="width:24px;height:24px;border-radius:6px;background:rgba(255,106,28,.22);display:flex;align-items:center;justify-content:center;"><div style="width:12px;height:12px;background:rgba(255,106,28,.7);border-radius:2px;"></div></div>
+              <span style="font-size:10px;font-weight:700;color:var(--cx-orange);">Home</span>
+            </div>
+            <!-- Deals -->
+            <div style="display:flex;flex-direction:column;align-items:center;gap:3px;">
+              <div style="width:24px;height:24px;border-radius:6px;background:var(--lx-s2);display:flex;align-items:center;justify-content:center;"><div style="width:12px;height:12px;background:rgba(255,255,255,.15);border-radius:2px;"></div></div>
+              <span style="font-size:10px;font-weight:600;color:var(--lx-dim);">Deals</span>
+            </div>
+            <!-- Degen Eye — raised FAB -->
+            <div style="display:flex;flex-direction:column;align-items:center;gap:2px;margin-top:-18px;">
+              <div style="width:46px;height:46px;border-radius:50%;background:linear-gradient(135deg,var(--cx-orange),#c44a00);box-shadow:0 4px 16px rgba(255,106,28,.5);display:flex;align-items:center;justify-content:center;border:2px solid #0b0c0e;">
+                <!-- eye SVG -->
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                  <circle cx="12" cy="12" r="3"/>
+                </svg>
+              </div>
+              <span style="font-size:10px;font-weight:700;color:var(--cx-orange);">Eye</span>
+            </div>
+            <!-- Streamer -->
+            <div style="display:flex;flex-direction:column;align-items:center;gap:3px;">
+              <div style="width:24px;height:24px;border-radius:6px;background:var(--lx-s2);display:flex;align-items:center;justify-content:center;"><div style="width:12px;height:12px;background:rgba(255,255,255,.15);border-radius:2px;"></div></div>
+              <span style="font-size:10px;font-weight:600;color:var(--lx-dim);">Streamer</span>
+            </div>
+            <!-- More -->
+            <div style="display:flex;flex-direction:column;align-items:center;gap:3px;">
+              <div style="width:24px;height:24px;border-radius:6px;background:var(--lx-s2);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;"><div style="width:3px;height:3px;background:rgba(255,255,255,.3);border-radius:50%;"></div><div style="width:3px;height:3px;background:rgba(255,255,255,.3);border-radius:50%;"></div><div style="width:3px;height:3px;background:rgba(255,255,255,.3);border-radius:50%;"></div></div>
+              <span style="font-size:10px;font-weight:600;color:var(--lx-dim);">More</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="anns">
+        <span class="ann">Eye raised above bar = primary action</span>
+        <span class="ann orange">Orange gradient FAB — stands out immediately</span>
+      </div>
+    </div>
+
+    <!-- NAV OPTION 2: flat 5-tab, Eye gets pill highlight -->
+    <div class="phone">
+      <div class="screen-lbl">Option 2 — Eye as pill button</div>
+      <div class="phone-outer">
+        <div class="phone-notch"></div>
+        <div class="phone-screen">
+          <div style="padding:10px;min-height:270px;background:var(--lx-bg);">
+            <div style="height:8px;background:var(--lx-s1);border-radius:4px;margin-bottom:8px;"></div>
+            <div style="height:100px;background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:8px;border-top:2px solid var(--cx-orange);margin-bottom:6px;"></div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
+              <div style="height:55px;background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:8px;border-top:2px solid var(--cx-green);"></div>
+              <div style="height:55px;background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:8px;"></div>
+            </div>
+          </div>
+          <!-- flat nav, eye gets pill shape -->
+          <div style="background:#0b0c0e;border-top:1px solid var(--lx-br);padding:8px 6px 6px;display:grid;grid-template-columns:repeat(5,1fr);gap:2px;">
+            <div style="display:flex;flex-direction:column;align-items:center;gap:3px;">
+              <div style="width:24px;height:24px;border-radius:6px;background:rgba(255,106,28,.22);display:flex;align-items:center;justify-content:center;"><div style="width:12px;height:12px;background:rgba(255,106,28,.7);border-radius:2px;"></div></div>
+              <span style="font-size:10px;font-weight:700;color:var(--cx-orange);">Home</span>
+            </div>
+            <div style="display:flex;flex-direction:column;align-items:center;gap:3px;">
+              <div style="width:24px;height:24px;border-radius:6px;background:var(--lx-s2);display:flex;align-items:center;justify-content:center;"><div style="width:12px;height:12px;background:rgba(255,255,255,.15);border-radius:2px;"></div></div>
+              <span style="font-size:10px;font-weight:600;color:var(--lx-dim);">Deals</span>
+            </div>
+            <!-- Eye: wide pill -->
+            <div style="display:flex;flex-direction:column;align-items:center;gap:3px;">
+              <div style="width:48px;height:24px;border-radius:99px;background:rgba(255,106,28,.18);border:1px solid rgba(255,106,28,.4);display:flex;align-items:center;justify-content:center;gap:4px;">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="rgba(255,106,28,.9)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </div>
+              <span style="font-size:10px;font-weight:700;color:var(--cx-orange);">Eye</span>
+            </div>
+            <div style="display:flex;flex-direction:column;align-items:center;gap:3px;">
+              <div style="width:24px;height:24px;border-radius:6px;background:var(--lx-s2);display:flex;align-items:center;justify-content:center;"><div style="width:12px;height:12px;background:rgba(255,255,255,.15);border-radius:2px;"></div></div>
+              <span style="font-size:10px;font-weight:600;color:var(--lx-dim);">Streamer</span>
+            </div>
+            <div style="display:flex;flex-direction:column;align-items:center;gap:3px;">
+              <div style="width:24px;height:24px;border-radius:6px;background:var(--lx-s2);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;"><div style="width:3px;height:3px;background:rgba(255,255,255,.3);border-radius:50%;"></div><div style="width:3px;height:3px;background:rgba(255,255,255,.3);border-radius:50%;"></div><div style="width:3px;height:3px;background:rgba(255,255,255,.3);border-radius:50%;"></div></div>
+              <span style="font-size:10px;font-weight:600;color:var(--lx-dim);">More</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="anns">
+        <span class="ann">Pill shape breaks visual rhythm — eye-catching</span>
+        <span class="ann">Flat nav, no height disruption</span>
+      </div>
+    </div>
+
+    <!-- More sheet -->
+    <div class="phone">
+      <div class="screen-lbl">More sheet (all options)</div>
+      <div class="phone-outer">
+        <div class="phone-notch"></div>
+        <div class="phone-screen" style="position:relative;">
+          <div style="height:160px;background:var(--lx-bg);opacity:.4;"></div>
+          <div style="background:#0b0c0e;border-top:1px solid var(--lx-br);border-radius:20px 20px 0 0;padding:12px 14px;">
+            <div style="width:32px;height:3px;background:rgba(255,255,255,.15);border-radius:99px;margin:0 auto 14px;"></div>
+            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--lx-dim);margin-bottom:8px;">Ops</div>
+            <div style="display:flex;flex-direction:column;gap:1px;">
+              <div style="display:flex;align-items:center;gap:10px;padding:9px 8px;border-radius:7px;background:var(--lx-s1);">
+                <div style="width:26px;height:26px;background:var(--lx-s2);border-radius:6px;border:1px solid var(--lx-br);"></div>
+                <span style="font-size:13px;font-weight:500;color:var(--lx-text);">Finance</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:10px;padding:9px 8px;border-radius:7px;">
+                <div style="width:26px;height:26px;background:var(--lx-s2);border-radius:6px;border:1px solid var(--lx-br);"></div>
+                <span style="font-size:13px;font-weight:500;color:var(--lx-text);">Reports</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:10px;padding:9px 8px;border-radius:7px;">
+                <div style="width:26px;height:26px;background:var(--lx-s2);border-radius:6px;border:1px solid var(--lx-br);"></div>
+                <span style="font-size:13px;font-weight:500;color:var(--lx-text);">Inventory</span>
+              </div>
+            </div>
+            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--lx-dim);margin:10px 0 8px;">Channels</div>
+            <div style="display:flex;flex-direction:column;gap:1px;">
+              <div style="display:flex;align-items:center;gap:10px;padding:9px 8px;border-radius:7px;">
+                <div style="width:26px;height:26px;background:var(--lx-s2);border-radius:6px;border:1px solid var(--lx-br);"></div>
+                <span style="font-size:13px;font-weight:500;color:var(--lx-text);">Shopify</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:10px;padding:9px 8px;border-radius:7px;">
+                <div style="width:26px;height:26px;background:var(--lx-s2);border-radius:6px;border:1px solid var(--lx-br);"></div>
+                <span style="font-size:13px;font-weight:500;color:var(--lx-text);">TikTok Orders</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="anns"><span class="ann green">Same sidebar sections, thumb-reachable</span></div>
+    </div>
+
+  </div>
+
+  <!-- ═══ DEGEN EYE ICON CONCEPTS ═══ -->
+  <div style="margin-top:36px;">
+    <div style="font-family:'Caveat',cursive;font-size:20px;font-weight:700;color:var(--lx-text);margin-bottom:4px;">Degen Eye — Icon Concepts</div>
+    <div style="font-size:13px;color:var(--lx-muted);margin-bottom:24px;max-width:540px;">5 directions for the center button icon. All shown at FAB size (46px) and small nav size (22px) so you can judge readability at both scales.</div>
+
+    <div style="display:flex;gap:20px;flex-wrap:wrap;align-items:flex-start;">
+
+      <!-- Concept 1: Classic Eye -->
+      <div style="background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:12px;padding:20px;width:170px;">
+        <div style="font-family:'Caveat',cursive;font-size:15px;font-weight:700;color:var(--lx-text);margin-bottom:4px;">1 · Classic Eye</div>
+        <div style="font-size:11px;color:var(--lx-muted);margin-bottom:16px;line-height:1.4;">Simple open eye. Universally readable. Clean and iconic.</div>
+        <!-- FAB -->
+        <div style="display:flex;align-items:center;gap:14px;margin-bottom:14px;">
+          <div style="width:46px;height:46px;border-radius:50%;background:linear-gradient(135deg,var(--cx-orange),#c44a00);display:flex;align-items:center;justify-content:center;box-shadow:0 4px 16px rgba(255,106,28,.4);">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          </div>
+          <div style="width:22px;height:22px;border-radius:5px;background:rgba(255,106,28,.2);display:flex;align-items:center;justify-content:center;">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="rgba(255,106,28,.9)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          </div>
+        </div>
+        <div class="anns"><span class="ann" style="font-size:11px;">Safe · clear at any size</span></div>
+      </div>
+
+      <!-- Concept 2: Eye + scan lines (scanner vibe) -->
+      <div style="background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:12px;padding:20px;width:170px;">
+        <div style="font-family:'Caveat',cursive;font-size:15px;font-weight:700;color:var(--lx-text);margin-bottom:4px;">2 · Scanner Eye</div>
+        <div style="font-size:11px;color:var(--lx-muted);margin-bottom:16px;line-height:1.4;">Eye with corner brackets — feels like a card scanner / camera mode.</div>
+        <div style="display:flex;align-items:center;gap:14px;margin-bottom:14px;">
+          <div style="width:46px;height:46px;border-radius:50%;background:linear-gradient(135deg,var(--cx-orange),#c44a00);display:flex;align-items:center;justify-content:center;box-shadow:0 4px 16px rgba(255,106,28,.4);">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <!-- eye -->
+              <path d="M4 12s3.5-6 8-6 8 6 8 6-3.5 6-8 6-8-6-8-6z"/>
+              <circle cx="12" cy="12" r="2.5"/>
+              <!-- corner brackets -->
+              <path d="M2 7V4h3M22 7V4h-3M2 17v3h3M22 17v3h-3"/>
+            </svg>
+          </div>
+          <div style="width:22px;height:22px;border-radius:5px;background:rgba(255,106,28,.2);display:flex;align-items:center;justify-content:center;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgba(255,106,28,.9)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12s3.5-6 8-6 8 6 8 6-3.5 6-8 6-8-6-8-6z"/><circle cx="12" cy="12" r="2.5"/></svg>
+          </div>
+        </div>
+        <div class="anns"><span class="ann" style="font-size:11px;">Ties into card scanning</span></div>
+      </div>
+
+      <!-- Concept 3: Eye with orange pupil / live dot -->
+      <div style="background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:12px;padding:20px;width:170px;">
+        <div style="font-family:'Caveat',cursive;font-size:15px;font-weight:700;color:var(--lx-text);margin-bottom:4px;">3 · Live Eye</div>
+        <div style="font-size:11px;color:var(--lx-muted);margin-bottom:16px;line-height:1.4;">Eye with a pulsing live-dot in the corner — signals real-time monitoring.</div>
+        <div style="display:flex;align-items:center;gap:14px;margin-bottom:14px;">
+          <div style="position:relative;">
+            <div style="width:46px;height:46px;border-radius:50%;background:linear-gradient(135deg,var(--cx-orange),#c44a00);display:flex;align-items:center;justify-content:center;box-shadow:0 4px 16px rgba(255,106,28,.4);">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3" fill="rgba(255,255,255,.3)"/></svg>
+            </div>
+            <div style="position:absolute;top:1px;right:1px;width:12px;height:12px;border-radius:50%;background:var(--lx-live);border:2px solid var(--lx-s1);"></div>
+          </div>
+          <div style="position:relative;width:22px;height:22px;border-radius:5px;background:rgba(255,106,28,.2);display:flex;align-items:center;justify-content:center;">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="rgba(255,106,28,.9)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            <div style="position:absolute;top:-2px;right:-2px;width:7px;height:7px;border-radius:50%;background:var(--lx-live);border:1.5px solid var(--lx-s1);"></div>
+          </div>
+        </div>
+        <div class="anns"><span class="ann" style="font-size:11px;">Inherits your db-live dot pattern</span></div>
+      </div>
+
+      <!-- Concept 4: Diamond / degen mark -->
+      <div style="background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:12px;padding:20px;width:170px;">
+        <div style="font-family:'Caveat',cursive;font-size:15px;font-weight:700;color:var(--lx-text);margin-bottom:4px;">4 · Degen Diamond</div>
+        <div style="font-size:11px;color:var(--lx-muted);margin-bottom:16px;line-height:1.4;">A diamond shape (crypto/degen culture shorthand) with a pupil center. Bold + on-brand.</div>
+        <div style="display:flex;align-items:center;gap:14px;margin-bottom:14px;">
+          <div style="width:46px;height:46px;border-radius:50%;background:linear-gradient(135deg,var(--cx-orange),#c44a00);display:flex;align-items:center;justify-content:center;box-shadow:0 4px 16px rgba(255,106,28,.4);">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <!-- diamond outline -->
+              <path d="M12 2L22 12 12 22 2 12Z"/>
+              <!-- inner eye pupil -->
+              <circle cx="12" cy="12" r="2.5" fill="rgba(255,255,255,.5)" stroke="none"/>
+            </svg>
+          </div>
+          <div style="width:22px;height:22px;border-radius:5px;background:rgba(255,106,28,.2);display:flex;align-items:center;justify-content:center;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgba(255,106,28,.9)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L22 12 12 22 2 12Z"/><circle cx="12" cy="12" r="2.5" fill="rgba(255,106,28,.4)" stroke="none"/></svg>
+          </div>
+        </div>
+        <div class="anns"><span class="ann" style="font-size:11px;">Unique · memorable · very "degen"</span></div>
+      </div>
+
+      <!-- Concept 5: Eye inside hexagon (collectibles vibe) -->
+      <div style="background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:12px;padding:20px;width:170px;">
+        <div style="font-family:'Caveat',cursive;font-size:15px;font-weight:700;color:var(--lx-text);margin-bottom:4px;">5 · Hex Eye</div>
+        <div style="font-size:11px;color:var(--lx-muted);margin-bottom:16px;line-height:1.4;">Eye inside a hexagon — nods to trading card geometry and collectible grading slabs.</div>
+        <div style="display:flex;align-items:center;gap:14px;margin-bottom:14px;">
+          <div style="width:46px;height:46px;border-radius:50%;background:linear-gradient(135deg,var(--cx-orange),#c44a00);display:flex;align-items:center;justify-content:center;box-shadow:0 4px 16px rgba(255,106,28,.4);">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 2l8 4.5v9L12 20l-8-4.5v-9L12 2z"/>
+              <path d="M6 11.5s2.5-3.5 6-3.5 6 3.5 6 3.5-2.5 3.5-6 3.5-6-3.5-6-3.5z"/>
+              <circle cx="12" cy="11.5" r="1.8" fill="rgba(255,255,255,.4)" stroke="none"/>
+            </svg>
+          </div>
+          <div style="width:22px;height:22px;border-radius:5px;background:rgba(255,106,28,.2);display:flex;align-items:center;justify-content:center;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgba(255,106,28,.9)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 2l8 4.5v9L12 20l-8-4.5v-9L12 2z"/>
+              <circle cx="12" cy="11.5" r="2.5" fill="rgba(255,106,28,.3)" stroke="none"/>
+            </svg>
+          </div>
+        </div>
+        <div class="anns"><span class="ann" style="font-size:11px;">Feels like a PSA slab / card grade mark</span></div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Mapping table -->
+  <div style="margin-top:32px;max-width:640px;">
+    <div style="font-family:'Caveat',cursive;font-size:16px;font-weight:700;color:var(--lx-text);margin-bottom:14px;">Tab mapping</div>
+    <div style="background:var(--lx-s1);border:1px solid var(--lx-br);border-radius:10px;overflow:hidden;">
+      <div class="sk-th" style="grid-template-columns:40px 1fr 1fr;padding:7px 14px;font-size:10px;">
+        <div>#</div><div>Label</div><div>Maps to (sidebar)</div>
+      </div>
+      <div class="sk-tr" style="grid-template-columns:40px 1fr 1fr;padding:0 14px;">
+        <div class="sk-td">1</div><div class="sk-td">Home</div><div class="sk-td muted">/dashboard</div>
+      </div>
+      <div class="sk-tr alt" style="grid-template-columns:40px 1fr 1fr;padding:0 14px;">
+        <div class="sk-td">2</div><div class="sk-td">Deals</div><div class="sk-td muted">/deals</div>
+      </div>
+      <div class="sk-tr" style="grid-template-columns:40px 1fr 1fr;padding:0 14px;">
+        <div class="sk-td" style="color:var(--cx-orange);font-weight:700;">3</div><div class="sk-td" style="color:var(--cx-orange);font-weight:700;">Degen Eye</div><div class="sk-td muted">/eye or modal — center FAB</div>
+      </div>
+      <div class="sk-tr alt" style="grid-template-columns:40px 1fr 1fr;padding:0 14px;">
+        <div class="sk-td">4</div><div class="sk-td">Streamer</div><div class="sk-td muted">/tiktok/streamer</div>
+      </div>
+      <div class="sk-tr" style="grid-template-columns:40px 1fr 1fr;padding:0 14px;">
+        <div class="sk-td">5</div><div class="sk-td">More</div><div class="sk-td muted">Finance · Reports · Inventory · Shopify · Admin…</div>
+      </div>
+    </div>
+    <div class="anns" style="margin-top:10px;">
+      <span class="ann">Stream Manager stays untouched per your request</span>
+      <span class="ann green">Pure CSS addition to _mobile_bottom_nav.html</span>
+    </div>
+  </div>
+</div>
+
+<!-- Tweaks panel -->
+<div id="tweaks-panel">
+  <h4>Tweaks</h4>
+  <div class="tw-row"><label>Show before/after</label><div class="tw-toggle on" id="tw-compare" onclick="toggleTweak(this)"><div class="tw-thumb"></div></div></div>
+  <div class="tw-row"><label>Orange lead stat</label><div class="tw-toggle on" id="tw-accent" onclick="toggleTweak(this)"><div class="tw-thumb"></div></div></div>
+  <div class="tw-row"><label>Net P&L card</label><div class="tw-toggle on" id="tw-pnl" onclick="toggleTweak(this)"><div class="tw-thumb"></div></div></div>
+  <div class="tw-row"><label>Color amounts</label><div class="tw-toggle on" id="tw-color" onclick="toggleTweak(this)"><div class="tw-thumb"></div></div></div>
+</div>
+
+<script>
+  function switchTab(id, btn) {
+    document.querySelectorAll('.canvas').forEach(c => c.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.getElementById('tab-' + id).classList.add('active');
+    btn.classList.add('active');
+    localStorage.setItem('degen-lx-tab', id);
+  }
+
+  function toggleTweak(el) { el.classList.toggle('on'); }
+
+  // restore tab
+  const saved = localStorage.getItem('degen-lx-tab');
+  if (saved) {
+    const btn = [...document.querySelectorAll('.tab')].find(t => t.textContent.trim().startsWith(saved));
+    if (btn) btn.click();
+  }
+
+  // tweaks panel
+  window.addEventListener('message', e => {
+    if (e.data?.type === '__activate_edit_mode') document.getElementById('tweaks-panel').style.display = 'block';
+    if (e.data?.type === '__deactivate_edit_mode') document.getElementById('tweaks-panel').style.display = 'none';
+  });
+  window.parent.postMessage({ type: '__edit_mode_available' }, '*');
+</script>
+</body>
+</html>
