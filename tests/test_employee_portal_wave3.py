@@ -295,7 +295,10 @@ class InviteAcceptTests(unittest.TestCase, _PortalHarness):
             follow_redirects=False,
         )
         self.assertEqual(r.status_code, 303)
-        self.assertEqual(r.headers["location"], "/team/")
+        # Post-onboarding redirect may include a welcome flash query string.
+        self.assertEqual(
+            r.headers["location"].split("?", 1)[0], "/team/", r.headers["location"]
+        )
         # Verify user + profile
         u = self.session.exec(select(User).where(User.username == "neweemp")).first()
         self.assertIsNotNone(u)

@@ -172,24 +172,32 @@ class RouteGatingTests(unittest.TestCase):
         return client, app_main
 
     def _login_as(self, client, role):
-        """Inject a user into the session via middleware shim."""
-        # The existing app uses session-cookie auth; easier path: monkey-patch
-        # get_request_user within a request scope. We use dependency overrides
-        # on a specific helper by patching shared.get_request_user.
+        """Inject a user into the session via middleware shim.
+
+        The middleware in app.main imports get_request_user from app.shared
+        with `from .shared import *`, which creates a bound local name in
+        app.main. Patching shared.get_request_user alone leaves app.main's
+        copy unchanged, so we have to patch BOTH namespaces. (This mirrors
+        what wave3's _PortalHarness does.)
+        """
         from app.models import User
         from app import shared
+        import app.main as app_main
 
         user = User(id=42 if role == "admin" else 43, username=f"{role}_t",
                     password_hash="x", role=role, is_active=True)
         self._patcher = patch.object(shared, "get_request_user", return_value=user)
         self._patcher.start()
+        self._patcher_main = patch.object(app_main, "get_request_user", return_value=user)
+        self._patcher_main.start()
         return user
 
     def tearDown(self):
-        p = getattr(self, "_patcher", None)
-        if p:
-            p.stop()
-            self._patcher = None
+        for attr in ("_patcher", "_patcher_main"):
+            p = getattr(self, attr, None)
+            if p:
+                p.stop()
+                setattr(self, attr, None)
 
     def test_non_admin_redirected_from_permissions_page(self):
         client, _ = self._build_client(portal_enabled=True)
