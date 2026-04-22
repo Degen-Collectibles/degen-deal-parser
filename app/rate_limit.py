@@ -20,6 +20,11 @@ def check(key: str, *, max_requests: int, window_seconds: float) -> bool:
         dq = _BUCKETS[key]
         while dq and dq[0] < cutoff:
             dq.popleft()
+        # m3: opportunistically prune any other keys whose deques drained to
+        # empty so silent clients don't leak an entry forever. Bounded O(k) on
+        # the outstanding bucket count, which is already small.
+        for stale_key in [k for k, v in _BUCKETS.items() if k != key and not v]:
+            _BUCKETS.pop(stale_key, None)
         if len(dq) >= max_requests:
             return False
         dq.append(now)

@@ -478,6 +478,9 @@ class EmployeeProfile(SQLModel, table=True):
 class InviteToken(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     token_hash: str = Field(index=True, unique=True)
+    token_lookup_hmac: Optional[bytes] = Field(
+        default=None, sa_column=Column(LargeBinary, index=True)
+    )
     role: str = Field(default="employee", index=True)
     created_by_user_id: int = Field(foreign_key="user.id", index=True)
     email_hint: Optional[str] = Field(default=None)
@@ -490,6 +493,9 @@ class InviteToken(SQLModel, table=True):
 class PasswordResetToken(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     token_hash: str = Field(index=True, unique=True)
+    token_lookup_hmac: Optional[bytes] = Field(
+        default=None, sa_column=Column(LargeBinary, index=True)
+    )
     user_id: int = Field(foreign_key="user.id", index=True)
     expires_at: datetime = Field(index=True)
     used_at: Optional[datetime] = Field(default=None, index=True)

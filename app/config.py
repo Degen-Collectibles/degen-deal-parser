@@ -206,6 +206,7 @@ class Settings(BaseSettings):
     employee_portal_enabled: bool = Field(default=False, alias="EMPLOYEE_PORTAL_ENABLED")
     employee_pii_key: str = Field(default="", alias="EMPLOYEE_PII_KEY")
     employee_email_hash_salt: str = Field(default="", alias="EMPLOYEE_EMAIL_HASH_SALT")
+    employee_token_hmac_key: str = Field(default="", alias="EMPLOYEE_TOKEN_HMAC_KEY")
     clockify_api_key: str = Field(default="", alias="CLOCKIFY_API_KEY")
     clockify_workspace_id: str = Field(default="", alias="CLOCKIFY_WORKSPACE_ID")
     session_hours: int = Field(default=8, alias="SESSION_HOURS")

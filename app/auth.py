@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import hashlib
 from hashlib import pbkdf2_hmac
 import hmac
 import secrets
@@ -223,16 +224,37 @@ def _verify_token(raw_token: str, token_hash: str) -> bool:
         return False
 
 
+def _token_hmac_key() -> bytes:
+    # Prefer a dedicated key so rotating session cookies doesn't invalidate
+    # in-flight invite/reset tokens. Fall back to SESSION_SECRET so existing
+    # deployments keep working without new env vars.
+    key = (settings.employee_token_hmac_key or settings.session_secret or "").encode("utf-8")
+    if not key:
+        raise RuntimeError("Token HMAC key is empty — set EMPLOYEE_TOKEN_HMAC_KEY or SESSION_SECRET")
+    return key
+
+
+def _token_lookup_hmac(raw_token: str) -> bytes:
+    return hmac.new(_token_hmac_key(), raw_token.encode("utf-8"), hashlib.sha256).digest()
+
+
 def _find_token_row(session: Session, model, raw_token: str):
-    # bcrypt hashes are not deterministic, so we must scan un-used + un-expired rows.
+    # O(1) HMAC indexed lookup, then single bcrypt verify on the matched row.
+    # NULL-HMAC legacy rows are unreachable here and expire naturally.
     now = utcnow()
-    rows = session.exec(
-        select(model).where(model.used_at.is_(None), model.expires_at > now)
-    ).all()
-    for row in rows:
-        if _verify_token(raw_token, row.token_hash):
-            return row
-    return None
+    lookup = _token_lookup_hmac(raw_token)
+    row = session.exec(
+        select(model).where(
+            model.token_lookup_hmac == lookup,
+            model.used_at.is_(None),
+            model.expires_at > now,
+        )
+    ).first()
+    if row is None:
+        return None
+    if not _verify_token(raw_token, row.token_hash):
+        return None
+    return row
 
 
 def generate_invite_token(
@@ -246,6 +268,7 @@ def generate_invite_token(
     raw = secrets.token_urlsafe(32)
     row = InviteToken(
         token_hash=_hash_token(raw),
+        token_lookup_hmac=_token_lookup_hmac(raw),
         role=role,
         created_by_user_id=created_by_user_id,
         email_hint=email_hint,
@@ -305,10 +328,23 @@ def generate_password_reset_token(
     ttl_minutes: int = 60,
 ) -> str:
     raw = secrets.token_urlsafe(32)
+    now = utcnow()
+    # m9: invalidate any prior un-used reset tokens for this user so only the
+    # newest link is ever live. Keeps a tidy audit trail (used_at is set).
+    prior_rows = session.exec(
+        select(PasswordResetToken).where(
+            PasswordResetToken.user_id == user_id,
+            PasswordResetToken.used_at.is_(None),
+        )
+    ).all()
+    for prior in prior_rows:
+        prior.used_at = now
+        session.add(prior)
     row = PasswordResetToken(
         token_hash=_hash_token(raw),
+        token_lookup_hmac=_token_lookup_hmac(raw),
         user_id=user_id,
-        expires_at=utcnow() + timedelta(minutes=ttl_minutes),
+        expires_at=now + timedelta(minutes=ttl_minutes),
         issued_by_user_id=issued_by_user_id,
     )
     session.add(row)
