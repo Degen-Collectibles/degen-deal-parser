@@ -1,3 +1,4 @@
+# last-touched: 2026-04-22T03:08UTC (portal enable)
 import asyncio
 import csv
 import hashlib
