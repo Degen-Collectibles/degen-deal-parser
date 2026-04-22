@@ -487,11 +487,18 @@ def generate_password_reset_token(
         issued_by_user_id=issued_by_user_id,
     )
     session.add(row)
+    # m2 (wave 4.5): split self-serve vs admin-issued so audit trails are
+    # unambiguous. "reset_requested" = user-initiated; "reset_issued" = an
+    # admin (a different user) is generating a link on their behalf.
+    if issued_by_user_id is not None and issued_by_user_id != user_id:
+        audit_action = "password.reset_issued"
+    else:
+        audit_action = "password.reset_requested"
     session.add(
         AuditLog(
             actor_user_id=issued_by_user_id or user_id,
             target_user_id=user_id,
-            action="password.reset_requested",
+            action=audit_action,
             details_json=json.dumps({"source": "generate"}),
         )
     )

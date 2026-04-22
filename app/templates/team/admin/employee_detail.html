@@ -10,7 +10,12 @@
     <span style="color:var(--lx-muted); font-size:12px;"> Every reveal writes an AuditLog row before decryption.</span>
 </div>
 
-{% if reveal_field %}
+{% if reveal_error %}
+<div class="ta-card" style="border-color:rgba(239,68,68,0.35); background:rgba(239,68,68,0.05);">
+    <h2 style="color:#fca5a5;">Reveal failed · {{ reveal_error }}</h2>
+    <p style="font-size:12px; color:var(--lx-muted);">Decryption failed for this field. The attempt has been audit-logged.</p>
+</div>
+{% elif reveal_field %}
 <div class="ta-card" style="border-color:rgba(239,68,68,0.35); background:rgba(239,68,68,0.05);">
     <h2 style="color:#fca5a5;">Revealed · {{ reveal_field }}</h2>
     <div style="font-family:ui-monospace, Menlo, monospace; font-size:14px; padding:8px 10px; background:var(--lx-bg); border-radius:6px; user-select:all;">{{ reveal_value }}</div>
@@ -20,6 +25,9 @@
 
 <div class="ta-card">
     <h2>Account</h2>
+    {% if not can_edit_profile %}
+    <p style="font-size:12px; color:var(--lx-muted); margin:0 0 8px;">View-only — you do not have permission to edit this profile.</p>
+    {% endif %}
     <form method="post" action="/team/admin/employees/{{ employee.id }}/profile-update">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
         <table style="width:100%; font-size:13px;">
@@ -55,7 +63,9 @@
                 <td><input type="text" name="clockify_user_id" value="{{ profile.clockify_user_id or '' }}" style="width:320px; padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/></td>
             </tr>
         </table>
+        {% if can_edit_profile %}
         <button class="ta-btn" type="submit" style="margin-top:10px;">Save profile</button>
+        {% endif %}
     </form>
 </div>
 
@@ -67,24 +77,34 @@
             <td style="padding:8px 0; color:var(--lx-muted); width:200px;">{{ label }}</td>
             <td style="padding:8px 0; font-family:ui-monospace, Menlo, monospace;">• Redacted •</td>
             <td style="padding:8px 0; text-align:right;">
+                {% if can_reveal_pii %}
                 <form method="post" action="/team/admin/employees/{{ employee.id }}/reveal" style="display:inline;">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
                     <input type="hidden" name="field" value="{{ fld }}"/>
                     <button class="ta-btn" type="submit">Reveal {{ fld }}</button>
                 </form>
+                {% endif %}
             </td>
         </tr>
         {% endfor %}
     </table>
 </div>
 
+{% if can_reset_password or can_terminate or can_purge %}
 <div class="ta-card" style="border-color:rgba(239,68,68,0.35);">
     <h2 style="color:#fca5a5;">Lifecycle actions</h2>
+    {% if can_reset_password %}
     <form method="post" action="/team/admin/employees/{{ employee.id }}/reset-password" style="display:inline-block; margin-right:8px;">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
         <button class="ta-btn" type="submit">Issue password reset link</button>
     </form>
+    {% endif %}
+    {% if can_terminate %}
     <a class="ta-btn danger" href="/team/admin/employees/{{ employee.id }}/terminate">Terminate…</a>
+    {% endif %}
+    {% if can_purge %}
     <a class="ta-btn danger" href="/team/admin/employees/{{ employee.id }}/purge">Purge PII (CCPA)…</a>
+    {% endif %}
 </div>
+{% endif %}
 {% endblock %}

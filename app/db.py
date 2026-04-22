@@ -759,8 +759,10 @@ DEFAULT_ROLE_PERMISSIONS: tuple[tuple[str, str, bool], ...] = tuple(
         ("admin.employees.purge", (False, False, False, False, True)),
         ("admin.invites.view", (False, False, False, False, True)),
         ("admin.invites.issue", (False, False, False, False, True)),
-        ("admin.supply.view", (False, False, True, False, True)),
-        ("admin.supply.approve", (False, False, True, False, True)),
+        ("admin.supply.view", (False, False, True, True, True)),
+        ("admin.supply.approve", (False, False, True, True, True)),
+        # Wave 4.5 — edit key distinct from view
+        ("admin.employees.edit", (False, False, False, False, True)),
     )
     for role, allowed in zip(
         ("employee", "viewer", "manager", "reviewer", "admin"), row
@@ -843,6 +845,24 @@ def seed_employee_portal_defaults(session: Session) -> None:
         added_any = True
 
     if added_any:
+        session.commit()
+
+    # Wave 4.5 MAJ-1: older deployments seeded reviewer=False for the two
+    # admin.supply.* keys before the spec was reconciled. Force-true on every
+    # boot for just these two rows. Idempotent: only UPDATEs when still False.
+    fixup_keys = ("admin.supply.view", "admin.supply.approve")
+    stale = session.exec(
+        _select(RolePermission).where(
+            RolePermission.role == "reviewer",
+            RolePermission.resource_key.in_(fixup_keys),
+            RolePermission.is_allowed == False,  # noqa: E712 (SQLModel needs ==)
+        )
+    ).all()
+    if stale:
+        for row in stale:
+            row.is_allowed = True
+            row.updated_at = now
+            session.add(row)
         session.commit()
 
 

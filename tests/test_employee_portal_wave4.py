@@ -230,7 +230,7 @@ class ResetPasswordTests(unittest.TestCase, _W4Harness):
         self.assertEqual(r.status_code, 200)
         self.assertIn("/team/password/reset/", r.text)
         rows = list(self.session.exec(
-            select(AuditLog).where(AuditLog.action == "password.reset_requested")
+            select(AuditLog).where(AuditLog.action == "password.reset_issued")
         ).all())
         self.assertGreaterEqual(len(rows), 1)
 

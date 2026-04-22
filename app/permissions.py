@@ -50,6 +50,7 @@ RESOURCE_KEYS: List[str] = [
     "admin.permissions.edit",
     # Wave 4 — admin surface
     "admin.employees.view",
+    "admin.employees.edit",
     "admin.employees.reveal_pii",
     "admin.employees.reset_password",
     "admin.employees.terminate",
@@ -86,6 +87,7 @@ _LABEL_OVERRIDES: Dict[str, str] = {
     "admin.permissions.view": "View permissions matrix",
     "admin.permissions.edit": "Edit permissions matrix",
     "admin.employees.view": "Admin · View employee list + profiles",
+    "admin.employees.edit": "Admin · Edit employee profile",
     "admin.employees.reveal_pii": "Admin · Reveal employee PII (audited)",
     "admin.employees.reset_password": "Admin · Issue password reset",
     "admin.employees.terminate": "Admin · Terminate employee",

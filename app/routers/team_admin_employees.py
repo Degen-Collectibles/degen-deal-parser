@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlmodel import Session, select
 
-from ..auth import generate_password_reset_token
+from ..auth import generate_password_reset_token, has_permission
 from ..csrf import issue_token, require_csrf
 from ..db import get_session
 from ..models import AuditLog, EmployeeProfile, User, utcnow
@@ -34,15 +34,33 @@ def _mask_phone(value: Optional[str]) -> str:
     return "(•••) ••• ••••"
 
 
+class PIIDecryptError(Exception):
+    """Raised when ciphertext cannot be decrypted with any configured key."""
+
+
+def _safe_decrypt(blob: Optional[bytes]) -> Optional[str]:
+    """decrypt_pii wrapper that raises PIIDecryptError on failure.
+
+    decrypt_pii already rewraps InvalidToken as ValueError; normalize to
+    our sentinel so callers don't care about cryptography internals.
+    """
+    if blob is None:
+        return None
+    try:
+        return decrypt_pii(blob)
+    except ValueError as exc:
+        raise PIIDecryptError(str(exc)) from exc
+
+
 def _decode_address(blob: Optional[bytes]) -> dict:
     if not blob:
         return {}
     try:
-        raw = decrypt_pii(blob) or ""
+        raw = _safe_decrypt(blob) or ""
         if not raw:
             return {}
         return json.loads(raw)
-    except (ValueError, json.JSONDecodeError):
+    except (PIIDecryptError, json.JSONDecodeError):
         return {}
 
 
@@ -56,6 +74,45 @@ def _base_url(request: Request) -> str:
     scheme = request.url.scheme
     netloc = request.url.netloc
     return f"{scheme}://{netloc}"
+
+
+def _detail_context(
+    request: Request,
+    session: Session,
+    current: User,
+    employee: User,
+    profile: EmployeeProfile,
+) -> dict:
+    """Context for employee_detail.html, including per-action permission flags
+    so the template renders only the buttons this user can actually submit."""
+    return {
+        "request": request,
+        "title": f"Employee · {employee.username}",
+        "current_user": current,
+        "employee": employee,
+        "profile": profile,
+        "roles": ROLES,
+        "reveal_field": None,
+        "reveal_value": None,
+        "reveal_error": None,
+        "flash": None,
+        "csrf_token": issue_token(request),
+        "can_reveal_pii": has_permission(
+            session, current, "admin.employees.reveal_pii"
+        ),
+        "can_reset_password": has_permission(
+            session, current, "admin.employees.reset_password"
+        ),
+        "can_terminate": has_permission(
+            session, current, "admin.employees.terminate"
+        ),
+        "can_purge": has_permission(
+            session, current, "admin.employees.purge"
+        ),
+        "can_edit_profile": has_permission(
+            session, current, "admin.employees.edit"
+        ),
+    }
 
 
 @router.get("/team/admin/employees", response_class=HTMLResponse)
@@ -114,21 +171,10 @@ def admin_employee_detail(
     if employee is None:
         return HTMLResponse("Employee not found", status_code=404)
     profile = session.get(EmployeeProfile, user_id) or EmployeeProfile(user_id=user_id)
+    ctx = _detail_context(request, session, current, employee, profile)
+    ctx["flash"] = flash
     return templates.TemplateResponse(
-        request,
-        "team/admin/employee_detail.html",
-        {
-            "request": request,
-            "title": f"Employee · {employee.username}",
-            "current_user": current,
-            "employee": employee,
-            "profile": profile,
-            "roles": ROLES,
-            "reveal_field": None,
-            "reveal_value": None,
-            "flash": flash,
-            "csrf_token": issue_token(request),
-        },
+        request, "team/admin/employee_detail.html", ctx
     )
 
 
@@ -152,58 +198,74 @@ async def admin_employee_reveal(
         return HTMLResponse("Employee not found", status_code=404)
     profile = session.get(EmployeeProfile, user_id)
 
-    # Audit FIRST — flush so that DB errors abort before decrypt.
-    _audit_then_commit(
-        session,
+    # Phase 1: persist audit row in its own transaction so that a subsequent
+    # decrypt failure cannot roll it back.
+    ip = request.client.host if request.client else None
+    session.add(
         AuditLog(
             actor_user_id=current.id,
             target_user_id=user_id,
             action="pii.reveal",
             resource_key="admin.employees.reveal_pii",
             details_json=json.dumps({"field": field}),
-            ip_address=(request.client.host if request.client else None),
-        ),
+            ip_address=ip,
+        )
     )
-
-    value: Optional[str] = None
-    if profile is not None:
-        if field == "phone":
-            value = decrypt_pii(profile.phone_enc)
-        elif field == "legal_name":
-            value = decrypt_pii(profile.legal_name_enc)
-        elif field == "emergency_contact_name":
-            value = decrypt_pii(profile.emergency_contact_name_enc)
-        elif field == "emergency_contact_phone":
-            value = decrypt_pii(profile.emergency_contact_phone_enc)
-        elif field == "address":
-            parts = _decode_address(profile.address_enc)
-            if parts:
-                value = ", ".join(
-                    p for p in (
-                        parts.get("street"),
-                        parts.get("city"),
-                        parts.get("state"),
-                        parts.get("zip"),
-                    ) if p
-                )
     session.commit()
 
+    # Phase 2: attempt decrypt. Any failure writes a SECOND audit row
+    # ("pii.reveal_failed") and surfaces a sanitized error to the user —
+    # never a 500 with Fernet internals.
+    value: Optional[str] = None
+    decrypt_failed = False
+    if profile is not None:
+        try:
+            if field == "phone":
+                value = _safe_decrypt(profile.phone_enc)
+            elif field == "legal_name":
+                value = _safe_decrypt(profile.legal_name_enc)
+            elif field == "emergency_contact_name":
+                value = _safe_decrypt(profile.emergency_contact_name_enc)
+            elif field == "emergency_contact_phone":
+                value = _safe_decrypt(profile.emergency_contact_phone_enc)
+            elif field == "address":
+                parts = _decode_address(profile.address_enc)
+                if parts:
+                    value = ", ".join(
+                        p for p in (
+                            parts.get("street"),
+                            parts.get("city"),
+                            parts.get("state"),
+                            parts.get("zip"),
+                        ) if p
+                    )
+        except PIIDecryptError:
+            decrypt_failed = True
+            session.add(
+                AuditLog(
+                    actor_user_id=current.id,
+                    target_user_id=user_id,
+                    action="pii.reveal_failed",
+                    resource_key="admin.employees.reveal_pii",
+                    details_json=json.dumps(
+                        {"field": field, "reason": "invalid_token"}
+                    ),
+                    ip_address=ip,
+                )
+            )
+            session.commit()
+
     profile_for_template = profile or EmployeeProfile(user_id=user_id)
+    ctx = _detail_context(
+        request, session, current, employee, profile_for_template
+    )
+    ctx.update({
+        "reveal_field": field,
+        "reveal_value": None if decrypt_failed else (value or "(empty)"),
+        "reveal_error": field if decrypt_failed else None,
+    })
     return templates.TemplateResponse(
-        request,
-        "team/admin/employee_detail.html",
-        {
-            "request": request,
-            "title": f"Employee · {employee.username}",
-            "current_user": current,
-            "employee": employee,
-            "profile": profile_for_template,
-            "roles": ROLES,
-            "reveal_field": field,
-            "reveal_value": value or "(empty)",
-            "flash": None,
-            "csrf_token": issue_token(request),
-        },
+        request, "team/admin/employee_detail.html", ctx
     )
 
 
@@ -232,7 +294,7 @@ async def admin_employee_profile_update(
     clockify_user_id: str = Form(default=""),
     session: Session = Depends(get_session),
 ):
-    denial, current = _admin_gate(request, session, "admin.employees.view")
+    denial, current = _admin_gate(request, session, "admin.employees.edit")
     if denial:
         return denial
     employee = session.get(User, user_id)
@@ -297,7 +359,7 @@ async def admin_employee_profile_update(
                 actor_user_id=current.id,
                 target_user_id=user_id,
                 action="admin.profile_update",
-                resource_key="admin.employees.view",
+                resource_key="admin.employees.edit",
                 details_json=json.dumps({"fields": changed}),
                 ip_address=(request.client.host if request.client else None),
             ),
