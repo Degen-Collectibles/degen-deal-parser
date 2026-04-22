@@ -103,43 +103,112 @@
         width: 14px; height: 14px; border-radius: 3px;
         border: 1px solid var(--lx-br);
     }
+    /* Per-week roster controls */
+    .sch-roster-bar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+        padding: 10px 12px;
+        border: 1px dashed var(--lx-br);
+        border-radius: 10px;
+        margin-bottom: 12px;
+        font-size: 13px;
+    }
+    .sch-roster-bar select {
+        background: var(--lx-s1);
+        color: inherit;
+        border: 1px solid var(--lx-br);
+        border-radius: 6px;
+        padding: 6px 8px;
+        font-size: 13px;
+        min-width: 220px;
+    }
+    .sch-roster-bar form { display: inline-flex; gap: 6px; align-items: center; margin: 0; }
+    .sch-remove-btn {
+        background: transparent;
+        border: 1px solid var(--lx-br);
+        color: #fca5a5;
+        border-radius: 999px;
+        width: 22px; height: 22px;
+        line-height: 20px;
+        padding: 0;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        margin-left: 8px;
+        opacity: 0.7;
+    }
+    .sch-remove-btn:hover { opacity: 1; background: rgba(248, 113, 113, 0.12); }
+    .sch-name-inner { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
 </style>
 {% endblock %}
 
 {% block content %}
 {% if flash %}<div class="ta-flash success">{{ flash }}</div>{% endif %}
 
-<form method="post" action="/team/admin/schedule">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
-    <input type="hidden" name="week" value="{{ week_start_iso }}"/>
-
-    <div class="sch-toolbar">
-        <div class="sch-week-btns">
-            <a class="ta-btn" href="/team/admin/schedule?week={{ prev_week }}">← Prev</a>
-            <span class="sch-wk-label">
-                Week of {{ week_start.strftime('%b') }} {{ week_start.day }}, {{ week_start.year }}
-                {% if is_current_week %}<span style="color:#86efac; font-weight:500; font-size:12px; margin-left:6px;">· this week</span>{% endif %}
-            </span>
-            <a class="ta-btn" href="/team/admin/schedule?week={{ next_week }}">Next →</a>
-            {% if not is_current_week %}
-            <a class="ta-btn" href="/team/admin/schedule?week={{ this_week }}" style="margin-left:10px;">Jump to this week</a>
-            {% endif %}
-        </div>
-
-        {% if can_edit %}
-        <button class="ta-btn" type="submit" style="background:#3b82f6; color:white; border-color:#3b82f6; font-weight:600;">
-            Save schedule
-        </button>
-        {% else %}
-        <span style="font-size:12px; color:var(--lx-muted);">View-only — you do not have edit permissions.</span>
+<div class="sch-toolbar">
+    <div class="sch-week-btns">
+        <a class="ta-btn" href="/team/admin/schedule?week={{ prev_week }}">← Prev</a>
+        <span class="sch-wk-label">
+            Week of {{ week_start.strftime('%b') }} {{ week_start.day }}, {{ week_start.year }}
+            {% if is_current_week %}<span style="color:#86efac; font-weight:500; font-size:12px; margin-left:6px;">· this week</span>{% endif %}
+        </span>
+        <a class="ta-btn" href="/team/admin/schedule?week={{ next_week }}">Next →</a>
+        {% if not is_current_week %}
+        <a class="ta-btn" href="/team/admin/schedule?week={{ this_week }}" style="margin-left:10px;">Jump to this week</a>
         {% endif %}
     </div>
 
-    <p style="font-size:12px; color:var(--lx-muted); margin:-4px 0 14px; max-width:820px;">
-        Type a shift time like <code style="background:var(--lx-s2); padding:1px 5px; border-radius:4px;">10:30 AM - 6:30 PM</code> in any cell.
-        Special words color themselves: <strong>OFF</strong>, <strong>SHOW</strong>, <strong>REQUEST</strong>, <strong>Stream</strong>, <strong>IF NEEDED</strong>, <strong>ALL</strong>.
-        The top "location" row is the header you see when the team works a show (e.g. <em>East Bay Santa Clara</em>).
-    </p>
+    {% if not can_edit %}
+    <span style="font-size:12px; color:var(--lx-muted);">View-only — you do not have edit permissions.</span>
+    {% endif %}
+</div>
+
+<p style="font-size:12px; color:var(--lx-muted); margin:-4px 0 14px; max-width:820px;">
+    Add employees to this week one at a time using the roster below, then type shift times like
+    <code style="background:var(--lx-s2); padding:1px 5px; border-radius:4px;">10:30 AM - 6:30 PM</code> into the cells.
+    Special words color themselves: <strong>OFF</strong>, <strong>SHOW</strong>, <strong>REQUEST</strong>, <strong>Stream</strong>, <strong>IF NEEDED</strong>, <strong>ALL</strong>.
+    The top "location" row is the header you see when the team works a show (e.g. <em>East Bay Santa Clara</em>).
+</p>
+
+{% if can_edit %}
+<div class="sch-roster-bar">
+    <strong style="margin-right:4px;">Roster for this week:</strong>
+    <form method="post" action="/team/admin/schedule/roster/add">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
+        <input type="hidden" name="week" value="{{ week_start_iso }}"/>
+        <select name="user_id" required>
+            <option value="">Add employee…</option>
+            {% for u in addable_users %}
+            <option value="{{ u.id }}">
+                {{ u.display_name or u.username }}{% if not u.is_active and (u.password_hash or '') == '' %} · draft{% endif %}
+            </option>
+            {% endfor %}
+        </select>
+        <button class="ta-btn" type="submit" style="background:#3b82f6; color:white; border-color:#3b82f6;">Add</button>
+    </form>
+    {% if prev_roster_count %}
+    <form method="post" action="/team/admin/schedule/roster/copy-previous">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
+        <input type="hidden" name="week" value="{{ week_start_iso }}"/>
+        <button class="ta-btn" type="submit" title="Copy the {{ prev_roster_count }} employee(s) from last week onto this week">
+            Copy last week ({{ prev_roster_count }})
+        </button>
+    </form>
+    {% endif %}
+    <span style="font-size:12px; color:var(--lx-muted); margin-left:auto;">
+        {{ users|length }} on this week
+    </span>
+</div>
+{% endif %}
+
+<form method="post" action="/team/admin/schedule">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
+    <input type="hidden" name="week" value="{{ week_start_iso }}"/>
 
     <div class="ta-card sch-wrap" style="padding:10px;">
         <table class="sch-table">
@@ -175,7 +244,22 @@
             <tbody>
                 {% for u in users %}
                 <tr>
-                    <td class="sch-name-col">{{ u.display_name or u.username }}</td>
+                    <td class="sch-name-col">
+                        <div class="sch-name-inner">
+                            <span>{{ u.display_name or u.username }}</span>
+                            {# Render the remove button OUTSIDE the save-form via form attribute
+                               so clicking it posts only to /roster/remove. We close the save form
+                               after the table, so inside the tbody this is still nested — that's
+                               illegal HTML, so instead we use a button that points back to a
+                               hidden form further down using the `form` attribute. #}
+                            {% if can_edit %}
+                            <button class="sch-remove-btn"
+                                    type="submit"
+                                    form="sch-remove-{{ u.id }}"
+                                    title="Remove {{ u.display_name or u.username }} from this week">×</button>
+                            {% endif %}
+                        </div>
+                    </td>
                     {% for d in week_days %}
                     {% set entry = entry_map.get((u.id, d.isoformat())) %}
                     {% set kind = (entry.kind if entry else 'blank') %}
@@ -196,12 +280,20 @@
                 {% endfor %}
                 {% if not users %}
                 <tr><td colspan="{{ week_days|length + 1 }}" style="padding:24px; text-align:center; color:var(--lx-muted);">
-                    No active employees to schedule yet. <a href="/team/admin/employees/new" style="color:#60a5fa;">Add someone →</a>
+                    Nobody on this week yet. Use the <strong>Add employee</strong> picker above to build this week's roster.
                 </td></tr>
                 {% endif %}
             </tbody>
         </table>
     </div>
+
+    {% if can_edit %}
+    <div style="margin-top:14px; display:flex; justify-content:flex-end;">
+        <button class="ta-btn" type="submit" style="background:#3b82f6; color:white; border-color:#3b82f6; font-weight:600;">
+            Save schedule
+        </button>
+    </div>
+    {% endif %}
 
     <div class="sch-legend">
         <span class="sch-legend-chip"><span class="sch-legend-sw" style="background:#86efac;"></span> Scheduled shift</span>
@@ -211,4 +303,18 @@
         <span class="sch-legend-chip"><span class="sch-legend-sw" style="background:#bbf7d0;"></span> Stream / IF NEEDED</span>
     </div>
 </form>
+
+{# Hidden per-row remove forms. The "×" buttons inside the table use the
+   form="sch-remove-{id}" attribute so they submit here instead of the
+   outer save form. Keeps the markup HTML5-valid (no nested forms) while
+   still giving us a one-click remove per row. #}
+{% if can_edit %}
+{% for u in users %}
+<form id="sch-remove-{{ u.id }}" method="post" action="/team/admin/schedule/roster/remove" style="display:none;">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
+    <input type="hidden" name="week" value="{{ week_start_iso }}"/>
+    <input type="hidden" name="user_id" value="{{ u.id }}"/>
+</form>
+{% endfor %}
+{% endif %}
 {% endblock %}

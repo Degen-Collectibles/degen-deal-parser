@@ -878,3 +878,30 @@ class ScheduleDayNote(SQLModel, table=True):
     updated_by_user_id: Optional[int] = Field(default=None, foreign_key="user.id")
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+
+
+class ScheduleRosterMember(SQLModel, table=True):
+    """Per-week schedule roster.
+
+    By default the admin schedule grid shows NO employees — admins add
+    people to each week individually. Membership is tracked per
+    Monday-starting week so rosters can differ week to week (drafts /
+    show-only hires / temps don't appear on weeks they weren't booked).
+
+    Rows in this table are additive: removing someone from the roster
+    does NOT delete their historical shifts, it just hides them from
+    that week's editor. Shifts already saved for that week will still
+    re-attach them to the grid so we never silently drop data.
+    """
+    __tablename__ = "schedule_roster_member"
+    __table_args__ = (
+        UniqueConstraint(
+            "week_start", "user_id", name="uq_schedule_roster_week_user"
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    week_start: date = Field(index=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    added_by_user_id: int = Field(foreign_key="user.id")
+    created_at: datetime = Field(default_factory=utcnow)

@@ -599,13 +599,33 @@ class AdminScheduleSaveTests(unittest.TestCase, _W47Harness):
         self.session.commit()
         return rows
 
+    def _roster(self, emps, week_start: date, *, admin_id: int = 500) -> None:
+        """Put the given employees on the roster for the given week.
+
+        The grid is empty by default now — admins add people per week —
+        so tests that exercise the save flow need to seed the roster
+        before posting cell edits.
+        """
+        from app.models import ScheduleRosterMember
+
+        for u in emps:
+            self.session.add(
+                ScheduleRosterMember(
+                    week_start=week_start,
+                    user_id=u.id,
+                    added_by_user_id=admin_id,
+                )
+            )
+        self.session.commit()
+
     def _monday_of_this_week(self) -> date:
         today = date.today()
         return today - timedelta(days=today.weekday())
 
     def test_admin_schedule_page_renders_grid(self):
-        self._login_as("admin")
+        admin = self._login_as("admin")
         emps = self._active_employees()
+        self._roster(emps, self._monday_of_this_week(), admin_id=admin.id)
         r = self.client.get("/team/admin/schedule")
         self.assertEqual(r.status_code, 200)
         for e in emps:
@@ -614,6 +634,204 @@ class AdminScheduleSaveTests(unittest.TestCase, _W47Harness):
         self.assertIn("Prev", r.text)
         self.assertIn("Next", r.text)
 
+    def test_admin_schedule_empty_by_default(self):
+        """A fresh week shows NO employees on the grid rows.
+
+        Admins opt people in per week via the roster picker; we should
+        not pre-fill with every active employee. The employees can
+        still appear in the "Add employee" picker options — that's
+        correct — but the grid body itself must be empty.
+        """
+        self._login_as("admin")
+        self._active_employees()
+        r = self.client.get("/team/admin/schedule")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("Nobody on this week yet", r.text)
+        self.assertIn("Add employee", r.text)
+        # No employee rows in the body — the sch-name-col cells should
+        # not exist yet.
+        self.assertNotIn('class="sch-name-col"', r.text)
+        self.assertIn("0 on this week", r.text)
+
+    def test_roster_add_lists_employee(self):
+        admin = self._login_as("admin")
+        emps = self._active_employees()
+        monday = self._monday_of_this_week()
+        r = self.client.post(
+            "/team/admin/schedule/roster/add",
+            data={
+                "csrf_token": self._csrf(),
+                "week": monday.isoformat(),
+                "user_id": str(emps[0].id),
+            },
+            follow_redirects=False,
+        )
+        self.assertIn(r.status_code, (302, 303))
+
+        page = self.client.get(f"/team/admin/schedule?week={monday.isoformat()}")
+        self.assertEqual(page.status_code, 200)
+        # David gets a grid row (sch-name-inner wraps the name cell).
+        self.assertIn(">David<", page.text)
+        self.assertIn("sch-name-inner", page.text)
+        # Roster count reflects 1 on this week.
+        self.assertIn("1 on this week", page.text)
+        # Emily and Chris still addable in the picker, but no Emily row.
+        self.assertNotIn("sch-remove-{}".format(emps[1].id), page.text)
+        self.assertNotIn("sch-remove-{}".format(emps[2].id), page.text)
+
+    def test_roster_add_rejects_terminated_user(self):
+        from app.models import User
+
+        admin = self._login_as("admin")
+        u = User(
+            id=9999, username="exEmployee", password_hash="realhash",
+            password_salt="s", display_name="Gone", role="employee",
+            is_active=False,
+        )
+        self.session.add(u)
+        self.session.commit()
+        monday = self._monday_of_this_week()
+        r = self.client.post(
+            "/team/admin/schedule/roster/add",
+            data={
+                "csrf_token": self._csrf(),
+                "week": monday.isoformat(),
+                "user_id": "9999",
+            },
+            follow_redirects=False,
+        )
+        self.assertIn(r.status_code, (302, 303))
+        # Follow to confirm they are NOT on the grid.
+        page = self.client.get(f"/team/admin/schedule?week={monday.isoformat()}")
+        self.assertNotIn("Gone", page.text)
+
+    def test_roster_add_allows_draft_user(self):
+        """Draft employees (not yet onboarded) should be schedulable.
+
+        They can't log in yet, but the admin often wants to book them
+        before sending the invite.
+        """
+        from app.models import User
+
+        admin = self._login_as("admin")
+        draft = User(
+            id=777, username="newhire", password_hash="",  # draft
+            password_salt="", display_name="Newbie", role="employee",
+            is_active=False,
+        )
+        self.session.add(draft)
+        self.session.commit()
+        monday = self._monday_of_this_week()
+        r = self.client.post(
+            "/team/admin/schedule/roster/add",
+            data={
+                "csrf_token": self._csrf(),
+                "week": monday.isoformat(),
+                "user_id": "777",
+            },
+            follow_redirects=False,
+        )
+        self.assertIn(r.status_code, (302, 303))
+        page = self.client.get(f"/team/admin/schedule?week={monday.isoformat()}")
+        self.assertIn("Newbie", page.text)
+
+    def test_roster_remove_drops_user_and_clears_week_shifts(self):
+        from app.models import ShiftEntry, ScheduleRosterMember, classify_shift_label
+
+        admin = self._login_as("admin")
+        emps = self._active_employees()
+        monday = self._monday_of_this_week()
+        self._roster(emps, monday, admin_id=admin.id)
+
+        # Give David (emps[0]) a shift this week; we expect removal to
+        # clear it so he actually disappears from the grid.
+        self.session.add(
+            ShiftEntry(
+                user_id=emps[0].id,
+                shift_date=monday,
+                label="10:30 AM - 6:30 PM",
+                kind=classify_shift_label("10:30 AM - 6:30 PM"),
+                created_by_user_id=admin.id,
+            )
+        )
+        self.session.commit()
+
+        r = self.client.post(
+            "/team/admin/schedule/roster/remove",
+            data={
+                "csrf_token": self._csrf(),
+                "week": monday.isoformat(),
+                "user_id": str(emps[0].id),
+            },
+            follow_redirects=False,
+        )
+        self.assertIn(r.status_code, (302, 303))
+
+        self.session.expire_all()
+        remaining_roster = list(
+            self.session.exec(
+                select(ScheduleRosterMember).where(
+                    ScheduleRosterMember.week_start == monday,
+                    ScheduleRosterMember.user_id == emps[0].id,
+                )
+            ).all()
+        )
+        self.assertEqual(remaining_roster, [], "roster row should be deleted")
+        remaining_shifts = list(
+            self.session.exec(
+                select(ShiftEntry).where(ShiftEntry.user_id == emps[0].id)
+            ).all()
+        )
+        self.assertEqual(
+            remaining_shifts, [],
+            "removing from the week should clear that week's shifts"
+        )
+
+        # Other employees still on the grid; David does not have a row
+        # anymore (no remove-form for him).
+        page = self.client.get(f"/team/admin/schedule?week={monday.isoformat()}")
+        self.assertNotIn(f'id="sch-remove-{emps[0].id}"', page.text)
+        self.assertIn(f'id="sch-remove-{emps[1].id}"', page.text)
+        self.assertIn(f'id="sch-remove-{emps[2].id}"', page.text)
+
+    def test_roster_copy_previous_carries_forward(self):
+        from app.models import ScheduleRosterMember
+
+        admin = self._login_as("admin")
+        emps = self._active_employees()
+        monday = self._monday_of_this_week()
+        prev_monday = monday - timedelta(days=7)
+
+        # Previous week has David + Chris on the roster.
+        self._roster([emps[0], emps[2]], prev_monday, admin_id=admin.id)
+
+        # Nothing on current week yet.
+        r = self.client.post(
+            "/team/admin/schedule/roster/copy-previous",
+            data={
+                "csrf_token": self._csrf(),
+                "week": monday.isoformat(),
+            },
+            follow_redirects=False,
+        )
+        self.assertIn(r.status_code, (302, 303))
+
+        self.session.expire_all()
+        now_on = {
+            r.user_id
+            for r in self.session.exec(
+                select(ScheduleRosterMember).where(
+                    ScheduleRosterMember.week_start == monday
+                )
+            ).all()
+        }
+        self.assertEqual(now_on, {emps[0].id, emps[2].id})
+
+        page = self.client.get(f"/team/admin/schedule?week={monday.isoformat()}")
+        self.assertIn(f'id="sch-remove-{emps[0].id}"', page.text)  # David
+        self.assertIn(f'id="sch-remove-{emps[2].id}"', page.text)  # Chris
+        self.assertNotIn(f'id="sch-remove-{emps[1].id}"', page.text)  # Emily not copied
+
     def test_save_creates_updates_and_clears_cells(self):
         from app.models import ShiftEntry, classify_shift_label
 
@@ -621,6 +839,7 @@ class AdminScheduleSaveTests(unittest.TestCase, _W47Harness):
         emps = self._active_employees()
         monday = self._monday_of_this_week()
         friday = monday + timedelta(days=4)
+        self._roster(emps, monday, admin_id=admin.id)
 
         # 1) First save: add two cells.
         def _build_cell_key(uid, d):
@@ -665,10 +884,11 @@ class AdminScheduleSaveTests(unittest.TestCase, _W47Harness):
     def test_save_handles_day_note_location(self):
         from app.models import ScheduleDayNote
 
-        self._login_as("admin")
+        admin = self._login_as("admin")
         emps = self._active_employees()
         monday = self._monday_of_this_week()
         saturday = monday + timedelta(days=5)
+        self._roster(emps, monday, admin_id=admin.id)
 
         data = {"csrf_token": self._csrf(), "week": monday.isoformat()}
         data[f"dayloc__{saturday.isoformat()}"] = "East Bay Santa Clara"

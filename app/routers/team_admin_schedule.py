@@ -28,6 +28,7 @@ from ..db import get_session
 from ..models import (
     AuditLog,
     ScheduleDayNote,
+    ScheduleRosterMember,
     SHIFT_KIND_BLANK,
     ShiftEntry,
     User,
@@ -77,24 +78,36 @@ def _grid_context(
     """Collect all the data the schedule grid template needs.
 
     Shared between the admin view (editable) and the employee view
-    (read-only) so the two render identically. Only active employees
-    are included — terminated / drafted employees are hidden from the
-    grid. We sort by display_name so it reads like the screenshot.
+    (read-only) so the two render identically.
+
+    The list of people on the grid is a union of:
+      1. The per-week roster (`ScheduleRosterMember`) — admins opt people
+         in explicitly for each week.
+      2. Anyone who already has a `ShiftEntry` for this week — so a week
+         with data can never "hide" that data just because we cleared
+         the roster. This also preserves backward compat for existing
+         schedules created before the roster existed.
+
+    Terminated users (is_active=False AND password_hash set) are still
+    excluded; drafts (is_active=False AND password_hash empty) are
+    eligible to be rostered so a new hire can be put on the schedule
+    before they finish onboarding.
     """
     week_days = _week_dates(week_start)
     first_day = week_days[0]
     last_day = week_days[-1]
 
-    # Active, onboarded employees only. Drafts (is_active=False) don't
-    # belong on a published grid yet.
-    users: list[User] = list(
+    # Roster membership for this week.
+    roster_user_ids: set[int] = set(
         session.exec(
-            select(User)
-            .where(User.is_active == True)  # noqa: E712
-            .order_by(User.display_name, User.username)
+            select(ScheduleRosterMember.user_id).where(
+                ScheduleRosterMember.week_start == week_start
+            )
         ).all()
     )
 
+    # Load shift entries first so we can surface anyone with saved data,
+    # even if they were removed from the roster.
     entries = list(
         session.exec(
             select(ShiftEntry).where(
@@ -103,10 +116,36 @@ def _grid_context(
             )
         ).all()
     )
-    # (user_id, iso_date) -> ShiftEntry
     entry_map: dict[tuple[int, str], ShiftEntry] = {
         (e.user_id, e.shift_date.isoformat()): e for e in entries
     }
+    shifted_user_ids = {e.user_id for e in entries}
+
+    grid_user_ids = roster_user_ids | shifted_user_ids
+
+    users: list[User] = []
+    if grid_user_ids:
+        users = list(
+            session.exec(
+                select(User)
+                .where(User.id.in_(grid_user_ids))  # type: ignore[attr-defined]
+                .where(_not_terminated_clause())
+                .order_by(User.display_name, User.username)
+            ).all()
+        )
+
+    # For the "add employee" picker: all schedulable users (active OR
+    # draft) who are NOT already on this week's grid. Sorted like the
+    # rest of the portal for consistency.
+    schedulable: list[User] = list(
+        session.exec(
+            select(User)
+            .where(_schedulable_clause())
+            .order_by(User.display_name, User.username)
+        ).all()
+    )
+    already_on_grid = {u.id for u in users}
+    addable_users = [u for u in schedulable if u.id not in already_on_grid]
 
     day_notes = list(
         session.exec(
@@ -120,9 +159,21 @@ def _grid_context(
         n.day_date.isoformat(): n for n in day_notes
     }
 
-    prev_week = (week_start - timedelta(days=7)).isoformat()
+    prev_week_date = week_start - timedelta(days=7)
+    prev_week = prev_week_date.isoformat()
     next_week = (week_start + timedelta(days=7)).isoformat()
     this_week = _monday_of(date.today()).isoformat()
+
+    # Is there a previous-week roster we could copy in one click?
+    prev_roster_count = len(
+        list(
+            session.exec(
+                select(ScheduleRosterMember.user_id).where(
+                    ScheduleRosterMember.week_start == prev_week_date
+                )
+            ).all()
+        )
+    )
 
     return {
         "week_start": week_start,
@@ -131,12 +182,36 @@ def _grid_context(
         "users": users,
         "entry_map": entry_map,
         "day_note_map": day_note_map,
+        "roster_user_ids": roster_user_ids,
+        "addable_users": addable_users,
         "prev_week": prev_week,
         "next_week": next_week,
         "this_week": this_week,
+        "prev_roster_count": prev_roster_count,
         "is_current_week": week_start == _monday_of(date.today()),
         "flash": flash,
     }
+
+
+def _schedulable_clause():
+    """Users eligible to appear in the 'add to schedule' picker.
+
+    Active employees, plus draft employees (is_active=False AND empty
+    password_hash) so a new hire can be booked on the schedule before
+    they've finished onboarding. Terminated employees (is_active=False
+    AND password_hash set) are excluded.
+    """
+    from sqlalchemy import or_
+
+    return or_(
+        User.is_active == True,  # noqa: E712
+        User.password_hash == "",
+    )
+
+
+def _not_terminated_clause():
+    """Mirror of `_schedulable_clause` for filtering grid users."""
+    return _schedulable_clause()
 
 
 @router.get("/team/admin/schedule", response_class=HTMLResponse)
@@ -193,13 +268,17 @@ async def admin_schedule_save(
     week_days = _week_dates(week_start)
     first_day, last_day = week_days[0], week_days[-1]
 
-    users = list(
+    # Only touch cells for users who are actually on this week's grid
+    # — the roster plus anyone with an existing shift that week. We
+    # never accept cell edits for arbitrary users via raw form keys;
+    # a savvy client could otherwise write to employees they shouldn't.
+    roster_user_ids: set[int] = set(
         session.exec(
-            select(User)
-            .where(User.is_active == True)  # noqa: E712
+            select(ScheduleRosterMember.user_id).where(
+                ScheduleRosterMember.week_start == week_start
+            )
         ).all()
     )
-    user_ids = {u.id for u in users if u.id is not None}
 
     existing_entries = list(
         session.exec(
@@ -212,6 +291,8 @@ async def admin_schedule_save(
     entry_map: dict[tuple[int, str], ShiftEntry] = {
         (e.user_id, e.shift_date.isoformat()): e for e in existing_entries
     }
+    shifted_user_ids = {e.user_id for e in existing_entries}
+    user_ids = roster_user_ids | shifted_user_ids
 
     now = utcnow()
     touched: int = 0
@@ -331,4 +412,247 @@ async def admin_schedule_save(
     return RedirectResponse(
         f"/team/admin/schedule?week={week_start.isoformat()}&flash={quote_plus(flash)}",
         status_code=303,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Per-week roster management
+#
+# The grid no longer auto-populates with every active employee. Admins add
+# people to each week explicitly. These endpoints cover the common ops:
+#   - add one employee to this week
+#   - remove one employee from this week (optionally clearing their saved
+#     shifts for that week)
+#   - copy the entire previous week's roster forward in one click
+# ---------------------------------------------------------------------------
+
+
+def _redirect_back(week_start: date, flash: str) -> RedirectResponse:
+    from urllib.parse import quote_plus
+    return RedirectResponse(
+        f"/team/admin/schedule?week={week_start.isoformat()}&flash={quote_plus(flash)}",
+        status_code=303,
+    )
+
+
+@router.post(
+    "/team/admin/schedule/roster/add",
+    dependencies=[Depends(require_csrf)],
+)
+async def admin_schedule_roster_add(
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    denial, current = _admin_gate(request, session, "admin.schedule.edit")
+    if denial:
+        return denial
+    form = await request.form()
+    week_start = _parse_week_start(form.get("week") or "")
+    try:
+        user_id = int(form.get("user_id") or 0)
+    except (TypeError, ValueError):
+        user_id = 0
+
+    if user_id <= 0:
+        return _redirect_back(week_start, "Pick an employee to add.")
+
+    target = session.get(User, user_id)
+    if target is None:
+        return _redirect_back(week_start, "Employee not found.")
+    # Schedulable = active OR draft. Terminated employees can't be scheduled.
+    is_draft = (not target.is_active) and (target.password_hash or "") == ""
+    if not (target.is_active or is_draft):
+        return _redirect_back(week_start, "That employee is not schedulable.")
+
+    existing = session.exec(
+        select(ScheduleRosterMember).where(
+            ScheduleRosterMember.week_start == week_start,
+            ScheduleRosterMember.user_id == user_id,
+        )
+    ).first()
+    if existing is not None:
+        return _redirect_back(
+            week_start, f"{target.display_name or target.username} is already on this week."
+        )
+
+    session.add(
+        ScheduleRosterMember(
+            week_start=week_start,
+            user_id=user_id,
+            added_by_user_id=current.id,
+            created_at=utcnow(),
+        )
+    )
+    session.add(
+        AuditLog(
+            actor_user_id=current.id,
+            action="admin.schedule.roster_add",
+            resource_key="admin.schedule.edit",
+            details_json=json.dumps(
+                {
+                    "week_start": week_start.isoformat(),
+                    "user_id": user_id,
+                }
+            ),
+            ip_address=(request.client.host if request.client else None),
+        )
+    )
+    session.commit()
+    return _redirect_back(
+        week_start, f"Added {target.display_name or target.username} to this week."
+    )
+
+
+@router.post(
+    "/team/admin/schedule/roster/remove",
+    dependencies=[Depends(require_csrf)],
+)
+async def admin_schedule_roster_remove(
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    denial, current = _admin_gate(request, session, "admin.schedule.edit")
+    if denial:
+        return denial
+    form = await request.form()
+    week_start = _parse_week_start(form.get("week") or "")
+    try:
+        user_id = int(form.get("user_id") or 0)
+    except (TypeError, ValueError):
+        user_id = 0
+
+    if user_id <= 0:
+        return _redirect_back(week_start, "Missing employee.")
+
+    target = session.get(User, user_id)
+
+    membership = session.exec(
+        select(ScheduleRosterMember).where(
+            ScheduleRosterMember.week_start == week_start,
+            ScheduleRosterMember.user_id == user_id,
+        )
+    ).first()
+    if membership is not None:
+        session.delete(membership)
+
+    # Also clear their saved shifts for this week so they actually drop
+    # off the grid (otherwise they'd re-appear via the "has shifts this
+    # week" union). We DO want this to be deliberate — it's the whole
+    # point of removing someone from a week.
+    week_days = _week_dates(week_start)
+    cleared = 0
+    entries = list(
+        session.exec(
+            select(ShiftEntry).where(
+                ShiftEntry.user_id == user_id,
+                ShiftEntry.shift_date >= week_days[0],
+                ShiftEntry.shift_date <= week_days[-1],
+            )
+        ).all()
+    )
+    for e in entries:
+        session.delete(e)
+        cleared += 1
+
+    if membership is None and cleared == 0:
+        return _redirect_back(week_start, "Not on this week's roster.")
+
+    session.add(
+        AuditLog(
+            actor_user_id=current.id,
+            action="admin.schedule.roster_remove",
+            resource_key="admin.schedule.edit",
+            details_json=json.dumps(
+                {
+                    "week_start": week_start.isoformat(),
+                    "user_id": user_id,
+                    "cells_cleared": cleared,
+                }
+            ),
+            ip_address=(request.client.host if request.client else None),
+        )
+    )
+    session.commit()
+    name = (target.display_name or target.username) if target else f"#{user_id}"
+    tail = f" ({cleared} shift{'s' if cleared != 1 else ''} cleared)" if cleared else ""
+    return _redirect_back(week_start, f"Removed {name} from this week{tail}.")
+
+
+@router.post(
+    "/team/admin/schedule/roster/copy-previous",
+    dependencies=[Depends(require_csrf)],
+)
+async def admin_schedule_roster_copy_previous(
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    denial, current = _admin_gate(request, session, "admin.schedule.edit")
+    if denial:
+        return denial
+    form = await request.form()
+    week_start = _parse_week_start(form.get("week") or "")
+    prev_week = week_start - timedelta(days=7)
+
+    existing_ids: set[int] = set(
+        session.exec(
+            select(ScheduleRosterMember.user_id).where(
+                ScheduleRosterMember.week_start == week_start
+            )
+        ).all()
+    )
+    prev_ids: list[int] = list(
+        session.exec(
+            select(ScheduleRosterMember.user_id).where(
+                ScheduleRosterMember.week_start == prev_week
+            )
+        ).all()
+    )
+    if not prev_ids:
+        return _redirect_back(week_start, "No roster on the previous week to copy.")
+
+    added = 0
+    now = utcnow()
+    for uid in prev_ids:
+        if uid in existing_ids:
+            continue
+        # Skip users who got terminated since last week. Keep drafts in
+        # because they're still schedulable.
+        target = session.get(User, uid)
+        if target is None:
+            continue
+        is_draft = (not target.is_active) and (target.password_hash or "") == ""
+        if not (target.is_active or is_draft):
+            continue
+        session.add(
+            ScheduleRosterMember(
+                week_start=week_start,
+                user_id=uid,
+                added_by_user_id=current.id,
+                created_at=now,
+            )
+        )
+        added += 1
+
+    if added == 0:
+        return _redirect_back(week_start, "Everyone from last week is already on this week.")
+
+    session.add(
+        AuditLog(
+            actor_user_id=current.id,
+            action="admin.schedule.roster_copy_previous",
+            resource_key="admin.schedule.edit",
+            details_json=json.dumps(
+                {
+                    "week_start": week_start.isoformat(),
+                    "from_week": prev_week.isoformat(),
+                    "users_added": added,
+                }
+            ),
+            ip_address=(request.client.host if request.client else None),
+        )
+    )
+    session.commit()
+    return _redirect_back(
+        week_start,
+        f"Copied {added} employee{'s' if added != 1 else ''} from last week.",
     )
