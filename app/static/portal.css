@@ -372,6 +372,66 @@ a { color: inherit; text-decoration: none; }
 }
 .pt-row.cols-3 { grid-template-columns: 2fr 1fr 1fr; }
 
+/* Reusable page-level two-column grid (main + aside). Collapses to a
+   single column on phones so nothing squeezes. Used by /team/profile,
+   /team/supply — anywhere we'd otherwise inline a grid-template-columns.
+   The default ratio is main-heavier (2fr : 1fr); .alt-wide gives the
+   aside a bit more room for tables (1fr : 1.2fr). */
+.pt-two-col {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 16px;
+}
+.pt-two-col.alt-wide { grid-template-columns: 1fr 1.2fr; }
+
+/* Address row — street/city/state/zip inline. Collapses to 1 col on
+   phones, and to 2 cols (city | state+zip) on tiny tablets. */
+.pt-addr-row {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr;
+  gap: 8px;
+}
+
+/* Password input with a tap-to-reveal button baked in. Wrap the
+   `<input>` in `.pt-pw-wrap` and add a `<button class="pt-pw-toggle">`
+   sibling; CSS positions it in the right edge of the field. */
+.pt-pw-wrap {
+  position: relative;
+  display: block;
+}
+.pt-pw-wrap .pt-input,
+.pt-pw-wrap .onb-input { padding-right: 58px; }
+.pt-pw-toggle {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  min-width: 46px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--pt-muted);
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 140ms var(--pt-ease-out), color 140ms var(--pt-ease-out);
+}
+.pt-pw-toggle:hover,
+.pt-pw-toggle:focus-visible {
+  background: var(--pt-surface-raised);
+  color: var(--pt-text);
+  outline: none;
+}
+.pt-pw-toggle[aria-pressed="true"] { color: var(--pt-accent); }
+
 /* =========================================================================
  * Flashes
  * ====================================================================== */
@@ -749,18 +809,275 @@ a { color: inherit; text-decoration: none; }
 }
 
 /* =========================================================================
- * Responsive
+ * Mobile topbar / drawer / bottom nav
+ *
+ * Desktop: hidden. Mobile (<= 860px): sticky topbar with hamburger,
+ * sidebar becomes a slide-in drawer with backdrop, and a bottom nav
+ * floats at the bottom of the viewport for one-tap access to the 5
+ * most common employee routes (Home / Schedule / Eye FAB / Stream /
+ * Profile). Mirrors the ops `linear-*` pattern but namespaced `pt-*`
+ * so the two systems don't cross-contaminate.
  * ====================================================================== */
 
+.pt-mobile-topbar,
+.pt-drawer-backdrop,
+.pt-drawer-close,
+.pt-mobile-bottom-nav {
+  display: none;
+}
+
 @media (max-width: 860px) {
+  /* Single-column layout; main gets room to breathe past the topbar / bottomnav */
   .pt-layout { grid-template-columns: 1fr; }
-  .pt-side { position: static; height: auto; border-right: none; border-bottom: 1px solid var(--pt-border); }
-  .pt-main { padding: 20px; }
+  .pt-main {
+    padding: 16px 16px calc(96px + env(safe-area-inset-bottom, 0px));
+    max-width: 100%;
+  }
   .pt-h1 { font-size: 22px; }
+  .pt-header { margin-bottom: 18px; padding-bottom: 14px; }
 
   .onb-title { font-size: 32px; }
   .onb-lede { font-size: 16px; }
   .onb-row, .onb-row.cols-3 { grid-template-columns: 1fr; }
+
+  /* Collapse page-level two-column + address grids so nothing squishes */
+  .pt-two-col,
+  .pt-two-col.alt-wide { grid-template-columns: 1fr; }
+  .pt-addr-row { grid-template-columns: 1fr; }
+
+  /* Onboarding topbar — don't let the brand + progress crowd each other
+     on narrow phones. Stack brand above the dots on <380px. */
+  .onb-topbar { padding: 18px 16px; gap: 10px; flex-wrap: wrap; }
+  .onb-stage {
+    padding: 16px 18px calc(40px + env(safe-area-inset-bottom, 0px));
+  }
+  .onb-title { line-height: 1.1; }
+  .onb-actions { flex-wrap: wrap; gap: 8px; }
+  .onb-btn { padding: 14px 22px; font-size: 15px; }
+  .onb-btn.ghost { padding: 12px 14px; }
+
+  /* Auth card on phones — fill width, gentle edges */
+  .pt-auth-body { padding: 16px; }
+  .pt-auth-card { padding: 28px 22px 22px; border-radius: 18px; }
+
+  /* Tables on phones — let the supply-list table scroll horizontally
+     instead of breaking layout. */
+  .pt-card .pt-table { font-size: 13px; }
+  .pt-card:has(.pt-table) { overflow-x: auto; }
+
+  /* ===== Mobile topbar — sticky, hamburger + brand ===== */
+  .pt-mobile-topbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    padding: calc(max(12px, env(safe-area-inset-top, 0px) + 8px)) 14px 10px;
+    background: rgba(11, 11, 14, 0.88);
+    backdrop-filter: saturate(160%) blur(14px);
+    -webkit-backdrop-filter: saturate(160%) blur(14px);
+    border-bottom: 1px solid var(--pt-border);
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .pt-hamburger {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 42px;
+    height: 42px;
+    border-radius: 10px;
+    border: 1px solid var(--pt-border);
+    background: rgba(255, 255, 255, 0.02);
+    color: var(--pt-text);
+    cursor: pointer;
+    padding: 0;
+    flex-shrink: 0;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .pt-hamburger:hover,
+  .pt-hamburger:focus-visible {
+    background: var(--pt-surface-raised);
+    border-color: rgba(255, 255, 255, 0.18);
+    outline: none;
+  }
+  .pt-hamburger svg { width: 22px; height: 22px; display: block; }
+
+  .pt-mobile-brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    font-weight: 700;
+    font-size: 14px;
+    letter-spacing: -0.01em;
+    color: var(--pt-text);
+  }
+  .pt-mobile-brand .pt-brand-dot {
+    width: 22px;
+    height: 22px;
+  }
+  .pt-mobile-brand .pt-brand-dot::after { width: 6px; height: 6px; }
+
+  .pt-topbar-spacer { flex: 1; }
+  .pt-topbar-chip {
+    font-size: 11px;
+    padding: 4px 10px;
+    border: 1px solid var(--pt-border);
+    border-radius: 999px;
+    color: var(--pt-muted);
+    text-transform: capitalize;
+  }
+
+  /* ===== Sidebar → off-canvas drawer ===== */
+  .pt-side {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 82vw;
+    max-width: 300px;
+    height: 100vh;
+    padding: calc(max(20px, env(safe-area-inset-top, 0px) + 12px)) 14px 18px;
+    transform: translateX(-100%);
+    transition: transform 240ms var(--pt-ease-spring);
+    z-index: 200;
+    overflow-y: auto;
+    border-right: 1px solid var(--pt-border);
+    background: rgba(13, 13, 16, 0.96);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+  }
+  body.pt-drawer-open .pt-side { transform: translateX(0); }
+  body.pt-drawer-open { overflow: hidden; }
+
+  /* Backdrop */
+  .pt-drawer-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(2px);
+    -webkit-backdrop-filter: blur(2px);
+    z-index: 199;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 220ms ease;
+  }
+  body.pt-drawer-open .pt-drawer-backdrop {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  /* Close ✕ button in the drawer's top-right (mobile only) */
+  .pt-drawer-close {
+    display: inline-flex;
+    position: absolute;
+    top: calc(max(14px, env(safe-area-inset-top, 0px) + 6px));
+    right: 12px;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 34px;
+    border-radius: 8px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--pt-muted);
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .pt-drawer-close:hover,
+  .pt-drawer-close:focus-visible {
+    background: var(--pt-surface-raised);
+    color: var(--pt-text);
+    border-color: var(--pt-border);
+    outline: none;
+  }
+
+  /* ===== Bottom nav (primary actions) ===== */
+  .pt-mobile-bottom-nav {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 2px;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 150;
+    padding: 8px 8px calc(8px + env(safe-area-inset-bottom, 0px));
+    background: rgba(11, 11, 14, 0.9);
+    backdrop-filter: saturate(160%) blur(16px);
+    -webkit-backdrop-filter: saturate(160%) blur(16px);
+    border-top: 1px solid var(--pt-border);
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .pt-mbn-item {
+    flex: 1 1 0;
+    min-width: 0;
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 2px;
+    padding: 6px 4px 4px;
+    color: var(--pt-muted);
+    text-decoration: none;
+    font-size: 10px;
+    letter-spacing: 0.02em;
+    border-radius: 10px;
+    transition: color 140ms var(--pt-ease-out), background 140ms var(--pt-ease-out);
+  }
+  .pt-mbn-item .pt-mbn-icon {
+    width: 24px;
+    height: 24px;
+    stroke: currentColor;
+    stroke-width: 2;
+    fill: none;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .pt-mbn-item.is-active {
+    color: var(--pt-accent);
+  }
+  .pt-mbn-item:hover { color: var(--pt-text); }
+  .pt-mbn-item.is-active:hover { color: var(--pt-accent); }
+
+  /* Center FAB — Degen Eye */
+  .pt-mbn-item-center {
+    align-self: flex-start;
+  }
+  .pt-mbn-fab {
+    position: relative;
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--pt-accent), #c11818);
+    box-shadow: 0 6px 18px -4px var(--pt-accent-glow), 0 0 0 2px #0b0b0e;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-top: -20px;
+    margin-bottom: 2px;
+  }
+  .pt-mbn-fab .pt-mbn-icon {
+    width: 24px;
+    height: 24px;
+    stroke: #fff;
+  }
+  .pt-mbn-item-center .pt-mbn-label { color: var(--pt-accent); font-weight: 700; }
+
+  /* Inside-drawer adjustments */
+  .pt-side .pt-brand { padding-top: 6px; }
+}
+
+/* Keep drawer styles hidden above 860px even if the body.pt-drawer-open
+   class got left behind by e.g. a resize-while-open scenario. */
+@media (min-width: 861px) {
+  body.pt-drawer-open .pt-side { transform: none; }
+  body.pt-drawer-open { overflow: auto; }
 }
 
 /* =========================================================================

@@ -8,7 +8,7 @@
     <link rel="stylesheet" href="https://rsms.me/inter/inter.css">
     <link rel="stylesheet" href="/static/linear.css?v=2026042020">
     <link rel="stylesheet" href="/static/safe-area.css?v=2026042020">
-    <link rel="stylesheet" href="/static/portal.css?v=2026042021">
+    <link rel="stylesheet" href="/static/portal.css?v=2026042025">
 </head>
 <body class="onb-body">
 
@@ -81,9 +81,14 @@
                 </div>
                 <div class="onb-field">
                     <label for="new_password">Password</label>
-                    <input class="onb-input" type="password" name="new_password" id="new_password"
-                           required autocomplete="new-password"
-                           placeholder="At least 12 characters">
+                    <span class="pt-pw-wrap">
+                        <input class="onb-input" type="password" name="new_password" id="new_password"
+                               required autocomplete="new-password"
+                               placeholder="At least 12 characters">
+                        <button type="button" class="pt-pw-toggle"
+                                data-toggle="password" data-target="new_password"
+                                aria-label="Show password" aria-pressed="false">Show</button>
+                    </span>
                     <div class="onb-strength" id="pw-strength" data-score="0">
                         <span></span><span></span><span></span><span></span>
                     </div>
@@ -110,12 +115,12 @@
                 <div class="onb-field">
                     <label for="legal_name">Legal name</label>
                     <input class="onb-input" type="text" name="legal_name" id="legal_name"
-                           autocomplete="name" placeholder="Jane Doe">
+                           autocomplete="name" autocapitalize="words" placeholder="Jane Doe">
                 </div>
                 <div class="onb-field">
                     <label for="preferred_name">What should we call you?</label>
                     <input class="onb-input" type="text" name="preferred_name" id="preferred_name"
-                           autocomplete="nickname" placeholder="Jane">
+                           autocomplete="nickname" autocapitalize="words" placeholder="Jane">
                     <div class="hint">Shows up on your dashboard.</div>
                 </div>
                 <div class="onb-field">
@@ -152,15 +157,20 @@
                 <div class="onb-row cols-3">
                     <div class="onb-field">
                         <label for="address_city">City</label>
-                        <input class="onb-input" type="text" name="address_city" id="address_city" autocomplete="address-level2">
+                        <input class="onb-input" type="text" name="address_city" id="address_city"
+                               autocomplete="address-level2" autocapitalize="words">
                     </div>
                     <div class="onb-field">
                         <label for="address_state">State</label>
-                        <input class="onb-input" type="text" name="address_state" id="address_state" autocomplete="address-level1" maxlength="4">
+                        <input class="onb-input" type="text" name="address_state" id="address_state"
+                               autocomplete="address-level1" maxlength="4"
+                               autocapitalize="characters" style="text-transform:uppercase;">
                     </div>
                     <div class="onb-field">
                         <label for="address_zip">ZIP</label>
-                        <input class="onb-input" type="text" name="address_zip" id="address_zip" autocomplete="postal-code" maxlength="10">
+                        <input class="onb-input" type="text" name="address_zip" id="address_zip"
+                               autocomplete="postal-code" maxlength="10"
+                               inputmode="numeric" pattern="[0-9\-]*">
                     </div>
                 </div>
             </div>
@@ -344,6 +354,29 @@
             if (btn && !btn.disabled) btn.click();
         }
     });
+
+    // Show / hide password — huge QOL on phones where typos are normal.
+    document.querySelectorAll('[data-toggle="password"]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const target = document.getElementById(btn.getAttribute('data-target'));
+            if (!target) return;
+            const showing = target.type === 'text';
+            target.type = showing ? 'password' : 'text';
+            btn.textContent = showing ? 'Show' : 'Hide';
+            btn.setAttribute('aria-pressed', showing ? 'false' : 'true');
+            btn.setAttribute('aria-label', showing ? 'Show password' : 'Hide password');
+        });
+    });
+
+    // Guard against a double-submit on the final button (iOS Safari can
+    // send the POST twice on a laggy connection otherwise).
+    const finishBtn = document.getElementById('finish-btn');
+    if (finishBtn) {
+        form.addEventListener('submit', () => {
+            finishBtn.disabled = true;
+            finishBtn.textContent = 'Creating your account…';
+        });
+    }
 })();
 </script>
 

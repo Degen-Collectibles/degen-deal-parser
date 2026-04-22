@@ -11,9 +11,28 @@
     </div>
     <div class="pt-field">
         <label class="pt-field-label" for="password">Password</label>
-        <input class="pt-input" type="password" name="password" id="password" required autocomplete="current-password" placeholder="••••••••••••">
+        <span class="pt-pw-wrap">
+            <input class="pt-input" type="password" name="password" id="password" required autocomplete="current-password" placeholder="••••••••••••">
+            <button type="button" class="pt-pw-toggle"
+                    data-pw-target="password" aria-label="Show password" aria-pressed="false">Show</button>
+        </span>
     </div>
     <button class="pt-btn primary lg" type="submit" style="width:100%; margin-top:6px;">Sign in</button>
 </form>
 <div class="pt-auth-hint"><a href="/team/password/forgot">Trouble signing in?</a></div>
+<script>
+(function(){
+    document.querySelectorAll('[data-pw-target]').forEach(function(btn){
+        btn.addEventListener('click', function(){
+            var target = document.getElementById(btn.getAttribute('data-pw-target'));
+            if (!target) return;
+            var showing = target.type === 'text';
+            target.type = showing ? 'password' : 'text';
+            btn.textContent = showing ? 'Show' : 'Hide';
+            btn.setAttribute('aria-pressed', showing ? 'false' : 'true');
+            btn.setAttribute('aria-label', showing ? 'Show password' : 'Hide password');
+        });
+    });
+})();
+</script>
 {% endblock %}
