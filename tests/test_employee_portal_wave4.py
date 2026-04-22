@@ -350,6 +350,43 @@ class InviteTests(unittest.TestCase, _W4Harness):
         ).all())
         self.assertEqual(len(rows), 1)
 
+    def test_invites_list_renders_with_naive_expires_at(self):
+        """Regression: SQLite returns `expires_at` as tz-naive, while
+        `utcnow()` is tz-aware. The invites list page previously
+        exploded with `TypeError: can't compare offset-naive and
+        offset-aware datetimes`. It must not anymore."""
+        from datetime import datetime, timedelta, timezone
+        from app.models import InviteToken
+
+        self._login(role="admin", user_id=503, username="adm_tz")
+
+        # Build a tz-naive "now" the way SQLite hands it back (by stripping
+        # tzinfo from an aware UTC datetime).
+        naive_now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+        expired_row = InviteToken(
+            token_hash="a" * 64,
+            role="employee",
+            email_hint="old@example.com",
+            created_by_user_id=503,
+            expires_at=naive_now - timedelta(days=1),
+        )
+        fresh_row = InviteToken(
+            token_hash="b" * 64,
+            role="employee",
+            email_hint="new@example.com",
+            created_by_user_id=503,
+            expires_at=naive_now + timedelta(hours=6),
+        )
+        self.session.add(expired_row)
+        self.session.add(fresh_row)
+        self.session.commit()
+
+        r = self.client.get("/team/admin/invites")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("expired", r.text)
+        self.assertIn("outstanding", r.text)
+
 
 class SupplyQueueTests(unittest.TestCase, _W4Harness):
     def setUp(self): self._setup()

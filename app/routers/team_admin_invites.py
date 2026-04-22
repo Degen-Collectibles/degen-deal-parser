@@ -7,7 +7,7 @@ ONCE upon issuance; there is no resend.
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Form, Request
@@ -29,6 +29,34 @@ ROLES = ("employee", "viewer", "manager", "reviewer", "admin")
 
 def _base_url(request: Request) -> str:
     return f"{request.url.scheme}://{request.url.netloc}"
+
+
+def _as_utc_aware(dt: Optional[datetime]) -> Optional[datetime]:
+    """Force a datetime into tz-aware UTC.
+
+    SQLite round-trips datetimes as tz-naive even when we store them
+    aware, so any Python-side comparison between a stored `expires_at`
+    and `utcnow()` raises `TypeError: can't compare offset-naive and
+    offset-aware datetimes`. We normalize on read before the template
+    does any comparing.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _invite_status(inv: InviteToken, now: datetime) -> str:
+    """Render-time status, computed server-side so the template never
+    has to compare datetimes (and therefore can't blow up on tz
+    mismatches again)."""
+    if inv.used_at is not None:
+        return "used/revoked"
+    expires = _as_utc_aware(inv.expires_at)
+    if expires is not None and expires <= now:
+        return "expired"
+    return "outstanding"
 
 
 @router.get("/team/admin/invites", response_class=HTMLResponse)
@@ -62,6 +90,16 @@ def admin_invites_list(
             u.id: u
             for u in session.exec(select(User).where(User.id.in_(creator_ids))).all()
         }
+
+    # Pre-compute per-row status + tz-aware fields so the template stays
+    # dumb and stops comparing datetimes.
+    outstanding_rows = [
+        {"inv": inv, "status": _invite_status(inv, now)} for inv in outstanding
+    ]
+    recent_rows = [
+        {"inv": inv, "status": _invite_status(inv, now)} for inv in recent
+    ]
+
     return templates.TemplateResponse(
         request,
         "team/admin/invites.html",
@@ -71,6 +109,8 @@ def admin_invites_list(
             "current_user": current,
             "outstanding": outstanding,
             "recent": recent,
+            "outstanding_rows": outstanding_rows,
+            "recent_rows": recent_rows,
             "creators": creators,
             "roles": ROLES,
             "now": now,

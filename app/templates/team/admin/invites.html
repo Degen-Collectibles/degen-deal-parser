@@ -57,14 +57,13 @@
             </tr>
         </thead>
         <tbody>
-            {% for inv in recent %}
+            {% for row in recent_rows %}
+            {% set inv = row.inv %}
             <tr>
                 <td style="padding:8px 0;">{{ inv.role }}</td>
                 <td>{{ inv.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
                 <td>{% if inv.used_at %}{{ inv.used_at.strftime('%Y-%m-%d %H:%M') }}{% else %}—{% endif %}</td>
-                <td>
-                    {% if inv.used_at %}used/revoked{% elif inv.expires_at <= now %}expired{% else %}outstanding{% endif %}
-                </td>
+                <td>{{ row.status }}</td>
             </tr>
             {% endfor %}
         </tbody>
