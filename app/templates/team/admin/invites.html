@@ -1,0 +1,73 @@
+{% extends "team/admin/base.html" %}
+{% set active = 'invites' %}
+{% block content %}
+<div class="ta-card">
+    <h2>Issue new invite</h2>
+    <form method="post" action="/team/admin/invites/issue">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
+        <label style="font-size:12px; color:var(--lx-muted);">Role</label>
+        <select name="role" style="padding:6px 10px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text); margin-right:10px;">
+            {% for r in roles %}<option value="{{ r }}" {% if r == 'employee' %}selected{% endif %}>{{ r }}</option>{% endfor %}
+        </select>
+        <input type="text" name="email_hint" placeholder="email hint (optional)" style="padding:6px 10px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text); min-width:280px;"/>
+        <button class="ta-btn" type="submit" style="margin-left:6px;">Generate invite link</button>
+    </form>
+    <p style="font-size:11px; color:var(--lx-muted); margin-top:10px;">
+        Links are valid for 24 hours, single-use. The full URL is shown once on the next screen.
+    </p>
+</div>
+
+<div class="ta-card">
+    <h2>Outstanding invites</h2>
+    <table style="width:100%; font-size:13px;">
+        <thead>
+            <tr style="text-align:left; color:var(--lx-muted); font-size:11px; text-transform:uppercase; letter-spacing:0.05em;">
+                <th style="padding:8px 0;">Role</th><th>Email hint</th><th>Created</th><th>Expires</th><th>Created by</th><th></th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for inv in outstanding %}
+            <tr>
+                <td style="padding:8px 0;">{{ inv.role }}</td>
+                <td>{{ inv.email_hint or '—' }}</td>
+                <td>{{ inv.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                <td>{{ inv.expires_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                <td>{% if inv.created_by_user_id and creators.get(inv.created_by_user_id) %}{{ creators[inv.created_by_user_id].username }}{% else %}—{% endif %}</td>
+                <td style="text-align:right;">
+                    <form method="post" action="/team/admin/invites/{{ inv.id }}/revoke" style="display:inline;">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
+                        <button class="ta-btn danger" type="submit">Revoke</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+            {% if not outstanding %}
+            <tr><td colspan="6" style="padding:16px 0; text-align:center; color:var(--lx-muted);">No outstanding invites.</td></tr>
+            {% endif %}
+        </tbody>
+    </table>
+</div>
+
+<div class="ta-card">
+    <h2>Recent history (30 days)</h2>
+    <table style="width:100%; font-size:13px;">
+        <thead>
+            <tr style="text-align:left; color:var(--lx-muted); font-size:11px; text-transform:uppercase; letter-spacing:0.05em;">
+                <th style="padding:8px 0;">Role</th><th>Created</th><th>Used</th><th>Status</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for inv in recent %}
+            <tr>
+                <td style="padding:8px 0;">{{ inv.role }}</td>
+                <td>{{ inv.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                <td>{% if inv.used_at %}{{ inv.used_at.strftime('%Y-%m-%d %H:%M') }}{% else %}—{% endif %}</td>
+                <td>
+                    {% if inv.used_at %}used/revoked{% elif inv.expires_at <= now %}expired{% else %}outstanding{% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

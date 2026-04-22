@@ -1,0 +1,24 @@
+{% extends "team/admin/base.html" %}
+{% set active = 'invites' %}
+{% block content %}
+<div class="ta-card" style="border-color:rgba(234,179,8,0.35);">
+    <h2 style="color:#fcd34d;">Invite link — visible ONCE</h2>
+    <p style="font-size:13px; color:var(--lx-muted);">
+        Copy this URL now and deliver it through a secure channel.
+        Role: <strong>{{ role }}</strong>{% if email_hint %} · Hint: <strong>{{ email_hint }}</strong>{% endif %}.
+        The link expires in 24 hours and can be consumed only once.
+    </p>
+    <div style="display:flex; gap:8px; align-items:center; margin-top:10px;">
+        <input
+            id="invite_url"
+            type="text"
+            readonly
+            value="{{ invite_url }}"
+            style="flex:1; padding:8px 10px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text); font-family:ui-monospace, Menlo, monospace; font-size:12px;"
+            onclick="this.select()"
+        />
+        <button class="ta-btn" type="button" onclick="navigator.clipboard.writeText(document.getElementById('invite_url').value)">Copy</button>
+    </div>
+</div>
+<a class="ta-btn" href="/team/admin/invites">← Back to invites</a>
+{% endblock %}

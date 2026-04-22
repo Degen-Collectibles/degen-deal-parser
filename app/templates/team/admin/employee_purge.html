@@ -1,0 +1,26 @@
+{% extends "team/admin/base.html" %}
+{% set active = 'employees' %}
+{% block content %}
+<div class="ta-card" style="border-color:rgba(239,68,68,0.5); background:rgba(239,68,68,0.04);">
+    <h2 style="color:#fca5a5;">Purge PII (CCPA)</h2>
+    {% if error %}<div class="ta-flash warn" style="background:rgba(239,68,68,0.12); color:#fca5a5; border-color:rgba(239,68,68,0.35);">{{ error }}</div>{% endif %}
+    <p style="font-size:13px;">
+        This wipes all encrypted PII fields on the employee profile and
+        deactivates the account. The AuditLog is retained. This is
+        <strong>not reversible</strong>.
+    </p>
+    <p style="font-size:13px;">Type the username <code>{{ employee.username }}</code> to confirm:</p>
+    <form method="post" action="/team/admin/employees/{{ employee.id }}/purge">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
+        <input
+            type="text"
+            name="confirm_username"
+            autocomplete="off"
+            placeholder="{{ employee.username }}"
+            style="padding:8px 10px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text); width:280px;"
+        />
+        <button class="ta-btn danger" type="submit" style="margin-left:8px;">Purge PII</button>
+        <a class="ta-btn" href="/team/admin/employees/{{ employee.id }}" style="margin-left:4px;">Cancel</a>
+    </form>
+</div>
+{% endblock %}

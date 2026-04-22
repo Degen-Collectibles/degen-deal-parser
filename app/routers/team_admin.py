@@ -17,7 +17,9 @@ from ..auth import has_permission
 from ..config import get_settings
 from ..csrf import issue_token, require_csrf
 from ..db import get_session
+from ..models import InviteToken, SupplyRequest, User, utcnow
 from ..shared import require_role_response, templates
+from sqlmodel import select
 
 router = APIRouter()
 
@@ -30,12 +32,35 @@ def _portal_gate(request: Request) -> Optional[RedirectResponse]:
 
 
 def _admin_gate(request: Request, session: Session, resource_key: str):
-    """Run portal + role + per-resource checks. Returns a Response on denial."""
+    """Run portal + admin-role + per-resource checks. Returns a Response on denial."""
     if denial := _portal_gate(request):
         return denial, None
     if denial := require_role_response(request, "admin"):
         return denial, None
     user = getattr(request.state, "current_user", None)
+    if not has_permission(session, user, resource_key):
+        return HTMLResponse(
+            "You do not have permission to view this page.", status_code=403
+        ), None
+    return None, user
+
+
+def _permission_gate(request: Request, session: Session, resource_key: str):
+    """Portal + authenticated + per-resource permission. No role floor — any
+    role that holds the permission may enter. Used for /team/admin/* pages
+    where managers have view/approve access but admins are the only writers
+    on PII-sensitive paths (handled by a stricter key on the POST handlers).
+    """
+    if denial := _portal_gate(request):
+        return denial, None
+    user = getattr(request.state, "current_user", None)
+    if user is None:
+        from ..shared import get_request_user, redirect_to_login
+
+        user = get_request_user(request)
+        if user is None:
+            return redirect_to_login(request), None
+        request.state.current_user = user
     if not has_permission(session, user, resource_key):
         return HTMLResponse(
             "You do not have permission to view this page.", status_code=403
@@ -51,6 +76,24 @@ def team_admin_home(
     denial, user = _admin_gate(request, session, "admin.permissions.view")
     if denial:
         return denial
+    now = utcnow()
+    employee_count = len(list(session.exec(select(User)).all()))
+    outstanding_invites = len(
+        list(
+            session.exec(
+                select(InviteToken).where(
+                    InviteToken.used_at.is_(None), InviteToken.expires_at > now
+                )
+            ).all()
+        )
+    )
+    pending_supply = len(
+        list(
+            session.exec(
+                select(SupplyRequest).where(SupplyRequest.status == "submitted")
+            ).all()
+        )
+    )
     return templates.TemplateResponse(
         request,
         "team/admin/index.html",
@@ -58,6 +101,9 @@ def team_admin_home(
             "request": request,
             "title": "Team Admin",
             "current_user": user,
+            "employee_count": employee_count,
+            "outstanding_invites": outstanding_invites,
+            "pending_supply": pending_supply,
             "csrf_token": issue_token(request),
         },
     )

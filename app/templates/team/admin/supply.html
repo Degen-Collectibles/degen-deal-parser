@@ -1,0 +1,67 @@
+{% extends "team/admin/base.html" %}
+{% set active = 'supply' %}
+{% block content %}
+{% if flash %}<div class="ta-flash success">{{ flash }}</div>{% endif %}
+
+<div style="margin-bottom:16px;">
+    <a class="ta-btn {% if not filter_status %}active{% endif %}" href="/team/admin/supply">All</a>
+    {% for s in statuses %}
+        <a class="ta-btn" href="/team/admin/supply?status={{ s }}"
+           style="{% if filter_status == s %}border-color:#ff8a3d; color:#ff8a3d;{% endif %} margin-left:4px;">
+            {{ s }} ({{ counts.get(s, 0) }})
+        </a>
+    {% endfor %}
+</div>
+
+<div class="ta-card" style="padding:0;">
+    <table style="width:100%; font-size:13px; border-collapse:collapse;">
+        <thead>
+            <tr style="text-align:left; color:var(--lx-muted); font-size:11px; text-transform:uppercase; letter-spacing:0.05em;">
+                <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">Submitted</th>
+                <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">By</th>
+                <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">Title</th>
+                <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">Urgency</th>
+                <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">Status</th>
+                <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in requests %}
+            <tr>
+                <td style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">{{ r.created_at.strftime('%Y-%m-%d') }}</td>
+                <td style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">
+                    {% if submitters.get(r.submitted_by_user_id) %}{{ submitters[r.submitted_by_user_id].username }}{% else %}—{% endif %}
+                </td>
+                <td style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">
+                    <strong>{{ r.title }}</strong>
+                    {% if r.description %}<div style="color:var(--lx-muted); font-size:12px;">{{ r.description[:140] }}</div>{% endif %}
+                </td>
+                <td style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">{{ r.urgency }}</td>
+                <td style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">{{ r.status }}</td>
+                <td style="padding:10px 14px; border-bottom:1px solid var(--lx-br); white-space:nowrap;">
+                    {% if r.status in ('submitted',) %}
+                        <form method="post" action="/team/admin/supply/{{ r.id }}/approve" style="display:inline;">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
+                            <button class="ta-btn" type="submit">Approve</button>
+                        </form>
+                        <form method="post" action="/team/admin/supply/{{ r.id }}/deny" style="display:inline;">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
+                            <button class="ta-btn danger" type="submit">Deny</button>
+                        </form>
+                    {% endif %}
+                    {% if r.status == 'approved' %}
+                        <form method="post" action="/team/admin/supply/{{ r.id }}/mark-ordered" style="display:inline;">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
+                            <button class="ta-btn" type="submit">Mark ordered</button>
+                        </form>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+            {% if not requests %}
+            <tr><td colspan="6" style="padding:20px 14px; text-align:center; color:var(--lx-muted);">No supply requests in this view.</td></tr>
+            {% endif %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

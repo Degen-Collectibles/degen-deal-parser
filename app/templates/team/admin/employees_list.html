@@ -1,0 +1,54 @@
+{% extends "team/admin/base.html" %}
+{% set active = 'employees' %}
+{% block content %}
+<form method="get" action="/team/admin/employees" style="margin-bottom:18px;">
+    <input
+        type="text"
+        name="q"
+        value="{{ q }}"
+        placeholder="Search username..."
+        style="padding:7px 10px; border-radius:8px; border:1px solid var(--lx-br); background:var(--lx-s1); color:var(--lx-text); min-width:260px;"
+    />
+    <button class="ta-btn" type="submit" style="margin-left:6px;">Search</button>
+    {% if q %}<a class="ta-btn" href="/team/admin/employees" style="margin-left:4px;">Clear</a>{% endif %}
+</form>
+
+<div class="ta-card" style="padding:0;">
+    <table style="width:100%; border-collapse:collapse; font-size:13px;">
+        <thead>
+            <tr style="text-align:left; color:var(--lx-muted); font-size:11px; text-transform:uppercase; letter-spacing:0.05em;">
+                <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">Username</th>
+                <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">Display name</th>
+                <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">Role</th>
+                <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">Hire date</th>
+                <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">Status</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for u in users %}
+            {% set profile = profiles.get(u.id) %}
+            <tr>
+                <td style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">
+                    <a href="/team/admin/employees/{{ u.id }}" style="color:#ff8a3d;">{{ u.username }}</a>
+                </td>
+                <td style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">{{ u.display_name or '—' }}</td>
+                <td style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">{{ u.role }}</td>
+                <td style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">
+                    {% if profile and profile.hire_date %}{{ profile.hire_date }}{% else %}—{% endif %}
+                </td>
+                <td style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">
+                    {% if u.is_active %}
+                        <span style="color:#86efac;">active</span>
+                    {% else %}
+                        <span style="color:#fca5a5;">inactive</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+            {% if not users %}
+            <tr><td colspan="5" style="padding:20px 14px; text-align:center; color:var(--lx-muted);">No employees match.</td></tr>
+            {% endif %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

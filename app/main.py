@@ -522,6 +522,12 @@ app.include_router(messages_router)
 if settings.employee_portal_enabled:
     from .routers.team_admin import router as team_admin_router  # noqa: E402
     app.include_router(team_admin_router, tags=["team-admin"])
+    from .routers.team_admin_employees import router as team_admin_employees_router  # noqa: E402
+    app.include_router(team_admin_employees_router, tags=["team-admin"])
+    from .routers.team_admin_invites import router as team_admin_invites_router  # noqa: E402
+    app.include_router(team_admin_invites_router, tags=["team-admin"])
+    from .routers.team_admin_supply import router as team_admin_supply_router  # noqa: E402
+    app.include_router(team_admin_supply_router, tags=["team-admin"])
     from .routers.team import router as team_router  # noqa: E402
     app.include_router(team_router, tags=["team"])
 

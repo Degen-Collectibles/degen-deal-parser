@@ -1,0 +1,15 @@
+{% extends "team/admin/base.html" %}
+{% set active = 'employees' %}
+{% block content %}
+<div class="ta-card" style="border-color:rgba(239,68,68,0.4);">
+    <h2 style="color:#fca5a5;">Terminate employee</h2>
+    <p style="font-size:13px;">Confirm termination of <strong>{{ employee.username }}</strong>.
+        This marks the account inactive and sets the termination date.
+        PII remains encrypted at rest; use Purge if full CCPA wipe is required.</p>
+    <form method="post" action="/team/admin/employees/{{ employee.id }}/terminate" style="margin-top:14px;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
+        <button class="ta-btn danger" type="submit">Terminate account</button>
+        <a class="ta-btn" href="/team/admin/employees/{{ employee.id }}">Cancel</a>
+    </form>
+</div>
+{% endblock %}

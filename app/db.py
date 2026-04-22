@@ -751,6 +751,16 @@ DEFAULT_ROLE_PERMISSIONS: tuple[tuple[str, str, bool], ...] = tuple(
         ("action.employee.purge", (False, False, False, False, True)),
         ("admin.permissions.view", (False, False, False, False, True)),
         ("admin.permissions.edit", (False, False, False, False, True)),
+        # Wave 4 — employee management, invites, supply queue
+        ("admin.employees.view", (False, False, True, False, True)),
+        ("admin.employees.reveal_pii", (False, False, False, False, True)),
+        ("admin.employees.reset_password", (False, False, False, False, True)),
+        ("admin.employees.terminate", (False, False, False, False, True)),
+        ("admin.employees.purge", (False, False, False, False, True)),
+        ("admin.invites.view", (False, False, False, False, True)),
+        ("admin.invites.issue", (False, False, False, False, True)),
+        ("admin.supply.view", (False, False, True, False, True)),
+        ("admin.supply.approve", (False, False, True, False, True)),
     )
     for role, allowed in zip(
         ("employee", "viewer", "manager", "reviewer", "admin"), row

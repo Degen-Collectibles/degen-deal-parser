@@ -48,6 +48,16 @@ RESOURCE_KEYS: List[str] = [
     # Admin meta (gate the permissions matrix itself)
     "admin.permissions.view",
     "admin.permissions.edit",
+    # Wave 4 — admin surface
+    "admin.employees.view",
+    "admin.employees.reveal_pii",
+    "admin.employees.reset_password",
+    "admin.employees.terminate",
+    "admin.employees.purge",
+    "admin.invites.view",
+    "admin.invites.issue",
+    "admin.supply.view",
+    "admin.supply.approve",
 ]
 
 
@@ -75,6 +85,15 @@ _LABEL_OVERRIDES: Dict[str, str] = {
     "action.employee.purge": "Purge employee (PII erase)",
     "admin.permissions.view": "View permissions matrix",
     "admin.permissions.edit": "Edit permissions matrix",
+    "admin.employees.view": "Admin · View employee list + profiles",
+    "admin.employees.reveal_pii": "Admin · Reveal employee PII (audited)",
+    "admin.employees.reset_password": "Admin · Issue password reset",
+    "admin.employees.terminate": "Admin · Terminate employee",
+    "admin.employees.purge": "Admin · Purge employee PII (CCPA)",
+    "admin.invites.view": "Admin · View invites",
+    "admin.invites.issue": "Admin · Issue invite",
+    "admin.supply.view": "Admin · View supply queue",
+    "admin.supply.approve": "Admin · Approve supply request",
 }
 
 

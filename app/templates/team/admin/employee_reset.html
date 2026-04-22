@@ -1,0 +1,23 @@
+{% extends "team/admin/base.html" %}
+{% set active = 'employees' %}
+{% block content %}
+<div class="ta-card" style="border-color:rgba(234,179,8,0.35);">
+    <h2 style="color:#fcd34d;">Password reset link — visible ONCE</h2>
+    <p style="font-size:13px; color:var(--lx-muted);">Copy this URL now and deliver it to
+        <strong>{{ employee.username }}</strong> through a secure channel.
+        Navigating away discards it; issue a new link if lost.
+        The link expires in 60 minutes and can be consumed only once.</p>
+    <div style="display:flex; gap:8px; align-items:center; margin-top:10px;">
+        <input
+            id="reset_url"
+            type="text"
+            readonly
+            value="{{ reset_url }}"
+            style="flex:1; padding:8px 10px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text); font-family:ui-monospace, Menlo, monospace; font-size:12px;"
+            onclick="this.select()"
+        />
+        <button class="ta-btn" type="button" onclick="navigator.clipboard.writeText(document.getElementById('reset_url').value)">Copy</button>
+    </div>
+</div>
+<a class="ta-btn" href="/team/admin/employees/{{ employee.id }}">← Back to employee</a>
+{% endblock %}
