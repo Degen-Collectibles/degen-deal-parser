@@ -632,7 +632,10 @@ class AdminScheduleSaveTests(unittest.TestCase, _W47Harness):
         for e in emps:
             self.assertIn(e.display_name, r.text)
         self.assertIn("Save storefront schedule", r.text)
-        self.assertIn("Save stream schedule", r.text)
+        # Stream grid is read-only (managed from /stream-manager) — it
+        # no longer renders a save button on this page.
+        self.assertNotIn("Save stream schedule", r.text)
+        self.assertIn("Read-only", r.text)
         self.assertIn("Prev", r.text)
         self.assertIn("Next", r.text)
 
@@ -648,9 +651,11 @@ class AdminScheduleSaveTests(unittest.TestCase, _W47Harness):
         self._active_employees()
         r = self.client.get("/team/admin/schedule")
         self.assertEqual(r.status_code, 200)
-        # Dual-grid layout renders two empty-state messages, one per kind.
+        # Dual-grid layout renders two empty-state messages. The stream
+        # grid auto-rosters Stream-role users, so its empty-state wording
+        # points admins at the Employees page instead of per-week add.
         self.assertIn("No storefront employees on this week yet", r.text)
-        self.assertIn("No stream employees on this week yet", r.text)
+        self.assertIn("No Stream-role employees yet", r.text)
         # No employee rows in the body — the sch-name-col cells should
         # not exist yet.
         self.assertNotIn('class="sch-name-col"', r.text)

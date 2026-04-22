@@ -164,21 +164,60 @@
     }
     .sch-remove-btn:hover { opacity: 1; background: rgba(248, 113, 113, 0.12); }
     .sch-name-inner { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+    .sch-account-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px 14px;
+        align-items: center;
+        font-size: 12px;
+        color: var(--lx-muted);
+        padding: 8px 12px;
+        border: 1px dashed var(--lx-br);
+        border-radius: 10px;
+        margin-bottom: 12px;
+    }
+    .sch-account-legend strong { color: var(--lx-text); margin-right: 4px; }
 </style>
 {% endblock %}
 
 {# ---------------------------------------------------------------------
-   Grid macro. Rendered once per staff_kind (storefront + stream) so the
-   same template handles both roster + cell editing for each kind without
-   duplicating dozens of lines of markup.
+   Grid macro. Rendered once per staff_kind (storefront + stream).
+
+   read_only=True forces the grid into a pure display — no inputs,
+   no roster bar, no save button, no remove buttons. That's how the
+   Stream grid is always rendered here: it's the read-only projection
+   of /stream-manager.
    --------------------------------------------------------------------- #}
-{% macro render_grid(ctx, kind_label, kind_slug, include_day_headers) %}
+{% macro render_grid(ctx, kind_label, kind_slug, include_day_headers, read_only=False) %}
+    {# Effective "can edit" within this macro instance. The outer
+       can_edit is the user's overall admin.schedule.edit permission;
+       read_only lets us turn that off for this specific grid. #}
+    {% set edit = can_edit and not read_only %}
+
     <div class="sch-grid-title">
         <span>{{ kind_label }} schedule</span>
         <span class="sch-kind-chip is-{{ kind_slug }}">{{ ctx.users|length }} on this week</span>
+        {% if read_only %}
+        <span class="sch-kind-chip" style="background: rgba(148,163,184,0.18); color:#cbd5e1;">
+            Read-only · edit in
+            <a href="/stream-manager" style="color:#93c5fd;">Stream Manager</a>
+        </span>
+        {% endif %}
     </div>
 
-    {% if can_edit %}
+    {% if kind_slug == 'stream' and ctx.stream_legend %}
+    <div class="sch-account-legend">
+        <strong>Streams:</strong>
+        {% for item in ctx.stream_legend %}
+        <span class="sch-legend-chip">
+            <span class="sch-legend-sw" style="background: {{ item.color }};"></span>
+            {{ item.name }}
+        </span>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if edit %}
     <div class="sch-roster-bar">
         <strong style="margin-right:4px;">Roster:</strong>
         <form method="post" action="/team/admin/schedule/roster/add">
@@ -229,7 +268,7 @@
                         {% for d in ctx.week_days %}
                         {% set note = ctx.day_note_map.get(d.isoformat()) %}
                         <th>
-                            {% if can_edit %}
+                            {% if edit %}
                             <input class="sch-loc-input"
                                    type="text"
                                    name="{{ build_day_loc_key(d) }}"
@@ -259,7 +298,7 @@
                         <td class="sch-name-col {% if kind_slug == 'stream' %}is-stream{% endif %}">
                             <div class="sch-name-inner">
                                 <a href="/team/admin/employees/{{ u.id }}" style="color:inherit; text-decoration:none;">{{ u.display_name or u.username }}</a>
-                                {% if can_edit %}
+                                {% if edit %}
                                 <button class="sch-remove-btn"
                                         type="submit"
                                         form="sch-remove-{{ kind_slug }}-{{ u.id }}"
@@ -270,12 +309,13 @@
                         {% for d in ctx.week_days %}
                         {% set entry = ctx.entry_map.get((u.id, d.isoformat())) %}
                         {% set hint = (ctx.stream_hint_map.get((u.id, d.isoformat())) if ctx.stream_hint_map else None) %}
-                        {% set from_stream = entry is none and hint %}
-                        {% set label = (entry.label if entry else (hint if hint else '')) %}
-                        {% set kind = (entry.kind if entry else ('stream' if hint else 'blank')) %}
-                        <td class="sch-cell sch-k-{{ kind }}{% if from_stream %} sch-from-stream{% endif %}"
-                            {% if from_stream %}title="From Stream Manager — edit here to override"{% endif %}>
-                            {% if can_edit %}
+                        {% set label = (entry.label if entry else (hint.label if hint else '')) %}
+                        {% set kind = (entry.kind if entry else 'blank') %}
+                        {% set hint_color = (hint.color if hint and not entry else None) %}
+                        <td class="sch-cell sch-k-{{ kind }}{% if hint_color %} sch-from-stream{% endif %}"
+                            {% if hint_color %}style="background: {{ hint_color }}; color:#0b1220;"{% endif %}
+                            {% if hint and not entry %}title="{{ hint.account_name }} · from Stream Manager"{% endif %}>
+                            {% if edit %}
                             <input type="text"
                                    name="{{ build_cell_key(u.id, d) }}"
                                    value="{{ label }}"
@@ -290,14 +330,20 @@
                     {% endfor %}
                     {% if not ctx.users %}
                     <tr><td colspan="{{ ctx.week_days|length + 1 }}" style="padding:24px; text-align:center; color:var(--lx-muted);">
+                        {% if kind_slug == 'stream' %}
+                        No Stream-role employees yet. Set an employee's <strong>Type</strong> to
+                        <strong>Stream</strong> and mark them <strong>On schedule</strong> on the
+                        <a href="/team/admin/employees" style="color:#fdba74;">Employees page</a>.
+                        {% else %}
                         No {{ kind_label|lower }} employees on this week yet.
+                        {% endif %}
                     </td></tr>
                     {% endif %}
                 </tbody>
             </table>
         </div>
 
-        {% if can_edit %}
+        {% if edit %}
         <div style="margin-top:14px; display:flex; justify-content:flex-end;">
             <button class="ta-btn" type="submit" style="background:#3b82f6; color:white; border-color:#3b82f6; font-weight:600;">
                 Save {{ kind_label|lower }} schedule
@@ -306,7 +352,7 @@
         {% endif %}
     </form>
 
-    {% if can_edit %}
+    {% if edit %}
     {% for u in ctx.users %}
     <form id="sch-remove-{{ kind_slug }}-{{ u.id }}" method="post" action="/team/admin/schedule/roster/remove" style="display:none;">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
@@ -339,20 +385,24 @@
     {% endif %}
 </div>
 
-<p style="font-size:12px; color:var(--lx-muted); margin:-4px 0 14px; max-width:820px;">
-    Two independent schedules: <strong>Storefront</strong> for the floor team, <strong>Stream</strong> for the live room.
-    Add employees to each grid individually, then type shift times like
-    <code style="background:var(--lx-s2); padding:1px 5px; border-radius:4px;">10:30 AM - 6:30 PM</code> into the cells.
-    Special words color themselves: <strong>OFF</strong>, <strong>SHOW</strong>, <strong>REQUEST</strong>, <strong>Stream</strong>, <strong>IF NEEDED</strong>, <strong>ALL</strong>.
+<p style="font-size:12px; color:var(--lx-muted); margin:-4px 0 14px; max-width:860px;">
+    Two independent schedules: <strong>Storefront</strong> for the floor team, and <strong>Stream</strong> for the live room.
+    On the Storefront grid, add employees individually each week and type shift times like
+    <code style="background:var(--lx-s2); padding:1px 5px; border-radius:4px;">10:30 AM - 6:30 PM</code> into the cells —
+    special words color themselves (<strong>OFF</strong>, <strong>SHOW</strong>, <strong>REQUEST</strong>, <strong>Stream</strong>, <strong>IF NEEDED</strong>, <strong>ALL</strong>).
+    The Stream grid is a read-only mirror of the
+    <a href="/stream-manager" style="color:#fdba74;">Stream Manager</a> — all Stream-role employees appear automatically
+    and each cell is color-coded by which stream account is booked.
     Which grid an employee appears in is controlled by the <strong>Type</strong> column on the
     <a href="/team/admin/employees" style="color:#fdba74;">Employees page</a>.
 </p>
 
 {{ render_grid(storefront, 'Storefront', 'storefront', True) }}
 
-{{ render_grid(stream, 'Stream', 'stream', False) }}
+{{ render_grid(stream, 'Stream', 'stream', False, read_only=True) }}
 
 <div class="sch-legend">
+    <strong style="color:var(--lx-text);">Storefront colors:</strong>
     <span class="sch-legend-chip"><span class="sch-legend-sw" style="background:#86efac;"></span> Scheduled shift</span>
     <span class="sch-legend-chip"><span class="sch-legend-sw" style="background:#a8a29e;"></span> OFF</span>
     <span class="sch-legend-chip"><span class="sch-legend-sw" style="background:#60a5fa;"></span> SHOW</span>

@@ -34,6 +34,7 @@ from ..models import (
     ScheduleRosterMember,
     SHIFT_KIND_BLANK,
     ShiftEntry,
+    StreamAccount,
     Streamer,
     StreamSchedule,
     User,
@@ -86,21 +87,54 @@ def _fmt_time_12h(t24: str) -> str:
         return t24
 
 
+# Palette used to give each StreamAccount a stable, distinct background
+# color on the weekly Stream grid. Deliberately picked to NOT collide with
+# the existing work/off/show/request/stream shift-kind colors. Account
+# IDs index into this list (wrapped) so the same account keeps the same
+# color across weeks.
+_STREAM_ACCOUNT_COLOR_PALETTE = [
+    "#a78bfa",  # violet
+    "#fbbf24",  # amber
+    "#f472b6",  # pink
+    "#22d3ee",  # cyan
+    "#fb923c",  # orange
+    "#84cc16",  # lime
+    "#e879f9",  # fuchsia
+    "#14b8a6",  # teal
+]
+
+
+def _stream_account_color(account_id: Optional[int]) -> str:
+    if account_id is None:
+        return "#bbf7d0"  # neutral mint fallback (matches the old Stream color)
+    return _STREAM_ACCOUNT_COLOR_PALETTE[
+        account_id % len(_STREAM_ACCOUNT_COLOR_PALETTE)
+    ]
+
+
 def _stream_schedule_hint_map(
     session: Session,
     week_days: list[date],
     user_ids: set[int],
-) -> dict[tuple[int, str], str]:
-    """Build (user_id, YYYY-MM-DD) -> 'start - end [next day]' pre-fill map.
+) -> tuple[dict[tuple[int, str], dict], list[dict]]:
+    """Build the week's Stream grid contents from StreamSchedule rows.
 
-    Sourced from `/stream-manager` StreamSchedule rows. We join
-    Streamer.user_id to get a user; streamers with no linked user are
-    skipped (they have no row on the grid to pre-fill). If multiple
-    shifts land on the same day for one user, we join the time ranges
-    with ' / ' so nothing silently disappears.
+    Returns a tuple ``(hint_map, legend)`` where:
+
+    * ``hint_map[(user_id, 'YYYY-MM-DD')]`` is a dict with ``label``
+      (``'4:00 PM - 6:00 AM (next day)'``), ``account_id``,
+      ``account_name``, and ``color`` keys.
+    * ``legend`` is a deduplicated list of ``{"name", "color"}`` dicts
+      for every StreamAccount that appears on the week, so the template
+      can render a per-account legend right next to the grid.
+
+    Streamers with no linked user are skipped (they have no row on the
+    grid to pre-fill). If multiple shifts land on the same day for one
+    user, we keep only the first and append a '+N more' note so nothing
+    silently disappears.
     """
     if not user_ids or not week_days:
-        return {}
+        return {}, []
     streamers = list(
         session.exec(
             select(Streamer).where(Streamer.user_id.in_(user_ids))  # type: ignore[attr-defined]
@@ -110,7 +144,7 @@ def _stream_schedule_hint_map(
         s.id: s.user_id for s in streamers if s.id is not None and s.user_id is not None
     }
     if not streamer_to_user:
-        return {}
+        return {}, []
     iso_days = [d.isoformat() for d in week_days]
     scheds = list(
         session.exec(
@@ -120,16 +154,63 @@ def _stream_schedule_hint_map(
             )
         ).all()
     )
-    hint: dict[tuple[int, str], list[str]] = {}
-    for s in scheds:
+    if not scheds:
+        return {}, []
+
+    account_ids = {s.stream_account_id for s in scheds if s.stream_account_id}
+    account_map: dict[int, StreamAccount] = {}
+    if account_ids:
+        for acct in session.exec(
+            select(StreamAccount).where(StreamAccount.id.in_(account_ids))  # type: ignore[attr-defined]
+        ).all():
+            if acct.id is not None:
+                account_map[acct.id] = acct
+
+    def _acct_name(aid: Optional[int]) -> str:
+        if aid is None:
+            return "Other"
+        acct = account_map.get(aid)
+        if acct is None:
+            return "Other"
+        return acct.name or acct.handle or f"Account {aid}"
+
+    hint_map: dict[tuple[int, str], dict] = {}
+    # Track account colors for the legend chips.
+    seen_accounts: dict[Optional[int], str] = {}
+
+    for s in sorted(scheds, key=lambda r: (r.date, r.start_time)):
         uid = streamer_to_user.get(s.streamer_id)
         if uid is None:
+            continue
+        color = _stream_account_color(s.stream_account_id)
+        seen_accounts[s.stream_account_id] = color
+        key = (uid, s.date)
+        if key in hint_map:
+            # Second shift on same (user, date). Tag the existing cell
+            # rather than dropping the data entirely.
+            hint_map[key]["label"] += "  +1"
             continue
         label = f"{_fmt_time_12h(s.start_time)} - {_fmt_time_12h(s.end_time)}"
         if s.is_overnight:
             label += " (next day)"
-        hint.setdefault((uid, s.date), []).append(label)
-    return {k: " / ".join(v) for k, v in hint.items()}
+        hint_map[key] = {
+            "label": label,
+            "account_id": s.stream_account_id,
+            "account_name": _acct_name(s.stream_account_id),
+            "color": color,
+        }
+
+    legend: list[dict] = []
+    seen_names: set[str] = set()
+    for aid, color in seen_accounts.items():
+        name = _acct_name(aid)
+        if name in seen_names:
+            continue
+        seen_names.add(name)
+        legend.append({"name": name, "color": color})
+    # Stable, human-friendly legend order: accounts sorted by name.
+    legend.sort(key=lambda row: row["name"].lower())
+    return hint_map, legend
 
 
 def _grid_context(
@@ -160,6 +241,15 @@ def _grid_context(
     week_days = _week_dates(week_start)
     first_day = week_days[0]
     last_day = week_days[-1]
+
+    # The Stream grid has a different population contract: it's the
+    # read-only projection of the Stream Manager schedule. Every
+    # schedulable Stream-role employee automatically gets a row (no
+    # per-week roster), cells are filled from StreamSchedule, and the
+    # page never writes into ShiftEntry. We handle that case first so
+    # the Storefront branch below can stay focused on its own logic.
+    if staff_kind == STAFF_KIND_STREAM:
+        return _stream_grid_context(session, week_start, week_days, flash=flash)
 
     # Roster membership for this week.
     roster_user_ids: set[int] = set(
@@ -260,23 +350,14 @@ def _grid_context(
     else:
         prev_roster_count = len(prev_roster_ids)
 
-    # Stream grid gets a hint layer from /stream-manager StreamSchedule
-    # rows so shifts booked there show up immediately on the weekly
-    # schedule without the admin having to re-type them. Storefront
-    # grid has no such source, so we skip the lookup.
-    stream_hint_map: dict[tuple[int, str], str] = {}
-    if staff_kind == STAFF_KIND_STREAM and users:
-        stream_hint_map = _stream_schedule_hint_map(
-            session, week_days, {u.id for u in users if u.id is not None}
-        )
-
     return {
         "week_start": week_start,
         "week_start_iso": week_start.isoformat(),
         "week_days": week_days,
         "users": users,
         "entry_map": entry_map,
-        "stream_hint_map": stream_hint_map,
+        "stream_hint_map": {},
+        "stream_legend": [],
         "day_note_map": day_note_map,
         "roster_user_ids": roster_user_ids,
         "addable_users": addable_users,
@@ -286,6 +367,61 @@ def _grid_context(
         "prev_roster_count": prev_roster_count,
         "is_current_week": week_start == _monday_of(date.today()),
         "staff_kind": staff_kind or "",
+        "flash": flash,
+    }
+
+
+def _stream_grid_context(
+    session: Session,
+    week_start: date,
+    week_days: list[date],
+    *,
+    flash: Optional[str] = None,
+) -> dict:
+    """Read-only context for the Stream grid.
+
+    Auto-rosters every schedulable Stream-role employee, and fills each
+    day cell from StreamSchedule rows. There is no edit, roster-add, or
+    remove path here — that all lives at /stream-manager.
+    """
+    # Auto-roster: every schedulable Stream-role user, active or draft.
+    users: list[User] = list(
+        session.exec(
+            select(User)
+            .where(_schedulable_clause())
+            .where(User.staff_kind == STAFF_KIND_STREAM)
+            .order_by(User.display_name, User.username)
+        ).all()
+    )
+
+    hint_map, legend = _stream_schedule_hint_map(
+        session, week_days, {u.id for u in users if u.id is not None}
+    )
+
+    prev_week = (week_start - timedelta(days=7)).isoformat()
+    next_week = (week_start + timedelta(days=7)).isoformat()
+    this_week = _monday_of(date.today()).isoformat()
+
+    return {
+        "week_start": week_start,
+        "week_start_iso": week_start.isoformat(),
+        "week_days": week_days,
+        "users": users,
+        # Stream grid never uses ShiftEntry data. Kept as an empty map
+        # so the shared macro's `ctx.entry_map.get(...)` calls stay safe.
+        "entry_map": {},
+        "stream_hint_map": hint_map,
+        "stream_legend": legend,
+        # Per-day location headers are a Storefront-only concept.
+        "day_note_map": {},
+        "roster_user_ids": set(),
+        "addable_users": [],
+        "prev_week": prev_week,
+        "next_week": next_week,
+        "this_week": this_week,
+        "prev_roster_count": 0,
+        "is_current_week": week_start == _monday_of(date.today()),
+        "staff_kind": STAFF_KIND_STREAM,
         "flash": flash,
     }
 
@@ -399,6 +535,18 @@ async def admin_schedule_save(
     week_start = _parse_week_start(week_raw)
     week_days = _week_dates(week_start)
     first_day, last_day = week_days[0], week_days[-1]
+
+    # The Stream grid is the read-only projection of /stream-manager —
+    # no writes accepted here. Guard against a hand-crafted POST that
+    # claims to be editing Stream cells so no ShiftEntry rows are ever
+    # created under a Stream-role user by this endpoint.
+    if (form.get("staff_kind") or "").strip() == STAFF_KIND_STREAM:
+        from urllib.parse import quote_plus
+        msg = "Stream schedule is managed in the Stream Manager."
+        return RedirectResponse(
+            f"/team/admin/schedule?week={week_start.isoformat()}&flash={quote_plus(msg)}",
+            status_code=303,
+        )
 
     # Only touch cells for users who are actually on this week's grid
     # — the roster plus anyone with an existing shift that week. We
@@ -580,6 +728,10 @@ async def admin_schedule_roster_add(
         return denial
     form = await request.form()
     week_start = _parse_week_start(form.get("week") or "")
+    if (form.get("staff_kind") or "").strip().lower() == STAFF_KIND_STREAM:
+        return _redirect_back(
+            week_start, "Stream schedule is managed in the Stream Manager."
+        )
     try:
         user_id = int(form.get("user_id") or 0)
     except (TypeError, ValueError):
@@ -668,6 +820,10 @@ async def admin_schedule_roster_remove(
         return denial
     form = await request.form()
     week_start = _parse_week_start(form.get("week") or "")
+    if (form.get("staff_kind") or "").strip().lower() == STAFF_KIND_STREAM:
+        return _redirect_back(
+            week_start, "Stream schedule is managed in the Stream Manager."
+        )
     try:
         user_id = int(form.get("user_id") or 0)
     except (TypeError, ValueError):
@@ -743,6 +899,10 @@ async def admin_schedule_roster_copy_previous(
         return denial
     form = await request.form()
     week_start = _parse_week_start(form.get("week") or "")
+    if (form.get("staff_kind") or "").strip().lower() == STAFF_KIND_STREAM:
+        return _redirect_back(
+            week_start, "Stream schedule is managed in the Stream Manager."
+        )
     prev_week = week_start - timedelta(days=7)
 
     form_kind = (form.get("staff_kind") or "").strip().lower()

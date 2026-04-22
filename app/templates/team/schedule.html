@@ -32,10 +32,23 @@
     .sch-legend { display: flex; flex-wrap: wrap; gap: 8px 14px; font-size: 11.5px; color: var(--pt-muted); margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--pt-border); }
     .sch-legend-chip { display: inline-flex; align-items: center; gap: 4px; }
     .sch-legend-sw { display: inline-block; width: 14px; height: 14px; border-radius: 3px; border: 1px solid var(--pt-border); }
-    .sch-grid-title { margin: 24px 0 10px; font-size: 15px; font-weight: 700; color: var(--pt-text); display:flex; align-items:center; gap:10px; }
+    .sch-grid-title { margin: 24px 0 10px; font-size: 15px; font-weight: 700; color: var(--pt-text); display:flex; align-items:center; gap:10px; flex-wrap: wrap; }
     .sch-kind-chip { font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 500; }
     .sch-kind-chip.is-storefront { background: rgba(251,146,60,0.18); color: #fdba74; }
     .sch-kind-chip.is-stream     { background: rgba(96,165,250,0.18); color: #93c5fd; }
+    .sch-account-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px 14px;
+        align-items: center;
+        font-size: 12px;
+        color: var(--pt-muted);
+        padding: 8px 12px;
+        border: 1px dashed var(--pt-border);
+        border-radius: 10px;
+        margin-bottom: 12px;
+    }
+    .sch-account-legend strong { color: var(--pt-text); margin-right: 4px; }
 </style>
 {% endblock %}
 
@@ -43,7 +56,23 @@
 <div class="sch-grid-title">
     <span>{{ kind_label }} schedule</span>
     <span class="sch-kind-chip is-{{ kind_slug }}">{{ ctx.users|length }} on this week</span>
+    {% if kind_slug == 'stream' %}
+    <span class="sch-kind-chip" style="background: rgba(148,163,184,0.18); color: #cbd5e1;">From Stream Manager</span>
+    {% endif %}
 </div>
+
+{% if kind_slug == 'stream' and ctx.stream_legend %}
+<div class="sch-account-legend">
+    <strong>Streams:</strong>
+    {% for item in ctx.stream_legend %}
+    <span class="sch-legend-chip">
+        <span class="sch-legend-sw" style="background: {{ item.color }};"></span>
+        {{ item.name }}
+    </span>
+    {% endfor %}
+</div>
+{% endif %}
+
 <div class="sch-wrap">
     <table class="sch-table">
         <thead>
@@ -76,11 +105,12 @@
                 {% for d in ctx.week_days %}
                 {% set entry = ctx.entry_map.get((u.id, d.isoformat())) %}
                 {% set hint = (ctx.stream_hint_map.get((u.id, d.isoformat())) if ctx.stream_hint_map else None) %}
-                {% set label = (entry.label if entry else (hint if hint else '')) %}
-                {% set kind = (entry.kind if entry else ('stream' if hint else 'blank')) %}
-                {% set from_stream = entry is none and hint %}
-                <td class="sch-cell sch-k-{{ kind }}{% if is_me and kind != 'blank' %} sch-me{% endif %}{% if from_stream %} sch-from-stream{% endif %}"
-                    {% if from_stream %}title="From Stream Manager"{% endif %}>{{ label }}</td>
+                {% set label = (entry.label if entry else (hint.label if hint else '')) %}
+                {% set kind = (entry.kind if entry else 'blank') %}
+                {% set hint_color = (hint.color if hint and not entry else None) %}
+                <td class="sch-cell sch-k-{{ kind }}{% if is_me and (kind != 'blank' or hint_color) %} sch-me{% endif %}{% if hint_color %} sch-from-stream{% endif %}"
+                    {% if hint_color %}style="background: {{ hint_color }}; color:#0b1220;"{% endif %}
+                    {% if hint and not entry %}title="{{ hint.account_name }} · from Stream Manager"{% endif %}>{{ label }}</td>
                 {% endfor %}
             </tr>
             {% endfor %}
@@ -114,6 +144,7 @@
 {{ render_grid(stream, 'Stream', 'stream', False) }}
 
 <div class="sch-legend">
+    <strong style="color:var(--pt-text);">Storefront colors:</strong>
     <span class="sch-legend-chip"><span class="sch-legend-sw" style="background:#86efac;"></span> Scheduled shift</span>
     <span class="sch-legend-chip"><span class="sch-legend-sw" style="background:#a8a29e;"></span> OFF</span>
     <span class="sch-legend-chip"><span class="sch-legend-sw" style="background:#60a5fa;"></span> SHOW</span>
