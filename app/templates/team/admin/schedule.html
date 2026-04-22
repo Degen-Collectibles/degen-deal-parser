@@ -74,6 +74,10 @@
     .sch-k-all_day    { background: #86efac; color: #111; font-weight: 600; }
     .sch-k-blank      { background: var(--lx-bg); color: var(--lx-muted); }
     .sch-k-blank input::placeholder { color: var(--lx-muted); opacity: 0.35; }
+    /* Cells pre-filled from /stream-manager — still editable, but visually
+       marked as "synced" so admins know they came from elsewhere. */
+    .sch-cell.sch-from-stream { font-style: italic; }
+    .sch-cell.sch-from-stream input { font-style: italic; }
 
     .sch-toolbar {
         display: flex;
@@ -265,9 +269,12 @@
                         </td>
                         {% for d in ctx.week_days %}
                         {% set entry = ctx.entry_map.get((u.id, d.isoformat())) %}
-                        {% set kind = (entry.kind if entry else 'blank') %}
-                        {% set label = (entry.label if entry else '') %}
-                        <td class="sch-cell sch-k-{{ kind }}">
+                        {% set hint = (ctx.stream_hint_map.get((u.id, d.isoformat())) if ctx.stream_hint_map else None) %}
+                        {% set from_stream = entry is none and hint %}
+                        {% set label = (entry.label if entry else (hint if hint else '')) %}
+                        {% set kind = (entry.kind if entry else ('stream' if hint else 'blank')) %}
+                        <td class="sch-cell sch-k-{{ kind }}{% if from_stream %} sch-from-stream{% endif %}"
+                            {% if from_stream %}title="From Stream Manager — edit here to override"{% endif %}>
                             {% if can_edit %}
                             <input type="text"
                                    name="{{ build_cell_key(u.id, d) }}"

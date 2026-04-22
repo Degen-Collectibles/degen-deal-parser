@@ -24,6 +24,7 @@
     .sch-k-all_day    { background: #86efac; color: #111; font-weight: 600; }
     .sch-k-blank      { background: transparent; color: var(--pt-muted); }
     .sch-me { outline: 2px solid #ff8a3d; outline-offset: -2px; }
+    .sch-from-stream { font-style: italic; }
 
     .sch-toolbar { display: flex; justify-content: space-between; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
     .sch-week-btns { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
@@ -74,9 +75,12 @@
                 </td>
                 {% for d in ctx.week_days %}
                 {% set entry = ctx.entry_map.get((u.id, d.isoformat())) %}
-                {% set kind = (entry.kind if entry else 'blank') %}
-                {% set label = (entry.label if entry else '') %}
-                <td class="sch-cell sch-k-{{ kind }}{% if is_me and kind != 'blank' %} sch-me{% endif %}">{{ label }}</td>
+                {% set hint = (ctx.stream_hint_map.get((u.id, d.isoformat())) if ctx.stream_hint_map else None) %}
+                {% set label = (entry.label if entry else (hint if hint else '')) %}
+                {% set kind = (entry.kind if entry else ('stream' if hint else 'blank')) %}
+                {% set from_stream = entry is none and hint %}
+                <td class="sch-cell sch-k-{{ kind }}{% if is_me and kind != 'blank' %} sch-me{% endif %}{% if from_stream %} sch-from-stream{% endif %}"
+                    {% if from_stream %}title="From Stream Manager"{% endif %}>{{ label }}</td>
                 {% endfor %}
             </tr>
             {% endfor %}

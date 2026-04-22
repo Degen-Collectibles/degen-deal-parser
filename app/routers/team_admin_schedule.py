@@ -34,6 +34,8 @@ from ..models import (
     ScheduleRosterMember,
     SHIFT_KIND_BLANK,
     ShiftEntry,
+    Streamer,
+    StreamSchedule,
     User,
     classify_shift_label,
     utcnow,
@@ -70,6 +72,64 @@ def _build_cell_key(user_id: int, d: date) -> str:
 
 def _build_day_loc_key(d: date) -> str:
     return f"dayloc__{d.isoformat()}"
+
+
+def _fmt_time_12h(t24: str) -> str:
+    """Format an 'HH:MM' 24-hour time string as '4:00 PM'."""
+    try:
+        h_s, m_s = t24.split(":")[0], t24.split(":")[1]
+        h = int(h_s)
+        suffix = "AM" if h < 12 else "PM"
+        h12 = h % 12 or 12
+        return f"{h12}:{m_s} {suffix}"
+    except Exception:
+        return t24
+
+
+def _stream_schedule_hint_map(
+    session: Session,
+    week_days: list[date],
+    user_ids: set[int],
+) -> dict[tuple[int, str], str]:
+    """Build (user_id, YYYY-MM-DD) -> 'start - end [next day]' pre-fill map.
+
+    Sourced from `/stream-manager` StreamSchedule rows. We join
+    Streamer.user_id to get a user; streamers with no linked user are
+    skipped (they have no row on the grid to pre-fill). If multiple
+    shifts land on the same day for one user, we join the time ranges
+    with ' / ' so nothing silently disappears.
+    """
+    if not user_ids or not week_days:
+        return {}
+    streamers = list(
+        session.exec(
+            select(Streamer).where(Streamer.user_id.in_(user_ids))  # type: ignore[attr-defined]
+        ).all()
+    )
+    streamer_to_user: dict[int, int] = {
+        s.id: s.user_id for s in streamers if s.id is not None and s.user_id is not None
+    }
+    if not streamer_to_user:
+        return {}
+    iso_days = [d.isoformat() for d in week_days]
+    scheds = list(
+        session.exec(
+            select(StreamSchedule).where(
+                StreamSchedule.streamer_id.in_(streamer_to_user.keys()),  # type: ignore[attr-defined]
+                StreamSchedule.date.in_(iso_days),  # type: ignore[attr-defined]
+            )
+        ).all()
+    )
+    hint: dict[tuple[int, str], list[str]] = {}
+    for s in scheds:
+        uid = streamer_to_user.get(s.streamer_id)
+        if uid is None:
+            continue
+        label = f"{_fmt_time_12h(s.start_time)} - {_fmt_time_12h(s.end_time)}"
+        if s.is_overnight:
+            label += " (next day)"
+        hint.setdefault((uid, s.date), []).append(label)
+    return {k: " / ".join(v) for k, v in hint.items()}
 
 
 def _grid_context(
@@ -200,12 +260,23 @@ def _grid_context(
     else:
         prev_roster_count = len(prev_roster_ids)
 
+    # Stream grid gets a hint layer from /stream-manager StreamSchedule
+    # rows so shifts booked there show up immediately on the weekly
+    # schedule without the admin having to re-type them. Storefront
+    # grid has no such source, so we skip the lookup.
+    stream_hint_map: dict[tuple[int, str], str] = {}
+    if staff_kind == STAFF_KIND_STREAM and users:
+        stream_hint_map = _stream_schedule_hint_map(
+            session, week_days, {u.id for u in users if u.id is not None}
+        )
+
     return {
         "week_start": week_start,
         "week_start_iso": week_start.isoformat(),
         "week_days": week_days,
         "users": users,
         "entry_map": entry_map,
+        "stream_hint_map": stream_hint_map,
         "day_note_map": day_note_map,
         "roster_user_ids": roster_user_ids,
         "addable_users": addable_users,
