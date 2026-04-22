@@ -388,7 +388,22 @@ def _nav_context(session: Session, user: User) -> dict:
     for name, key, href in keys:
         if has_permission(session, user, key, cache=cache):
             nav.append({"name": name, "href": href})
-    return {"nav_items": nav}
+
+    # Admin-only section. Rendered as a separate group in the sidebar when
+    # at least one entry is visible. Gated per-key against the perms matrix
+    # so managers/reviewers only see the admin links they actually have.
+    admin_keys = (
+        ("employees", "page.admin.employees", "/team/admin/employees"),
+        ("invites", "page.admin.invites", "/team/admin/invites"),
+        ("permissions", "page.admin.permissions", "/team/admin/permissions"),
+        ("supply-queue", "page.admin.supply", "/team/admin/supply"),
+    )
+    admin_nav = []
+    for name, key, href in admin_keys:
+        if has_permission(session, user, key, cache=cache):
+            admin_nav.append({"name": name, "href": href})
+
+    return {"nav_items": nav, "admin_nav_items": admin_nav}
 
 
 @router.get("/team/", response_class=HTMLResponse)
