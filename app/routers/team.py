@@ -399,10 +399,19 @@ async def team_password_reset_post(
 
 def _nav_context(session: Session, user: User) -> dict:
     cache: dict = {}
+    # Admins / managers with edit rights get the editable admin schedule
+    # wherever a "Schedule" link appears — bottom mobile nav, sidebar,
+    # etc. Without this, phone users were tapping the mobile Schedule
+    # icon and landing on the read-only employee view (no + cells, no
+    # modal editing), which looked like the admin page was broken.
+    can_edit_schedule = has_permission(
+        session, user, "admin.schedule.edit", cache=cache
+    )
+    schedule_href = "/team/admin/schedule" if can_edit_schedule else "/team/schedule"
     keys = (
         ("dashboard", "page.dashboard", "/team/"),
         ("hours", "page.hours", "/team/hours"),
-        ("schedule", "page.schedule", "/team/schedule"),
+        ("schedule", "page.schedule", schedule_href),
         ("policies", "page.policies", "/team/policies"),
         ("supply", "page.supply_requests", "/team/supply"),
         ("profile", "page.profile", "/team/profile"),
@@ -442,6 +451,8 @@ def _nav_context(session: Session, user: User) -> dict:
         "nav_items": nav,
         "admin_nav_items": admin_nav,
         "tools_nav_items": tools_nav,
+        "schedule_href": schedule_href,
+        "can_edit_schedule": can_edit_schedule,
     }
 
 
@@ -846,6 +857,16 @@ def team_schedule(
     denial, user = _require_employee(request, session, resource_key="page.schedule")
     if denial:
         return denial
+    # If this user can edit the schedule (admins / managers), send them to
+    # the editable admin page instead of the read-only employee view. This
+    # fixes a confusing case on mobile where tapping the bottom-nav
+    # Schedule icon landed admins on /team/schedule (no + cells, no modal)
+    # and looked like the editor was "broken on mobile."
+    if has_permission(session, user, "admin.schedule.edit"):
+        target = "/team/admin/schedule"
+        if week:
+            target += f"?week={week}"
+        return RedirectResponse(url=target, status_code=303)
     # Reuse the admin grid builder so the employee view is literally the
     # same visual — no translation layer, no "my shifts" fork. Everyone
     # sees the published grid the same way; only the top-level wrapper
