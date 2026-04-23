@@ -15,6 +15,7 @@ of the portal suite.
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import unittest
 from datetime import date, timedelta
@@ -521,6 +522,119 @@ class AdminPIIEditTests(unittest.TestCase, _W47Harness):
         )
         self.assertIn(r.status_code, (302, 303))
         self.assertIn("already+taken", r.headers.get("location", ""))
+
+    def test_admin_sensitive_write_requires_reveal_authority(self):
+        from app.auth import create_draft_employee
+        from app.models import EmployeeProfile, RolePermission
+
+        admin = self._login_as("admin")
+        perm = self.session.exec(
+            select(RolePermission).where(
+                RolePermission.role == "admin",
+                RolePermission.resource_key == "admin.employees.reveal_pii",
+            )
+        ).one()
+        perm.is_allowed = False
+        self.session.add(perm)
+        self.session.commit()
+        draft = create_draft_employee(
+            self.session,
+            created_by_user_id=admin.id,
+            display_name="Reveal Locked",
+        )
+        r = self.client.post(
+            f"/team/admin/employees/{draft.id}/pii-update",
+            data={
+                "csrf_token": self._csrf(),
+                "legal_name": "Hidden Name",
+                "email": "",
+                "phone": "",
+                "emergency_contact_name": "",
+                "emergency_contact_phone": "",
+                "address_street": "",
+                "address_city": "",
+                "address_state": "",
+                "address_zip": "",
+            },
+            follow_redirects=False,
+        )
+        self.assertEqual(r.status_code, 403)
+        self.session.expire_all()
+        profile = self.session.get(EmployeeProfile, draft.id)
+        self.assertFalse(bool(profile and profile.legal_name_enc))
+
+    def test_admin_blank_sensitive_write_allowed_without_reveal_authority(self):
+        from app.auth import create_draft_employee
+        from app.models import RolePermission
+
+        admin = self._login_as("admin")
+        perm = self.session.exec(
+            select(RolePermission).where(
+                RolePermission.role == "admin",
+                RolePermission.resource_key == "admin.employees.reveal_pii",
+            )
+        ).one()
+        perm.is_allowed = False
+        self.session.add(perm)
+        self.session.commit()
+        draft = create_draft_employee(
+            self.session,
+            created_by_user_id=admin.id,
+            display_name="No Reveal Needed",
+        )
+        r = self.client.post(
+            f"/team/admin/employees/{draft.id}/pii-update",
+            data={
+                "csrf_token": self._csrf(),
+                "legal_name": "",
+                "email": "",
+                "phone": "",
+                "emergency_contact_name": "",
+                "emergency_contact_phone": "",
+                "address_street": "",
+                "address_city": "",
+                "address_state": "",
+                "address_zip": "",
+            },
+            follow_redirects=False,
+        )
+        self.assertEqual(r.status_code, 303)
+
+    def test_admin_pii_audit_includes_fingerprints(self):
+        from app.auth import create_draft_employee
+        from app.models import AuditLog
+
+        admin = self._login_as("admin")
+        draft = create_draft_employee(
+            self.session,
+            created_by_user_id=admin.id,
+            display_name="Fingerprint Me",
+        )
+        r = self.client.post(
+            f"/team/admin/employees/{draft.id}/pii-update",
+            data={
+                "csrf_token": self._csrf(),
+                "legal_name": "Jane Example",
+                "email": "jane@example.com",
+                "phone": "5551234567",
+                "emergency_contact_name": "John Example",
+                "emergency_contact_phone": "5552223333",
+                "address_street": "1 Main",
+                "address_city": "Austin",
+                "address_state": "TX",
+                "address_zip": "78701",
+            },
+            follow_redirects=False,
+        )
+        self.assertEqual(r.status_code, 303)
+        row = self.session.exec(
+            select(AuditLog).where(AuditLog.action == "admin.pii_update")
+        ).one()
+        details = json.loads(row.details_json or "{}")
+        self.assertIn("fingerprints", details)
+        self.assertEqual(details["fingerprints"]["email"]["len"], len("jane@example.com"))
+        self.assertTrue(details["fingerprints"]["address"]["present"])
+        self.assertEqual(len(details["fingerprints"]["email"]["sha256_12"]), 12)
 
 
 # ---------------------------------------------------------------------------

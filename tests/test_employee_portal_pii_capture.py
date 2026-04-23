@@ -270,14 +270,65 @@ class InvitePIICaptureTests(unittest.TestCase, _PIIHarness):
             },
             follow_redirects=False,
         )
-        # Should NOT create the second user. Implementation may return the
-        # form (200) with an error flash, or redirect (303) back. Either is
-        # acceptable as long as the second user was not persisted.
-        self.assertIn(r2.status_code, (200, 303, 400, 409), r2.text)
+        # Should onboard successfully but drop the conflicting email.
+        self.assertEqual(r2.status_code, 303, r2.text)
         second = self.session.exec(
             select(User).where(User.username == "second_user")
         ).first()
-        self.assertIsNone(second, "second user must NOT be created on email clash")
+        self.assertIsNotNone(second)
+        self.assertIn("banner=Email+not+saved", r2.headers.get("location", ""))
+
+    def test_invite_accept_drops_duplicate_email_but_still_onboards(self):
+        from app.auth import generate_invite_token
+        from app.models import EmployeeProfile, User
+        from app.pii import decrypt_pii, email_lookup_hash, encrypt_pii
+
+        existing = User(
+            id=9100,
+            username="existing_email_owner",
+            password_hash="x",
+            password_salt="x",
+            display_name="Existing",
+            role="employee",
+            is_active=True,
+        )
+        existing_profile = EmployeeProfile(
+            user_id=9100,
+            email_ciphertext=encrypt_pii("dup@example.com"),
+            email_lookup_hash=email_lookup_hash("dup@example.com"),
+        )
+        self.session.add(existing)
+        self.session.add(existing_profile)
+        self.session.commit()
+
+        admin = self._login(role="admin", user_id=200, username="adm_pii")
+        raw = generate_invite_token(
+            self.session, role="employee", created_by_user_id=admin.id
+        )
+        csrf = self._csrf()
+        r = self.client.post(
+            f"/team/invite/accept/{raw}",
+            data={
+                "new_username": "email_drop_user",
+                "new_password": "StrongPass9#xy",
+                "preferred_name": "Drop",
+                "email": "DUP@example.com",
+                "phone": "5551112222",
+                "csrf_token": csrf,
+            },
+            follow_redirects=False,
+        )
+        self.assertEqual(r.status_code, 303, r.text)
+        self.assertIn("banner=Email+not+saved", r.headers.get("location", ""))
+
+        onboarded = self.session.exec(
+            select(User).where(User.username == "email_drop_user")
+        ).first()
+        self.assertIsNotNone(onboarded)
+        profile = self.session.get(EmployeeProfile, onboarded.id)
+        self.assertEqual(decrypt_pii(profile.phone_enc), "5551112222")
+        self.assertFalse(profile.email_ciphertext)
+        self.assertFalse(profile.email_lookup_hash)
 
 
 class AdminEmailRevealTests(unittest.TestCase, _PIIHarness):

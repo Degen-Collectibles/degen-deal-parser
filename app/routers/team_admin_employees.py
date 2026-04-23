@@ -553,16 +553,14 @@ def _parse_date(value: str) -> Optional[date]:
         return None
 
 
-def _clamp_hourly_rate_cents(raw: str) -> tuple[Optional[int], bool]:
-    value = (raw or "").strip()
+def _clamp_hourly_rate_cents(value: str) -> tuple[Optional[int], bool]:
+    value = (value or "").strip()
     if not value:
         return None, False
     if not value.isdigit():
         return None, True
     parsed = int(value)
-    if parsed < 0 or parsed > 1_000_000:
-        return None, True
-    return parsed, False
+    return min(max(parsed, 0), 1_000_000), False
 
 
 @router.post(
@@ -662,7 +660,7 @@ async def admin_employee_profile_update(
         session.commit()
     flash = "Saved."
     if rate_invalid:
-        flash = "Invalid+hourly_rate_cents.+Existing+value+kept."
+        flash = "Saved.+Invalid+hourly_rate_cents+ignored."
     return RedirectResponse(
         f"/team/admin/employees/{user_id}?flash={flash}", status_code=303
     )

@@ -348,6 +348,52 @@ class PasswordResetActionSplitTests(unittest.TestCase, _Harness):
     def setUp(self): self._setup()
     def tearDown(self): self._teardown()
 
+    def test_invalid_hourly_rate_does_not_clobber_existing_value(self):
+        from app.models import AuditLog, EmployeeProfile
+        from app.pii import decrypt_pii, encrypt_pii
+
+        self._login(role="admin", user_id=7000, username="adm_rate_bad")
+        emp = self._seed_employee(user_id=7100, username="emp7100")
+        profile = self.session.get(EmployeeProfile, emp.id)
+        profile.hourly_rate_cents_enc = encrypt_pii("2300")
+        self.session.add(profile)
+        self.session.commit()
+        csrf = self._csrf()
+
+        for bad in ("abc", "12.5", "-1"):
+            r = self.client.post(
+                f"/team/admin/employees/{emp.id}/profile-update",
+                data={"hourly_rate_cents": bad, "csrf_token": csrf},
+                follow_redirects=False,
+            )
+            self.assertEqual(r.status_code, 303)
+            self.assertIn("ignored", r.headers["location"])
+            self.session.expire_all()
+            refreshed = self.session.get(EmployeeProfile, emp.id)
+            self.assertEqual(decrypt_pii(refreshed.hourly_rate_cents_enc), "2300")
+
+        rows = list(self.session.exec(
+            select(AuditLog).where(AuditLog.action == "admin.profile_update")
+        ).all())
+        self.assertEqual(rows, [])
+
+    def test_hourly_rate_is_clamped_before_storage(self):
+        from app.models import EmployeeProfile
+        from app.pii import decrypt_pii
+
+        self._login(role="admin", user_id=7001, username="adm_rate_clamp")
+        emp = self._seed_employee(user_id=7101, username="emp7101")
+        csrf = self._csrf()
+        r = self.client.post(
+            f"/team/admin/employees/{emp.id}/profile-update",
+            data={"hourly_rate_cents": "99999999", "csrf_token": csrf},
+            follow_redirects=False,
+        )
+        self.assertEqual(r.status_code, 303)
+        self.session.expire_all()
+        refreshed = self.session.get(EmployeeProfile, emp.id)
+        self.assertEqual(decrypt_pii(refreshed.hourly_rate_cents_enc), "1000000")
+
     def test_admin_issued_reset_uses_reset_issued_action(self):
         from app.auth import generate_password_reset_token
         from app.models import AuditLog, User
