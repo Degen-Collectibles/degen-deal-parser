@@ -38,6 +38,7 @@ from ..tiktok_ingest import (
 )
 
 from .tiktok_streamer import _compute_buyer_lifetime_totals
+from ..tiktok_alerts import alert_ghost_cancellation, alert_reverse_order
 
 settings = get_settings()
 
@@ -378,6 +379,13 @@ async def tiktok_orders_webhook(request: Request):
                         error=err_text,
                     )
                 )
+                # Alert on ghost cancellations — TikTok cancelled something
+                # but didn't tell us which order.
+                if envelope_type == 5:  # CANCELLATION_STATUS_CHANGE
+                    alert_ghost_cancellation(
+                        event_type_name=event_type_name,
+                        body_sha256=body_hash,
+                    )
                 return Response(status_code=200)
             print(
                 structured_log_line(
@@ -409,6 +417,16 @@ async def tiktok_orders_webhook(request: Request):
             )
             enrich_order_id = (order_record.get("tiktok_order_id") or "").strip()
             _start_tiktok_webhook_enrichment(enrich_order_id)
+            # Alert immediately on reverse / cancellation events.
+            if envelope_type in (2, 5):  # REVERSE_ORDER_STATUS_CHANGE or CANCELLATION_STATUS_CHANGE
+                _price = order_record.get("total_price")
+                alert_reverse_order(
+                    tiktok_order_id=order_record.get("tiktok_order_id", ""),
+                    customer_name=order_record.get("customer_name", ""),
+                    total_price=float(_price) if _price is not None else None,
+                    order_status=order_record.get("order_status", ""),
+                    upsert_status=order_upsert_status,
+                )
     elif isinstance(payload, dict):
         # Non-order webhook type (package update, settlement, seller deauth,
         # product change, etc). Acknowledge so TikTok stops retrying.
