@@ -490,24 +490,27 @@
         .sch-roster-bar select { min-width: 140px; font-size: 12px; }
 
         /* Sticky bottom save bar. Only shown when an editable (Storefront)
-           form is present; stream grid is read-only so no bar. */
+           form is present; stream grid is read-only so no bar.
+           Pinned ABOVE the shared mobile bottom nav (which is ~64px tall
+           at z-index 150) so both stay reachable. */
         .sch-mobile-savebar {
             position: fixed;
-            left: 0; right: 0; bottom: 0;
-            padding: 10px 14px calc(10px + env(safe-area-inset-bottom, 0px));
+            left: 0; right: 0;
+            bottom: calc(64px + env(safe-area-inset-bottom, 0px));
+            padding: 6px 10px;
             background: var(--lx-s1);
             border-top: 1px solid var(--lx-br);
             box-shadow: 0 -4px 18px rgba(0,0,0,0.35);
-            z-index: 40;
+            z-index: 160;  /* above .pt-mobile-bottom-nav (150) */
             display: flex;
             gap: 8px;
             align-items: center;
-            justify-content: space-between;
+            justify-content: flex-end;
         }
         .sch-mobile-savebar button[type="submit"] {
-            flex: 1;
-            padding: 10px 14px;
-            font-size: 14px;
+            flex: 0 0 auto;
+            padding: 7px 14px;
+            font-size: 13px;
             font-weight: 600;
             background: #3b82f6;
             color: white;
@@ -518,9 +521,12 @@
         .sch-mobile-savebar .sch-mobile-dirty {
             font-size: 11px;
             color: #fdba74;
+            margin-right: auto;  /* push text left, button right */
         }
-        /* Reserve space so the bottom nav + savebar don't overlap grid. */
-        .ta-main { padding-bottom: 140px !important; }
+        /* Reserve space so the bottom nav + savebar don't overlap grid.
+           Override admin-base's 96px bottom padding because we now stack
+           two bars (nav ~64px + savebar ~44px + breathing room). */
+        .ta-main { padding-bottom: 160px !important; }
         /* Hide the inline (desktop) save button row on mobile — savebar covers it. */
         .sch-desktop-save { display: none; }
 

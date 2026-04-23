@@ -3,6 +3,8 @@
 <head>
     {% include '_linear_base_head.html' %}
     <title>{{ title }} · Degen Team Admin</title>
+    {# portal.css provides the shared mobile bottom-nav styles (.pt-mobile-bottom-nav). #}
+    <link rel="stylesheet" href="/static/portal.css?v=2026042025">
     <style>
         * { box-sizing: border-box; }
         body {
@@ -135,9 +137,58 @@
             border-color: rgba(239,68,68,0.35);
         }
         @media (max-width: 860px) {
-            .ta-layout { grid-template-columns: 1fr; }
-            .ta-sidebar { border-right: none; border-bottom: 1px solid var(--lx-br); }
-            .ta-main { padding: 20px; }
+            /* On phones the full vertical sidebar ate too much screen and
+               pushed the main content off the fold. Collapse it into a
+               compact horizontal chip strip pinned at the top so admins
+               still get quick nav without losing space. */
+            .ta-layout {
+                display: block;
+                min-height: 100vh;
+            }
+            .ta-sidebar {
+                position: sticky;
+                top: 0;
+                z-index: 20;
+                background: var(--lx-bg);
+                padding: 8px 10px;
+                border-right: none;
+                border-bottom: 1px solid var(--lx-br);
+                flex-direction: row;
+                align-items: center;
+                gap: 6px;
+                overflow-x: auto;
+                -webkit-overflow-scrolling: touch;
+                white-space: nowrap;
+                scrollbar-width: none;
+            }
+            .ta-sidebar::-webkit-scrollbar { display: none; }
+            .ta-brand {
+                font-size: 11px;
+                padding: 0 8px 0 4px;
+                flex-shrink: 0;
+            }
+            .ta-nav-group { display: none; }
+            .ta-nav-link {
+                padding: 6px 10px;
+                font-size: 12px;
+                border: 1px solid var(--lx-br);
+                border-radius: 999px;
+                flex-shrink: 0;
+            }
+            .ta-nav-link:hover { background: var(--lx-s1); }
+            .ta-nav-link.active {
+                background: rgba(255, 138, 61, 0.12);
+                border-color: rgba(255, 138, 61, 0.4);
+            }
+            /* Hide the tucked-under-sidebar back links on mobile — the
+               shared bottom nav handles going "back to team portal". */
+            .ta-sidebar > div[style*="margin-top:auto"] { display: none; }
+            .ta-main {
+                padding: 16px 14px 96px;  /* 96px reserves room for bottom nav */
+                max-width: 100%;
+            }
+            .ta-header { margin-bottom: 16px; padding-bottom: 12px; }
+            .ta-h1 { font-size: 18px; }
         }
     </style>
     {% block extra_head %}{% endblock %}
@@ -167,5 +218,11 @@
         <div class="ta-footer">Degen Deal Parser · team admin</div>
     </main>
 </div>
+{# Admin pages don't run _nav_context(); supply sensible defaults so the
+   shared mobile bottom nav renders the Stream/Eye tool slots that admins
+   always have, and points Schedule at the editable admin page. #}
+{% set tools_nav_items = tools_nav_items|default([{'name': 'tools'}]) %}
+{% set schedule_href = schedule_href|default('/team/admin/schedule') %}
+{% include "_team_mobile_bottom_nav.html" %}
 </body>
 </html>
