@@ -21,10 +21,12 @@
         <button class="ta-btn" type="submit">Search</button>
         {% if q or show_inactive %}<a class="ta-btn" href="/team/admin/employees">Clear</a>{% endif %}
     </form>
+    {% if can_edit_employees %}
     <a class="ta-btn" href="/team/admin/employees/new"
        style="background:#3b82f6; color:white; border-color:#3b82f6; font-weight:600;">
         + Add employee
     </a>
+    {% endif %}
 </div>
 
 <p style="font-size:12px; color:var(--lx-muted); margin:-10px 0 16px;">
@@ -85,6 +87,7 @@
                     {% endif %}
                 </td>
                 <td style="padding:10px 14px; border-bottom:1px solid var(--lx-br); text-align:center;">
+                    {% if can_edit_employees %}
                     <form method="post" action="/team/admin/employees/{{ u.id }}/schedulable-toggle" style="display:inline; margin:0;">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
                         <input type="hidden" name="return_show_inactive" value="{{ '1' if show_inactive else '' }}"/>
@@ -99,6 +102,9 @@
                                    aria-label="Toggle schedulable for {{ u.display_name or u.username }}"/>
                         </label>
                     </form>
+                    {% else %}
+                    <span style="color:var(--lx-muted); font-size:12px;">{% if u.is_schedulable %}Yes{% else %}No{% endif %}</span>
+                    {% endif %}
                 </td>
                 <td style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">
                     {% if profile and profile.hire_date %}{{ profile.hire_date }}{% else %}—{% endif %}

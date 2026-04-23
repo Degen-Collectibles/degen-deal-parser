@@ -159,7 +159,7 @@
             <line x1="3" y1="18" x2="21" y2="18"/>
         </svg>
     </button>
-    <a href="/team/admin" class="pt-mobile-brand" aria-label="Degen Team Admin home">
+    <a href="{{ admin_home_href|default('/team/admin') }}" class="pt-mobile-brand" aria-label="Degen Team Admin home">
         <span class="pt-brand-dot"></span>
         <span>Team Admin</span>
     </a>
@@ -179,13 +179,18 @@
         <div class="ta-brand">Degen · Team Admin</div>
         {# Admin nav links. pt-link class applied too so portal-drawer.js's
            click-to-close hook fires on mobile. #}
-        <a class="ta-nav-link pt-link {% if active == 'overview' %}active{% endif %}" href="/team/admin">Overview</a>
-        <a class="ta-nav-link pt-link {% if active == 'permissions' %}active{% endif %}" href="/team/admin/permissions">Permissions</a>
+        {% set admin_nav_items = admin_nav_items|default([]) %}
+        {% set people_names = ['employees', 'schedule', 'invites', 'supply'] %}
+        {% for item in admin_nav_items if item.name in ['overview', 'permissions'] %}
+            <a class="ta-nav-link pt-link {% if active == item.name %}active{% endif %}" href="{{ item.href }}">{{ item.label }}</a>
+        {% endfor %}
+        {% set people_items = admin_nav_items | selectattr('name', 'in', people_names) | list %}
+        {% if people_items %}
         <div class="ta-nav-group">People</div>
-        <a class="ta-nav-link pt-link {% if active == 'employees' %}active{% endif %}" href="/team/admin/employees">Employees</a>
-        <a class="ta-nav-link pt-link {% if active == 'schedule' %}active{% endif %}" href="/team/admin/schedule">Schedule</a>
-        <a class="ta-nav-link pt-link {% if active == 'invites' %}active{% endif %}" href="/team/admin/invites">Invites</a>
-        <a class="ta-nav-link pt-link {% if active == 'supply' %}active{% endif %}" href="/team/admin/supply">Supply queue</a>
+        {% for item in people_items %}
+            <a class="ta-nav-link pt-link {% if active == item.name %}active{% endif %}" href="{{ item.href }}">{{ item.label }}</a>
+        {% endfor %}
+        {% endif %}
         <div class="ta-sidebar-footer">
             <a href="/team/">← back to team portal</a>
             <a href="/admin">← back to ops admin</a>

@@ -44,9 +44,15 @@ from ..models import (
     utcnow,
 )
 from ..shared import templates
-from .team_admin import _admin_gate, _permission_gate
+from .team_admin import _permission_gate
 
 router = APIRouter()
+
+
+def _admin_nav_context(session: Session, user) -> dict:
+    from .team import _nav_context
+
+    return _nav_context(session, user)
 
 
 def _monday_of(d: date) -> date:
@@ -795,6 +801,7 @@ def admin_schedule_view(
             "is_current_week": storefront_ctx["is_current_week"],
             "today": date.today(),
             "flash": flash,
+            **_admin_nav_context(session, user),
         },
     )
 

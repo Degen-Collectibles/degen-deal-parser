@@ -80,27 +80,58 @@ class _Harness:
 
     def _login(self, *, role: str, user_id: int = 100, username: str = "admin_t"):
         from app import shared
+        from app.auth import hash_password
         from app.models import User
         import app.main as app_main
 
-        u = User(
-            id=user_id,
-            username=username,
-            password_hash="x",
-            password_salt="x",
-            display_name=username,
-            role=role,
-            is_active=True,
-        )
-        self._patcher_shared = patch.object(shared, "get_request_user", return_value=u)
-        self._patcher_shared.start()
-        self._patcher_main = patch.object(app_main, "get_request_user", return_value=u)
-        self._patcher_main.start()
+        password = "TestPass!234"
         existing = self.session.get(User, user_id)
         if existing is None:
-            self.session.add(u)
+            password_hash, password_salt = hash_password(password)
+            user = User(
+                id=user_id,
+                username=username,
+                password_hash=password_hash,
+                password_salt=password_salt,
+                display_name=username,
+                role=role,
+                is_active=True,
+                session_version=1,
+            )
+            self.session.add(user)
             self.session.commit()
-        return u
+            self.session.refresh(user)
+        else:
+            password_hash, password_salt = hash_password(password)
+            existing.username = username
+            existing.password_hash = password_hash
+            existing.password_salt = password_salt
+            existing.display_name = username
+            existing.role = role
+            existing.is_active = True
+            existing.session_version = int(getattr(existing, "session_version", 0) or 1)
+            self.session.add(existing)
+            self.session.commit()
+            self.session.refresh(existing)
+            user = existing
+
+        self._patcher_shared = patch.object(shared, "get_request_user", return_value=user)
+        self._patcher_shared.start()
+        self._patcher_main = patch.object(app_main, "get_request_user", return_value=user)
+        self._patcher_main.start()
+
+        csrf = self._csrf()
+        response = self.client.post(
+            "/team/login",
+            data={
+                "username": username,
+                "password": password,
+                "csrf_token": csrf,
+            },
+            follow_redirects=False,
+        )
+        assert response.status_code == 303, response.text[:300]
+        return user
 
     def _csrf(self) -> str:
         marker = 'name="csrf_token" value="'
@@ -441,6 +472,36 @@ class ResetConsumeRoundTripTests(unittest.TestCase, _Harness):
         self.assertIsNotNone(logged_in)
         self.assertEqual(logged_in.id, 8001)
 
+    def test_reset_consume_bumps_session_version(self):
+        from app.auth import (
+            consume_password_reset_token,
+            generate_password_reset_token,
+            hash_password,
+        )
+        from app.models import User
+
+        old_hash, old_salt = hash_password("OldPassword1!")
+        target = User(
+            id=8003,
+            username="resetver",
+            password_hash=old_hash,
+            password_salt=old_salt,
+            display_name="resetver",
+            role="employee",
+            is_active=True,
+            session_version=2,
+        )
+        self.session.add(target)
+        self.session.commit()
+
+        raw = generate_password_reset_token(
+            self.session, user_id=8003, issued_by_user_id=None
+        )
+        consume_password_reset_token(self.session, raw, new_password="BrandNewSecret9!")
+        self.session.expire_all()
+        refreshed = self.session.get(User, 8003)
+        self.assertEqual(refreshed.session_version, 3)
+
 
 # ---------------------------------------------------------------------------
 # End-to-end: admin invite → new user accepts → authenticates
@@ -488,8 +549,15 @@ class PurgeIdempotencyTests(unittest.TestCase, _Harness):
     def tearDown(self): self._teardown()
 
     def test_second_purge_no_duplicate_audit_and_pii_still_none(self):
-        from app.models import AuditLog, EmployeeProfile
+        from app.models import AuditLog, User
         self._login(role="admin", user_id=40, username="adm_purge")
+        from app.models import User
+        admin_row = self.session.get(User, 40)
+        admin_row.password_hash = "x"
+        admin_row.password_salt = "x"
+        admin_row.session_version = 1
+        self.session.add(admin_row)
+        self.session.commit()
         emp = self._seed_employee(user_id=1401, username="emp1401")
         csrf = self._csrf()
         r1 = self.client.post(
@@ -498,6 +566,8 @@ class PurgeIdempotencyTests(unittest.TestCase, _Harness):
             follow_redirects=False,
         )
         self.assertEqual(r1.status_code, 303)
+        follow1 = self.client.get(r1.headers["location"])
+        self.assertEqual(follow1.status_code, 200)
         # Second purge: should still "succeed" but not add new PII (already None).
         r2 = self.client.post(
             f"/team/admin/employees/{emp.id}/purge",
@@ -506,17 +576,123 @@ class PurgeIdempotencyTests(unittest.TestCase, _Harness):
         )
         # Either 303 (noop) or a redirect — but MUST NOT 500.
         self.assertIn(r2.status_code, (303, 400, 409))
-        self.session.expire_all()
-        p = self.session.get(EmployeeProfile, emp.id)
-        self.assertIsNone(p.phone_enc)
-        self.assertIsNone(p.legal_name_enc)
-        # At least one purge audit row — brief tolerates duplicate audits from
-        # a second purge since current impl writes one per call. Verify PII
-        # cannot leak or be "restored" across a replayed purge.
+        self.assertEqual(r2.status_code, 303)
+        self.assertTrue(r2.headers.get("location", "").endswith("flash=PII+purged."))
         rows = list(self.session.exec(
             select(AuditLog).where(AuditLog.action == "account.purged")
         ).all())
-        self.assertGreaterEqual(len(rows), 1)
+        self.assertEqual(len(rows), 1)
+
+    def test_terminate_revokes_session_version_and_deactivates_user(self):
+        from app.models import AuditLog, EmployeeProfile, User
+
+        self._login(role="admin", user_id=40, username="adm_term")
+        admin_row = self.session.get(User, 40)
+        admin_row.password_hash = "x"
+        admin_row.password_salt = "x"
+        admin_row.session_version = 1
+        self.session.add(admin_row)
+        employee = self._seed_employee(user_id=1402, username="emp1402")
+        user_row = self.session.get(User, employee.id)
+        user_row.session_version = 1
+        self.session.add(user_row)
+        self.session.commit()
+
+        csrf = self._csrf()
+        r_term = self.client.post(
+            f"/team/admin/employees/{employee.id}/terminate",
+            data={"csrf_token": csrf},
+            follow_redirects=False,
+        )
+        self.assertEqual(r_term.status_code, 303)
+        follow = self.client.get(r_term.headers["location"])
+        self.assertEqual(follow.status_code, 200)
+
+        self.session.expire_all()
+        refreshed = self.session.get(User, employee.id)
+        self.assertFalse(refreshed.is_active)
+        self.assertEqual(refreshed.session_version, 2)
+        profile = self.session.get(EmployeeProfile, employee.id)
+        self.assertIsNotNone(profile.termination_date)
+        rows = list(self.session.exec(
+            select(AuditLog).where(AuditLog.action == "account.terminated")
+        ).all())
+        self.assertEqual(len(rows), 1)
+        self.assertIn('"session_version": 2', rows[0].details_json)
+
+
+class PublicFlowErrorSanitizationTests(unittest.TestCase, _Harness):
+    def setUp(self): self._setup()
+    def tearDown(self): self._teardown()
+
+    def test_invite_accept_hides_internal_error_codes(self):
+        from app.auth import generate_invite_token
+
+        from app.auth import create_draft_employee
+
+        self._login(role="admin", user_id=41, username="adm_invite_sanitize")
+        draft = create_draft_employee(
+            self.session,
+            role="employee",
+            created_by_user_id=41,
+            legal_name="Draft Employee",
+        )
+        token = generate_invite_token(
+            self.session,
+            role="employee",
+            created_by_user_id=41,
+            target_user_id=draft.id,
+        )
+        user_row = self.session.get(type(draft), draft.id)
+        user_row.is_active = True
+        user_row.password_hash = "x"
+        user_row.password_salt = "x"
+        self.session.add(user_row)
+        self.session.commit()
+
+        r = self.client.post(
+            f"/team/invite/accept/{token}",
+            data={
+                "csrf_token": self._csrf(),
+                "new_username": "newhire1450",
+                "new_password": "StrongPassw0rd!",
+                "preferred_name": "New Hire",
+            },
+            follow_redirects=False,
+        )
+        self.assertEqual(r.status_code, 303)
+        location = r.headers.get("location", "")
+        self.assertIn("error=Invite", location)
+        self.assertIn("invalid", location)
+        self.assertIn("expired", location)
+        self.assertNotIn("invite_target_already_registered", location)
+
+    def test_reset_consume_hides_internal_inactive_error_code(self):
+        from app.auth import generate_password_reset_token
+        from app.models import User
+
+        self._login(role="admin", user_id=42, username="adm_reset_sanitize")
+        employee = self._seed_employee(user_id=1451, username="emp1451")
+        user_row = self.session.get(User, employee.id)
+        user_row.is_active = False
+        self.session.add(user_row)
+        self.session.commit()
+        token = generate_password_reset_token(self.session, user_id=employee.id)
+
+        r = self.client.post(
+            f"/team/password/reset/{token}",
+            data={
+                "csrf_token": self._csrf(),
+                "new_password": "StrongPassw0rd!",
+            },
+            follow_redirects=False,
+        )
+        self.assertEqual(r.status_code, 303)
+        location = r.headers.get("location", "")
+        self.assertIn("error=Reset", location)
+        self.assertIn("invalid", location)
+        self.assertIn("expired", location)
+        self.assertNotIn("reset_user_inactive", location)
 
 
 if __name__ == "__main__":

@@ -70,29 +70,58 @@ class _W4Harness:
 
     def _login(self, *, role: str, user_id: int = 100, username: str = "admin_t"):
         from app import shared
+        from app.auth import hash_password
         from app.models import User
         import app.main as app_main
 
-        u = User(
-            id=user_id,
-            username=username,
-            password_hash="x",
-            password_salt="x",
-            display_name=username,
-            role=role,
-            is_active=True,
-        )
-        self._patcher_shared = patch.object(shared, "get_request_user", return_value=u)
-        self._patcher_shared.start()
-        self._patcher_main = patch.object(app_main, "get_request_user", return_value=u)
-        self._patcher_main.start()
-        # Ensure the user row is ALSO present in the in-memory DB so FK
-        # audit-log rows referencing actor_user_id are valid.
+        password = "TestPass!234"
         existing = self.session.get(User, user_id)
         if existing is None:
-            self.session.add(u)
+            password_hash, password_salt = hash_password(password)
+            user = User(
+                id=user_id,
+                username=username,
+                password_hash=password_hash,
+                password_salt=password_salt,
+                display_name=username,
+                role=role,
+                is_active=True,
+                session_version=1,
+            )
+            self.session.add(user)
             self.session.commit()
-        return u
+            self.session.refresh(user)
+        else:
+            password_hash, password_salt = hash_password(password)
+            existing.username = username
+            existing.password_hash = password_hash
+            existing.password_salt = password_salt
+            existing.display_name = username
+            existing.role = role
+            existing.is_active = True
+            existing.session_version = int(getattr(existing, "session_version", 0) or 1)
+            self.session.add(existing)
+            self.session.commit()
+            self.session.refresh(existing)
+            user = existing
+
+        self._patcher_shared = patch.object(shared, "get_request_user", return_value=user)
+        self._patcher_shared.start()
+        self._patcher_main = patch.object(app_main, "get_request_user", return_value=user)
+        self._patcher_main.start()
+
+        csrf = self._csrf()
+        response = self.client.post(
+            "/team/login",
+            data={
+                "username": username,
+                "password": password,
+                "csrf_token": csrf,
+            },
+            follow_redirects=False,
+        )
+        assert response.status_code == 303, response.text[:300]
+        return user
 
     def _csrf(self) -> str:
         marker = 'name="csrf_token" value="'
@@ -147,6 +176,44 @@ class EmployeeListTests(unittest.TestCase, _W4Harness):
         self._seed_employee(user_id=502, username="emp502")
         r = self.client.get("/team/admin/employees")
         self.assertEqual(r.status_code, 200)
+
+    def test_manager_list_hides_add_employee_and_schedulable_toggle(self):
+        self._login(role="manager", user_id=104, username="mgr_list")
+        emp = self._seed_employee(user_id=503, username="emp503")
+        r = self.client.get("/team/admin/employees")
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn('href="/team/admin/employees/new"', r.text)
+        self.assertNotIn(
+            f'action="/team/admin/employees/{emp.id}/schedulable-toggle"',
+            r.text,
+        )
+
+    def test_admin_list_still_shows_add_employee_and_schedulable_toggle(self):
+        self._login(role="admin", user_id=105, username="adm_list")
+        emp = self._seed_employee(user_id=504, username="emp504")
+        r = self.client.get("/team/admin/employees")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn('href="/team/admin/employees/new"', r.text)
+        self.assertIn(
+            f'action="/team/admin/employees/{emp.id}/schedulable-toggle"',
+            r.text,
+        )
+
+    def test_manager_list_hides_admin_only_controls(self):
+        self._login(role="manager", user_id=104, username="mgr_hidden")
+        self._seed_employee(user_id=504, username="emp504")
+        r = self.client.get("/team/admin/employees")
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn('action="/team/admin/employees/504/schedulable-toggle"', r.text)
+        self.assertNotIn('href="/team/admin/employees/new"', r.text)
+
+    def test_admin_list_shows_edit_controls(self):
+        self._login(role="admin", user_id=105, username="adm_list")
+        self._seed_employee(user_id=505, username="emp505")
+        r = self.client.get("/team/admin/employees")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn('action="/team/admin/employees/505/schedulable-toggle"', r.text)
+        self.assertIn('href="/team/admin/employees/new"', r.text)
 
     def test_employee_cannot_list(self):
         self._login(role="employee", user_id=103, username="emp103")
@@ -212,6 +279,161 @@ class DetailAndRevealTests(unittest.TestCase, _W4Harness):
         )
         self.assertEqual(r.status_code, 403)
 
+    def test_manager_detail_hides_forbidden_controls(self):
+        self._login(role="manager", user_id=205, username="mgr_detail")
+        emp = self._seed_employee(user_id=605, username="emp605")
+        r = self.client.get(f"/team/admin/employees/{emp.id}")
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn(
+            f'action="/team/admin/employees/{emp.id}/profile-update"',
+            r.text,
+        )
+        self.assertNotIn(
+            f'action="/team/admin/employees/{emp.id}/pii-update"',
+            r.text,
+        )
+        self.assertNotIn(
+            f'action="/team/admin/employees/{emp.id}/reveal"',
+            r.text,
+        )
+        self.assertNotIn(
+            f'action="/team/admin/employees/{emp.id}/reset-password"',
+            r.text,
+        )
+        self.assertNotIn(
+            f'href="/team/admin/employees/{emp.id}/terminate"',
+            r.text,
+        )
+        self.assertNotIn(
+            f'href="/team/admin/employees/{emp.id}/purge"',
+            r.text,
+        )
+
+    def test_admin_detail_still_shows_allowed_controls(self):
+        self._login(role="admin", user_id=206, username="adm_detail")
+        emp = self._seed_employee(user_id=606, username="emp606")
+        r = self.client.get(f"/team/admin/employees/{emp.id}")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn(
+            f'action="/team/admin/employees/{emp.id}/profile-update"',
+            r.text,
+        )
+        self.assertIn(
+            f'action="/team/admin/employees/{emp.id}/pii-update"',
+            r.text,
+        )
+        self.assertIn(
+            f'action="/team/admin/employees/{emp.id}/reveal"',
+            r.text,
+        )
+        self.assertIn(
+            f'action="/team/admin/employees/{emp.id}/reset-password"',
+            r.text,
+        )
+        self.assertIn(
+            f'href="/team/admin/employees/{emp.id}/terminate"',
+            r.text,
+        )
+        self.assertIn(
+            f'href="/team/admin/employees/{emp.id}/purge"',
+            r.text,
+        )
+
+    def test_manager_detail_hides_invite_button_for_draft_employee(self):
+        self._login(role="manager", user_id=207, username="mgr_inv")
+        from app.auth import create_draft_employee
+
+        draft = create_draft_employee(
+            self.session,
+            created_by_user_id=207,
+            display_name="Drafty",
+            legal_name="Draft Person",
+            role="employee",
+        )
+        r = self.client.get(f"/team/admin/employees/{draft.id}")
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn(
+            f'action="/team/admin/employees/{draft.id}/send-invite"',
+            r.text,
+        )
+
+    def test_admin_detail_shows_invite_button_for_draft_employee(self):
+        self._login(role="admin", user_id=208, username="adm_inv")
+        from app.auth import create_draft_employee
+
+        draft = create_draft_employee(
+            self.session,
+            created_by_user_id=208,
+            display_name="Drafty",
+            legal_name="Draft Person",
+            role="employee",
+        )
+        r = self.client.get(f"/team/admin/employees/{draft.id}")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn(
+            f'action="/team/admin/employees/{draft.id}/send-invite"',
+            r.text,
+        )
+
+    def test_manager_detail_hides_admin_only_controls(self):
+        self._login(role="manager", user_id=205, username="mgr_detail")
+        emp = self._seed_employee(user_id=605, username="emp605")
+        r = self.client.get(f"/team/admin/employees/{emp.id}")
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn(f'action="/team/admin/employees/{emp.id}/reveal"', r.text)
+        self.assertNotIn(f'action="/team/admin/employees/{emp.id}/profile-update"', r.text)
+        self.assertNotIn(f'action="/team/admin/employees/{emp.id}/pii-update"', r.text)
+        self.assertNotIn(f'action="/team/admin/employees/{emp.id}/reset-password"', r.text)
+        self.assertNotIn(f'href="/team/admin/employees/{emp.id}/terminate"', r.text)
+        self.assertNotIn(f'href="/team/admin/employees/{emp.id}/purge"', r.text)
+
+    def test_admin_detail_shows_allowed_controls(self):
+        self._login(role="admin", user_id=206, username="adm_detail")
+        emp = self._seed_employee(user_id=606, username="emp606")
+        r = self.client.get(f"/team/admin/employees/{emp.id}")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn(f'action="/team/admin/employees/{emp.id}/reveal"', r.text)
+        self.assertIn(f'action="/team/admin/employees/{emp.id}/profile-update"', r.text)
+        self.assertIn(f'action="/team/admin/employees/{emp.id}/pii-update"', r.text)
+        self.assertIn(f'action="/team/admin/employees/{emp.id}/reset-password"', r.text)
+        self.assertIn(f'href="/team/admin/employees/{emp.id}/terminate"', r.text)
+        self.assertIn(f'href="/team/admin/employees/{emp.id}/purge"', r.text)
+
+
+class DraftInviteControlTests(unittest.TestCase, _W4Harness):
+    def setUp(self): self._setup()
+    def tearDown(self): self._teardown()
+
+    def test_manager_detail_hides_send_invite_controls_for_draft(self):
+        from app.auth import create_draft_employee
+
+        self._login(role="manager", user_id=260, username="mgr_invite")
+        draft = create_draft_employee(
+            self.session,
+            created_by_user_id=260,
+            display_name="Draft Invitee",
+            legal_name="Draft Invitee",
+            role="employee",
+        )
+        r = self.client.get(f"/team/admin/employees/{draft.id}")
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn(f'action="/team/admin/employees/{draft.id}/send-invite"', r.text)
+
+    def test_admin_detail_shows_send_invite_controls_for_draft(self):
+        from app.auth import create_draft_employee
+
+        self._login(role="admin", user_id=261, username="adm_invite")
+        draft = create_draft_employee(
+            self.session,
+            created_by_user_id=261,
+            display_name="Draft Invitee",
+            legal_name="Draft Invitee",
+            role="employee",
+        )
+        r = self.client.get(f"/team/admin/employees/{draft.id}")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn(f'action="/team/admin/employees/{draft.id}/send-invite"', r.text)
+
 
 class ResetPasswordTests(unittest.TestCase, _W4Harness):
     def setUp(self): self._setup()
@@ -250,6 +472,8 @@ class TerminateAndPurgeTests(unittest.TestCase, _W4Harness):
             follow_redirects=False,
         )
         self.assertEqual(r.status_code, 303)
+        follow = self.client.get(r.headers["location"])
+        self.assertEqual(follow.status_code, 200)
         self.session.expire_all()
         refreshed = self.session.get(User, emp.id)
         self.assertFalse(refreshed.is_active)
@@ -288,6 +512,8 @@ class TerminateAndPurgeTests(unittest.TestCase, _W4Harness):
             follow_redirects=False,
         )
         self.assertEqual(r.status_code, 303)
+        follow = self.client.get(r.headers["location"])
+        self.assertEqual(follow.status_code, 200)
         self.session.expire_all()
         p = self.session.get(EmployeeProfile, emp.id)
         self.assertIsNone(p.phone_enc)

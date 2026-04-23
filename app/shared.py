@@ -3819,15 +3819,23 @@ def user_role_for_path(path: str) -> Optional[str]:
 
 
 def get_request_user(request: Request) -> Optional[User]:
-    session_data = request.scope.get("session") or {}
+    session_data = request.scope.get("session")
+    if not isinstance(session_data, dict):
+        return None
     user_id = session_data.get("user_id")
     if not user_id:
         return None
-    if recent_db_failure():
-        return None
+    session_version = int(session_data.get("session_version") or 0)
     with managed_session() as session:
         user = session.get(User, user_id)
         if not user or not user.is_active:
+            session_data.clear()
+            return None
+        expected_version = int(getattr(user, "session_version", 0) or 0)
+        if expected_version < 1:
+            expected_version = 1
+        if session_version != expected_version:
+            session_data.clear()
             return None
         return user
 

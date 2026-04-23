@@ -65,22 +65,32 @@
     {% if not can_edit_profile %}
     <p style="font-size:12px; color:var(--lx-muted); margin:0 0 8px;">View-only — you do not have permission to edit this profile.</p>
     {% endif %}
+    {% if can_edit_profile %}
     <form method="post" action="/team/admin/employees/{{ employee.id }}/profile-update">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
+    {% endif %}
         <table style="width:100%; font-size:13px;">
             <tr><td style="padding:6px 0; color:var(--lx-muted); width:180px;">Username</td><td>{{ employee.username }}</td></tr>
             <tr><td style="padding:6px 0; color:var(--lx-muted);">User ID</td><td>{{ employee.id }}</td></tr>
             <tr><td style="padding:6px 0; color:var(--lx-muted);">Status</td><td>{% if employee.is_active %}<span style="color:#86efac;">active</span>{% else %}<span style="color:#fca5a5;">inactive</span>{% endif %}</td></tr>
             <tr>
                 <td style="padding:6px 0; color:var(--lx-muted);">Display name</td>
+                {% if can_edit_profile %}
                 <td><input type="text" name="display_name" value="{{ employee.display_name or '' }}" style="width:280px; padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/></td>
+                {% else %}
+                <td>{{ employee.display_name or '—' }}</td>
+                {% endif %}
             </tr>
             <tr>
                 <td style="padding:6px 0; color:var(--lx-muted);">Role</td>
                 <td>
+                    {% if can_edit_profile %}
                     <select name="role" style="padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);">
                         {% for r in roles %}<option value="{{ r }}" {% if r == employee.role %}selected{% endif %}>{{ r }}</option>{% endfor %}
                     </select>
+                    {% else %}
+                    <span>{{ employee.role }}</span>
+                    {% endif %}
                     <span style="font-size:11px; color:var(--lx-muted); margin-left:8px;">permission level (admin / manager / employee / viewer / reviewer)</span>
                 </td>
             </tr>
@@ -88,34 +98,54 @@
                 <td style="padding:6px 0; color:var(--lx-muted);">Type</td>
                 <td>
                     {% set current_kind = employee.staff_kind or 'storefront' %}
+                    {% if can_edit_profile %}
                     <select name="staff_kind" style="padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);">
                         <option value="storefront" {% if current_kind == 'storefront' %}selected{% endif %}>Storefront</option>
                         <option value="stream" {% if current_kind == 'stream' %}selected{% endif %}>Stream</option>
                     </select>
+                    {% else %}
+                    <span>{% if current_kind == 'stream' %}Stream{% else %}Storefront{% endif %}</span>
+                    {% endif %}
                     <span style="font-size:11px; color:var(--lx-muted); margin-left:8px;">which schedule they can be booked on</span>
                 </td>
             </tr>
             <tr>
                 <td style="padding:6px 0; color:var(--lx-muted);">Hire date</td>
+                {% if can_edit_profile %}
                 <td><input type="date" name="hire_date" value="{{ profile.hire_date or '' }}" style="padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/></td>
+                {% else %}
+                <td>{{ profile.hire_date or '—' }}</td>
+                {% endif %}
             </tr>
             <tr>
                 <td style="padding:6px 0; color:var(--lx-muted);">Termination date</td>
+                {% if can_edit_profile %}
                 <td><input type="date" name="termination_date" value="{{ profile.termination_date or '' }}" style="padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/></td>
+                {% else %}
+                <td>{{ profile.termination_date or '—' }}</td>
+                {% endif %}
             </tr>
             <tr>
                 <td style="padding:6px 0; color:var(--lx-muted);">Hourly rate (cents)</td>
+                {% if can_edit_profile %}
                 <td><input type="text" name="hourly_rate_cents" placeholder="e.g. 2500 for $25.00" style="width:200px; padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/></td>
+                {% else %}
+                <td>—</td>
+                {% endif %}
             </tr>
             <tr>
                 <td style="padding:6px 0; color:var(--lx-muted);">Clockify user ID</td>
+                {% if can_edit_profile %}
                 <td><input type="text" name="clockify_user_id" value="{{ profile.clockify_user_id or '' }}" style="width:320px; padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/></td>
+                {% else %}
+                <td>{{ profile.clockify_user_id or '—' }}</td>
+                {% endif %}
             </tr>
         </table>
         {% if can_edit_profile %}
         <button class="ta-btn" type="submit" style="margin-top:10px;">Save profile</button>
-        {% endif %}
     </form>
+        {% endif %}
 </div>
 
 <div class="ta-card">

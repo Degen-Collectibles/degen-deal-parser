@@ -104,12 +104,15 @@ def _require_employee(
 
 def _safe_next(value: Optional[str]) -> str:
     """Only forward local paths to prevent open-redirects through `next`."""
-    value = (value or "").strip()
-    if not value:
-        return ""
-    if value.startswith("/") and not value.startswith("//"):
-        return value
+    candidate = (value or "").strip()
+    if candidate.startswith("/") and not candidate.startswith("//"):
+        return candidate
     return ""
+
+
+def _set_authenticated_session(request: Request, user: User) -> None:
+    request.session["user_id"] = user.id
+    request.session["session_version"] = int(getattr(user, "session_version", 0) or 1)
 
 
 @router.get("/team/login", response_class=HTMLResponse)
@@ -186,7 +189,7 @@ async def team_login_post(
             status_code=303,
         )
 
-    request.session["user_id"] = user.id
+    _set_authenticated_session(request, user)
     rotate_token(request)  # m1 — bind a fresh CSRF to the authenticated session
     if next_url:
         return RedirectResponse(next_url, status_code=303)
@@ -275,11 +278,12 @@ async def team_invite_accept_post(
         return RedirectResponse(
             f"/team/invite/accept/{token}?{qs}", status_code=303
         )
-    except ValueError as exc:
+    except ValueError:
+        message = "Invite link is invalid or has expired."
         return RedirectResponse(
-            f"/team/invite/accept/{token}?error={str(exc)}", status_code=303
+            f"/team/invite/accept/{token}?error={message}", status_code=303
         )
-    request.session["user_id"] = user.id
+    _set_authenticated_session(request, user)
     rotate_token(request)
     return RedirectResponse("/team/?flash=Welcome+to+the+team!", status_code=303)
 
@@ -383,9 +387,10 @@ async def team_password_reset_post(
         return RedirectResponse(
             f"/team/password/reset/{token}?{qs}", status_code=303
         )
-    except ValueError as exc:
+    except ValueError:
+        message = "Reset link is invalid or has expired."
         return RedirectResponse(
-            f"/team/password/reset/{token}?error={str(exc)}", status_code=303
+            f"/team/password/reset/{token}?error={message}", status_code=303
         )
     return RedirectResponse(
         "/team/login?flash=Password+updated.+Please+sign+in.",
@@ -424,16 +429,38 @@ def _nav_context(session: Session, user: User) -> dict:
     # Admin-only section. Rendered as a separate group in the sidebar when
     # at least one entry is visible. Gated per-key against the perms matrix
     # so managers/reviewers only see the admin links they actually have.
+    can_view_admin_overview = has_permission(
+        session, user, "admin.permissions.view", cache=cache
+    )
+    can_view_admin_schedule = has_permission(
+        session, user, "admin.schedule.view", cache=cache
+    )
     admin_keys = (
-        ("employees", "page.admin.employees", "/team/admin/employees"),
-        ("invites", "page.admin.invites", "/team/admin/invites"),
-        ("permissions", "page.admin.permissions", "/team/admin/permissions"),
-        ("supply-queue", "page.admin.supply", "/team/admin/supply"),
+        (
+            "overview",
+            None,
+            "/team/admin" if can_view_admin_overview else "/team/admin/schedule",
+            "Overview",
+        ),
+        ("permissions", "page.admin.permissions", "/team/admin/permissions", "Permissions"),
+        ("employees", "page.admin.employees", "/team/admin/employees", "Employees"),
+        ("schedule", None, "/team/admin/schedule", "Schedule"),
+        ("invites", "page.admin.invites", "/team/admin/invites", "Invites"),
+        ("supply", "page.admin.supply", "/team/admin/supply", "Supply queue"),
     )
     admin_nav = []
-    for name, key, href in admin_keys:
-        if has_permission(session, user, key, cache=cache):
-            admin_nav.append({"name": name, "href": href})
+    for name, key, href, label in admin_keys:
+        allowed = (
+            can_view_admin_overview
+            if name == "overview"
+            else can_view_admin_schedule
+            if name == "schedule"
+            else has_permission(session, user, key, cache=cache)
+        )
+        if allowed:
+            admin_nav.append({"name": name, "href": href, "label": label})
+
+    admin_home_href = admin_nav[0]["href"] if admin_nav else "/team/"
 
     # "Tools" section — ops pages selectively exposed to rank-and-file staff.
     # These are pages where TikTok numbers / public market prices are OK but
@@ -450,6 +477,7 @@ def _nav_context(session: Session, user: User) -> dict:
     return {
         "nav_items": nav,
         "admin_nav_items": admin_nav,
+        "admin_home_href": admin_home_href,
         "tools_nav_items": tools_nav,
         "schedule_href": schedule_href,
         "can_edit_schedule": can_edit_schedule,
@@ -716,6 +744,7 @@ async def team_password_change_post(
             new_password=new_password,
             ip_address=(request.client.host if request.client else None),
         )
+        request.session["session_version"] = int(getattr(user, "session_version", 0) or 1)
     except BadCurrentPasswordError as exc:
         code = str(exc)
         message = {

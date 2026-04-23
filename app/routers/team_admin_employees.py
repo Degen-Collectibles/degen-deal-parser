@@ -16,6 +16,7 @@ from sqlmodel import Session, select
 
 from ..auth import (
     create_draft_employee,
+    bump_session_version,
     generate_invite_token,
     generate_password_reset_token,
     has_permission,
@@ -33,6 +34,7 @@ from ..models import (
 )
 from ..pii import decrypt_pii
 from ..shared import templates
+from .team import _nav_context
 from .team_admin import _admin_gate, _permission_gate
 
 router = APIRouter()
@@ -78,9 +80,15 @@ def _decode_address(blob: Optional[bytes]) -> dict:
 
 
 def _audit_then_commit(session: Session, row: AuditLog) -> None:
-    """Flush audit row first so a DB failure aborts the caller."""
+    """Persist audit + caller mutations atomically.
+
+    We flush first so DB errors surface before redirecting success, then commit
+    the whole transaction so request-scoped sessions don't roll everything back
+    on close.
+    """
     session.add(row)
     session.flush()
+    session.commit()
 
 
 def _base_url(request: Request) -> str:
@@ -219,6 +227,7 @@ def admin_employees_list(
                     draft_legal_names[uid] = decrypt_pii(prof.legal_name_enc) or ""
                 except ValueError:
                     draft_legal_names[uid] = ""
+    can_edit_employees = has_permission(session, user, "admin.employees.edit")
     return templates.TemplateResponse(
         request,
         "team/admin/employees_list.html",
@@ -235,6 +244,8 @@ def admin_employees_list(
             "flash": flash,
             "show_inactive": include_inactive,
             "csrf_token": issue_token(request),
+            "can_edit_employees": can_edit_employees,
+            **_nav_context(session, user),
         },
     )
 
@@ -852,26 +863,39 @@ async def admin_employee_terminate_post(
     if employee is None:
         return HTMLResponse("Employee not found", status_code=404)
     now = utcnow()
-    employee.is_active = False
+    state_changed = False
+    new_session_version = int(getattr(employee, "session_version", 0) or 0)
+    if employee.is_active:
+        employee.is_active = False
+        state_changed = True
     employee.updated_at = now
     profile = session.get(EmployeeProfile, user_id)
     if profile is not None:
-        profile.termination_date = now.date()
+        if profile.termination_date != now.date():
+            profile.termination_date = now.date()
+            state_changed = True
         profile.updated_at = now
         session.add(profile)
+    if state_changed:
+        new_session_version = bump_session_version(employee)
     session.add(employee)
-    _audit_then_commit(
-        session,
-        AuditLog(
-            actor_user_id=current.id,
-            target_user_id=user_id,
-            action="account.terminated",
-            resource_key="admin.employees.terminate",
-            details_json=json.dumps({"username": employee.username}),
-            ip_address=(request.client.host if request.client else None),
-        ),
-    )
-    session.commit()
+    if state_changed:
+        _audit_then_commit(
+            session,
+            AuditLog(
+                actor_user_id=current.id,
+                target_user_id=user_id,
+                action="account.terminated",
+                resource_key="admin.employees.terminate",
+                details_json=json.dumps({
+                    "username": employee.username,
+                    "session_version": new_session_version,
+                }),
+                ip_address=(request.client.host if request.client else None),
+            ),
+        )
+    else:
+        session.commit()
     return RedirectResponse(
         f"/team/admin/employees/{user_id}?flash=Terminated.", status_code=303
     )
@@ -930,6 +954,7 @@ async def admin_employee_purge_post(
         )
     profile = session.get(EmployeeProfile, user_id)
     now = utcnow()
+    pii_changed = False
     if profile is not None:
         for attr in (
             "legal_name_enc",
@@ -940,26 +965,44 @@ async def admin_employee_purge_post(
             "email_ciphertext",
             "hourly_rate_cents_enc",
         ):
-            setattr(profile, attr, None)
-        profile.email_lookup_hash = None
-        profile.clockify_user_id = None
+            if getattr(profile, attr) is not None:
+                setattr(profile, attr, None)
+                pii_changed = True
+        if profile.email_lookup_hash is not None:
+            profile.email_lookup_hash = None
+            pii_changed = True
+        if profile.clockify_user_id is not None:
+            profile.clockify_user_id = None
+            pii_changed = True
         profile.updated_at = now
         session.add(profile)
-    employee.is_active = False
+    deactivated = False
+    if employee.is_active:
+        employee.is_active = False
+        deactivated = True
+    if pii_changed or deactivated:
+        bump_session_version(employee)
     employee.updated_at = now
     session.add(employee)
-    _audit_then_commit(
-        session,
-        AuditLog(
-            actor_user_id=current.id,
-            target_user_id=user_id,
-            action="account.purged",
-            resource_key="admin.employees.purge",
-            details_json=json.dumps({"username": employee.username}),
-            ip_address=(request.client.host if request.client else None),
-        ),
-    )
-    session.commit()
+    if pii_changed or deactivated:
+        _audit_then_commit(
+            session,
+            AuditLog(
+                actor_user_id=current.id,
+                target_user_id=user_id,
+                action="account.purged",
+                resource_key="admin.employees.purge",
+                details_json=json.dumps({
+                    "username": employee.username,
+                    "pii_changed": pii_changed,
+                    "deactivated": deactivated,
+                    "session_revoked": True,
+                }),
+                ip_address=(request.client.host if request.client else None),
+            ),
+        )
+    else:
+        session.commit()
     return RedirectResponse(
         f"/team/admin/employees/{user_id}?flash=PII+purged.", status_code=303
     )

@@ -454,6 +454,7 @@ class User(SQLModel, table=True):
     username: str = Field(index=True, unique=True)
     password_hash: str
     password_salt: str = Field(default="")
+    session_version: int = Field(default=1, index=True)
     display_name: str = Field(default="")
     role: str = Field(default="viewer", index=True)
     is_active: bool = Field(default=True, index=True)

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -24,6 +25,8 @@ os.environ.setdefault("EMPLOYEE_PORTAL_ENABLED", "true")
 os.environ.setdefault("EMPLOYEE_PII_KEY", Fernet.generate_key().decode("ascii"))
 os.environ.setdefault("EMPLOYEE_EMAIL_HASH_SALT", "unit-test-salt-adminnav")
 os.environ.setdefault("EMPLOYEE_TOKEN_HMAC_KEY", "unit-test-hmac-adminnav")
+
+sys.path.insert(0, "/home/ubuntu/degen-deal-parser")
 
 
 def _fresh_engine():
@@ -119,7 +122,7 @@ class AdminSidebarVisibilityTests(unittest.TestCase):
     def test_employee_sees_no_admin_links(self):
         self._login_as("employee", user_id=102, username="emp")
         html = self._dashboard_html()
-        self.assertNotIn('href="/team/admin/employees"', html)
+        self.assertNotIn('<a class="ta-nav-link pt-link " href="/team/admin/employees">Employees</a>', html)
         self.assertNotIn('href="/team/admin/invites"', html)
         self.assertNotIn('href="/team/admin/permissions"', html)
         self.assertNotIn('href="/team/admin/supply"', html)
@@ -147,6 +150,34 @@ class AdminSidebarVisibilityTests(unittest.TestCase):
         self.assertNotIn('href="/team/admin/employees"', html)
         self.assertNotIn('href="/team/admin/invites"', html)
         self.assertNotIn('href="/team/admin/permissions"', html)
+
+    def test_manager_admin_schedule_page_hides_admin_only_links_and_brand_targets_schedule(self):
+        self._login_as("manager", user_id=105, username="mgrsched")
+        r = self.client.get("/team/admin/schedule", follow_redirects=False)
+        self.assertEqual(r.status_code, 200, f"schedule admin page failed: {r.status_code} {r.text[:200]}")
+        html = r.text
+        self.assertIn('href="/team/admin/schedule" class="pt-mobile-brand"', html)
+        self.assertNotIn('>Overview</a>', html)
+        self.assertIn('class="ta-nav-link pt-link active" href="/team/admin/schedule">Schedule</a>', html)
+        self.assertIn('href="/team/admin/supply">Supply queue</a>', html)
+        self.assertNotIn('href="/team/admin">Overview</a>', html)
+        self.assertNotIn('<a class="ta-nav-link pt-link " href="/team/admin/permissions">', html)
+        self.assertNotIn('<a class="ta-nav-link pt-link " href="/team/admin/invites">', html)
+        self.assertNotIn('<a class="ta-nav-link pt-link " href="/team/admin/employees">Employees</a>', html)
+
+    def test_reviewer_admin_supply_page_brand_targets_supply_and_keeps_schedule_discoverable(self):
+        self._login_as("reviewer", user_id=106, username="revsupply")
+        r = self.client.get("/team/admin/supply", follow_redirects=False)
+        self.assertEqual(r.status_code, 200, f"supply admin page failed: {r.status_code} {r.text[:200]}")
+        html = r.text
+        self.assertIn('href="/team/admin/supply" class="pt-mobile-brand"', html)
+        self.assertNotIn('>Overview</a>', html)
+        self.assertIn('href="/team/admin/supply">Supply queue</a>', html)
+        self.assertIn('href="/team/schedule"', html)
+        self.assertNotIn('href="/team/admin">Overview</a>', html)
+        self.assertNotIn('href="/team/admin/permissions"', html)
+        self.assertNotIn('href="/team/admin/invites"', html)
+        self.assertNotIn('href="/team/admin/employees"', html)
 
 
 if __name__ == "__main__":

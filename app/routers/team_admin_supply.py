@@ -25,6 +25,12 @@ router = APIRouter()
 VALID_STATUSES = ("submitted", "approved", "denied", "ordered")
 
 
+def _admin_nav_context(session: Session, user: User) -> dict:
+    from .team import _nav_context
+
+    return _nav_context(session, user)
+
+
 @router.get("/team/admin/supply", response_class=HTMLResponse)
 def admin_supply_list(
     request: Request,
@@ -62,6 +68,7 @@ def admin_supply_list(
         {
             "request": request,
             "title": "Supply queue",
+            "active": "supply",
             "current_user": current,
             "requests": rows,
             "submitters": submitters,
@@ -70,6 +77,7 @@ def admin_supply_list(
             "counts": counts,
             "flash": flash,
             "csrf_token": issue_token(request),
+            **_admin_nav_context(session, current),
         },
     )
 

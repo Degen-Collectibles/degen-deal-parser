@@ -26,6 +26,16 @@ from .models import (
 settings = get_settings()
 
 
+def bump_session_version(user: Optional[User]) -> int:
+    """Invalidate existing browser sessions for `user` by rotating a monotonic version."""
+    if user is None:
+        return 0
+    current = int(getattr(user, "session_version", 0) or 0)
+    user.session_version = current + 1 if current >= 1 else 1
+    user.updated_at = utcnow()
+    return user.session_version
+
+
 def hash_password(password: str, salt: Optional[str] = None) -> tuple[str, str]:
     salt_used = salt if salt is not None else secrets.token_hex(16)
     digest = pbkdf2_hmac(
@@ -814,10 +824,9 @@ def change_user_password(
         raise ValueError("new_password_same_as_current")
 
     pwd_hash, pwd_salt = hash_password(new_password)
-    now = utcnow()
     user.password_hash = pwd_hash
     user.password_salt = pwd_salt
-    user.updated_at = now
+    bump_session_version(user)
     session.add(user)
     _audit_pw_change(session, user.id, "password.self_change_succeeded", {}, ip_address)
     session.commit()
@@ -865,7 +874,7 @@ def consume_password_reset_token(
     now = utcnow()
     user.password_hash = pwd_hash
     user.password_salt = pwd_salt
-    user.updated_at = now
+    bump_session_version(user)
     row.used_at = now
     session.add(user)
     session.add(row)
