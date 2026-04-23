@@ -1706,6 +1706,22 @@
 (function() {
     "use strict";
 
+    // Per-account color map from the server, used when rendering
+    // freshly-added stream pills so they match the server-rendered
+    // pills (which already use _stream_account_color). Without this
+    // newly-added pills fell back to the neutral mint default while
+    // existing pills on the same row kept their account color.
+    var STREAM_ACCOUNT_COLORS = {{ (stream_account_colors or {}) | tojson }};
+    // Default fallback for a stream pill with no account_id assigned.
+    // Kept in sync with app/routers/team_admin_schedule.py::_stream_account_color.
+    var STREAM_DEFAULT_COLOR = '#bbf7d0';
+
+    function streamPillColor(accountId) {
+        if (accountId == null) return STREAM_DEFAULT_COLOR;
+        var c = STREAM_ACCOUNT_COLORS[accountId] || STREAM_ACCOUNT_COLORS[String(accountId)];
+        return c || STREAM_DEFAULT_COLOR;
+    }
+
     // Both grids are editable in edit mode now (Stream writes to
     // StreamSchedule for bidirectional /stream-manager sync).
     var grids = Array.prototype.slice.call(
@@ -1959,7 +1975,7 @@
             pill.dataset.shiftIdx = String(idx);
             if (kindSlug === 'stream') {
                 pill.className = 'sch-block sch-k-stream';
-                pill.style.background = '#bbf7d0';
+                pill.style.background = streamPillColor(sh.account_id);
                 pill.style.color = '#0b1220';
                 pill.dataset.streamStart = sh.start || '';
                 pill.dataset.streamEnd = sh.end || '';

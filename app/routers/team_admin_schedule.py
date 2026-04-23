@@ -718,6 +718,12 @@ def admin_schedule_view(
     # Stream accounts for the edit modal's account selector. We only
     # need them when edit mode is on; skip the query otherwise.
     stream_accounts: list[StreamAccount] = []
+    # JSON-serializable map of {account_id: hex_color} consumed by the
+    # shift modal's client-side renderCellFromList(). Without this the
+    # JS fell back to the neutral mint for freshly-added stream pills
+    # while server-rendered pills used the per-account palette color,
+    # producing two different colors for the same Main Stream account.
+    stream_account_colors: dict[int, str] = {}
     if edit_mode:
         stream_accounts = list(
             session.exec(
@@ -726,6 +732,9 @@ def admin_schedule_view(
                 .order_by(StreamAccount.sort_order, StreamAccount.name)
             ).all()
         )
+        for acct in stream_accounts:
+            if acct.id is not None:
+                stream_account_colors[acct.id] = _stream_account_color(acct.id)
 
     # Holidays modal data. Only computed in edit mode to keep the
     # read-only view cheap. We show the current year + the following
@@ -779,6 +788,7 @@ def admin_schedule_view(
             "can_edit": can_edit,
             "edit_mode": edit_mode,
             "stream_accounts": stream_accounts,
+            "stream_account_colors": stream_account_colors,
             "holiday_options": holiday_options,
             "custom_closures": custom_closures,
             "csrf_token": issue_token(request),
