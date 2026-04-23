@@ -28,7 +28,7 @@ from .auth import has_role
 from .card_scanner import identify_card_from_image, lookup_card_image_and_price
 from .cert_lookup import lookup_cert
 from .pokemon_scanner import run_pipeline as run_pokemon_pipeline, get_scan_history, fetch_tcg_categories, get_validation_result, text_search_cards
-from .degen_eye_v2 import run_v2_pipeline, run_v2_pipeline_stream
+from .degen_eye_v2 import get_v2_scan_history, run_v2_pipeline, run_v2_pipeline_stream
 from .phash_scanner import get_index_stats as phash_index_stats, has_index as phash_has_index
 from .price_cache import get_warm_stats as price_cache_stats, warm_price_cache
 from .config import get_settings
@@ -1076,7 +1076,120 @@ async def degen_eye_v2_stats(request: Request):
         "phash_index": phash_index_stats(),
         "price_cache": price_cache_stats(),
         "pending_scans": len(_V2_PENDING_SCANS),
+        "v2_history_entries": len(get_v2_scan_history()),
     })
+
+
+@router.get("/degen_eye/v2/history")
+async def degen_eye_v2_history(request: Request):
+    """v2-only scan history. Separate from v1's /degen_eye/history so v2
+    debugging doesn't pollute the v1 ops log and vice versa."""
+    if denial := _require_employee(request):
+        return denial
+    return JSONResponse(get_v2_scan_history())
+
+
+@router.get("/degen_eye/v2/debug", response_class=HTMLResponse)
+async def degen_eye_v2_debug_page(request: Request):
+    """Live debug page for v2 scans only. Mirrors v1's /degen_eye/debug UX
+    but points at /degen_eye/v2/history so only v2 entries show up."""
+    if denial := _require_employee(request):
+        return denial
+    return HTMLResponse("""<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Degen Eye v2 Debug Log</title>
+<style>
+  body{font-family:monospace;background:#0b0e13;color:#e0e0e0;margin:0;padding:20px;}
+  h1{color:#00c2ff;font-size:18px;margin:0 0 4px;}
+  .sub{color:#888;font-size:12px;margin-bottom:16px;}
+  .entry{background:#101725;border:1px solid #1f2a3a;border-radius:8px;padding:14px;margin-bottom:12px;}
+  .entry.MATCHED{border-left:4px solid #4caf50;}
+  .entry.AMBIGUOUS{border-left:4px solid #ff9800;}
+  .entry.NO_MATCH{border-left:4px solid #f44336;}
+  .entry.ERROR{border-left:4px solid #f44336;}
+  .ts{color:#888;font-size:11px;}
+  .status{font-weight:bold;font-size:13px;margin-bottom:6px;}
+  .status.MATCHED{color:#4caf50;} .status.AMBIGUOUS{color:#ff9800;}
+  .status.NO_MATCH{color:#f44336;} .status.ERROR{color:#f44336;}
+  .field{margin:3px 0;font-size:12px;line-height:1.5;}
+  .label{color:#00c2ff;} .val{color:#e0e0e0;}
+  .dbg{background:#070a10;padding:8px;border-radius:4px;white-space:pre-wrap;font-size:11px;
+       max-height:220px;overflow-y:auto;margin-top:6px;color:#aaa;border:1px solid #1f2a3a;}
+  .empty{color:#666;text-align:center;padding:40px;font-size:14px;}
+  #auto{margin-bottom:12px;display:flex;align-items:center;gap:8px;font-size:12px;color:#888;}
+</style>
+</head><body>
+<h1>Degen Eye v2 Debug Log</h1>
+<div class="sub">Only v2 scans (pHash + optional Ximilar fallback). For v1 scans, open <a style="color:#888;" href="/degen_eye/debug">/degen_eye/debug</a>.</div>
+<div id="auto"><input type="checkbox" id="autoRefresh" checked> Auto-refresh
+  <button onclick="loadHistory()" style="margin-left:8px;padding:4px 10px;border-radius:4px;
+    border:1px solid #1f2a3a;background:#101725;color:#e0e0e0;cursor:pointer;">Refresh Now</button></div>
+<div id="log"></div>
+<script>
+function loadHistory(){
+  fetch('/degen_eye/v2/history').then(r=>r.json()).then(data=>{
+    var el = document.getElementById('log');
+    if (!data || !data.length) {
+      el.innerHTML = '<div class="empty">No v2 scans yet. Scan a card on /degen_eye/v2 to see entries here.</div>';
+      return;
+    }
+    el.innerHTML = data.map(function(e){
+      var status = e.status || 'UNKNOWN';
+      var dbg = e.debug || {};
+      var v2 = dbg.v2 || {};
+      var fields = '';
+      if (e.best_match_name) {
+        fields += '<div class="field"><span class="label">Best:</span> <span class="val">' +
+          (e.best_match_name||'') + ' #' + (e.best_match_number||'') +
+          ' | ' + (e.best_match_set||'') + '</span></div>';
+        fields += '<div class="field"><span class="label">Confidence:</span> <span class="val">' +
+          (e.best_match_confidence||'') + ' score=' + (e.best_match_score||0).toFixed(1) + '</span></div>';
+        if (e.best_match_price != null) {
+          fields += '<div class="field"><span class="label">Price:</span> <span class="val">$' +
+            Number(e.best_match_price).toFixed(2) + '</span></div>';
+        }
+      }
+      if (e.processing_time_ms != null) {
+        fields += '<div class="field"><span class="label">Total:</span> <span class="val">' +
+          Math.round(e.processing_time_ms) + 'ms</span></div>';
+      }
+      if (v2.stages_ms) {
+        fields += '<div class="field"><span class="label">Stages:</span> <span class="val">' +
+          JSON.stringify(v2.stages_ms) + '</span></div>';
+      }
+      if (v2.phash && v2.phash.top && v2.phash.top.length) {
+        fields += '<div class="field"><span class="label">pHash top:</span> <span class="val">' +
+          (v2.phash.top[0].distance + ' (' + v2.phash.top[0].confidence + ')') + '</span></div>';
+      }
+      if (v2.raw_image_preferred) {
+        fields += '<div class="field"><span class="label">Raw-image fallback:</span> <span class="val">' +
+          JSON.stringify(v2.raw_image_preferred) + '</span></div>';
+      }
+      if (dbg.engines_used) {
+        fields += '<div class="field"><span class="label">Engines:</span> <span class="val">' +
+          dbg.engines_used.join(', ') + '</span></div>';
+      }
+      if (e.error) {
+        fields += '<div class="field"><span class="label">Error:</span> <span class="val" style="color:#f88;">' +
+          e.error + '</span></div>';
+      }
+      return '<div class="entry ' + status + '">' +
+        '<div class="ts">' + (e.timestamp||'') + '</div>' +
+        '<div class="status ' + status + '">' + status + '</div>' +
+        fields +
+        '<details><summary style="cursor:pointer;color:#666;font-size:11px;margin-top:6px;">Raw debug</summary>' +
+        '<div class="dbg">' + JSON.stringify(dbg, null, 2) + '</div></details>' +
+      '</div>';
+    }).join('');
+  }).catch(function(err){
+    document.getElementById('log').innerHTML = '<div class="empty">Failed to load: ' + err + '</div>';
+  });
+}
+loadHistory();
+setInterval(function(){if(document.getElementById('autoRefresh').checked)loadHistory();},3000);
+</script>
+</body></html>""")
 
 
 @router.post("/degen_eye/v2/warm")

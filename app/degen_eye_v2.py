@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import collections
+import datetime as _dt
 import logging
 import time
 from dataclasses import asdict
@@ -43,11 +45,58 @@ from .pokemon_scanner import (
     ScoredCandidate,
     _game_for_category,
     _run_ximilar_pipeline,
-    _save_to_history,
+    _scan_history as _V1_SCAN_HISTORY,
 )
 from .price_cache import get_price_for_match
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# v2 has its own scan history — kept separate from v1's _scan_history so the
+# /degen_eye/debug and /degen_eye/history endpoints stay pure v1, and the new
+# /degen_eye/v2/history endpoint returns only v2 scans. Mirrors v1's ring
+# buffer semantics (maxlen=25).
+# ---------------------------------------------------------------------------
+_V2_SCAN_HISTORY: collections.deque[dict] = collections.deque(maxlen=25)
+
+
+def _save_v2_history(result: dict) -> None:
+    """Write a v2 scan result to the v2-only history buffer.
+
+    Shape mirrors v1's ``_save_to_history`` entry layout so the debug page
+    can render either history with the same template.
+    """
+    bm = result.get("best_match") or {}
+    ef = result.get("extracted_fields") or {}
+    dbg = result.get("debug") or {}
+    entry = {
+        "timestamp": _dt.datetime.now().isoformat(timespec="seconds"),
+        "status": result.get("status"),
+        "best_match_name": bm.get("name"),
+        "best_match_number": bm.get("number"),
+        "best_match_set": bm.get("set_name"),
+        "best_match_score": bm.get("score"),
+        "best_match_confidence": bm.get("confidence"),
+        "best_match_price": bm.get("market_price"),
+        "candidates_count": len(result.get("candidates") or []),
+        "processing_time_ms": result.get("processing_time_ms"),
+        "extracted_name": ef.get("card_name"),
+        "extracted_number": ef.get("collector_number"),
+        "extracted_set": ef.get("set_name"),
+        "ocr_text": dbg.get("ocr_raw_text", ""),
+        "ocr_confidence": dbg.get("ocr_confidence"),
+        "extraction_method": dbg.get("extraction_method", "phash"),
+        "disambiguation": result.get("disambiguation_method"),
+        "error": result.get("error"),
+        "debug": dbg,
+    }
+    _V2_SCAN_HISTORY.appendleft(entry)
+
+
+def get_v2_scan_history() -> list[dict]:
+    """Return the recent v2-only scan history (newest first)."""
+    return list(_V2_SCAN_HISTORY)
 
 
 def _b64_to_bytes(image_b64: str) -> Optional[bytes]:
@@ -139,11 +188,21 @@ def _phash_top_sig(matches: list[PhashMatch]) -> Optional[tuple[str, str]]:
 async def _run_ximilar_fallback(
     image_b64: str, category_id: str, debug: dict[str, Any],
 ) -> Optional[dict]:
-    """Run v1's Ximilar pipeline when pHash is weak or the index is missing."""
+    """Run v1's Ximilar pipeline when pHash is weak or the index is missing.
+
+    ``_run_ximilar_pipeline`` writes its own entry into v1's ``_scan_history``
+    ring buffer. Since this call was triggered by a v2 scan we don't want it
+    to appear in v1's debug/history endpoints — the v2 orchestrator will
+    record the wrapped result into ``_V2_SCAN_HISTORY`` separately. Snapshot
+    v1's history length before the call and pop the entry Ximilar added so
+    v1's history stays "pure v1".
+    """
     settings = get_settings()
     if not settings.ximilar_api_token:
         debug["ximilar_fallback"] = "skipped_no_token"
         return None
+
+    v1_hist_len_before = len(_V1_SCAN_HISTORY)
     t_ximilar = time.monotonic()
     try:
         result = await _run_ximilar_pipeline(
@@ -153,6 +212,17 @@ async def _run_ximilar_fallback(
         logger.warning("[degen_eye_v2] Ximilar fallback failed: %s", exc)
         debug["ximilar_fallback"] = f"error: {exc}"
         return None
+
+    # Ximilar pipeline appendleft-ed one history entry. Because asyncio is
+    # cooperative + single-threaded, no other scan ran between Ximilar's
+    # save and our read here, so popleft is race-free and removes exactly
+    # the entry Ximilar added.
+    if len(_V1_SCAN_HISTORY) > v1_hist_len_before:
+        try:
+            _V1_SCAN_HISTORY.popleft()
+        except IndexError:
+            pass
+
     debug["ximilar_fallback_elapsed_ms"] = _elapsed(t_ximilar)
     debug["ximilar_fallback"] = "ran"
     return result
@@ -215,7 +285,7 @@ async def run_v2_pipeline(image_b64: str, category_id: str = "3") -> dict[str, A
                 "v2_fallback": "phash_index_missing",
             })
             out = _stamp(ximilar_result, category_id, v2_debug)
-            _save_to_history(out)
+            _save_v2_history(out)
             return out
         result = asdict(ScanResult(
             status="ERROR",
@@ -260,7 +330,7 @@ async def run_v2_pipeline(image_b64: str, category_id: str = "3") -> dict[str, A
                 "engines_used": ["ximilar"], "v2_fallback": "phash_no_match",
             })
             out = _stamp(ximilar_result, category_id, v2_debug)
-            _save_to_history(out)
+            _save_v2_history(out)
             return out
         result = asdict(ScanResult(
             status="NO_MATCH", error="No pHash match and Ximilar unavailable",
@@ -350,7 +420,7 @@ async def run_v2_pipeline(image_b64: str, category_id: str = "3") -> dict[str, A
         top_match.distance, top_match.confidence,
         out["processing_time_ms"], v2_debug.get("price_source"),
     )
-    _save_to_history(out)
+    _save_v2_history(out)
     return out
 
 
@@ -454,7 +524,7 @@ async def run_v2_pipeline_stream(
                 "engines_used": ["ximilar"], "v2_fallback": "phash_no_match",
             })
             stamped = _stamp(ximilar_result, category_id, v2_debug)
-            _save_to_history(stamped)
+            _save_v2_history(stamped)
             yield ("done", stamped)
             return
         # Nothing worked
@@ -537,5 +607,5 @@ async def run_v2_pipeline_stream(
     result_dict.setdefault("debug", {})
     result_dict["debug"]["engines_used"] = engines_used
     final = _stamp(result_dict, category_id, v2_debug)
-    _save_to_history(final)
+    _save_v2_history(final)
     yield ("done", final)
