@@ -6,6 +6,7 @@ If the audit write fails, the decrypt does not happen (fail-closed).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import date, datetime
 from typing import Optional
@@ -81,6 +82,10 @@ def _audit_then_commit(session: Session, row: AuditLog) -> None:
     """Flush audit row first so a DB failure aborts the caller."""
     session.add(row)
     session.flush()
+
+
+def _pii_fingerprint(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
 
 
 def _base_url(request: Request) -> str:
@@ -548,6 +553,18 @@ def _parse_date(value: str) -> Optional[date]:
         return None
 
 
+def _clamp_hourly_rate_cents(raw: str) -> tuple[Optional[int], bool]:
+    value = (raw or "").strip()
+    if not value:
+        return None, False
+    if not value.isdigit():
+        return None, True
+    parsed = int(value)
+    if parsed < 0 or parsed > 1_000_000:
+        return None, True
+    return parsed, False
+
+
 @router.post(
     "/team/admin/employees/{user_id}/profile-update",
     dependencies=[Depends(require_csrf)],
@@ -600,14 +617,14 @@ async def admin_employee_profile_update(
         session.add(employee)
         changed.append("staff_kind")
 
-    rate_raw = (hourly_rate_cents or "").strip()
-    if rate_raw:
+    rate_int, rate_invalid = _clamp_hourly_rate_cents(hourly_rate_cents)
+    if rate_int is not None:
+        from ..pii import decrypt_pii, encrypt_pii
         try:
-            rate_int = int(rate_raw)
+            current_rate = decrypt_pii(profile.hourly_rate_cents_enc) or ""
         except ValueError:
-            rate_int = None
-        if rate_int is not None:
-            from ..pii import encrypt_pii
+            current_rate = ""
+        if str(rate_int) != current_rate:
             profile.hourly_rate_cents_enc = encrypt_pii(str(rate_int))
             changed.append("hourly_rate_cents")
 
@@ -640,10 +657,14 @@ async def admin_employee_profile_update(
                 details_json=json.dumps({"fields": changed}),
                 ip_address=(request.client.host if request.client else None),
             ),
+
         )
         session.commit()
+    flash = "Saved."
+    if rate_invalid:
+        flash = "Invalid+hourly_rate_cents.+Existing+value+kept."
     return RedirectResponse(
-        f"/team/admin/employees/{user_id}?flash=Saved.", status_code=303
+        f"/team/admin/employees/{user_id}?flash={flash}", status_code=303
     )
 
 
@@ -675,8 +696,10 @@ async def admin_employee_pii_update(
     add a per-field delete button later. This prevents accidentally
     wiping an employee's emergency contact by saving an empty form.
 
-    Only admins with `admin.employees.edit` can call this; no reveal
-    permission is required (typing a new value is a blind overwrite).
+    Non-empty sensitive writes also require reveal authority. That keeps
+    "can edit general employee metadata" distinct from "may handle live
+    PII at all" — blank submissions still behave as no-ops and do not
+    require reveal authority.
     """
     denial, current = _admin_gate(request, session, "admin.employees.edit")
     if denial:
@@ -694,6 +717,30 @@ async def admin_employee_pii_update(
 
     now = utcnow()
     changed: list[str] = []
+    sensitive_write_requested = any(
+        (
+            (legal_name or "").strip(),
+            (email or "").strip(),
+            (phone or "").strip(),
+            (emergency_contact_name or "").strip(),
+            (emergency_contact_phone or "").strip(),
+            (address_street or "").strip(),
+            (address_city or "").strip(),
+            (address_state or "").strip(),
+            (address_zip or "").strip(),
+        )
+    )
+    if sensitive_write_requested:
+        reveal_denial, _ = _admin_gate(request, session, "admin.employees.reveal_pii")
+        if reveal_denial:
+            return reveal_denial
+
+    def _field_fingerprint(label: str, value: str) -> dict[str, object]:
+        cleaned = (value or "").strip().lower()
+        digest = hashlib.sha256(f"{label}:{cleaned}".encode("utf-8")).hexdigest()
+        return {"present": bool(cleaned), "len": len(cleaned), "sha256_12": digest[:12]}
+
+    field_fingerprints: dict[str, str] = {}
 
     def _overwrite_if_set(attr: str, raw: str, label: str) -> None:
         v = (raw or "").strip()
@@ -707,6 +754,7 @@ async def admin_employee_pii_update(
         if v != current_val:
             setattr(profile, attr, encrypt_pii(v))
             changed.append(label)
+            field_fingerprints[label] = _field_fingerprint(label, v)["sha256_12"]
 
     _overwrite_if_set("legal_name_enc", legal_name, "legal_name")
     _overwrite_if_set("phone_enc", phone, "phone")
@@ -735,6 +783,7 @@ async def admin_employee_pii_update(
             profile.email_ciphertext = encrypt_pii(new_email)
             profile.email_lookup_hash = new_hash
             changed.append("email")
+            field_fingerprints["email"] = _field_fingerprint("email", new_email)["sha256_12"]
 
     new_address = {
         "street": (address_street or "").strip(),
@@ -749,6 +798,9 @@ async def admin_employee_pii_update(
         if new_address != current_addr:
             profile.address_enc = encrypt_pii(json.dumps(new_address))
             changed.append("address")
+            field_fingerprints["address"] = _field_fingerprint(
+                "address", json.dumps(new_address, sort_keys=True)
+            )["sha256_12"]
 
     if changed:
         profile.updated_at = now
@@ -760,7 +812,33 @@ async def admin_employee_pii_update(
                 target_user_id=user_id,
                 action="admin.pii_update",
                 resource_key="admin.employees.edit",
-                details_json=json.dumps({"fields": changed}),
+                details_json=json.dumps(
+                    {
+                        "fields": changed,
+                        "fingerprints": {
+                            "legal_name": _field_fingerprint("legal_name", legal_name),
+                            "email": _field_fingerprint("email", new_email),
+                            "phone": _field_fingerprint("phone", phone),
+                            "emergency_contact_name": _field_fingerprint(
+                                "emergency_contact_name", emergency_contact_name
+                            ),
+                            "emergency_contact_phone": _field_fingerprint(
+                                "emergency_contact_phone", emergency_contact_phone
+                            ),
+                            "address": _field_fingerprint(
+                                "address",
+                                "|".join(
+                                    [
+                                        new_address["street"],
+                                        new_address["city"],
+                                        new_address["state"],
+                                        new_address["zip"],
+                                    ]
+                                ),
+                            ),
+                        },
+                    }
+                ),
                 ip_address=(request.client.host if request.client else None),
             ),
         )

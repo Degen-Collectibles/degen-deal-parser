@@ -306,6 +306,74 @@ class InviteAcceptTests(unittest.TestCase, _PortalHarness):
         prof = self.session.get(EmployeeProfile, u.id)
         self.assertIsNotNone(prof)
 
+    def test_invite_accept_email_collision_keeps_onboarding_successful_with_flash(self):
+        from app.auth import generate_invite_token, hash_password
+        from app.models import AuditLog, EmployeeProfile, User
+        from app.pii import email_lookup_hash, encrypt_pii
+
+        ph, salt = hash_password("AdminPass1!")
+        admin = User(username="adm2", password_hash=ph, password_salt=salt,
+                     display_name="A2", role="admin", is_active=True)
+        self.session.add(admin)
+        self.session.commit()
+        self.session.refresh(admin)
+
+        existing = User(
+            username="existingemp",
+            password_hash="x",
+            password_salt="x",
+            display_name="Existing",
+            role="employee",
+            is_active=True,
+        )
+        self.session.add(existing)
+        self.session.commit()
+        self.session.refresh(existing)
+        self.session.add(EmployeeProfile(
+            user_id=existing.id,
+            email_ciphertext=encrypt_pii("collision@example.com"),
+            email_lookup_hash=email_lookup_hash("collision@example.com"),
+        ))
+        self.session.commit()
+
+        raw = generate_invite_token(self.session, role="employee", created_by_user_id=admin.id)
+        csrf = self._csrf()
+        r = self.client.post(
+            f"/team/invite/accept/{raw}",
+            data={
+                "new_username": "autofillvictim",
+                "new_password": "StrongPass9#xy",
+                "email": "collision@example.com",
+                "csrf_token": csrf,
+            },
+            follow_redirects=False,
+        )
+        self.assertEqual(r.status_code, 303)
+        self.assertIn("/team/?flash=Welcome+to+the+team!", r.headers["location"])
+        self.assertIn("banner=Email+not+saved", r.headers["location"])
+
+        u = self.session.exec(select(User).where(User.username == "autofillvictim")).first()
+        self.assertIsNotNone(u)
+        prof = self.session.get(EmployeeProfile, u.id)
+        self.assertIsNotNone(prof)
+        self.assertIsNone(prof.email_ciphertext)
+        self.assertIsNone(prof.email_lookup_hash)
+
+        rows = list(self.session.exec(
+            select(AuditLog).where(AuditLog.target_user_id == u.id)
+        ).all())
+        actions = {row.action for row in rows}
+        self.assertIn("account.invite_accepted", actions)
+        self.assertIn("account.invite_email_dropped", actions)
+        accepted = next(row for row in rows if row.action == "account.invite_accepted")
+        dropped = next(row for row in rows if row.action == "account.invite_email_dropped")
+        accepted_details = json.loads(accepted.details_json)
+        dropped_details = json.loads(dropped.details_json)
+        self.assertTrue(accepted_details["email_skipped_due_to_clash"])
+        self.assertNotIn("collision@example.com", dropped.details_json)
+        self.assertNotIn("collision@example.com", accepted.details_json)
+        self.assertEqual(dropped_details["reason"], "address_already_on_file_for_another_employee")
+
 
 class SupplyAndPoliciesTests(unittest.TestCase, _PortalHarness):
     def setUp(self):

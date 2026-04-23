@@ -212,6 +212,138 @@ class DetailAndRevealTests(unittest.TestCase, _W4Harness):
         )
         self.assertEqual(r.status_code, 403)
 
+    def test_manager_cannot_blind_overwrite_sensitive_pii(self):
+        from app.models import AuditLog, EmployeeProfile
+        from app.pii import decrypt_pii
+
+        self._login(role="manager", user_id=205, username="mgr3")
+        emp = self._seed_employee(user_id=605, username="emp605")
+        csrf = self._csrf()
+        r = self.client.post(
+            f"/team/admin/employees/{emp.id}/pii-update",
+            data={"phone": "444-222-1111", "csrf_token": csrf},
+            follow_redirects=False,
+        )
+        self.assertEqual(r.status_code, 403)
+        self.session.expire_all()
+        profile = self.session.get(EmployeeProfile, emp.id)
+        self.assertEqual(decrypt_pii(profile.phone_enc), "555-867-5309")
+        rows = list(self.session.exec(
+            select(AuditLog).where(AuditLog.action == "admin.pii_update")
+        ).all())
+        self.assertEqual(rows, [])
+
+    def test_manager_blank_sensitive_pii_update_preserves_existing_values(self):
+        from app.models import AuditLog, EmployeeProfile
+        from app.pii import decrypt_pii
+
+        self._login(role="manager", user_id=206, username="mgr4")
+        emp = self._seed_employee(user_id=606, username="emp606")
+        csrf = self._csrf()
+        r = self.client.post(
+            f"/team/admin/employees/{emp.id}/pii-update",
+            data={"phone": "   ", "legal_name": "", "csrf_token": csrf},
+            follow_redirects=False,
+        )
+        self.assertEqual(r.status_code, 403)
+        self.session.expire_all()
+        profile = self.session.get(EmployeeProfile, emp.id)
+        self.assertEqual(decrypt_pii(profile.phone_enc), "555-867-5309")
+        self.assertEqual(decrypt_pii(profile.legal_name_enc), "Jane Q Test")
+        rows = list(self.session.exec(
+            select(AuditLog).where(AuditLog.action == "admin.pii_update")
+        ).all())
+        self.assertEqual(rows, [])
+
+    def test_admin_pii_update_audit_uses_safe_fingerprints(self):
+        from app.models import AuditLog
+
+        self._login(role="admin", user_id=207, username="adm7")
+        emp = self._seed_employee(user_id=607, username="emp607")
+        csrf = self._csrf()
+        r = self.client.post(
+            f"/team/admin/employees/{emp.id}/pii-update",
+            data={
+                "phone": "444-222-1111",
+                "email": "new607@example.com",
+                "address_street": "77 Broadway",
+                "address_city": "New York",
+                "address_state": "NY",
+                "address_zip": "10001",
+                "csrf_token": csrf,
+            },
+            follow_redirects=False,
+        )
+        self.assertEqual(r.status_code, 303)
+        row = self.session.exec(
+            select(AuditLog).where(AuditLog.action == "admin.pii_update")
+        ).one()
+        details = json.loads(row.details_json)
+        self.assertEqual(set(details["fields"]), {"phone", "email", "address"})
+        self.assertIn("fingerprints", details)
+        self.assertNotIn("field_fingerprints", details)
+        self.assertNotIn("444-222-1111", row.details_json)
+        self.assertNotIn("new607@example.com", row.details_json)
+        self.assertNotIn("77 Broadway", row.details_json)
+        self.assertRegex(details["fingerprints"]["phone"]["sha256_12"], r"^[0-9a-f]{12}$")
+        self.assertRegex(details["fingerprints"]["email"]["sha256_12"], r"^[0-9a-f]{12}$")
+        self.assertRegex(details["fingerprints"]["address"]["sha256_12"], r"^[0-9a-f]{12}$")
+
+
+class AdminProfileUpdateHardeningTests(unittest.TestCase, _W4Harness):
+    def setUp(self): self._setup()
+    def tearDown(self): self._teardown()
+
+    def test_hourly_rate_rejects_invalid_inputs_without_mutating_existing_value(self):
+        from app.models import AuditLog, EmployeeProfile
+        from app.pii import decrypt_pii, encrypt_pii
+
+        self._login(role="admin", user_id=520, username="adm520")
+        emp = self._seed_employee(user_id=820, username="emp820")
+        profile = self.session.get(EmployeeProfile, emp.id)
+        profile.hourly_rate_cents_enc = encrypt_pii("2300")
+        self.session.add(profile)
+        self.session.commit()
+        csrf = self._csrf()
+
+        for bad in ("abc", "12.5", "-1", "99999999"):
+            r = self.client.post(
+                f"/team/admin/employees/{emp.id}/profile-update",
+                data={"hourly_rate_cents": bad, "csrf_token": csrf},
+                follow_redirects=False,
+            )
+            self.assertEqual(r.status_code, 303)
+            self.assertIn("hourly_rate_cents", r.headers["location"])
+            self.session.expire_all()
+            refreshed = self.session.get(EmployeeProfile, emp.id)
+            self.assertEqual(decrypt_pii(refreshed.hourly_rate_cents_enc), "2300")
+
+        rows = list(self.session.exec(
+            select(AuditLog).where(AuditLog.action == "admin.profile_update")
+        ).all())
+        self.assertEqual(rows, [])
+
+    def test_hourly_rate_accepts_sane_integer_value(self):
+        from app.models import AuditLog, EmployeeProfile
+        from app.pii import decrypt_pii
+
+        self._login(role="admin", user_id=521, username="adm521")
+        emp = self._seed_employee(user_id=821, username="emp821")
+        csrf = self._csrf()
+        r = self.client.post(
+            f"/team/admin/employees/{emp.id}/profile-update",
+            data={"hourly_rate_cents": "2750", "csrf_token": csrf},
+            follow_redirects=False,
+        )
+        self.assertEqual(r.status_code, 303)
+        self.session.expire_all()
+        refreshed = self.session.get(EmployeeProfile, emp.id)
+        self.assertEqual(decrypt_pii(refreshed.hourly_rate_cents_enc), "2750")
+        row = self.session.exec(
+            select(AuditLog).where(AuditLog.action == "admin.profile_update")
+        ).one()
+        self.assertIn("hourly_rate_cents", row.details_json)
+
 
 class ResetPasswordTests(unittest.TestCase, _W4Harness):
     def setUp(self): self._setup()

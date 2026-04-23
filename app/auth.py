@@ -718,6 +718,7 @@ def consume_invite_token(
                 }),
             )
         )
+    session.info["invite_email_skipped_due_to_clash"] = email_skipped_due_to_clash
     session.commit()
     session.refresh(user)
     return user

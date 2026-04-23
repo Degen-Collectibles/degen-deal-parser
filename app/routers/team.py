@@ -281,7 +281,10 @@ async def team_invite_accept_post(
         )
     request.session["user_id"] = user.id
     rotate_token(request)
-    return RedirectResponse("/team/?flash=Welcome+to+the+team!", status_code=303)
+    redirect_url = "/team/?flash=Welcome+to+the+team!"
+    if session.info.pop("invite_email_skipped_due_to_clash", False):
+        redirect_url += "&banner=Email+not+saved.+That+address+is+already+on+file+for+another+employee."
+    return RedirectResponse(redirect_url, status_code=303)
 
 
 @router.get("/team/password/forgot", response_class=HTMLResponse)
