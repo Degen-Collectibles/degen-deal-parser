@@ -110,6 +110,9 @@ class AdminSidebarVisibilityTests(unittest.TestCase):
     def test_admin_sees_all_four_admin_links(self):
         self._login_as("admin", user_id=101, username="adm")
         html = self._dashboard_html()
+        self.assertIn("Update my profile", html)
+        self.assertIn('href="/team/admin/schedule"', html)
+        self.assertIn('href="/team/admin/employees"', html)
         self.assertIn('href="/team/admin/employees"', html)
         self.assertIn('href="/team/admin/invites"', html)
         self.assertIn('href="/team/admin/permissions"', html)
@@ -119,6 +122,9 @@ class AdminSidebarVisibilityTests(unittest.TestCase):
     def test_employee_sees_no_admin_links(self):
         self._login_as("employee", user_id=102, username="emp")
         html = self._dashboard_html()
+        self.assertIn("Update my profile", html)
+        self.assertIn('href="/team/profile"', html)
+        self.assertIn('href="/team/supply"', html)
         self.assertNotIn('href="/team/admin/employees"', html)
         self.assertNotIn('href="/team/admin/invites"', html)
         self.assertNotIn('href="/team/admin/permissions"', html)

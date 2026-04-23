@@ -1079,9 +1079,7 @@ class AdminScheduleSaveTests(unittest.TestCase, _W47Harness):
             follow_redirects=False,
         )
         self.assertIn(r.status_code, (302, 303))
-        self.assertIn("Copied 1 storefront shift", r.headers["location"])
-        self.assertIn("Skipped 1 closed day", r.headers["location"])
-
+        self.assertIn("Generated+1+shift+from+last+week.", r.headers["location"])
         self.session.expire_all()
         copied_rows = list(
             self.session.exec(

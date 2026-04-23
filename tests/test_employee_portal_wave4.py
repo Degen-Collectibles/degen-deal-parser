@@ -330,7 +330,7 @@ class AdminProfileUpdateHardeningTests(unittest.TestCase, _W4Harness):
         self.session.commit()
         csrf = self._csrf()
 
-        for bad in ("abc", "12.5", "-1", "99999999"):
+        for bad in ("abc", "12.5", "-1"):
             r = self.client.post(
                 f"/team/admin/employees/{emp.id}/profile-update",
                 data={"hourly_rate_cents": bad, "csrf_token": csrf},
@@ -340,13 +340,24 @@ class AdminProfileUpdateHardeningTests(unittest.TestCase, _W4Harness):
             self.assertIn("Invalid+hourly_rate_cents+ignored", r.headers["location"])
             self.session.expire_all()
             refreshed = self.session.get(EmployeeProfile, emp.id)
-            expected_rate = "2300" if bad != "99999999" else "1000000"
-            self.assertEqual(decrypt_pii(refreshed.hourly_rate_cents_enc), expected_rate)
+            self.assertEqual(decrypt_pii(refreshed.hourly_rate_cents_enc), "2300")
+
+        r = self.client.post(
+            f"/team/admin/employees/{emp.id}/profile-update",
+            data={"hourly_rate_cents": "99999999", "csrf_token": csrf},
+            follow_redirects=False,
+        )
+        self.assertEqual(r.status_code, 303)
+        self.assertIn("flash=Saved.", r.headers["location"])
+        self.session.expire_all()
+        refreshed = self.session.get(EmployeeProfile, emp.id)
+        self.assertEqual(decrypt_pii(refreshed.hourly_rate_cents_enc), "1000000")
 
         rows = list(self.session.exec(
             select(AuditLog).where(AuditLog.action == "admin.profile_update")
         ).all())
-        self.assertEqual(rows, [])
+        self.assertEqual(len(rows), 1)
+        self.assertIn("hourly_rate_cents", rows[0].details_json)
 
     def test_hourly_rate_accepts_sane_integer_value(self):
         from app.models import AuditLog, EmployeeProfile
