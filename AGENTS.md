@@ -458,7 +458,39 @@ Models: `InventoryItem`, `PriceHistory` in `app/models.py`
 
 ## Degen Eye Card Scanner
 
-The Degen Eye scanner (`/degen_eye`) is implemented in `app/pokemon_scanner.py`. It powers both camera-based and text-based card identification across multiple trading card games (Pokemon, Magic, Yu-Gi-Oh, One Piece, Lorcana, Dragon Ball, etc.). The Python module and the `inventory_scan_pokemon.html` template kept their Pokemon-era names for backward compatibility with git history; only the public URL was renamed.
+Two coexisting scanners at `/degen_eye` (v1, multi-TCG cloud pipeline) and `/degen_eye/v2` (Pokemon-only pHash pipeline). Users pick whichever fits the job.
+
+The v1 scanner (`/degen_eye`) is implemented in `app/pokemon_scanner.py`. It powers both camera-based and text-based card identification across multiple trading card games (Pokemon, Magic, Yu-Gi-Oh, One Piece, Lorcana, Dragon Ball, etc.). The Python module and the `inventory_scan_pokemon.html` template kept their Pokemon-era names for backward compatibility with git history; only the public URL was renamed.
+
+### Degen Eye v2 (Pokemon, `/degen_eye/v2`)
+
+Local-first scanner targeting sub-1-second scan-to-result on Pokemon. Owns its own pipeline modules separate from v1:
+
+- `app/card_detect.py` — OpenCV Canny + contour-based card detection with perspective rectification to 300×420. Skips the warp when the input is already tight (no meaningful background inset) so clean uploads don't get degraded by resampling. Also exposes `detect_box()` for the auto-capture polling loop.
+- `app/phash_scanner.py` — Loads `data/phash_index.sqlite` into memory once, offers `lookup()` via linear Hamming-distance scan over ~20k 64-bit pHashes. Banding: 0-6 HIGH, 7-12 MEDIUM, >12 LOW. Storage is BLOB, not INTEGER, because 64-bit unsigned values overflow SQLite's signed INT64 range.
+- `app/price_cache.py` — Thin wrapper around v1's `_enrich_price_fast`; pre-warms the TCGTracking cache for the top-N most-recent Pokemon sets at startup + every 24h.
+- `app/degen_eye_v2.py` — Orchestrator. `run_v2_pipeline` (single shot) and `run_v2_pipeline_stream` (SSE-compatible async generator). Falls back to raw-image pHash if the cropped hash is weak, and to v1's Ximilar pipeline if even that scores LOW.
+- `scripts/build_phash_index.py` — Offline bulk builder. Walks TCGdex for every Pokemon card, downloads the image, computes pHash, writes to `data/phash_index.sqlite`. Run once manually; `--incremental` skips already-indexed cards on re-runs. Full build is ~20-40 min one-time; incremental updates for new sets are seconds.
+
+Routes (all behind `_require_employee`):
+- `GET  /degen_eye/v2` — HTML scanner page
+- `POST /degen_eye/v2/scan` — non-streaming scan (same ScanResult shape as v1)
+- `POST /degen_eye/v2/scan-init` — allocate scan_id + stash image for SSE
+- `GET  /degen_eye/v2/scan-stream?scan_id=...` — Server-Sent Events emitting `detected` / `identified` / `price` / `variants` / `done` (or `error`) as each stage completes
+- `POST /degen_eye/v2/detect-only` — card-edge detection only (used by auto-capture polling)
+- `GET  /degen_eye/v2/stats` — index + cache telemetry
+- `POST /degen_eye/v2/warm` — manual price-cache warm (reviewer role)
+
+Capture UX:
+- **Tap mode** (default): shutter button, progressive result card with a 4-dot progress indicator.
+- **Auto mode**: every ~350ms the frontend POSTs a thumbnail to `/detect-only`, draws a yellow bounding quad over the detected card, tracks the `stability_hash`. When 3 consecutive hashes match (card held stable) the full scan fires automatically with a 1.2s cooldown afterward.
+
+Operational notes:
+- The pHash index isn't tracked in git (`data/phash_index.sqlite`). Each deployment bootstraps by running the build script once.
+- v2 shares `localStorage.scan_batch` with v1 so batch items created via v2 flow through v1's review + confirm UI unchanged.
+- New dependencies: `opencv-python-headless` (~40MB, headless avoids GUI libs) and `imagehash`.
+- New optional env var: none yet. The scanner reads TCGdex + TCGTracking via unauthenticated public endpoints, same as v1.
+- A nightly index-refresh background task is Phase C (not yet shipped); for now re-run the builder manually when new sets release.
 
 ### Scanner Modes
 

@@ -55,6 +55,21 @@
         .focus-indicator.active { opacity:1; transform:translate(-50%,-50%) scale(1); }
         .focus-indicator.fade { opacity:0; transition:opacity .5s ease-out .4s; }
 
+        /* Auto-capture detection overlay */
+        .detect-overlay { position:absolute; inset:0; pointer-events:none; z-index:7; }
+        .detect-overlay svg { width:100%; height:100%; display:block; }
+        .detect-poly { fill:none; stroke:rgba(255,204,0,.85); stroke-width:3; stroke-linejoin:round; transition:stroke .15s; filter:drop-shadow(0 0 6px rgba(255,204,0,.5)); }
+        .detect-poly.locked { stroke:rgba(76,175,80,.95); filter:drop-shadow(0 0 8px rgba(76,175,80,.65)); }
+
+        /* Mode toggle (Tap / Auto) */
+        .mode-toggle { display:inline-flex; gap:0; background:rgba(0,0,0,.4); border:1px solid rgba(255,255,255,.12); border-radius:999px; padding:2px; margin-left:auto; margin-right:6px; }
+        .mode-toggle button { appearance:none; border:none; padding:5px 12px; font-size:11px; font-weight:800; letter-spacing:.05em; text-transform:uppercase; color:rgba(255,255,255,.6); background:transparent; cursor:pointer; border-radius:999px; }
+        .mode-toggle button.active { background:linear-gradient(135deg,var(--accent),var(--accent-strong)); color:#fff; }
+
+        /* Auto-capture status label near the capture button */
+        .auto-hint { position:absolute; bottom:calc(180px + env(safe-area-inset-bottom,0px)); left:0; right:0; text-align:center; color:rgba(255,255,255,.75); font-size:12px; font-weight:700; letter-spacing:.04em; text-shadow:0 2px 6px rgba(0,0,0,.6); z-index:6; pointer-events:none; display:none; }
+        .auto-hint.visible { display:block; }
+
         .capture-btn { position:absolute; bottom:calc(88px + env(safe-area-inset-bottom,0px)); left:50%; transform:translateX(-50%); width:72px; height:72px; border-radius:50%; border:4px solid rgba(255,255,255,.95); background:transparent; cursor:pointer; padding:0; z-index:10; transition:transform .1s; }
         .capture-btn:active { transform:translateX(-50%) scale(.92); }
         .capture-btn:disabled { opacity:.35; cursor:not-allowed; }
@@ -104,6 +119,10 @@
     <div class="top-bar">
         <a class="top-bar-back" href="/inventory">&larr;</a>
         <span class="top-bar-title">Degen Eye<span class="v2-badge">V2</span></span>
+        <div class="mode-toggle" id="mode-toggle" role="tablist" aria-label="Capture mode">
+            <button type="button" data-mode="tap" class="active" aria-pressed="true">Tap</button>
+            <button type="button" data-mode="auto" aria-pressed="false">Auto</button>
+        </div>
         <a class="v1-link" href="/degen_eye">v1</a>
     </div>
 
@@ -120,6 +139,13 @@
         </div>
         <div class="flash-overlay" id="flash-overlay"></div>
         <div class="focus-indicator" id="focus-indicator"></div>
+
+        <div class="detect-overlay" id="detect-overlay">
+            <svg xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="none" viewBox="0 0 100 100">
+                <polygon id="detect-poly" class="detect-poly" points="" style="display:none;"></polygon>
+            </svg>
+        </div>
+        <div class="auto-hint" id="auto-hint">Auto mode &mdash; point at a card</div>
 
         <div class="live-result" id="live-result">
             <div class="lr-row">
@@ -157,6 +183,22 @@ var V2 = (function() {
     var stream = null;
     var facingMode = 'environment';
     var scanInFlight = false;
+
+    // --- Capture mode (tap / auto) ---
+    // Persisted so rapid-fire users don't have to re-toggle on every visit.
+    var VALID_CAPTURE_MODES = ['tap', 'auto'];
+    var captureMode = localStorage.getItem('degen_eye_v2_mode') || 'tap';
+    if (VALID_CAPTURE_MODES.indexOf(captureMode) < 0) captureMode = 'tap';
+
+    // Auto-capture internals
+    var autoLoopTimer = null;
+    var autoInFlight = false;          // single-flight guard for /detect-only
+    var autoStabilityBuffer = [];       // recent stability_hash values
+    var autoCooldownUntil = 0;          // wall-clock ms; skip detection while < now
+    var AUTO_POLL_INTERVAL_MS = 350;
+    var AUTO_STABILITY_THRESHOLD = 3;   // N consecutive matching hashes
+    var AUTO_COOLDOWN_AFTER_SCAN_MS = 1200;
+    var AUTO_DETECT_WIDTH = 400;        // downscale frame to this width before POST
 
     // Batch: shares localStorage key with v1 so added items flow into v1's
     // review/confirm screens without v2 having to re-implement all of it.
@@ -427,15 +469,165 @@ var V2 = (function() {
         showToast('\u2713 ' + (m.name || 'Card') + ' added');
     }
 
+    // --- Auto-capture loop ---
+    // Every ~350ms we sample a downscaled frame, POST to /degen_eye/v2/detect-only,
+    // and draw a quadrilateral overlay on the detected card. When the
+    // stability_hash stays constant across 3 consecutive detections the
+    // full scan fires. A cooldown after each scan keeps the loop from
+    // re-triggering on the same card while the result is still visible.
+    function _captureThumb(targetWidth) {
+        var video = document.getElementById('video');
+        var vw = video.videoWidth || 1280;
+        var vh = video.videoHeight || 720;
+        var scale = Math.min(1, targetWidth / vw);
+        var w = Math.max(1, Math.round(vw * scale));
+        var h = Math.max(1, Math.round(vh * scale));
+        // Use a detached canvas so we don't clobber the shutter-capture one.
+        var c = document.createElement('canvas');
+        c.width = w;
+        c.height = h;
+        c.getContext('2d').drawImage(video, 0, 0, w, h);
+        return {
+            b64: c.toDataURL('image/jpeg', 0.7).split(',')[1],
+            width: w,
+            height: h,
+        };
+    }
+
+    function _drawDetectPoly(corners, locked, srcW, srcH) {
+        var poly = document.getElementById('detect-poly');
+        if (!poly) return;
+        if (!corners || corners.length < 4) {
+            poly.style.display = 'none';
+            return;
+        }
+        // Map corner coordinates (in the thumbnail's coord space) to the
+        // overlay's 100x100 viewBox so the polygon scales with the video
+        // regardless of zoom/object-fit. The video element uses object-fit:
+        // cover, so corner positions in the source thumbnail map linearly to
+        // percentages of the video's intrinsic size — close enough for a
+        // visual affordance.
+        var pts = corners.map(function(pt) {
+            var x = (pt[0] / srcW) * 100;
+            var y = (pt[1] / srcH) * 100;
+            return x.toFixed(2) + ',' + y.toFixed(2);
+        }).join(' ');
+        poly.setAttribute('points', pts);
+        poly.style.display = '';
+        if (locked) poly.classList.add('locked');
+        else poly.classList.remove('locked');
+    }
+
+    async function _autoDetectOnce() {
+        if (autoInFlight || scanInFlight || !stream) return;
+        var now = Date.now();
+        if (now < autoCooldownUntil) return;
+        autoInFlight = true;
+        try {
+            var thumb = _captureThumb(AUTO_DETECT_WIDTH);
+            var resp = await fetch('/degen_eye/v2/detect-only', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ image: thumb.b64 })
+            });
+            if (!resp.ok) {
+                // Treat auth / server errors as transient — retry on next tick.
+                return;
+            }
+            var d = await resp.json();
+            if (!d.found) {
+                _drawDetectPoly(null, false, thumb.width, thumb.height);
+                autoStabilityBuffer = [];
+                return;
+            }
+            // Buffer stability hashes and check for lock
+            autoStabilityBuffer.push(d.stability_hash || '');
+            if (autoStabilityBuffer.length > AUTO_STABILITY_THRESHOLD) {
+                autoStabilityBuffer.shift();
+            }
+            var allSame = autoStabilityBuffer.length >= AUTO_STABILITY_THRESHOLD
+                && autoStabilityBuffer.every(function(h) { return h === autoStabilityBuffer[0]; });
+            _drawDetectPoly(d.corners, allSame, thumb.width, thumb.height);
+
+            if (allSame) {
+                // Lock achieved — fire full scan and start cooldown.
+                autoStabilityBuffer = [];
+                autoCooldownUntil = Date.now() + AUTO_COOLDOWN_AFTER_SCAN_MS;
+                // Hide the overlay during/after the scan so the user sees the result card clearly
+                _drawDetectPoly(null, false, thumb.width, thumb.height);
+                runScan();
+            }
+        } catch (e) {
+            // Silent — transient network blips shouldn't spam the user
+        } finally {
+            autoInFlight = false;
+        }
+    }
+
+    function _startAutoLoop() {
+        if (autoLoopTimer) return;
+        autoLoopTimer = setInterval(_autoDetectOnce, AUTO_POLL_INTERVAL_MS);
+        var hint = document.getElementById('auto-hint');
+        if (hint) hint.classList.add('visible');
+    }
+
+    function _stopAutoLoop() {
+        if (autoLoopTimer) {
+            clearInterval(autoLoopTimer);
+            autoLoopTimer = null;
+        }
+        autoStabilityBuffer = [];
+        _drawDetectPoly(null, false, 1, 1);
+        var hint = document.getElementById('auto-hint');
+        if (hint) hint.classList.remove('visible');
+    }
+
+    function setCaptureMode(mode) {
+        if (VALID_CAPTURE_MODES.indexOf(mode) < 0) return;
+        captureMode = mode;
+        try { localStorage.setItem('degen_eye_v2_mode', mode); } catch (_) {}
+        var buttons = document.querySelectorAll('#mode-toggle button');
+        buttons.forEach(function(b) {
+            var active = b.getAttribute('data-mode') === mode;
+            b.classList.toggle('active', active);
+            b.setAttribute('aria-pressed', active ? 'true' : 'false');
+        });
+        if (mode === 'auto' && stream) _startAutoLoop();
+        else _stopAutoLoop();
+    }
+
     // --- Init ---
     saveBatch();
     document.getElementById('capture-btn').addEventListener('click', runScan);
-    if (window.innerWidth <= 780) { startCamera(); }
+    document.querySelectorAll('#mode-toggle button').forEach(function(b) {
+        b.addEventListener('click', function() {
+            setCaptureMode(b.getAttribute('data-mode'));
+        });
+    });
+    // Apply persisted mode state immediately (before camera starts), but don't
+    // fire the loop until the video stream is actually live.
+    setCaptureMode(captureMode);
+
+    if (window.innerWidth <= 780) {
+        startCamera().then(function() {
+            // Now that video is live, honor auto mode if that was persisted.
+            if (captureMode === 'auto') _startAutoLoop();
+        });
+    } else {
+        // Desktop: user explicitly taps Start. Wrap it so auto loop kicks in
+        // after they do.
+        var _origStart = startCamera;
+        startCamera = async function() {
+            await _origStart();
+            if (captureMode === 'auto') _startAutoLoop();
+        };
+    }
     setupTap();
 
     return {
         startCamera: startCamera,
-        runScan: runScan
+        runScan: runScan,
+        setCaptureMode: setCaptureMode
     };
 })();
 </script>

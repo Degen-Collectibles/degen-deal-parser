@@ -1021,6 +1021,52 @@ async def degen_eye_v2_scan_stream(request: Request, scan_id: str):
     )
 
 
+@router.post("/degen_eye/v2/detect-only")
+async def degen_eye_v2_detect_only(request: Request):
+    """Fast card-edge detection endpoint used by Phase B auto-capture.
+
+    Accepts a small thumbnail image (~400px JPEG base64) and runs ONLY the
+    OpenCV detection + quad scoring — no pHash lookup, no price. Response
+    target latency: < 100ms so the frontend can poll ~3x/second.
+
+    Response shape:
+        {
+            "found": bool,
+            "reason": str,
+            "box": [x, y, w, h]?,           # only when found
+            "corners": [[x,y], ...]?,       # only when found, 4 entries
+            "stability_hash": str?,         # rounded-to-10px corner hash
+            "score": float?,                # quad score for debugging
+            "elapsed_ms": float,
+        }
+    """
+    if denial := _require_employee(request):
+        return denial
+    import base64 as _b64
+    import time as _time
+    from .card_detect import detect_box
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+    image_b64 = (body.get("image") or "").strip()
+    if not image_b64:
+        return JSONResponse({"error": "Missing image field"}, status_code=400)
+    if "," in image_b64:
+        image_b64 = image_b64.split(",", 1)[1]
+    try:
+        raw = _b64.b64decode(image_b64)
+    except Exception:
+        return JSONResponse({"error": "Invalid base64"}, status_code=400)
+
+    t_start = _time.monotonic()
+    result = detect_box(raw)
+    result["elapsed_ms"] = round((_time.monotonic() - t_start) * 1000, 1)
+    return JSONResponse(result)
+
+
 @router.get("/degen_eye/v2/stats")
 async def degen_eye_v2_stats(request: Request):
     """Admin-ish JSON: index size, last build, cache warm state."""

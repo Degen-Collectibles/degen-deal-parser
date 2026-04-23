@@ -41,6 +41,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run_hosted.ps1
   - **Fast**: Ximilar only (2-4s, 0 AI calls)
   - **Balanced** (default): Ximilar first; HIGH short-circuits; otherwise Haiku + Gemini Flash run in parallel in the background, 3-way majority vote
   - **Accurate**: Ximilar first; HIGH short-circuits; MEDIUM backgrounds a single Opus call; LOW blocks on Opus + Gemini Pro tiebreaker on disagreement
+- **Degen Eye v2 Pokemon scanner** (`/degen_eye/v2`) — separate local-first Pokemon scanner targeting sub-1-second scan-to-result. Runs OpenCV card detection + a perceptual-hash nearest-neighbor lookup against a pre-built index of every Pokemon card. No per-scan LLM call on the happy path; Ximilar fallback only when pHash is LOW confidence. Streaming SSE response so name lands in ~500ms, price in ~800ms. Two capture modes: Tap (shutter button) and Auto (continuous detection, auto-triggers on 3 consecutive stable frames). Bootstrap: `python scripts/build_phash_index.py` (~20-40 min one-time for the full Pokemon catalog).
 
 ## Key Pages
 

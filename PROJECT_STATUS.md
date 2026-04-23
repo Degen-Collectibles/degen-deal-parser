@@ -201,6 +201,17 @@ As of April 2026, `app/main.py` was refactored from ~12,000 lines into a modular
 - **Rapid-fire camera scan queue** — client-side batching with `localStorage`, mobile-first UI
 - **Configurable AI provider** — defaults to OpenAI (`gpt-5-nano`); can switch to NVIDIA Inference Hub (Claude Opus for vision, Haiku for fast query parsing) via `AI_PROVIDER` env var
 
+### Degen Eye v2 Pokemon Scanner (`/degen_eye/v2`)
+- **Local perceptual-hash pipeline** — OpenCV card detection + 64-bit pHash nearest-neighbor lookup against a pre-built index of every Pokemon card. No per-scan LLM call on the happy path.
+- **Index builder** — `python scripts/build_phash_index.py` walks TCGdex and writes `data/phash_index.sqlite`. Full build ~20-40 min one-time; incremental mode via `--incremental` makes subsequent runs seconds.
+- **Streaming Server-Sent Events response** — `detected` → `identified` → `price` → `variants` → `done`. Name lands in ~500ms, price in ~800ms on a warm cache.
+- **Two capture modes**:
+  - **Tap** — shutter button, progressive 4-dot progress indicator
+  - **Auto** — continuous ~350ms detection polling; when 3 consecutive frames show stable card corners the full scan auto-fires with a 1.2s cooldown
+- **Ximilar fallback** — when pHash Hamming distance > 12 (LOW), v1's cloud pipeline backstops identification. Keeps v2 honest on new sets that aren't in the index yet.
+- **Shared batch** — saves to the same `localStorage.scan_batch` key as v1 so batches flow into v1's review/confirm UI.
+- **Target performance** — sub-1-second scan-to-result on warm-cache HIGH-confidence scans.
+
 ### Stream Management
 - Multi-stream account support — tabbed schedule interface (e.g., "Main Stream", "Second Stream")
 - Team scheduling with AM/PM time display
