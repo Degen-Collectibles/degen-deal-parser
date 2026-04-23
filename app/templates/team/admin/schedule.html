@@ -77,7 +77,11 @@
     }
     .sch-cell.is-today { box-shadow: inset 2px 0 0 #fdba74; }
 
-    /* The clickable block (edit mode). */
+    /* The clickable block (edit mode).
+       `touch-action: manipulation` is critical for mobile: it removes the
+       ~300ms iOS double-tap-zoom delay and prevents the horizontally
+       scrollable .sch-wrap parent from stealing taps as pan gestures —
+       that was why taps looked dead on Jeffrey's phone. */
     .sch-block {
         width: 100%;
         height: 100%;
@@ -97,7 +101,12 @@
         padding: 4px 6px;
         text-align: center;
         transition: transform 0.08s ease, box-shadow 0.08s ease;
+        touch-action: manipulation;
+        -webkit-tap-highlight-color: rgba(59,130,246,0.25);
+        -webkit-user-select: none;
+        user-select: none;
     }
+    .sch-block:active { transform: translateY(0) scale(0.97); }
     .sch-block:hover {
         transform: translateY(-1px);
         box-shadow: 0 2px 6px rgba(0,0,0,0.25);
@@ -518,8 +527,9 @@
             overflow-y: auto;
             border-radius: 14px 14px 0 0;
             margin: 0;
+            padding-bottom: env(safe-area-inset-bottom, 0px);
         }
-        .sch-modal-body { padding: 14px 14px 12px; gap: 10px; }
+        .sch-modal-body { padding: 14px 14px 14px; gap: 12px; }
         .sch-modal-tabs button { padding: 8px 12px; font-size: 13px; }
         .sch-modal-times input[type=time] { font-size: 16px; }
         .sch-modal-actions button { padding: 10px 14px; font-size: 14px; }
@@ -912,16 +922,16 @@
         modal.classList.add('is-open');
         if (backdrop) backdrop.classList.add('is-open');
         modal.setAttribute('aria-hidden', 'false');
-        // On mobile (iOS Safari, older WebKit) the layout viewport can be
-        // taller than the visual viewport; a bottom-anchored fixed element
-        // can then sit outside the current scroll window. Nudge the modal
-        // into view so the tabs/fields are actually reachable.
-        try { modal.scrollIntoView({ block: 'nearest' }); } catch (_) {}
+        // Lock the background scroll so the bottom-sheet stays anchored
+        // on iOS (otherwise the grid underneath keeps scrolling and the
+        // sheet looks like it's jumping around).
+        document.body.style.overflow = 'hidden';
     }
     function closeModal() {
         modal.classList.remove('is-open');
         if (backdrop) backdrop.classList.remove('is-open');
         modal.setAttribute('aria-hidden', 'true');
+        document.body.style.overflow = '';
     }
     function isOpen() {
         return modal.classList.contains('is-open');
@@ -1108,15 +1118,20 @@
         noteEl.value = parsed.note;
 
         openModal();
-        // Light focus trap: move focus to the first tab button so the
-        // keyboard user lands inside the dialog. Phones keep the original
-        // input-focus behavior so the on-screen keyboard shows up.
+        // Focus the first tab for keyboard users. On mobile we INTENTIONALLY
+        // do NOT auto-focus the time/note inputs: iOS Safari pops up the
+        // native time-picker wheel on focus, which stacks over the bottom-
+        // sheet and makes the modal look broken ("I tapped a cell, a picker
+        // showed up, and I can't edit"). Desktop keeps the input-focus
+        // convenience so keyboard typing flows naturally.
+        var isTouch = (('ontouchstart' in window) || navigator.maxTouchPoints > 0);
         setTimeout(function() {
             var firstTab = tabsEl.querySelector('button');
             if (firstTab) firstTab.focus();
-            // After the tab gets focus, move to the appropriate field.
-            if (parsed.status === 'shift') startEl.focus();
-            else noteEl.focus();
+            if (!isTouch) {
+                if (parsed.status === 'shift') startEl.focus();
+                else if (!noteEl.disabled) noteEl.focus();
+            }
         }, 30);
     }
 
@@ -1148,30 +1163,24 @@
         backdrop.addEventListener('click', function() { closeModal(); });
     }
 
-    // Single entry point for both mouse clicks and touch taps. We listen
-    // on the grid (event delegation) and — critically — also bind a
-    // `touchend` handler. Some mobile Safari versions delay synthesizing
-    // `click` on nested buttons inside scroll containers, so the explicit
-    // touch path keeps tap-to-edit responsive on the phone.
-    var lastTouchAt = 0;
+    // Single entry point for both mouse clicks and touch taps. With
+    // `touch-action: manipulation` on `.sch-block` (see CSS), iOS fires a
+    // fast synthetic click on tap — no custom touchend dance needed. The
+    // previous touchend + preventDefault approach was unreliable: when
+    // the user's finger drifted even a pixel inside the horizontally
+    // scrollable `.sch-wrap`, iOS classified the tap as a pan gesture
+    // and silently dropped both `touchend` and the synthetic `click`,
+    // so tap-to-edit never fired. A plain click listener + CSS is the
+    // simplest thing that reliably works across Safari/Chrome/Android.
     function handleCellActivate(ev) {
         var btn = ev.target.closest('.sch-block');
         if (!btn) return;
         if (btn.classList.contains('is-ro')) return;
         var cell = btn.closest('.sch-cell');
         if (!cell) return;
-        ev.preventDefault();
         openFor(cell);
     }
-    grid.addEventListener('click', function(ev) {
-        // Suppress the synthetic click that follows a touchend we already handled.
-        if (Date.now() - lastTouchAt < 700) return;
-        handleCellActivate(ev);
-    });
-    grid.addEventListener('touchend', function(ev) {
-        lastTouchAt = Date.now();
-        handleCellActivate(ev);
-    }, { passive: false });
+    grid.addEventListener('click', handleCellActivate);
 
     // Warn if user navigates away with unsaved changes.
     window.addEventListener('beforeunload', function(ev) {
