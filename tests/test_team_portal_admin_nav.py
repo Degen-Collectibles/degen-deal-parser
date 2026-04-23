@@ -148,6 +148,11 @@ class AdminSidebarVisibilityTests(unittest.TestCase):
         self.assertNotIn('href="/team/admin/invites"', html)
         self.assertNotIn('href="/team/admin/permissions"', html)
 
+    def test_viewer_cannot_enter_permission_gated_admin_page(self):
+        self._login_as("viewer", user_id=105, username="viewer")
+        response = self.client.get("/team/admin/supply", follow_redirects=False)
+        self.assertEqual(response.status_code, 403)
+
 
 if __name__ == "__main__":
     unittest.main()

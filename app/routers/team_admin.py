@@ -46,10 +46,9 @@ def _admin_gate(request: Request, session: Session, resource_key: str):
 
 
 def _permission_gate(request: Request, session: Session, resource_key: str):
-    """Portal + authenticated + per-resource permission. No role floor — any
-    role that holds the permission may enter. Used for /team/admin/* pages
-    where managers have view/approve access but admins are the only writers
-    on PII-sensitive paths (handled by a stricter key on the POST handlers).
+    """Portal + authenticated + per-resource permission with an admin-surface
+    role floor. Only admin/manager/reviewer may enter permission-gated
+    /team/admin pages, even if a lower role somehow holds the permission.
     """
     if denial := _portal_gate(request):
         return denial, None
@@ -61,6 +60,10 @@ def _permission_gate(request: Request, session: Session, resource_key: str):
         if user is None:
             return redirect_to_login(request), None
         request.state.current_user = user
+    if getattr(user, "role", None) not in {"admin", "manager", "reviewer"}:
+        return HTMLResponse(
+            "You do not have permission to view this page.", status_code=403
+        ), None
     if not has_permission(session, user, resource_key):
         return HTMLResponse(
             "You do not have permission to view this page.", status_code=403

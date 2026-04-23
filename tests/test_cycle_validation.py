@@ -240,7 +240,12 @@ class CycleValidationTests(unittest.TestCase):
         self.assertIn("ADMIN_PASSWORD", str(exc.exception))
 
     def test_settings_do_not_raise_on_local_defaults(self) -> None:
-        settings = config_module.Settings()
+        settings = config_module.Settings(
+            EMPLOYEE_PORTAL_ENABLED="false",
+            EMPLOYEE_PII_KEY="",
+            EMPLOYEE_EMAIL_HASH_SALT="",
+            EMPLOYEE_TOKEN_HMAC_KEY="",
+        )
         settings.public_base_url = "http://127.0.0.1:8000"
         settings.session_https_only = False
         settings.session_domain = ""

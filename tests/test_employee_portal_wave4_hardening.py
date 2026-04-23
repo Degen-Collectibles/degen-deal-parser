@@ -16,6 +16,7 @@ import importlib
 import json
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from cryptography.fernet import Fernet
@@ -517,6 +518,80 @@ class PurgeIdempotencyTests(unittest.TestCase, _Harness):
             select(AuditLog).where(AuditLog.action == "account.purged")
         ).all())
         self.assertGreaterEqual(len(rows), 1)
+
+
+class ProxyAwareRateLimitTests(unittest.TestCase):
+    def tearDown(self):
+        from app import rate_limit
+        from app import config as cfg
+        rate_limit.reset()
+        os.environ.pop("TRUST_X_FORWARDED_FOR", None)
+        cfg.get_settings.cache_clear()
+
+    def test_trusted_proxy_uses_first_forwarded_for_ip(self):
+        from app import config as cfg
+        from app import rate_limit
+
+        cfg.get_settings.cache_clear()
+        os.environ["TRUST_X_FORWARDED_FOR"] = "true"
+        request = SimpleNamespace(
+            client=SimpleNamespace(host="10.0.0.9"),
+            headers={"x-forwarded-for": "198.51.100.10, 10.0.0.9"},
+        )
+        self.assertEqual(rate_limit._client_ip(request), "198.51.100.10")
+        limited = rate_limit.rate_limited_or_429(
+            request, key_prefix="login", max_requests=1, window_seconds=60
+        )
+        self.assertIsNone(limited)
+        limited = rate_limit.rate_limited_or_429(
+            request, key_prefix="login", max_requests=1, window_seconds=60
+        )
+        self.assertEqual(limited.status_code, 429)
+        self.assertIn("login:198.51.100.10", getattr(rate_limit, "_BUCKETS"))
+
+    def test_untrusted_proxy_ignores_forwarded_for_header(self):
+        from app import config as cfg
+        from app import rate_limit
+
+        cfg.get_settings.cache_clear()
+        os.environ.pop("TRUST_X_FORWARDED_FOR", None)
+        request = SimpleNamespace(
+            client=SimpleNamespace(host="10.0.0.9"),
+            headers={"x-forwarded-for": "198.51.100.10, 10.0.0.9"},
+        )
+        self.assertEqual(rate_limit._client_ip(request), "10.0.0.9")
+
+
+class RuntimeHardeningDefaultsTests(unittest.TestCase):
+    def test_session_https_only_defaults_true(self):
+        from app import config as cfg
+
+        settings = cfg.Settings(
+            EMPLOYEE_PORTAL_ENABLED="false",
+            SESSION_HTTPS_ONLY="true",
+            SESSION_SECRET="unit-test-secret-" + "x" * 32,
+            ADMIN_PASSWORD="unit-test-admin-pass",
+        )
+        self.assertTrue(settings.session_https_only)
+
+    def test_employee_portal_rejects_default_runtime_secrets_even_on_local_host(self):
+        from app import config as cfg
+
+        settings = cfg.Settings(
+            EMPLOYEE_PORTAL_ENABLED="true",
+            EMPLOYEE_PII_KEY=Fernet.generate_key().decode("ascii"),
+            EMPLOYEE_EMAIL_HASH_SALT="portal-hardening-salt",
+            EMPLOYEE_TOKEN_HMAC_KEY="portal-hardening-hmac",
+            PUBLIC_BASE_URL="http://127.0.0.1:8000",
+            SESSION_SECRET=cfg.DEFAULT_SESSION_SECRET,
+            ADMIN_PASSWORD=cfg.DEFAULT_ADMIN_PASSWORD,
+        )
+
+        with self.assertRaises(RuntimeError) as exc:
+            settings.validate_runtime_secrets()
+
+        self.assertIn("SESSION_SECRET", str(exc.exception))
+        self.assertIn("ADMIN_PASSWORD", str(exc.exception))
 
 
 if __name__ == "__main__":
