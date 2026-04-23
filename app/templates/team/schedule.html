@@ -56,11 +56,34 @@
     .sch-name-col.is-stream { background: rgba(96,165,250,0.08); }
     .sch-name-sub { font-size: 10.5px; color: var(--pt-muted); font-weight: 500; display: block; margin-top: 2px; }
 
-    .sch-cell { height: 54px; min-width: 118px; padding: 4px; background: var(--pt-bg); }
+    .sch-cell { min-height: 54px; min-width: 118px; padding: 4px; background: var(--pt-bg); }
     .sch-cell.is-today { box-shadow: inset 2px 0 0 #fdba74; }
 
+    /* Multi-shift stacking: read-only mirror of the admin grid. Each
+       shift renders as its own colored pill stacked vertically inside
+       the cell. Single-shift cells look identical to the old design. */
+    .sch-cell-stack {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        width: 100%;
+        min-height: 46px;
+    }
+    .sch-cell-stack .sch-block {
+        min-height: 38px;
+        padding: 4px 6px;
+    }
+    .sch-cell-stack.is-multi .sch-block {
+        min-height: 30px;
+        padding: 2px 6px;
+        font-size: 11.5px;
+    }
+    .sch-cell-stack.is-multi .sch-block-note {
+        font-size: 10px;
+    }
+
     .sch-block {
-        width: 100%; height: 100%;
+        width: 100%;
         display: flex; flex-direction: column;
         align-items: center; justify-content: center;
         gap: 2px;
@@ -264,24 +287,45 @@
                     </div>
                 </td>
                 {% for d in ctx.week_days %}
-                {% set entry = ctx.entry_map.get((u.id, d.isoformat())) %}
-                {% set hint = (ctx.stream_hint_map.get((u.id, d.isoformat())) if ctx.stream_hint_map else None) %}
-                {% set label = (entry.label if entry else (hint.label if hint else '')) %}
-                {% set kind = (entry.kind if entry else 'blank') %}
-                {% set hint_color = (hint.color if hint and not entry else None) %}
+                {#
+                    Multi-shift read-only cell. `entry_map` / `stream_hint_map`
+                    now return a list-per-cell. Empty list ⇒ blank "—". One
+                    or more items ⇒ stacked pills.
+                #}
+                {% set entries_list = ctx.entry_map.get((u.id, d.isoformat())) or [] %}
+                {% set hints_list = (ctx.stream_hint_map.get((u.id, d.isoformat())) if ctx.stream_hint_map else None) or [] %}
+                {% if kind_slug == 'stream' %}
+                    {% set items = hints_list %}
+                    {% set is_stream_list = True %}
+                {% else %}
+                    {% set items = entries_list %}
+                    {% set is_stream_list = False %}
+                {% endif %}
+                {% set shift_count = items|length %}
                 {% set is_today = (d == today) %}
-                {% set parts = label.split(' · ') if ' · ' in label else [label] %}
                 <td class="sch-cell {% if is_today %}is-today{% endif %}">
-                    <div class="sch-block sch-k-{{ kind }}{% if is_me and (kind != 'blank' or hint_color) %} sch-me{% endif %}"
-                         {% if hint_color %}style="background: {{ hint_color }}; color:#0b1220;"{% endif %}
-                         {% if hint and not entry %}title="{{ hint.account_name }} · from Stream Manager"{% endif %}>
-                        {% if kind == 'blank' and not label %}
-                        <span style="opacity:0.45;">—</span>
+                    <div class="sch-cell-stack {% if shift_count > 1 %}is-multi{% endif %}">
+                        {% if shift_count == 0 %}
+                        <div class="sch-block sch-k-blank">
+                            <span style="opacity:0.45;">—</span>
+                        </div>
+                        {% elif is_stream_list %}
+                            {% for hint in items %}
+                            <div class="sch-block sch-k-stream{% if is_me %} sch-me{% endif %}"
+                                 style="background: {{ hint.color }}; color:#0b1220;"
+                                 title="{{ hint.account_name }} · from Stream Manager">
+                                <span class="sch-block-time">{{ hint.label }}</span>
+                                {% if hint.title %}<span class="sch-block-note">{{ hint.title }}</span>{% endif %}
+                            </div>
+                            {% endfor %}
                         {% else %}
-                        <span class="sch-block-time">{{ parts[0] }}</span>
-                        {% if parts|length > 1 %}
-                        <span class="sch-block-note">{{ parts[1:]|join(' · ') }}</span>
-                        {% endif %}
+                            {% for e in items %}
+                            {% set parts = (e.label or '').split(' · ') %}
+                            <div class="sch-block sch-k-{{ e.kind }}{% if is_me %} sch-me{% endif %}">
+                                <span class="sch-block-time">{{ parts[0] }}</span>
+                                {% if parts|length > 1 %}<span class="sch-block-note">{{ parts[1:]|join(' · ') }}</span>{% endif %}
+                            </div>
+                            {% endfor %}
                         {% endif %}
                     </div>
                 </td>

@@ -78,13 +78,80 @@
     .sch-name-sub { font-size: 10.5px; color: var(--lx-muted); font-weight: 500; display: block; margin-top: 2px; }
 
     /* Cells are dark tiles; the "shift" sits inside as a colored pill so
-       multiple visual states can live on the same dark ground. */
+       multiple visual states can live on the same dark ground.
+       Cells support multiple shifts ("pills") stacked vertically — the
+       min-height grows as pills are added; the max-height caps the row
+       so an employee with 4 shifts on one day doesn't push the whole
+       grid out of proportion (excess pills still render, the cell just
+       scrolls internally). */
     .sch-cell {
-        height: 54px;
+        min-height: 54px;
         min-width: 118px;
         padding: 4px;
         position: relative;
         background: var(--lx-bg);
+    }
+
+    /* Stacked pills wrapper. Uses flex-column so multiple .sch-block
+       pills and the "+ Add another" button sit on top of each other
+       with a consistent 3px gap. `gap` works because the .sch-cell is
+       already a flex-friendly container when this class is applied. */
+    .sch-cell-stack {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        width: 100%;
+        min-height: 46px;   /* matches single-pill height */
+    }
+
+    /* Individual pills shrink vertical padding when stacked so two or
+       three shifts fit without the row ballooning. */
+    .sch-cell-stack .sch-block {
+        min-height: 38px;
+        padding: 4px 6px;
+    }
+    .sch-cell-stack.is-multi .sch-block {
+        min-height: 30px;
+        padding: 2px 6px;
+        font-size: 11.5px;
+    }
+    .sch-cell-stack.is-multi .sch-block-note {
+        font-size: 10px;
+    }
+
+    /* "+ Add another" ghost button appears under existing shift pills in
+       edit mode (only when the cell already has at least one shift).
+       Clicking it opens the edit modal for a brand-new shift slot. */
+    .sch-add-shift-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 4px;
+        width: 100%;
+        height: 18px;
+        padding: 0 6px;
+        background: transparent;
+        color: var(--lx-muted);
+        border: 1px dashed rgba(148, 163, 184, 0.28);
+        border-radius: 5px;
+        font-family: inherit;
+        font-size: 10.5px;
+        font-weight: 500;
+        line-height: 1;
+        cursor: pointer;
+        opacity: 0.75;
+        transition: color 0.08s ease, border-color 0.08s ease, opacity 0.08s ease;
+        -webkit-tap-highlight-color: rgba(59, 130, 246, 0.25);
+        touch-action: manipulation;
+    }
+    .sch-add-shift-btn:hover {
+        color: #93c5fd;
+        border-color: rgba(96, 165, 250, 0.6);
+        opacity: 1;
+    }
+    .sch-add-shift-btn:focus-visible {
+        outline: 2px solid #3b82f6;
+        outline-offset: 1px;
     }
     /* Editable cells: iOS Safari needs the WHOLE td to look clickable,
        otherwise a thumb tap that drifts onto the 2–4px padding around
@@ -578,25 +645,214 @@
         margin-bottom: 14px;
     }
 
-    /* ------- Modal: recurring + stream-specific fields ------- */
+    /* ------- Modal: recurrence link + sub-modal + stream fields ------- */
+    /* 7shifts-style recurrence link: replaces the old "Repeat weekly [N]"
+       inline checkbox. Defaults to "Does not repeat"; after a click the
+       link opens the recurrence sub-modal and (after save) its text
+       updates to a human-readable summary like "Every week on Friday
+       for 5 times". */
     .sch-modal-recur {
         display: flex;
-        gap: 8px;
+        gap: 12px;
         align-items: center;
-        padding: 6px 0;
+        padding: 4px 0 2px;
         font-size: 13px;
         flex-wrap: wrap;
     }
-    .sch-modal-recur input[type="number"] {
-        width: 56px;
-        padding: 4px 6px;
+    .sch-modal-recur-link {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: transparent;
+        border: none;
+        padding: 2px 0;
+        font-family: inherit;
         font-size: 13px;
+        font-weight: 500;
+        color: #60a5fa;
+        cursor: pointer;
+        text-decoration: none;
+    }
+    .sch-modal-recur-link:hover { color: #93c5fd; text-decoration: underline; }
+    .sch-modal-recur-link:focus-visible {
+        outline: 2px solid #3b82f6;
+        outline-offset: 2px;
+        border-radius: 4px;
+    }
+    .sch-modal-recur-link.is-repeating { color: #a78bfa; }
+    .sch-modal-recur-icon { font-size: 14px; line-height: 1; }
+
+    /* ------- Repeat sub-modal (opens on top of the shift modal) -------
+       Mirrors the 7shifts "Repeating shift settings" sheet. Lives above
+       the main modal by using a higher z-index, and has its own
+       backdrop so clicking outside dismisses only the sub-modal. */
+    .sch-recur-modal-backdrop {
+        display: none;
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.55);
+        z-index: 1060;
+    }
+    .sch-recur-modal-backdrop.is-open { display: block; }
+    .sch-recur-modal {
+        display: none;
+        position: fixed;
+        top: 50%; left: 50%;
+        transform: translate(-50%, -50%);
+        width: min(440px, 94vw);
+        max-height: 92vh;
+        overflow-y: auto;
+        background: var(--lx-s1);
+        color: var(--lx-text);
+        border: 1px solid var(--lx-br);
+        border-radius: 14px;
+        box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
+        z-index: 1070;
+    }
+    .sch-recur-modal.is-open { display: block; }
+    .sch-recur-modal-body {
+        padding: 18px 22px 20px;
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+    }
+    .sch-recur-modal-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+    }
+    .sch-recur-modal-head h3 {
+        margin: 0;
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--lx-muted);
+        text-align: center;
+        flex: 1;
+    }
+    .sch-recur-modal-close {
+        background: transparent;
+        border: none;
+        color: var(--lx-muted);
+        cursor: pointer;
+        font-size: 18px;
+        line-height: 1;
+        padding: 2px 6px;
+        border-radius: 4px;
+    }
+    .sch-recur-modal-close:hover { color: var(--lx-text); background: rgba(255,255,255,0.05); }
+
+    .sch-recur-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+    }
+    .sch-recur-row-label {
+        font-size: 13px;
+        color: var(--lx-muted);
+    }
+    .sch-recur-select,
+    .sch-recur-number {
+        padding: 6px 10px;
         background: var(--lx-bg);
         border: 1px solid var(--lx-br);
         border-radius: 6px;
         color: var(--lx-text);
+        font-family: inherit;
+        font-size: 13px;
     }
-    .sch-modal-recur input[type="number"]:disabled { opacity: 0.4; }
+    .sch-recur-number { width: 64px; text-align: center; }
+
+    .sch-recur-dow {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+    }
+    .sch-recur-dow-btn {
+        width: 30px;
+        height: 30px;
+        border-radius: 50%;
+        border: 1px solid var(--lx-br);
+        background: transparent;
+        color: var(--lx-muted);
+        font-family: inherit;
+        font-size: 11px;
+        font-weight: 600;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        transition: background 0.08s ease, color 0.08s ease, border-color 0.08s ease;
+    }
+    .sch-recur-dow-btn.is-on {
+        background: #3b82f6;
+        color: white;
+        border-color: #3b82f6;
+    }
+    .sch-recur-dow-btn.is-locked {
+        cursor: default;  /* anchor day is pre-selected and can't be unchecked */
+    }
+    .sch-recur-dow-btn:disabled {
+        opacity: 0.35;
+        cursor: not-allowed;
+    }
+    .sch-recur-dow-btn:disabled.is-on { opacity: 1; }
+
+    .sch-recur-help {
+        font-size: 11px;
+        color: var(--lx-muted);
+        margin-top: -8px;
+        line-height: 1.4;
+    }
+
+    .sch-recur-end-date {
+        padding: 6px 10px;
+        background: var(--lx-bg);
+        border: 1px solid var(--lx-br);
+        border-radius: 6px;
+        color: var(--lx-text);
+        font-family: inherit;
+        font-size: 13px;
+    }
+
+    .sch-recur-actions {
+        display: flex;
+        gap: 10px;
+        justify-content: center;
+        align-items: center;
+        padding-top: 6px;
+        border-top: 1px solid rgba(148,163,184,0.15);
+        margin-top: 2px;
+    }
+    .sch-recur-actions button {
+        padding: 8px 18px;
+        border-radius: 999px;
+        font-family: inherit;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        border: 1px solid var(--lx-br);
+    }
+    .sch-recur-actions .sch-recur-cancel {
+        background: transparent;
+        color: var(--lx-text);
+    }
+    .sch-recur-actions .sch-recur-save {
+        background: #3b82f6;
+        color: white;
+        border-color: #3b82f6;
+    }
+    .sch-recur-actions .sch-recur-save:hover { background: #2563eb; border-color: #2563eb; }
+    .sch-recur-actions .sch-recur-save:disabled { opacity: 0.5; cursor: not-allowed; }
+    .sch-recur-help-btn {
+        width: 30px; height: 30px;
+        border-radius: 50%;
+        border: 1px solid var(--lx-br);
+        background: transparent;
+        color: var(--lx-muted);
+        cursor: help;
+    }
     .sch-modal-stream-fields {
         display: none;  /* shown only when modal opens for a stream cell */
         flex-direction: column;
@@ -917,31 +1173,43 @@
                             </div>
                         </td>
                         {% for d in ctx.week_days %}
-                        {% set entry = ctx.entry_map.get((u.id, d.isoformat())) %}
-                        {% set hint = (ctx.stream_hint_map.get((u.id, d.isoformat())) if ctx.stream_hint_map else None) %}
-                        {% set label = (entry.label if entry else (hint.label if hint else '')) %}
-                        {% set kind = (entry.kind if entry else ('stream' if hint else 'blank')) %}
-                        {% set hint_color = (hint.color if hint and not entry else None) %}
+                        {#
+                           Multi-shift cell rendering. Both `entry_map` and
+                           `stream_hint_map` return a list-per-cell now; an
+                           empty/missing list means "blank" and renders the
+                           "+" placeholder. A non-empty list stacks pills
+                           vertically inside a `.sch-cell-stack`.
+
+                           Storefront list items: ShiftEntry rows.
+                           Stream list items: hint dicts.
+                        #}
+                        {% if kind_slug == 'stream' %}
+                            {% set entries_list = [] %}
+                            {% set hints_list = ctx.stream_hint_map.get((u.id, d.isoformat())) or [] %}
+                        {% else %}
+                            {% set entries_list = ctx.entry_map.get((u.id, d.isoformat())) or [] %}
+                            {% set hints_list = [] %}
+                        {% endif %}
+                        {% set shift_count = entries_list|length if kind_slug != 'stream' else hints_list|length %}
+                        {% set has_shifts = shift_count > 0 %}
                         {% set is_today = (d == today) %}
                         <td class="sch-cell {% if edit %}sch-cell-edit{% endif %} {% if is_today %}is-today{% endif %}"
                             data-user-id="{{ u.id }}"
                             data-user-name="{{ u.display_name or u.username }}"
                             data-date="{{ d.isoformat() }}"
                             data-date-label="{{ d.strftime('%A, %b') }} {{ d.day }}"
-                            data-kind-slug="{{ kind_slug }}"
-                            {% if kind_slug == 'stream' and hint %}
-                            data-stream-start="{{ hint.start_time }}"
-                            data-stream-end="{{ hint.end_time }}"
-                            data-stream-account-id="{{ hint.account_id or '' }}"
-                            data-stream-title="{{ hint.title }}"
-                            data-stream-notes="{{ hint.notes }}"
-                            data-stream-extra="{{ hint.extra_count or 0 }}"
-                            {% endif %}>
+                            data-kind-slug="{{ kind_slug }}">
                             {% if edit %}
+                            {#
+                               Hidden JSON array input. One per cell regardless
+                               of kind. JS writes:
+                                 storefront → [{"label":"9 AM - 5 PM","recur":1}, ...]
+                                 stream     → [{"start":"09:00","end":"17:00", ...}, ...]
+                               Server `_parse_cell_payload` accepts both the
+                               JSON array and the legacy single-label string
+                               for backwards compatibility.
+                            #}
                             {% if kind_slug == 'stream' %}
-                            {# Stream cell: JSON payload written by the modal. Empty
-                               by default so the server no-ops cells the admin didn't
-                               touch. #}
                             <input type="hidden"
                                    class="sch-stream-input"
                                    name="stream_cell__{{ u.id }}__{{ d.isoformat() }}"
@@ -950,32 +1218,81 @@
                             <input type="hidden"
                                    class="sch-cell-input"
                                    name="{{ build_cell_key(u.id, d) }}"
-                                   value="{{ label }}"/>
-                            <input type="hidden"
-                                   class="sch-recur-input"
-                                   name="recur__{{ u.id }}__{{ d.isoformat() }}"
-                                   value="1"/>
+                                   value=""/>
                             {% endif %}
-                            <button type="button"
-                                    class="sch-block sch-k-{{ kind }}"
-                                    data-label="{{ label }}"
-                                    data-kind="{{ kind }}"
-                                    {% if hint_color %}style="background: {{ hint_color }}; color:#0b1220;"{% endif %}
-                                    {% if hint %}title="{{ hint.account_name }} · {{ hint.label }}{% if hint.extra_count %} · {{ hint.extra_count }} more shift(s) — edit in Stream Manager{% endif %}"{% endif %}>
-                                {% if kind == 'blank' and not label %}
-                                <span class="sch-block-add">+</span>
+                            <div class="sch-cell-stack {% if shift_count > 1 %}is-multi{% endif %}">
+                                {% if has_shifts %}
+                                    {% if kind_slug == 'stream' %}
+                                        {% for hint in hints_list %}
+                                        <button type="button"
+                                                class="sch-block sch-k-stream"
+                                                data-shift-idx="{{ loop.index0 }}"
+                                                data-label="{{ hint.label }}"
+                                                data-kind="stream"
+                                                data-stream-start="{{ hint.start_time }}"
+                                                data-stream-end="{{ hint.end_time }}"
+                                                data-stream-account-id="{{ hint.account_id or '' }}"
+                                                data-stream-title="{{ hint.title }}"
+                                                data-stream-notes="{{ hint.notes }}"
+                                                style="background: {{ hint.color }}; color:#0b1220;"
+                                                title="{{ hint.account_name }} · {{ hint.label }}">
+                                            <span class="sch-block-time">{{ hint.label }}</span>
+                                            {% if hint.title %}<span class="sch-block-note">{{ hint.title }}</span>{% endif %}
+                                        </button>
+                                        {% endfor %}
+                                    {% else %}
+                                        {% for e in entries_list %}
+                                        <button type="button"
+                                                class="sch-block sch-k-{{ e.kind }}"
+                                                data-shift-idx="{{ loop.index0 }}"
+                                                data-label="{{ e.label }}"
+                                                data-kind="{{ e.kind }}">
+                                            {% set parts = (e.label or '').split(' · ') %}
+                                            <span class="sch-block-time">{{ parts[0] }}</span>
+                                            {% if parts|length > 1 %}<span class="sch-block-note">{{ parts[1:]|join(' · ') }}</span>{% endif %}
+                                        </button>
+                                        {% endfor %}
+                                    {% endif %}
+                                    <button type="button"
+                                            class="sch-add-shift-btn"
+                                            data-add-shift="1"
+                                            title="Add another shift on {{ d.strftime('%A') }}">+ Add another</button>
                                 {% else %}
-                                <span class="sch-block-time">{{ label }}</span>
+                                <button type="button"
+                                        class="sch-block sch-k-blank"
+                                        data-shift-idx="0"
+                                        data-label=""
+                                        data-kind="blank">
+                                    <span class="sch-block-add">+</span>
+                                </button>
                                 {% endif %}
-                            </button>
+                            </div>
                             {% else %}
-                            <div class="sch-block sch-k-{{ kind }} is-ro"
-                                 {% if hint_color %}style="background: {{ hint_color }}; color:#0b1220;"{% endif %}
-                                 {% if hint %}title="{{ hint.account_name }} · {{ hint.label }}"{% endif %}>
-                                {% if kind == 'blank' and not label %}
-                                <span style="opacity:0.45;">—</span>
+                            {# Read-only rendering: same stacking, no buttons. #}
+                            <div class="sch-cell-stack {% if shift_count > 1 %}is-multi{% endif %}">
+                                {% if has_shifts %}
+                                    {% if kind_slug == 'stream' %}
+                                        {% for hint in hints_list %}
+                                        <div class="sch-block sch-k-stream is-ro"
+                                             style="background: {{ hint.color }}; color:#0b1220;"
+                                             title="{{ hint.account_name }} · {{ hint.label }}">
+                                            <span class="sch-block-time">{{ hint.label }}</span>
+                                            {% if hint.title %}<span class="sch-block-note">{{ hint.title }}</span>{% endif %}
+                                        </div>
+                                        {% endfor %}
+                                    {% else %}
+                                        {% for e in entries_list %}
+                                        <div class="sch-block sch-k-{{ e.kind }} is-ro">
+                                            {% set parts = (e.label or '').split(' · ') %}
+                                            <span class="sch-block-time">{{ parts[0] }}</span>
+                                            {% if parts|length > 1 %}<span class="sch-block-note">{{ parts[1:]|join(' · ') }}</span>{% endif %}
+                                        </div>
+                                        {% endfor %}
+                                    {% endif %}
                                 {% else %}
-                                <span class="sch-block-time">{{ label }}</span>
+                                <div class="sch-block sch-k-blank is-ro">
+                                    <span style="opacity:0.45;">—</span>
+                                </div>
                                 {% endif %}
                             </div>
                             {% endif %}
@@ -1206,16 +1523,18 @@
             </div>
         </div>
 
+        {#
+           Recurrence link (replaces the old inline "Repeat weekly [N]
+           weeks" checkbox). Clicking this opens the recurrence sub-modal
+           below. After the admin saves a recurrence the link text updates
+           to a human-readable summary, e.g. "Every week on Friday for 5
+           times", matching the 7shifts pattern.
+        #}
         <div class="sch-modal-recur">
-            <label style="display:inline-flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;">
-                <input type="checkbox" id="sch-modal-recur-on"/>
-                Repeat weekly
-            </label>
-            <label style="display:inline-flex; align-items:center; gap:6px; font-size:13px; color:var(--lx-muted);">
-                for
-                <input type="number" id="sch-modal-recur-weeks" min="1" max="12" value="4" disabled/>
-                weeks (including this one)
-            </label>
+            <button type="button" class="sch-modal-recur-link" id="sch-modal-recur-link">
+                <span class="sch-modal-recur-icon">↻</span>
+                <span id="sch-modal-recur-link-text">Does not repeat</span>
+            </button>
         </div>
 
         <div class="sch-modal-actions">
@@ -1223,6 +1542,87 @@
             <span class="sch-modal-spacer"></span>
             <button type="button" class="sch-modal-cancel" id="sch-modal-cancel">Cancel</button>
             <button type="button" class="sch-modal-ok" id="sch-modal-save">Save</button>
+        </div>
+    </div>
+</div>
+
+{#
+   ---- Recurrence sub-modal ---------------------------------------
+   Opens ON TOP of the main shift modal (higher z-index + own backdrop).
+   Mirrors the 7shifts "Repeating shift settings" sheet:
+
+       [Weekly ▼]  Every [1 ▼] Weeks
+       On  S M T W T F S          ← anchor day pre-selected + locked.
+                                     Other days disabled for now with a
+                                     tooltip explaining multi-day repeats
+                                     are coming soon. The backend still
+                                     only clones the anchor weekday.
+       End repeat  [After ▼] [5] occurrences
+                   or
+       End repeat  [On ▼] [YYYY-MM-DD]
+
+   The anchor-day label (S/M/T/W/T/F/S) is re-rendered in JS when the
+   modal opens based on the cell's actual weekday.
+#}
+<div id="sch-recur-modal-backdrop" class="sch-recur-modal-backdrop"></div>
+<div id="sch-recur-modal" class="sch-recur-modal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="sch-recur-modal-title">
+    <div class="sch-recur-modal-body">
+        <div class="sch-recur-modal-head">
+            <span style="width:18px;"></span>
+            <h3 id="sch-recur-modal-title">Repeating shift settings</h3>
+            <button type="button" class="sch-recur-modal-close" id="sch-recur-modal-close" aria-label="Close">×</button>
+        </div>
+
+        <div class="sch-recur-row">
+            <select id="sch-recur-freq" class="sch-recur-select">
+                <option value="weekly" selected>Weekly</option>
+            </select>
+            <span class="sch-recur-row-label">Every</span>
+            <select id="sch-recur-interval" class="sch-recur-select">
+                {% for n in range(1, 9) %}
+                <option value="{{ n }}">{{ n }}</option>
+                {% endfor %}
+            </select>
+            <span class="sch-recur-row-label">Weeks</span>
+        </div>
+
+        <div class="sch-recur-row">
+            <span class="sch-recur-row-label">On</span>
+            <div class="sch-recur-dow" id="sch-recur-dow">
+                {# Day buttons get rendered/populated by JS based on the anchor day. #}
+                <button type="button" class="sch-recur-dow-btn" data-dow="0" disabled title="Multi-day repeats coming soon">S</button>
+                <button type="button" class="sch-recur-dow-btn" data-dow="1" disabled title="Multi-day repeats coming soon">M</button>
+                <button type="button" class="sch-recur-dow-btn" data-dow="2" disabled title="Multi-day repeats coming soon">T</button>
+                <button type="button" class="sch-recur-dow-btn" data-dow="3" disabled title="Multi-day repeats coming soon">W</button>
+                <button type="button" class="sch-recur-dow-btn" data-dow="4" disabled title="Multi-day repeats coming soon">T</button>
+                <button type="button" class="sch-recur-dow-btn" data-dow="5" disabled title="Multi-day repeats coming soon">F</button>
+                <button type="button" class="sch-recur-dow-btn" data-dow="6" disabled title="Multi-day repeats coming soon">S</button>
+            </div>
+        </div>
+        <div class="sch-recur-help">
+            Multi-day repeat is coming soon. For now, the shift repeats only on its anchor day each week.
+        </div>
+
+        <div class="sch-recur-row">
+            <span class="sch-recur-row-label">End repeat</span>
+            <select id="sch-recur-end-mode" class="sch-recur-select">
+                <option value="after" selected>After</option>
+                <option value="on">On</option>
+                <option value="never">Never</option>
+            </select>
+            <span id="sch-recur-end-after-wrap" style="display:inline-flex; gap:8px; align-items:center;">
+                <input type="number" id="sch-recur-end-count" class="sch-recur-number" min="2" max="12" value="5"/>
+                <span class="sch-recur-row-label">occurrences</span>
+            </span>
+            <span id="sch-recur-end-on-wrap" style="display:none;">
+                <input type="date" id="sch-recur-end-date" class="sch-recur-end-date"/>
+            </span>
+        </div>
+
+        <div class="sch-recur-actions">
+            <button type="button" class="sch-recur-help-btn" title="Weekly repeats clone this shift onto the same weekday for N weeks (max 12).">?</button>
+            <button type="button" class="sch-recur-cancel" id="sch-recur-cancel-btn">Cancel repeat</button>
+            <button type="button" class="sch-recur-save" id="sch-recur-save-btn">Save repeat</button>
         </div>
     </div>
 </div>
@@ -1356,15 +1756,53 @@
     // Stream-only modal elements.
     var streamAcctEl = document.getElementById('sch-modal-stream-account');
     var streamTitleEl = document.getElementById('sch-modal-stream-title');
-    // Recurrence controls.
-    var recurOnEl = document.getElementById('sch-modal-recur-on');
-    var recurWeeksEl = document.getElementById('sch-modal-recur-weeks');
 
-    var activeCell = null;
-    var activeInput = null;       // .sch-cell-input (storefront) OR .sch-stream-input
-    var activeRecurInput = null;  // .sch-recur-input (storefront only)
-    var activeBlock = null;
-    var activeKindSlug = 'storefront';
+    // ---- Recurrence link + sub-modal elements --------------------------
+    // The old inline "Repeat weekly [N]" pair was replaced by a single
+    // link that opens a dedicated sub-modal for configuring recurrence.
+    // `pendingRecur` is the in-flight state the main modal Save handler
+    // reads when it writes back to the shift object.
+    var recurLinkEl      = document.getElementById('sch-modal-recur-link');
+    var recurLinkTextEl  = document.getElementById('sch-modal-recur-link-text');
+    var recurModal       = document.getElementById('sch-recur-modal');
+    var recurModalBd     = document.getElementById('sch-recur-modal-backdrop');
+    var recurCloseBtn    = document.getElementById('sch-recur-modal-close');
+    var recurCancelBtn   = document.getElementById('sch-recur-cancel-btn');
+    var recurSaveBtn     = document.getElementById('sch-recur-save-btn');
+    var recurIntervalEl  = document.getElementById('sch-recur-interval');
+    var recurEndModeEl   = document.getElementById('sch-recur-end-mode');
+    var recurEndCountEl  = document.getElementById('sch-recur-end-count');
+    var recurEndDateEl   = document.getElementById('sch-recur-end-date');
+    var recurEndAfterEl  = document.getElementById('sch-recur-end-after-wrap');
+    var recurEndOnEl     = document.getElementById('sch-recur-end-on-wrap');
+    var recurDowEls      = Array.prototype.slice.call(
+        document.querySelectorAll('.sch-recur-dow-btn')
+    );
+
+    var DOW_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+    // Pending recurrence state while the main modal is open for one
+    // shift. Reset on every openFor().
+    var pendingRecur = {
+        active: false,     // false => "Does not repeat"
+        interval: 1,       // every N weeks (UI-only for now; server always weekly)
+        endMode: 'after',  // "after" | "on" | "never"
+        count: 5,          // occurrences incl. the base; only used when endMode='after'
+        endDate: '',       // YYYY-MM-DD; only used when endMode='on'
+        anchorDow: 0,      // 0=Sun..6=Sat — computed from cell date
+    };
+
+    // ---- Cell state --------------------------------------------------
+    // activeShiftList is an in-memory mutable array of shift objects.
+    // Storefront shape: {label: "9 AM - 5 PM", recur: 1}
+    // Stream shape:     {start:"09:00", end:"17:00", account_id, title, notes, recur}
+    // activeEditIdx is the index being edited; if >= activeShiftList.length
+    // the Save handler appends a new shift instead of replacing.
+    var activeCell       = null;
+    var activeInput      = null;
+    var activeKindSlug   = 'storefront';
+    var activeShiftList  = [];
+    var activeEditIdx    = 0;
 
     function setStatus(status) {
         Array.prototype.forEach.call(tabsEl.children, function(btn) {
@@ -1375,13 +1813,6 @@
         var allowNote = status === 'shift' || status === 'stream' || status === 'if_needed';
         noteEl.disabled = !allowNote;
         noteEl.style.opacity = allowNote ? '1' : '0.5';
-    }
-
-    // Recurrence weeks enabled only when the checkbox is checked.
-    if (recurOnEl && recurWeeksEl) {
-        recurOnEl.addEventListener('change', function() {
-            recurWeeksEl.disabled = !recurOnEl.checked;
-        });
     }
 
     // Parse existing label into {status, start, end, note} so re-opening
@@ -1469,37 +1900,6 @@
         return a ? a.dataset.status : 'shift';
     }
 
-    function applyToCell(label) {
-        activeInput.value = label;
-        activeCell.classList.add('is-dirty');
-        if (dirtyFlag) dirtyFlag.style.display = 'inline-block';
-
-        var isStream = activeKindSlug === 'stream';
-        activeBlock.style.background = '';
-        activeBlock.style.color = '';
-        activeBlock.className = 'sch-block sch-k-' + (isStream ? (label ? 'stream' : 'blank') : kindFromLabel(label));
-        activeBlock.innerHTML = '';
-        if (!label) {
-            var plus = document.createElement('span');
-            plus.className = 'sch-block-add';
-            plus.textContent = '+';
-            activeBlock.appendChild(plus);
-        } else {
-            var lines = splitLabelForDisplay(label);
-            var t = document.createElement('span');
-            t.className = 'sch-block-time';
-            t.textContent = lines.primary;
-            activeBlock.appendChild(t);
-            if (lines.note) {
-                var n = document.createElement('span');
-                n.className = 'sch-block-note';
-                n.textContent = lines.note;
-                activeBlock.appendChild(n);
-            }
-        }
-        activeBlock.dataset.label = label;
-    }
-
     // Build the display label we show inside a stream cell block after
     // an edit. Mirrors _stream_schedule_hint_map on the server so the
     // post-save look matches what we'll render after a full reload.
@@ -1508,6 +1908,147 @@
         var label = from24(start24) + ' - ' + from24(end24);
         if (end24 < start24) label += ' (next day)';
         return label;
+    }
+
+    // -----------------------------------------------------------------
+    // Cell-stack rendering. Replaces the old single-pill applyToCell.
+    // Rebuilds the entire .sch-cell-stack DOM from the in-memory list
+    // every time a cell is mutated, and writes the JSON array payload
+    // to the cell's hidden input. Keeping DOM-from-state (instead of
+    // patching individual pills) makes multi-shift add/remove trivial.
+    // -----------------------------------------------------------------
+    function renderCellFromList(cell, shifts, kindSlug) {
+        var input = cell.querySelector(kindSlug === 'stream' ? '.sch-stream-input' : '.sch-cell-input');
+        var stack = cell.querySelector('.sch-cell-stack');
+        if (!input || !stack) return;
+
+        // Empty array → write "" so the server treats this as "cell
+        // cleared" rather than "no change". JSON "[]" would also work
+        // but "" matches legacy empty-cell semantics more cleanly.
+        if (!shifts || !shifts.length) {
+            input.value = '';
+            stack.classList.remove('is-multi');
+            stack.innerHTML = '';
+            var blank = document.createElement('button');
+            blank.type = 'button';
+            blank.className = 'sch-block sch-k-blank';
+            blank.dataset.shiftIdx = '0';
+            blank.dataset.label = '';
+            blank.dataset.kind = 'blank';
+            var plus = document.createElement('span');
+            plus.className = 'sch-block-add';
+            plus.textContent = '+';
+            blank.appendChild(plus);
+            stack.appendChild(blank);
+            bindPill(cell, blank);
+            return;
+        }
+
+        // Serialize. Server accepts both storefront & stream array
+        // shapes; _parse_cell_payload / _save_stream_shifts each see
+        // the list they expect because different hidden inputs carry
+        // the two shapes.
+        input.value = JSON.stringify(shifts);
+
+        stack.innerHTML = '';
+        stack.classList.toggle('is-multi', shifts.length > 1);
+
+        shifts.forEach(function(sh, idx) {
+            var pill = document.createElement('button');
+            pill.type = 'button';
+            pill.dataset.shiftIdx = String(idx);
+            if (kindSlug === 'stream') {
+                pill.className = 'sch-block sch-k-stream';
+                pill.style.background = '#bbf7d0';
+                pill.style.color = '#0b1220';
+                pill.dataset.streamStart = sh.start || '';
+                pill.dataset.streamEnd = sh.end || '';
+                pill.dataset.streamAccountId = sh.account_id == null ? '' : String(sh.account_id);
+                pill.dataset.streamTitle = sh.title || '';
+                pill.dataset.streamNotes = sh.notes || '';
+                pill.dataset.label = streamDisplayLabel(sh.start, sh.end);
+                pill.dataset.kind = 'stream';
+                var t = document.createElement('span');
+                t.className = 'sch-block-time';
+                t.textContent = streamDisplayLabel(sh.start, sh.end) || '—';
+                pill.appendChild(t);
+                if (sh.title) {
+                    var n = document.createElement('span');
+                    n.className = 'sch-block-note';
+                    n.textContent = sh.title;
+                    pill.appendChild(n);
+                }
+            } else {
+                var lbl = sh.label || '';
+                var kind = kindFromLabel(lbl);
+                pill.className = 'sch-block sch-k-' + kind;
+                pill.dataset.label = lbl;
+                pill.dataset.kind = kind;
+                var parts = splitLabelForDisplay(lbl);
+                var tt = document.createElement('span');
+                tt.className = 'sch-block-time';
+                tt.textContent = parts.primary || '—';
+                pill.appendChild(tt);
+                if (parts.note) {
+                    var nn = document.createElement('span');
+                    nn.className = 'sch-block-note';
+                    nn.textContent = parts.note;
+                    pill.appendChild(nn);
+                }
+            }
+            stack.appendChild(pill);
+            bindPill(cell, pill);
+        });
+
+        // "+ Add another" ghost button under the pills.
+        var addBtn = document.createElement('button');
+        addBtn.type = 'button';
+        addBtn.className = 'sch-add-shift-btn';
+        addBtn.dataset.addShift = '1';
+        addBtn.textContent = '+ Add another';
+        stack.appendChild(addBtn);
+        bindPill(cell, addBtn);
+
+        cell.classList.add('is-dirty');
+        if (dirtyFlag) dirtyFlag.style.display = 'inline-block';
+    }
+
+    // Read the currently-rendered shift list for a cell. On first open
+    // the hidden input is empty — we reconstruct from DOM. After any
+    // edit the hidden input IS the source of truth.
+    function readCellShifts(cell, kindSlug) {
+        var input = cell.querySelector(kindSlug === 'stream' ? '.sch-stream-input' : '.sch-cell-input');
+        var raw = input ? (input.value || '') : '';
+        if (raw) {
+            try {
+                var parsed = JSON.parse(raw);
+                if (Array.isArray(parsed)) return parsed;
+            } catch (_) {}
+        }
+        // DOM fallback — first open on a cell that was rendered server-side.
+        var pills = cell.querySelectorAll('.sch-block:not(.sch-k-blank):not(.is-ro)');
+        var out = [];
+        Array.prototype.forEach.call(pills, function(pill) {
+            if (kindSlug === 'stream') {
+                var s = pill.dataset.streamStart || '';
+                var e = pill.dataset.streamEnd || '';
+                if (!s || !e) return;
+                var acct = pill.dataset.streamAccountId || '';
+                out.push({
+                    start: s,
+                    end: e,
+                    account_id: acct ? parseInt(acct, 10) : null,
+                    title: pill.dataset.streamTitle || '',
+                    notes: pill.dataset.streamNotes || '',
+                    recur: 1,
+                });
+            } else {
+                var lbl = pill.dataset.label || '';
+                if (!lbl) return;
+                out.push({ label: lbl, recur: 1 });
+            }
+        });
+        return out;
     }
 
     function splitLabelForDisplay(label) {
@@ -1527,65 +2068,231 @@
         return 'work';
     }
 
-    function openFor(cell) {
+    // -----------------------------------------------------------------
+    // Recurrence sub-modal ("7shifts-style"). Opens on top of the main
+    // shift modal. All state lives in `pendingRecur`; the "↻ …" link in
+    // the main modal reflects that state in human-readable form.
+    // -----------------------------------------------------------------
+    function recurSummaryText(p, anchorDow) {
+        if (!p.active) return 'Does not repeat';
+        var dayName = DOW_SHORT[(anchorDow + 7) % 7];
+        var interval = p.interval > 1 ? 'every ' + p.interval + ' weeks' : 'Every week';
+        if (p.endMode === 'never')
+            return interval + ' on ' + dayName;
+        if (p.endMode === 'on' && p.endDate)
+            return interval + ' on ' + dayName + ' until ' + p.endDate;
+        // "after" is the default.
+        return interval + ' on ' + dayName + ' for ' + p.count + ' times';
+    }
+
+    function updateRecurLink() {
+        if (!recurLinkEl || !recurLinkTextEl) return;
+        recurLinkTextEl.textContent = recurSummaryText(pendingRecur, pendingRecur.anchorDow);
+        recurLinkEl.classList.toggle('is-repeating', pendingRecur.active);
+    }
+
+    // Turn pendingRecur into an integer N the server can project forward.
+    //   never  → hard-cap at 12 (same as legacy max).
+    //   after  → count directly.
+    //   on     → (endDate - baseDate) / 7 + 1, clamped to [1, 12].
+    function recurNFromState(p, baseDateISO) {
+        if (!p.active) return 1;
+        if (p.endMode === 'never') return 12;
+        if (p.endMode === 'on' && p.endDate && baseDateISO) {
+            var base = new Date(baseDateISO + 'T00:00:00');
+            var end = new Date(p.endDate + 'T00:00:00');
+            if (isNaN(base.getTime()) || isNaN(end.getTime())) return 1;
+            var diffWeeks = Math.floor((end - base) / (7 * 24 * 3600 * 1000)) + 1;
+            if (diffWeeks < 1) return 1;
+            if (diffWeeks > 12) return 12;
+            return diffWeeks;
+        }
+        var n = parseInt(p.count, 10);
+        if (isNaN(n) || n < 1) n = 1;
+        if (n > 12) n = 12;
+        return n;
+    }
+
+    function openRecurModal() {
+        // Seed the DOW circles with the anchor day pre-selected (and
+        // locked). Multi-day repeats are disabled for this first pass —
+        // the server always clones only the anchor weekday.
+        recurDowEls.forEach(function(btn) {
+            var idx = parseInt(btn.dataset.dow || '0', 10);
+            var isAnchor = idx === pendingRecur.anchorDow;
+            btn.classList.toggle('is-on', isAnchor);
+            btn.classList.toggle('is-locked', isAnchor);
+            if (!isAnchor) {
+                btn.disabled = true;
+                btn.title = 'Multi-day repeats coming soon';
+            } else {
+                btn.disabled = false;
+                btn.title = 'Repeats on ' + DOW_SHORT[idx] + ' each week';
+            }
+        });
+        if (recurIntervalEl) recurIntervalEl.value = String(pendingRecur.interval || 1);
+        if (recurEndModeEl) {
+            recurEndModeEl.value = pendingRecur.endMode || 'after';
+        }
+        if (recurEndCountEl) recurEndCountEl.value = String(pendingRecur.count || 5);
+        if (recurEndDateEl) recurEndDateEl.value = pendingRecur.endDate || '';
+        syncRecurEndVisibility();
+        recurModal.classList.add('is-open');
+        if (recurModalBd) recurModalBd.classList.add('is-open');
+        recurModal.setAttribute('aria-hidden', 'false');
+    }
+
+    function closeRecurModal() {
+        recurModal.classList.remove('is-open');
+        if (recurModalBd) recurModalBd.classList.remove('is-open');
+        recurModal.setAttribute('aria-hidden', 'true');
+    }
+
+    function syncRecurEndVisibility() {
+        if (!recurEndModeEl) return;
+        var mode = recurEndModeEl.value;
+        if (recurEndAfterEl) recurEndAfterEl.style.display = mode === 'after' ? '' : 'none';
+        if (recurEndOnEl) recurEndOnEl.style.display = mode === 'on' ? '' : 'none';
+    }
+
+    if (recurLinkEl) {
+        recurLinkEl.addEventListener('click', function() { openRecurModal(); });
+    }
+    if (recurCloseBtn) {
+        recurCloseBtn.addEventListener('click', function() { closeRecurModal(); });
+    }
+    if (recurCancelBtn) {
+        // "Cancel repeat" in the sub-modal wipes recurrence back to
+        // "Does not repeat" (matches 7shifts UX — it's not a close-
+        // without-saving button, it's a "clear recurrence" action).
+        recurCancelBtn.addEventListener('click', function() {
+            pendingRecur.active = false;
+            updateRecurLink();
+            closeRecurModal();
+        });
+    }
+    if (recurSaveBtn) {
+        recurSaveBtn.addEventListener('click', function() {
+            pendingRecur.active = true;
+            pendingRecur.interval = parseInt(recurIntervalEl.value || '1', 10) || 1;
+            pendingRecur.endMode = recurEndModeEl.value || 'after';
+            var c = parseInt(recurEndCountEl.value || '5', 10);
+            if (isNaN(c) || c < 2) c = 2;
+            if (c > 12) c = 12;
+            pendingRecur.count = c;
+            pendingRecur.endDate = recurEndDateEl.value || '';
+            updateRecurLink();
+            closeRecurModal();
+        });
+    }
+    if (recurEndModeEl) {
+        recurEndModeEl.addEventListener('change', syncRecurEndVisibility);
+    }
+    if (recurModalBd) {
+        recurModalBd.addEventListener('click', function() { closeRecurModal(); });
+    }
+    document.addEventListener('keydown', function(ev) {
+        if (ev.key === 'Escape' && recurModal && recurModal.classList.contains('is-open')) {
+            ev.preventDefault();
+            closeRecurModal();
+        }
+    });
+
+    // -----------------------------------------------------------------
+    // Main shift modal open/save/delete, now multi-shift aware.
+    // -----------------------------------------------------------------
+    function openFor(cell, editIdx) {
         activeCell = cell;
         activeKindSlug = cell.dataset.kindSlug || 'storefront';
         var isStream = activeKindSlug === 'stream';
         modal.classList.toggle('is-stream', isStream);
 
-        if (isStream) {
-            activeInput = cell.querySelector('.sch-stream-input');
-            activeRecurInput = null;
+        activeInput = cell.querySelector(isStream ? '.sch-stream-input' : '.sch-cell-input');
+        if (!activeInput) return;
+
+        // Pull the cell's current shift list (hidden-input JSON if set,
+        // otherwise derived from the rendered pills).
+        activeShiftList = readCellShifts(cell, activeKindSlug);
+
+        // editIdx === -1 → "add new"; otherwise replace/edit at that idx.
+        if (typeof editIdx !== 'number' || editIdx < 0) {
+            activeEditIdx = activeShiftList.length; // append on save
         } else {
-            activeInput = cell.querySelector('.sch-cell-input');
-            activeRecurInput = cell.querySelector('.sch-recur-input');
+            activeEditIdx = Math.min(editIdx, activeShiftList.length);
         }
-        activeBlock = cell.querySelector('.sch-block');
-        if (!activeInput || !activeBlock) return;
 
         var name = cell.dataset.userName || '';
         var dateLabel = cell.dataset.dateLabel || '';
-        titleEl.textContent = name;
-        subEl.textContent = dateLabel + (isStream ? ' · Stream' : '');
-
-        // Reset recurrence UI every open so one cell's "repeat 4 weeks"
-        // doesn't bleed into the next cell the admin opens.
-        if (recurOnEl) recurOnEl.checked = false;
-        if (recurWeeksEl) {
-            recurWeeksEl.value = '4';
-            recurWeeksEl.disabled = true;
+        var totalCount = activeShiftList.length;
+        var isNew = activeEditIdx >= totalCount;
+        var badgePart = '';
+        if (totalCount > 1 || (totalCount >= 1 && isNew)) {
+            // Show "Shift 2 of 3" or "New shift · 3 existing".
+            if (isNew) {
+                badgePart = ' · New shift (' + totalCount + ' existing)';
+            } else {
+                badgePart = ' · Shift ' + (activeEditIdx + 1) + ' of ' + totalCount;
+            }
         }
+        titleEl.textContent = name;
+        subEl.textContent = dateLabel + (isStream ? ' · Stream' : '') + badgePart;
+
+        // Reset recurrence state for this modal-open. Anchor weekday is
+        // derived from the cell's date (data-date="YYYY-MM-DD").
+        var iso = cell.dataset.date || '';
+        var anchorDow = 0;
+        if (iso) {
+            var dObj = new Date(iso + 'T00:00:00');
+            if (!isNaN(dObj.getTime())) anchorDow = dObj.getDay();
+        }
+        pendingRecur = {
+            active: false,
+            interval: 1,
+            endMode: 'after',
+            count: 5,
+            endDate: '',
+            anchorDow: anchorDow,
+        };
+
+        // Pre-fill from existing shift at activeEditIdx, if any.
+        var existing = !isNew ? activeShiftList[activeEditIdx] : null;
 
         if (isStream) {
-            // Stream cells pre-fill from data-stream-* attrs.
-            var s = cell.dataset.streamStart || '';
-            var e = cell.dataset.streamEnd || '';
-            var acctId = cell.dataset.streamAccountId || '';
-            var title = cell.dataset.streamTitle || '';
+            var s = existing ? (existing.start || '') : '';
+            var e = existing ? (existing.end || '') : '';
+            var acctId = existing && existing.account_id != null ? String(existing.account_id) : '';
+            var title = existing ? (existing.title || '') : '';
             startEl.value = s;
             endEl.value = e;
             if (streamAcctEl) streamAcctEl.value = acctId;
             if (streamTitleEl) streamTitleEl.value = title;
-            // Warn admin if multiple shifts land on this date — we only
-            // edit the first one from here. They should use /stream-manager
-            // to touch the extras.
-            var extra = parseInt(cell.dataset.streamExtra || '0', 10);
-            if (extra > 0) {
-                subEl.textContent += ' (' + extra + ' more shift' + (extra > 1 ? 's' : '') + ' — use Stream Manager for extras)';
+            if (existing && existing.recur && existing.recur > 1) {
+                pendingRecur.active = true;
+                pendingRecur.count = Math.min(Math.max(parseInt(existing.recur, 10) || 1, 2), 12);
+                pendingRecur.endMode = 'after';
             }
         } else {
-            var parsed = parseLabel(activeInput.value);
+            var parsed = parseLabel(existing ? (existing.label || '') : '');
             setStatus(parsed.status);
             startEl.value = parsed.start;
             endEl.value = parsed.end;
             noteEl.value = parsed.note;
+            if (existing && existing.recur && existing.recur > 1) {
+                pendingRecur.active = true;
+                pendingRecur.count = Math.min(Math.max(parseInt(existing.recur, 10) || 1, 2), 12);
+                pendingRecur.endMode = 'after';
+            }
+        }
+        updateRecurLink();
+
+        // When adding a NEW shift, show the Clear button as disabled —
+        // there's nothing to remove yet; hitting Cancel or the backdrop
+        // is the right way to bail out.
+        if (delBtn) {
+            delBtn.style.display = isNew ? 'none' : '';
         }
 
         openModal();
-        // Focus the first tab for keyboard users. On mobile we INTENTIONALLY
-        // do NOT auto-focus the time/note inputs: iOS Safari pops up the
-        // native time-picker wheel on focus, which stacks over the bottom-
-        // sheet and makes the modal look broken.
         var isTouch = (('ontouchstart' in window) || navigator.maxTouchPoints > 0);
         setTimeout(function() {
             if (!isStream) {
@@ -1608,16 +2315,10 @@
         setStatus(t.dataset.status);
     });
 
-    function currentRecurN() {
-        if (!recurOnEl || !recurOnEl.checked) return 1;
-        var n = parseInt(recurWeeksEl.value || '1', 10);
-        if (isNaN(n) || n < 1) n = 1;
-        if (n > 12) n = 12;
-        return n;
-    }
-
     saveBtn.addEventListener('click', function() {
-        var recurN = currentRecurN();
+        var iso = activeCell ? (activeCell.dataset.date || '') : '';
+        var recurN = recurNFromState(pendingRecur, iso);
+
         if (activeKindSlug === 'stream') {
             var acctId = streamAcctEl ? (streamAcctEl.value || '') : '';
             var title = streamTitleEl ? (streamTitleEl.value || '').trim() : '';
@@ -1627,31 +2328,74 @@
                 alert('Stream shifts need both a start and end time.');
                 return;
             }
-            var payload = {
+            var newShift = {
                 start: startV,
                 end: endV,
                 account_id: acctId ? parseInt(acctId, 10) : null,
                 title: title,
                 notes: '',
                 recur: recurN,
-                clear: false
             };
-            activeInput.value = JSON.stringify(payload);
-            applyToCell(streamDisplayLabel(startV, endV));
+            if (activeEditIdx >= activeShiftList.length) {
+                activeShiftList.push(newShift);
+            } else {
+                activeShiftList[activeEditIdx] = newShift;
+            }
         } else {
             var label = synthesize(getStatus(), startEl.value, endEl.value, noteEl.value);
-            applyToCell(label);
-            if (activeRecurInput) activeRecurInput.value = String(recurN);
+            if (!label) {
+                // Empty storefront save on a new slot = no-op. On an
+                // existing slot = remove.
+                if (activeEditIdx < activeShiftList.length) {
+                    activeShiftList.splice(activeEditIdx, 1);
+                }
+            } else {
+                var newEntry = { label: label, recur: recurN };
+                if (activeEditIdx >= activeShiftList.length) {
+                    activeShiftList.push(newEntry);
+                } else {
+                    activeShiftList[activeEditIdx] = newEntry;
+                }
+            }
         }
+
+        renderCellFromList(activeCell, activeShiftList, activeKindSlug);
         closeModal();
     });
+
     delBtn.addEventListener('click', function() {
-        if (activeKindSlug === 'stream') {
-            activeInput.value = JSON.stringify({ clear: true });
-            applyToCell('');
+        // "Clear" in the main modal = remove THIS ONE shift. The whole
+        // cell only becomes blank if this was the only shift.
+        if (activeEditIdx < activeShiftList.length) {
+            activeShiftList.splice(activeEditIdx, 1);
+        }
+        if (activeKindSlug === 'stream' && activeCell && !activeShiftList.length) {
+            // On a fully-cleared stream cell we still need to tell the
+            // server to wipe the StreamSchedule rows. Use the explicit
+            // clear flag; _save_stream_shifts accepts that shape.
+            var input = activeCell.querySelector('.sch-stream-input');
+            if (input) input.value = JSON.stringify({ clear: true });
+            var stack = activeCell.querySelector('.sch-cell-stack');
+            if (stack) {
+                stack.innerHTML = '';
+                stack.classList.remove('is-multi');
+                var blank = document.createElement('button');
+                blank.type = 'button';
+                blank.className = 'sch-block sch-k-blank';
+                blank.dataset.shiftIdx = '0';
+                blank.dataset.label = '';
+                blank.dataset.kind = 'blank';
+                var plus = document.createElement('span');
+                plus.className = 'sch-block-add';
+                plus.textContent = '+';
+                blank.appendChild(plus);
+                stack.appendChild(blank);
+                bindPill(activeCell, blank);
+            }
+            activeCell.classList.add('is-dirty');
+            if (dirtyFlag) dirtyFlag.style.display = 'inline-block';
         } else {
-            applyToCell('');
-            if (activeRecurInput) activeRecurInput.value = '1';
+            renderCellFromList(activeCell, activeShiftList, activeKindSlug);
         }
         closeModal();
     });
@@ -1686,42 +2430,92 @@
         try { console.log.apply(console, ['[sch]'].concat([].slice.call(arguments))); } catch (_) {}
     }
 
-    function activateBlock(btn) {
-        if (!btn || btn.classList.contains('is-ro')) return;
-        var cell = btn.closest('.sch-cell');
-        if (!cell) return;
-        openFor(cell);
-    }
-
-    // Bind to BOTH the cell (td) and the block (button) across all grids
-    // (storefront + stream). On iOS the whole <td> needs to look clickable
-    // so finger-drift onto padding still triggers the modal.
     function hasDirty() {
         return !!document.querySelector('.sch-cell.is-dirty');
+    }
+
+    // Per-pill binding. Each pill in a multi-shift cell knows its own
+    // `data-shift-idx` so clicking pill #2 opens the modal editing that
+    // specific slot. The "+ Add another" ghost button opens a blank
+    // modal with editIdx = -1 (append on save).
+    //
+    // Direct per-element listeners (not delegation) because iOS Safari
+    // 17 on the horizontally-scrollable container occasionally swallows
+    // form-delegated taps — same "no tap-highlight at all" symptom from
+    // the earlier single-shift rewrite. We also wire `pointerup` as a
+    // belt-and-suspenders fallback for when `click` gets eaten.
+    function bindPill(cell, el) {
+        if (!cell || !el) return;
+        if (el.classList && el.classList.contains('is-ro')) return;
+        if (el.dataset.schBound === '1') return;
+        el.dataset.schBound = '1';
+        var lastFired = 0;
+        function fire(ev) {
+            var now = Date.now();
+            if (now - lastFired < 350) return;
+            lastFired = now;
+            // Prevent cell-level re-fire bubbling up when we clicked a
+            // specific pill.
+            if (ev && ev.stopPropagation) ev.stopPropagation();
+
+            if (el.dataset.addShift === '1') {
+                openFor(cell, -1);
+                return;
+            }
+            var idx = parseInt(el.dataset.shiftIdx || '0', 10);
+            openFor(cell, idx);
+        }
+        el.addEventListener('click', fire);
+        if (window.PointerEvent) {
+            el.addEventListener('pointerup', function(ev) {
+                if (ev.pointerType === 'mouse') return;
+                fire(ev);
+            });
+        }
+    }
+
+    // Cell-level fallback binding. When the admin taps the padding
+    // around pills (or onto a completely blank single-pill cell), we
+    // still want the modal to open. We route that tap to whatever pill
+    // is in the cell — for blank cells that's the "+" button; for
+    // populated cells we default to the first pill. This preserves the
+    // iOS "whole td is clickable" UX Jeffrey required.
+    function bindCell(cell) {
+        if (!cell || cell.dataset.schBoundCell === '1') return;
+        cell.dataset.schBoundCell = '1';
+        var lastFired = 0;
+        function fire(ev) {
+            // If the tap already hit a pill or the "+ Add another"
+            // button, that element's own listener will handle it.
+            var hitBlock = ev.target.closest('.sch-block, .sch-add-shift-btn');
+            if (hitBlock) return;
+            var now = Date.now();
+            if (now - lastFired < 350) return;
+            lastFired = now;
+            var pill = cell.querySelector('.sch-block:not(.is-ro)');
+            if (!pill) return;
+            if (pill.classList.contains('sch-k-blank')) {
+                openFor(cell, 0);
+            } else {
+                openFor(cell, 0);  // default to first pill
+            }
+        }
+        cell.addEventListener('click', fire);
+        if (window.PointerEvent) {
+            cell.addEventListener('pointerup', function(ev) {
+                if (ev.pointerType === 'mouse') return;
+                fire(ev);
+            });
+        }
     }
 
     grids.forEach(function(grid) {
         var editableCells = grid.querySelectorAll('.sch-cell-edit');
         log('binding', editableCells.length, 'editable cells on', grid.dataset.schgrid);
         Array.prototype.forEach.call(editableCells, function(cell) {
-            var btn = cell.querySelector('.sch-block:not(.is-ro)');
-            if (!btn) return;
-            var lastFired = 0;
-            function fire(ev) {
-                var now = Date.now();
-                if (now - lastFired < 350) return;
-                lastFired = now;
-                log('activate via', ev.type, btn.getAttribute('data-label'));
-                activateBlock(btn);
-            }
-            cell.addEventListener('click', fire);
-            btn.addEventListener('click', fire);
-            if (window.PointerEvent) {
-                cell.addEventListener('pointerup', function(ev) {
-                    if (ev.pointerType === 'mouse') return;
-                    fire(ev);
-                });
-            }
+            bindCell(cell);
+            var pills = cell.querySelectorAll('.sch-block:not(.is-ro), .sch-add-shift-btn');
+            Array.prototype.forEach.call(pills, function(el) { bindPill(cell, el); });
         });
     });
 

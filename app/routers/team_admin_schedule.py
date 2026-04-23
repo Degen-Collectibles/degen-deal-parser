@@ -285,22 +285,24 @@ def _stream_schedule_hint_map(
     session: Session,
     week_days: list[date],
     user_ids: set[int],
-) -> tuple[dict[tuple[int, str], dict], list[dict]]:
+) -> tuple[dict[tuple[int, str], list[dict]], list[dict]]:
     """Build the week's Stream grid contents from StreamSchedule rows.
 
     Returns a tuple ``(hint_map, legend)`` where:
 
-    * ``hint_map[(user_id, 'YYYY-MM-DD')]`` is a dict with ``label``
+    * ``hint_map[(user_id, 'YYYY-MM-DD')]`` is a **list** of dicts (one
+      per shift on that cell) each with ``label``
       (``'4:00 PM - 6:00 AM (next day)'``), ``account_id``,
-      ``account_name``, and ``color`` keys.
+      ``account_name``, and ``color`` keys, plus ``schedule_id``,
+      ``start_time``, ``end_time``, ``title``, ``notes``, and
+      ``is_overnight`` for the edit modal to pre-fill from.
     * ``legend`` is a deduplicated list of ``{"name", "color"}`` dicts
       for every StreamAccount that appears on the week, so the template
       can render a per-account legend right next to the grid.
 
     Streamers with no linked user are skipped (they have no row on the
-    grid to pre-fill). If multiple shifts land on the same day for one
-    user, we keep only the first and append a '+N more' note so nothing
-    silently disappears.
+    grid to pre-fill). Multiple shifts on the same (user, date) are all
+    kept, sorted by start_time.
     """
     if not user_ids or not week_days:
         return {}, []
@@ -343,7 +345,7 @@ def _stream_schedule_hint_map(
             return "Other"
         return acct.name or acct.handle or f"Account {aid}"
 
-    hint_map: dict[tuple[int, str], dict] = {}
+    hint_map: dict[tuple[int, str], list[dict]] = {}
     # Track account colors for the legend chips.
     seen_accounts: dict[Optional[int], str] = {}
 
@@ -354,17 +356,10 @@ def _stream_schedule_hint_map(
         color = _stream_account_color(s.stream_account_id)
         seen_accounts[s.stream_account_id] = color
         key = (uid, s.date)
-        if key in hint_map:
-            # Second shift on same (user, date). Tag the existing cell
-            # rather than dropping the data entirely. `extra_count` tells
-            # the admin UI "this cell has N more shifts — edit in /stream-manager".
-            hint_map[key]["label"] += "  +1"
-            hint_map[key]["extra_count"] = hint_map[key].get("extra_count", 0) + 1
-            continue
         label = f"{_fmt_time_12h(s.start_time)} - {_fmt_time_12h(s.end_time)}"
         if s.is_overnight:
             label += " (next day)"
-        hint_map[key] = {
+        hint_map.setdefault(key, []).append({
             "label": label,
             "account_id": s.stream_account_id,
             "account_name": _acct_name(s.stream_account_id),
@@ -377,8 +372,7 @@ def _stream_schedule_hint_map(
             "title": s.title or "",
             "notes": s.notes or "",
             "is_overnight": s.is_overnight,
-            "extra_count": 0,
-        }
+        })
 
     legend: list[dict] = []
     seen_names: set[str] = set()
@@ -441,18 +435,23 @@ def _grid_context(
     )
 
     # Load shift entries first so we can surface anyone with saved data,
-    # even if they were removed from the roster.
+    # even if they were removed from the roster. `entry_map` is a list
+    # per (user, date) because a cell can hold multiple shifts (e.g.
+    # "10a-2p" + "3p-7p"). Rows are sorted by (sort_order, id) so the
+    # stacking order matches what the admin saved.
     entries = list(
         session.exec(
-            select(ShiftEntry).where(
+            select(ShiftEntry)
+            .where(
                 ShiftEntry.shift_date >= first_day,
                 ShiftEntry.shift_date <= last_day,
             )
+            .order_by(ShiftEntry.sort_order, ShiftEntry.id)
         ).all()
     )
-    entry_map: dict[tuple[int, str], ShiftEntry] = {
-        (e.user_id, e.shift_date.isoformat()): e for e in entries
-    }
+    entry_map: dict[tuple[int, str], list[ShiftEntry]] = {}
+    for e in entries:
+        entry_map.setdefault((e.user_id, e.shift_date.isoformat()), []).append(e)
     shifted_user_ids = {e.user_id for e in entries}
 
     grid_user_ids = roster_user_ids | shifted_user_ids
@@ -538,22 +537,25 @@ def _grid_context(
     user_hours: dict[int, float] = {uid: 0.0 for uid in user_ids_on_grid}
     day_hours: dict[str, float] = {d.isoformat(): 0.0 for d in week_days}
     total_shifts = 0
-    for (uid, iso), e in entry_map.items():
+    # Sum hours and count shifts across every entry in every cell — multi-
+    # shift days contribute their full stacked total to the row / column.
+    for (uid, iso), es in entry_map.items():
         if uid not in user_ids_on_grid:
             continue
-        hrs = _parse_shift_hours(e.label or "")
-        if hrs > 0:
-            user_hours[uid] = user_hours.get(uid, 0.0) + hrs
-            day_hours[iso] = day_hours.get(iso, 0.0) + hrs
-        if (e.kind or "") in ("work", "all_day"):
-            total_shifts += 1
+        for e in es:
+            hrs = _parse_shift_hours(e.label or "")
+            if hrs > 0:
+                user_hours[uid] = user_hours.get(uid, 0.0) + hrs
+                day_hours[iso] = day_hours.get(iso, 0.0) + hrs
+            if (e.kind or "") in ("work", "all_day"):
+                total_shifts += 1
     grand_hours = round(sum(user_hours.values()), 2)
-    # Count distinct employees who have at least one worked cell.
+    # Count distinct employees who have at least one worked cell on any day.
     people_with_shifts = sum(
         1
         for uid in user_ids_on_grid
         if any(
-            (entry_map.get((uid, d.isoformat())) and (entry_map[(uid, d.isoformat())].kind or "") in ("work", "all_day"))
+            any((e.kind or "") in ("work", "all_day") for e in entry_map.get((uid, d.isoformat()), []))
             for d in week_days
         )
     )
@@ -857,75 +859,162 @@ async def admin_schedule_save(
             )
         ).all()
     )
-    entry_map: dict[tuple[int, str], ShiftEntry] = {
-        (e.user_id, e.shift_date.isoformat()): e for e in existing_entries
-    }
+    # Existing rows grouped by cell. Multiple shifts per cell are allowed.
+    entry_map: dict[tuple[int, str], list[ShiftEntry]] = {}
+    for e in existing_entries:
+        entry_map.setdefault((e.user_id, e.shift_date.isoformat()), []).append(e)
     shifted_user_ids = {e.user_id for e in existing_entries}
     user_ids = roster_user_ids | shifted_user_ids
 
     now = utcnow()
+    # Aggregate counters across the whole save (all cells, all users).
+    added: int = 0
     touched: int = 0
     emptied: int = 0
-    added: int = 0
     recurred: int = 0
 
-    # Collect (uid, iso_date, label, kind, recur_weeks) we applied so
-    # recurrence can project the same shift forward on later passes.
-    applied_labels: list[tuple[int, date, str, str, int]] = []
+    # Per-shift recurrence we need to project forward. Each tuple is
+    # (uid, base_date, [shift_spec, ...]) where shift_spec is
+    # {"label", "kind", "recur_n"}. base_date is the cell's anchor;
+    # recur_n > 1 means "this cell plus the next N-1 weeks", same as
+    # before, but now per-shift instead of per-cell.
+    recur_plan: list[tuple[int, date, list[dict]]] = []
+
+    def _parse_cell_payload(raw: str) -> list[dict]:
+        """Normalize a cell input into a list of {label, kind, recur_n}.
+
+        New format (what the template posts): JSON array of
+        ``[{"label": "...", "recur": 5}, ...]``. Missing ``recur`` defaults
+        to 1. Empty or malformed array → no shifts (cell cleared).
+
+        Legacy format (what existing tests post): a single plain-text
+        label. We treat that as ``[{"label": raw, "recur": 1}]``. Empty
+        legacy string → no shifts (cell cleared). This keeps the old
+        ``cell__{uid}__{iso}=10:30 AM - 6:30 PM`` wire-format working
+        unchanged.
+        """
+        s = (raw or "").strip()
+        if not s:
+            return []
+        # Detect JSON array payload. Anything else is legacy plain text.
+        if s.startswith("["):
+            try:
+                parsed = json.loads(s)
+            except (TypeError, ValueError):
+                return []
+            if not isinstance(parsed, list):
+                return []
+            out: list[dict] = []
+            for item in parsed:
+                if not isinstance(item, dict):
+                    continue
+                label = (item.get("label") or "").strip()
+                # Blank label in an array entry = skip that slot. The
+                # whole cell-clear case is handled by posting [] or "".
+                if not label:
+                    continue
+                try:
+                    recur_n = int(item.get("recur") or 1)
+                except (TypeError, ValueError):
+                    recur_n = 1
+                recur_n = max(1, min(recur_n, 12))
+                out.append({
+                    "label": label,
+                    "kind": classify_shift_label(label),
+                    "recur_n": recur_n,
+                })
+            return out
+        # Legacy single-label path. Pull recur_n from the old
+        # recur__{uid}__{iso} sibling input if present.
+        return [{
+            "label": s,
+            "kind": classify_shift_label(s),
+            "recur_n": None,  # filled in below from recur__ input
+        }]
 
     for uid in user_ids:
         for d in week_days:
             key = _build_cell_key(uid, d)
             if key not in form:
                 continue
-            raw = (form.get(key) or "").strip()
-            kind = classify_shift_label(raw)
-            entry = entry_map.get((uid, d.isoformat()))
-            if entry is None:
-                if kind == SHIFT_KIND_BLANK:
-                    continue  # nothing to save
-                session.add(
-                    ShiftEntry(
-                        user_id=uid,
-                        shift_date=d,
-                        label=raw,
-                        kind=kind,
-                        created_by_user_id=current.id,
-                        created_at=now,
-                        updated_at=now,
-                    )
+            raw = form.get(key) or ""
+            specs = _parse_cell_payload(raw)
+            # Legacy recur__ input applies to legacy single-label cells.
+            if specs and specs[0].get("recur_n") is None:
+                try:
+                    recur_legacy = int(form.get(f"recur__{uid}__{d.isoformat()}") or "1")
+                except (TypeError, ValueError):
+                    recur_legacy = 1
+                recur_legacy = max(1, min(recur_legacy, 12))
+                specs[0]["recur_n"] = recur_legacy
+            # Replace-the-cell semantics: delete existing rows, insert
+            # the new set in order. This is the only way to handle multi-
+            # shift cells without a second "which slot am I" handshake.
+            existing_list = entry_map.get((uid, d.isoformat()), [])
+            prev_count = len(existing_list)
+            new_count = len(specs)
+
+            # Cheap no-change detection when both sides are identical (in
+            # order). Skips a pointless delete-and-reinsert that would
+            # churn sequence IDs on every save.
+            identical = (
+                prev_count == new_count
+                and all(
+                    (existing_list[i].label or "") == specs[i]["label"]
+                    and (existing_list[i].kind or "") == specs[i]["kind"]
+                    and (existing_list[i].sort_order or 0) == i
+                    for i in range(new_count)
                 )
-                added += 1
-            else:
-                if entry.label == raw and entry.kind == kind:
-                    # No-change, but still project recurrence forward.
-                    pass
-                elif kind == SHIFT_KIND_BLANK and not raw:
-                    session.delete(entry)
-                    emptied += 1
+            )
+
+            if not identical:
+                for e in existing_list:
+                    session.delete(e)
+                for i, spec in enumerate(specs):
+                    session.add(
+                        ShiftEntry(
+                            user_id=uid,
+                            shift_date=d,
+                            label=spec["label"],
+                            kind=spec["kind"],
+                            sort_order=i,
+                            created_by_user_id=current.id,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+                # Attribute changes to the most useful counter. Multi-
+                # shift edits often touch several at once; rolling into a
+                # single updated/added/emptied label keeps the flash
+                # message readable.
+                if new_count == 0 and prev_count > 0:
+                    emptied += prev_count
+                elif prev_count == 0 and new_count > 0:
+                    added += new_count
                 else:
-                    entry.label = raw
-                    entry.kind = kind
-                    entry.updated_at = now
-                    session.add(entry)
-                    touched += 1
+                    touched += max(prev_count, new_count)
 
-            # Capture recurrence intent. A value of N means "this shift
-            # plus the next N-1 weeks". Empty cells never recur.
-            try:
-                recur_n = int(form.get(f"recur__{uid}__{d.isoformat()}") or "1")
-            except (TypeError, ValueError):
-                recur_n = 1
-            recur_n = max(1, min(recur_n, 12))
-            if recur_n > 1 and kind != SHIFT_KIND_BLANK and raw:
-                applied_labels.append((uid, d, raw, kind, recur_n))
+            # Capture recurrence plan for this cell's shifts (whether or
+            # not the cell itself changed — a repeat-for-4 saved yesterday
+            # still needs to project today when the admin re-saves).
+            if specs:
+                recur_plan.append((uid, d, specs))
 
-    # Apply recurrence by upserting the same label into the same weekday
-    # on each of the next recur_n-1 weeks. We always OVERWRITE the
-    # destination cell so "Repeat for 4 weeks" is idempotent — re-saving
-    # the same modal won't create drift with an old pre-existing entry.
-    if applied_labels:
-        max_offset = max(n for _, _, _, _, n in applied_labels)
+    # Project recurrence forward. Each (uid, weekday) cell that has any
+    # shift with recur_n > 1 gets that cell's FULL shift stack replayed
+    # into the next (recur_n - 1) weeks. Anchor-weekday only: different
+    # weekdays don't cross-pollinate.
+    recurring_cells = [
+        (uid, base_date, specs)
+        for (uid, base_date, specs) in recur_plan
+        if any(spec["recur_n"] > 1 for spec in specs)
+    ]
+    if recurring_cells:
+        max_offset = max(
+            spec["recur_n"]
+            for (_uid, _d, specs) in recurring_cells
+            for spec in specs
+        )
         future_start = first_day + timedelta(days=7)
         future_end = first_day + timedelta(days=7 * (max_offset - 1)) + timedelta(days=6)
         future_entries = list(
@@ -936,33 +1025,50 @@ async def admin_schedule_save(
                 )
             ).all()
         )
-        future_map: dict[tuple[int, date], ShiftEntry] = {
-            (e.user_id, e.shift_date): e for e in future_entries
-        }
-        for uid, base_date, raw, kind, recur_n in applied_labels:
-            for i in range(1, recur_n):
-                fut = base_date + timedelta(days=7 * i)
-                existing = future_map.get((uid, fut))
-                if existing is None:
+        future_map: dict[tuple[int, date], list[ShiftEntry]] = {}
+        for e in future_entries:
+            future_map.setdefault((e.user_id, e.shift_date), []).append(e)
+
+        for uid, base_date, specs in recurring_cells:
+            # The cell's maximum recur_n decides how many future weeks
+            # this stack projects forward. Individual shifts can have
+            # smaller recur_n to "expire" earlier in the run.
+            max_cell_recur = max(spec["recur_n"] for spec in specs)
+            for offset in range(1, max_cell_recur):
+                fut = base_date + timedelta(days=7 * offset)
+                # Only the shifts whose recur_n still reaches this offset
+                # get written to the future cell. recur_n=5 means weeks
+                # 0..4 (offsets 0,1,2,3,4 inclusive), so we keep shifts
+                # where recur_n > offset.
+                active = [s for s in specs if s["recur_n"] > offset]
+                existing = future_map.get((uid, fut), [])
+                # Skip the future cell if it's identical — avoid churn.
+                identical_fut = (
+                    len(existing) == len(active)
+                    and all(
+                        (existing[i].label or "") == active[i]["label"]
+                        and (existing[i].kind or "") == active[i]["kind"]
+                        and (existing[i].sort_order or 0) == i
+                        for i in range(len(active))
+                    )
+                )
+                if identical_fut:
+                    continue
+                for e in existing:
+                    session.delete(e)
+                for i, spec in enumerate(active):
                     session.add(
                         ShiftEntry(
                             user_id=uid,
                             shift_date=fut,
-                            label=raw,
-                            kind=kind,
+                            label=spec["label"],
+                            kind=spec["kind"],
+                            sort_order=i,
                             created_by_user_id=current.id,
                             created_at=now,
                             updated_at=now,
                         )
                     )
-                    recurred += 1
-                else:
-                    if existing.label == raw and existing.kind == kind:
-                        continue
-                    existing.label = raw
-                    existing.kind = kind
-                    existing.updated_at = now
-                    session.add(existing)
                     recurred += 1
 
     # Per-day location header (e.g. "East Bay Santa Clara" for the weekend).
@@ -1052,17 +1158,24 @@ async def admin_schedule_save(
 #
 # Stream shifts live in StreamSchedule (same table /stream-manager uses), so
 # anything saved here appears in the Stream Manager and vice versa. Each
-# cell hidden-input `stream_cell__{uid}__{date}` carries a JSON payload:
+# cell hidden-input `stream_cell__{uid}__{date}` carries a JSON payload.
 #
-#   { "start": "14:00", "end": "18:00", "account_id": 2,
-#     "title": "", "notes": "", "recur": 1, "clear": false }
+# Two payload shapes are accepted:
 #
-# - clear=true deletes any existing StreamSchedule rows for (streamer, date).
-# - otherwise: one-shift-per-(streamer, date) semantics — existing rows are
-#   wiped and a single new row is inserted. For multi-shift days, admins
-#   still use /stream-manager.
-# - recur N applies the same upsert to the same weekday in the next N-1
-#   weeks (max 12).
+#   1) Multi-shift array (what the grid posts for multi-shift cells):
+#        [
+#          {"start":"14:00","end":"18:00","account_id":2,
+#           "title":"","notes":"","recur":1},
+#          {"start":"20:00","end":"23:00","account_id":3,"recur":4}
+#        ]
+#      The whole (streamer, date) row-set is replaced with this array,
+#      in order. Each shift tracks its own recurrence.
+#
+#   2) Single object (legacy single-shift path):
+#        {"start":"14:00","end":"18:00","account_id":2,"recur":1}
+#      or {"clear": true} to wipe the cell.
+#
+# An empty/missing payload is a no-op (cells the admin never touched).
 # ---------------------------------------------------------------------------
 
 
@@ -1130,8 +1243,86 @@ async def _save_stream_shifts(
     cleared = 0
     recurred = 0
 
-    # Track what we applied so recurrence can project forward.
-    applied: list[tuple[int, date, dict, int]] = []  # (uid, date, payload, recur_n)
+    # Per-cell recurrence plans. Each entry is (uid, base_date, shifts)
+    # where shifts is the full list of normalized stream-shift dicts we
+    # just wrote for that cell; individual shift.recur_n >1 carries its
+    # own projection horizon. Anchor-weekday only: future projection
+    # writes to (base_date + 7k) for k = 1..recur_n-1.
+    plans: list[tuple[int, date, list[dict]]] = []
+
+    def _normalize_stream_shift(raw_shift: dict) -> Optional[dict]:
+        """Turn one stream shift dict into a canonical form, or None."""
+        if not isinstance(raw_shift, dict):
+            return None
+        start_t = (raw_shift.get("start") or "").strip()
+        end_t = (raw_shift.get("end") or "").strip()
+        if not (start_t and end_t):
+            return None
+        acct_id_raw = raw_shift.get("account_id")
+        try:
+            acct_id: Optional[int] = int(acct_id_raw) if acct_id_raw else None
+        except (TypeError, ValueError):
+            acct_id = None
+        if acct_id is None:
+            acct_id = default_acct_id
+        title = (raw_shift.get("title") or "").strip() or None
+        notes = (raw_shift.get("notes") or "").strip() or None
+        try:
+            recur_n = int(raw_shift.get("recur") or 1)
+        except (TypeError, ValueError):
+            recur_n = 1
+        recur_n = max(1, min(recur_n, 12))
+        return {
+            "start": start_t,
+            "end": end_t,
+            "account_id": acct_id,
+            "title": title,
+            "notes": notes,
+            "is_overnight": end_t < start_t,
+            "recur_n": recur_n,
+        }
+
+    def _write_cell(streamer_id: int, iso_date: str, shifts: list[dict]) -> tuple[int, int, int]:
+        """Replace the StreamSchedule rows for (streamer, iso_date).
+
+        Returns (added_delta, updated_delta, cleared_delta). Deletes
+        existing rows and inserts the new set in order. An empty
+        ``shifts`` list is the cell-clear path.
+        """
+        existing_rows = list(
+            session.exec(
+                select(StreamSchedule).where(
+                    StreamSchedule.streamer_id == streamer_id,
+                    StreamSchedule.date == iso_date,
+                )
+            ).all()
+        )
+        prev = len(existing_rows)
+        new = len(shifts)
+        if not shifts:
+            for row in existing_rows:
+                session.delete(row)
+            return 0, 0, prev
+        for row in existing_rows:
+            session.delete(row)
+        for sh in shifts:
+            session.add(
+                StreamSchedule(
+                    streamer_id=streamer_id,
+                    stream_account_id=sh["account_id"],
+                    date=iso_date,
+                    start_time=sh["start"],
+                    end_time=sh["end"],
+                    is_overnight=sh["is_overnight"],
+                    title=sh["title"],
+                    notes=sh["notes"],
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        if prev == 0:
+            return new, 0, 0
+        return 0, max(prev, new), 0
 
     for key in list(form.keys()):
         if not key.startswith("stream_cell__"):
@@ -1153,116 +1344,67 @@ async def _save_stream_shifts(
             payload = json.loads(raw)
         except (TypeError, ValueError):
             continue
-        if not isinstance(payload, dict):
-            continue
 
         streamer = _ensure_streamer(uid)
         if streamer is None or streamer.id is None:
             continue
 
-        # Nuke whatever currently exists for (streamer, date). Keeps the
-        # invariant that admin-schedule edits are single-shift-per-day.
-        existing_rows = list(
-            session.exec(
-                select(StreamSchedule).where(
-                    StreamSchedule.streamer_id == streamer.id,
-                    StreamSchedule.date == iso,
-                )
-            ).all()
-        )
-
-        if payload.get("clear"):
-            for row in existing_rows:
-                session.delete(row)
-                cleared += 1
+        # Normalize payload into a list of shifts + a cell-level "clear"
+        # flag. Three possible shapes are tolerated:
+        #   - [...]                       → multi-shift array
+        #   - {"clear": true}             → wipe the cell
+        #   - {"start": ..., "end": ...}  → legacy single-shift object
+        clear_cell = False
+        shifts: list[dict] = []
+        if isinstance(payload, list):
+            for item in payload:
+                norm = _normalize_stream_shift(item)
+                if norm is not None:
+                    shifts.append(norm)
+        elif isinstance(payload, dict):
+            if payload.get("clear"):
+                clear_cell = True
+            else:
+                norm = _normalize_stream_shift(payload)
+                if norm is not None:
+                    shifts.append(norm)
+        else:
             continue
 
-        start_t = (payload.get("start") or "").strip()
-        end_t = (payload.get("end") or "").strip()
-        if not (start_t and end_t):
-            continue  # nothing to save without times
-        acct_id_raw = payload.get("account_id")
-        try:
-            acct_id: Optional[int] = int(acct_id_raw) if acct_id_raw else None
-        except (TypeError, ValueError):
-            acct_id = None
-        if acct_id is None:
-            acct_id = default_acct_id
+        if clear_cell:
+            _, _, c = _write_cell(streamer.id, iso, [])
+            cleared += c
+            continue
 
-        title = (payload.get("title") or "").strip() or None
-        notes = (payload.get("notes") or "").strip() or None
-        is_overnight = end_t < start_t
+        if not shifts:
+            continue  # nothing to save (empty array or invalid single)
 
-        for row in existing_rows:
-            session.delete(row)
-        session.add(
-            StreamSchedule(
-                streamer_id=streamer.id,
-                stream_account_id=acct_id,
-                date=iso,
-                start_time=start_t,
-                end_time=end_t,
-                is_overnight=is_overnight,
-                title=title,
-                notes=notes,
-                created_at=now,
-                updated_at=now,
-            )
-        )
-        if existing_rows:
-            updated += 1
-        else:
-            added += 1
+        a, u, c = _write_cell(streamer.id, iso, shifts)
+        added += a
+        updated += u
+        cleared += c
 
-        try:
-            recur_n = int(payload.get("recur") or 1)
-        except (TypeError, ValueError):
-            recur_n = 1
-        recur_n = max(1, min(recur_n, 12))
-        if recur_n > 1:
+        if any(s["recur_n"] > 1 for s in shifts):
             try:
                 base_date = datetime.strptime(iso, "%Y-%m-%d").date()
             except ValueError:
-                base_date = None
-            if base_date is not None:
-                applied.append((uid, base_date, {
-                    "start": start_t, "end": end_t, "account_id": acct_id,
-                    "title": title, "notes": notes, "is_overnight": is_overnight,
-                }, recur_n))
+                continue
+            plans.append((uid, base_date, shifts))
 
-    # Project recurrence forward.
-    for uid, base_date, payload, recur_n in applied:
+    # Project recurrence forward. A cell's max recur_n decides how many
+    # future weeks get written; individual shifts with smaller recur_n
+    # drop out of later projections. Anchor weekday only.
+    for uid, base_date, shifts in plans:
         streamer = streamer_by_uid.get(uid)
         if streamer is None or streamer.id is None:
             continue
-        for i in range(1, recur_n):
-            fut = base_date + timedelta(days=7 * i)
+        max_recur = max(s["recur_n"] for s in shifts)
+        for offset in range(1, max_recur):
+            fut = base_date + timedelta(days=7 * offset)
             iso_fut = fut.isoformat()
-            existing_rows = list(
-                session.exec(
-                    select(StreamSchedule).where(
-                        StreamSchedule.streamer_id == streamer.id,
-                        StreamSchedule.date == iso_fut,
-                    )
-                ).all()
-            )
-            for row in existing_rows:
-                session.delete(row)
-            session.add(
-                StreamSchedule(
-                    streamer_id=streamer.id,
-                    stream_account_id=payload["account_id"],
-                    date=iso_fut,
-                    start_time=payload["start"],
-                    end_time=payload["end"],
-                    is_overnight=payload["is_overnight"],
-                    title=payload["title"],
-                    notes=payload["notes"],
-                    created_at=now,
-                    updated_at=now,
-                )
-            )
-            recurred += 1
+            active = [s for s in shifts if s["recur_n"] > offset]
+            _, _, _ = _write_cell(streamer.id, iso_fut, active)
+            recurred += len(active) if active else 0
 
     total = added + updated + cleared + recurred
     if total:

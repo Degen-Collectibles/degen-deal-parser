@@ -195,6 +195,14 @@ SQLITE_ADDITIVE_MIGRATIONS = {
     "streamers": {
         "user_id": "INTEGER",
     },
+    "shift_entry": {
+        # Multi-shift-per-day support: sort_order decides the vertical
+        # stacking order of shifts that share the same (user_id,
+        # shift_date). Legacy single-shift rows default to 0. The
+        # matching UNIQUE constraint drop for SQLite happens in
+        # ensure_sqlite_schema() via a table rebuild.
+        "sort_order": "INTEGER DEFAULT 0",
+    },
     "invitetoken": {
         "token_lookup_hmac": "BLOB",
         "target_user_id": "INTEGER",
@@ -393,6 +401,13 @@ POSTGRES_ADDITIVE_MIGRATIONS = {
     },
     "streamers": {
         "user_id": "INTEGER",
+    },
+    "shift_entry": {
+        # Multi-shift-per-day support: sort_order decides the vertical
+        # stacking order of shifts that share the same (user_id,
+        # shift_date). Legacy single-shift rows default to 0. The
+        # matching UNIQUE constraint drop happens in ensure_postgres_schema().
+        "sort_order": "INTEGER DEFAULT 0",
     },
     "invitetoken": {
         "token_lookup_hmac": "BYTEA",
@@ -629,6 +644,142 @@ def migrate_legacy_postgres_shopify_orders(connection) -> None:
     )
 
 
+def _migrate_shift_entry_drop_unique(connection) -> None:
+    """Drop the legacy UNIQUE(user_id, shift_date) index on shift_entry.
+
+    The original schema had a UniqueConstraint so every (employee, day)
+    cell held exactly one ShiftEntry row. Multi-shift-per-day support
+    requires allowing N rows per (employee, day), so we drop the unique
+    index. SQLite can't actually remove a table-level UniqueConstraint
+    without rebuilding the table, but we don't need to: when SQLModel
+    sees an existing table on `create_all`, it leaves the schema alone.
+    The UniqueConstraint wasn't re-declared on the model (it was dropped
+    in the same refactor), so newly-created DBs never get it; older DBs
+    already in the wild carry it as an auto-generated unique index
+    named `sqlite_autoindex_shift_entry_1` (or a named one) which we
+    drop here.
+
+    Idempotent: DROP INDEX IF EXISTS is a no-op on clean databases.
+    """
+    if not sqlite_table_exists(connection, "shift_entry"):
+        return
+    # Find any unique index covering (user_id, shift_date) and drop it.
+    # Named constraints land in sqlite_master as regular indexes; the
+    # implicit ones SQLite auto-generates are prefixed sqlite_autoindex_
+    # and can't be DROPped directly — a full table rebuild is the only
+    # way to remove those. Detect that case and rebuild.
+    indexes = list(
+        connection.execute(
+            text("PRAGMA index_list('shift_entry')")
+        )
+    )
+    # PRAGMA index_list returns: (seq, name, unique, origin, partial)
+    for row in indexes:
+        name = row[1]
+        is_unique = int(row[2]) == 1
+        if not is_unique:
+            continue
+        info = list(
+            connection.execute(text(f"PRAGMA index_info('{name}')"))
+        )
+        cols = {r[2] for r in info}  # column names
+        if cols != {"user_id", "shift_date"}:
+            continue
+        if name.startswith("sqlite_autoindex_"):
+            # Can't drop implicit constraint indexes — must rebuild table.
+            _rebuild_shift_entry_without_unique(connection)
+            return
+        try:
+            connection.execute(text(f'DROP INDEX IF EXISTS "{name}"'))
+        except Exception as exc:
+            print(f"[db] shift_entry unique-index drop skipped ({name}): {exc}")
+
+
+def _rebuild_shift_entry_without_unique(connection) -> None:
+    """Recreate shift_entry without the implicit UNIQUE constraint.
+
+    SQLite doesn't support ALTER TABLE DROP CONSTRAINT, so we use the
+    officially-sanctioned rename-copy-drop-rename dance:
+      1. CREATE TABLE shift_entry_new (...) without the unique
+      2. INSERT INTO shift_entry_new SELECT ... FROM shift_entry
+      3. DROP TABLE shift_entry
+      4. ALTER TABLE shift_entry_new RENAME TO shift_entry
+      5. Recreate the non-unique indexes we still want
+    Foreign key checks are temporarily disabled so step 3 doesn't
+    cascade-delete rows in tables referencing shift_entry.id.
+    """
+    # Collect existing columns so the INSERT copies everything forward
+    # even if the old DB is missing recent additive columns (e.g.
+    # sort_order hasn't run yet because _ensure_sqlite_schema runs the
+    # column-adds BEFORE this migration). We recreate with the full
+    # current shape.
+    existing_cols = [
+        row[1]
+        for row in connection.execute(text("PRAGMA table_info('shift_entry')"))
+    ]
+    has_sort_order = "sort_order" in existing_cols
+    # FK checks off for the duration of the rebuild. `PRAGMA
+    # foreign_keys` only takes effect when NOT inside a transaction on
+    # some SQLite versions, so this is best-effort; rebuilding a
+    # leaf-like table like shift_entry is safe even with FKs on.
+    connection.execute(text("PRAGMA foreign_keys = OFF"))
+    try:
+        connection.execute(text("DROP TABLE IF EXISTS shift_entry_new"))
+        connection.execute(
+            text(
+                """
+                CREATE TABLE shift_entry_new (
+                    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    shift_date DATE NOT NULL,
+                    label TEXT NOT NULL DEFAULT '',
+                    kind TEXT NOT NULL DEFAULT 'blank',
+                    notes TEXT NOT NULL DEFAULT '',
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    created_by_user_id INTEGER NOT NULL,
+                    created_at TIMESTAMP NOT NULL,
+                    updated_at TIMESTAMP NOT NULL,
+                    FOREIGN KEY (user_id) REFERENCES user(id),
+                    FOREIGN KEY (created_by_user_id) REFERENCES user(id)
+                )
+                """
+            )
+        )
+        # Build the SELECT list so missing columns are substituted with
+        # defaults rather than failing the copy.
+        copy_cols = (
+            "id, user_id, shift_date, label, kind, notes, "
+            + ("sort_order" if has_sort_order else "0")
+            + ", created_by_user_id, created_at, updated_at"
+        )
+        connection.execute(
+            text(
+                "INSERT INTO shift_entry_new "
+                "(id, user_id, shift_date, label, kind, notes, sort_order, "
+                "created_by_user_id, created_at, updated_at) "
+                f"SELECT {copy_cols} FROM shift_entry"
+            )
+        )
+        connection.execute(text("DROP TABLE shift_entry"))
+        connection.execute(text("ALTER TABLE shift_entry_new RENAME TO shift_entry"))
+        # Recreate the non-unique indexes SQLModel declared.
+        for stmt in (
+            "CREATE INDEX IF NOT EXISTS ix_shift_entry_user_id ON shift_entry(user_id)",
+            "CREATE INDEX IF NOT EXISTS ix_shift_entry_shift_date ON shift_entry(shift_date)",
+            "CREATE INDEX IF NOT EXISTS ix_shift_entry_kind ON shift_entry(kind)",
+            "CREATE INDEX IF NOT EXISTS ix_shift_entry_sort_order ON shift_entry(sort_order)",
+        ):
+            try:
+                connection.execute(text(stmt))
+            except Exception as exc:
+                print(f"[db] shift_entry index recreate skipped: {exc}")
+    finally:
+        try:
+            connection.execute(text("PRAGMA foreign_keys = ON"))
+        except Exception:
+            pass
+
+
 def ensure_sqlite_schema() -> None:
     if not database_url.startswith("sqlite"):
         return
@@ -652,6 +803,7 @@ def ensure_sqlite_schema() -> None:
         for statement in SQLITE_INDEX_MIGRATIONS:
             connection.execute(text(statement))
         migrate_legacy_sqlite_shopify_orders(connection)
+        _migrate_shift_entry_drop_unique(connection)
 
 
 def fixup_transaction_parse_status_aliases() -> None:
@@ -712,6 +864,15 @@ def ensure_postgres_schema() -> None:
             )
     for idx_stmt in POSTGRES_INDEX_MIGRATIONS:
         _pg_migrate_statement(idx_stmt, idx_stmt[:60])
+    # Multi-shift-per-day: the original shift_entry table had a UNIQUE
+    # constraint on (user_id, shift_date). Drop it so a single employee
+    # can have multiple shifts on the same day. Safe to run repeatedly
+    # (IF EXISTS) and harmless on fresh databases where the constraint
+    # was never created.
+    _pg_migrate_statement(
+        "ALTER TABLE shift_entry DROP CONSTRAINT IF EXISTS uq_shift_entry_user_date",
+        "shift_entry.drop_uq_user_date",
+    )
     with engine.begin() as connection:
         migrate_legacy_postgres_shopify_orders(connection)
 

@@ -861,10 +861,14 @@ def classify_shift_label(label: str) -> str:
 
 
 class ShiftEntry(SQLModel, table=True):
+    # Originally one shift per (user, shift_date) — enforced via a
+    # UniqueConstraint. Dropped in the multi-shift refactor: an employee
+    # can have multiple shifts on the same day (e.g. "10a-2p + 3p-7p")
+    # rendered as stacked pills in the admin schedule grid. `sort_order`
+    # keeps them in a stable vertical order within a cell. The matching
+    # migration in app/db.py rebuilds the SQLite table and drops the
+    # Postgres constraint.
     __tablename__ = "shift_entry"
-    __table_args__ = (
-        UniqueConstraint("user_id", "shift_date", name="uq_shift_entry_user_date"),
-    )
 
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
@@ -872,6 +876,10 @@ class ShiftEntry(SQLModel, table=True):
     label: str = Field(default="")
     kind: str = Field(default=SHIFT_KIND_BLANK, index=True)
     notes: str = Field(default="")
+    # Vertical order when multiple shifts share the same (user_id,
+    # shift_date). Rows are rendered top-to-bottom by (sort_order, id).
+    # Legacy single-shift rows default to 0.
+    sort_order: int = Field(default=0, index=True)
     created_by_user_id: int = Field(foreign_key="user.id")
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
