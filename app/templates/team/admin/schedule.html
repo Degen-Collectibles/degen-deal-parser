@@ -489,46 +489,9 @@
         .sch-grid-title { font-size: 14px; margin: 16px 0 8px; }
         .sch-roster-bar select { min-width: 140px; font-size: 12px; }
 
-        /* Sticky bottom save bar. Only shown when an editable (Storefront)
-           form is present; stream grid is read-only so no bar.
-           Pinned ABOVE the shared mobile bottom nav (which is ~64px tall
-           at z-index 150) so both stay reachable. */
-        .sch-mobile-savebar {
-            position: fixed;
-            left: 0; right: 0;
-            bottom: calc(64px + env(safe-area-inset-bottom, 0px));
-            padding: 6px 10px;
-            background: var(--lx-s1);
-            border-top: 1px solid var(--lx-br);
-            box-shadow: 0 -4px 18px rgba(0,0,0,0.35);
-            z-index: 160;  /* above .pt-mobile-bottom-nav (150) */
-            display: flex;
-            gap: 8px;
-            align-items: center;
-            justify-content: flex-end;
-        }
-        .sch-mobile-savebar button[type="submit"] {
-            flex: 0 0 auto;
-            padding: 7px 14px;
-            font-size: 13px;
-            font-weight: 600;
-            background: #3b82f6;
-            color: white;
-            border: 1px solid #3b82f6;
-            border-radius: 8px;
-            cursor: pointer;
-        }
-        .sch-mobile-savebar .sch-mobile-dirty {
-            font-size: 11px;
-            color: #fdba74;
-            margin-right: auto;  /* push text left, button right */
-        }
-        /* Reserve space so the bottom nav + savebar don't overlap grid.
-           Override admin-base's 96px bottom padding because we now stack
-           two bars (nav ~64px + savebar ~44px + breathing room). */
-        .ta-main { padding-bottom: 160px !important; }
-        /* Hide the inline (desktop) save button row on mobile — savebar covers it. */
-        .sch-desktop-save { display: none; }
+        /* Mobile save button kept inline (same as desktop) — not a
+           sticky savebar. We shrunk the bottom padding to just leave
+           room for the shared bottom nav. */
 
         .sch-modal {
             top: auto;
@@ -549,23 +512,117 @@
         .sch-modal-times input[type=time] { font-size: 16px; }
         .sch-modal-actions button { padding: 10px 14px; font-size: 14px; }
     }
-    .sch-mobile-savebar { display: none; }
-    @media (max-width: 600px) {
-        .sch-mobile-savebar.is-on { display: flex; }
+
+    /* ------- Edit-mode toolbar + edit/save/discard/generate buttons -------
+       The page defaults to read-only for everyone. When ?edit=1 is set
+       (admins only), the edit buttons appear and cells become interactive.
+       */
+    .sch-edit-actions {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
     }
+    .sch-edit-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 8px 14px;
+        border-radius: 8px;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        border: 1px solid var(--lx-br);
+        background: var(--lx-s2);
+        color: var(--lx-text);
+        font-family: inherit;
+    }
+    .sch-edit-btn:hover { background: var(--lx-s1); }
+    .sch-edit-btn.primary {
+        background: #3b82f6;
+        color: white;
+        border-color: #3b82f6;
+    }
+    .sch-edit-btn.primary:hover { background: #2563eb; border-color: #2563eb; }
+    .sch-edit-btn.warn {
+        background: transparent;
+        color: #fca5a5;
+        border-color: rgba(239,68,68,0.35);
+    }
+    .sch-edit-btn.warn:hover { background: rgba(239,68,68,0.08); }
+    .sch-grid-actions {
+        display: flex;
+        gap: 8px;
+        justify-content: flex-end;
+        margin-top: 12px;
+        flex-wrap: wrap;
+    }
+    .sch-viewonly-banner {
+        padding: 10px 14px;
+        background: rgba(96,165,250,0.08);
+        border: 1px solid rgba(96,165,250,0.2);
+        border-radius: 8px;
+        font-size: 13px;
+        color: var(--lx-muted);
+        margin-bottom: 14px;
+    }
+
+    /* ------- Modal: recurring + stream-specific fields ------- */
+    .sch-modal-recur {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        padding: 6px 0;
+        font-size: 13px;
+        flex-wrap: wrap;
+    }
+    .sch-modal-recur input[type="number"] {
+        width: 56px;
+        padding: 4px 6px;
+        font-size: 13px;
+        background: var(--lx-bg);
+        border: 1px solid var(--lx-br);
+        border-radius: 6px;
+        color: var(--lx-text);
+    }
+    .sch-modal-recur input[type="number"]:disabled { opacity: 0.4; }
+    .sch-modal-stream-fields {
+        display: none;  /* shown only when modal opens for a stream cell */
+        flex-direction: column;
+        gap: 8px;
+    }
+    .sch-modal-stream-fields label {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        font-size: 12px;
+        color: var(--lx-muted);
+    }
+    .sch-modal-stream-fields select,
+    .sch-modal-stream-fields input[type="text"] {
+        padding: 8px 10px;
+        background: var(--lx-bg);
+        border: 1px solid var(--lx-br);
+        border-radius: 6px;
+        color: var(--lx-text);
+        font-size: 14px;
+        font-family: inherit;
+    }
+    .sch-modal.is-stream .sch-modal-stream-fields { display: flex; }
+    .sch-modal.is-stream .sch-modal-tabs { display: none; }
+    .sch-modal.is-stream .sch-modal-note { display: none; }
 </style>
 {% endblock %}
 
 {# ---------------------------------------------------------------------
    Grid macro. Rendered once per staff_kind (storefront + stream).
 
-   read_only=True forces the grid into a pure display — no inputs,
-   no roster bar, no save button, no remove buttons. That's how the
-   Stream grid is always rendered here: it's the read-only projection
-   of /stream-manager.
+   The grid gates editability on a page-level `edit_mode` flag. By
+   default everyone (including admins) sees a read-only grid; admins
+   flip into edit mode with the "Edit schedule" button (or ?edit=1).
    --------------------------------------------------------------------- #}
-{% macro render_grid(ctx, kind_label, kind_slug, include_day_headers, read_only=False) %}
-    {% set edit = can_edit and not read_only %}
+{% macro render_grid(ctx, kind_label, kind_slug, include_day_headers) %}
+    {% set edit = edit_mode %}
 
     <div class="sch-grid-title">
         <span>{{ kind_label }} schedule</span>
@@ -573,12 +630,6 @@
         {% if kind_slug == 'storefront' %}
         <span class="sch-kind-chip" style="background: rgba(148,163,184,0.12); color:#cbd5e1;">
             {{ '%.1f'|format(ctx.grand_hours) }} hrs · {{ ctx.total_shifts }} shifts
-        </span>
-        {% endif %}
-        {% if read_only %}
-        <span class="sch-kind-chip" style="background: rgba(148,163,184,0.18); color:#cbd5e1;">
-            Read-only · edit in
-            <a href="/stream-manager" style="color:#93c5fd;">Stream Manager</a>
         </span>
         {% endif %}
     </div>
@@ -701,25 +752,48 @@
                         {% set entry = ctx.entry_map.get((u.id, d.isoformat())) %}
                         {% set hint = (ctx.stream_hint_map.get((u.id, d.isoformat())) if ctx.stream_hint_map else None) %}
                         {% set label = (entry.label if entry else (hint.label if hint else '')) %}
-                        {% set kind = (entry.kind if entry else 'blank') %}
+                        {% set kind = (entry.kind if entry else ('stream' if hint else 'blank')) %}
                         {% set hint_color = (hint.color if hint and not entry else None) %}
                         {% set is_today = (d == today) %}
                         <td class="sch-cell {% if edit %}sch-cell-edit{% endif %} {% if is_today %}is-today{% endif %}"
                             data-user-id="{{ u.id }}"
                             data-user-name="{{ u.display_name or u.username }}"
                             data-date="{{ d.isoformat() }}"
-                            data-date-label="{{ d.strftime('%A, %b') }} {{ d.day }}">
+                            data-date-label="{{ d.strftime('%A, %b') }} {{ d.day }}"
+                            data-kind-slug="{{ kind_slug }}"
+                            {% if kind_slug == 'stream' and hint %}
+                            data-stream-start="{{ hint.start_time }}"
+                            data-stream-end="{{ hint.end_time }}"
+                            data-stream-account-id="{{ hint.account_id or '' }}"
+                            data-stream-title="{{ hint.title }}"
+                            data-stream-notes="{{ hint.notes }}"
+                            data-stream-extra="{{ hint.extra_count or 0 }}"
+                            {% endif %}>
                             {% if edit %}
+                            {% if kind_slug == 'stream' %}
+                            {# Stream cell: JSON payload written by the modal. Empty
+                               by default so the server no-ops cells the admin didn't
+                               touch. #}
+                            <input type="hidden"
+                                   class="sch-stream-input"
+                                   name="stream_cell__{{ u.id }}__{{ d.isoformat() }}"
+                                   value=""/>
+                            {% else %}
                             <input type="hidden"
                                    class="sch-cell-input"
                                    name="{{ build_cell_key(u.id, d) }}"
                                    value="{{ label }}"/>
+                            <input type="hidden"
+                                   class="sch-recur-input"
+                                   name="recur__{{ u.id }}__{{ d.isoformat() }}"
+                                   value="1"/>
+                            {% endif %}
                             <button type="button"
                                     class="sch-block sch-k-{{ kind }}"
                                     data-label="{{ label }}"
                                     data-kind="{{ kind }}"
                                     {% if hint_color %}style="background: {{ hint_color }}; color:#0b1220;"{% endif %}
-                                    {% if hint and not entry %}title="{{ hint.account_name }} · from Stream Manager (click to override)"{% endif %}>
+                                    {% if hint %}title="{{ hint.account_name }} · {{ hint.label }}{% if hint.extra_count %} · {{ hint.extra_count }} more shift(s) — edit in Stream Manager{% endif %}"{% endif %}>
                                 {% if kind == 'blank' and not label %}
                                 <span class="sch-block-add">+</span>
                                 {% else %}
@@ -729,7 +803,7 @@
                             {% else %}
                             <div class="sch-block sch-k-{{ kind }} is-ro"
                                  {% if hint_color %}style="background: {{ hint_color }}; color:#0b1220;"{% endif %}
-                                 {% if hint and not entry %}title="{{ hint.account_name }} · from Stream Manager"{% endif %}>
+                                 {% if hint %}title="{{ hint.account_name }} · {{ hint.label }}"{% endif %}>
                                 {% if kind == 'blank' and not label %}
                                 <span style="opacity:0.45;">—</span>
                                 {% else %}
@@ -776,19 +850,32 @@
         </div>
 
         {% if edit %}
-        <div class="sch-desktop-save" style="margin-top:14px; display:flex; justify-content:flex-end; gap:8px;">
-            <button class="ta-btn" type="submit" style="background:#3b82f6; color:white; border-color:#3b82f6; font-weight:600;">
+        <div class="sch-grid-actions">
+            <a class="sch-edit-btn warn"
+               href="/team/admin/schedule?week={{ ctx.week_start_iso }}"
+               data-discard="1">Discard changes</a>
+            <button class="sch-edit-btn primary" type="submit">
                 Save {{ kind_label|lower }} schedule
             </button>
         </div>
-        {% if kind_slug == 'storefront' %}
-        <div class="sch-mobile-savebar is-on" role="region" aria-label="Save schedule">
-            <span class="sch-mobile-dirty" id="sch-mobile-dirty" aria-live="polite">&nbsp;</span>
-            <button type="submit">Save {{ kind_label|lower }} schedule</button>
-        </div>
-        {% endif %}
         {% endif %}
     </form>
+
+    {% if edit %}
+    {# Generate-from-previous lives in its own form so the user can
+       trigger it without submitting any in-progress cell edits. #}
+    <form method="post" action="/team/admin/schedule/generate-from-previous"
+          style="margin-top:10px; display:flex; justify-content:flex-end;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
+        <input type="hidden" name="week" value="{{ ctx.week_start_iso }}"/>
+        <input type="hidden" name="staff_kind" value="{{ kind_slug }}"/>
+        <button class="sch-edit-btn"
+                type="submit"
+                title="Clone last week's {{ kind_label|lower }} shifts onto this week. Existing cells are preserved.">
+            ↺ Generate from last week
+        </button>
+    </form>
+    {% endif %}
 
     {% if edit %}
     {% for u in ctx.users %}
@@ -807,21 +894,36 @@
 
 <div class="sch-toolbar">
     <div class="sch-week-btns">
-        <a class="ta-btn" href="/team/admin/schedule?week={{ prev_week }}">← Prev</a>
+        <a class="ta-btn" href="/team/admin/schedule?week={{ prev_week }}{% if edit_mode %}&edit=1{% endif %}">← Prev</a>
         <span class="sch-wk-label">
             Week of {{ week_start.strftime('%b') }} {{ week_start.day }}, {{ week_start.year }}
             {% if is_current_week %}<span style="color:#86efac; font-weight:500; font-size:12px; margin-left:6px;">· this week</span>{% endif %}
         </span>
-        <a class="ta-btn" href="/team/admin/schedule?week={{ next_week }}">Next →</a>
+        <a class="ta-btn" href="/team/admin/schedule?week={{ next_week }}{% if edit_mode %}&edit=1{% endif %}">Next →</a>
         {% if not is_current_week %}
-        <a class="ta-btn" href="/team/admin/schedule?week={{ this_week }}" style="margin-left:10px;">Jump to this week</a>
+        <a class="ta-btn" href="/team/admin/schedule?week={{ this_week }}{% if edit_mode %}&edit=1{% endif %}" style="margin-left:10px;">Jump to this week</a>
         {% endif %}
     </div>
 
-    {% if not can_edit %}
-    <span style="font-size:12px; color:var(--lx-muted);">View-only — you do not have edit permissions.</span>
-    {% endif %}
+    <div class="sch-edit-actions">
+        {% if edit_mode %}
+        <span style="font-size:12px; color:#86efac; font-weight:500;">Editing · click any cell</span>
+        {% elif can_edit %}
+        <a class="sch-edit-btn primary"
+           href="/team/admin/schedule?week={{ week_start_iso }}&edit=1">
+            ✎ Edit schedule
+        </a>
+        {% else %}
+        <span style="font-size:12px; color:var(--lx-muted);">View-only — you do not have edit permissions.</span>
+        {% endif %}
+    </div>
 </div>
+
+{% if not edit_mode %}
+<div class="sch-viewonly-banner">
+    Read-only view. {% if can_edit %}Tap <strong>Edit schedule</strong> above to make changes, add shifts, or generate a week from the previous schedule.{% else %}Only admins with schedule edit permission can modify this page.{% endif %}
+</div>
+{% endif %}
 
 {# 7shifts-style summary strip: quick stats for the visible Storefront week. #}
 <div class="sch-summary">
@@ -847,17 +949,22 @@
 </div>
 
 <p style="font-size:12px; color:var(--lx-muted); margin:-4px 0 14px; max-width:860px;">
-    Click any cell on the <strong>Storefront</strong> grid to add or edit a shift.
-    Daily and weekly hours update as soon as you save.
-    The <strong>Stream</strong> grid is a read-only mirror of the
-    <a href="/stream-manager" style="color:#fdba74;">Stream Manager</a> — cells are color-coded per stream account.
-    Employee type is controlled by the <strong>Type</strong> column on the
+    {% if edit_mode %}
+    Click any cell to add, edit, or clear a shift. Stream-grid edits save
+    to the <a href="/stream-manager" style="color:#fdba74;">Stream Manager</a>
+    (and vice versa), so both stay in sync. Employee type is controlled
+    by the <strong>Type</strong> column on the
     <a href="/team/admin/employees" style="color:#fdba74;">Employees page</a>.
+    {% else %}
+    Storefront hours update as soon as you save. Stream cells are color-coded
+    per stream account. Employee type is controlled by the <strong>Type</strong>
+    column on the <a href="/team/admin/employees" style="color:#fdba74;">Employees page</a>.
+    {% endif %}
 </p>
 
 {{ render_grid(storefront, 'Storefront', 'storefront', True) }}
 
-{{ render_grid(stream, 'Stream', 'stream', False, read_only=True) }}
+{{ render_grid(stream, 'Stream', 'stream', False) }}
 
 <div class="sch-legend">
     <strong style="color:var(--lx-text);">Storefront colors:</strong>
@@ -868,14 +975,16 @@
     <span class="sch-legend-chip"><span class="sch-legend-sw" style="background:#bbf7d0;"></span> Stream / IF NEEDED</span>
 </div>
 
-{# ---- Click-to-edit modal (Storefront only) ---- #}
-{% if can_edit %}
+{# ---- Click-to-edit modal (only rendered when an admin is in edit mode) ---- #}
+{% if edit_mode %}
 <div id="sch-modal-backdrop" class="sch-modal-backdrop"></div>
 <div id="sch-modal" class="sch-modal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="sch-modal-title">
     <div class="sch-modal-body">
         <h3 id="sch-modal-title">Edit shift</h3>
         <div class="sch-modal-sub" id="sch-modal-sub"></div>
 
+        {# Storefront status tabs — hidden by CSS when .is-stream class
+           is on the modal. #}
         <div class="sch-modal-tabs" id="sch-modal-tabs">
             <button type="button" data-status="shift">Shift</button>
             <button type="button" data-status="off">OFF</button>
@@ -883,6 +992,25 @@
             <button type="button" data-status="request">REQUEST</button>
             <button type="button" data-status="stream">Stream</button>
             <button type="button" data-status="if_needed">IF NEEDED</button>
+        </div>
+
+        {# Stream-only fields. The account dropdown and title input only
+           render inside stream cells; CSS shows them when the modal has
+           .is-stream applied. #}
+        <div class="sch-modal-stream-fields">
+            <label>
+                Stream account
+                <select id="sch-modal-stream-account">
+                    <option value="">(default)</option>
+                    {% for acct in stream_accounts %}
+                    <option value="{{ acct.id }}">{{ acct.name }}{% if acct.handle %} · {{ acct.handle }}{% endif %}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label>
+                Title (optional)
+                <input type="text" id="sch-modal-stream-title" maxlength="80" placeholder="e.g. fan requests night"/>
+            </label>
         </div>
 
         <div class="sch-modal-times" id="sch-modal-times">
@@ -906,6 +1034,18 @@
             </div>
         </div>
 
+        <div class="sch-modal-recur">
+            <label style="display:inline-flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;">
+                <input type="checkbox" id="sch-modal-recur-on"/>
+                Repeat weekly
+            </label>
+            <label style="display:inline-flex; align-items:center; gap:6px; font-size:13px; color:var(--lx-muted);">
+                for
+                <input type="number" id="sch-modal-recur-weeks" min="1" max="12" value="4" disabled/>
+                weeks (including this one)
+            </label>
+        </div>
+
         <div class="sch-modal-actions">
             <button type="button" class="sch-modal-del" id="sch-modal-delete">Clear</button>
             <span class="sch-modal-spacer"></span>
@@ -919,10 +1059,12 @@
 (function() {
     "use strict";
 
-    // Only the Storefront grid is editable via this modal. Select it
-    // explicitly so Stream cells (read-only mirror) are inert.
-    var grid = document.querySelector('form[data-schgrid="storefront"]');
-    if (!grid) return;
+    // Both grids are editable in edit mode now (Stream writes to
+    // StreamSchedule for bidirectional /stream-manager sync).
+    var grids = Array.prototype.slice.call(
+        document.querySelectorAll('form[data-schgrid]')
+    );
+    if (!grids.length) return;
 
     var modal = document.getElementById('sch-modal');
     if (!modal) return;
@@ -964,11 +1106,18 @@
     var delBtn   = document.getElementById('sch-modal-delete');
     var cancelBtn= document.getElementById('sch-modal-cancel');
     var dirtyFlag= document.getElementById('sch-dirty-flag');
-    var mobileDirty = document.getElementById('sch-mobile-dirty');
+    // Stream-only modal elements.
+    var streamAcctEl = document.getElementById('sch-modal-stream-account');
+    var streamTitleEl = document.getElementById('sch-modal-stream-title');
+    // Recurrence controls.
+    var recurOnEl = document.getElementById('sch-modal-recur-on');
+    var recurWeeksEl = document.getElementById('sch-modal-recur-weeks');
 
     var activeCell = null;
-    var activeInput = null;
+    var activeInput = null;       // .sch-cell-input (storefront) OR .sch-stream-input
+    var activeRecurInput = null;  // .sch-recur-input (storefront only)
     var activeBlock = null;
+    var activeKindSlug = 'storefront';
 
     function setStatus(status) {
         Array.prototype.forEach.call(tabsEl.children, function(btn) {
@@ -979,6 +1128,13 @@
         var allowNote = status === 'shift' || status === 'stream' || status === 'if_needed';
         noteEl.disabled = !allowNote;
         noteEl.style.opacity = allowNote ? '1' : '0.5';
+    }
+
+    // Recurrence weeks enabled only when the checkbox is checked.
+    if (recurOnEl && recurWeeksEl) {
+        recurOnEl.addEventListener('change', function() {
+            recurWeeksEl.disabled = !recurOnEl.checked;
+        });
     }
 
     // Parse existing label into {status, start, end, note} so re-opening
@@ -1070,12 +1226,11 @@
         activeInput.value = label;
         activeCell.classList.add('is-dirty');
         if (dirtyFlag) dirtyFlag.style.display = 'inline-block';
-        if (mobileDirty) mobileDirty.textContent = '● Unsaved changes';
 
-        // Update the visible block's color/content without a page reload.
+        var isStream = activeKindSlug === 'stream';
         activeBlock.style.background = '';
         activeBlock.style.color = '';
-        activeBlock.className = 'sch-block sch-k-' + kindFromLabel(label);
+        activeBlock.className = 'sch-block sch-k-' + (isStream ? (label ? 'stream' : 'blank') : kindFromLabel(label));
         activeBlock.innerHTML = '';
         if (!label) {
             var plus = document.createElement('span');
@@ -1098,6 +1253,16 @@
         activeBlock.dataset.label = label;
     }
 
+    // Build the display label we show inside a stream cell block after
+    // an edit. Mirrors _stream_schedule_hint_map on the server so the
+    // post-save look matches what we'll render after a full reload.
+    function streamDisplayLabel(start24, end24) {
+        if (!start24 || !end24) return '';
+        var label = from24(start24) + ' - ' + from24(end24);
+        if (end24 < start24) label += ' (next day)';
+        return label;
+    }
+
     function splitLabelForDisplay(label) {
         var parts = label.split(/\s*[·•|]\s*/);
         return { primary: parts[0], note: parts.length > 1 ? parts.slice(1).join(' · ') : '' };
@@ -1117,34 +1282,74 @@
 
     function openFor(cell) {
         activeCell = cell;
-        activeInput = cell.querySelector('.sch-cell-input');
+        activeKindSlug = cell.dataset.kindSlug || 'storefront';
+        var isStream = activeKindSlug === 'stream';
+        modal.classList.toggle('is-stream', isStream);
+
+        if (isStream) {
+            activeInput = cell.querySelector('.sch-stream-input');
+            activeRecurInput = null;
+        } else {
+            activeInput = cell.querySelector('.sch-cell-input');
+            activeRecurInput = cell.querySelector('.sch-recur-input');
+        }
         activeBlock = cell.querySelector('.sch-block');
         if (!activeInput || !activeBlock) return;
 
         var name = cell.dataset.userName || '';
         var dateLabel = cell.dataset.dateLabel || '';
         titleEl.textContent = name;
-        subEl.textContent = dateLabel;
+        subEl.textContent = dateLabel + (isStream ? ' · Stream' : '');
 
-        var parsed = parseLabel(activeInput.value);
-        setStatus(parsed.status);
-        startEl.value = parsed.start;
-        endEl.value = parsed.end;
-        noteEl.value = parsed.note;
+        // Reset recurrence UI every open so one cell's "repeat 4 weeks"
+        // doesn't bleed into the next cell the admin opens.
+        if (recurOnEl) recurOnEl.checked = false;
+        if (recurWeeksEl) {
+            recurWeeksEl.value = '4';
+            recurWeeksEl.disabled = true;
+        }
+
+        if (isStream) {
+            // Stream cells pre-fill from data-stream-* attrs.
+            var s = cell.dataset.streamStart || '';
+            var e = cell.dataset.streamEnd || '';
+            var acctId = cell.dataset.streamAccountId || '';
+            var title = cell.dataset.streamTitle || '';
+            startEl.value = s;
+            endEl.value = e;
+            if (streamAcctEl) streamAcctEl.value = acctId;
+            if (streamTitleEl) streamTitleEl.value = title;
+            // Warn admin if multiple shifts land on this date — we only
+            // edit the first one from here. They should use /stream-manager
+            // to touch the extras.
+            var extra = parseInt(cell.dataset.streamExtra || '0', 10);
+            if (extra > 0) {
+                subEl.textContent += ' (' + extra + ' more shift' + (extra > 1 ? 's' : '') + ' — use Stream Manager for extras)';
+            }
+        } else {
+            var parsed = parseLabel(activeInput.value);
+            setStatus(parsed.status);
+            startEl.value = parsed.start;
+            endEl.value = parsed.end;
+            noteEl.value = parsed.note;
+        }
 
         openModal();
         // Focus the first tab for keyboard users. On mobile we INTENTIONALLY
         // do NOT auto-focus the time/note inputs: iOS Safari pops up the
         // native time-picker wheel on focus, which stacks over the bottom-
-        // sheet and makes the modal look broken ("I tapped a cell, a picker
-        // showed up, and I can't edit"). Desktop keeps the input-focus
-        // convenience so keyboard typing flows naturally.
+        // sheet and makes the modal look broken.
         var isTouch = (('ontouchstart' in window) || navigator.maxTouchPoints > 0);
         setTimeout(function() {
-            var firstTab = tabsEl.querySelector('button');
-            if (firstTab) firstTab.focus();
-            if (!isTouch) {
-                if (parsed.status === 'shift') startEl.focus();
+            if (!isStream) {
+                var firstTab = tabsEl.querySelector('button');
+                if (firstTab) firstTab.focus();
+            } else if (streamAcctEl) {
+                streamAcctEl.focus();
+            }
+            if (!isTouch && !isStream) {
+                var parsedStatus = getStatus();
+                if (parsedStatus === 'shift') startEl.focus();
                 else if (!noteEl.disabled) noteEl.focus();
             }
         }, 30);
@@ -1156,13 +1361,51 @@
         setStatus(t.dataset.status);
     });
 
+    function currentRecurN() {
+        if (!recurOnEl || !recurOnEl.checked) return 1;
+        var n = parseInt(recurWeeksEl.value || '1', 10);
+        if (isNaN(n) || n < 1) n = 1;
+        if (n > 12) n = 12;
+        return n;
+    }
+
     saveBtn.addEventListener('click', function() {
-        var label = synthesize(getStatus(), startEl.value, endEl.value, noteEl.value);
-        applyToCell(label);
+        var recurN = currentRecurN();
+        if (activeKindSlug === 'stream') {
+            var acctId = streamAcctEl ? (streamAcctEl.value || '') : '';
+            var title = streamTitleEl ? (streamTitleEl.value || '').trim() : '';
+            var startV = startEl.value || '';
+            var endV = endEl.value || '';
+            if (!startV || !endV) {
+                alert('Stream shifts need both a start and end time.');
+                return;
+            }
+            var payload = {
+                start: startV,
+                end: endV,
+                account_id: acctId ? parseInt(acctId, 10) : null,
+                title: title,
+                notes: '',
+                recur: recurN,
+                clear: false
+            };
+            activeInput.value = JSON.stringify(payload);
+            applyToCell(streamDisplayLabel(startV, endV));
+        } else {
+            var label = synthesize(getStatus(), startEl.value, endEl.value, noteEl.value);
+            applyToCell(label);
+            if (activeRecurInput) activeRecurInput.value = String(recurN);
+        }
         closeModal();
     });
     delBtn.addEventListener('click', function() {
-        applyToCell('');
+        if (activeKindSlug === 'stream') {
+            activeInput.value = JSON.stringify({ clear: true });
+            applyToCell('');
+        } else {
+            applyToCell('');
+            if (activeRecurInput) activeRecurInput.value = '1';
+        }
         closeModal();
     });
     cancelBtn.addEventListener('click', function() { closeModal(); });
@@ -1203,39 +1446,56 @@
         openFor(cell);
     }
 
-    // Bind to BOTH the cell (td) and the block (button). Jeffrey's finger
-    // on a ~84px-wide cell only needs to land anywhere inside the td —
-    // even if the tap lands on the 2px padding around the button, the
-    // cell handler still fires. iOS Safari shows no tap highlight on a
-    // plain <td>, so we also set cursor:pointer on the cell (see CSS)
-    // which tells iOS "yes, this is a click target" and activates the
-    // -webkit-tap-highlight-color flash.
-    var editableCells = grid.querySelectorAll('.sch-cell-edit');
-    log('binding', editableCells.length, 'editable cells');
-    Array.prototype.forEach.call(editableCells, function(cell) {
-        var btn = cell.querySelector('.sch-block:not(.is-ro)');
-        if (!btn) return;
-        var lastFired = 0;
-        function fire(ev) {
-            var now = Date.now();
-            if (now - lastFired < 350) return;
-            lastFired = now;
-            log('activate via', ev.type, btn.getAttribute('data-label'));
-            activateBlock(btn);
-        }
-        cell.addEventListener('click', fire);
-        btn.addEventListener('click', fire);
-        if (window.PointerEvent) {
-            cell.addEventListener('pointerup', function(ev) {
-                if (ev.pointerType === 'mouse') return;
-                fire(ev);
-            });
-        }
+    // Bind to BOTH the cell (td) and the block (button) across all grids
+    // (storefront + stream). On iOS the whole <td> needs to look clickable
+    // so finger-drift onto padding still triggers the modal.
+    function hasDirty() {
+        return !!document.querySelector('.sch-cell.is-dirty');
+    }
+
+    grids.forEach(function(grid) {
+        var editableCells = grid.querySelectorAll('.sch-cell-edit');
+        log('binding', editableCells.length, 'editable cells on', grid.dataset.schgrid);
+        Array.prototype.forEach.call(editableCells, function(cell) {
+            var btn = cell.querySelector('.sch-block:not(.is-ro)');
+            if (!btn) return;
+            var lastFired = 0;
+            function fire(ev) {
+                var now = Date.now();
+                if (now - lastFired < 350) return;
+                lastFired = now;
+                log('activate via', ev.type, btn.getAttribute('data-label'));
+                activateBlock(btn);
+            }
+            cell.addEventListener('click', fire);
+            btn.addEventListener('click', fire);
+            if (window.PointerEvent) {
+                cell.addEventListener('pointerup', function(ev) {
+                    if (ev.pointerType === 'mouse') return;
+                    fire(ev);
+                });
+            }
+        });
     });
 
-    // Warn if user navigates away with unsaved changes.
+    // Discard-changes link: if the admin has pending edits, warn before
+    // leaving. Both anchors on both grids share data-discard="1".
+    Array.prototype.forEach.call(
+        document.querySelectorAll('a[data-discard="1"]'),
+        function(a) {
+            a.addEventListener('click', function(ev) {
+                if (!hasDirty()) return;
+                if (!window.confirm('Discard unsaved changes?')) {
+                    ev.preventDefault();
+                }
+            });
+        }
+    );
+
+    // Warn if user navigates away (closes tab, clicks Prev/Next, etc.)
+    // with unsaved changes. Discard links have their own guard above.
     window.addEventListener('beforeunload', function(ev) {
-        if (!grid.querySelector('.sch-cell.is-dirty')) return;
+        if (!hasDirty()) return;
         ev.preventDefault();
         ev.returnValue = '';
     });

@@ -207,7 +207,13 @@ class ScheduleMobileTests(unittest.TestCase):
             is_mobile=is_mobile,
         )
         page = ctx.new_page()
-        url = f"{self.server.base_url}/team/admin/schedule?week={self.WEEK.isoformat()}"
+        # edit=1 opts the admin into edit mode (the default is now a
+        # read-only view for everyone). Without it, cells render as
+        # static blocks and the modal never opens.
+        url = (
+            f"{self.server.base_url}/team/admin/schedule"
+            f"?week={self.WEEK.isoformat()}&edit=1"
+        )
         page.goto(url, wait_until="domcontentloaded")
         page.wait_for_selector('form[data-schgrid="storefront"] .sch-block')
         return ctx, page
@@ -315,10 +321,12 @@ class ScheduleMobileTests(unittest.TestCase):
             self.assertIn("6:30 PM", val)
             self.assertIn("opener", val)
 
-            # The mobile sticky savebar must be visible and its Save button
-            # must submit the Storefront form.
-            savebar = page.locator(".sch-mobile-savebar.is-on")
-            self.assertTrue(savebar.is_visible())
+            # The inline Save button (no longer a sticky savebar) is inside
+            # the storefront form and must be present in edit mode.
+            save_btn = page.locator(
+                'form[data-schgrid="storefront"] .sch-edit-btn.primary[type="submit"]'
+            )
+            self.assertTrue(save_btn.count() >= 1)
 
             captured = self._posted_form_body(page)
             with page.expect_request(
@@ -341,9 +349,10 @@ class ScheduleMobileTests(unittest.TestCase):
         finally:
             ctx.close()
 
-    def test_mobile_sticky_left_column_and_savebar(self):
-        """Layout sanity: at 390px the name column is sticky-left and the
-        savebar is fixed at bottom so neither disappears behind scroll."""
+    def test_mobile_sticky_left_column_and_edit_actions(self):
+        """Layout sanity: at 390px the name column is sticky-left so it
+        doesn't disappear behind horizontal scroll, and the inline Save /
+        Discard action row is present (the old sticky savebar is gone)."""
         ctx, page = self._open_page(
             viewport={"width": 390, "height": 844},
             has_touch=True,
@@ -354,10 +363,12 @@ class ScheduleMobileTests(unittest.TestCase):
                 "getComputedStyle(document.querySelector('.sch-name-col')).position"
             )
             self.assertEqual(name_pos, "sticky")
-            bar_pos = page.evaluate(
-                "getComputedStyle(document.querySelector('.sch-mobile-savebar')).position"
+            # Inline edit actions (Save + Discard) sit at the bottom of
+            # each editable grid form and are always static (not fixed).
+            actions = page.locator(
+                'form[data-schgrid="storefront"] .sch-grid-actions'
             )
-            self.assertEqual(bar_pos, "fixed")
+            self.assertTrue(actions.count() >= 1)
         finally:
             ctx.close()
 
@@ -373,11 +384,12 @@ class ScheduleMobileTests(unittest.TestCase):
         try:
             page.click(self._cell_selector())
             page.wait_for_selector("#sch-modal.is-open", timeout=2000)
-            # Desktop hides the mobile savebar.
-            bar_display = page.evaluate(
-                "getComputedStyle(document.querySelector('.sch-mobile-savebar')).display"
+            # The edit-action row (Save + Discard) must always be visible
+            # on desktop in edit mode.
+            actions_visible = page.evaluate(
+                "getComputedStyle(document.querySelector('form[data-schgrid=\"storefront\"] .sch-grid-actions')).display"
             )
-            self.assertEqual(bar_display, "none")
+            self.assertNotEqual(actions_visible, "none")
         finally:
             ctx.close()
 

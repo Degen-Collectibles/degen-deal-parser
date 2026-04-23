@@ -268,8 +268,10 @@ def _stream_schedule_hint_map(
         key = (uid, s.date)
         if key in hint_map:
             # Second shift on same (user, date). Tag the existing cell
-            # rather than dropping the data entirely.
+            # rather than dropping the data entirely. `extra_count` tells
+            # the admin UI "this cell has N more shifts — edit in /stream-manager".
             hint_map[key]["label"] += "  +1"
+            hint_map[key]["extra_count"] = hint_map[key].get("extra_count", 0) + 1
             continue
         label = f"{_fmt_time_12h(s.start_time)} - {_fmt_time_12h(s.end_time)}"
         if s.is_overnight:
@@ -279,6 +281,15 @@ def _stream_schedule_hint_map(
             "account_id": s.stream_account_id,
             "account_name": _acct_name(s.stream_account_id),
             "color": color,
+            # Raw fields so the click-to-edit modal can pre-fill without
+            # parsing the display label back out.
+            "schedule_id": s.id,
+            "start_time": s.start_time,
+            "end_time": s.end_time,
+            "title": s.title or "",
+            "notes": s.notes or "",
+            "is_overnight": s.is_overnight,
+            "extra_count": 0,
         }
 
     legend: list[dict] = []
@@ -590,6 +601,7 @@ def admin_schedule_view(
     request: Request,
     week: Optional[str] = Query(default=None),
     flash: Optional[str] = Query(default=None),
+    edit: int = Query(default=0),
     session: Session = Depends(get_session),
 ):
     denial, user = _permission_gate(request, session, "admin.schedule.view")
@@ -603,6 +615,21 @@ def admin_schedule_view(
         session, week_start, staff_kind=STAFF_KIND_STREAM
     )
     can_edit = has_permission(session, user, "admin.schedule.edit")
+    # Edit mode is opt-in per visit. The default is a clean read-only
+    # view for everyone (including admins) — safer on mobile and avoids
+    # accidental cell edits. Admins flip it on with ?edit=1.
+    edit_mode = bool(can_edit and edit)
+    # Stream accounts for the edit modal's account selector. We only
+    # need them when edit mode is on; skip the query otherwise.
+    stream_accounts: list[StreamAccount] = []
+    if edit_mode:
+        stream_accounts = list(
+            session.exec(
+                select(StreamAccount)
+                .where(StreamAccount.is_active == True)  # noqa: E712
+                .order_by(StreamAccount.sort_order, StreamAccount.name)
+            ).all()
+        )
     # Top-level nav context (week_start / prev_week / etc.) mirrors the
     # storefront grid so the week buttons still work.
     return templates.TemplateResponse(
@@ -614,6 +641,8 @@ def admin_schedule_view(
             "active": "schedule",
             "current_user": user,
             "can_edit": can_edit,
+            "edit_mode": edit_mode,
+            "stream_accounts": stream_accounts,
             "csrf_token": issue_token(request),
             "build_cell_key": _build_cell_key,
             "build_day_loc_key": _build_day_loc_key,
@@ -659,16 +688,12 @@ async def admin_schedule_save(
     week_days = _week_dates(week_start)
     first_day, last_day = week_days[0], week_days[-1]
 
-    # The Stream grid is the read-only projection of /stream-manager —
-    # no writes accepted here. Guard against a hand-crafted POST that
-    # claims to be editing Stream cells so no ShiftEntry rows are ever
-    # created under a Stream-role user by this endpoint.
+    # Stream grid writes into StreamSchedule (same table /stream-manager
+    # uses) so edits are bidirectional — whatever an admin edits here
+    # shows up in the Stream Manager and vice versa.
     if (form.get("staff_kind") or "").strip() == STAFF_KIND_STREAM:
-        from urllib.parse import quote_plus
-        msg = "Stream schedule is managed in the Stream Manager."
-        return RedirectResponse(
-            f"/team/admin/schedule?week={week_start.isoformat()}&flash={quote_plus(msg)}",
-            status_code=303,
+        return await _save_stream_shifts(
+            request, session, current, form, week_start, week_days
         )
 
     # Only touch cells for users who are actually on this week's grid
@@ -701,6 +726,11 @@ async def admin_schedule_save(
     touched: int = 0
     emptied: int = 0
     added: int = 0
+    recurred: int = 0
+
+    # Collect (uid, iso_date, label, kind, recur_weeks) we applied so
+    # recurrence can project the same shift forward on later passes.
+    applied_labels: list[tuple[int, date, str, str, int]] = []
 
     for uid in user_ids:
         for d in week_days:
@@ -727,8 +757,9 @@ async def admin_schedule_save(
                 added += 1
             else:
                 if entry.label == raw and entry.kind == kind:
-                    continue
-                if kind == SHIFT_KIND_BLANK and not raw:
+                    # No-change, but still project recurrence forward.
+                    pass
+                elif kind == SHIFT_KIND_BLANK and not raw:
                     session.delete(entry)
                     emptied += 1
                 else:
@@ -737,6 +768,61 @@ async def admin_schedule_save(
                     entry.updated_at = now
                     session.add(entry)
                     touched += 1
+
+            # Capture recurrence intent. A value of N means "this shift
+            # plus the next N-1 weeks". Empty cells never recur.
+            try:
+                recur_n = int(form.get(f"recur__{uid}__{d.isoformat()}") or "1")
+            except (TypeError, ValueError):
+                recur_n = 1
+            recur_n = max(1, min(recur_n, 12))
+            if recur_n > 1 and kind != SHIFT_KIND_BLANK and raw:
+                applied_labels.append((uid, d, raw, kind, recur_n))
+
+    # Apply recurrence by upserting the same label into the same weekday
+    # on each of the next recur_n-1 weeks. We always OVERWRITE the
+    # destination cell so "Repeat for 4 weeks" is idempotent — re-saving
+    # the same modal won't create drift with an old pre-existing entry.
+    if applied_labels:
+        max_offset = max(n for _, _, _, _, n in applied_labels)
+        future_start = first_day + timedelta(days=7)
+        future_end = first_day + timedelta(days=7 * (max_offset - 1)) + timedelta(days=6)
+        future_entries = list(
+            session.exec(
+                select(ShiftEntry).where(
+                    ShiftEntry.shift_date >= future_start,
+                    ShiftEntry.shift_date <= future_end,
+                )
+            ).all()
+        )
+        future_map: dict[tuple[int, date], ShiftEntry] = {
+            (e.user_id, e.shift_date): e for e in future_entries
+        }
+        for uid, base_date, raw, kind, recur_n in applied_labels:
+            for i in range(1, recur_n):
+                fut = base_date + timedelta(days=7 * i)
+                existing = future_map.get((uid, fut))
+                if existing is None:
+                    session.add(
+                        ShiftEntry(
+                            user_id=uid,
+                            shift_date=fut,
+                            label=raw,
+                            kind=kind,
+                            created_by_user_id=current.id,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+                    recurred += 1
+                else:
+                    if existing.label == raw and existing.kind == kind:
+                        continue
+                    existing.label = raw
+                    existing.kind = kind
+                    existing.updated_at = now
+                    session.add(existing)
+                    recurred += 1
 
     # Per-day location header (e.g. "East Bay Santa Clara" for the weekend).
     # Same non-clobbering rule: empty input on a day with no existing note
@@ -784,7 +870,7 @@ async def admin_schedule_save(
                 session.add(existing)
             day_note_changes += 1
 
-    total_changes = touched + emptied + added + day_note_changes
+    total_changes = touched + emptied + added + day_note_changes + recurred
     if total_changes:
         session.add(
             AuditLog(
@@ -797,6 +883,7 @@ async def admin_schedule_save(
                         "cells_added": added,
                         "cells_updated": touched,
                         "cells_cleared": emptied,
+                        "cells_recurred": recurred,
                         "day_headers_changed": day_note_changes,
                     }
                 ),
@@ -806,6 +893,7 @@ async def admin_schedule_save(
         session.commit()
         flash = (
             f"Saved · {added} added · {touched} updated · {emptied} cleared"
+            + (f" · {recurred} future week{'s' if recurred != 1 else ''}" if recurred else "")
             + (f" · {day_note_changes} header{'s' if day_note_changes != 1 else ''}" if day_note_changes else "")
         )
     else:
@@ -815,6 +903,441 @@ async def admin_schedule_save(
     return RedirectResponse(
         f"/team/admin/schedule?week={week_start.isoformat()}&flash={quote_plus(flash)}",
         status_code=303,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Stream shift save — called from admin_schedule_save when staff_kind=stream.
+#
+# Stream shifts live in StreamSchedule (same table /stream-manager uses), so
+# anything saved here appears in the Stream Manager and vice versa. Each
+# cell hidden-input `stream_cell__{uid}__{date}` carries a JSON payload:
+#
+#   { "start": "14:00", "end": "18:00", "account_id": 2,
+#     "title": "", "notes": "", "recur": 1, "clear": false }
+#
+# - clear=true deletes any existing StreamSchedule rows for (streamer, date).
+# - otherwise: one-shift-per-(streamer, date) semantics — existing rows are
+#   wiped and a single new row is inserted. For multi-shift days, admins
+#   still use /stream-manager.
+# - recur N applies the same upsert to the same weekday in the next N-1
+#   weeks (max 12).
+# ---------------------------------------------------------------------------
+
+
+async def _save_stream_shifts(
+    request: Request,
+    session: Session,
+    current: User,
+    form,
+    week_start: date,
+    week_days: list[date],
+) -> RedirectResponse:
+    from urllib.parse import quote_plus
+
+    iso_dates_this_week = {d.isoformat() for d in week_days}
+
+    # Only edit streamers for users that belong on the Stream grid.
+    stream_users: list[User] = list(
+        session.exec(
+            select(User)
+            .where(_schedulable_clause())
+            .where(User.staff_kind == STAFF_KIND_STREAM)
+        ).all()
+    )
+    valid_uids = {u.id for u in stream_users if u.id is not None}
+    user_by_id = {u.id: u for u in stream_users if u.id is not None}
+
+    # Map user_id -> Streamer row; create on the fly if missing so admins
+    # can schedule a newly-flipped Stream-role employee without first
+    # visiting /stream-manager to register them.
+    existing_streamers = list(
+        session.exec(
+            select(Streamer).where(Streamer.user_id.in_(valid_uids))  # type: ignore[attr-defined]
+        ).all()
+    ) if valid_uids else []
+    streamer_by_uid: dict[int, Streamer] = {
+        s.user_id: s for s in existing_streamers if s.user_id is not None
+    }
+
+    def _ensure_streamer(uid: int) -> Optional[Streamer]:
+        s = streamer_by_uid.get(uid)
+        if s is not None:
+            return s
+        user = user_by_id.get(uid)
+        if user is None:
+            return None
+        s = Streamer(
+            name=(user.display_name or user.username or f"User {uid}"),
+            user_id=uid,
+            is_active=True,
+        )
+        session.add(s)
+        session.flush()  # get the id
+        streamer_by_uid[uid] = s
+        return s
+
+    # Default StreamAccount — used when a cell doesn't pick one.
+    default_acct = session.exec(
+        select(StreamAccount).where(StreamAccount.is_default == True)  # noqa: E712
+    ).first()
+    default_acct_id = default_acct.id if default_acct else None
+
+    now = utcnow()
+    added = 0
+    updated = 0
+    cleared = 0
+    recurred = 0
+
+    # Track what we applied so recurrence can project forward.
+    applied: list[tuple[int, date, dict, int]] = []  # (uid, date, payload, recur_n)
+
+    for key in list(form.keys()):
+        if not key.startswith("stream_cell__"):
+            continue
+        parts = key.split("__")
+        if len(parts) != 3:
+            continue
+        try:
+            uid = int(parts[1])
+        except (TypeError, ValueError):
+            continue
+        iso = parts[2]
+        if uid not in valid_uids or iso not in iso_dates_this_week:
+            continue
+        raw = (form.get(key) or "").strip()
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+
+        streamer = _ensure_streamer(uid)
+        if streamer is None or streamer.id is None:
+            continue
+
+        # Nuke whatever currently exists for (streamer, date). Keeps the
+        # invariant that admin-schedule edits are single-shift-per-day.
+        existing_rows = list(
+            session.exec(
+                select(StreamSchedule).where(
+                    StreamSchedule.streamer_id == streamer.id,
+                    StreamSchedule.date == iso,
+                )
+            ).all()
+        )
+
+        if payload.get("clear"):
+            for row in existing_rows:
+                session.delete(row)
+                cleared += 1
+            continue
+
+        start_t = (payload.get("start") or "").strip()
+        end_t = (payload.get("end") or "").strip()
+        if not (start_t and end_t):
+            continue  # nothing to save without times
+        acct_id_raw = payload.get("account_id")
+        try:
+            acct_id: Optional[int] = int(acct_id_raw) if acct_id_raw else None
+        except (TypeError, ValueError):
+            acct_id = None
+        if acct_id is None:
+            acct_id = default_acct_id
+
+        title = (payload.get("title") or "").strip() or None
+        notes = (payload.get("notes") or "").strip() or None
+        is_overnight = end_t < start_t
+
+        for row in existing_rows:
+            session.delete(row)
+        session.add(
+            StreamSchedule(
+                streamer_id=streamer.id,
+                stream_account_id=acct_id,
+                date=iso,
+                start_time=start_t,
+                end_time=end_t,
+                is_overnight=is_overnight,
+                title=title,
+                notes=notes,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        if existing_rows:
+            updated += 1
+        else:
+            added += 1
+
+        try:
+            recur_n = int(payload.get("recur") or 1)
+        except (TypeError, ValueError):
+            recur_n = 1
+        recur_n = max(1, min(recur_n, 12))
+        if recur_n > 1:
+            try:
+                base_date = datetime.strptime(iso, "%Y-%m-%d").date()
+            except ValueError:
+                base_date = None
+            if base_date is not None:
+                applied.append((uid, base_date, {
+                    "start": start_t, "end": end_t, "account_id": acct_id,
+                    "title": title, "notes": notes, "is_overnight": is_overnight,
+                }, recur_n))
+
+    # Project recurrence forward.
+    for uid, base_date, payload, recur_n in applied:
+        streamer = streamer_by_uid.get(uid)
+        if streamer is None or streamer.id is None:
+            continue
+        for i in range(1, recur_n):
+            fut = base_date + timedelta(days=7 * i)
+            iso_fut = fut.isoformat()
+            existing_rows = list(
+                session.exec(
+                    select(StreamSchedule).where(
+                        StreamSchedule.streamer_id == streamer.id,
+                        StreamSchedule.date == iso_fut,
+                    )
+                ).all()
+            )
+            for row in existing_rows:
+                session.delete(row)
+            session.add(
+                StreamSchedule(
+                    streamer_id=streamer.id,
+                    stream_account_id=payload["account_id"],
+                    date=iso_fut,
+                    start_time=payload["start"],
+                    end_time=payload["end"],
+                    is_overnight=payload["is_overnight"],
+                    title=payload["title"],
+                    notes=payload["notes"],
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            recurred += 1
+
+    total = added + updated + cleared + recurred
+    if total:
+        session.add(
+            AuditLog(
+                actor_user_id=current.id,
+                action="admin.schedule.stream_save",
+                resource_key="admin.schedule.edit",
+                details_json=json.dumps({
+                    "week_start": week_start.isoformat(),
+                    "added": added,
+                    "updated": updated,
+                    "cleared": cleared,
+                    "recurred": recurred,
+                }),
+                ip_address=(request.client.host if request.client else None),
+            )
+        )
+        session.commit()
+        flash = (
+            f"Stream saved · {added} added · {updated} updated · {cleared} cleared"
+            + (f" · {recurred} future week{'s' if recurred != 1 else ''}" if recurred else "")
+        )
+    else:
+        flash = "No stream changes."
+
+    return RedirectResponse(
+        f"/team/admin/schedule?week={week_start.isoformat()}&flash={quote_plus(flash)}",
+        status_code=303,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Generate from previous week — copies shifts from the immediately prior
+# week onto the target week for a blank/partial week. Handles both grids:
+#   staff_kind=storefront -> clones ShiftEntry rows
+#   staff_kind=stream     -> clones StreamSchedule rows
+# Never touches cells that already have a value on the target week.
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/team/admin/schedule/generate-from-previous",
+    dependencies=[Depends(require_csrf)],
+)
+async def admin_schedule_generate_from_previous(
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    denial, current = _admin_gate(request, session, "admin.schedule.edit")
+    if denial:
+        return denial
+    form = await request.form()
+    week_start = _parse_week_start(form.get("week") or "")
+    week_days = _week_dates(week_start)
+    first_day, last_day = week_days[0], week_days[-1]
+    prev_start = week_start - timedelta(days=7)
+    prev_first = prev_start
+    prev_last = prev_start + timedelta(days=6)
+
+    form_kind = (form.get("staff_kind") or "").strip().lower()
+    staff_kind = form_kind if form_kind in STAFF_KINDS else STAFF_KIND_STOREFRONT
+
+    now = utcnow()
+    added = 0
+
+    if staff_kind == STAFF_KIND_STREAM:
+        stream_users: list[User] = list(
+            session.exec(
+                select(User)
+                .where(_schedulable_clause())
+                .where(User.staff_kind == STAFF_KIND_STREAM)
+            ).all()
+        )
+        uids = {u.id for u in stream_users if u.id is not None}
+        streamers = list(
+            session.exec(
+                select(Streamer).where(Streamer.user_id.in_(uids))  # type: ignore[attr-defined]
+            ).all()
+        ) if uids else []
+        streamer_ids = {s.id for s in streamers if s.id is not None}
+        if not streamer_ids:
+            return _redirect_back(week_start, "No stream employees to copy shifts for.")
+        prev_rows = list(
+            session.exec(
+                select(StreamSchedule).where(
+                    StreamSchedule.streamer_id.in_(streamer_ids),  # type: ignore[attr-defined]
+                    StreamSchedule.date >= prev_first.isoformat(),
+                    StreamSchedule.date <= prev_last.isoformat(),
+                )
+            ).all()
+        )
+        if not prev_rows:
+            return _redirect_back(week_start, "No stream shifts on the previous week to copy.")
+
+        existing_this_week = list(
+            session.exec(
+                select(StreamSchedule).where(
+                    StreamSchedule.streamer_id.in_(streamer_ids),  # type: ignore[attr-defined]
+                    StreamSchedule.date >= first_day.isoformat(),
+                    StreamSchedule.date <= last_day.isoformat(),
+                )
+            ).all()
+        )
+        occupied = {(r.streamer_id, r.date) for r in existing_this_week}
+        for row in prev_rows:
+            try:
+                prev_d = datetime.strptime(row.date, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            fut = prev_d + timedelta(days=7)
+            iso_fut = fut.isoformat()
+            if (row.streamer_id, iso_fut) in occupied:
+                continue  # don't clobber existing shift on the target week
+            session.add(
+                StreamSchedule(
+                    streamer_id=row.streamer_id,
+                    stream_account_id=row.stream_account_id,
+                    date=iso_fut,
+                    start_time=row.start_time,
+                    end_time=row.end_time,
+                    is_overnight=row.is_overnight,
+                    title=row.title,
+                    notes=row.notes,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            added += 1
+    else:
+        # Storefront: clone ShiftEntry rows for the roster/shifted set
+        # (same "who's on this week" rules admin_schedule_save uses).
+        roster_ids: set[int] = set(
+            session.exec(
+                select(ScheduleRosterMember.user_id).where(
+                    ScheduleRosterMember.week_start == week_start
+                )
+            ).all()
+        )
+        prev_entries = list(
+            session.exec(
+                select(ShiftEntry).where(
+                    ShiftEntry.shift_date >= prev_first,
+                    ShiftEntry.shift_date <= prev_last,
+                )
+            ).all()
+        )
+        if not prev_entries:
+            return _redirect_back(week_start, "No storefront shifts on the previous week to copy.")
+
+        existing_this_week = list(
+            session.exec(
+                select(ShiftEntry).where(
+                    ShiftEntry.shift_date >= first_day,
+                    ShiftEntry.shift_date <= last_day,
+                )
+            ).all()
+        )
+        occupied = {(e.user_id, e.shift_date) for e in existing_this_week}
+
+        # Filter to storefront-kind users (users whose staff_kind is
+        # either 'storefront' or NULL — the legacy default pre-dating
+        # the Stream/Storefront split).
+        from sqlalchemy import or_ as _or
+        kind_user_ids = set(
+            session.exec(
+                select(User.id).where(
+                    _or(
+                        User.staff_kind == STAFF_KIND_STOREFRONT,
+                        User.staff_kind.is_(None),  # type: ignore[attr-defined]
+                    )
+                )
+            ).all()
+        )
+        for entry in prev_entries:
+            if entry.user_id not in kind_user_ids and entry.user_id not in roster_ids:
+                continue
+            fut = entry.shift_date + timedelta(days=7)
+            if (entry.user_id, fut) in occupied:
+                continue
+            session.add(
+                ShiftEntry(
+                    user_id=entry.user_id,
+                    shift_date=fut,
+                    label=entry.label,
+                    kind=entry.kind,
+                    created_by_user_id=current.id,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            added += 1
+
+    if added == 0:
+        return _redirect_back(
+            week_start,
+            "Nothing to copy — every targeted cell already has a shift this week.",
+        )
+    session.add(
+        AuditLog(
+            actor_user_id=current.id,
+            action="admin.schedule.generate_from_previous",
+            resource_key="admin.schedule.edit",
+            details_json=json.dumps({
+                "week_start": week_start.isoformat(),
+                "from_week": prev_start.isoformat(),
+                "staff_kind": staff_kind,
+                "shifts_added": added,
+            }),
+            ip_address=(request.client.host if request.client else None),
+        )
+    )
+    session.commit()
+    return _redirect_back(
+        week_start,
+        f"Generated {added} shift{'s' if added != 1 else ''} from last week.",
     )
 
 

@@ -663,17 +663,23 @@ class AdminScheduleSaveTests(unittest.TestCase, _W47Harness):
         admin = self._login_as("admin")
         emps = self._active_employees()
         self._roster(emps, self._monday_of_this_week(), admin_id=admin.id)
-        r = self.client.get("/team/admin/schedule")
+        # edit=1 flips the page into edit mode so Save/remove markup
+        # renders. The default view is read-only for everyone.
+        r = self.client.get("/team/admin/schedule?edit=1")
         self.assertEqual(r.status_code, 200)
         for e in emps:
             self.assertIn(e.display_name, r.text)
         self.assertIn("Save storefront schedule", r.text)
-        # Stream grid is read-only (managed from /stream-manager) — it
-        # no longer renders a save button on this page.
-        self.assertNotIn("Save stream schedule", r.text)
-        self.assertIn("Read-only", r.text)
+        # Stream grid is now also editable (writes sync with Stream Manager).
+        self.assertIn("Save stream schedule", r.text)
         self.assertIn("Prev", r.text)
         self.assertIn("Next", r.text)
+
+        # Read-only view does NOT render the Save button.
+        r_ro = self.client.get("/team/admin/schedule")
+        self.assertEqual(r_ro.status_code, 200)
+        self.assertNotIn("Save storefront schedule", r_ro.text)
+        self.assertIn("Edit schedule", r_ro.text)
 
     def test_admin_schedule_empty_by_default(self):
         """A fresh week shows NO employees on the grid rows.
@@ -832,8 +838,11 @@ class AdminScheduleSaveTests(unittest.TestCase, _W47Harness):
         )
 
         # Other employees still on the grid; David does not have a row
-        # anymore (no remove-form for him).
-        page = self.client.get(f"/team/admin/schedule?week={monday.isoformat()}")
+        # anymore (no remove-form for him). Remove-form markup only
+        # renders when the admin is in edit mode (?edit=1).
+        page = self.client.get(
+            f"/team/admin/schedule?week={monday.isoformat()}&edit=1"
+        )
         self.assertNotIn(f'id="sch-remove-storefront-{emps[0].id}"', page.text)
         self.assertIn(f'id="sch-remove-storefront-{emps[1].id}"', page.text)
         self.assertIn(f'id="sch-remove-storefront-{emps[2].id}"', page.text)
@@ -871,7 +880,10 @@ class AdminScheduleSaveTests(unittest.TestCase, _W47Harness):
         }
         self.assertEqual(now_on, {emps[0].id, emps[2].id})
 
-        page = self.client.get(f"/team/admin/schedule?week={monday.isoformat()}")
+        # Remove-form markup renders only in edit mode.
+        page = self.client.get(
+            f"/team/admin/schedule?week={monday.isoformat()}&edit=1"
+        )
         self.assertIn(f'id="sch-remove-storefront-{emps[0].id}"', page.text)  # David
         self.assertIn(f'id="sch-remove-storefront-{emps[2].id}"', page.text)  # Chris
         self.assertNotIn(f'id="sch-remove-storefront-{emps[1].id}"', page.text)  # Emily not copied
