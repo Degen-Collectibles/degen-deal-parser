@@ -805,7 +805,7 @@ def _payroll_cost_summary(session: Session, *, today: Optional[date] = None) -> 
         "hourly_count": hourly_count,
         "missing_hourly_rate_count": len(missing_hourly_rate_ids),
         "missing_salary_count": len(missing_salary_ids),
-        "basis_label": "Salary accrual + scheduled hourly shifts",
+        "basis_label": "Salary prorated by calendar day + scheduled hourly shifts",
     }
 
 

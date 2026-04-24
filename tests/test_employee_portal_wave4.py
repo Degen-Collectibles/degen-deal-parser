@@ -565,6 +565,27 @@ class AdminProfileUpdateHardeningTests(unittest.TestCase, _W4Harness):
         self.assertEqual(periods["month_to_date"]["total_label"], "$2,480.00")
         self.assertEqual(summary["monthly_salary_commitment_label"], "$3,000.00")
 
+    def test_payroll_cost_summary_prorates_monthly_salary_by_calendar_days(self):
+        from datetime import date
+
+        from app.models import EmployeeProfile
+        from app.pii import encrypt_pii
+        from app.routers.team_admin_employees import _payroll_cost_summary
+
+        self._login(role="admin", user_id=527, username="adm527")
+        salaried = self._seed_employee(user_id=829, username="emp829")
+        profile = self.session.get(EmployeeProfile, salaried.id)
+        profile.compensation_type = "monthly_salary"
+        profile.monthly_salary_cents_enc = encrypt_pii("600000")
+        self.session.add(profile)
+        self.session.commit()
+
+        summary = _payroll_cost_summary(self.session, today=date(2026, 4, 24))
+        periods = {row["key"]: row for row in summary["periods"]}
+        self.assertEqual(periods["today"]["salary_label"], "$200.00")
+        self.assertEqual(periods["week_to_date"]["salary_label"], "$1,000.00")
+        self.assertEqual(periods["month_to_date"]["salary_label"], "$4,800.00")
+
 
 class ResetPasswordTests(unittest.TestCase, _W4Harness):
     def setUp(self): self._setup()
