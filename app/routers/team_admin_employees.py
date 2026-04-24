@@ -639,6 +639,7 @@ def _pay_rate_rows(session: Session, *, include_inactive: bool = False) -> list[
                 "payment_method": payment_method,
             }
         )
+    rows.sort(key=lambda row: row["compensation_type"] == COMPENSATION_TYPE_UNPAID)
     return rows
 
 

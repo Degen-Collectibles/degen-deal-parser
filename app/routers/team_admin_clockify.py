@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 from urllib.parse import urlencode
 
@@ -17,6 +17,7 @@ from ..clockify import (
     ClockifyApiError,
     ClockifyConfigError,
     ClockifyWeekSummary,
+    build_week_summary,
     clockify_week_bounds,
     clockify_client_from_settings,
     clockify_is_configured,
@@ -41,6 +42,7 @@ CLOCKIFY_NAME_OVERRIDES = {
 }
 _CLOCKIFY_WEEK_CACHE: dict[tuple[str, date], tuple[float, ClockifyWeekSummary]] = {}
 _CLOCKIFY_WEEK_CACHE_TTL_SECONDS = 60.0
+_BREAK_KEYWORDS = ("break", "lunch", "meal", "rest")
 
 
 def _mask_id(value: str) -> str:
@@ -313,6 +315,163 @@ def build_clockify_roster_preview(
     return rows
 
 
+def _clockify_day_bounds(
+    today: Optional[date] = None,
+    *,
+    settings=None,
+) -> tuple[datetime, datetime]:
+    day = today or date.today()
+    week_start_local, _week_end_local = clockify_week_bounds(day, settings=settings)
+    day_offset = (day - week_start_local.date()).days
+    start_local = week_start_local + timedelta(days=day_offset)
+    return start_local, start_local + timedelta(days=1)
+
+
+def _format_clockify_time(value: Optional[datetime]) -> str:
+    if value is None:
+        return "-"
+    return value.strftime("%I:%M %p").lstrip("0")
+
+
+def _clockify_entry_search_text(entry: Any) -> str:
+    pieces: list[str] = []
+    if hasattr(entry, "description"):
+        pieces.append(str(getattr(entry, "description") or ""))
+    if isinstance(entry, dict):
+        for key in ("description", "projectName", "taskName"):
+            pieces.append(str(entry.get(key) or ""))
+        for key in ("project", "task"):
+            nested = entry.get(key)
+            if isinstance(nested, dict):
+                pieces.append(str(nested.get("name") or ""))
+    return " ".join(piece for piece in pieces if piece).lower()
+
+
+def _clockify_entry_is_break(entry: Any) -> bool:
+    text = _clockify_entry_search_text(entry)
+    return any(re.search(rf"\b{re.escape(keyword)}\b", text) for keyword in _BREAK_KEYWORDS)
+
+
+def build_clockify_live_status(
+    session: Session,
+    client: ClockifyClient,
+    *,
+    settings=None,
+    today: Optional[date] = None,
+    now: Optional[datetime] = None,
+    employee_rows: Optional[list[dict[str, Any]]] = None,
+) -> dict[str, Any]:
+    """Build current Clockify timer status for mapped portal employees."""
+    day = today or date.today()
+    start_local, end_local = _clockify_day_bounds(day, settings=settings)
+    now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    rows: list[dict[str, Any]] = []
+    employees = employee_rows if employee_rows is not None else _employee_rows(session)
+    eligible_rows = [row for row in employees if row.get("profile")]
+    mapped_rows = [
+        row for row in eligible_rows if (row.get("clockify_user_id") or "").strip()
+    ]
+
+    for row in mapped_rows:
+        employee = row.get("user")
+        clockify_user_id = (row.get("clockify_user_id") or "").strip()
+        display_name = (
+            getattr(employee, "display_name", None)
+            or getattr(employee, "username", None)
+            or "Employee"
+        )
+        base = {
+            "employee": employee,
+            "employee_name": display_name,
+            "clockify_user_id": clockify_user_id,
+            "clockify_user_id_masked": _mask_id(clockify_user_id),
+            "status": "Not clocked in",
+            "status_key": "not_clocked_in",
+            "status_color": "var(--lx-muted)",
+            "current_start_label": "-",
+            "running_duration_label": "-",
+            "today_total_label": "0m",
+            "break_label": "No time today",
+            "break_color": "var(--lx-muted)",
+            "entry_count": 0,
+            "error": "",
+            "rank": 4,
+        }
+        try:
+            raw_entries = client.get_user_time_entries(
+                clockify_user_id,
+                start_utc=start_local.astimezone(timezone.utc),
+                end_utc=end_local.astimezone(timezone.utc),
+            )
+            summary = build_week_summary(
+                raw_entries,
+                week_start_local=start_local,
+                week_end_local=end_local,
+                settings=settings,
+                now=now_utc,
+            )
+        except (ClockifyApiError, ClockifyConfigError) as exc:
+            base.update(
+                {
+                    "status": "Clockify error",
+                    "status_key": "error",
+                    "status_color": "#fca5a5",
+                    "break_label": "-",
+                    "error": str(exc),
+                    "rank": 5,
+                }
+            )
+            rows.append(base)
+            continue
+
+        running_entries = [entry for entry in summary.entries if entry.running]
+        running_entry = running_entries[-1] if running_entries else None
+        break_entries = [entry for entry in summary.entries if _clockify_entry_is_break(entry)]
+        break_taken = any(entry.duration_seconds > 0 for entry in break_entries)
+        running_is_break = bool(running_entry and _clockify_entry_is_break(running_entry))
+        base["today_total_label"] = format_hours(summary.total_seconds)
+        base["entry_count"] = len(summary.entries)
+
+        if running_entry is not None:
+            base["current_start_label"] = _format_clockify_time(running_entry.start_local)
+            base["running_duration_label"] = format_hours(running_entry.duration_seconds)
+            if running_is_break:
+                base["status"] = "On break"
+                base["status_key"] = "on_break"
+                base["status_color"] = "#facc15"
+                base["break_label"] = "On break now"
+                base["break_color"] = "#facc15"
+                base["rank"] = 0
+            else:
+                base["status"] = "Clocked in"
+                base["status_key"] = "clocked_in"
+                base["status_color"] = "#86efac"
+                base["break_label"] = "Taken" if break_taken else "No break yet"
+                base["break_color"] = "#86efac" if break_taken else "var(--lx-muted)"
+                base["rank"] = 1
+        elif summary.total_seconds > 0:
+            base["status"] = "Clocked out"
+            base["status_key"] = "clocked_out"
+            base["status_color"] = "var(--lx-text)"
+            base["break_label"] = "Taken" if break_taken else "No break"
+            base["break_color"] = "#86efac" if break_taken else "var(--lx-muted)"
+            base["rank"] = 3
+
+        rows.append(base)
+
+    rows.sort(key=lambda item: (item["rank"], str(item["employee_name"]).lower()))
+    generated_at = now_utc.astimezone(start_local.tzinfo)
+    timezone_name = str(getattr(start_local.tzinfo, "key", None) or start_local.tzinfo)
+    return {
+        "rows": rows,
+        "mapped_count": len(mapped_rows),
+        "unmapped_count": max(0, len(eligible_rows) - len(mapped_rows)),
+        "timezone_name": timezone_name,
+        "date_label": day.strftime("%b %d, %Y").replace(" 0", " "),
+        "generated_at_label": _format_clockify_time(generated_at),
+    }
+
+
 def set_employee_clockify_user_id(
     session: Session,
     *,
@@ -498,6 +657,7 @@ def admin_clockify_page(
     flash: Optional[str] = None,
     error: Optional[str] = None,
     include_hours: str = Query(default="0"),
+    live_status: str = Query(default="0"),
     session: Session = Depends(get_session),
 ):
     denial, user = _permission_gate(request, session, "admin.employees.view")
@@ -512,6 +672,9 @@ def admin_clockify_page(
     roster_preview: list[dict[str, Any]] = []
     clockify_user_map: dict[str, dict[str, Any]] = {}
     preview_capped = False
+    client: Optional[ClockifyClient] = None
+    include_hour_preview = include_hours not in ("0", "false", "no", "off")
+    load_live_status = live_status not in ("0", "false", "no", "off")
     if configured:
         try:
             client = clockify_client_from_settings(settings)
@@ -527,7 +690,7 @@ def admin_clockify_page(
                 clockify_users,
                 client=client,
                 settings=settings,
-                include_hours=include_hours not in ("0", "false", "no", "off"),
+                include_hours=include_hour_preview,
             )
             preview_capped = len(clockify_users) > len(roster_preview)
         except (ClockifyApiError, ClockifyConfigError) as exc:
@@ -535,6 +698,14 @@ def admin_clockify_page(
     employees = _employee_rows(session)
     linked_by_clockify = _employee_link_map(employees)
     counts = _employee_clockify_counts(employees)
+    live = None
+    if configured and client is not None and load_live_status:
+        live = build_clockify_live_status(
+            session,
+            client,
+            settings=settings,
+            employee_rows=employees,
+        )
     return templates.TemplateResponse(
         request,
         "team/admin/clockify.html",
@@ -550,7 +721,9 @@ def admin_clockify_page(
             "clockify_user_map": clockify_user_map,
             "roster_preview": roster_preview,
             "preview_capped": preview_capped,
-            "include_hours": include_hours not in ("0", "false", "no", "off"),
+            "include_hours": include_hour_preview,
+            "live_status": load_live_status,
+            "live": live,
             "employees": employees,
             "linked_by_clockify": linked_by_clockify,
             "counts": counts,

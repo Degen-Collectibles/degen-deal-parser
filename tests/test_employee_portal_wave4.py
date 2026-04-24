@@ -601,6 +601,27 @@ class AdminProfileUpdateHardeningTests(unittest.TestCase, _W4Harness):
         summary = _payroll_cost_summary(self.session)
         self.assertGreaterEqual(summary["unpaid_count"], 1)
 
+    def test_bulk_pay_rates_sorts_unpaid_people_to_bottom(self):
+        from app.models import EmployeeProfile
+        from app.routers.team_admin_employees import _pay_rate_rows
+
+        paid_a = self._seed_employee(user_id=833, username="aaa-paid")
+        unpaid = self._seed_employee(user_id=834, username="bbb-unpaid")
+        paid_z = self._seed_employee(user_id=835, username="zzz-paid")
+        unpaid_profile = self.session.get(EmployeeProfile, unpaid.id)
+        unpaid_profile.compensation_type = "unpaid"
+        self.session.add(unpaid_profile)
+        self.session.commit()
+
+        rows = _pay_rate_rows(self.session)
+        names = [
+            row["user"].username
+            for row in rows
+            if row["user"].username in {"aaa-paid", "bbb-unpaid", "zzz-paid"}
+        ]
+
+        self.assertEqual(names, [paid_a.username, paid_z.username, unpaid.username])
+
     def test_payroll_cost_summary_includes_salary_accrual_and_scheduled_hourly(self):
         from datetime import date
 
