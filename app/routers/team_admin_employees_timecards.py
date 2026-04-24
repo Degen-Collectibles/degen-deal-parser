@@ -55,6 +55,13 @@ EARLY_LEAVE_THRESHOLD_MIN = 15
 _LABOR_KINDS = {SHIFT_KIND_WORK, SHIFT_KIND_ALL}
 
 
+def _format_month_day(value: date, *, include_year: bool = False) -> str:
+    label = f"{value.strftime('%b')} {value.day}"
+    if include_year:
+        label = f"{label}, {value.year}"
+    return label
+
+
 def _tz(settings=None) -> ZoneInfo:
     settings = settings or get_settings()
     name = (getattr(settings, "clockify_timezone", None) or DEFAULT_TZ).strip() or DEFAULT_TZ
@@ -315,10 +322,7 @@ def _build_day_rows(
             day, sum(e.duration_seconds for e in day_entries)
         )
         pills, running = _anomaly_pills(day_shifts, day_entries, day, tz, today)
-        try:
-            date_label = day.strftime("%b %-d")
-        except ValueError:
-            date_label = day.strftime("%b %d").replace(" 0", " ")
+        date_label = _format_month_day(day)
         rows.append(
             _DayRow(
                 day=day,
@@ -434,7 +438,10 @@ def admin_employee_timecards(
     has_any_scheduled = bool(shift_rows)
     has_any_actual = bool(summary and summary.entries)
 
-    week_label = f"{week_start.strftime('%b %-d')} – {week_end_inclusive.strftime('%b %-d, %Y')}"
+    week_label = (
+        f"{_format_month_day(week_start)} - "
+        f"{_format_month_day(week_end_inclusive, include_year=True)}"
+    )
 
     context = {
         "request": request,
