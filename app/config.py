@@ -310,6 +310,11 @@ class Settings(BaseSettings):
             insecure_fields.append("SESSION_SECRET")
         if not self.admin_password or self.admin_password == DEFAULT_ADMIN_PASSWORD:
             insecure_fields.append("ADMIN_PASSWORD")
+        if self.employee_portal_enabled:
+            if not self.employee_token_hmac_key:
+                insecure_fields.append("EMPLOYEE_TOKEN_HMAC_KEY")
+            elif self.employee_token_hmac_key == self.session_secret:
+                insecure_fields.append("EMPLOYEE_TOKEN_HMAC_KEY (must differ from SESSION_SECRET)")
 
         if insecure_fields:
             fields_text = ", ".join(insecure_fields)

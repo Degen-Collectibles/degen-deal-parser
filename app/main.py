@@ -26,7 +26,13 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 from sqlmodel import Session, delete, select
 
-from .auth import authenticate_user, has_role, seed_default_users
+from .auth import (
+    _token_hmac_key,
+    authenticate_user,
+    has_role,
+    migrate_empty_password_salts,
+    seed_default_users,
+)
 from .attachment_storage import attachment_cache_path, generate_thumbnail, warm_attachment_cache, write_attachment_cache_file
 from .bookkeeping import (
     refresh_bookkeeping_import_from_source,
@@ -249,6 +255,7 @@ async def lifespan(app: FastAPI):
     if settings.employee_portal_enabled:
         # Imported for side-effect: fail-closed key validation at startup.
         from . import pii as _pii  # noqa: F401
+        _token_hmac_key()
         print("[main] employee portal: enabled")
     else:
         print("[main] employee portal: disabled")
@@ -256,6 +263,7 @@ async def lifespan(app: FastAPI):
     _load_stream_range()
     _load_tiktok_state_from_db()
     with managed_session() as session:
+        migrate_empty_password_salts(session)
         seed_default_users(session)
         requeue_interrupted_backfill_requests(session)
     seed_channels_from_env()

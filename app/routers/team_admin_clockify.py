@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from datetime import date
 from typing import Any, Optional
 from urllib.parse import urlencode
@@ -15,6 +16,8 @@ from ..clockify import (
     ClockifyClient,
     ClockifyApiError,
     ClockifyConfigError,
+    ClockifyWeekSummary,
+    clockify_week_bounds,
     clockify_client_from_settings,
     clockify_is_configured,
     format_hours,
@@ -36,6 +39,8 @@ CLOCKIFY_NAME_OVERRIDES = {
     "alex": ("mod alex",),
     "dat david": ("david",),
 }
+_CLOCKIFY_WEEK_CACHE: dict[tuple[str, date], tuple[float, ClockifyWeekSummary]] = {}
+_CLOCKIFY_WEEK_CACHE_TTL_SECONDS = 60.0
 
 
 def _mask_id(value: str) -> str:
@@ -61,6 +66,33 @@ def _clockify_user_name(row: dict[str, Any]) -> str:
 
 def _clockify_user_email(row: dict[str, Any]) -> str:
     return str(row.get("email") or "").strip()
+
+
+def _mask_email(email: str) -> str:
+    email = (email or "").strip()
+    if "@" not in email:
+        return f"{email[:3]}***" if email else ""
+    local, domain = email.split("@", 1)
+    return f"{local[:3]}***@{domain}" if domain else f"{local[:3]}***"
+
+
+def _clockify_display_name(row: dict[str, Any]) -> str:
+    name = str(row.get("name") or "").strip()
+    if name:
+        return _mask_email(name) if "@" in name else name
+    email = _clockify_user_email(row)
+    if email:
+        return _mask_email(email)
+    return _mask_id(_clockify_user_id(row))
+
+
+def _masked_clockify_user(row: dict[str, Any]) -> dict[str, Any]:
+    masked = dict(row)
+    masked["email"] = _mask_email(_clockify_user_email(row))
+    name = str(masked.get("name") or "").strip()
+    if "@" in name:
+        masked["name"] = _mask_email(name)
+    return masked
 
 
 def _is_matchable_team_user(user: Optional[User]) -> bool:
@@ -117,18 +149,8 @@ def _employee_match_keys(user: User, profile: Optional[EmployeeProfile]) -> list
     return keys
 
 
-def _employee_clockify_counts(session: Session) -> dict[str, int]:
-    profiles = list(session.exec(select(EmployeeProfile)).all())
-    users = {
-        row.id: row
-        for row in session.exec(select(User)).all()
-        if row.id is not None
-    }
-    matchable_profiles = [
-        profile
-        for profile in profiles
-        if _is_matchable_team_user(users.get(profile.user_id))
-    ]
+def _employee_clockify_counts(employee_rows: list[dict[str, Any]]) -> dict[str, int]:
+    matchable_profiles = [row.get("profile") for row in employee_rows if row.get("profile")]
     mapped = sum(1 for profile in matchable_profiles if profile.clockify_user_id)
     with_email = sum(1 for profile in matchable_profiles if profile.email_ciphertext)
     return {
@@ -140,24 +162,14 @@ def _employee_clockify_counts(session: Session) -> dict[str, int]:
 
 
 def _employee_rows(session: Session) -> list[dict[str, Any]]:
-    users = list(
-        session.exec(
-            select(User)
-            .where((User.is_active == True) | (User.password_hash == ""))  # noqa: E712
-            .order_by(User.display_name, User.username)
-        ).all()
-    )
-    profiles = {
-        row.user_id: row
-        for row in session.exec(
-            select(EmployeeProfile).where(
-                EmployeeProfile.user_id.in_([user.id for user in users if user.id])
-            )
-        ).all()
-    } if users else {}
     out: list[dict[str, Any]] = []
-    for employee in users:
-        profile = profiles.get(employee.id)
+    result = session.exec(
+        select(User, EmployeeProfile)
+        .join(EmployeeProfile, EmployeeProfile.user_id == User.id, isouter=True)
+        .where((User.is_active == True) | (User.password_hash == ""))  # noqa: E712
+        .order_by(User.display_name, User.username)
+    ).all()
+    for employee, profile in result:
         out.append(
             {
                 "user": employee,
@@ -169,6 +181,30 @@ def _employee_rows(session: Session) -> list[dict[str, Any]]:
             }
         )
     return out
+
+
+def _cached_user_week_summary(
+    client: ClockifyClient,
+    clockify_user_id: str,
+    *,
+    today: date,
+    settings=None,
+) -> ClockifyWeekSummary:
+    week_start_local, _week_end_local = clockify_week_bounds(today, settings=settings)
+    key = (clockify_user_id, week_start_local.date())
+    now = time.time()
+    cached = _CLOCKIFY_WEEK_CACHE.get(key)
+    if cached is not None:
+        cached_at, summary = cached
+        if now - cached_at < _CLOCKIFY_WEEK_CACHE_TTL_SECONDS:
+            return summary
+    summary = client.user_week_summary(
+        clockify_user_id,
+        today=today,
+        settings=settings,
+    )
+    _CLOCKIFY_WEEK_CACHE[key] = (now, summary)
+    return summary
 
 
 def _employee_link_map(employee_rows: list[dict[str, Any]]) -> dict[str, User]:
@@ -237,7 +273,7 @@ def build_clockify_roster_preview(
     *,
     client: Optional[ClockifyClient] = None,
     settings=None,
-    include_hours: bool = True,
+    include_hours: bool = False,
     today: Optional[date] = None,
     limit: int = 100,
 ) -> list[dict[str, Any]]:
@@ -249,10 +285,10 @@ def build_clockify_roster_preview(
         preview = {
             "id": clockify_id,
             "id_masked": _mask_id(clockify_id),
-            "name": _clockify_user_name(row),
-            "email": _clockify_user_email(row),
+            "name": _clockify_display_name(row),
+            "email": _mask_email(_clockify_user_email(row)),
             "status": str(row.get("status") or "").strip() or "-",
-            "raw": row,
+            "raw": _masked_clockify_user(row),
             "has_data": False,
             "hours_label": "-",
             "entry_count": 0,
@@ -261,7 +297,8 @@ def build_clockify_roster_preview(
         }
         if include_hours and client is not None and clockify_id:
             try:
-                summary = client.user_week_summary(
+                summary = _cached_user_week_summary(
+                    client,
                     clockify_id,
                     today=today,
                     settings=settings,
@@ -471,6 +508,7 @@ def admin_clockify_page(
     workspace = None
     status_error = None
     clockify_users: list[dict[str, Any]] = []
+    clockify_users_display: list[dict[str, Any]] = []
     roster_preview: list[dict[str, Any]] = []
     clockify_user_map: dict[str, dict[str, Any]] = {}
     preview_capped = False
@@ -479,9 +517,10 @@ def admin_clockify_page(
             client = clockify_client_from_settings(settings)
             workspace = client.workspace_info()
             clockify_users = client.list_workspace_users(status="ALL")
+            clockify_users_display = [_masked_clockify_user(row) for row in clockify_users]
             clockify_user_map = {
                 _clockify_user_id(row): row
-                for row in clockify_users
+                for row in clockify_users_display
                 if _clockify_user_id(row)
             }
             roster_preview = build_clockify_roster_preview(
@@ -495,6 +534,7 @@ def admin_clockify_page(
             status_error = str(exc)
     employees = _employee_rows(session)
     linked_by_clockify = _employee_link_map(employees)
+    counts = _employee_clockify_counts(employees)
     return templates.TemplateResponse(
         request,
         "team/admin/clockify.html",
@@ -506,14 +546,14 @@ def admin_clockify_page(
             "workspace": workspace,
             "workspace_id_masked": _mask_id(settings.clockify_workspace_id),
             "status_error": status_error,
-            "clockify_users": clockify_users,
+            "clockify_users": clockify_users_display,
             "clockify_user_map": clockify_user_map,
             "roster_preview": roster_preview,
             "preview_capped": preview_capped,
             "include_hours": include_hours not in ("0", "false", "no", "off"),
             "employees": employees,
             "linked_by_clockify": linked_by_clockify,
-            "counts": _employee_clockify_counts(session),
+            "counts": counts,
             "can_sync": user.role == "admin",
             "mask_id": _mask_id,
             "flash": flash,

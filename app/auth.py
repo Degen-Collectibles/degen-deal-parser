@@ -5,6 +5,7 @@ import hashlib
 from hashlib import pbkdf2_hmac
 import hmac
 import json
+import logging
 import secrets
 from typing import Optional
 
@@ -24,6 +25,11 @@ from .models import (
 
 
 settings = get_settings()
+log = logging.getLogger(__name__)
+
+
+class AuthError(RuntimeError):
+    """Raised when an account cannot be authenticated safely."""
 
 
 def hash_password(password: str, salt: Optional[str] = None) -> tuple[str, str]:
@@ -43,10 +49,9 @@ def verify_password(
     *,
     salt: Optional[str] = None,
 ) -> bool:
-    if salt:
-        salt_bytes = salt.encode("utf-8")
-    else:
-        salt_bytes = settings.session_secret.encode("utf-8")
+    if not salt:
+        raise AuthError("account requires re-migration")
+    salt_bytes = salt.encode("utf-8")
     digest = pbkdf2_hmac(
         "sha256",
         password.encode("utf-8"),
@@ -96,10 +101,17 @@ def authenticate_user(
         )
         return None
     stored_salt = (user.password_salt or "").strip()
-    if stored_salt:
+    try:
         ok = verify_password(password, user.password_hash, salt=stored_salt)
-    else:
-        ok = verify_password(password, user.password_hash)
+    except AuthError:
+        _audit_login(
+            session,
+            target_user_id=user.id,
+            action="login.failed",
+            details={"username": normalized_username, "reason": "missing_password_salt"},
+            ip_address=ip_address,
+        )
+        return None
     if not ok:
         _audit_login(
             session,
@@ -162,10 +174,10 @@ def upsert_seed_user(
         changed = False
         if settings.auth_reseed_passwords:
             stored_salt = (existing.password_salt or "").strip()
-            if stored_salt:
+            try:
                 matches = verify_password(password, existing.password_hash, salt=stored_salt)
-            else:
-                matches = verify_password(password, existing.password_hash)
+            except AuthError:
+                matches = False
             if not matches:
                 h, s = hash_password(password)
                 existing.password_hash = h
@@ -360,12 +372,14 @@ def _verify_token(raw_token: str, token_hash: str) -> bool:
 
 
 def _token_hmac_key() -> bytes:
-    # Prefer a dedicated key so rotating session cookies doesn't invalidate
-    # in-flight invite/reset tokens. Fall back to SESSION_SECRET so existing
-    # deployments keep working without new env vars.
-    key = (settings.employee_token_hmac_key or settings.session_secret or "").encode("utf-8")
+    key_text = (settings.employee_token_hmac_key or "").strip()
+    if not key_text:
+        raise ValueError("EMPLOYEE_TOKEN_HMAC_KEY must be set (distinct from SESSION_SECRET)")
+    if key_text == (settings.session_secret or "").strip():
+        raise ValueError("EMPLOYEE_TOKEN_HMAC_KEY must be distinct from SESSION_SECRET")
+    key = key_text.encode("utf-8")
     if not key:
-        raise RuntimeError("Token HMAC key is empty — set EMPLOYEE_TOKEN_HMAC_KEY or SESSION_SECRET")
+        raise ValueError("EMPLOYEE_TOKEN_HMAC_KEY must be set (distinct from SESSION_SECRET)")
     return key
 
 
@@ -549,6 +563,37 @@ def is_draft_user(user: Optional[User]) -> bool:
     if user is None:
         return False
     return (not user.is_active) and not (user.password_hash or "")
+
+
+def migrate_empty_password_salts(session: Session) -> int:
+    """Populate explicit password salts for legacy rows.
+
+    Legacy portal users without a stored salt were verified with
+    SESSION_SECRET. Without plaintext passwords we cannot re-hash them onto a
+    fresh random salt during boot, so the migration persists the current
+    legacy salt explicitly. That removes the runtime fallback and keeps those
+    accounts working after future SESSION_SECRET rotations. Draft users with no
+    password get a fresh random salt because no verifier has to be preserved.
+    """
+    migrated = 0
+    now = utcnow()
+    rows = session.exec(
+        select(User).where(
+            (User.password_salt == None) | (User.password_salt == "")  # noqa: E711
+        )
+    ).all()
+    for user in rows:
+        if user.password_hash:
+            user.password_salt = settings.session_secret
+        else:
+            user.password_salt = secrets.token_hex(32)
+        user.updated_at = now
+        session.add(user)
+        migrated += 1
+    if migrated:
+        session.commit()
+        log.info("migrated %s users to explicit salts", migrated)
+    return migrated
 
 
 def consume_invite_token(

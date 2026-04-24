@@ -15,6 +15,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
+from sqlalchemy import or_, update
 from sqlmodel import Session, select
 
 from ..auth import (
@@ -30,6 +31,7 @@ from ..models import (
     AuditLog,
     EmployeeProfile,
     InviteToken,
+    PasswordResetToken,
     SHIFT_KIND_ALL,
     SHIFT_KIND_WORK,
     STAFF_KINDS,
@@ -211,6 +213,30 @@ def _pii_fingerprint(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
 
 
+def _revoke_employee_tokens(
+    session: Session,
+    user_id: int,
+    now: datetime,
+) -> tuple[int, int]:
+    invite_result = session.exec(
+        update(InviteToken)
+        .where(
+            InviteToken.target_user_id == user_id,
+            InviteToken.used_at.is_(None),
+        )
+        .values(used_at=now)
+    )
+    reset_result = session.exec(
+        update(PasswordResetToken)
+        .where(
+            PasswordResetToken.user_id == user_id,
+            PasswordResetToken.used_at.is_(None),
+        )
+        .values(used_at=now)
+    )
+    return int(invite_result.rowcount or 0), int(reset_result.rowcount or 0)
+
+
 def _base_url(request: Request) -> str:
     scheme = request.url.scheme
     netloc = request.url.netloc
@@ -306,17 +332,28 @@ def admin_employees_list(
     # see so he can put them on the schedule before they register.
     # The "Show inactive" toggle reveals TRUE inactives — terminated
     # employees who have a real password but are switched off.
-    stmt = select(User).order_by(User.is_active.desc(), User.username)
+    stmt = (
+        select(User)
+        .join(EmployeeProfile, EmployeeProfile.user_id == User.id, isouter=True)
+        .order_by(User.is_active.desc(), User.username)
+    )
     q_clean = (q or "").strip()
-    q_lower = q_clean.lower()
     if not include_inactive:
         # Keep active OR draft (is_active=False AND password_hash=''). Drafts
         # have an empty password_hash set by create_draft_employee.
         stmt = stmt.where((User.is_active == True) | (User.password_hash == ""))  # noqa: E712
-    rows = list(session.exec(stmt).all())[:200]
+    if q_clean:
+        q_like = f"%{q_clean}%"
+        stmt = stmt.where(
+            or_(
+                User.username.ilike(q_like),
+                User.display_name.ilike(q_like),
+                EmployeeProfile.email_lookup_hash.ilike(q_like),
+            )
+        )
+    rows = list(session.exec(stmt.limit(200)).all())
     profiles: dict[int, EmployeeProfile] = {}
     outstanding_invite_ids: set[int] = set()
-    draft_legal_names: dict[int, str] = {}
     if rows:
         ids = [r.id for r in rows if r.id is not None]
         if ids:
@@ -342,41 +379,6 @@ def admin_employees_list(
                 ).all()
                 if inv.target_user_id is not None
             }
-            # Decrypt legal_name for drafts so admin sees a real name in the
-            # list (the placeholder username is intentionally ugly). Classic
-            # users keep showing username + display_name; we never decrypt
-            # their legal name without an audited reveal.
-            for uid, prof in profiles.items():
-                usr = next((r for r in rows if r.id == uid), None)
-                if usr is None or not is_draft_user(usr):
-                    continue
-                if not prof.legal_name_enc:
-                    continue
-                try:
-                    draft_legal_names[uid] = decrypt_pii(prof.legal_name_enc) or ""
-                except ValueError:
-                    draft_legal_names[uid] = ""
-    if q_clean:
-        filtered_rows: list[User] = []
-        q_hash = q_lower[:12]
-        for row in rows:
-            row_id = row.id or 0
-            if q_lower in (row.username or "").lower():
-                filtered_rows.append(row)
-                continue
-            if q_lower in (row.display_name or "").lower():
-                filtered_rows.append(row)
-                continue
-            if q_lower in (draft_legal_names.get(row_id) or "").lower():
-                filtered_rows.append(row)
-                continue
-            profile = profiles.get(row_id)
-            if profile and profile.email_lookup_hash:
-                lookup_hash = profile.email_lookup_hash.lower()
-                if q_lower == lookup_hash or q_hash == lookup_hash[:12]:
-                    filtered_rows.append(row)
-                    continue
-        rows = filtered_rows
     return templates.TemplateResponse(
         request,
         "team/admin/employees_list.html",
@@ -387,8 +389,10 @@ def admin_employees_list(
             "users": rows,
             "profiles": profiles,
             "outstanding_invite_ids": outstanding_invite_ids,
-            "draft_legal_names": draft_legal_names,
             "is_draft_user": is_draft_user,
+            "can_reveal_pii": has_permission(
+                session, user, "admin.employees.reveal_pii"
+            ),
             "q": q or "",
             "flash": flash,
             "show_inactive": include_inactive,
@@ -1556,6 +1560,7 @@ async def admin_employee_terminate_post(
     if employee is None:
         return HTMLResponse("Employee not found", status_code=404)
     now = utcnow()
+    invite_revoked, reset_revoked = _revoke_employee_tokens(session, user_id, now)
     employee.is_active = False
     employee.updated_at = now
     profile = session.get(EmployeeProfile, user_id)
@@ -1571,7 +1576,14 @@ async def admin_employee_terminate_post(
             target_user_id=user_id,
             action="account.terminated",
             resource_key="admin.employees.terminate",
-            details_json=json.dumps({"username": employee.username}),
+            details_json=json.dumps(
+                {
+                    "username": employee.username,
+                    "invite_tokens_revoked": invite_revoked,
+                    "reset_tokens_revoked": reset_revoked,
+                },
+                sort_keys=True,
+            ),
             ip_address=(request.client.host if request.client else None),
         ),
     )
@@ -1634,6 +1646,7 @@ async def admin_employee_purge_post(
         )
     profile = session.get(EmployeeProfile, user_id)
     now = utcnow()
+    invite_revoked, reset_revoked = _revoke_employee_tokens(session, user_id, now)
     if profile is not None:
         for attr in (
             "legal_name_enc",
@@ -1653,6 +1666,10 @@ async def admin_employee_purge_post(
         profile.updated_at = now
         session.add(profile)
     employee.is_active = False
+    employee.username = f"purged+{employee.id}@anonymized.local"
+    employee.password_hash = "__purged_password_hash__"
+    employee.password_salt = "__purged_password_salt__"
+    employee.display_name = ""
     employee.updated_at = now
     session.add(employee)
     _audit_then_commit(
@@ -1662,7 +1679,14 @@ async def admin_employee_purge_post(
             target_user_id=user_id,
             action="account.purged",
             resource_key="admin.employees.purge",
-            details_json=json.dumps({"username": employee.username}),
+            details_json=json.dumps(
+                {
+                    "username": employee.username,
+                    "invite_tokens_revoked": invite_revoked,
+                    "reset_tokens_revoked": reset_revoked,
+                },
+                sort_keys=True,
+            ),
             ip_address=(request.client.host if request.client else None),
         ),
     )

@@ -9,8 +9,9 @@ from __future__ import annotations
 import json
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Form, Query, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
+from sqlalchemy import update
 from sqlmodel import Session, select
 
 from ..csrf import issue_token, require_csrf
@@ -23,6 +24,20 @@ router = APIRouter()
 
 
 VALID_STATUSES = ("submitted", "approved", "denied", "ordered")
+SUPPLY_ALLOWED_TRANSITIONS = {
+    "submitted": {"approved", "denied"},
+    "approved": {"ordered", "denied"},
+    "denied": set(),
+    "ordered": set(),
+}
+
+
+def _validate_transition(current: str, target: str) -> None:
+    if target not in SUPPLY_ALLOWED_TRANSITIONS.get(current, set()):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot transition {current} -> {target}",
+        )
 
 
 @router.get("/team/admin/supply", response_class=HTMLResponse)
@@ -87,15 +102,33 @@ def _transition(
     row = session.get(SupplyRequest, request_id)
     if row is None:
         return HTMLResponse("Supply request not found", status_code=404)
+    current_status = row.status
+    _validate_transition(current_status, new_status)
+
     now = utcnow()
-    row.status = new_status
-    row.status_changed_at = now
-    row.updated_at = now
-    if new_status in ("approved", "denied"):
-        row.approved_by_user_id = actor.id
+    values = {
+        "status": new_status,
+        "status_changed_at": now,
+        "updated_at": now,
+    }
+    if new_status != "submitted":
+        values["approved_by_user_id"] = actor.id
     if notes:
-        row.notes = (notes[:2000] if notes else row.notes)
-    session.add(row)
+        values["notes"] = notes[:2000]
+    result = session.exec(
+        update(SupplyRequest)
+        .where(
+            SupplyRequest.id == request_id,
+            SupplyRequest.status == current_status,
+        )
+        .values(**values)
+    )
+    if int(result.rowcount or 0) != 1:
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot transition {current_status} -> {new_status}",
+        )
     session.add(
         AuditLog(
             actor_user_id=actor.id,
