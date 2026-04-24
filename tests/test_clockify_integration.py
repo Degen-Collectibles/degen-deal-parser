@@ -269,6 +269,80 @@ class ClockifyAdminSyncTests(unittest.TestCase):
         self.assertIsNotNone(audit)
         self.assertNotIn("alice@example.com", audit.details_json)
 
+    def test_sync_maps_drafts_by_safe_clockify_names(self):
+        from app.models import EmployeeProfile, User
+        from app.routers.team_admin_clockify import sync_clockify_user_ids_by_email
+
+        admin = User(
+            id=99,
+            username="admin",
+            password_hash="x",
+            password_salt="x",
+            role="admin",
+            is_active=True,
+        )
+        mod_alex = User(
+            id=10,
+            username="mod_alex",
+            display_name="Mod Alex",
+            password_hash="x",
+            password_salt="x",
+            role="employee",
+            is_active=True,
+        )
+        david = User(
+            id=11,
+            username="__draft_david__",
+            display_name="David",
+            password_hash="",
+            password_salt="",
+            role="employee",
+            is_active=False,
+        )
+        portal_only = User(
+            id=12,
+            username="portal_only",
+            display_name="Portal Only",
+            password_hash="x",
+            password_salt="x",
+            role="employee",
+            is_active=True,
+        )
+        self.session.add_all([admin, mod_alex, david, portal_only])
+        self.session.add_all(
+            [
+                EmployeeProfile(user_id=mod_alex.id),
+                EmployeeProfile(user_id=david.id),
+                EmployeeProfile(user_id=portal_only.id),
+            ]
+        )
+        self.session.commit()
+
+        counts = sync_clockify_user_ids_by_email(
+            self.session,
+            current_user=admin,
+            clockify_users=[
+                {"id": "clock-alex", "name": "Alex", "status": "LIMITED"},
+                {"id": "clock-david", "name": "Dat (David)", "status": "LIMITED"},
+                {"id": "clock-ray", "name": "Ray", "status": "LIMITED"},
+            ],
+        )
+
+        self.assertEqual(
+            self.session.get(EmployeeProfile, mod_alex.id).clockify_user_id,
+            "clock-alex",
+        )
+        self.assertEqual(
+            self.session.get(EmployeeProfile, david.id).clockify_user_id,
+            "clock-david",
+        )
+        self.assertIsNone(
+            self.session.get(EmployeeProfile, portal_only.id).clockify_user_id
+        )
+        self.assertEqual(counts["mapped"], 2)
+        self.assertEqual(counts["name_matched"], 2)
+        self.assertEqual(counts["no_clockify_match"], 1)
+
     def test_manual_link_creates_profile_and_audits(self):
         from app.models import AuditLog, EmployeeProfile, User
         from app.routers.team_admin_clockify import set_employee_clockify_user_id

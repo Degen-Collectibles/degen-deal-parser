@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date
 from typing import Any, Optional
 from urllib.parse import urlencode
@@ -18,6 +19,7 @@ from ..clockify import (
     clockify_is_configured,
     format_hours,
 )
+from ..auth import is_draft_user
 from ..config import get_settings
 from ..csrf import issue_token, require_csrf
 from ..db import get_session
@@ -27,6 +29,13 @@ from ..shared import templates
 from .team_admin import _admin_gate, _permission_gate
 
 router = APIRouter()
+
+
+CLOCKIFY_NAME_OVERRIDES = {
+    # Store nickname differences that are safe enough to auto-link.
+    "alex": ("mod alex",),
+    "dat david": ("david",),
+}
 
 
 def _mask_id(value: str) -> str:
@@ -54,6 +63,60 @@ def _clockify_user_email(row: dict[str, Any]) -> str:
     return str(row.get("email") or "").strip()
 
 
+def _is_matchable_team_user(user: Optional[User]) -> bool:
+    return bool(user and (user.is_active or is_draft_user(user)))
+
+
+def _normalize_match_name(value: str) -> str:
+    value = (value or "").strip().lower()
+    value = re.sub(r"[^a-z0-9]+", " ", value)
+    return " ".join(value.split())
+
+
+def _clockify_match_keys(row: dict[str, Any]) -> list[str]:
+    raw_name = _clockify_user_name(row)
+    full_key = _normalize_match_name(raw_name)
+    keys: list[str] = []
+    overrides = CLOCKIFY_NAME_OVERRIDES.get(full_key, ())
+    for override in overrides:
+        key = _normalize_match_name(override)
+        if key and key not in keys:
+            keys.append(key)
+    if overrides:
+        return keys
+    for inner in re.findall(r"\(([^)]+)\)", raw_name):
+        key = _normalize_match_name(inner)
+        if key and key not in keys:
+            keys.append(key)
+    if full_key and full_key not in keys:
+        keys.append(full_key)
+    return keys
+
+
+def _safe_decrypt_name(profile: Optional[EmployeeProfile]) -> str:
+    if profile is None or not profile.legal_name_enc:
+        return ""
+    try:
+        return (decrypt_pii(profile.legal_name_enc) or "").strip()
+    except ValueError:
+        return ""
+
+
+def _employee_match_keys(user: User, profile: Optional[EmployeeProfile]) -> list[str]:
+    values = [
+        user.display_name,
+        _safe_decrypt_name(profile),
+    ]
+    if not is_draft_user(user):
+        values.append(user.username)
+    keys: list[str] = []
+    for value in values:
+        key = _normalize_match_name(value or "")
+        if key and key not in keys:
+            keys.append(key)
+    return keys
+
+
 def _employee_clockify_counts(session: Session) -> dict[str, int]:
     profiles = list(session.exec(select(EmployeeProfile)).all())
     users = {
@@ -61,17 +124,17 @@ def _employee_clockify_counts(session: Session) -> dict[str, int]:
         for row in session.exec(select(User)).all()
         if row.id is not None
     }
-    active_profiles = [
+    matchable_profiles = [
         profile
         for profile in profiles
-        if (users.get(profile.user_id) is not None and users[profile.user_id].is_active)
+        if _is_matchable_team_user(users.get(profile.user_id))
     ]
-    mapped = sum(1 for profile in active_profiles if profile.clockify_user_id)
-    with_email = sum(1 for profile in active_profiles if profile.email_ciphertext)
+    mapped = sum(1 for profile in matchable_profiles if profile.clockify_user_id)
+    with_email = sum(1 for profile in matchable_profiles if profile.email_ciphertext)
     return {
-        "active_profiles": len(active_profiles),
+        "active_profiles": len(matchable_profiles),
         "mapped": mapped,
-        "unmapped": max(0, len(active_profiles) - mapped),
+        "unmapped": max(0, len(matchable_profiles) - mapped),
         "with_email": with_email,
     }
 
@@ -80,7 +143,7 @@ def _employee_rows(session: Session) -> list[dict[str, Any]]:
     users = list(
         session.exec(
             select(User)
-            .where(User.is_active == True)  # noqa: E712
+            .where((User.is_active == True) | (User.password_hash == ""))  # noqa: E712
             .order_by(User.display_name, User.username)
         ).all()
     )
@@ -102,6 +165,7 @@ def _employee_rows(session: Session) -> list[dict[str, Any]]:
                 "clockify_user_id": (profile.clockify_user_id or "").strip()
                 if profile
                 else "",
+                "is_draft": is_draft_user(employee),
             }
         )
     return out
@@ -125,6 +189,47 @@ def _clockify_users_by_email(clockify_users: list[dict[str, Any]]) -> dict[str, 
         if email and user_id:
             by_email.setdefault(email, row)
     return by_email
+
+
+def _clockify_users_by_name(
+    clockify_users: list[dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], set[str]]:
+    by_name: dict[str, dict[str, Any]] = {}
+    ambiguous: set[str] = set()
+    for row in clockify_users:
+        if not _clockify_user_id(row):
+            continue
+        for key in _clockify_match_keys(row):
+            if key in ambiguous:
+                continue
+            if key in by_name and _clockify_user_id(by_name[key]) != _clockify_user_id(row):
+                by_name.pop(key, None)
+                ambiguous.add(key)
+                continue
+            by_name[key] = row
+    return by_name, ambiguous
+
+
+def _find_clockify_name_match(
+    user: User,
+    profile: Optional[EmployeeProfile],
+    by_name: dict[str, dict[str, Any]],
+    ambiguous_names: set[str],
+) -> tuple[Optional[dict[str, Any]], bool]:
+    matches: dict[str, dict[str, Any]] = {}
+    saw_ambiguous = False
+    for key in _employee_match_keys(user, profile):
+        if key in ambiguous_names:
+            saw_ambiguous = True
+            continue
+        match = by_name.get(key)
+        if match is not None:
+            matches[_clockify_user_id(match)] = match
+    if len(matches) == 1:
+        return next(iter(matches.values())), False
+    if len(matches) > 1:
+        return None, True
+    return None, saw_ambiguous
 
 
 def build_clockify_roster_preview(
@@ -242,46 +347,73 @@ def sync_clockify_user_ids_by_email(
     clockify_users: list[dict[str, Any]],
     ip_address: Optional[str] = None,
 ) -> dict[str, int]:
-    """Link local employee profiles to Clockify ids by exact email match.
+    """Link local employee profiles to Clockify ids by email or safe name match.
 
-    Existing conflicting Clockify ids are left untouched. Counts are audited;
-    raw email addresses are never written to AuditLog or returned to the UI.
+    Existing conflicting Clockify ids are left untouched. Draft employees are
+    included because they are inactive until onboarding. Counts are audited;
+    raw email addresses and employee names are never written to AuditLog.
     """
     by_email = _clockify_users_by_email(clockify_users)
+    by_name, ambiguous_names = _clockify_users_by_name(clockify_users)
     profiles = list(session.exec(select(EmployeeProfile)).all())
     users = {
         row.id: row
         for row in session.exec(select(User)).all()
         if row.id is not None
     }
+    linked_clockify_ids = {
+        (profile.clockify_user_id or "").strip(): profile.user_id
+        for profile in profiles
+        if (profile.clockify_user_id or "").strip()
+    }
     now = utcnow()
     counts = {
         "checked": 0,
         "mapped": 0,
+        "email_matched": 0,
+        "name_matched": 0,
         "already_mapped": 0,
         "conflicts": 0,
         "missing_email": 0,
         "email_decrypt_failed": 0,
         "no_clockify_match": 0,
+        "ambiguous_name_match": 0,
     }
 
     for profile in profiles:
         user = users.get(profile.user_id)
-        if user is None or not user.is_active:
+        if not _is_matchable_team_user(user):
             continue
         counts["checked"] += 1
+        match: Optional[dict[str, Any]] = None
+        match_method = ""
         if not profile.email_ciphertext:
             counts["missing_email"] += 1
-            continue
-        try:
-            email = (decrypt_pii(profile.email_ciphertext) or "").strip().lower()
-        except ValueError:
-            counts["email_decrypt_failed"] += 1
-            continue
-        if not email:
-            counts["missing_email"] += 1
-            continue
-        match = by_email.get(email)
+        else:
+            try:
+                email = (decrypt_pii(profile.email_ciphertext) or "").strip().lower()
+            except ValueError:
+                counts["email_decrypt_failed"] += 1
+                email = ""
+            if not email:
+                counts["missing_email"] += 1
+            else:
+                match = by_email.get(email)
+                if match is not None:
+                    match_method = "email"
+
+        if match is None:
+            match, ambiguous = _find_clockify_name_match(
+                user,
+                profile,
+                by_name,
+                ambiguous_names,
+            )
+            if ambiguous:
+                counts["ambiguous_name_match"] += 1
+            if match is not None:
+                match_method = "name"
+
         if match is None:
             counts["no_clockify_match"] += 1
             continue
@@ -296,10 +428,19 @@ def sync_clockify_user_ids_by_email(
         if existing and existing != match_id:
             counts["conflicts"] += 1
             continue
+        linked_user_id = linked_clockify_ids.get(match_id)
+        if linked_user_id is not None and linked_user_id != profile.user_id:
+            counts["conflicts"] += 1
+            continue
         profile.clockify_user_id = match_id
         profile.updated_at = now
         session.add(profile)
+        linked_clockify_ids[match_id] = profile.user_id
         counts["mapped"] += 1
+        if match_method == "email":
+            counts["email_matched"] += 1
+        elif match_method == "name":
+            counts["name_matched"] += 1
 
     session.add(
         AuditLog(
@@ -319,7 +460,7 @@ def admin_clockify_page(
     request: Request,
     flash: Optional[str] = None,
     error: Optional[str] = None,
-    include_hours: str = Query(default="1"),
+    include_hours: str = Query(default="0"),
     session: Session = Depends(get_session),
 ):
     denial, user = _permission_gate(request, session, "admin.employees.view")
@@ -415,10 +556,11 @@ async def admin_clockify_sync_users(
             status_code=303,
         )
     flash = (
-        f"Mapped {counts['mapped']} employee(s). "
+        f"Mapped {counts['mapped']} employee(s) "
+        f"({counts['email_matched']} by email, {counts['name_matched']} by name). "
         f"{counts['already_mapped']} already linked, "
         f"{counts['conflicts']} conflict(s), "
-        f"{counts['no_clockify_match']} without a Clockify email match."
+        f"{counts['no_clockify_match']} without a Clockify match."
     )
     return RedirectResponse(
         "/team/admin/clockify?" + urlencode({"flash": flash}),
