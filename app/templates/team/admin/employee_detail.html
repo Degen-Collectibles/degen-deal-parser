@@ -7,6 +7,7 @@
     <a class="ta-btn" href="/team/admin/employees/{{ employee.id }}/timecards" style="background:linear-gradient(135deg,#86efac22,#60a5fa22); border-color:rgba(134,239,172,0.45); color:#bbf7d0;">
         📅 View weekly timecards →
     </a>
+    <a class="ta-btn" href="/team/admin/employees/pay-rates">Edit pay rates</a>
 </div>
 
 {% if is_draft %}
@@ -112,6 +113,18 @@
             <tr>
                 <td style="padding:6px 0; color:var(--lx-muted);">Hourly rate (cents)</td>
                 <td><input type="text" name="hourly_rate_cents" placeholder="e.g. 2500 for $25.00" style="width:200px; padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/></td>
+            </tr>
+            <tr>
+                <td style="padding:6px 0; color:var(--lx-muted);">Payment method</td>
+                <td>
+                    {% set current_payment_method = profile.payment_method or 'cash' %}
+                    <select name="payment_method" style="padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);">
+                        {% for method in payment_methods %}
+                            <option value="{{ method }}" {% if current_payment_method == method %}selected{% endif %}>{{ payment_method_labels[method] }}</option>
+                        {% endfor %}
+                    </select>
+                    <span style="font-size:11px; color:var(--lx-muted); margin-left:8px;">check = official payroll; cash = cash payout</span>
+                </td>
             </tr>
             <tr>
                 <td style="padding:6px 0; color:var(--lx-muted);">Clockify user ID</td>

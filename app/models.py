@@ -480,6 +480,7 @@ class EmployeeProfile(SQLModel, table=True):
     hire_date: Optional[date] = Field(default=None, index=True)
     termination_date: Optional[date] = Field(default=None, index=True)
     hourly_rate_cents_enc: Optional[bytes] = Field(default=None, sa_column=Column(LargeBinary))
+    payment_method: str = Field(default="cash", index=True)
     clockify_user_id: Optional[str] = Field(default=None, index=True)
     onboarding_completed_at: Optional[datetime] = Field(default=None)
     policies_acknowledged_at: Optional[datetime] = Field(default=None)

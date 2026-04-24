@@ -380,6 +380,79 @@ class AdminProfileUpdateHardeningTests(unittest.TestCase, _W4Harness):
         ).one()
         self.assertIn("hourly_rate_cents", row.details_json)
 
+    def test_profile_update_saves_payment_method(self):
+        from app.models import AuditLog, EmployeeProfile
+
+        self._login(role="admin", user_id=522, username="adm522")
+        emp = self._seed_employee(user_id=822, username="emp822")
+        csrf = self._csrf()
+
+        r = self.client.post(
+            f"/team/admin/employees/{emp.id}/profile-update",
+            data={"payment_method": "check", "csrf_token": csrf},
+            follow_redirects=False,
+        )
+
+        self.assertEqual(r.status_code, 303)
+        self.session.expire_all()
+        refreshed = self.session.get(EmployeeProfile, emp.id)
+        self.assertEqual(refreshed.payment_method, "check")
+        row = self.session.exec(
+            select(AuditLog).where(AuditLog.action == "admin.profile_update")
+        ).one()
+        self.assertIn("payment_method", row.details_json)
+
+    def test_bulk_pay_rates_page_updates_rates_and_payment_methods(self):
+        from app.models import AuditLog, EmployeeProfile
+        from app.pii import decrypt_pii, encrypt_pii
+
+        self._login(role="admin", user_id=523, username="adm523")
+        emp_a = self._seed_employee(user_id=823, username="emp823")
+        emp_b = self._seed_employee(user_id=824, username="emp824")
+
+        profile_a = self.session.get(EmployeeProfile, emp_a.id)
+        profile_a.hourly_rate_cents_enc = encrypt_pii("2300")
+        profile_a.payment_method = "cash"
+        profile_b = self.session.get(EmployeeProfile, emp_b.id)
+        profile_b.hourly_rate_cents_enc = encrypt_pii("3000")
+        profile_b.payment_method = "check"
+        self.session.add_all([profile_a, profile_b])
+        self.session.commit()
+
+        page = self.client.get("/team/admin/employees/pay-rates")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("/team/admin/employees/823", page.text)
+        self.assertIn('value="23.00"', page.text)
+
+        csrf = self._csrf()
+        r = self.client.post(
+            "/team/admin/employees/pay-rates",
+            data={
+                "csrf_token": csrf,
+                f"rate_{emp_a.id}": "24.50",
+                f"payment_{emp_a.id}": "check",
+                f"rate_{emp_b.id}": "",
+                f"payment_{emp_b.id}": "cash",
+            },
+            follow_redirects=False,
+        )
+
+        self.assertEqual(r.status_code, 303)
+        self.session.expire_all()
+        refreshed_a = self.session.get(EmployeeProfile, emp_a.id)
+        refreshed_b = self.session.get(EmployeeProfile, emp_b.id)
+        self.assertEqual(decrypt_pii(refreshed_a.hourly_rate_cents_enc), "2450")
+        self.assertEqual(refreshed_a.payment_method, "check")
+        self.assertIsNone(refreshed_b.hourly_rate_cents_enc)
+        self.assertEqual(refreshed_b.payment_method, "cash")
+
+        row = self.session.exec(
+            select(AuditLog).where(AuditLog.action == "admin.pay_rates.bulk_update")
+        ).one()
+        self.assertIn("rate_changes", row.details_json)
+        self.assertNotIn("24.50", row.details_json)
+        self.assertNotIn("2450", row.details_json)
+
 
 class ResetPasswordTests(unittest.TestCase, _W4Harness):
     def setUp(self): self._setup()

@@ -1,0 +1,94 @@
+{% extends "team/admin/base.html" %}
+{% set active = 'pay-rates' %}
+{% block content %}
+{% if flash %}<div class="ta-flash success">{{ flash }}</div>{% endif %}
+{% if error %}<div class="ta-flash warn">{{ error }}</div>{% endif %}
+
+<div style="display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:18px; flex-wrap:wrap;">
+    <div>
+        <a class="ta-btn" href="/team/admin/employees">Back to employees</a>
+    </div>
+    <form method="get" action="/team/admin/employees/pay-rates" style="margin:0;">
+        <label style="display:inline-flex; align-items:center; gap:6px; font-size:13px; color:var(--lx-muted); cursor:pointer; user-select:none;">
+            <input type="checkbox" name="show_inactive" value="1" {% if show_inactive %}checked{% endif %}
+                   onchange="this.form.submit()" style="accent-color:#3b82f6;"/>
+            Show inactive
+        </label>
+    </form>
+</div>
+
+<div class="ta-card">
+    <h2>Bulk compensation</h2>
+    <p style="font-size:13px; color:var(--lx-muted); margin:0;">
+        Edit hourly rates in dollars per hour. Blank means no rate set. Rates are stored encrypted; payment method is used to separate cash from check payroll.
+    </p>
+</div>
+
+<form method="post" action="/team/admin/employees/pay-rates">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
+    <input type="hidden" name="show_inactive" value="{{ '1' if show_inactive else '' }}"/>
+    <div class="ta-card" style="padding:0;">
+        <div style="overflow:auto;">
+            <table style="width:100%; border-collapse:collapse; font-size:13px; min-width:760px;">
+                <thead>
+                    <tr style="text-align:left; color:var(--lx-muted); font-size:11px; text-transform:uppercase; letter-spacing:0.05em;">
+                        <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">Employee</th>
+                        <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">Status</th>
+                        <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">Hourly rate</th>
+                        <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">Payment</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in rows %}
+                    {% set employee = row.user %}
+                    <tr>
+                        <td style="padding:12px 14px; border-bottom:1px solid var(--lx-br);">
+                            <a href="/team/admin/employees/{{ employee.id }}" style="color:#ff8a3d; font-weight:650;">
+                                {{ employee.display_name or employee.username }}
+                            </a>
+                            <div style="font-size:11px; color:var(--lx-muted); margin-top:2px;">
+                                {{ employee.username }} &middot; {{ employee.role }}
+                            </div>
+                        </td>
+                        <td style="padding:12px 14px; border-bottom:1px solid var(--lx-br);">
+                            {% if row.is_draft %}
+                                <span style="padding:2px 8px; border-radius:999px; background:rgba(96,165,250,0.15); color:#93c5fd; font-size:11px; font-weight:500;">draft</span>
+                            {% elif employee.is_active %}
+                                <span style="padding:2px 8px; border-radius:999px; background:rgba(134,239,172,0.15); color:#86efac; font-size:11px; font-weight:500;">active</span>
+                            {% else %}
+                                <span style="padding:2px 8px; border-radius:999px; background:rgba(252,165,165,0.15); color:#fca5a5; font-size:11px; font-weight:500;">inactive</span>
+                            {% endif %}
+                        </td>
+                        <td style="padding:12px 14px; border-bottom:1px solid var(--lx-br);">
+                            <div style="display:flex; align-items:center; gap:6px;">
+                                <span style="color:var(--lx-muted);">$</span>
+                                <input type="text"
+                                       name="rate_{{ employee.id }}"
+                                       value="{{ row.rate_value }}"
+                                       inputmode="decimal"
+                                       placeholder="25.00"
+                                       style="width:110px; padding:6px 8px; border-radius:8px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/>
+                            </div>
+                        </td>
+                        <td style="padding:12px 14px; border-bottom:1px solid var(--lx-br);">
+                            <select name="payment_{{ employee.id }}"
+                                    style="width:130px; padding:6px 8px; border-radius:8px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);">
+                                {% for method in payment_methods %}
+                                    <option value="{{ method }}" {% if row.payment_method == method %}selected{% endif %}>{{ payment_method_labels[method] }}</option>
+                                {% endfor %}
+                            </select>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                    {% if not rows %}
+                    <tr><td colspan="4" style="padding:20px 14px; text-align:center; color:var(--lx-muted);">No employees found.</td></tr>
+                    {% endif %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    <button class="ta-btn" type="submit" style="background:#3b82f6; color:white; border-color:#3b82f6; font-weight:600;">
+        Save pay rates
+    </button>
+</form>
+{% endblock %}

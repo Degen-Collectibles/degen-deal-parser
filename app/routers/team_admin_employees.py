@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import date, datetime
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Form, Query, Request
@@ -40,6 +41,47 @@ router = APIRouter()
 
 
 ROLES = ("employee", "viewer", "manager", "reviewer", "admin")
+PAYMENT_METHODS = ("cash", "check")
+PAYMENT_METHOD_LABELS = {
+    "cash": "Cash",
+    "check": "Check",
+}
+
+
+def _normalize_payment_method(value: str) -> str:
+    value = (value or "").strip().lower()
+    return value if value in PAYMENT_METHODS else "cash"
+
+
+def _decrypt_hourly_rate_cents(profile: Optional[EmployeeProfile]) -> Optional[int]:
+    if profile is None or not profile.hourly_rate_cents_enc:
+        return None
+    try:
+        raw = decrypt_pii(profile.hourly_rate_cents_enc) or ""
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_hourly_rate_dollars(cents: Optional[int]) -> str:
+    if cents is None:
+        return ""
+    return f"{Decimal(cents) / Decimal(100):.2f}"
+
+
+def _parse_hourly_rate_dollars(value: str) -> tuple[Optional[int], bool]:
+    raw = (value or "").strip()
+    if not raw:
+        return None, False
+    raw = raw.replace("$", "").replace(",", "").strip()
+    try:
+        amount = Decimal(raw)
+    except (InvalidOperation, ValueError):
+        return None, True
+    if amount < 0:
+        return None, True
+    cents = int((amount * Decimal(100)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    return min(max(cents, 0), 1_000_000), False
 
 
 def _mask_phone(value: Optional[str]) -> str:
@@ -120,6 +162,8 @@ def _detail_context(
         "employee": employee,
         "profile": profile,
         "roles": ROLES,
+        "payment_methods": PAYMENT_METHODS,
+        "payment_method_labels": PAYMENT_METHOD_LABELS,
         "reveal_field": None,
         "reveal_value": None,
         "reveal_error": None,
@@ -444,6 +488,180 @@ async def admin_employee_send_invite(
     )
 
 
+def _pay_rate_rows(session: Session, *, include_inactive: bool = False) -> list[dict]:
+    stmt = select(User).order_by(User.is_active.desc(), User.display_name, User.username)
+    if not include_inactive:
+        stmt = stmt.where((User.is_active == True) | (User.password_hash == ""))  # noqa: E712
+    users = list(session.exec(stmt).all())
+    ids = [row.id for row in users if row.id is not None]
+    profiles: dict[int, EmployeeProfile] = {}
+    if ids:
+        profiles = {
+            profile.user_id: profile
+            for profile in session.exec(
+                select(EmployeeProfile).where(EmployeeProfile.user_id.in_(ids))
+            ).all()
+        }
+    rows: list[dict] = []
+    for employee in users:
+        profile = profiles.get(employee.id or 0)
+        rate_cents = _decrypt_hourly_rate_cents(profile)
+        payment_method = _normalize_payment_method(
+            profile.payment_method if profile is not None else "cash"
+        )
+        rows.append(
+            {
+                "user": employee,
+                "profile": profile,
+                "is_draft": is_draft_user(employee),
+                "rate_value": _format_hourly_rate_dollars(rate_cents),
+                "has_rate": rate_cents is not None,
+                "payment_method": payment_method,
+            }
+        )
+    return rows
+
+
+@router.get("/team/admin/employees/pay-rates", response_class=HTMLResponse)
+def admin_employee_pay_rates_page(
+    request: Request,
+    flash: Optional[str] = Query(default=None),
+    error: Optional[str] = Query(default=None),
+    show_inactive: Optional[str] = Query(default=None),
+    session: Session = Depends(get_session),
+):
+    denial, current = _permission_gate(request, session, "admin.employees.edit")
+    if denial:
+        return denial
+    include_inactive = show_inactive in ("1", "true", "yes", "on")
+    return templates.TemplateResponse(
+        request,
+        "team/admin/employee_pay_rates.html",
+        {
+            "request": request,
+            "title": "Pay Rates",
+            "current_user": current,
+            "rows": _pay_rate_rows(session, include_inactive=include_inactive),
+            "payment_methods": PAYMENT_METHODS,
+            "payment_method_labels": PAYMENT_METHOD_LABELS,
+            "show_inactive": include_inactive,
+            "flash": flash,
+            "error": error,
+            "csrf_token": issue_token(request),
+        },
+    )
+
+
+@router.post(
+    "/team/admin/employees/pay-rates",
+    dependencies=[Depends(require_csrf)],
+)
+async def admin_employee_pay_rates_post(
+    request: Request,
+    show_inactive: str = Form(default=""),
+    session: Session = Depends(get_session),
+):
+    denial, current = _admin_gate(request, session, "admin.employees.edit")
+    if denial:
+        return denial
+
+    form = await request.form()
+    user_ids: set[int] = set()
+    for key in form.keys():
+        if key.startswith("rate_") or key.startswith("payment_"):
+            try:
+                user_ids.add(int(key.split("_", 1)[1]))
+            except (IndexError, ValueError):
+                continue
+
+    from ..pii import encrypt_pii
+
+    now = utcnow()
+    changed_user_ids: set[int] = set()
+    rate_changes = 0
+    cleared_rates = 0
+    payment_changes = 0
+    invalid_rates = 0
+
+    for user_id in sorted(user_ids):
+        employee = session.get(User, user_id)
+        if employee is None:
+            continue
+        profile = session.get(EmployeeProfile, user_id)
+        if profile is None:
+            profile = EmployeeProfile(user_id=user_id)
+            session.add(profile)
+            session.flush()
+
+        rate_raw = str(form.get(f"rate_{user_id}") or "").strip()
+        parsed_rate, rate_invalid = _parse_hourly_rate_dollars(rate_raw)
+        if rate_invalid:
+            invalid_rates += 1
+        else:
+            current_rate = _decrypt_hourly_rate_cents(profile)
+            if parsed_rate is None:
+                if profile.hourly_rate_cents_enc:
+                    profile.hourly_rate_cents_enc = None
+                    cleared_rates += 1
+                    rate_changes += 1
+                    changed_user_ids.add(user_id)
+            elif parsed_rate != current_rate:
+                profile.hourly_rate_cents_enc = encrypt_pii(str(parsed_rate))
+                rate_changes += 1
+                changed_user_ids.add(user_id)
+
+        method_raw = str(form.get(f"payment_{user_id}") or "")
+        new_method = _normalize_payment_method(method_raw)
+        if new_method != _normalize_payment_method(profile.payment_method or ""):
+            profile.payment_method = new_method
+            payment_changes += 1
+            changed_user_ids.add(user_id)
+
+        if user_id in changed_user_ids:
+            profile.updated_at = now
+            session.add(profile)
+
+    if changed_user_ids:
+        _audit_then_commit(
+            session,
+            AuditLog(
+                actor_user_id=current.id,
+                action="admin.pay_rates.bulk_update",
+                resource_key="admin.employees.edit",
+                details_json=json.dumps(
+                    {
+                        "updated_count": len(changed_user_ids),
+                        "rate_changes": rate_changes,
+                        "cleared_rates": cleared_rates,
+                        "payment_method_changes": payment_changes,
+                        "invalid_rates": invalid_rates,
+                        "user_ids": sorted(changed_user_ids),
+                    },
+                    sort_keys=True,
+                ),
+                ip_address=(request.client.host if request.client else None),
+            ),
+        )
+        session.commit()
+
+    from urllib.parse import urlencode
+
+    qs = {
+        "flash": (
+            f"Saved {len(changed_user_ids)} employee(s). "
+            f"{rate_changes} rate change(s), {payment_changes} payment method change(s)."
+        )
+    }
+    if invalid_rates:
+        qs["error"] = f"{invalid_rates} invalid rate value(s) were ignored."
+    if show_inactive in ("1", "true", "yes", "on"):
+        qs["show_inactive"] = "1"
+    return RedirectResponse(
+        "/team/admin/employees/pay-rates?" + urlencode(qs),
+        status_code=303,
+    )
+
+
 @router.get("/team/admin/employees/{user_id}", response_class=HTMLResponse)
 def admin_employee_detail(
     request: Request,
@@ -590,6 +808,7 @@ async def admin_employee_profile_update(
     display_name: str = Form(default=""),
     staff_kind: str = Form(default=""),
     hourly_rate_cents: str = Form(default=""),
+    payment_method: str = Form(default=""),
     hire_date: str = Form(default=""),
     termination_date: str = Form(default=""),
     clockify_user_id: str = Form(default=""),
@@ -641,6 +860,12 @@ async def admin_employee_profile_update(
         if str(rate_int) != current_rate:
             profile.hourly_rate_cents_enc = encrypt_pii(str(rate_int))
             changed.append("hourly_rate_cents")
+
+    if (payment_method or "").strip():
+        new_payment_method = _normalize_payment_method(payment_method)
+        if new_payment_method != _normalize_payment_method(profile.payment_method or ""):
+            profile.payment_method = new_payment_method
+            changed.append("payment_method")
 
     for form_val, attr, label in (
         (hire_date, "hire_date", "hire_date"),

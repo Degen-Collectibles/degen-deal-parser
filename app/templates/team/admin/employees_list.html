@@ -21,10 +21,13 @@
         <button class="ta-btn" type="submit">Search</button>
         {% if q or show_inactive %}<a class="ta-btn" href="/team/admin/employees">Clear</a>{% endif %}
     </form>
-    <a class="ta-btn" href="/team/admin/employees/new"
-       style="background:#3b82f6; color:white; border-color:#3b82f6; font-weight:600;">
-        + Add employee
-    </a>
+    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <a class="ta-btn" href="/team/admin/employees/pay-rates">Pay rates</a>
+        <a class="ta-btn" href="/team/admin/employees/new"
+           style="background:#3b82f6; color:white; border-color:#3b82f6; font-weight:600;">
+            + Add employee
+        </a>
+    </div>
 </div>
 
 <p style="font-size:12px; color:var(--lx-muted); margin:-10px 0 16px;">
