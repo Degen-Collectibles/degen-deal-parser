@@ -66,6 +66,12 @@ _INDEX_METADATA: dict[str, str] = {}
 def _configured_index_path() -> Path:
     raw = (os.getenv("DEGEN_EYE_V2_INDEX_PATH") or "").strip()
     if not raw:
+        try:
+            from .config import get_settings
+            raw = str(getattr(get_settings(), "degen_eye_v2_index_path", "") or "").strip()
+        except Exception:
+            raw = ""
+    if not raw:
         return _DEFAULT_INDEX_PATH
     path = Path(raw)
     return path if path.is_absolute() else (_ROOT / path)
