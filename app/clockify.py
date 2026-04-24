@@ -19,6 +19,12 @@ from .config import Settings, get_settings
 
 DEFAULT_CLOCKIFY_BASE_URL = "https://api.clockify.me/api/v1"
 DEFAULT_CLOCKIFY_TIMEZONE = "America/Los_Angeles"
+DEFAULT_CLOCKIFY_ACCOUNT_STATUSES = (
+    "ACTIVE",
+    "PENDING_EMAIL_VERIFICATION",
+    "NOT_REGISTERED",
+    "LIMITED",
+)
 
 
 class ClockifyConfigError(RuntimeError):
@@ -336,7 +342,10 @@ class ClockifyClient:
     def list_workspace_users(
         self,
         *,
-        status: str = "ACTIVE",
+        status: str = "ALL",
+        account_statuses: Optional[tuple[str, ...] | list[str] | str] = (
+            DEFAULT_CLOCKIFY_ACCOUNT_STATUSES
+        ),
         page_size: int = 100,
         max_pages: int = 20,
     ) -> list[dict[str, Any]]:
@@ -349,6 +358,17 @@ class ClockifyClient:
             }
             if status:
                 params["status"] = status
+            if account_statuses:
+                if isinstance(account_statuses, str):
+                    account_statuses_value = account_statuses
+                else:
+                    account_statuses_value = ",".join(
+                        str(value).strip()
+                        for value in account_statuses
+                        if str(value).strip()
+                    )
+                if account_statuses_value:
+                    params["account-statuses"] = account_statuses_value
             data = self._request(
                 "GET",
                 f"/workspaces/{self.workspace_id}/users",
@@ -368,7 +388,12 @@ class ClockifyClient:
         data = self._request(
             "GET",
             f"/workspaces/{self.workspace_id}/users",
-            params={"email": email_clean, "status": "ALL", "page-size": 25},
+            params={
+                "email": email_clean,
+                "status": "ALL",
+                "account-statuses": ",".join(DEFAULT_CLOCKIFY_ACCOUNT_STATUSES),
+                "page-size": 25,
+            },
         )
         if not isinstance(data, list):
             return None

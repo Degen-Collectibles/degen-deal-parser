@@ -165,6 +165,25 @@ class ClockifyServiceTests(unittest.TestCase):
         self.assertEqual(client.params_seen[0]["start"], "2026-04-20T07:00:00Z")
         self.assertEqual(client.params_seen[0]["page-size"], 50)
 
+    def test_workspace_users_request_includes_limited_accounts(self):
+        from app.clockify import ClockifyClient
+
+        class FakeClockifyClient(ClockifyClient):
+            def __init__(self):
+                super().__init__(api_key="key", workspace_id="workspace")
+                self.params_seen = []
+
+            def _request(self, method, path, *, params=None, json_body=None):
+                self.params_seen.append(params or {})
+                return [{"id": "limited-user", "name": "Limited User", "status": "LIMITED"}]
+
+        client = FakeClockifyClient()
+        users = client.list_workspace_users()
+
+        self.assertEqual(users[0]["status"], "LIMITED")
+        self.assertEqual(client.params_seen[0]["status"], "ALL")
+        self.assertIn("LIMITED", client.params_seen[0]["account-statuses"])
+
 
 class ClockifyAdminSyncTests(unittest.TestCase):
     def setUp(self):
