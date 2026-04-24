@@ -24,12 +24,43 @@
     </p>
 </div>
 
+<div class="ta-card">
+    <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:16px; flex-wrap:wrap; margin-bottom:14px;">
+        <div>
+            <h2 style="margin-bottom:4px;">Labor spend</h2>
+            <p style="font-size:12px; color:var(--lx-muted); margin:0;">{{ payroll_summary.basis_label }}</p>
+        </div>
+        <div style="font-size:12px; color:var(--lx-muted); text-align:right;">
+            Monthly salary run rate<br/>
+            <strong style="font-size:18px; color:var(--lx-text);">{{ payroll_summary.monthly_salary_commitment_label }}</strong>
+        </div>
+    </div>
+    <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:10px;">
+        {% for period in payroll_summary.periods %}
+        <div style="border:1px solid var(--lx-br); border-radius:8px; padding:12px; background:var(--lx-s2);">
+            <div style="font-size:11px; text-transform:uppercase; letter-spacing:0.05em; color:var(--lx-muted);">{{ period.label }}</div>
+            <div style="font-size:24px; font-weight:750; color:var(--lx-text); margin-top:3px;">{{ period.total_label }}</div>
+            <div style="font-size:11px; color:var(--lx-muted); margin-top:4px;">{{ period.range_label }}</div>
+            <div style="font-size:11px; color:var(--lx-muted); margin-top:8px;">
+                Salary {{ period.salary_label }} &middot; Hourly {{ period.hourly_label }}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    <div style="font-size:12px; color:var(--lx-muted); margin-top:10px;">
+        {{ payroll_summary.salaried_count }} salaried &middot; {{ payroll_summary.hourly_count }} hourly
+        {% if payroll_summary.missing_salary_count or payroll_summary.missing_hourly_rate_count %}
+            &middot; {{ payroll_summary.missing_salary_count }} missing salary &middot; {{ payroll_summary.missing_hourly_rate_count }} missing hourly rate
+        {% endif %}
+    </div>
+</div>
+
 <form method="post" action="/team/admin/employees/pay-rates">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
     <input type="hidden" name="show_inactive" value="{{ '1' if show_inactive else '' }}"/>
     <div class="ta-card" style="padding:0;">
         <div style="overflow:auto;">
-            <table style="width:100%; border-collapse:collapse; font-size:13px; min-width:980px;">
+            <table style="width:100%; border-collapse:collapse; font-size:13px; min-width:1120px;">
                 <thead>
                     <tr style="text-align:left; color:var(--lx-muted); font-size:11px; text-transform:uppercase; letter-spacing:0.05em;">
                         <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">Employee</th>
@@ -37,6 +68,7 @@
                         <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">Pay type</th>
                         <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">Hourly rate</th>
                         <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">Monthly salary</th>
+                        <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">Pay date</th>
                         <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">Payment</th>
                     </tr>
                 </thead>
@@ -92,6 +124,17 @@
                             </div>
                         </td>
                         <td style="padding:12px 14px; border-bottom:1px solid var(--lx-br);">
+                            <input type="number"
+                                   name="pay_day_{{ employee.id }}"
+                                   value="{{ row.monthly_pay_day }}"
+                                   min="1"
+                                   max="31"
+                                   inputmode="numeric"
+                                   placeholder="15"
+                                   style="width:76px; padding:6px 8px; border-radius:8px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/>
+                            <div style="font-size:11px; color:var(--lx-muted); margin-top:4px;">{{ row.monthly_pay_date_label }}</div>
+                        </td>
+                        <td style="padding:12px 14px; border-bottom:1px solid var(--lx-br);">
                             <select name="payment_{{ employee.id }}"
                                     style="width:130px; padding:6px 8px; border-radius:8px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);">
                                 {% for method in payment_methods %}
@@ -102,7 +145,7 @@
                     </tr>
                     {% endfor %}
                     {% if not rows %}
-                    <tr><td colspan="6" style="padding:20px 14px; text-align:center; color:var(--lx-muted);">No employees found.</td></tr>
+                    <tr><td colspan="7" style="padding:20px 14px; text-align:center; color:var(--lx-muted);">No employees found.</td></tr>
                     {% endif %}
                 </tbody>
             </table>

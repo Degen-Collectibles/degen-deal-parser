@@ -482,6 +482,7 @@ class EmployeeProfile(SQLModel, table=True):
     compensation_type: str = Field(default="hourly", index=True)
     hourly_rate_cents_enc: Optional[bytes] = Field(default=None, sa_column=Column(LargeBinary))
     monthly_salary_cents_enc: Optional[bytes] = Field(default=None, sa_column=Column(LargeBinary))
+    monthly_salary_pay_day: Optional[int] = Field(default=None, index=True)
     payment_method: str = Field(default="cash", index=True)
     clockify_user_id: Optional[str] = Field(default=None, index=True)
     onboarding_completed_at: Optional[datetime] = Field(default=None)

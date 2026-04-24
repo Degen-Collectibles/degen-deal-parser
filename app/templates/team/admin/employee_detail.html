@@ -134,6 +134,13 @@
                 </td>
             </tr>
             <tr>
+                <td style="padding:6px 0; color:var(--lx-muted);">Monthly pay date</td>
+                <td>
+                    <input type="number" name="monthly_salary_pay_day" value="{{ monthly_salary_pay_day_value }}" min="1" max="31" inputmode="numeric" placeholder="15" style="width:90px; padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/>
+                    <span style="font-size:11px; color:var(--lx-muted); margin-left:8px;">day of month; next {{ monthly_salary_pay_date_label }}</span>
+                </td>
+            </tr>
+            <tr>
                 <td style="padding:6px 0; color:var(--lx-muted);">Payment method</td>
                 <td>
                     {% set current_payment_method = profile.payment_method or 'cash' %}

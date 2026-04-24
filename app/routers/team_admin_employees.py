@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date, datetime
+from calendar import monthrange
+from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Optional
 
@@ -29,7 +30,10 @@ from ..models import (
     AuditLog,
     EmployeeProfile,
     InviteToken,
+    SHIFT_KIND_ALL,
+    SHIFT_KIND_WORK,
     STAFF_KINDS,
+    ShiftEntry,
     User,
     utcnow,
 )
@@ -114,6 +118,51 @@ def _parse_hourly_rate_dollars(value: str) -> tuple[Optional[int], bool]:
 
 def _parse_monthly_salary_dollars(value: str) -> tuple[Optional[int], bool]:
     return _parse_money_dollars(value, max_cents=100_000_000)
+
+
+def _parse_monthly_pay_day(value: str) -> tuple[Optional[int], bool]:
+    raw = (value or "").strip()
+    if not raw:
+        return None, False
+    if not raw.isdigit():
+        return None, True
+    day = int(raw)
+    if day < 1 or day > 31:
+        return None, True
+    return day, False
+
+
+def _monthly_pay_date(year: int, month: int, pay_day: Optional[int]) -> Optional[date]:
+    if pay_day is None:
+        return None
+    last_day = monthrange(year, month)[1]
+    return date(year, month, min(pay_day, last_day))
+
+
+def _next_monthly_pay_date(
+    today: date, pay_day: Optional[int]
+) -> Optional[date]:
+    this_month = _monthly_pay_date(today.year, today.month, pay_day)
+    if this_month is None:
+        return None
+    if this_month >= today:
+        return this_month
+    next_month = today.month + 1
+    next_year = today.year
+    if next_month == 13:
+        next_month = 1
+        next_year += 1
+    return _monthly_pay_date(next_year, next_month, pay_day)
+
+
+def _format_date_label(value: Optional[date]) -> str:
+    if value is None:
+        return "Not set"
+    return f"{value.strftime('%b')} {value.day}, {value.year}"
+
+
+def _format_dollars(cents: int) -> str:
+    return f"${Decimal(cents) / Decimal(100):,.2f}"
 
 
 def _mask_phone(value: Optional[str]) -> str:
@@ -201,6 +250,10 @@ def _detail_context(
         ),
         "monthly_salary_value": _format_money_dollars(
             _decrypt_monthly_salary_cents(profile)
+        ),
+        "monthly_salary_pay_day_value": profile.monthly_salary_pay_day or "",
+        "monthly_salary_pay_date_label": _format_date_label(
+            _next_monthly_pay_date(utcnow().date(), profile.monthly_salary_pay_day)
         ),
         "payment_methods": PAYMENT_METHODS,
         "payment_method_labels": PAYMENT_METHOD_LABELS,
@@ -550,6 +603,7 @@ def _pay_rate_rows(session: Session, *, include_inactive: bool = False) -> list[
         )
         rate_cents = _decrypt_hourly_rate_cents(profile)
         salary_cents = _decrypt_monthly_salary_cents(profile)
+        pay_day = profile.monthly_salary_pay_day if profile is not None else None
         payment_method = _normalize_payment_method(
             profile.payment_method if profile is not None else "cash"
         )
@@ -563,10 +617,192 @@ def _pay_rate_rows(session: Session, *, include_inactive: bool = False) -> list[
                 "has_rate": rate_cents is not None,
                 "salary_value": _format_money_dollars(salary_cents),
                 "has_salary": salary_cents is not None,
+                "monthly_pay_day": pay_day or "",
+                "monthly_pay_date_label": _format_date_label(
+                    _next_monthly_pay_date(utcnow().date(), pay_day)
+                ),
                 "payment_method": payment_method,
             }
         )
     return rows
+
+
+def _employee_in_payroll_scope(user: User) -> bool:
+    return bool(user.is_active or is_draft_user(user))
+
+
+def _employee_active_on(user: User, profile: Optional[EmployeeProfile], day: date) -> bool:
+    if not _employee_in_payroll_scope(user):
+        return False
+    if profile is not None:
+        if profile.hire_date and day < profile.hire_date:
+            return False
+        if profile.termination_date and day > profile.termination_date:
+            return False
+    return True
+
+
+def _salary_cost_for_period(
+    *,
+    salary_cents: int,
+    user: User,
+    profile: EmployeeProfile,
+    start_day: date,
+    end_day: date,
+) -> int:
+    if salary_cents <= 0 or end_day < start_day:
+        return 0
+    total = Decimal("0")
+    cursor = start_day
+    while cursor <= end_day:
+        if _employee_active_on(user, profile, cursor):
+            days_in_month = monthrange(cursor.year, cursor.month)[1]
+            total += Decimal(salary_cents) / Decimal(days_in_month)
+        cursor += timedelta(days=1)
+    return int(total.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def _cents_for_minutes(minutes: int, rate_cents: int) -> int:
+    if minutes <= 0 or rate_cents <= 0:
+        return 0
+    amount = (Decimal(minutes) / Decimal(60)) * Decimal(rate_cents)
+    return int(amount.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def _payroll_cost_summary(session: Session, *, today: Optional[date] = None) -> dict:
+    today = today or utcnow().date()
+    week_start = today - timedelta(days=today.weekday())
+    month_start = today.replace(day=1)
+    periods = {
+        "today": {"label": "Today", "start": today, "end": today},
+        "week_to_date": {"label": "Week to date", "start": week_start, "end": today},
+        "month_to_date": {"label": "Month to date", "start": month_start, "end": today},
+    }
+
+    users = [
+        row
+        for row in session.exec(select(User).order_by(User.display_name, User.username)).all()
+        if row.id is not None and _employee_in_payroll_scope(row)
+    ]
+    user_ids = [row.id for row in users if row.id is not None]
+    profiles: dict[int, EmployeeProfile] = {}
+    if user_ids:
+        profiles = {
+            row.user_id: row
+            for row in session.exec(
+                select(EmployeeProfile).where(EmployeeProfile.user_id.in_(user_ids))
+            ).all()
+        }
+
+    totals = {
+        key: {"salary_cents": 0, "hourly_cents": 0, "total_cents": 0}
+        for key in periods
+    }
+    monthly_salary_commitment_cents = 0
+    salaried_count = 0
+    hourly_count = 0
+    missing_hourly_rate_ids: set[int] = set()
+    missing_salary_ids: set[int] = set()
+
+    for user in users:
+        profile = profiles.get(user.id or 0)
+        compensation_type = _normalize_compensation_type(
+            profile.compensation_type if profile is not None else ""
+        )
+        if compensation_type == "monthly_salary":
+            salaried_count += 1
+            salary_cents = _decrypt_monthly_salary_cents(profile)
+            if salary_cents is None:
+                missing_salary_ids.add(user.id or 0)
+                continue
+            monthly_salary_commitment_cents += salary_cents
+            for key, period in periods.items():
+                totals[key]["salary_cents"] += _salary_cost_for_period(
+                    salary_cents=salary_cents,
+                    user=user,
+                    profile=profile,
+                    start_day=period["start"],
+                    end_day=period["end"],
+                )
+        else:
+            hourly_count += 1
+            if _decrypt_hourly_rate_cents(profile) is None:
+                missing_hourly_rate_ids.add(user.id or 0)
+
+    hourly_rates: dict[int, int] = {}
+    for user_id, profile in profiles.items():
+        if _normalize_compensation_type(profile.compensation_type or "") != "hourly":
+            continue
+        rate_cents = _decrypt_hourly_rate_cents(profile)
+        if rate_cents is not None:
+            hourly_rates[user_id] = rate_cents
+
+    shift_rows: list[ShiftEntry] = []
+    if user_ids:
+        shift_rows = list(
+            session.exec(
+                select(ShiftEntry)
+                .where(ShiftEntry.user_id.in_(user_ids))
+                .where(ShiftEntry.shift_date >= month_start)
+                .where(ShiftEntry.shift_date <= today)
+            ).all()
+        )
+
+    from .team_admin_employees_timecards import _parse_shift_ranges
+
+    labor_kinds = {SHIFT_KIND_WORK, SHIFT_KIND_ALL}
+    for shift in shift_rows:
+        rate_cents = hourly_rates.get(shift.user_id)
+        user = next((row for row in users if row.id == shift.user_id), None)
+        profile = profiles.get(shift.user_id)
+        if (
+            rate_cents is None
+            or user is None
+            or not _employee_active_on(user, profile, shift.shift_date)
+            or (shift.kind or "") not in labor_kinds
+        ):
+            continue
+        ranges = _parse_shift_ranges(shift.label or "")
+        minutes = sum(max(0, end - start) for start, end in ranges)
+        cost_cents = _cents_for_minutes(minutes, rate_cents)
+        if cost_cents <= 0:
+            continue
+        for key, period in periods.items():
+            if period["start"] <= shift.shift_date <= period["end"]:
+                totals[key]["hourly_cents"] += cost_cents
+
+    period_rows = []
+    for key, period in periods.items():
+        salary_cents = totals[key]["salary_cents"]
+        hourly_cents = totals[key]["hourly_cents"]
+        total_cents = salary_cents + hourly_cents
+        totals[key]["total_cents"] = total_cents
+        period_rows.append(
+            {
+                "key": key,
+                "label": period["label"],
+                "range_label": (
+                    _format_date_label(period["start"])
+                    if period["start"] == period["end"]
+                    else f"{_format_date_label(period['start'])} - {_format_date_label(period['end'])}"
+                ),
+                "total_label": _format_dollars(total_cents),
+                "salary_label": _format_dollars(salary_cents),
+                "hourly_label": _format_dollars(hourly_cents),
+            }
+        )
+
+    return {
+        "periods": period_rows,
+        "monthly_salary_commitment_label": _format_dollars(
+            monthly_salary_commitment_cents
+        ),
+        "salaried_count": salaried_count,
+        "hourly_count": hourly_count,
+        "missing_hourly_rate_count": len(missing_hourly_rate_ids),
+        "missing_salary_count": len(missing_salary_ids),
+        "basis_label": "Salary accrual + scheduled hourly shifts",
+    }
 
 
 @router.get("/team/admin/employees/pay-rates", response_class=HTMLResponse)
@@ -581,6 +817,7 @@ def admin_employee_pay_rates_page(
     if denial:
         return denial
     include_inactive = show_inactive in ("1", "true", "yes", "on")
+    rows = _pay_rate_rows(session, include_inactive=include_inactive)
     return templates.TemplateResponse(
         request,
         "team/admin/employee_pay_rates.html",
@@ -588,7 +825,8 @@ def admin_employee_pay_rates_page(
             "request": request,
             "title": "Compensation",
             "current_user": current,
-            "rows": _pay_rate_rows(session, include_inactive=include_inactive),
+            "rows": rows,
+            "payroll_summary": _payroll_cost_summary(session),
             "compensation_types": COMPENSATION_TYPES,
             "compensation_type_labels": COMPENSATION_TYPE_LABELS,
             "payment_methods": PAYMENT_METHODS,
@@ -621,10 +859,12 @@ async def admin_employee_pay_rates_post(
             key.startswith("comp_")
             or key.startswith("rate_")
             or key.startswith("salary_")
+            or key.startswith("pay_day_")
             or key.startswith("payment_")
         ):
             try:
-                user_ids.add(int(key.split("_", 1)[1]))
+                suffix = key[8:] if key.startswith("pay_day_") else key.split("_", 1)[1]
+                user_ids.add(int(suffix))
             except (IndexError, ValueError):
                 continue
 
@@ -637,9 +877,11 @@ async def admin_employee_pay_rates_post(
     salary_changes = 0
     cleared_rates = 0
     cleared_salaries = 0
+    pay_day_changes = 0
     payment_changes = 0
     invalid_rates = 0
     invalid_salaries = 0
+    invalid_pay_days = 0
 
     for user_id in sorted(user_ids):
         employee = session.get(User, user_id)
@@ -700,6 +942,17 @@ async def admin_employee_pay_rates_post(
                     salary_changes += 1
                     changed_user_ids.add(user_id)
 
+        pay_day_key = f"pay_day_{user_id}"
+        if pay_day_key in form:
+            pay_day_raw = str(form.get(pay_day_key) or "").strip()
+            parsed_pay_day, pay_day_invalid = _parse_monthly_pay_day(pay_day_raw)
+            if pay_day_invalid:
+                invalid_pay_days += 1
+            elif parsed_pay_day != profile.monthly_salary_pay_day:
+                profile.monthly_salary_pay_day = parsed_pay_day
+                pay_day_changes += 1
+                changed_user_ids.add(user_id)
+
         payment_key = f"payment_{user_id}"
         if payment_key in form:
             method_raw = str(form.get(payment_key) or "")
@@ -728,9 +981,11 @@ async def admin_employee_pay_rates_post(
                         "monthly_salary_changes": salary_changes,
                         "cleared_rates": cleared_rates,
                         "cleared_monthly_salaries": cleared_salaries,
+                        "monthly_pay_day_changes": pay_day_changes,
                         "payment_method_changes": payment_changes,
                         "invalid_rates": invalid_rates,
                         "invalid_monthly_salaries": invalid_salaries,
+                        "invalid_monthly_pay_days": invalid_pay_days,
                         "user_ids": sorted(changed_user_ids),
                     },
                     sort_keys=True,
@@ -747,12 +1002,13 @@ async def admin_employee_pay_rates_post(
             f"Saved {len(changed_user_ids)} employee(s). "
             f"{compensation_changes} pay type change(s), "
             f"{rate_changes + salary_changes} amount change(s), "
+            f"{pay_day_changes} pay date change(s), "
             f"{payment_changes} payment method change(s)."
         )
     }
-    if invalid_rates or invalid_salaries:
+    if invalid_rates or invalid_salaries or invalid_pay_days:
         qs["error"] = (
-            f"{invalid_rates + invalid_salaries} invalid compensation value(s) "
+            f"{invalid_rates + invalid_salaries + invalid_pay_days} invalid compensation value(s) "
             "were ignored."
         )
     if show_inactive in ("1", "true", "yes", "on"):
@@ -911,6 +1167,7 @@ async def admin_employee_profile_update(
     compensation_type: str = Form(default=""),
     hourly_rate_cents: str = Form(default=""),
     monthly_salary_dollars: str = Form(default=""),
+    monthly_salary_pay_day: str = Form(default=""),
     payment_method: str = Form(default=""),
     hire_date: str = Form(default=""),
     termination_date: str = Form(default=""),
@@ -983,6 +1240,12 @@ async def admin_employee_profile_update(
             profile.monthly_salary_cents_enc = encrypt_pii(str(salary_int))
             changed.append("monthly_salary_cents")
 
+    pay_day_int, pay_day_invalid = _parse_monthly_pay_day(monthly_salary_pay_day)
+    if (monthly_salary_pay_day or "").strip() and not pay_day_invalid:
+        if pay_day_int != profile.monthly_salary_pay_day:
+            profile.monthly_salary_pay_day = pay_day_int
+            changed.append("monthly_salary_pay_day")
+
     if (payment_method or "").strip():
         new_payment_method = _normalize_payment_method(payment_method)
         if new_payment_method != _normalize_payment_method(profile.payment_method or ""):
@@ -1022,9 +1285,9 @@ async def admin_employee_profile_update(
         )
         session.commit()
     flash = "Saved."
-    if rate_invalid and not salary_invalid:
+    if rate_invalid and not salary_invalid and not pay_day_invalid:
         flash = "Saved.+Invalid+hourly_rate_cents+ignored."
-    elif salary_invalid or rate_invalid:
+    elif salary_invalid or rate_invalid or pay_day_invalid:
         flash = "Saved.+Invalid+compensation+value+ignored."
     return RedirectResponse(
         f"/team/admin/employees/{user_id}?flash={flash}", status_code=303
@@ -1385,6 +1648,7 @@ async def admin_employee_purge_post(
             setattr(profile, attr, None)
         profile.email_lookup_hash = None
         profile.compensation_type = "hourly"
+        profile.monthly_salary_pay_day = None
         profile.clockify_user_id = None
         profile.updated_at = now
         session.add(profile)

@@ -415,6 +415,7 @@ class AdminProfileUpdateHardeningTests(unittest.TestCase, _W4Harness):
             data={
                 "compensation_type": "monthly_salary",
                 "monthly_salary_dollars": "4500.00",
+                "monthly_salary_pay_day": "15",
                 "csrf_token": csrf,
             },
             follow_redirects=False,
@@ -425,11 +426,13 @@ class AdminProfileUpdateHardeningTests(unittest.TestCase, _W4Harness):
         refreshed = self.session.get(EmployeeProfile, emp.id)
         self.assertEqual(refreshed.compensation_type, "monthly_salary")
         self.assertEqual(decrypt_pii(refreshed.monthly_salary_cents_enc), "450000")
+        self.assertEqual(refreshed.monthly_salary_pay_day, 15)
         row = self.session.exec(
             select(AuditLog).where(AuditLog.action == "admin.profile_update")
         ).one()
         self.assertIn("compensation_type", row.details_json)
         self.assertIn("monthly_salary_cents", row.details_json)
+        self.assertIn("monthly_salary_pay_day", row.details_json)
         self.assertNotIn("4500.00", row.details_json)
         self.assertNotIn("450000", row.details_json)
 
@@ -495,6 +498,7 @@ class AdminProfileUpdateHardeningTests(unittest.TestCase, _W4Harness):
         self.assertEqual(page.status_code, 200)
         self.assertIn("Monthly salary", page.text)
         self.assertIn(f'name="salary_{emp.id}"', page.text)
+        self.assertIn(f'name="pay_day_{emp.id}"', page.text)
 
         csrf = self._csrf()
         r = self.client.post(
@@ -503,6 +507,7 @@ class AdminProfileUpdateHardeningTests(unittest.TestCase, _W4Harness):
                 "csrf_token": csrf,
                 f"comp_{emp.id}": "monthly_salary",
                 f"salary_{emp.id}": "5200.00",
+                f"pay_day_{emp.id}": "31",
                 f"payment_{emp.id}": "check",
             },
             follow_redirects=False,
@@ -513,14 +518,52 @@ class AdminProfileUpdateHardeningTests(unittest.TestCase, _W4Harness):
         refreshed = self.session.get(EmployeeProfile, emp.id)
         self.assertEqual(refreshed.compensation_type, "monthly_salary")
         self.assertEqual(decrypt_pii(refreshed.monthly_salary_cents_enc), "520000")
+        self.assertEqual(refreshed.monthly_salary_pay_day, 31)
         self.assertEqual(refreshed.payment_method, "check")
 
         row = self.session.exec(
             select(AuditLog).where(AuditLog.action == "admin.pay_rates.bulk_update")
         ).one()
         self.assertIn("monthly_salary_changes", row.details_json)
+        self.assertIn("monthly_pay_day_changes", row.details_json)
         self.assertNotIn("5200.00", row.details_json)
         self.assertNotIn("520000", row.details_json)
+
+    def test_payroll_cost_summary_includes_salary_accrual_and_scheduled_hourly(self):
+        from datetime import date
+
+        from app.models import EmployeeProfile, ShiftEntry
+        from app.pii import encrypt_pii
+        from app.routers.team_admin_employees import _payroll_cost_summary
+
+        self._login(role="admin", user_id=526, username="adm526")
+        salaried = self._seed_employee(user_id=827, username="emp827")
+        hourly = self._seed_employee(user_id=828, username="emp828")
+
+        salaried_profile = self.session.get(EmployeeProfile, salaried.id)
+        salaried_profile.compensation_type = "monthly_salary"
+        salaried_profile.monthly_salary_cents_enc = encrypt_pii("300000")
+        hourly_profile = self.session.get(EmployeeProfile, hourly.id)
+        hourly_profile.compensation_type = "hourly"
+        hourly_profile.hourly_rate_cents_enc = encrypt_pii("2000")
+        self.session.add_all([salaried_profile, hourly_profile])
+        self.session.add(
+            ShiftEntry(
+                user_id=hourly.id,
+                shift_date=date(2026, 4, 24),
+                label="10 AM - 2 PM",
+                kind="work",
+                created_by_user_id=526,
+            )
+        )
+        self.session.commit()
+
+        summary = _payroll_cost_summary(self.session, today=date(2026, 4, 24))
+        periods = {row["key"]: row for row in summary["periods"]}
+        self.assertEqual(periods["today"]["total_label"], "$180.00")
+        self.assertEqual(periods["week_to_date"]["total_label"], "$580.00")
+        self.assertEqual(periods["month_to_date"]["total_label"], "$2,480.00")
+        self.assertEqual(summary["monthly_salary_commitment_label"], "$3,000.00")
 
 
 class ResetPasswordTests(unittest.TestCase, _W4Harness):
