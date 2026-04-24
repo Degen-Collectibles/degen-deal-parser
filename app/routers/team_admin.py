@@ -45,6 +45,9 @@ def _admin_gate(request: Request, session: Session, resource_key: str):
     request.state.can_view_admin_announcements = has_permission(
         session, user, "admin.announcements.view"
     )
+    request.state.can_view_admin_timeoff = has_permission(
+        session, user, "admin.timeoff.view"
+    )
     return None, user
 
 
@@ -73,6 +76,9 @@ def _permission_gate(request: Request, session: Session, resource_key: str):
         ), None
     request.state.can_view_admin_announcements = has_permission(
         session, user, "admin.announcements.view"
+    )
+    request.state.can_view_admin_timeoff = has_permission(
+        session, user, "admin.timeoff.view"
     )
     return None, user
 

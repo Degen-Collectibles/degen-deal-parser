@@ -185,11 +185,15 @@
         <a class="ta-nav-link pt-link {% if active == 'employees' %}active{% endif %}" href="/team/admin/employees">Employees</a>
         <a class="ta-nav-link pt-link {% if active == 'schedule' %}active{% endif %}" href="/team/admin/schedule">Schedule</a>
         {% set _can_admin_announcements = can_view_admin_announcements if can_view_admin_announcements is defined else request.state.can_view_admin_announcements|default(false) %}
+        {% set _can_admin_timeoff = can_view_admin_timeoff if can_view_admin_timeoff is defined else request.state.can_view_admin_timeoff|default(false) %}
         {% if _can_admin_announcements %}
         <a class="ta-nav-link pt-link {% if active == 'announcements' %}active{% endif %}" href="/team/admin/announcements">Announcements</a>
         {% endif %}
         <a class="ta-nav-link pt-link {% if active == 'invites' %}active{% endif %}" href="/team/admin/invites">Invites</a>
         <a class="ta-nav-link pt-link {% if active == 'supply' %}active{% endif %}" href="/team/admin/supply">Supply queue</a>
+        {% if _can_admin_timeoff %}
+        <a class="ta-nav-link pt-link {% if active == 'time-off' %}active{% endif %}" href="/team/admin/timeoff">Time off</a>
+        {% endif %}
         <div class="ta-sidebar-footer">
             <a href="/team/">← back to team portal</a>
             <a href="/admin">← back to ops admin</a>

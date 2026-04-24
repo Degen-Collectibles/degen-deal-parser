@@ -1,0 +1,59 @@
+{% extends "team/base.html" %}
+{% block header_sub %}
+<div class="pt-h1-sub">Submit upcoming time off and track decisions.</div>
+{% endblock %}
+{% block content %}
+<div class="pt-two-col alt-wide">
+  <div>
+    <div class="pt-card">
+        <h2>New time-off request</h2>
+        <form method="post" action="/team/timeoff">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div class="pt-field">
+                <label class="pt-field-label" for="start_date">Start date</label>
+                <input class="pt-input" type="date" id="start_date" name="start_date" min="{{ today }}" required>
+            </div>
+            <div class="pt-field">
+                <label class="pt-field-label" for="end_date">End date</label>
+                <input class="pt-input" type="date" id="end_date" name="end_date" min="{{ today }}" required>
+            </div>
+            <div class="pt-field">
+                <label class="pt-field-label" for="reason">Reason</label>
+                <textarea class="pt-textarea" id="reason" name="reason" rows="4" maxlength="2000" placeholder="Optional context for the schedule team"></textarea>
+            </div>
+            <button class="pt-btn primary lg" type="submit">Submit request</button>
+        </form>
+    </div>
+  </div>
+  <div>
+    <div class="pt-card">
+        <h2>My requests</h2>
+        {% if requests %}
+          <table class="pt-table">
+            <thead><tr><th>Dates</th><th>Reason</th><th>Status</th><th>Sent</th></tr></thead>
+            <tbody>
+            {% for r in requests %}
+              <tr>
+                <td>
+                  {{ r.start_date.strftime('%b %d') }}
+                  {% if r.end_date != r.start_date %}- {{ r.end_date.strftime('%b %d') }}{% endif %}
+                  {% if r.decision_notes %}
+                    <div style="color:var(--pt-muted); font-size:12px; margin-top:4px;">{{ r.decision_notes }}</div>
+                  {% endif %}
+                </td>
+                <td>{{ r.reason[:120] }}{% if r.reason|length > 120 %}...{% endif %}</td>
+                <td><span class="pt-pill {{ r.status }}">{{ r.status }}</span></td>
+                <td style="color:var(--pt-muted); font-size:12px;">{{ r.created_at.strftime('%b %d') if r.created_at else '' }}</td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        {% else %}
+          <div style="padding:20px 0; text-align:center; color:var(--pt-muted); font-size:14px;">
+            No time-off requests yet.
+          </div>
+        {% endif %}
+    </div>
+  </div>
+</div>
+{% endblock %}

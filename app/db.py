@@ -915,6 +915,7 @@ DEFAULT_ROLE_PERMISSIONS: tuple[tuple[str, str, bool], ...] = tuple(
         ("page.hours", (True, False, True, True, True)),
         ("page.schedule", (True, False, True, True, True)),
         ("page.announcements", (True, True, True, True, True)),
+        ("page.timeoff", (True, True, True, True, True)),
         ("page.supply_requests", (True, False, True, True, True)),
         ("page.admin.employees", (False, False, False, False, True)),
         ("page.admin.invites", (False, False, False, False, True)),
@@ -925,6 +926,7 @@ DEFAULT_ROLE_PERMISSIONS: tuple[tuple[str, str, bool], ...] = tuple(
         ("widget.dashboard.todays_tasks", (True, False, True, True, True)),
         ("widget.dashboard.upcoming_shifts", (True, False, True, True, True)),
         ("widget.dashboard.supply_queue_count", (False, False, True, True, True)),
+        ("action.timeoff.submit", (True, True, True, True, True)),
         ("action.supply_request.submit", (True, False, True, True, True)),
         ("action.supply_request.approve", (False, False, True, True, True)),
         ("action.pii.reveal", (False, False, False, False, True)),
@@ -943,6 +945,8 @@ DEFAULT_ROLE_PERMISSIONS: tuple[tuple[str, str, bool], ...] = tuple(
         ("admin.invites.issue", (False, False, False, False, True)),
         ("admin.supply.view", (False, False, True, True, True)),
         ("admin.supply.approve", (False, False, True, True, True)),
+        ("admin.timeoff.view", (False, False, True, True, True)),
+        ("admin.timeoff.approve", (False, False, True, False, True)),
         # Wave 4.5 — edit key distinct from view
         ("admin.employees.edit", (False, False, False, False, True)),
         # Wave 4.7 — schedule admin surface. Managers can also view/edit

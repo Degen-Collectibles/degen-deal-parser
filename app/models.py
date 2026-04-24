@@ -555,6 +555,22 @@ class SupplyRequest(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utcnow, index=True)
 
 
+class TimeOffRequest(SQLModel, table=True):
+    __tablename__ = "time_off_request"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    submitted_by_user_id: int = Field(foreign_key="user.id", index=True)
+    start_date: date = Field(index=True)
+    end_date: date = Field(index=True)
+    reason: str = Field(default="", max_length=2000)
+    status: str = Field(default="submitted", index=True)
+    approved_by_user_id: Optional[int] = Field(default=None, foreign_key="user.id")
+    status_changed_at: Optional[datetime] = Field(default=None, index=True)
+    decision_notes: str = Field(default="", max_length=2000)
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+    updated_at: datetime = Field(default_factory=utcnow, index=True)
+
+
 class TeamAnnouncement(SQLModel, table=True):
     __tablename__ = "team_announcement"
 

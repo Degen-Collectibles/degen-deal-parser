@@ -428,6 +428,7 @@ def _nav_context(session: Session, user: User) -> dict:
         ("hours", "page.hours", "/team/hours"),
         ("announcements", "page.announcements", "/team/announcements"),
         ("schedule", "page.schedule", schedule_href),
+        ("time-off", "page.timeoff", "/team/timeoff"),
         ("policies", "page.policies", "/team/policies"),
         ("supply", "page.supply_requests", "/team/supply"),
         ("profile", "page.profile", "/team/profile"),
@@ -445,6 +446,7 @@ def _nav_context(session: Session, user: User) -> dict:
         ("invites", "page.admin.invites", "/team/admin/invites"),
         ("permissions", "page.admin.permissions", "/team/admin/permissions"),
         ("supply-queue", "page.admin.supply", "/team/admin/supply"),
+        ("time-off-queue", "admin.timeoff.view", "/team/admin/timeoff"),
         (
             "announcements-admin",
             "admin.announcements.view",

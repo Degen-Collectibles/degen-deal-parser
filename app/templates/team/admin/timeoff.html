@@ -1,0 +1,72 @@
+{% extends "team/admin/base.html" %}
+{% set active = 'time-off' %}
+{% block content %}
+{% if flash %}<div class="ta-flash success">{{ flash }}</div>{% endif %}
+{% if error %}<div class="ta-flash warn">{{ error }}</div>{% endif %}
+
+<div style="margin-bottom:16px;">
+    <a class="ta-btn {% if not filter_status %}active{% endif %}" href="/team/admin/timeoff">All</a>
+    {% for s in statuses %}
+        <a class="ta-btn" href="/team/admin/timeoff?status={{ s }}"
+           style="{% if filter_status == s %}border-color:#ff8a3d; color:#ff8a3d;{% endif %} margin-left:4px;">
+            {{ s }} ({{ counts.get(s, 0) }})
+        </a>
+    {% endfor %}
+</div>
+
+<div class="ta-card" style="padding:0;">
+    <table style="width:100%; font-size:13px; border-collapse:collapse;">
+        <thead>
+            <tr style="text-align:left; color:var(--lx-muted); font-size:11px; text-transform:uppercase; letter-spacing:0.05em;">
+                <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">Submitted</th>
+                <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">By</th>
+                <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">Dates</th>
+                <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">Reason</th>
+                <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">Status</th>
+                <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">Decision</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in requests %}
+            {% set submitter = submitters.get(r.submitted_by_user_id) %}
+            <tr>
+                <td style="padding:10px 14px; border-bottom:1px solid var(--lx-br); white-space:nowrap;">{{ r.created_at.strftime('%Y-%m-%d') }}</td>
+                <td style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">
+                    {% if submitter %}{{ submitter.display_name or submitter.username }}{% else %}User {{ r.submitted_by_user_id }}{% endif %}
+                </td>
+                <td style="padding:10px 14px; border-bottom:1px solid var(--lx-br); white-space:nowrap;">
+                    {{ r.start_date.strftime('%Y-%m-%d') }}
+                    {% if r.end_date != r.start_date %}<br>{{ r.end_date.strftime('%Y-%m-%d') }}{% endif %}
+                </td>
+                <td style="padding:10px 14px; border-bottom:1px solid var(--lx-br); max-width:320px;">
+                    {{ r.reason[:220] }}{% if r.reason|length > 220 %}...{% endif %}
+                    {% if r.decision_notes %}
+                      <div style="color:var(--lx-muted); font-size:12px; margin-top:4px;">{{ r.decision_notes }}</div>
+                    {% endif %}
+                </td>
+                <td style="padding:10px 14px; border-bottom:1px solid var(--lx-br); text-transform:capitalize;">{{ r.status }}</td>
+                <td style="padding:10px 14px; border-bottom:1px solid var(--lx-br); min-width:260px;">
+                    {% if r.status == 'submitted' %}
+                        <form method="post" action="/team/admin/timeoff/{{ r.id }}/approve" style="display:flex; gap:6px; margin-bottom:6px;">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
+                            <input name="decision_notes" maxlength="2000" placeholder="Optional note"
+                                   style="min-width:0; flex:1; padding:7px 9px; border:1px solid var(--lx-br); border-radius:8px; background:var(--lx-s2); color:var(--lx-text); font:inherit;">
+                            <button class="ta-btn" type="submit">Approve</button>
+                        </form>
+                        <form method="post" action="/team/admin/timeoff/{{ r.id }}/deny" style="display:flex; gap:6px;">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
+                            <input name="decision_notes" maxlength="2000" placeholder="Optional note"
+                                   style="min-width:0; flex:1; padding:7px 9px; border:1px solid var(--lx-br); border-radius:8px; background:var(--lx-s2); color:var(--lx-text); font:inherit;">
+                            <button class="ta-btn danger" type="submit">Deny</button>
+                        </form>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+            {% if not requests %}
+            <tr><td colspan="6" style="padding:20px 14px; text-align:center; color:var(--lx-muted);">No time-off requests in this view.</td></tr>
+            {% endif %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

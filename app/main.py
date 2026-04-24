@@ -532,10 +532,14 @@ if settings.employee_portal_enabled:
     app.include_router(team_admin_invites_router, tags=["team-admin"])
     from .routers.team_admin_supply import router as team_admin_supply_router  # noqa: E402
     app.include_router(team_admin_supply_router, tags=["team-admin"])
+    from .routers.team_admin_timeoff import router as team_admin_timeoff_router  # noqa: E402
+    app.include_router(team_admin_timeoff_router, tags=["team-admin"])
     from .routers.team_admin_schedule import router as team_admin_schedule_router  # noqa: E402
     app.include_router(team_admin_schedule_router, tags=["team-admin"])
     from .routers.team_admin_announcements import router as team_admin_announcements_router  # noqa: E402
     app.include_router(team_admin_announcements_router, tags=["team-admin"])
+    from .routers.team_timeoff import router as team_timeoff_router  # noqa: E402
+    app.include_router(team_timeoff_router, tags=["team"])
     from .routers.team import router as team_router  # noqa: E402
     app.include_router(team_router, tags=["team"])
 
@@ -757,4 +761,3 @@ def health():
             local_runtime_needs_attention=True,
             error=str(exc),
         )
-

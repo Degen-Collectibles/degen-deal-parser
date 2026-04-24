@@ -6,8 +6,8 @@ The "Admin" group in the portal sidebar (`base.html`) is populated by
 
 - Admins see all privileged sidebar links.
 - Employees see ZERO admin/tools links and no privileged dividers.
-- Managers see only Supply Queue (page.admin.supply is manager+).
-- Reviewers see only Supply Queue.
+- Managers see schedule plus their permitted queue links.
+- Reviewers see their permitted queue links.
 """
 from __future__ import annotations
 
@@ -114,6 +114,7 @@ class AdminSidebarVisibilityTests(unittest.TestCase):
         self.assertIn('href="/team/admin/invites"', html)
         self.assertIn('href="/team/admin/permissions"', html)
         self.assertIn('href="/team/admin/supply"', html)
+        self.assertIn('href="/team/admin/timeoff"', html)
         self.assertIn('href="/tiktok/streamer"', html)
         self.assertIn('href="/degen_eye"', html)
         self.assertIn('href="/dashboard"', html)
@@ -148,24 +149,26 @@ class AdminSidebarVisibilityTests(unittest.TestCase):
             "tools divider leaked into an employee's sidebar",
         )
 
-    def test_manager_sees_only_supply_queue(self):
+    def test_manager_sees_queue_links(self):
         self._current_user = self._login_as("manager", user_id=103, username="mgr")
         html = self._dashboard_html()
         self.assertIn('href="/team/admin/schedule"', html)
         # page.admin.supply is manager=True in DEFAULT_ROLE_PERMISSIONS.
         self.assertIn('href="/team/admin/supply"', html)
+        self.assertIn('href="/team/admin/timeoff"', html)
         self.assertIn('href="/tiktok/streamer"', html)
         self.assertIn('href="/degen_eye"', html)
         self.assertIn('href="/dashboard"', html)
-        # The other three admin pages are admin-only.
+        # These employee-management pages stay admin-only.
         self.assertNotIn('href="/team/admin/employees"', html)
         self.assertNotIn('href="/team/admin/invites"', html)
         self.assertNotIn('href="/team/admin/permissions"', html)
 
-    def test_reviewer_sees_only_supply_queue(self):
+    def test_reviewer_sees_queue_links(self):
         self._current_user = self._login_as("reviewer", user_id=104, username="rev")
         html = self._dashboard_html()
         self.assertIn('href="/team/admin/supply"', html)
+        self.assertIn('href="/team/admin/timeoff"', html)
         self.assertIn('href="/tiktok/streamer"', html)
         self.assertIn('href="/degen_eye"', html)
         self.assertNotIn('href="/team/admin/employees"', html)
