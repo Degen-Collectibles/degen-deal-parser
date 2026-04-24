@@ -40,6 +40,7 @@ Thumbs.db
 # Temp test artifacts
 tests/.tmp_*/
 .forge-scratch/
+.worktrees/
 
 # Employee portal secrets (never commit)
 EMPLOYEE_PORTAL_SECRETS.txt
