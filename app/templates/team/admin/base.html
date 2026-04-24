@@ -8,7 +8,7 @@
        .pt-mobile-bottom-nav). Admin pages reuse the exact same pattern
        as /team/ so the hamburger pops out the admin sidebar on phones
        instead of a weird horizontal chip strip. #}
-    <link rel="stylesheet" href="/static/portal.css?v=2026042025">
+    <link rel="stylesheet" href="/static/portal.css?v=2026042424">
     <style>
         * { box-sizing: border-box; }
         body {
@@ -164,7 +164,7 @@
         <span>Team Admin</span>
     </a>
     <span class="pt-topbar-spacer"></span>
-    <span class="pt-topbar-chip">Admin</span>
+    {% if current_user %}<span class="pt-topbar-chip">{{ current_user.role }}</span>{% endif %}
 </header>
 {# Backdrop for the mobile drawer. Click-to-close handled by portal-drawer.js. #}
 <div class="pt-drawer-backdrop" id="pt-drawer-backdrop" aria-hidden="true"></div>

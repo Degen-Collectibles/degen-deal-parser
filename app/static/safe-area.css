@@ -20,14 +20,16 @@
   /* When the linear mobile topbar is present it owns the top safe-area inset.
      Zero out body padding-top so the inset isn't applied twice. */
   @media (max-width: 767.98px) {
-    body:has(.linear-mobile-topbar) {
+    body:has(.linear-mobile-topbar),
+    body:has(.pt-mobile-topbar) {
       padding-top: 0 !important;
     }
   }
 
   /* If there's a fixed bottom nav, it owns the bottom safe area.
      The body gets padding for nav height only, not double the inset. */
-  body:has(.mobile-bottom-nav) {
+  body:has(.mobile-bottom-nav),
+  body:has(.pt-mobile-bottom-nav) {
     padding-bottom: 0 !important;
   }
 }
