@@ -717,6 +717,185 @@ class ParseShiftHoursTests(unittest.TestCase):
         self.assertEqual(_parse_shift_hours("whatever"), 0.0)
         self.assertEqual(_parse_shift_hours("10:30 AM -"), 0.0)
 
+    def test_parse_shift_hours_known_formats(self):
+        from app.routers.team_admin_schedule import _parse_shift_hours
+        self.assertEqual(_parse_shift_hours("10-6"), 8.0)
+        self.assertEqual(_parse_shift_hours("10:30 AM - 6 PM"), 7.5)
+        self.assertEqual(_parse_shift_hours("10-2 / 3-7"), 8.0)
+        self.assertEqual(_parse_shift_hours(""), 0.0)
+        self.assertEqual(_parse_shift_hours("garbage"), 0.0)
+
+
+class ManagerToolingGridContextTests(unittest.TestCase):
+    WEEK = date(2026, 4, 20)
+
+    def setUp(self):
+        from app.db import seed_employee_portal_defaults
+        from app.models import User
+
+        self.engine = _fresh_engine()
+        self.session = Session(self.engine)
+        seed_employee_portal_defaults(self.session)
+        self.admin = User(
+            id=850,
+            username="mgr_w47",
+            password_hash="x",
+            password_salt="x",
+            display_name="Manager",
+            role="admin",
+            is_active=True,
+        )
+        self.session.add(self.admin)
+        self.session.commit()
+
+    def tearDown(self):
+        self.session.close()
+
+    def _employee(self, user_id: int, name: str, *, staff_kind: str = "storefront"):
+        from app.models import User
+
+        u = User(
+            id=user_id,
+            username=name.lower(),
+            password_hash="x",
+            password_salt="x",
+            display_name=name,
+            role="employee",
+            is_active=True,
+            is_schedulable=True,
+            staff_kind=staff_kind,
+        )
+        self.session.add(u)
+        self.session.commit()
+        return u
+
+    def _roster(self, user_id: int) -> None:
+        from app.models import ScheduleRosterMember
+
+        self.session.add(
+            ScheduleRosterMember(
+                week_start=self.WEEK,
+                user_id=user_id,
+                added_by_user_id=self.admin.id,
+            )
+        )
+        self.session.commit()
+
+    def _profile_rate(self, user_id: int, cents: str) -> None:
+        from app.models import EmployeeProfile
+        from app.pii import encrypt_pii
+
+        self.session.add(
+            EmployeeProfile(
+                user_id=user_id,
+                hourly_rate_cents_enc=encrypt_pii(cents),
+            )
+        )
+        self.session.commit()
+
+    def _shift(self, user_id: int, day_offset: int, label: str, kind: str) -> None:
+        from app.models import ShiftEntry
+
+        self.session.add(
+            ShiftEntry(
+                user_id=user_id,
+                shift_date=self.WEEK + timedelta(days=day_offset),
+                label=label,
+                kind=kind,
+                created_by_user_id=self.admin.id,
+            )
+        )
+        self.session.commit()
+
+    def _ctx(self):
+        from app.models import STAFF_KIND_STOREFRONT
+        from app.routers.team_admin_schedule import _grid_context
+
+        return _grid_context(
+            self.session,
+            self.WEEK,
+            staff_kind=STAFF_KIND_STOREFRONT,
+        )
+
+    def test_grid_context_labor_totals_sums_work_only(self):
+        from app.models import SHIFT_KIND_OFF, SHIFT_KIND_REQUEST, SHIFT_KIND_WORK
+
+        employee = self._employee(9101, "Labor One")
+        self._roster(employee.id)
+        self._profile_rate(employee.id, "2500")
+        self._shift(employee.id, 0, "10-6", SHIFT_KIND_WORK)
+        self._shift(employee.id, 1, "10-6", SHIFT_KIND_REQUEST)
+        self._shift(employee.id, 2, "10-6", SHIFT_KIND_OFF)
+
+        ctx = self._ctx()
+        self.assertEqual(ctx["grand_hours"], 8.0)
+        self.assertEqual(ctx["labor_total_cents"], 20000)
+        self.assertEqual(ctx["labor_total_display"], "$200.00")
+
+    def test_grid_context_labor_excludes_stream_rows(self):
+        from app.models import (
+            SHIFT_KIND_STREAM,
+            STAFF_KIND_STREAM,
+        )
+
+        employee = self._employee(9102, "Stream Only", staff_kind=STAFF_KIND_STREAM)
+        self._roster(employee.id)
+        self._profile_rate(employee.id, "2500")
+        self._shift(employee.id, 0, "10-6", SHIFT_KIND_STREAM)
+
+        ctx = self._ctx()
+        self.assertEqual(ctx["grand_hours"], 0.0)
+        self.assertEqual(ctx["labor_total_cents"], 0)
+
+    def test_coverage_gap_days_non_closed_zero_hours(self):
+        from app.models import SHIFT_KIND_WORK, StoreClosure
+
+        employee = self._employee(9103, "Coverage")
+        self._roster(employee.id)
+        self._profile_rate(employee.id, "2500")
+        for offset in (0, 1, 2):
+            self._shift(employee.id, offset, "10-6", SHIFT_KIND_WORK)
+        for offset in (5, 6):
+            self.session.add(
+                StoreClosure(
+                    day_date=self.WEEK + timedelta(days=offset),
+                    label="Closed",
+                )
+            )
+        self.session.commit()
+
+        ctx = self._ctx()
+        self.assertEqual(
+            ctx["coverage_gap_days"],
+            [self.WEEK + timedelta(days=3), self.WEEK + timedelta(days=4)],
+        )
+
+    def test_coverage_gap_ignores_request_only_days(self):
+        from app.models import SHIFT_KIND_REQUEST
+
+        employee = self._employee(9104, "Request Only")
+        self._roster(employee.id)
+        self._profile_rate(employee.id, "2500")
+        self._shift(employee.id, 0, "10-6", SHIFT_KIND_REQUEST)
+
+        ctx = self._ctx()
+        self.assertIn(self.WEEK, ctx["coverage_gap_days"])
+        self.assertEqual(ctx["day_hours"][self.WEEK.isoformat()], 0.0)
+
+    def test_multi_shift_cell_hours_sum(self):
+        from app.models import SHIFT_KIND_WORK
+
+        employee = self._employee(9105, "Split Shift")
+        self._roster(employee.id)
+        self._profile_rate(employee.id, "2500")
+        self._shift(employee.id, 0, "10-2", SHIFT_KIND_WORK)
+        self._shift(employee.id, 0, "3-7", SHIFT_KIND_WORK)
+
+        ctx = self._ctx()
+        self.assertEqual(ctx["user_hours"][employee.id], 8.0)
+        self.assertEqual(ctx["day_hours"][self.WEEK.isoformat()], 8.0)
+        self.assertEqual(ctx["grand_hours"], 8.0)
+
 
 # ---------------------------------------------------------------------------
 # Admin schedule save
@@ -1126,6 +1305,7 @@ class AdminScheduleSaveTests(unittest.TestCase, _W47Harness):
         data2 = {"csrf_token": self._csrf(), "week": monday.isoformat()}
         data2[_build_cell_key(emps[0].id, monday)] = "11 AM - 7 PM"  # updated
         data2[_build_cell_key(emps[1].id, friday)] = ""               # cleared
+        data2["cleared_cells"] = json.dumps([f"{emps[1].id}__{friday.isoformat()}"]) 
         data2[_build_cell_key(emps[2].id, monday)] = "OFF"            # added
         r = self.client.post("/team/admin/schedule", data=data2, follow_redirects=False)
         self.assertIn(r.status_code, (302, 303))

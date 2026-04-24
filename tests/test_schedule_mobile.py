@@ -19,6 +19,7 @@ import threading
 import time
 import unittest
 from datetime import date, timedelta
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from cryptography.fernet import Fernet
@@ -470,6 +471,175 @@ class ScheduleMobileWebKitTests(ScheduleMobileTests):
             )
         finally:
             ctx.close()
+
+
+class ScheduleMobileSummaryRenderTests(unittest.TestCase):
+    """Direct-render mobile guards for the expanded summary/header markup.
+
+    These avoid TestClient and browser startup; the existing Playwright tests
+    above still cover real tap behavior.
+    """
+
+    WEEK = date(2026, 4, 20)
+
+    def setUp(self):
+        self.engine = _fresh_engine()
+        from app.db import seed_employee_portal_defaults
+
+        self.session = Session(self.engine)
+        seed_employee_portal_defaults(self.session)
+        self.admin = self._seed_admin()
+        self._seed_storefront_roster()
+
+    def tearDown(self):
+        self.session.close()
+
+    def _seed_admin(self):
+        from app.models import User
+
+        u = User(
+            id=6500,
+            username="mobileadmin",
+            password_hash="x",
+            password_salt="x",
+            display_name="Mobile Admin",
+            role="admin",
+            is_active=True,
+        )
+        self.session.add(u)
+        self.session.commit()
+        return u
+
+    def _seed_storefront_roster(self):
+        from app.models import (
+            EmployeeProfile,
+            ScheduleRosterMember,
+            SHIFT_KIND_WORK,
+            ShiftEntry,
+            User,
+        )
+        from app.pii import encrypt_pii
+
+        paid = User(
+            id=6501,
+            username="paidmobile",
+            password_hash="x",
+            password_salt="x",
+            display_name="Paid Mobile",
+            role="employee",
+            is_active=True,
+            is_schedulable=True,
+        )
+        missing = User(
+            id=6502,
+            username="missingmobile",
+            password_hash="x",
+            password_salt="x",
+            display_name="Missing Mobile",
+            role="employee",
+            is_active=True,
+            is_schedulable=True,
+        )
+        self.session.add(paid)
+        self.session.add(missing)
+        self.session.add(
+            EmployeeProfile(
+                user_id=paid.id,
+                hourly_rate_cents_enc=encrypt_pii("2500"),
+            )
+        )
+        for u in (paid, missing):
+            self.session.add(
+                ScheduleRosterMember(
+                    week_start=self.WEEK,
+                    user_id=u.id,
+                    added_by_user_id=self.admin.id,
+                )
+            )
+        self.session.add(
+            ShiftEntry(
+                user_id=paid.id,
+                shift_date=self.WEEK,
+                label="10-6",
+                kind=SHIFT_KIND_WORK,
+                created_by_user_id=self.admin.id,
+            )
+        )
+        self.session.commit()
+
+    def _render_direct(self) -> str:
+        from app import shared
+        from app.models import STAFF_KIND_STOREFRONT, STAFF_KIND_STREAM
+        from app.routers.team_admin_schedule import (
+            _build_cell_key,
+            _build_day_loc_key,
+            _grid_context,
+        )
+
+        storefront = _grid_context(
+            self.session,
+            self.WEEK,
+            staff_kind=STAFF_KIND_STOREFRONT,
+        )
+        stream = _grid_context(
+            self.session,
+            self.WEEK,
+            staff_kind=STAFF_KIND_STREAM,
+        )
+        request = SimpleNamespace(
+            state=SimpleNamespace(
+                can_view_admin_announcements=False,
+                can_view_admin_timeoff=False,
+            ),
+            url=SimpleNamespace(path="/team/admin/schedule"),
+        )
+        template = shared.templates.env.get_template("team/admin/schedule.html")
+        return template.render(
+            request=request,
+            title="Schedule",
+            active="schedule",
+            current_user=self.admin,
+            can_edit=True,
+            edit_mode=True,
+            stream_accounts=[],
+            stream_account_colors={},
+            holiday_options=[],
+            custom_closures=[],
+            csrf_token="csrf-token",
+            build_cell_key=_build_cell_key,
+            build_day_loc_key=_build_day_loc_key,
+            storefront=storefront,
+            stream=stream,
+            week_start=storefront["week_start"],
+            week_start_iso=storefront["week_start_iso"],
+            week_days=storefront["week_days"],
+            day_note_map=storefront["day_note_map"],
+            prev_week=storefront["prev_week"],
+            next_week=storefront["next_week"],
+            this_week=storefront["this_week"],
+            is_current_week=storefront["is_current_week"],
+            today=self.WEEK,
+            flash=None,
+        )
+
+    def test_summary_strip_visible_on_mobile(self):
+        html = self._render_direct()
+        self.assertIn("sch-summary", html)
+        self.assertIn("Labor this week", html)
+        self.assertIn("$200.00", html)
+        self.assertIn("⚠ 1 missing rates", html)
+
+    def test_cells_still_editable_with_new_headers(self):
+        html = self._render_direct()
+        self.assertIn('form method="post" action="/team/admin/schedule" data-schgrid="storefront"', html)
+        self.assertIn("sch-cell-edit", html)
+        self.assertIn("Save storefront schedule", html)
+
+    def test_totals_column_does_not_break_table_layout(self):
+        html = self._render_direct()
+        self.assertIn("sch-total-head", html)
+        self.assertIn("sch-total-col", html)
+        self.assertIn("Daily hours", html)
 
 
 if __name__ == "__main__":

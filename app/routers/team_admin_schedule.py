@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+from decimal import Decimal, ROUND_HALF_UP
 from datetime import date, datetime, timedelta
 from typing import Optional
 
@@ -28,12 +29,15 @@ from ..csrf import issue_token, require_csrf
 from ..db import get_session
 from ..models import (
     AuditLog,
+    EmployeeProfile,
     STAFF_KIND_STOREFRONT,
     STAFF_KIND_STREAM,
     STAFF_KINDS,
     ScheduleDayNote,
     ScheduleRosterMember,
+    SHIFT_KIND_ALL,
     SHIFT_KIND_BLANK,
+    SHIFT_KIND_WORK,
     ShiftEntry,
     StoreClosure,
     StreamAccount,
@@ -43,6 +47,7 @@ from ..models import (
     classify_shift_label,
     utcnow,
 )
+from ..pii import decrypt_pii
 from ..shared import templates
 from .team_admin import _admin_gate, _permission_gate
 
@@ -230,6 +235,7 @@ _TIME_RE = re.compile(
 )
 
 _NON_SHIFT_TOKENS = {"OFF", "SHOW", "REQUEST", "IF NEEDED", "STREAM"}
+_LABOR_SHIFT_KINDS = {SHIFT_KIND_WORK, SHIFT_KIND_ALL}
 
 
 def _parse_time_to_minutes(s: str) -> Optional[int]:
@@ -291,6 +297,47 @@ def _parse_shift_hours(label: str) -> float:
             b += 24 * 60  # overnight wrap
         total += (b - a) / 60.0
     return round(total, 2)
+
+
+def _counts_for_storefront_labor(entry: ShiftEntry) -> bool:
+    """Return whether a storefront ShiftEntry contributes labor/coverage."""
+    return (entry.kind or "") in _LABOR_SHIFT_KINDS
+
+
+def _format_labor_cents(cents: int) -> str:
+    return f"${cents / 100:,.2f}"
+
+
+def _labor_cents_for_hours(hours: float, hourly_rate_cents: int) -> int:
+    return int(
+        (Decimal(str(hours)) * Decimal(hourly_rate_cents)).quantize(
+            Decimal("1"), rounding=ROUND_HALF_UP
+        )
+    )
+
+
+def _profile_hourly_rate_cents(profile: Optional[EmployeeProfile]) -> tuple[int, bool]:
+    """Return (rate_cents, missing).
+
+    Privacy note: this helper never logs, raises, or returns plaintext. The
+    caller uses the integer only for aggregate labor math inside the request.
+    """
+    if profile is None or not profile.hourly_rate_cents_enc:
+        return 0, True
+    try:
+        raw = decrypt_pii(profile.hourly_rate_cents_enc)
+    except Exception:
+        return 0, True
+    raw_s = (raw or "").strip()
+    if not raw_s:
+        return 0, True
+    try:
+        cents = int(raw_s)
+    except (TypeError, ValueError):
+        return 0, True
+    if cents < 0:
+        return 0, True
+    return cents, False
 
 
 # Palette used to give each StreamAccount a stable, distinct background
@@ -566,38 +613,76 @@ def _grid_context(
     else:
         prev_roster_count = len(prev_roster_ids)
 
-    # 7shifts-style totals: per-user weekly hours, per-day column totals,
-    # grand weekly total, and a raw "how many shift cells were scheduled".
-    # We only tally entries for users actually on the grid so rows hidden
-    # by a staff_kind filter don't pollute the totals.
+    # 7shifts-style totals plus manager-only labor tooling. We only tally
+    # WORK / ALL storefront entries for users actually on the grid so time-off
+    # REQUEST rows, OFF rows, and Stream rows never count as labor/coverage.
     user_ids_on_grid = {u.id for u in users if u.id is not None}
     user_hours: dict[int, float] = {uid: 0.0 for uid in user_ids_on_grid}
     day_hours: dict[str, float] = {d.isoformat(): 0.0 for d in week_days}
     total_shifts = 0
+    profile_map: dict[int, EmployeeProfile] = {}
+    if user_ids_on_grid:
+        profiles = list(
+            session.exec(
+                select(EmployeeProfile).where(
+                    EmployeeProfile.user_id.in_(user_ids_on_grid)  # type: ignore[attr-defined]
+                )
+            ).all()
+        )
+        profile_map = {p.user_id: p for p in profiles}
+
+    hourly_rate_cents_by_user: dict[int, int] = {}
+    missing_rate_count = 0
+    for uid in user_ids_on_grid:
+        rate_cents, missing = _profile_hourly_rate_cents(profile_map.get(uid))
+        hourly_rate_cents_by_user[uid] = rate_cents
+        if missing:
+            missing_rate_count += 1
+
+    labor_total_cents = 0
     # Sum hours and count shifts across every entry in every cell — multi-
     # shift days contribute their full stacked total to the row / column.
     for (uid, iso), es in entry_map.items():
         if uid not in user_ids_on_grid:
             continue
         for e in es:
+            # total_shifts counts ALL entry kinds (used by schedule-save clear logic)
+            if (e.kind or "") in ("work", "all_day"):
+                total_shifts += 1
+            # labor math only counts WORK / ALL — excludes REQUEST, OFF, SHOW, etc.
+            if not _counts_for_storefront_labor(e):
+                continue
             hrs = _parse_shift_hours(e.label or "")
             if hrs > 0:
                 user_hours[uid] = user_hours.get(uid, 0.0) + hrs
                 day_hours[iso] = day_hours.get(iso, 0.0) + hrs
-            if (e.kind or "") in ("work", "all_day"):
-                total_shifts += 1
+                labor_total_cents += _labor_cents_for_hours(
+                    hrs, hourly_rate_cents_by_user.get(uid, 0)
+                )
     grand_hours = round(sum(user_hours.values()), 2)
     # Count distinct employees who have at least one worked cell on any day.
     people_with_shifts = sum(
         1
         for uid in user_ids_on_grid
         if any(
-            any((e.kind or "") in ("work", "all_day") for e in entry_map.get((uid, d.isoformat()), []))
+            any(
+                _counts_for_storefront_labor(e)
+                for e in entry_map.get((uid, d.isoformat()), [])
+            )
             for d in week_days
         )
     )
 
     closure_map = _closure_map_for_range(session, first_day, last_day)
+    coverage_gap_days = [
+        d
+        for d in week_days
+        if not closure_map.get(d.isoformat())
+        and day_hours.get(d.isoformat(), 0.0) <= 0
+    ]
+    labor_total_needs_missing_rate_note = (
+        labor_total_cents == 0 and grand_hours > 0 and missing_rate_count > 0
+    )
 
     return {
         "week_start": week_start,
@@ -623,6 +708,15 @@ def _grid_context(
         "grand_hours": grand_hours,
         "total_shifts": total_shifts,
         "people_with_shifts": people_with_shifts,
+        "labor_total_cents": labor_total_cents,
+        "labor_total_display": (
+            "— (missing rates)"
+            if labor_total_needs_missing_rate_note
+            else _format_labor_cents(labor_total_cents)
+        ),
+        "missing_rate_count": missing_rate_count,
+        "coverage_gap_days": coverage_gap_days,
+        "coverage_gap_day_isos": {d.isoformat() for d in coverage_gap_days},
     }
 
 
