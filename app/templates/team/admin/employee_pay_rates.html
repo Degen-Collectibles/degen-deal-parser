@@ -20,7 +20,7 @@
 <div class="ta-card">
     <h2>Bulk compensation</h2>
     <p style="font-size:13px; color:var(--lx-muted); margin:0;">
-        Edit hourly rates and fixed monthly salaries in dollars. Blank means no amount set. Amounts are stored encrypted; payment method is used to separate cash from check payroll.
+        Choose who is paid, then fill in only the matching pay fields. Not paid users stay in the portal but are excluded from labor spend.
     </p>
 </div>
 
@@ -48,7 +48,7 @@
         {% endfor %}
     </div>
     <div style="font-size:12px; color:var(--lx-muted); margin-top:10px;">
-        {{ payroll_summary.salaried_count }} salaried &middot; {{ payroll_summary.hourly_count }} hourly
+        {{ payroll_summary.salaried_count }} salaried &middot; {{ payroll_summary.hourly_count }} hourly &middot; {{ payroll_summary.unpaid_count }} not paid
         {% if payroll_summary.missing_salary_count or payroll_summary.missing_hourly_rate_count %}
             &middot; {{ payroll_summary.missing_salary_count }} missing salary &middot; {{ payroll_summary.missing_hourly_rate_count }} missing hourly rate
         {% endif %}
@@ -75,7 +75,7 @@
                 <tbody>
                     {% for row in rows %}
                     {% set employee = row.user %}
-                    <tr>
+                    <tr data-compensation-row data-current-type="{{ row.compensation_type }}" style="{% if row.compensation_type == 'unpaid' %}opacity:0.78;{% endif %}">
                         <td style="padding:12px 14px; border-bottom:1px solid var(--lx-br);">
                             <a href="/team/admin/employees/{{ employee.id }}" style="color:#ff8a3d; font-weight:650;">
                                 {{ employee.display_name or employee.username }}
@@ -83,6 +83,11 @@
                             <div style="font-size:11px; color:var(--lx-muted); margin-top:2px;">
                                 {{ employee.username }} &middot; {{ employee.role }}
                             </div>
+                            {% if row.compensation_type == 'unpaid' %}
+                            <div data-unpaid-note style="font-size:11px; color:#fbbf24; margin-top:4px;">Excluded from payroll totals</div>
+                            {% else %}
+                            <div data-unpaid-note style="font-size:11px; color:#fbbf24; margin-top:4px; display:none;">Excluded from payroll totals</div>
+                            {% endif %}
                         </td>
                         <td style="padding:12px 14px; border-bottom:1px solid var(--lx-br);">
                             {% if row.is_draft %}
@@ -95,6 +100,7 @@
                         </td>
                         <td style="padding:12px 14px; border-bottom:1px solid var(--lx-br);">
                             <select name="comp_{{ employee.id }}"
+                                    data-comp-select
                                     style="width:150px; padding:6px 8px; border-radius:8px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);">
                                 {% for comp in compensation_types %}
                                     <option value="{{ comp }}" {% if row.compensation_type == comp %}selected{% endif %}>{{ compensation_type_labels[comp] }}</option>
@@ -107,10 +113,13 @@
                                 <input type="text"
                                        name="rate_{{ employee.id }}"
                                        value="{{ row.rate_value }}"
+                                       data-hourly-input
                                        inputmode="decimal"
                                        placeholder="25.00"
+                                       {% if not row.can_edit_hourly %}disabled aria-disabled="true"{% endif %}
                                        style="width:110px; padding:6px 8px; border-radius:8px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/>
                             </div>
+                            <div data-hourly-help style="font-size:11px; color:var(--lx-muted); margin-top:4px; {% if row.can_edit_hourly %}display:none;{% endif %}">Only for hourly</div>
                         </td>
                         <td style="padding:12px 14px; border-bottom:1px solid var(--lx-br);">
                             <div style="display:flex; align-items:center; gap:6px;">
@@ -118,24 +127,31 @@
                                 <input type="text"
                                        name="salary_{{ employee.id }}"
                                        value="{{ row.salary_value }}"
+                                       data-salary-input
                                        inputmode="decimal"
                                        placeholder="4500.00"
+                                       {% if not row.can_edit_salary %}disabled aria-disabled="true"{% endif %}
                                        style="width:120px; padding:6px 8px; border-radius:8px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/>
                             </div>
+                            <div data-salary-help style="font-size:11px; color:var(--lx-muted); margin-top:4px; {% if row.can_edit_salary %}display:none;{% endif %}">Only for salary</div>
                         </td>
                         <td style="padding:12px 14px; border-bottom:1px solid var(--lx-br);">
                             <input type="number"
                                    name="pay_day_{{ employee.id }}"
                                    value="{{ row.monthly_pay_day }}"
+                                   data-payday-input
                                    min="1"
                                    max="31"
                                    inputmode="numeric"
                                    placeholder="15"
+                                   {% if not row.can_edit_salary %}disabled aria-disabled="true"{% endif %}
                                    style="width:76px; padding:6px 8px; border-radius:8px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/>
                             <div style="font-size:11px; color:var(--lx-muted); margin-top:4px;">{{ row.monthly_pay_date_label }}</div>
                         </td>
                         <td style="padding:12px 14px; border-bottom:1px solid var(--lx-br);">
                             <select name="payment_{{ employee.id }}"
+                                    data-payment-input
+                                    {% if not row.is_paid %}disabled aria-disabled="true"{% endif %}
                                     style="width:130px; padding:6px 8px; border-radius:8px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);">
                                 {% for method in payment_methods %}
                                     <option value="{{ method }}" {% if row.payment_method == method %}selected{% endif %}>{{ payment_method_labels[method] }}</option>
@@ -155,4 +171,41 @@
         Save compensation
     </button>
 </form>
+
+<script>
+(function () {
+    function setDisabled(input, disabled) {
+        if (!input) return;
+        input.disabled = disabled;
+        input.setAttribute("aria-disabled", disabled ? "true" : "false");
+        input.style.opacity = disabled ? "0.45" : "1";
+        input.style.cursor = disabled ? "not-allowed" : "";
+    }
+
+    function updateRow(row) {
+        const type = row.querySelector("[data-comp-select]")?.value || "hourly";
+        const isHourly = type === "hourly";
+        const isSalary = type === "monthly_salary";
+        const isPaid = type !== "unpaid";
+
+        setDisabled(row.querySelector("[data-hourly-input]"), !isHourly);
+        setDisabled(row.querySelector("[data-salary-input]"), !isSalary);
+        setDisabled(row.querySelector("[data-payday-input]"), !isSalary);
+        setDisabled(row.querySelector("[data-payment-input]"), !isPaid);
+
+        const hourlyHelp = row.querySelector("[data-hourly-help]");
+        const salaryHelp = row.querySelector("[data-salary-help]");
+        const unpaidNote = row.querySelector("[data-unpaid-note]");
+        if (hourlyHelp) hourlyHelp.style.display = isHourly ? "none" : "";
+        if (salaryHelp) salaryHelp.style.display = isSalary ? "none" : "";
+        if (unpaidNote) unpaidNote.style.display = isPaid ? "none" : "";
+        row.style.opacity = isPaid ? "1" : "0.78";
+    }
+
+    document.querySelectorAll("[data-compensation-row]").forEach((row) => {
+        updateRow(row);
+        row.querySelector("[data-comp-select]")?.addEventListener("change", () => updateRow(row));
+    });
+})();
+</script>
 {% endblock %}

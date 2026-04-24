@@ -47,10 +47,18 @@ router = APIRouter()
 
 
 ROLES = ("employee", "viewer", "manager", "reviewer", "admin")
-COMPENSATION_TYPES = ("hourly", "monthly_salary")
+COMPENSATION_TYPE_UNPAID = "unpaid"
+COMPENSATION_TYPE_HOURLY = "hourly"
+COMPENSATION_TYPE_MONTHLY = "monthly_salary"
+COMPENSATION_TYPES = (
+    COMPENSATION_TYPE_UNPAID,
+    COMPENSATION_TYPE_HOURLY,
+    COMPENSATION_TYPE_MONTHLY,
+)
 COMPENSATION_TYPE_LABELS = {
-    "hourly": "Hourly",
-    "monthly_salary": "Monthly salary",
+    COMPENSATION_TYPE_UNPAID: "Not paid",
+    COMPENSATION_TYPE_HOURLY: "Hourly",
+    COMPENSATION_TYPE_MONTHLY: "Monthly salary",
 }
 PAYMENT_METHODS = ("cash", "check")
 PAYMENT_METHOD_LABELS = {
@@ -61,7 +69,7 @@ PAYMENT_METHOD_LABELS = {
 
 def _normalize_compensation_type(value: str) -> str:
     value = (value or "").strip().lower()
-    return value if value in COMPENSATION_TYPES else "hourly"
+    return value if value in COMPENSATION_TYPES else COMPENSATION_TYPE_HOURLY
 
 
 def _normalize_payment_method(value: str) -> str:
@@ -617,6 +625,9 @@ def _pay_rate_rows(session: Session, *, include_inactive: bool = False) -> list[
                 "profile": profile,
                 "is_draft": is_draft_user(employee),
                 "compensation_type": compensation_type,
+                "is_paid": compensation_type != COMPENSATION_TYPE_UNPAID,
+                "can_edit_hourly": compensation_type == COMPENSATION_TYPE_HOURLY,
+                "can_edit_salary": compensation_type == COMPENSATION_TYPE_MONTHLY,
                 "rate_value": _format_money_dollars(rate_cents),
                 "has_rate": rate_cents is not None,
                 "salary_value": _format_money_dollars(salary_cents),
@@ -705,6 +716,7 @@ def _payroll_cost_summary(session: Session, *, today: Optional[date] = None) -> 
     monthly_salary_commitment_cents = 0
     salaried_count = 0
     hourly_count = 0
+    unpaid_count = 0
     missing_hourly_rate_ids: set[int] = set()
     missing_salary_ids: set[int] = set()
 
@@ -713,7 +725,10 @@ def _payroll_cost_summary(session: Session, *, today: Optional[date] = None) -> 
         compensation_type = _normalize_compensation_type(
             profile.compensation_type if profile is not None else ""
         )
-        if compensation_type == "monthly_salary":
+        if compensation_type == COMPENSATION_TYPE_UNPAID:
+            unpaid_count += 1
+            continue
+        if compensation_type == COMPENSATION_TYPE_MONTHLY:
             salaried_count += 1
             salary_cents = _decrypt_monthly_salary_cents(profile)
             if salary_cents is None:
@@ -735,7 +750,7 @@ def _payroll_cost_summary(session: Session, *, today: Optional[date] = None) -> 
 
     hourly_rates: dict[int, int] = {}
     for user_id, profile in profiles.items():
-        if _normalize_compensation_type(profile.compensation_type or "") != "hourly":
+        if _normalize_compensation_type(profile.compensation_type or "") != COMPENSATION_TYPE_HOURLY:
             continue
         rate_cents = _decrypt_hourly_rate_cents(profile)
         if rate_cents is not None:
@@ -803,6 +818,7 @@ def _payroll_cost_summary(session: Session, *, today: Optional[date] = None) -> 
         ),
         "salaried_count": salaried_count,
         "hourly_count": hourly_count,
+        "unpaid_count": unpaid_count,
         "missing_hourly_rate_count": len(missing_hourly_rate_ids),
         "missing_salary_count": len(missing_salary_ids),
         "basis_label": "Salary prorated by calendar day + scheduled hourly shifts",
@@ -908,8 +924,12 @@ async def admin_employee_pay_rates_post(
                 compensation_changes += 1
                 changed_user_ids.add(user_id)
 
+        effective_compensation = _normalize_compensation_type(
+            profile.compensation_type or ""
+        )
+
         rate_key = f"rate_{user_id}"
-        if rate_key in form:
+        if rate_key in form and effective_compensation == COMPENSATION_TYPE_HOURLY:
             rate_raw = str(form.get(rate_key) or "").strip()
             parsed_rate, rate_invalid = _parse_hourly_rate_dollars(rate_raw)
             if rate_invalid:
@@ -928,7 +948,7 @@ async def admin_employee_pay_rates_post(
                     changed_user_ids.add(user_id)
 
         salary_key = f"salary_{user_id}"
-        if salary_key in form:
+        if salary_key in form and effective_compensation == COMPENSATION_TYPE_MONTHLY:
             salary_raw = str(form.get(salary_key) or "").strip()
             parsed_salary, salary_invalid = _parse_monthly_salary_dollars(salary_raw)
             if salary_invalid:
@@ -947,7 +967,7 @@ async def admin_employee_pay_rates_post(
                     changed_user_ids.add(user_id)
 
         pay_day_key = f"pay_day_{user_id}"
-        if pay_day_key in form:
+        if pay_day_key in form and effective_compensation == COMPENSATION_TYPE_MONTHLY:
             pay_day_raw = str(form.get(pay_day_key) or "").strip()
             parsed_pay_day, pay_day_invalid = _parse_monthly_pay_day(pay_day_raw)
             if pay_day_invalid:
@@ -958,7 +978,7 @@ async def admin_employee_pay_rates_post(
                 changed_user_ids.add(user_id)
 
         payment_key = f"payment_{user_id}"
-        if payment_key in form:
+        if payment_key in form and effective_compensation != COMPENSATION_TYPE_UNPAID:
             method_raw = str(form.get(payment_key) or "")
             new_method = _normalize_payment_method(method_raw)
             if new_method != _normalize_payment_method(profile.payment_method or ""):
@@ -1222,7 +1242,15 @@ async def admin_employee_profile_update(
             profile.compensation_type = new_compensation
             changed.append("compensation_type")
 
-    rate_int, rate_invalid = _clamp_hourly_rate_cents(hourly_rate_cents)
+    effective_compensation = _normalize_compensation_type(
+        profile.compensation_type or ""
+    )
+
+    rate_invalid = False
+    if effective_compensation == COMPENSATION_TYPE_HOURLY:
+        rate_int, rate_invalid = _clamp_hourly_rate_cents(hourly_rate_cents)
+    else:
+        rate_int = None
     if rate_int is not None:
         from ..pii import decrypt_pii, encrypt_pii
         try:
@@ -1233,24 +1261,30 @@ async def admin_employee_profile_update(
             profile.hourly_rate_cents_enc = encrypt_pii(str(rate_int))
             changed.append("hourly_rate_cents")
 
-    salary_int, salary_invalid = _parse_monthly_salary_dollars(
-        monthly_salary_dollars
-    )
-    if salary_int is not None:
-        from ..pii import encrypt_pii
+    salary_invalid = False
+    pay_day_invalid = False
+    if effective_compensation == COMPENSATION_TYPE_MONTHLY:
+        salary_int, salary_invalid = _parse_monthly_salary_dollars(
+            monthly_salary_dollars
+        )
+        if salary_int is not None:
+            from ..pii import encrypt_pii
 
-        current_salary = _decrypt_monthly_salary_cents(profile)
-        if salary_int != current_salary:
-            profile.monthly_salary_cents_enc = encrypt_pii(str(salary_int))
-            changed.append("monthly_salary_cents")
+            current_salary = _decrypt_monthly_salary_cents(profile)
+            if salary_int != current_salary:
+                profile.monthly_salary_cents_enc = encrypt_pii(str(salary_int))
+                changed.append("monthly_salary_cents")
 
-    pay_day_int, pay_day_invalid = _parse_monthly_pay_day(monthly_salary_pay_day)
-    if (monthly_salary_pay_day or "").strip() and not pay_day_invalid:
-        if pay_day_int != profile.monthly_salary_pay_day:
-            profile.monthly_salary_pay_day = pay_day_int
-            changed.append("monthly_salary_pay_day")
+        pay_day_int, pay_day_invalid = _parse_monthly_pay_day(monthly_salary_pay_day)
+        if (monthly_salary_pay_day or "").strip() and not pay_day_invalid:
+            if pay_day_int != profile.monthly_salary_pay_day:
+                profile.monthly_salary_pay_day = pay_day_int
+                changed.append("monthly_salary_pay_day")
 
-    if (payment_method or "").strip():
+    if (
+        (payment_method or "").strip()
+        and effective_compensation != COMPENSATION_TYPE_UNPAID
+    ):
         new_payment_method = _normalize_payment_method(payment_method)
         if new_payment_method != _normalize_payment_method(profile.payment_method or ""):
             profile.payment_method = new_payment_method

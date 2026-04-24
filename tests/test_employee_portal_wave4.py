@@ -529,6 +529,78 @@ class AdminProfileUpdateHardeningTests(unittest.TestCase, _W4Harness):
         self.assertNotIn("5200.00", row.details_json)
         self.assertNotIn("520000", row.details_json)
 
+    def test_bulk_compensation_only_updates_fields_for_selected_pay_type(self):
+        from app.models import EmployeeProfile
+        from app.pii import decrypt_pii, encrypt_pii
+        from app.routers.team_admin_employees import _payroll_cost_summary
+
+        self._login(role="admin", user_id=529, username="adm529")
+        hourly = self._seed_employee(user_id=830, username="emp830")
+        salary = self._seed_employee(user_id=831, username="emp831")
+        owner = self._seed_employee(user_id=832, username="owner832")
+
+        hourly_profile = self.session.get(EmployeeProfile, hourly.id)
+        hourly_profile.compensation_type = "hourly"
+        hourly_profile.monthly_salary_cents_enc = encrypt_pii("900000")
+        salary_profile = self.session.get(EmployeeProfile, salary.id)
+        salary_profile.compensation_type = "monthly_salary"
+        salary_profile.hourly_rate_cents_enc = encrypt_pii("9900")
+        salary_profile.monthly_salary_cents_enc = encrypt_pii("300000")
+        owner_profile = self.session.get(EmployeeProfile, owner.id)
+        owner_profile.compensation_type = "hourly"
+        owner_profile.payment_method = "cash"
+        self.session.add_all([hourly_profile, salary_profile, owner_profile])
+        self.session.commit()
+
+        page = self.client.get("/team/admin/employees/pay-rates")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("Not paid", page.text)
+        self.assertIn("data-hourly-input", page.text)
+        self.assertIn("data-salary-input", page.text)
+
+        csrf = self._csrf()
+        r = self.client.post(
+            "/team/admin/employees/pay-rates",
+            data={
+                "csrf_token": csrf,
+                f"comp_{hourly.id}": "hourly",
+                f"rate_{hourly.id}": "25.00",
+                f"salary_{hourly.id}": "9999.00",
+                f"pay_day_{hourly.id}": "22",
+                f"payment_{hourly.id}": "check",
+                f"comp_{salary.id}": "monthly_salary",
+                f"rate_{salary.id}": "88.00",
+                f"salary_{salary.id}": "4000.00",
+                f"pay_day_{salary.id}": "15",
+                f"payment_{salary.id}": "check",
+                f"comp_{owner.id}": "unpaid",
+                f"rate_{owner.id}": "99.00",
+                f"salary_{owner.id}": "5000.00",
+                f"pay_day_{owner.id}": "1",
+                f"payment_{owner.id}": "check",
+            },
+            follow_redirects=False,
+        )
+        self.assertEqual(r.status_code, 303)
+
+        self.session.expire_all()
+        hourly_profile = self.session.get(EmployeeProfile, hourly.id)
+        salary_profile = self.session.get(EmployeeProfile, salary.id)
+        owner_profile = self.session.get(EmployeeProfile, owner.id)
+        self.assertEqual(decrypt_pii(hourly_profile.hourly_rate_cents_enc), "2500")
+        self.assertEqual(decrypt_pii(hourly_profile.monthly_salary_cents_enc), "900000")
+        self.assertIsNone(hourly_profile.monthly_salary_pay_day)
+        self.assertEqual(decrypt_pii(salary_profile.hourly_rate_cents_enc), "9900")
+        self.assertEqual(decrypt_pii(salary_profile.monthly_salary_cents_enc), "400000")
+        self.assertEqual(salary_profile.monthly_salary_pay_day, 15)
+        self.assertEqual(owner_profile.compensation_type, "unpaid")
+        self.assertIsNone(owner_profile.hourly_rate_cents_enc)
+        self.assertIsNone(owner_profile.monthly_salary_cents_enc)
+        self.assertEqual(owner_profile.payment_method, "cash")
+
+        summary = _payroll_cost_summary(self.session)
+        self.assertGreaterEqual(summary["unpaid_count"], 1)
+
     def test_payroll_cost_summary_includes_salary_accrual_and_scheduled_hourly(self):
         from datetime import date
 
