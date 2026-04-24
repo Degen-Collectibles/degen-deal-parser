@@ -216,6 +216,9 @@ class Settings(BaseSettings):
     trusted_proxy_ips: str = Field(default="127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16", alias="TRUSTED_PROXY_IPS")
     clockify_api_key: str = Field(default="", alias="CLOCKIFY_API_KEY")
     clockify_workspace_id: str = Field(default="", alias="CLOCKIFY_WORKSPACE_ID")
+    clockify_base_url: str = Field(default="https://api.clockify.me/api/v1", alias="CLOCKIFY_BASE_URL")
+    clockify_timezone: str = Field(default="America/Los_Angeles", alias="CLOCKIFY_TIMEZONE")
+    clockify_timeout_seconds: float = Field(default=12.0, alias="CLOCKIFY_TIMEOUT_SECONDS")
     session_hours: int = Field(default=8, alias="SESSION_HOURS")
 
     @property

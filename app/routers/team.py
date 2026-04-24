@@ -33,6 +33,13 @@ from ..auth import (
     has_permission,
     validate_password_strength,
 )
+from ..clockify import (
+    ClockifyApiError,
+    ClockifyConfigError,
+    clockify_client_from_settings,
+    clockify_is_configured,
+    format_hours,
+)
 from ..config import get_settings
 from ..csrf import issue_token, require_csrf, rotate_token
 from ..db import get_session
@@ -498,7 +505,7 @@ def team_dashboard(
     if denial:
         return denial
     widgets = perms.allowed_widgets_for(session, user)
-    clockify_ready = bool((get_settings().clockify_api_key or "").strip())
+    clockify_ready = clockify_is_configured()
     supply_queue_count = int(
         session.exec(
             select(func.count())
@@ -1080,8 +1087,21 @@ def team_hours(
     denial, user = _require_employee(request, session, resource_key="page.hours")
     if denial:
         return denial
-    clockify_ready = bool((get_settings().clockify_api_key or "").strip())
-    # TODO(Wave 5): fetch time entries from Clockify here.
+    settings = get_settings()
+    clockify_ready = clockify_is_configured(settings)
+    profile = session.get(EmployeeProfile, user.id)
+    clockify_user_id = (profile.clockify_user_id or "").strip() if profile else ""
+    clockify_summary = None
+    clockify_error = None
+    if clockify_ready and clockify_user_id:
+        try:
+            clockify_summary = clockify_client_from_settings(settings).user_week_summary(
+                clockify_user_id,
+                today=date.today(),
+                settings=settings,
+            )
+        except (ClockifyApiError, ClockifyConfigError) as exc:
+            clockify_error = str(exc)
     return templates.TemplateResponse(
         request,
         "team/hours.html",
@@ -1091,6 +1111,10 @@ def team_hours(
             "active": "hours",
             "current_user": user,
             "clockify_ready": clockify_ready,
+            "clockify_user_id": clockify_user_id,
+            "clockify_summary": clockify_summary,
+            "clockify_error": clockify_error,
+            "format_hours": format_hours,
             "csrf_token": issue_token(request),
             **_nav_context(session, user),
         },

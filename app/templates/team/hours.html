@@ -1,21 +1,92 @@
 {% extends "team/base.html" %}
 {% block header_sub %}
-<div class="pt-h1-sub">Your tracked time this week.</div>
+<div class="pt-h1-sub">Your Clockify time for the current week.</div>
 {% endblock %}
 {% block content %}
-<div class="pt-card pt-hero" style="text-align:center; padding:56px 32px;">
-    {% if not clockify_ready %}
-        <div style="font-size:48px; margin-bottom:16px;">◴</div>
-        <h2 class="pt-card-title" style="font-size:22px; margin-bottom:12px;">Hours are tracked through payroll.</h2>
-        <p class="pt-card-sub" style="max-width:440px; margin:0 auto;">
-            Ask your manager for your paystub or current payroll details.
-        </p>
+
+{% if not clockify_ready %}
+<div class="pt-card pt-hero" style="text-align:center; padding:48px 32px;">
+    <div style="font-size:42px; margin-bottom:14px;">T</div>
+    <h2 class="pt-card-title" style="font-size:22px; margin-bottom:12px;">Clockify is not connected yet.</h2>
+    <p class="pt-card-sub" style="max-width:520px; margin:0 auto;">
+        Your manager needs to add CLOCKIFY_API_KEY and CLOCKIFY_WORKSPACE_ID before live hours can appear here.
+    </p>
+</div>
+{% elif not clockify_user_id %}
+<div class="pt-card pt-hero" style="text-align:center; padding:48px 32px;">
+    <div style="font-size:42px; margin-bottom:14px;">T</div>
+    <h2 class="pt-card-title" style="font-size:22px; margin-bottom:12px;">Your Clockify account is not linked yet.</h2>
+    <p class="pt-card-sub" style="max-width:520px; margin:0 auto;">
+        Ask a manager to run the Clockify email sync or paste your Clockify user ID into your employee profile.
+    </p>
+</div>
+{% elif clockify_error %}
+<div class="pt-card pt-hero" style="text-align:center; padding:48px 32px; border-color:rgba(239,68,68,0.35);">
+    <div style="font-size:42px; margin-bottom:14px;">!</div>
+    <h2 class="pt-card-title" style="font-size:22px; margin-bottom:12px;">Clockify could not load your hours.</h2>
+    <p class="pt-card-sub" style="max-width:620px; margin:0 auto;">{{ clockify_error }}</p>
+</div>
+{% else %}
+{% set summary = clockify_summary %}
+<div class="pt-widget-grid">
+    <div class="pt-widget">
+        <div class="pt-widget-label">This week</div>
+        <div class="pt-widget-value">{{ format_hours(summary.total_seconds) }}</div>
+        <div class="pt-widget-sub">
+            {{ summary.week_start.strftime('%b %d') }} - {{ summary.week_end_inclusive.strftime('%b %d') }}
+        </div>
+    </div>
+    <div class="pt-widget">
+        <div class="pt-widget-label">Clockify status</div>
+        <div class="pt-widget-value" style="font-size:18px; font-weight:650;">
+            {% if summary.running_count %}Timer running{% else %}No running timer{% endif %}
+        </div>
+        <div class="pt-widget-sub">{{ summary.timezone_name }}</div>
+    </div>
+</div>
+
+<div class="pt-card" style="margin-top:20px;">
+    <div style="display:flex; justify-content:space-between; align-items:center; gap:16px; flex-wrap:wrap; margin-bottom:12px;">
+        <div class="pt-card-title">Daily totals</div>
+        <a class="pt-link" href="https://app.clockify.me/tracker" target="_blank" rel="noreferrer" style="font-size:13px;">Open Clockify</a>
+    </div>
+    <div style="display:grid; grid-template-columns:repeat(7, minmax(92px, 1fr)); gap:8px; overflow:auto;">
+        {% for day in summary.daily_totals %}
+        <div style="padding:12px; border:1px solid var(--pt-border); border-radius:8px; background:var(--pt-surface-raised); min-width:92px;">
+            <div style="font-size:12px; color:var(--pt-muted); font-weight:600;">{{ day.day.strftime('%a') }}</div>
+            <div style="font-size:18px; font-weight:750; margin-top:4px;">{{ format_hours(day.duration_seconds) }}</div>
+            <div style="font-size:11px; color:var(--pt-muted); margin-top:2px;">{{ day.day.strftime('%b %d') }}</div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+
+<div class="pt-card" style="margin-top:20px;">
+    <div class="pt-card-title">Entries</div>
+    {% if summary.entries %}
+        <div style="display:grid; gap:0; margin-top:12px;">
+            {% for entry in summary.entries %}
+            <div style="display:grid; grid-template-columns:minmax(140px, 1fr) 110px; gap:16px; padding:12px 0; border-top:{% if not loop.first %}1px solid var(--pt-border){% else %}0{% endif %};">
+                <div>
+                    <div style="font-weight:700;">{{ entry.description }}</div>
+                    <div class="pt-card-sub" style="margin-top:3px;">
+                        {% if entry.start_local %}
+                            {{ entry.start_local.strftime('%a %b %d, %I:%M %p') }}
+                            {% if entry.end_local and not entry.running %}- {{ entry.end_local.strftime('%I:%M %p') }}{% endif %}
+                            {% if entry.running %}- running{% endif %}
+                        {% else %}
+                            Time entry
+                        {% endif %}
+                    </div>
+                </div>
+                <div style="text-align:right; font-weight:750;">{{ format_hours(entry.duration_seconds) }}</div>
+            </div>
+            {% endfor %}
+        </div>
     {% else %}
-        <div style="font-size:48px; margin-bottom:16px;">◴</div>
-        <h2 class="pt-card-title" style="font-size:22px; margin-bottom:12px;">Syncing up with Clockify.</h2>
-        <p class="pt-card-sub" style="max-width:440px; margin:0 auto;">
-            Live entries land here in the next release. Until then, Clockify is the source of truth.
-        </p>
+        <div class="pt-card-sub" style="margin-top:8px;">No time entries this week yet.</div>
     {% endif %}
 </div>
+{% endif %}
+
 {% endblock %}
