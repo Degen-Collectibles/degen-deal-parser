@@ -41,7 +41,9 @@ def _load_app():
 class ClockifyWebhookTests(unittest.TestCase):
     def setUp(self):
         os.environ["CLOCKIFY_WEBHOOK_SECRET"] = "test-clockify-secret"
-        os.environ["CLOCKIFY_WEBHOOK_SIGNING_SECRET"] = "clockify-signing-secret"
+        os.environ["CLOCKIFY_WEBHOOK_SIGNING_SECRETS"] = (
+            "clockify-signing-secret,second-clockify-signing-secret"
+        )
         self.engine = _fresh_engine()
         self.session = Session(self.engine)
         self.app_main = _load_app()
@@ -64,6 +66,7 @@ class ClockifyWebhookTests(unittest.TestCase):
         self.session.close()
         os.environ.pop("CLOCKIFY_WEBHOOK_SECRET", None)
         os.environ.pop("CLOCKIFY_WEBHOOK_SIGNING_SECRET", None)
+        os.environ.pop("CLOCKIFY_WEBHOOK_SIGNING_SECRETS", None)
 
     def _seed_linked_employee(self):
         from app.models import EmployeeProfile, User
@@ -100,9 +103,27 @@ class ClockifyWebhookTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
 
-    def test_clockify_webhook_rejects_bad_signing_secret_even_with_url_secret(self):
+    def test_clockify_webhook_accepts_second_clockify_signing_secret(self):
+        response = self.client.post(
+            "/webhooks/clockify",
+            headers={"Authorization": "Bearer second-clockify-signing-secret"},
+            json={"id": "event-signed-two", "event": "NEW_TIME_ENTRY"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_clockify_webhook_accepts_url_secret_if_signing_header_unknown(self):
         response = self.client.post(
             "/webhooks/clockify?secret=test-clockify-secret",
+            headers={"X-Clockify-Webhook-Token": "wrong-signing-secret"},
+            json={"event": "NEW_TIMER_STARTED"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_clockify_webhook_rejects_bad_signing_secret_without_url_secret(self):
+        response = self.client.post(
+            "/webhooks/clockify",
             headers={"X-Clockify-Webhook-Token": "wrong-signing-secret"},
             json={"event": "NEW_TIMER_STARTED"},
         )

@@ -392,11 +392,25 @@ def _clockify_webhook_secret() -> str:
     return _env_file_value("CLOCKIFY_WEBHOOK_SECRET")
 
 
-def _clockify_webhook_signing_secret() -> str:
-    env_value = (os.getenv("CLOCKIFY_WEBHOOK_SIGNING_SECRET") or "").strip()
-    if env_value:
-        return env_value
-    return _env_file_value("CLOCKIFY_WEBHOOK_SIGNING_SECRET")
+def _split_secret_values(raw: str) -> list[str]:
+    values: list[str] = []
+    for value in re.split(r"[\s,;]+", raw or ""):
+        value = value.strip().strip('"').strip("'")
+        if value and value not in values:
+            values.append(value)
+    return values
+
+
+def _clockify_webhook_signing_secrets() -> list[str]:
+    values: list[str] = []
+    for key_name in ("CLOCKIFY_WEBHOOK_SIGNING_SECRET", "CLOCKIFY_WEBHOOK_SIGNING_SECRETS"):
+        for value in _split_secret_values(os.getenv(key_name) or ""):
+            if value not in values:
+                values.append(value)
+        for value in _split_secret_values(_env_file_value(key_name)):
+            if value not in values:
+                values.append(value)
+    return values
 
 
 def _env_file_value(key_name: str) -> str:
@@ -450,8 +464,8 @@ def _clockify_signing_secret_candidates(request: Request) -> list[str]:
 
 def _require_clockify_webhook_secret(request: Request, supplied_secret: str) -> None:
     expected_url_secret = _clockify_webhook_secret()
-    expected_signing_secret = _clockify_webhook_signing_secret()
-    if not expected_url_secret and not expected_signing_secret:
+    expected_signing_secrets = _clockify_webhook_signing_secrets()
+    if not expected_url_secret and not expected_signing_secrets:
         raise HTTPException(status_code=503, detail="Clockify webhook secret is not configured.")
 
     url_secret_ok = bool(
@@ -463,14 +477,13 @@ def _require_clockify_webhook_secret(request: Request, supplied_secret: str) -> 
     )
     signing_candidates = _clockify_signing_secret_candidates(request)
     signing_secret_ok = bool(
-        expected_signing_secret
+        expected_signing_secrets
         and any(
-            hmac.compare_digest(expected_signing_secret, candidate)
+            hmac.compare_digest(expected, candidate)
+            for expected in expected_signing_secrets
             for candidate in signing_candidates
         )
     )
-    if expected_signing_secret and signing_candidates and not signing_secret_ok:
-        raise HTTPException(status_code=403, detail="Invalid Clockify webhook signing secret.")
     if not url_secret_ok and not signing_secret_ok:
         raise HTTPException(status_code=403, detail="Invalid Clockify webhook secret.")
 
