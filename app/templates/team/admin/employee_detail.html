@@ -7,7 +7,7 @@
     <a class="ta-btn" href="/team/admin/employees/{{ employee.id }}/timecards" style="background:linear-gradient(135deg,#86efac22,#60a5fa22); border-color:rgba(134,239,172,0.45); color:#bbf7d0;">
         📅 View weekly timecards →
     </a>
-    <a class="ta-btn" href="/team/admin/employees/pay-rates">Edit pay rates</a>
+    <a class="ta-btn" href="/team/admin/employees/pay-rates">Edit compensation</a>
 </div>
 
 {% if is_draft %}
@@ -111,8 +111,27 @@
                 <td><input type="date" name="termination_date" value="{{ profile.termination_date or '' }}" style="padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/></td>
             </tr>
             <tr>
+                <td style="padding:6px 0; color:var(--lx-muted);">Compensation</td>
+                <td>
+                    <select name="compensation_type" style="padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);">
+                        {% for comp in compensation_types %}
+                            <option value="{{ comp }}" {% if current_compensation_type == comp %}selected{% endif %}>{{ compensation_type_labels[comp] }}</option>
+                        {% endfor %}
+                    </select>
+                    <span style="font-size:11px; color:var(--lx-muted); margin-left:8px;">monthly salary does not use Clockify hours for pay</span>
+                </td>
+            </tr>
+            <tr>
                 <td style="padding:6px 0; color:var(--lx-muted);">Hourly rate (cents)</td>
                 <td><input type="text" name="hourly_rate_cents" placeholder="e.g. 2500 for $25.00" style="width:200px; padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/></td>
+            </tr>
+            <tr>
+                <td style="padding:6px 0; color:var(--lx-muted);">Monthly salary</td>
+                <td>
+                    <span style="color:var(--lx-muted); margin-right:4px;">$</span>
+                    <input type="text" name="monthly_salary_dollars" value="{{ monthly_salary_value }}" inputmode="decimal" placeholder="4500.00" style="width:200px; padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/>
+                    <span style="font-size:11px; color:var(--lx-muted); margin-left:8px;">per month</span>
+                </td>
             </tr>
             <tr>
                 <td style="padding:6px 0; color:var(--lx-muted);">Payment method</td>

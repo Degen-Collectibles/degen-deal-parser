@@ -177,11 +177,11 @@
     </div>
 </div>
 
-{% if not clockify_configured %}
+{% if not clockify_configured and not salary_employee %}
 <div class="tc-banner warn">
     Clockify is not configured. <a href="/team/admin/clockify">Set it up on the Clockify admin page</a> to pull this employee's actual hours.
 </div>
-{% elif not profile_mapped %}
+{% elif not profile_mapped and not salary_employee %}
 <div class="tc-banner warn">
     This employee isn't mapped to a Clockify user. <a href="/team/admin/clockify">Map them on the Clockify admin page</a> to show actual hours alongside the schedule.
 </div>
@@ -210,15 +210,15 @@
     </div>
     {% if labor_rate_missing %}
     <div class="tc-tile tc-tile-muted">
-        <div class="tc-tile-label">Labor cost</div>
-        <div class="tc-tile-value">— (rate not set)</div>
-        <div class="tc-tile-sub">Add an hourly rate on the profile</div>
+        <div class="tc-tile-label">{{ labor_tile_label }}</div>
+        <div class="tc-tile-value">-- ({{ labor_missing_label }})</div>
+        <div class="tc-tile-sub">{{ labor_missing_help }}</div>
     </div>
     {% else %}
     <div class="tc-tile">
-        <div class="tc-tile-label">Labor cost</div>
+        <div class="tc-tile-label">{{ labor_tile_label }}</div>
         <div class="tc-tile-value">{{ labor_total_label }}</div>
-        <div class="tc-tile-sub">Actual hours × hourly rate</div>
+        <div class="tc-tile-sub">{{ labor_basis_label }}</div>
     </div>
     {% endif %}
     <div class="tc-tile">

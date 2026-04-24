@@ -2,7 +2,9 @@
 
 Combines the scheduled ShiftEntry rows for a week with the employee's
 Clockify time entries, computes per-day anomalies (late/early/no-show/
-unscheduled/running), and shows an aggregate labor total.
+unscheduled/running), and shows an aggregate labor total. Salaried
+employees use their fixed monthly amount for the labor tile; Clockify
+hours are optional for them.
 
 Wage privacy: individual hourly rates are never placed in the template
 context, logs, or response body. Only the aggregate labor total and a
@@ -53,6 +55,7 @@ DEFAULT_TZ = "America/Los_Angeles"
 LATE_THRESHOLD_MIN = 15
 EARLY_LEAVE_THRESHOLD_MIN = 15
 _LABOR_KINDS = {SHIFT_KIND_WORK, SHIFT_KIND_ALL}
+_COMPENSATION_MONTHLY_SALARY = "monthly_salary"
 
 
 def _format_month_day(value: date, *, include_year: bool = False) -> str:
@@ -156,12 +159,20 @@ def _fmt_time(dt: Optional[datetime]) -> str:
         return dt.strftime("%I:%M %p").lstrip("0")
 
 
-def _hourly_rate_cents(profile: Optional[EmployeeProfile]) -> tuple[int, bool]:
-    """Return (rate_cents, missing). Never logs or renders plaintext."""
-    if profile is None or not profile.hourly_rate_cents_enc:
+def _normalize_compensation_type(profile: Optional[EmployeeProfile]) -> str:
+    value = (profile.compensation_type if profile is not None else "") or ""
+    value = value.strip().lower()
+    if value == _COMPENSATION_MONTHLY_SALARY:
+        return _COMPENSATION_MONTHLY_SALARY
+    return "hourly"
+
+
+def _encrypted_cents(blob: Optional[bytes]) -> tuple[int, bool]:
+    """Return (cents, missing). Never logs or renders plaintext."""
+    if not blob:
         return 0, True
     try:
-        raw = decrypt_pii(profile.hourly_rate_cents_enc)
+        raw = decrypt_pii(blob)
     except Exception:
         return 0, True
     raw = (raw or "").strip()
@@ -172,6 +183,18 @@ def _hourly_rate_cents(profile: Optional[EmployeeProfile]) -> tuple[int, bool]:
     except (TypeError, ValueError):
         return 0, True
     return (cents if cents >= 0 else 0), False
+
+
+def _hourly_rate_cents(profile: Optional[EmployeeProfile]) -> tuple[int, bool]:
+    if profile is None:
+        return 0, True
+    return _encrypted_cents(profile.hourly_rate_cents_enc)
+
+
+def _monthly_salary_cents(profile: Optional[EmployeeProfile]) -> tuple[int, bool]:
+    if profile is None:
+        return 0, True
+    return _encrypted_cents(profile.monthly_salary_cents_enc)
 
 
 def _labor_cents(total_seconds: int, rate_cents: int) -> int:
@@ -429,11 +452,26 @@ def admin_employee_timecards(
     shifts_worked = sum(1 for row in day_rows if row.actual_seconds > 0)
     running_count = summary.running_count if summary else 0
 
-    rate_cents, rate_missing = _hourly_rate_cents(profile)
-    labor_cents = _labor_cents(actual_total_seconds, rate_cents)
-    # Drop the plaintext rate before building the context to keep it out
-    # of both the template namespace and any future locals() dumps.
-    del rate_cents
+    compensation_type = _normalize_compensation_type(profile)
+    salary_employee = compensation_type == _COMPENSATION_MONTHLY_SALARY
+    if salary_employee:
+        salary_cents, pay_missing = _monthly_salary_cents(profile)
+        labor_cents = salary_cents
+        labor_tile_label = "Monthly pay"
+        labor_basis_label = "Fixed monthly salary"
+        labor_missing_label = "salary not set"
+        labor_missing_help = "Add a monthly salary on the profile"
+        # Drop the plaintext amount before building the context to keep it out
+        # of both the template namespace and any future locals() dumps.
+        del salary_cents
+    else:
+        rate_cents, pay_missing = _hourly_rate_cents(profile)
+        labor_cents = _labor_cents(actual_total_seconds, rate_cents)
+        labor_tile_label = "Labor cost"
+        labor_basis_label = "Actual hours x hourly rate"
+        labor_missing_label = "rate not set"
+        labor_missing_help = "Add an hourly rate on the profile"
+        del rate_cents
 
     has_any_scheduled = bool(shift_rows)
     has_any_actual = bool(summary and summary.entries)
@@ -467,8 +505,13 @@ def admin_employee_timecards(
         "actual_total_seconds": actual_total_seconds,
         "shifts_worked": shifts_worked,
         "running_count": running_count,
-        "labor_total_label": _format_dollars(labor_cents) if not rate_missing else None,
-        "labor_rate_missing": rate_missing,
+        "labor_total_label": _format_dollars(labor_cents) if not pay_missing else None,
+        "labor_rate_missing": pay_missing,
+        "labor_tile_label": labor_tile_label,
+        "labor_missing_label": labor_missing_label,
+        "labor_missing_help": labor_missing_help,
+        "labor_basis_label": labor_basis_label,
+        "salary_employee": salary_employee,
         "has_any_scheduled": has_any_scheduled,
         "has_any_actual": has_any_actual,
         "csrf_token": issue_token(request),

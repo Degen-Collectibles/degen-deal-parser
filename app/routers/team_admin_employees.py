@@ -41,6 +41,11 @@ router = APIRouter()
 
 
 ROLES = ("employee", "viewer", "manager", "reviewer", "admin")
+COMPENSATION_TYPES = ("hourly", "monthly_salary")
+COMPENSATION_TYPE_LABELS = {
+    "hourly": "Hourly",
+    "monthly_salary": "Monthly salary",
+}
 PAYMENT_METHODS = ("cash", "check")
 PAYMENT_METHOD_LABELS = {
     "cash": "Cash",
@@ -48,28 +53,47 @@ PAYMENT_METHOD_LABELS = {
 }
 
 
+def _normalize_compensation_type(value: str) -> str:
+    value = (value or "").strip().lower()
+    return value if value in COMPENSATION_TYPES else "hourly"
+
+
 def _normalize_payment_method(value: str) -> str:
     value = (value or "").strip().lower()
     return value if value in PAYMENT_METHODS else "cash"
 
 
-def _decrypt_hourly_rate_cents(profile: Optional[EmployeeProfile]) -> Optional[int]:
-    if profile is None or not profile.hourly_rate_cents_enc:
+def _decrypt_money_cents(blob: Optional[bytes]) -> Optional[int]:
+    if not blob:
         return None
     try:
-        raw = decrypt_pii(profile.hourly_rate_cents_enc) or ""
+        raw = decrypt_pii(blob) or ""
         return max(0, int(raw))
     except (TypeError, ValueError):
         return None
 
 
-def _format_hourly_rate_dollars(cents: Optional[int]) -> str:
+def _decrypt_hourly_rate_cents(profile: Optional[EmployeeProfile]) -> Optional[int]:
+    if profile is None:
+        return None
+    return _decrypt_money_cents(profile.hourly_rate_cents_enc)
+
+
+def _decrypt_monthly_salary_cents(profile: Optional[EmployeeProfile]) -> Optional[int]:
+    if profile is None:
+        return None
+    return _decrypt_money_cents(profile.monthly_salary_cents_enc)
+
+
+def _format_money_dollars(cents: Optional[int]) -> str:
     if cents is None:
         return ""
     return f"{Decimal(cents) / Decimal(100):.2f}"
 
 
-def _parse_hourly_rate_dollars(value: str) -> tuple[Optional[int], bool]:
+def _parse_money_dollars(
+    value: str, *, max_cents: int
+) -> tuple[Optional[int], bool]:
     raw = (value or "").strip()
     if not raw:
         return None, False
@@ -81,7 +105,15 @@ def _parse_hourly_rate_dollars(value: str) -> tuple[Optional[int], bool]:
     if amount < 0:
         return None, True
     cents = int((amount * Decimal(100)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
-    return min(max(cents, 0), 1_000_000), False
+    return min(max(cents, 0), max_cents), False
+
+
+def _parse_hourly_rate_dollars(value: str) -> tuple[Optional[int], bool]:
+    return _parse_money_dollars(value, max_cents=1_000_000)
+
+
+def _parse_monthly_salary_dollars(value: str) -> tuple[Optional[int], bool]:
+    return _parse_money_dollars(value, max_cents=100_000_000)
 
 
 def _mask_phone(value: Optional[str]) -> str:
@@ -162,6 +194,14 @@ def _detail_context(
         "employee": employee,
         "profile": profile,
         "roles": ROLES,
+        "compensation_types": COMPENSATION_TYPES,
+        "compensation_type_labels": COMPENSATION_TYPE_LABELS,
+        "current_compensation_type": _normalize_compensation_type(
+            profile.compensation_type if profile is not None else ""
+        ),
+        "monthly_salary_value": _format_money_dollars(
+            _decrypt_monthly_salary_cents(profile)
+        ),
         "payment_methods": PAYMENT_METHODS,
         "payment_method_labels": PAYMENT_METHOD_LABELS,
         "reveal_field": None,
@@ -505,7 +545,11 @@ def _pay_rate_rows(session: Session, *, include_inactive: bool = False) -> list[
     rows: list[dict] = []
     for employee in users:
         profile = profiles.get(employee.id or 0)
+        compensation_type = _normalize_compensation_type(
+            profile.compensation_type if profile is not None else ""
+        )
         rate_cents = _decrypt_hourly_rate_cents(profile)
+        salary_cents = _decrypt_monthly_salary_cents(profile)
         payment_method = _normalize_payment_method(
             profile.payment_method if profile is not None else "cash"
         )
@@ -514,8 +558,11 @@ def _pay_rate_rows(session: Session, *, include_inactive: bool = False) -> list[
                 "user": employee,
                 "profile": profile,
                 "is_draft": is_draft_user(employee),
-                "rate_value": _format_hourly_rate_dollars(rate_cents),
+                "compensation_type": compensation_type,
+                "rate_value": _format_money_dollars(rate_cents),
                 "has_rate": rate_cents is not None,
+                "salary_value": _format_money_dollars(salary_cents),
+                "has_salary": salary_cents is not None,
                 "payment_method": payment_method,
             }
         )
@@ -539,9 +586,11 @@ def admin_employee_pay_rates_page(
         "team/admin/employee_pay_rates.html",
         {
             "request": request,
-            "title": "Pay Rates",
+            "title": "Compensation",
             "current_user": current,
             "rows": _pay_rate_rows(session, include_inactive=include_inactive),
+            "compensation_types": COMPENSATION_TYPES,
+            "compensation_type_labels": COMPENSATION_TYPE_LABELS,
             "payment_methods": PAYMENT_METHODS,
             "payment_method_labels": PAYMENT_METHOD_LABELS,
             "show_inactive": include_inactive,
@@ -568,7 +617,12 @@ async def admin_employee_pay_rates_post(
     form = await request.form()
     user_ids: set[int] = set()
     for key in form.keys():
-        if key.startswith("rate_") or key.startswith("payment_"):
+        if (
+            key.startswith("comp_")
+            or key.startswith("rate_")
+            or key.startswith("salary_")
+            or key.startswith("payment_")
+        ):
             try:
                 user_ids.add(int(key.split("_", 1)[1]))
             except (IndexError, ValueError):
@@ -578,10 +632,14 @@ async def admin_employee_pay_rates_post(
 
     now = utcnow()
     changed_user_ids: set[int] = set()
+    compensation_changes = 0
     rate_changes = 0
+    salary_changes = 0
     cleared_rates = 0
+    cleared_salaries = 0
     payment_changes = 0
     invalid_rates = 0
+    invalid_salaries = 0
 
     for user_id in sorted(user_ids):
         employee = session.get(User, user_id)
@@ -593,29 +651,63 @@ async def admin_employee_pay_rates_post(
             session.add(profile)
             session.flush()
 
-        rate_raw = str(form.get(f"rate_{user_id}") or "").strip()
-        parsed_rate, rate_invalid = _parse_hourly_rate_dollars(rate_raw)
-        if rate_invalid:
-            invalid_rates += 1
-        else:
-            current_rate = _decrypt_hourly_rate_cents(profile)
-            if parsed_rate is None:
-                if profile.hourly_rate_cents_enc:
-                    profile.hourly_rate_cents_enc = None
-                    cleared_rates += 1
-                    rate_changes += 1
-                    changed_user_ids.add(user_id)
-            elif parsed_rate != current_rate:
-                profile.hourly_rate_cents_enc = encrypt_pii(str(parsed_rate))
-                rate_changes += 1
+        comp_key = f"comp_{user_id}"
+        if comp_key in form:
+            comp_raw = str(form.get(comp_key) or "")
+            new_compensation = _normalize_compensation_type(comp_raw)
+            if new_compensation != _normalize_compensation_type(
+                profile.compensation_type or ""
+            ):
+                profile.compensation_type = new_compensation
+                compensation_changes += 1
                 changed_user_ids.add(user_id)
 
-        method_raw = str(form.get(f"payment_{user_id}") or "")
-        new_method = _normalize_payment_method(method_raw)
-        if new_method != _normalize_payment_method(profile.payment_method or ""):
-            profile.payment_method = new_method
-            payment_changes += 1
-            changed_user_ids.add(user_id)
+        rate_key = f"rate_{user_id}"
+        if rate_key in form:
+            rate_raw = str(form.get(rate_key) or "").strip()
+            parsed_rate, rate_invalid = _parse_hourly_rate_dollars(rate_raw)
+            if rate_invalid:
+                invalid_rates += 1
+            else:
+                current_rate = _decrypt_hourly_rate_cents(profile)
+                if parsed_rate is None:
+                    if profile.hourly_rate_cents_enc:
+                        profile.hourly_rate_cents_enc = None
+                        cleared_rates += 1
+                        rate_changes += 1
+                        changed_user_ids.add(user_id)
+                elif parsed_rate != current_rate:
+                    profile.hourly_rate_cents_enc = encrypt_pii(str(parsed_rate))
+                    rate_changes += 1
+                    changed_user_ids.add(user_id)
+
+        salary_key = f"salary_{user_id}"
+        if salary_key in form:
+            salary_raw = str(form.get(salary_key) or "").strip()
+            parsed_salary, salary_invalid = _parse_monthly_salary_dollars(salary_raw)
+            if salary_invalid:
+                invalid_salaries += 1
+            else:
+                current_salary = _decrypt_monthly_salary_cents(profile)
+                if parsed_salary is None:
+                    if profile.monthly_salary_cents_enc:
+                        profile.monthly_salary_cents_enc = None
+                        cleared_salaries += 1
+                        salary_changes += 1
+                        changed_user_ids.add(user_id)
+                elif parsed_salary != current_salary:
+                    profile.monthly_salary_cents_enc = encrypt_pii(str(parsed_salary))
+                    salary_changes += 1
+                    changed_user_ids.add(user_id)
+
+        payment_key = f"payment_{user_id}"
+        if payment_key in form:
+            method_raw = str(form.get(payment_key) or "")
+            new_method = _normalize_payment_method(method_raw)
+            if new_method != _normalize_payment_method(profile.payment_method or ""):
+                profile.payment_method = new_method
+                payment_changes += 1
+                changed_user_ids.add(user_id)
 
         if user_id in changed_user_ids:
             profile.updated_at = now
@@ -631,10 +723,14 @@ async def admin_employee_pay_rates_post(
                 details_json=json.dumps(
                     {
                         "updated_count": len(changed_user_ids),
+                        "compensation_type_changes": compensation_changes,
                         "rate_changes": rate_changes,
+                        "monthly_salary_changes": salary_changes,
                         "cleared_rates": cleared_rates,
+                        "cleared_monthly_salaries": cleared_salaries,
                         "payment_method_changes": payment_changes,
                         "invalid_rates": invalid_rates,
+                        "invalid_monthly_salaries": invalid_salaries,
                         "user_ids": sorted(changed_user_ids),
                     },
                     sort_keys=True,
@@ -649,11 +745,16 @@ async def admin_employee_pay_rates_post(
     qs = {
         "flash": (
             f"Saved {len(changed_user_ids)} employee(s). "
-            f"{rate_changes} rate change(s), {payment_changes} payment method change(s)."
+            f"{compensation_changes} pay type change(s), "
+            f"{rate_changes + salary_changes} amount change(s), "
+            f"{payment_changes} payment method change(s)."
         )
     }
-    if invalid_rates:
-        qs["error"] = f"{invalid_rates} invalid rate value(s) were ignored."
+    if invalid_rates or invalid_salaries:
+        qs["error"] = (
+            f"{invalid_rates + invalid_salaries} invalid compensation value(s) "
+            "were ignored."
+        )
     if show_inactive in ("1", "true", "yes", "on"):
         qs["show_inactive"] = "1"
     return RedirectResponse(
@@ -807,7 +908,9 @@ async def admin_employee_profile_update(
     role: str = Form(default=""),
     display_name: str = Form(default=""),
     staff_kind: str = Form(default=""),
+    compensation_type: str = Form(default=""),
     hourly_rate_cents: str = Form(default=""),
+    monthly_salary_dollars: str = Form(default=""),
     payment_method: str = Form(default=""),
     hire_date: str = Form(default=""),
     termination_date: str = Form(default=""),
@@ -850,6 +953,14 @@ async def admin_employee_profile_update(
         session.add(employee)
         changed.append("staff_kind")
 
+    if (compensation_type or "").strip():
+        new_compensation = _normalize_compensation_type(compensation_type)
+        if new_compensation != _normalize_compensation_type(
+            profile.compensation_type or ""
+        ):
+            profile.compensation_type = new_compensation
+            changed.append("compensation_type")
+
     rate_int, rate_invalid = _clamp_hourly_rate_cents(hourly_rate_cents)
     if rate_int is not None:
         from ..pii import decrypt_pii, encrypt_pii
@@ -860,6 +971,17 @@ async def admin_employee_profile_update(
         if str(rate_int) != current_rate:
             profile.hourly_rate_cents_enc = encrypt_pii(str(rate_int))
             changed.append("hourly_rate_cents")
+
+    salary_int, salary_invalid = _parse_monthly_salary_dollars(
+        monthly_salary_dollars
+    )
+    if salary_int is not None:
+        from ..pii import encrypt_pii
+
+        current_salary = _decrypt_monthly_salary_cents(profile)
+        if salary_int != current_salary:
+            profile.monthly_salary_cents_enc = encrypt_pii(str(salary_int))
+            changed.append("monthly_salary_cents")
 
     if (payment_method or "").strip():
         new_payment_method = _normalize_payment_method(payment_method)
@@ -900,8 +1022,10 @@ async def admin_employee_profile_update(
         )
         session.commit()
     flash = "Saved."
-    if rate_invalid:
+    if rate_invalid and not salary_invalid:
         flash = "Saved.+Invalid+hourly_rate_cents+ignored."
+    elif salary_invalid or rate_invalid:
+        flash = "Saved.+Invalid+compensation+value+ignored."
     return RedirectResponse(
         f"/team/admin/employees/{user_id}?flash={flash}", status_code=303
     )
@@ -1256,9 +1380,11 @@ async def admin_employee_purge_post(
             "emergency_contact_phone_enc",
             "email_ciphertext",
             "hourly_rate_cents_enc",
+            "monthly_salary_cents_enc",
         ):
             setattr(profile, attr, None)
         profile.email_lookup_hash = None
+        profile.compensation_type = "hourly"
         profile.clockify_user_id = None
         profile.updated_at = now
         session.add(profile)

@@ -402,6 +402,37 @@ class AdminProfileUpdateHardeningTests(unittest.TestCase, _W4Harness):
         ).one()
         self.assertIn("payment_method", row.details_json)
 
+    def test_profile_update_saves_monthly_salary_compensation(self):
+        from app.models import AuditLog, EmployeeProfile
+        from app.pii import decrypt_pii
+
+        self._login(role="admin", user_id=524, username="adm524")
+        emp = self._seed_employee(user_id=825, username="emp825")
+        csrf = self._csrf()
+
+        r = self.client.post(
+            f"/team/admin/employees/{emp.id}/profile-update",
+            data={
+                "compensation_type": "monthly_salary",
+                "monthly_salary_dollars": "4500.00",
+                "csrf_token": csrf,
+            },
+            follow_redirects=False,
+        )
+
+        self.assertEqual(r.status_code, 303)
+        self.session.expire_all()
+        refreshed = self.session.get(EmployeeProfile, emp.id)
+        self.assertEqual(refreshed.compensation_type, "monthly_salary")
+        self.assertEqual(decrypt_pii(refreshed.monthly_salary_cents_enc), "450000")
+        row = self.session.exec(
+            select(AuditLog).where(AuditLog.action == "admin.profile_update")
+        ).one()
+        self.assertIn("compensation_type", row.details_json)
+        self.assertIn("monthly_salary_cents", row.details_json)
+        self.assertNotIn("4500.00", row.details_json)
+        self.assertNotIn("450000", row.details_json)
+
     def test_bulk_pay_rates_page_updates_rates_and_payment_methods(self):
         from app.models import AuditLog, EmployeeProfile
         from app.pii import decrypt_pii, encrypt_pii
@@ -452,6 +483,44 @@ class AdminProfileUpdateHardeningTests(unittest.TestCase, _W4Harness):
         self.assertIn("rate_changes", row.details_json)
         self.assertNotIn("24.50", row.details_json)
         self.assertNotIn("2450", row.details_json)
+
+    def test_bulk_pay_rates_page_updates_monthly_salary_compensation(self):
+        from app.models import AuditLog, EmployeeProfile
+        from app.pii import decrypt_pii
+
+        self._login(role="admin", user_id=525, username="adm525")
+        emp = self._seed_employee(user_id=826, username="emp826")
+
+        page = self.client.get("/team/admin/employees/pay-rates")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("Monthly salary", page.text)
+        self.assertIn(f'name="salary_{emp.id}"', page.text)
+
+        csrf = self._csrf()
+        r = self.client.post(
+            "/team/admin/employees/pay-rates",
+            data={
+                "csrf_token": csrf,
+                f"comp_{emp.id}": "monthly_salary",
+                f"salary_{emp.id}": "5200.00",
+                f"payment_{emp.id}": "check",
+            },
+            follow_redirects=False,
+        )
+
+        self.assertEqual(r.status_code, 303)
+        self.session.expire_all()
+        refreshed = self.session.get(EmployeeProfile, emp.id)
+        self.assertEqual(refreshed.compensation_type, "monthly_salary")
+        self.assertEqual(decrypt_pii(refreshed.monthly_salary_cents_enc), "520000")
+        self.assertEqual(refreshed.payment_method, "check")
+
+        row = self.session.exec(
+            select(AuditLog).where(AuditLog.action == "admin.pay_rates.bulk_update")
+        ).one()
+        self.assertIn("monthly_salary_changes", row.details_json)
+        self.assertNotIn("5200.00", row.details_json)
+        self.assertNotIn("520000", row.details_json)
 
 
 class ResetPasswordTests(unittest.TestCase, _W4Harness):

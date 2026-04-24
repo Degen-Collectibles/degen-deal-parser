@@ -211,6 +211,8 @@ SQLITE_ADDITIVE_MIGRATIONS = {
         "token_lookup_hmac": "BLOB",
     },
     "employeeprofile": {
+        "compensation_type": "TEXT DEFAULT 'hourly'",
+        "monthly_salary_cents_enc": "BLOB",
         "payment_method": "TEXT DEFAULT 'cash'",
     },
 }
@@ -280,6 +282,7 @@ SQLITE_INDEX_MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS idx_invitetoken_token_lookup_hmac ON invitetoken (token_lookup_hmac)",
     "CREATE INDEX IF NOT EXISTS idx_invitetoken_target_user_id ON invitetoken (target_user_id)",
     "CREATE INDEX IF NOT EXISTS idx_passwordresettoken_token_lookup_hmac ON passwordresettoken (token_lookup_hmac)",
+    "CREATE INDEX IF NOT EXISTS idx_employeeprofile_compensation_type ON employeeprofile (compensation_type)",
     "CREATE INDEX IF NOT EXISTS idx_employeeprofile_payment_method ON employeeprofile (payment_method)",
 ]
 
@@ -421,6 +424,8 @@ POSTGRES_ADDITIVE_MIGRATIONS = {
         "token_lookup_hmac": "BYTEA",
     },
     "employeeprofile": {
+        "compensation_type": "TEXT DEFAULT 'hourly'",
+        "monthly_salary_cents_enc": "BYTEA",
         "payment_method": "TEXT DEFAULT 'cash'",
     },
 }
@@ -490,6 +495,7 @@ POSTGRES_INDEX_MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS idx_invitetoken_token_lookup_hmac ON invitetoken (token_lookup_hmac)",
     "CREATE INDEX IF NOT EXISTS idx_invitetoken_target_user_id ON invitetoken (target_user_id)",
     "CREATE INDEX IF NOT EXISTS idx_passwordresettoken_token_lookup_hmac ON passwordresettoken (token_lookup_hmac)",
+    "CREATE INDEX IF NOT EXISTS idx_employeeprofile_compensation_type ON employeeprofile (compensation_type)",
     "CREATE INDEX IF NOT EXISTS idx_employeeprofile_payment_method ON employeeprofile (payment_method)",
 ]
 

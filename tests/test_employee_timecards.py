@@ -106,17 +106,27 @@ class EmployeeTimecardsTests(unittest.TestCase):
         self.session.refresh(user)
         return user
 
-    def _seed_profile(self, *, clockify_user_id=None, hourly_rate_cents=None):
+    def _seed_profile(
+        self,
+        *,
+        clockify_user_id=None,
+        hourly_rate_cents=None,
+        compensation_type="hourly",
+        monthly_salary_cents=None,
+    ):
         from app.models import EmployeeProfile
         from app.pii import encrypt_pii
 
         profile = self.session.get(EmployeeProfile, self.employee.id) or EmployeeProfile(
             user_id=self.employee.id
         )
+        profile.compensation_type = compensation_type
         if clockify_user_id is not None:
             profile.clockify_user_id = clockify_user_id
         if hourly_rate_cents is not None:
             profile.hourly_rate_cents_enc = encrypt_pii(str(hourly_rate_cents))
+        if monthly_salary_cents is not None:
+            profile.monthly_salary_cents_enc = encrypt_pii(str(monthly_salary_cents))
         self.session.add(profile)
         self.session.commit()
         return profile
@@ -262,6 +272,22 @@ class EmployeeTimecardsTests(unittest.TestCase):
         self.assertNotIn("2500", body)
         self.assertNotIn("$25.00", body)
         self.assertNotIn("25.00/", body)
+
+    def test_timecards_salary_employee_uses_fixed_monthly_amount(self):
+        self._seed_profile(
+            compensation_type="monthly_salary",
+            monthly_salary_cents=450000,
+        )
+
+        response, client = self._render(configured=False)
+        self.assertEqual(response.status_code, 200)
+        body = response.body.decode("utf-8")
+        self.assertIn("$4,500.00", body)
+        self.assertIn("Monthly pay", body)
+        self.assertIn("Fixed monthly salary", body)
+        self.assertNotIn("Clockify is not configured", body)
+        self.assertNotIn("isn't mapped to a Clockify user", body)
+        self.assertEqual(client.calls, [])
 
     def test_timecards_permission_gate_denies_employee(self):
         # Employee role does NOT have admin.employees.view permission.

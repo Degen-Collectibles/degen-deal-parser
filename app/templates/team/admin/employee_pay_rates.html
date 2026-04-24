@@ -20,7 +20,7 @@
 <div class="ta-card">
     <h2>Bulk compensation</h2>
     <p style="font-size:13px; color:var(--lx-muted); margin:0;">
-        Edit hourly rates in dollars per hour. Blank means no rate set. Rates are stored encrypted; payment method is used to separate cash from check payroll.
+        Edit hourly rates and fixed monthly salaries in dollars. Blank means no amount set. Amounts are stored encrypted; payment method is used to separate cash from check payroll.
     </p>
 </div>
 
@@ -29,12 +29,14 @@
     <input type="hidden" name="show_inactive" value="{{ '1' if show_inactive else '' }}"/>
     <div class="ta-card" style="padding:0;">
         <div style="overflow:auto;">
-            <table style="width:100%; border-collapse:collapse; font-size:13px; min-width:760px;">
+            <table style="width:100%; border-collapse:collapse; font-size:13px; min-width:980px;">
                 <thead>
                     <tr style="text-align:left; color:var(--lx-muted); font-size:11px; text-transform:uppercase; letter-spacing:0.05em;">
                         <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">Employee</th>
                         <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">Status</th>
+                        <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">Pay type</th>
                         <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">Hourly rate</th>
+                        <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">Monthly salary</th>
                         <th style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">Payment</th>
                     </tr>
                 </thead>
@@ -60,6 +62,14 @@
                             {% endif %}
                         </td>
                         <td style="padding:12px 14px; border-bottom:1px solid var(--lx-br);">
+                            <select name="comp_{{ employee.id }}"
+                                    style="width:150px; padding:6px 8px; border-radius:8px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);">
+                                {% for comp in compensation_types %}
+                                    <option value="{{ comp }}" {% if row.compensation_type == comp %}selected{% endif %}>{{ compensation_type_labels[comp] }}</option>
+                                {% endfor %}
+                            </select>
+                        </td>
+                        <td style="padding:12px 14px; border-bottom:1px solid var(--lx-br);">
                             <div style="display:flex; align-items:center; gap:6px;">
                                 <span style="color:var(--lx-muted);">$</span>
                                 <input type="text"
@@ -68,6 +78,17 @@
                                        inputmode="decimal"
                                        placeholder="25.00"
                                        style="width:110px; padding:6px 8px; border-radius:8px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/>
+                            </div>
+                        </td>
+                        <td style="padding:12px 14px; border-bottom:1px solid var(--lx-br);">
+                            <div style="display:flex; align-items:center; gap:6px;">
+                                <span style="color:var(--lx-muted);">$</span>
+                                <input type="text"
+                                       name="salary_{{ employee.id }}"
+                                       value="{{ row.salary_value }}"
+                                       inputmode="decimal"
+                                       placeholder="4500.00"
+                                       style="width:120px; padding:6px 8px; border-radius:8px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/>
                             </div>
                         </td>
                         <td style="padding:12px 14px; border-bottom:1px solid var(--lx-br);">
@@ -81,14 +102,14 @@
                     </tr>
                     {% endfor %}
                     {% if not rows %}
-                    <tr><td colspan="4" style="padding:20px 14px; text-align:center; color:var(--lx-muted);">No employees found.</td></tr>
+                    <tr><td colspan="6" style="padding:20px 14px; text-align:center; color:var(--lx-muted);">No employees found.</td></tr>
                     {% endif %}
                 </tbody>
             </table>
         </div>
     </div>
     <button class="ta-btn" type="submit" style="background:#3b82f6; color:white; border-color:#3b82f6; font-weight:600;">
-        Save pay rates
+        Save compensation
     </button>
 </form>
 {% endblock %}
