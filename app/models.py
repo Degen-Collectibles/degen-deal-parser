@@ -491,6 +491,45 @@ class EmployeeProfile(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utcnow, index=True)
 
 
+class ClockifyTimeEntry(SQLModel, table=True):
+    __tablename__ = "clockify_time_entry"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    clockify_entry_id: str = Field(index=True, unique=True)
+    clockify_user_id: str = Field(index=True)
+    user_id: Optional[int] = Field(default=None, foreign_key="user.id", index=True)
+    workspace_id: str = Field(default="", index=True)
+    description: str = Field(default="")
+    project_id: Optional[str] = Field(default=None, index=True)
+    task_id: Optional[str] = Field(default=None, index=True)
+    entry_type: str = Field(default="REGULAR", index=True)
+    start_at: Optional[datetime] = Field(default=None, index=True)
+    end_at: Optional[datetime] = Field(default=None, index=True)
+    duration_seconds: int = Field(default=0)
+    is_running: bool = Field(default=False, index=True)
+    is_deleted: bool = Field(default=False, index=True)
+    source_event: str = Field(default="", index=True)
+    raw_payload: str = Field(default="{}")
+    received_at: datetime = Field(default_factory=utcnow, index=True)
+    updated_at: datetime = Field(default_factory=utcnow, index=True)
+
+
+class ClockifyWebhookEvent(SQLModel, table=True):
+    __tablename__ = "clockify_webhook_event"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    dedupe_key: str = Field(index=True, unique=True)
+    event_type: str = Field(default="", index=True)
+    clockify_entry_id: Optional[str] = Field(default=None, index=True)
+    clockify_user_id: Optional[str] = Field(default=None, index=True)
+    payload_sha256: str = Field(default="", index=True)
+    payload_json: str = Field(default="{}")
+    processed: bool = Field(default=False, index=True)
+    error: Optional[str] = None
+    received_at: datetime = Field(default_factory=utcnow, index=True)
+    processed_at: Optional[datetime] = Field(default=None, index=True)
+
+
 class InviteToken(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     token_hash: str = Field(index=True, unique=True)

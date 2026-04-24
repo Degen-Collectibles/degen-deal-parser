@@ -440,6 +440,17 @@ class ClockifyClient:
             if _entry_intersects_range(row, start_utc, end_utc, now_utc)
         ]
 
+    def get_time_entry(self, entry_id: str, *, hydrated: bool = True) -> dict[str, Any]:
+        entry_id = (entry_id or "").strip()
+        if not entry_id:
+            raise ClockifyConfigError("Clockify time entry id is not set.")
+        data = self._request(
+            "GET",
+            f"/workspaces/{self.workspace_id}/time-entries/{entry_id}",
+            params={"hydrated": str(bool(hydrated)).lower()},
+        )
+        return data if isinstance(data, dict) else {}
+
     def user_week_summary(
         self,
         user_id: str,

@@ -279,3 +279,30 @@ class ClockifyAdminPerfPrivacyTests(unittest.TestCase):
         self.assertEqual(row["current_start_label"], "2:45 PM")
         self.assertEqual(row["running_duration_label"], "15m")
         self.assertEqual(row["break_label"], "On break now")
+
+    def test_live_status_uses_cached_webhook_entries_before_api(self):
+        from app.models import ClockifyTimeEntry
+
+        self._seed_linked_employee()
+        self.session.add(
+            ClockifyTimeEntry(
+                clockify_entry_id="cached-running",
+                clockify_user_id="clock-1",
+                user_id=20,
+                description="Cached work",
+                start_at=datetime(2026, 4, 24, 20, 0, tzinfo=timezone.utc),
+                end_at=None,
+                is_running=True,
+            )
+        )
+        self.session.commit()
+
+        with patch("app.routers.team_admin_clockify.datetime") as fake_datetime:
+            fake_datetime.now.return_value = datetime(2026, 4, 24, 22, 0, tzinfo=timezone.utc)
+            fake_datetime.combine.side_effect = datetime.combine
+            fake_datetime.min = datetime.min
+            html, client = self._render(include_hours="0", live_status="1")
+
+        self.assertIn("Clocked in", html)
+        self.assertIn("2h", html)
+        self.assertEqual(client.entry_calls, 0)

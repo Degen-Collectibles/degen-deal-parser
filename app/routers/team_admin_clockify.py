@@ -1,15 +1,20 @@
 """/team/admin/clockify - Clockify setup and employee mapping tools."""
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import os
 import re
 import time
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, Form, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from sqlalchemy import or_
 from sqlmodel import Session, select
 
 from ..clockify import (
@@ -22,12 +27,21 @@ from ..clockify import (
     clockify_client_from_settings,
     clockify_is_configured,
     format_hours,
+    parse_clockify_datetime,
+    parse_iso_duration_seconds,
 )
 from ..auth import is_draft_user
 from ..config import get_settings
 from ..csrf import issue_token, require_csrf
 from ..db import get_session
-from ..models import AuditLog, EmployeeProfile, User, utcnow
+from ..models import (
+    AuditLog,
+    ClockifyTimeEntry,
+    ClockifyWebhookEvent,
+    EmployeeProfile,
+    User,
+    utcnow,
+)
 from ..pii import decrypt_pii
 from ..shared import templates
 from .team_admin import _admin_gate, _permission_gate
@@ -337,8 +351,10 @@ def _clockify_entry_search_text(entry: Any) -> str:
     pieces: list[str] = []
     if hasattr(entry, "description"):
         pieces.append(str(getattr(entry, "description") or ""))
+    if hasattr(entry, "entry_type"):
+        pieces.append(str(getattr(entry, "entry_type") or ""))
     if isinstance(entry, dict):
-        for key in ("description", "projectName", "taskName"):
+        for key in ("description", "projectName", "taskName", "type", "entry_type"):
             pieces.append(str(entry.get(key) or ""))
         for key in ("project", "task"):
             nested = entry.get(key)
@@ -352,9 +368,401 @@ def _clockify_entry_is_break(entry: Any) -> bool:
     return any(re.search(rf"\b{re.escape(keyword)}\b", text) for keyword in _BREAK_KEYWORDS)
 
 
+def _json_dumps_safe(value: Any) -> str:
+    try:
+        return json.dumps(value, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return "{}"
+
+
+def _json_loads_body(raw_body: bytes) -> dict[str, Any]:
+    try:
+        payload = json.loads(raw_body.decode("utf-8") if raw_body else "{}")
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Clockify webhook body must be JSON.") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("Clockify webhook body must be a JSON object.")
+    return payload
+
+
+def _clockify_webhook_secret() -> str:
+    env_value = (os.getenv("CLOCKIFY_WEBHOOK_SECRET") or "").strip()
+    if env_value:
+        return env_value
+    try:
+        for line in Path(".env").read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, value = stripped.split("=", 1)
+            if key.strip() == "CLOCKIFY_WEBHOOK_SECRET":
+                return value.strip().strip('"').strip("'")
+    except OSError:
+        return ""
+    return ""
+
+
+def _require_clockify_webhook_secret(request: Request, supplied_secret: str) -> None:
+    expected = _clockify_webhook_secret()
+    if not expected:
+        raise HTTPException(status_code=503, detail="Clockify webhook secret is not configured.")
+    candidates = [
+        supplied_secret,
+        request.headers.get("X-Degen-Webhook-Secret", ""),
+        request.headers.get("X-Clockify-Webhook-Secret", ""),
+        request.headers.get("X-Webhook-Secret", ""),
+    ]
+    if not any(hmac.compare_digest(expected, (candidate or "").strip()) for candidate in candidates):
+        raise HTTPException(status_code=403, detail="Invalid Clockify webhook secret.")
+
+
+def _first_string(*values: Any) -> str:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def _nested_dict(value: Any, *keys: str) -> Optional[dict[str, Any]]:
+    if not isinstance(value, dict):
+        return None
+    current: Any = value
+    for key in keys:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current if isinstance(current, dict) else None
+
+
+def _clockify_event_type(payload: dict[str, Any]) -> str:
+    event_obj = payload.get("event")
+    if isinstance(event_obj, dict):
+        nested = _first_string(
+            event_obj.get("type"),
+            event_obj.get("eventType"),
+            event_obj.get("name"),
+            event_obj.get("action"),
+        )
+        if nested:
+            return nested.upper()
+    return _first_string(
+        payload.get("eventType"),
+        payload.get("event"),
+        payload.get("type"),
+        payload.get("action"),
+        payload.get("name"),
+    ).upper() or "UNKNOWN"
+
+
+def _clockify_entry_payload(payload: dict[str, Any]) -> Optional[dict[str, Any]]:
+    for keys in (
+        ("timeEntry",),
+        ("time_entry",),
+        ("entry",),
+        ("entity",),
+        ("data", "timeEntry"),
+        ("data", "time_entry"),
+        ("data", "entry"),
+        ("data", "entity"),
+    ):
+        nested = _nested_dict(payload, *keys)
+        if nested:
+            return nested
+    if isinstance(payload.get("timeInterval"), dict) and payload.get("id"):
+        return payload
+    data = payload.get("data")
+    if isinstance(data, dict) and isinstance(data.get("timeInterval"), dict):
+        return data
+    return None
+
+
+def _clockify_entry_id(payload: dict[str, Any], entry: Optional[dict[str, Any]] = None) -> str:
+    entry = entry or {}
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    return _first_string(
+        entry.get("id"),
+        entry.get("timeEntryId"),
+        payload.get("timeEntryId"),
+        payload.get("time_entry_id"),
+        payload.get("entityId"),
+        data.get("timeEntryId") if isinstance(data, dict) else "",
+        data.get("id") if isinstance(data, dict) else "",
+    )
+
+
+def _clockify_user_id_from_entry(payload: dict[str, Any], entry: Optional[dict[str, Any]] = None) -> str:
+    entry = entry or {}
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    user_obj = entry.get("user") if isinstance(entry.get("user"), dict) else {}
+    return _first_string(
+        entry.get("userId"),
+        entry.get("user_id"),
+        user_obj.get("id") if isinstance(user_obj, dict) else "",
+        payload.get("userId"),
+        payload.get("user_id"),
+        data.get("userId") if isinstance(data, dict) else "",
+    )
+
+
+def _clockify_workspace_id_from_payload(payload: dict[str, Any], settings=None) -> str:
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    return _first_string(
+        payload.get("workspaceId"),
+        payload.get("workspace_id"),
+        data.get("workspaceId") if isinstance(data, dict) else "",
+        getattr(settings, "clockify_workspace_id", ""),
+    )
+
+
+def _clockify_event_id(payload: dict[str, Any]) -> str:
+    event_obj = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+    return _first_string(
+        payload.get("eventId"),
+        payload.get("event_id"),
+        payload.get("webhookEventId"),
+        payload.get("id") if not isinstance(payload.get("timeInterval"), dict) else "",
+        event_obj.get("id") if isinstance(event_obj, dict) else "",
+    )
+
+
+def _is_delete_event(event_type: str) -> bool:
+    normalized = (event_type or "").upper()
+    return "DELETE" in normalized or "DELETED" in normalized or normalized.endswith("_REMOVED")
+
+
+def _entry_interval_payload(entry: dict[str, Any]) -> dict[str, Any]:
+    interval = entry.get("timeInterval") if isinstance(entry.get("timeInterval"), dict) else {}
+    return interval if isinstance(interval, dict) else {}
+
+
+def _entry_duration_from_payload(entry: dict[str, Any], start_at: Optional[datetime], end_at: Optional[datetime]) -> int:
+    interval = _entry_interval_payload(entry)
+    parsed = parse_iso_duration_seconds(interval.get("duration"))
+    if parsed is not None:
+        return max(0, parsed)
+    if start_at and end_at:
+        return max(0, int((end_at - start_at).total_seconds()))
+    duration = entry.get("duration")
+    if isinstance(duration, (int, float)):
+        return max(0, int(duration))
+    return 0
+
+
+def _portal_user_id_for_clockify(session: Session, clockify_user_id: str) -> Optional[int]:
+    clockify_user_id = (clockify_user_id or "").strip()
+    if not clockify_user_id:
+        return None
+    profile = session.exec(
+        select(EmployeeProfile).where(EmployeeProfile.clockify_user_id == clockify_user_id)
+    ).first()
+    return profile.user_id if profile is not None else None
+
+
+def _upsert_clockify_time_entry_from_payload(
+    session: Session,
+    payload: dict[str, Any],
+    *,
+    source_event: str,
+    settings=None,
+    received_at: Optional[datetime] = None,
+) -> Optional[ClockifyTimeEntry]:
+    entry = _clockify_entry_payload(payload)
+    entry_id = _clockify_entry_id(payload, entry)
+    if not entry_id:
+        return None
+    received_at = received_at or utcnow()
+    existing = session.exec(
+        select(ClockifyTimeEntry).where(ClockifyTimeEntry.clockify_entry_id == entry_id)
+    ).first()
+    if _is_delete_event(source_event):
+        if existing is None:
+            existing = ClockifyTimeEntry(
+                clockify_entry_id=entry_id,
+                clockify_user_id=_clockify_user_id_from_entry(payload, entry),
+                workspace_id=_clockify_workspace_id_from_payload(payload, settings),
+                is_deleted=True,
+                source_event=source_event,
+                received_at=received_at,
+                updated_at=received_at,
+            )
+        existing.is_deleted = True
+        existing.is_running = False
+        existing.source_event = source_event
+        existing.raw_payload = _json_dumps_safe(payload)
+        existing.updated_at = received_at
+        session.add(existing)
+        return existing
+    if entry is None:
+        return existing
+
+    interval = _entry_interval_payload(entry)
+    start_at = parse_clockify_datetime(interval.get("start") or entry.get("start"))
+    end_at = parse_clockify_datetime(interval.get("end") or entry.get("end"))
+    clockify_user_id = _clockify_user_id_from_entry(payload, entry)
+    if existing is None:
+        existing = ClockifyTimeEntry(
+            clockify_entry_id=entry_id,
+            clockify_user_id=clockify_user_id,
+            received_at=received_at,
+        )
+    existing.clockify_user_id = clockify_user_id or existing.clockify_user_id
+    existing.user_id = _portal_user_id_for_clockify(session, existing.clockify_user_id)
+    existing.workspace_id = _clockify_workspace_id_from_payload(payload, settings)
+    existing.description = str(entry.get("description") or "").strip()
+    existing.project_id = _first_string(entry.get("projectId"), entry.get("project_id")) or None
+    existing.task_id = _first_string(entry.get("taskId"), entry.get("task_id")) or None
+    existing.entry_type = _first_string(entry.get("type"), entry.get("entry_type"), "REGULAR").upper()
+    existing.start_at = start_at
+    existing.end_at = end_at
+    existing.duration_seconds = _entry_duration_from_payload(entry, start_at, end_at)
+    existing.is_running = bool(start_at and end_at is None and not existing.is_deleted)
+    existing.is_deleted = False
+    existing.source_event = source_event
+    existing.raw_payload = _json_dumps_safe(entry)
+    existing.updated_at = received_at
+    session.add(existing)
+    return existing
+
+
+def _clockify_time_entry_to_raw(row: ClockifyTimeEntry) -> dict[str, Any]:
+    def iso(dt: Optional[datetime]) -> Optional[str]:
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    return {
+        "id": row.clockify_entry_id,
+        "userId": row.clockify_user_id,
+        "description": row.description,
+        "projectId": row.project_id,
+        "taskId": row.task_id,
+        "type": row.entry_type,
+        "timeInterval": {
+            "start": iso(row.start_at),
+            "end": iso(row.end_at),
+        },
+    }
+
+
+def _cached_clockify_entries_by_user(
+    session: Session,
+    clockify_user_ids: list[str],
+    *,
+    start_local: datetime,
+    end_local: datetime,
+) -> dict[str, list[dict[str, Any]]]:
+    if not clockify_user_ids:
+        return {}
+    start_utc = start_local.astimezone(timezone.utc)
+    end_utc = end_local.astimezone(timezone.utc)
+    rows = session.exec(
+        select(ClockifyTimeEntry).where(
+            ClockifyTimeEntry.clockify_user_id.in_(clockify_user_ids),
+            ClockifyTimeEntry.is_deleted == False,  # noqa: E712
+            ClockifyTimeEntry.start_at < end_utc,
+            or_(ClockifyTimeEntry.end_at == None, ClockifyTimeEntry.end_at > start_utc),  # noqa: E711
+        )
+    ).all()
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(row.clockify_user_id, []).append(_clockify_time_entry_to_raw(row))
+    return grouped
+
+
+def process_clockify_webhook_payload(
+    session: Session,
+    payload: dict[str, Any],
+    *,
+    raw_body: bytes,
+    settings=None,
+) -> dict[str, Any]:
+    received_at = utcnow()
+    payload_hash = hashlib.sha256(raw_body).hexdigest()
+    event_type = _clockify_event_type(payload)
+    entry_payload = _clockify_entry_payload(payload)
+    entry_id = _clockify_entry_id(payload, entry_payload) or None
+    clockify_user_id = _clockify_user_id_from_entry(payload, entry_payload) or None
+    event_id = _clockify_event_id(payload)
+    dedupe_key = event_id or payload_hash
+
+    existing_event = session.exec(
+        select(ClockifyWebhookEvent).where(ClockifyWebhookEvent.dedupe_key == dedupe_key)
+    ).first()
+    if existing_event is not None and existing_event.processed:
+        return {
+            "ok": True,
+            "duplicate": True,
+            "event_type": existing_event.event_type,
+            "entry_id": existing_event.clockify_entry_id,
+        }
+
+    webhook_event = existing_event or ClockifyWebhookEvent(
+        dedupe_key=dedupe_key,
+        received_at=received_at,
+    )
+    webhook_event.event_type = event_type
+    webhook_event.clockify_entry_id = entry_id
+    webhook_event.clockify_user_id = clockify_user_id
+    webhook_event.payload_sha256 = payload_hash
+    webhook_event.payload_json = _json_dumps_safe(payload)
+
+    fetched_entry = False
+    error = ""
+    if entry_payload is None and entry_id and not _is_delete_event(event_type):
+        try:
+            if clockify_is_configured(settings):
+                fetched = clockify_client_from_settings(settings).get_time_entry(entry_id)
+                if fetched:
+                    payload = dict(payload)
+                    payload["timeEntry"] = fetched
+                    entry_payload = fetched
+                    clockify_user_id = _clockify_user_id_from_entry(payload, entry_payload) or clockify_user_id
+                    fetched_entry = True
+        except (ClockifyApiError, ClockifyConfigError) as exc:
+            error = str(exc)
+
+    cached_entry = _upsert_clockify_time_entry_from_payload(
+        session,
+        payload,
+        source_event=event_type,
+        settings=settings,
+        received_at=received_at,
+    )
+    webhook_event.clockify_entry_id = (
+        cached_entry.clockify_entry_id
+        if cached_entry is not None
+        else webhook_event.clockify_entry_id
+    )
+    webhook_event.clockify_user_id = (
+        cached_entry.clockify_user_id
+        if cached_entry is not None
+        else clockify_user_id
+    )
+    webhook_event.processed = not bool(error)
+    webhook_event.error = error or None
+    webhook_event.processed_at = utcnow()
+    session.add(webhook_event)
+    session.commit()
+    return {
+        "ok": True,
+        "duplicate": False,
+        "event_type": event_type,
+        "entry_id": webhook_event.clockify_entry_id,
+        "clockify_user_id": webhook_event.clockify_user_id,
+        "cached": cached_entry is not None,
+        "fetched_entry": fetched_entry,
+        "warning": error,
+    }
+
+
 def build_clockify_live_status(
     session: Session,
-    client: ClockifyClient,
+    client: Optional[ClockifyClient],
     *,
     settings=None,
     today: Optional[date] = None,
@@ -371,6 +779,17 @@ def build_clockify_live_status(
     mapped_rows = [
         row for row in eligible_rows if (row.get("clockify_user_id") or "").strip()
     ]
+    mapped_clockify_ids = [
+        (row.get("clockify_user_id") or "").strip()
+        for row in mapped_rows
+        if (row.get("clockify_user_id") or "").strip()
+    ]
+    cached_entries_by_user = _cached_clockify_entries_by_user(
+        session,
+        mapped_clockify_ids,
+        start_local=start_local,
+        end_local=end_local,
+    )
 
     for row in mapped_rows:
         employee = row.get("user")
@@ -398,11 +817,16 @@ def build_clockify_live_status(
             "rank": 4,
         }
         try:
-            raw_entries = client.get_user_time_entries(
-                clockify_user_id,
-                start_utc=start_local.astimezone(timezone.utc),
-                end_utc=end_local.astimezone(timezone.utc),
-            )
+            raw_entries = cached_entries_by_user.get(clockify_user_id)
+            if raw_entries is None:
+                if client is None:
+                    raw_entries = []
+                else:
+                    raw_entries = client.get_user_time_entries(
+                        clockify_user_id,
+                        start_utc=start_local.astimezone(timezone.utc),
+                        end_utc=end_local.astimezone(timezone.utc),
+                    )
             summary = build_week_summary(
                 raw_entries,
                 week_start_local=start_local,
@@ -649,6 +1073,29 @@ def sync_clockify_user_ids_by_email(
     )
     session.commit()
     return counts
+
+
+@router.post("/webhooks/clockify")
+async def clockify_webhook(
+    request: Request,
+    secret: str = Query(default=""),
+    session: Session = Depends(get_session),
+):
+    _require_clockify_webhook_secret(request, secret)
+    raw_body = await request.body()
+    try:
+        payload = _json_loads_body(raw_body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    result = process_clockify_webhook_payload(
+        session,
+        payload,
+        raw_body=raw_body,
+        settings=get_settings(),
+    )
+    status_code = 200 if not result.get("warning") else 202
+    return JSONResponse(result, status_code=status_code)
 
 
 @router.get("/team/admin/clockify", response_class=HTMLResponse)
