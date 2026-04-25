@@ -162,7 +162,7 @@ class CSRFEnforcementTests(unittest.TestCase, _Harness):
         emp = self._seed_employee(user_id=1102, username="emp1102")
         r = self.client.post(
             f"/team/admin/employees/{emp.id}/purge",
-            data={"confirm_username": "emp1102"},
+            data={"confirm_username": "PURGE"},
             follow_redirects=False,
         )
         self.assertEqual(r.status_code, 403)
@@ -541,14 +541,14 @@ class PurgeIdempotencyTests(unittest.TestCase, _Harness):
         csrf = self._csrf()
         r1 = self.client.post(
             f"/team/admin/employees/{emp.id}/purge",
-            data={"csrf_token": csrf, "confirm_username": "emp1401"},
+            data={"csrf_token": csrf, "confirm_username": "PURGE"},
             follow_redirects=False,
         )
         self.assertEqual(r1.status_code, 303)
         # Second purge: should still "succeed" but not add new PII (already None).
         r2 = self.client.post(
             f"/team/admin/employees/{emp.id}/purge",
-            data={"csrf_token": csrf, "confirm_username": "emp1401"},
+            data={"csrf_token": csrf, "confirm_username": "PURGE"},
             follow_redirects=False,
         )
         # Either 303 (noop) or a redirect — but MUST NOT 500.
@@ -564,6 +564,30 @@ class PurgeIdempotencyTests(unittest.TestCase, _Harness):
             select(AuditLog).where(AuditLog.action == "account.purged")
         ).all())
         self.assertGreaterEqual(len(rows), 1)
+
+    def test_purge_rejects_lowercase_and_username_with_400(self):
+        from app.models import AuditLog, EmployeeProfile
+
+        self._login(role="admin", user_id=41, username="adm_purge_guard")
+        emp = self._seed_employee(user_id=1402, username="emp1402")
+        csrf = self._csrf()
+
+        for confirmation in ("purge", "emp1402"):
+            r = self.client.post(
+                f"/team/admin/employees/{emp.id}/purge",
+                data={"csrf_token": csrf, "confirm_username": confirmation},
+                follow_redirects=False,
+            )
+            self.assertEqual(r.status_code, 400)
+
+        self.session.expire_all()
+        p = self.session.get(EmployeeProfile, emp.id)
+        self.assertIsNotNone(p.phone_enc)
+        self.assertIsNotNone(p.legal_name_enc)
+        rows = list(self.session.exec(
+            select(AuditLog).where(AuditLog.action == "account.purged")
+        ).all())
+        self.assertEqual(rows, [])
 
 
 class ProxyAwareRateLimitTests(unittest.TestCase):

@@ -751,7 +751,7 @@ class TerminateAndPurgeTests(unittest.TestCase, _W4Harness):
         csrf = self._csrf()
         r = self.client.post(
             f"/team/admin/employees/{emp.id}/purge",
-            data={"csrf_token": csrf, "confirm_username": "emp803"},
+            data={"csrf_token": csrf, "confirm_username": "PURGE"},
             follow_redirects=False,
         )
         self.assertEqual(r.status_code, 303)

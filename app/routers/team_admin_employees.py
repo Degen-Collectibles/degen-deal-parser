@@ -1673,9 +1673,9 @@ async def admin_employee_purge_post(
     employee = session.get(User, user_id)
     if employee is None:
         return HTMLResponse("Employee not found", status_code=404)
-    if (confirm_username or "").strip().lower() != (employee.username or "").lower():
+    if (confirm_username or "").strip() != "PURGE":
         return HTMLResponse(
-            "Confirmation did not match the employee username.",
+            "Confirmation did not match PURGE.",
             status_code=400,
         )
     profile = session.get(EmployeeProfile, user_id)

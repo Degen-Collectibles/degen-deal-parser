@@ -128,7 +128,7 @@ class EmployeeTokenRevocationTests(unittest.TestCase):
             admin_employee_purge_post(
                 self._request(),
                 self.employee.id,
-                confirm_username="employee-token",
+                confirm_username="PURGE",
                 session=self.session,
             )
         )
