@@ -108,7 +108,14 @@
             </tr>
             <tr>
                 <td style="padding:6px 0; color:var(--lx-muted);">Termination date</td>
-                <td><input type="date" name="termination_date" value="{{ profile.termination_date or '' }}" style="padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/></td>
+                <td>
+                    {% if profile.termination_date %}
+                        {{ profile.termination_date.strftime('%Y-%m-%d') }}
+                    {% else %}
+                        <span style="color:var(--lx-muted);">—</span>
+                    {% endif %}
+                    <span style="font-size:11px; color:var(--lx-muted); margin-left:8px;">set by the Terminate action</span>
+                </td>
             </tr>
             <tr>
                 <td style="padding:6px 0; color:var(--lx-muted);">Compensation</td>
