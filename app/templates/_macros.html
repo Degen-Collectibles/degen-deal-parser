@@ -1,0 +1,10 @@
+{% macro status_label(status) -%}
+{{ {
+    'submitted': 'Waiting review',
+    'approved': 'Approved',
+    'denied': 'Denied',
+    'ordered': 'Ordered',
+    'pending': 'Pending',
+    'granted': 'Approved'
+}.get(status, status|replace('_', ' ')|title) }}
+{%- endmacro %}

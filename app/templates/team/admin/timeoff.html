@@ -1,4 +1,5 @@
 {% extends "team/admin/base.html" %}
+{% from "_macros.html" import status_label %}
 {% set active = 'time-off' %}
 {% block content %}
 {% if flash %}<div class="ta-flash success">{{ flash }}</div>{% endif %}
@@ -9,7 +10,7 @@
     {% for s in statuses %}
         <a class="ta-btn" href="/team/admin/timeoff?status={{ s }}"
            style="{% if filter_status == s %}border-color:#ff8a3d; color:#ff8a3d;{% endif %} margin-left:4px;">
-            {{ s }} ({{ counts.get(s, 0) }})
+            {{ status_label(s) }} ({{ counts.get(s, 0) }})
         </a>
     {% endfor %}
 </div>
@@ -44,7 +45,7 @@
                       <div style="color:var(--lx-muted); font-size:12px; margin-top:4px;">{{ r.decision_notes }}</div>
                     {% endif %}
                 </td>
-                <td style="padding:10px 14px; border-bottom:1px solid var(--lx-br); text-transform:capitalize;">{{ r.status }}</td>
+                <td style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">{{ status_label(r.status) }}</td>
                 <td style="padding:10px 14px; border-bottom:1px solid var(--lx-br); min-width:260px;">
                     {% if r.status == 'submitted' %}
                         <form method="post" action="/team/admin/timeoff/{{ r.id }}/approve" style="display:flex; gap:6px; margin-bottom:6px;">
