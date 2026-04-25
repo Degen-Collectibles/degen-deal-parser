@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 from cryptography.fernet import Fernet
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, create_engine
+from sqlmodel import Session, create_engine, select
 
 os.environ.setdefault("EMPLOYEE_PORTAL_ENABLED", "true")
 os.environ.setdefault("EMPLOYEE_PII_KEY", Fernet.generate_key().decode("ascii"))
@@ -288,6 +288,66 @@ class EmployeeTimecardsTests(unittest.TestCase):
         self.assertNotIn("Clockify is not configured", body)
         self.assertNotIn("isn't mapped to a Clockify user", body)
         self.assertEqual(client.calls, [])
+
+    def test_timecards_paid_hours_exclude_break_entries(self):
+        self._seed_profile(clockify_user_id="ck-1", hourly_rate_cents=2500)
+        self._seed_shift(day=date(2026, 4, 20), label="10 AM - 6 PM", kind="work")
+        entries = [
+            _make_entry(
+                start_local=datetime(2026, 4, 20, 10, 0, tzinfo=LA),
+                end_local=datetime(2026, 4, 20, 14, 0, tzinfo=LA),
+                desc="Floor",
+                eid="work-a",
+            ),
+            _make_entry(
+                start_local=datetime(2026, 4, 20, 14, 0, tzinfo=LA),
+                end_local=datetime(2026, 4, 20, 14, 30, tzinfo=LA),
+                desc="Lunch break",
+                eid="break-a",
+            ),
+            _make_entry(
+                start_local=datetime(2026, 4, 20, 14, 30, tzinfo=LA),
+                end_local=datetime(2026, 4, 20, 18, 0, tzinfo=LA),
+                desc="Floor",
+                eid="work-b",
+            ),
+        ]
+
+        response, _ = self._render(entries=entries)
+        body = response.body.decode("utf-8")
+        self.assertIn("Paid hours", body)
+        self.assertIn("Lunch break", body)
+        self.assertIn("Break", body)
+        self.assertIn("30m", body)
+        self.assertIn("variance -0:30", body)
+        self.assertIn("$187.50", body)
+
+    def test_timecards_day_status_persists_with_audit_note(self):
+        from app.models import AuditLog, TimecardApproval
+        from app.routers import team_admin_employees_timecards as mod
+
+        self._seed_profile(clockify_user_id="ck-1")
+        approval = mod.set_timecard_day_status(
+            self.session,
+            current_user=self.admin,
+            user_id=self.employee.id,
+            work_date=date(2026, 4, 20),
+            status=mod.TIMECARD_STATUS_APPROVED,
+            note="checked with payroll",
+            ip_address="127.0.0.1",
+        )
+        self.assertEqual(approval.status, mod.TIMECARD_STATUS_APPROVED)
+        persisted = self.session.exec(select(TimecardApproval)).first()
+        self.assertIsNotNone(persisted)
+        self.assertEqual(persisted.note, "checked with payroll")
+        audit_row = self.session.exec(select(AuditLog)).first()
+        self.assertIsNotNone(audit_row)
+        self.assertIn("checked with payroll", audit_row.details_json)
+
+        response, _ = self._render(entries=[])
+        body = response.body.decode("utf-8")
+        self.assertIn("Approved", body)
+        self.assertIn("checked with payroll", body)
 
     def test_timecards_permission_gate_denies_employee(self):
         # Employee role does NOT have admin.employees.view permission.

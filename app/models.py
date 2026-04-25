@@ -530,6 +530,23 @@ class ClockifyWebhookEvent(SQLModel, table=True):
     processed_at: Optional[datetime] = Field(default=None, index=True)
 
 
+class TimecardApproval(SQLModel, table=True):
+    __tablename__ = "timecard_approval"
+    __table_args__ = (
+        UniqueConstraint("user_id", "work_date", name="uq_timecard_approval_user_date"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    work_date: date = Field(index=True)
+    status: str = Field(default="pending", index=True)
+    note: str = Field(default="")
+    decided_by_user_id: Optional[int] = Field(default=None, foreign_key="user.id", index=True)
+    decided_at: Optional[datetime] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+    updated_at: datetime = Field(default_factory=utcnow, index=True)
+
+
 class InviteToken(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     token_hash: str = Field(index=True, unique=True)
