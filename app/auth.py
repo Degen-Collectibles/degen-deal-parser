@@ -10,6 +10,7 @@ import secrets
 from typing import Optional
 
 import bcrypt
+from sqlalchemy import update
 from sqlmodel import Session, select
 
 from .config import get_settings
@@ -30,6 +31,14 @@ log = logging.getLogger(__name__)
 
 class AuthError(RuntimeError):
     """Raised when an account cannot be authenticated safely."""
+
+
+class LoginRateLimitedError(AuthError):
+    """Raised when a login attempt hits a request-scoped throttle."""
+
+    def __init__(self, response):
+        super().__init__("login_rate_limited")
+        self.response = response
 
 
 def hash_password(password: str, salt: Optional[str] = None) -> tuple[str, str]:
@@ -66,9 +75,27 @@ def authenticate_user(
     username: str,
     password: str,
     *,
+    request=None,
     ip_address: Optional[str] = None,
 ) -> Optional[User]:
     normalized_username = (username or "").strip().lower()
+    if normalized_username and request is not None:
+        from .rate_limit import rate_limited_or_429
+
+        if limited := rate_limited_or_429(
+            request,
+            key_prefix=f"team:login:user:{normalized_username}",
+            max_requests=10,
+            window_seconds=900,
+        ):
+            _audit_login(
+                session,
+                target_user_id=None,
+                action="login.rate_limited",
+                details={"username": normalized_username, "reason": "username_bucket"},
+                ip_address=ip_address,
+            )
+            raise LoginRateLimitedError(limited)
     if not normalized_username or not password:
         _audit_login(
             session,
@@ -863,6 +890,7 @@ def change_user_password(
     now = utcnow()
     user.password_hash = pwd_hash
     user.password_salt = pwd_salt
+    user.password_changed_at = now
     user.updated_at = now
     session.add(user)
     _audit_pw_change(session, user.id, "password.self_change_succeeded", {}, ip_address)
@@ -911,7 +939,16 @@ def consume_password_reset_token(
     now = utcnow()
     user.password_hash = pwd_hash
     user.password_salt = pwd_salt
+    user.password_changed_at = now
     user.updated_at = now
+    session.exec(
+        update(PasswordResetToken)
+        .where(
+            PasswordResetToken.user_id == user.id,
+            PasswordResetToken.used_at.is_(None),
+        )
+        .values(used_at=now)
+    )
     row.used_at = now
     session.add(user)
     session.add(row)

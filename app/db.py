@@ -191,6 +191,7 @@ SQLITE_ADDITIVE_MIGRATIONS = {
         "password_salt": "TEXT",
         "is_schedulable": "BOOLEAN DEFAULT 0",
         "staff_kind": "TEXT DEFAULT 'storefront'",
+        "password_changed_at": "TIMESTAMP",
     },
     "streamers": {
         "user_id": "INTEGER",
@@ -407,6 +408,7 @@ POSTGRES_ADDITIVE_MIGRATIONS = {
         "password_salt": "TEXT",
         "is_schedulable": "BOOLEAN DEFAULT FALSE",
         "staff_kind": "TEXT DEFAULT 'storefront'",
+        "password_changed_at": "TIMESTAMP",
     },
     "streamers": {
         "user_id": "INTEGER",

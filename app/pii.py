@@ -12,6 +12,10 @@ _settings = get_settings()
 _multi_fernet: Optional[MultiFernet] = None
 
 
+class PIIDecryptError(ValueError):
+    """Raised when ciphertext cannot be decrypted with any configured key."""
+
+
 def _validate_and_build(keys_raw: str) -> MultiFernet:
     raw_keys = [k.strip() for k in (keys_raw or "").split(",") if k.strip()]
     if not raw_keys:
@@ -75,7 +79,7 @@ def decrypt_pii(blob: Optional[bytes]) -> Optional[str]:
     try:
         return _fernet().decrypt(bytes(blob)).decode("utf-8")
     except InvalidToken as exc:
-        raise ValueError("PII ciphertext failed to decrypt with any configured key") from exc
+        raise PIIDecryptError("PII ciphertext failed to decrypt with any configured key") from exc
 
 
 def email_lookup_hash(email: str) -> str:

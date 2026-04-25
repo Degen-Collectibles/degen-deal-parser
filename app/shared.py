@@ -3818,6 +3818,31 @@ def user_role_for_path(path: str) -> Optional[str]:
     return None
 
 
+def _coerce_session_datetime(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if not value:
+            return None
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _password_session_is_stale(user: User, session_data: dict) -> bool:
+    changed_at = _coerce_session_datetime(getattr(user, "password_changed_at", None))
+    if changed_at is None:
+        return False
+    session_stamp = _coerce_session_datetime(session_data.get("password_changed_at"))
+    return session_stamp is None or changed_at > session_stamp
+
+
 def get_request_user(request: Request) -> Optional[User]:
     session_data = request.scope.get("session") or {}
     user_id = session_data.get("user_id")
@@ -3828,6 +3853,9 @@ def get_request_user(request: Request) -> Optional[User]:
     with managed_session() as session:
         user = session.get(User, user_id)
         if not user or not user.is_active:
+            return None
+        if _password_session_is_stale(user, session_data):
+            session_data.clear()
             return None
         return user
 
