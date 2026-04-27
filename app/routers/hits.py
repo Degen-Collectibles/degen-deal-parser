@@ -15,13 +15,16 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from sqlalchemy import or_
 from sqlmodel import Session, select
 
-from ..config import BASE_DIR
+from ..config import get_settings
 from ..shared import *  # noqa: F401,F403 -- shared helpers, constants, state
 from ..db import get_session
 
 router = APIRouter()
 
-HIT_IMAGES_DIR = BASE_DIR / "data" / "hit_images"
+
+def _hit_images_dir() -> Path:
+    return get_settings().media_path("hit_images")
+
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
 MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10 MB
 
@@ -536,8 +539,9 @@ async def hits_upload_image(
     ext = ext_map.get(content_type, ".jpg")
     filename = f"{uuid.uuid4().hex}{ext}"
 
-    HIT_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-    (HIT_IMAGES_DIR / filename).write_bytes(data)
+    hit_images_dir = _hit_images_dir()
+    hit_images_dir.mkdir(parents=True, exist_ok=True)
+    (hit_images_dir / filename).write_bytes(data)
 
     return JSONResponse({"ok": True, "filename": filename})
 
@@ -547,7 +551,7 @@ def serve_hit_image(filename: str):
     if ".." in filename or "/" in filename or "\\" in filename:
         return JSONResponse({"error": "Invalid filename"}, status_code=400)
 
-    path = HIT_IMAGES_DIR / filename
+    path = _hit_images_dir() / filename
     if not path.is_file():
         return JSONResponse({"error": "Not found"}, status_code=404)
 

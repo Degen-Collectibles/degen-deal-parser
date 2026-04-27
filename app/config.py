@@ -14,6 +14,16 @@ DEFAULT_SESSION_SECRET = "degen-dev-session-secret"
 DEFAULT_ADMIN_PASSWORD = "degen1234"
 
 
+def _resolve_root(value: str, fallback_subdir: str) -> Path:
+    """Resolve a configured root: absolute paths used as-is, relative paths
+    joined to BASE_DIR. Empty value falls back to BASE_DIR / fallback_subdir."""
+    raw = (value or "").strip()
+    if not raw:
+        return BASE_DIR / fallback_subdir
+    path = Path(raw)
+    return path if path.is_absolute() else (BASE_DIR / path)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -29,6 +39,15 @@ class Settings(BaseSettings):
     session_max_age_seconds: int = Field(default=30 * 24 * 60 * 60, alias="SESSION_MAX_AGE_SECONDS")
     log_to_file: bool = Field(default=True, alias="LOG_TO_FILE")
     log_dir: str = Field(default="logs", alias="LOG_DIR")
+
+    # Durable runtime data root. Defaults to repo-relative `data/` for local
+    # dev; Green/Linux production should set DATA_ROOT=/opt/degen/data so
+    # uploaded attachments, hit images, and v2 training captures persist
+    # outside the app checkout. MEDIA_ROOT optionally splits user-uploaded
+    # media (attachments, hit images) from operational data; when unset it
+    # falls back to DATA_ROOT.
+    data_root: str = Field(default="data", alias="DATA_ROOT")
+    media_root: str = Field(default="", alias="MEDIA_ROOT")
 
     discord_bot_token: str = Field(default="", alias="DISCORD_BOT_TOKEN")
     openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
@@ -221,6 +240,24 @@ class Settings(BaseSettings):
     clockify_timezone: str = Field(default="America/Los_Angeles", alias="CLOCKIFY_TIMEZONE")
     clockify_timeout_seconds: float = Field(default=12.0, alias="CLOCKIFY_TIMEOUT_SECONDS")
     session_hours: int = Field(default=8, alias="SESSION_HOURS")
+
+    @property
+    def data_root_path(self) -> Path:
+        return _resolve_root(self.data_root, "data")
+
+    @property
+    def media_root_path(self) -> Path:
+        # Empty MEDIA_ROOT inherits DATA_ROOT so a single env var is enough
+        # for the common case (Green sets DATA_ROOT=/opt/degen/data).
+        if (self.media_root or "").strip():
+            return _resolve_root(self.media_root, "data")
+        return self.data_root_path
+
+    def data_path(self, *parts: str) -> Path:
+        return self.data_root_path.joinpath(*parts)
+
+    def media_path(self, *parts: str) -> Path:
+        return self.media_root_path.joinpath(*parts)
 
     @property
     def channel_ids(self) -> List[int]:

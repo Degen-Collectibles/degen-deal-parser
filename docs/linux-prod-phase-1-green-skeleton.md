@@ -89,6 +89,24 @@ During staging, keep the worker disabled unless deliberately testing external in
 - Did not touch Machine B.
 - Did not change Cloudflare.
 
+## Durable data root (DATA_ROOT)
+
+Green deployments pin durable runtime data to `/opt/degen/data` via the
+`DATA_ROOT` env var (set in the systemd unit examples). The app reads it
+through `Settings.data_root_path` / `Settings.media_root_path` so
+attachments, hit images, v2 training captures, the v2 scan-history JSONL,
+and the pHash index all land outside the app checkout.
+
+`deploy/linux/deploy.sh` creates the standard subdirectory layout under
+`DATA_ROOT` and symlinks `/opt/degen/app/data` -> `/opt/degen/data` for
+backward compatibility with operator scripts and backup paths from before
+the split. Leaving `MEDIA_ROOT` unset keeps user-uploaded media under the
+same root; set it to a separate path if media should live on a different
+volume.
+
+For local dev, leaving `DATA_ROOT` unset preserves the previous behavior of
+writing under `<repo>/data`.
+
 ## Next Phase 1/2 steps
 
 1. Decide whether to create a dedicated Linux user/group `degen` before continuing.

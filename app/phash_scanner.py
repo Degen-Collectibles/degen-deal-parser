@@ -31,7 +31,14 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 _ROOT = Path(__file__).resolve().parent.parent
-_DEFAULT_INDEX_PATH = _ROOT / "data" / "phash_index.sqlite"
+
+
+def _default_index_path() -> Path:
+    try:
+        from .config import get_settings
+        return get_settings().data_path("phash_index.sqlite")
+    except Exception:
+        return _ROOT / "data" / "phash_index.sqlite"
 
 
 # ---------------------------------------------------------------------------
@@ -72,9 +79,21 @@ def _configured_index_path() -> Path:
         except Exception:
             raw = ""
     if not raw:
-        return _DEFAULT_INDEX_PATH
+        return _default_index_path()
     path = Path(raw)
-    return path if path.is_absolute() else (_ROOT / path)
+    if path.is_absolute():
+        return path
+    # Relative paths resolve under DATA_ROOT. Legacy values like
+    # "data/phash_index.sqlite" still work: the leading "data/" segment is
+    # stripped so DATA_ROOT=/opt/degen/data does not yield /opt/degen/data/data/...
+    parts = path.parts
+    if parts and parts[0] == "data":
+        path = Path(*parts[1:]) if len(parts) > 1 else Path()
+    try:
+        from .config import get_settings
+        return get_settings().data_root_path / path
+    except Exception:
+        return _ROOT / "data" / path
 
 
 _INDEX_PATH: Path = _configured_index_path()

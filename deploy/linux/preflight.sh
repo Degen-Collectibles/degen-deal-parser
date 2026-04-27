@@ -3,6 +3,7 @@ set -euo pipefail
 
 APP_DIR="${APP_DIR:-/opt/degen/app}"
 ENV_FILE="${ENV_FILE:-/opt/degen/.env}"
+DATA_ROOT="${DATA_ROOT:-/opt/degen/data}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8000/health}"
 
 fail() { echo "preflight: ERROR: $*" >&2; exit 1; }
@@ -12,6 +13,7 @@ info() { echo "preflight: $*"; }
 [[ -f "$ENV_FILE" ]] || fail "ENV_FILE missing: $ENV_FILE"
 [[ -f "$APP_DIR/app/main.py" ]] || fail "app/main.py missing under $APP_DIR"
 [[ -x "$APP_DIR/.venv/bin/python" ]] || fail "venv python missing: $APP_DIR/.venv/bin/python"
+[[ -d "$DATA_ROOT" ]] || fail "DATA_ROOT missing: $DATA_ROOT (run deploy.sh or create manually)"
 
 info "python version: $($APP_DIR/.venv/bin/python --version)"
 info "checking imports"

@@ -8,12 +8,39 @@ HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8000/health}"
 SERVICE_WEB="${SERVICE_WEB:-degen-web}"
 SERVICE_WORKER="${SERVICE_WORKER:-degen-worker}"
 STATE_DIR="${STATE_DIR:-/opt/degen/deploy/state}"
+DATA_ROOT="${DATA_ROOT:-/opt/degen/data}"
 RESTART_WORKER="${RESTART_WORKER:-1}"
 
 fail() { echo "deploy: ERROR: $*" >&2; exit 1; }
 info() { echo "deploy: $*"; }
 
 mkdir -p "$STATE_DIR"
+
+# Durable runtime data lives outside the app checkout. Ensure the
+# Green-standard layout exists so first-deploy doesn't 500 on attachment or
+# hit-image writes. The app also creates these on demand at runtime.
+mkdir -p \
+  "$DATA_ROOT" \
+  "$DATA_ROOT/attachments/thumbs" \
+  "$DATA_ROOT/hit_images" \
+  "$DATA_ROOT/v2_training_scans" \
+  "$DATA_ROOT/v2_pending_scans" \
+  "$DATA_ROOT/exports"
+
+# Migration compatibility: the legacy in-checkout path /opt/degen/app/data
+# is replaced by a symlink to DATA_ROOT so any operator scripts or backups
+# that still reference it keep working during the cutover. Skips if the
+# target is already a regular directory with content (to avoid clobbering
+# uncopied state on a fresh host).
+if [[ -d "$APP_DIR" && ! -e "$APP_DIR/data" ]]; then
+  ln -s "$DATA_ROOT" "$APP_DIR/data"
+  info "linked $APP_DIR/data -> $DATA_ROOT"
+elif [[ -L "$APP_DIR/data" ]]; then
+  current_target="$(readlink -f "$APP_DIR/data" || true)"
+  if [[ "$current_target" != "$(readlink -f "$DATA_ROOT")" ]]; then
+    info "WARN: $APP_DIR/data points at $current_target, expected $DATA_ROOT"
+  fi
+fi
 
 if [[ ! -d "$APP_DIR/.git" ]]; then
   fail "$APP_DIR is not a git checkout yet. Clone manually first during Phase 1/2."

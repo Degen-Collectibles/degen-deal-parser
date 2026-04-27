@@ -62,20 +62,28 @@ def _capture_enabled() -> bool:
     return bool(getattr(get_settings(), "degen_eye_v2_capture_enabled", True))
 
 
+def _resolve_under_data_root(raw: str, fallback: str) -> Path:
+    """Resolve a v2 path: absolute paths used as-is; relative paths join
+    DATA_ROOT, with a legacy leading `data/` segment stripped so existing
+    `.env` values keep working when DATA_ROOT is set to /opt/degen/data."""
+    value = (raw or "").strip() or fallback
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    parts = path.parts
+    if parts and parts[0] == "data":
+        path = Path(*parts[1:]) if len(parts) > 1 else Path()
+    return get_settings().data_root_path / path
+
+
 def capture_root() -> Path:
-    raw = str(getattr(get_settings(), "degen_eye_v2_capture_dir", "data/v2_training_scans") or "").strip()
-    path = Path(raw or "data/v2_training_scans")
-    if not path.is_absolute():
-        path = _ROOT / path
-    return path
+    raw = str(getattr(get_settings(), "degen_eye_v2_capture_dir", "v2_training_scans") or "")
+    return _resolve_under_data_root(raw, "v2_training_scans")
 
 
 def default_index_path() -> Path:
-    raw = str(getattr(get_settings(), "degen_eye_v2_index_path", "data/phash_index.sqlite") or "").strip()
-    path = Path(raw or "data/phash_index.sqlite")
-    if not path.is_absolute():
-        path = _ROOT / path
-    return path
+    raw = str(getattr(get_settings(), "degen_eye_v2_index_path", "phash_index.sqlite") or "")
+    return _resolve_under_data_root(raw, "phash_index.sqlite")
 
 
 def _make_capture_id(now: datetime) -> str:

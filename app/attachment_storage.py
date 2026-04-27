@@ -5,19 +5,26 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from .config import BASE_DIR
+from .config import get_settings
 
 logger = logging.getLogger(__name__)
 
-ATTACHMENT_CACHE_DIR = BASE_DIR / "data" / "attachments"
-THUMBNAIL_CACHE_DIR = BASE_DIR / "data" / "attachments" / "thumbs"
 SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 THUMB_MAX_SIZE = (240, 240)
 
 
+def _attachment_cache_dir() -> Path:
+    return get_settings().media_path("attachments")
+
+
+def _thumbnail_cache_dir() -> Path:
+    return get_settings().media_path("attachments", "thumbs")
+
+
 def ensure_attachment_cache_dir() -> Path:
-    ATTACHMENT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    return ATTACHMENT_CACHE_DIR
+    path = _attachment_cache_dir()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def guess_attachment_suffix(filename: Optional[str], content_type: Optional[str]) -> str:
@@ -71,8 +78,9 @@ def delete_attachment_cache_file(
 
 
 def ensure_thumbnail_cache_dir() -> Path:
-    THUMBNAIL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    return THUMBNAIL_CACHE_DIR
+    path = _thumbnail_cache_dir()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def thumbnail_cache_path(asset_id: int) -> Path:

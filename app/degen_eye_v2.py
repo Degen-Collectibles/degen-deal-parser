@@ -61,22 +61,25 @@ logger = logging.getLogger(__name__)
 # buffer semantics (maxlen=25).
 # ---------------------------------------------------------------------------
 _V2_SCAN_HISTORY: collections.deque[dict] = collections.deque(maxlen=25)
-_ROOT = Path(__file__).resolve().parent.parent
-_V2_HISTORY_PATH = _ROOT / "data" / "v2_scan_history.jsonl"
 _V2_HISTORY_LOCK = Lock()
 _V2_HISTORY_MAX_BYTES = 1024 * 1024
 
 
+def _v2_history_path() -> Path:
+    return get_settings().data_path("v2_scan_history.jsonl")
+
+
 def _append_v2_history_file(entry: dict) -> None:
     try:
-        _V2_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        path = _v2_history_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(entry, default=str, separators=(",", ":"))
         with _V2_HISTORY_LOCK:
-            with _V2_HISTORY_PATH.open("a", encoding="utf-8") as f:
+            with path.open("a", encoding="utf-8") as f:
                 f.write(line + "\n")
-            if _V2_HISTORY_PATH.stat().st_size > _V2_HISTORY_MAX_BYTES:
-                lines = _V2_HISTORY_PATH.read_text(encoding="utf-8", errors="ignore").splitlines()
-                _V2_HISTORY_PATH.write_text("\n".join(lines[-200:]) + "\n", encoding="utf-8")
+            if path.stat().st_size > _V2_HISTORY_MAX_BYTES:
+                lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+                path.write_text("\n".join(lines[-200:]) + "\n", encoding="utf-8")
     except OSError:
         logger.debug("[degen_eye_v2] unable to persist v2 history", exc_info=True)
 
@@ -118,8 +121,9 @@ def _save_v2_history(result: dict) -> None:
 def get_v2_scan_history() -> list[dict]:
     """Return the recent v2-only scan history (newest first)."""
     try:
-        if _V2_HISTORY_PATH.exists():
-            lines = _V2_HISTORY_PATH.read_text(encoding="utf-8", errors="ignore").splitlines()
+        history_path = _v2_history_path()
+        if history_path.exists():
+            lines = history_path.read_text(encoding="utf-8", errors="ignore").splitlines()
             entries: list[dict] = []
             for line in reversed(lines[-100:]):
                 try:

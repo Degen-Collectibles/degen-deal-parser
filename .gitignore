@@ -11,6 +11,7 @@ data/*.db-wal
 data/*.sqlite
 data/*.sqlite3
 data/attachments/
+data/hit_images/
 data/scraper/
 data/v2_scan_history.jsonl
 data/v2_eval/
