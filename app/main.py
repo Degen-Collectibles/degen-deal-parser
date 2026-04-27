@@ -447,9 +447,13 @@ async def lifespan(app: FastAPI):
     else:
         app.state.inv_price_task = None
 
-    price_cache_task = start_background_warm_refresh()
-    if price_cache_task is not None:
-        background_tasks.append(price_cache_task)
+    if settings.disable_external_warmups:
+        price_cache_task = None
+        print("[price_cache] external warmups disabled by configuration")
+    else:
+        price_cache_task = start_background_warm_refresh()
+        if price_cache_task is not None:
+            background_tasks.append(price_cache_task)
     app.state.price_cache_warm_task = price_cache_task
 
     yield

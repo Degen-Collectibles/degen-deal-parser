@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     discord_channel_ids: str = Field(default="", alias="DISCORD_CHANNEL_IDS")
     discord_ingest_enabled: bool = Field(default=True, alias="DISCORD_INGEST_ENABLED")
     parser_worker_enabled: bool = Field(default=True, alias="PARSER_WORKER_ENABLED")
+    disable_external_warmups: bool = Field(default=False, alias="DISABLE_EXTERNAL_WARMUPS")
 
     parser_poll_seconds: float = Field(default=2.0, alias="PARSER_POLL_SECONDS")
     parser_batch_size: int = Field(default=10, alias="PARSER_BATCH_SIZE")

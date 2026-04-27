@@ -15,6 +15,7 @@ Environment=DISCORD_INGEST_ENABLED=true
 Environment=PARSER_WORKER_ENABLED=true
 Environment=STARTUP_BACKFILL_ENABLED=true
 Environment=STARTUP_BACKFILL_LOOKBACK_HOURS=24
+Environment=DISABLE_EXTERNAL_WARMUPS=false
 Environment=RUNTIME_NAME=linux_worker
 Environment=RUNTIME_LABEL=Linux Worker
 ExecStart=/opt/degen/app/.venv/bin/python -m app.worker_service

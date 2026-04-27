@@ -189,6 +189,16 @@ async def warm_price_cache(
 
     Safe to call repeatedly — sets already cached are skipped.
     """
+    settings = get_settings()
+    if settings.disable_external_warmups:
+        logger.info("[price_cache] external warmups disabled by configuration")
+        return {
+            "categories": {},
+            "total_warmed": 0,
+            "elapsed_ms": 0,
+            "disabled": True,
+        }
+
     global _last_warm_at
     t_start = time.monotonic()
     stats = {"categories": {}, "total_warmed": 0, "elapsed_ms": 0}

@@ -14,6 +14,7 @@ EnvironmentFile=/opt/degen/.env
 Environment=DISCORD_INGEST_ENABLED=false
 Environment=PARSER_WORKER_ENABLED=false
 Environment=STARTUP_BACKFILL_ENABLED=false
+Environment=DISABLE_EXTERNAL_WARMUPS=true
 Environment=RUNTIME_NAME=linux_web
 Environment=RUNTIME_LABEL=Linux Web
 Environment=WORKER_RUNTIME_NAME=linux_worker
