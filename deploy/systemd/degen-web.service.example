@@ -1,0 +1,33 @@
+# Copy to /etc/systemd/system/degen-web.service on the Green Linux host.
+# Review User/Group/WorkingDirectory/EnvironmentFile before enabling.
+[Unit]
+Description=Degen Ops web service (FastAPI/Uvicorn)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=degen
+Group=degen
+WorkingDirectory=/opt/degen/app
+EnvironmentFile=/opt/degen/.env
+Environment=DISCORD_INGEST_ENABLED=false
+Environment=PARSER_WORKER_ENABLED=false
+Environment=STARTUP_BACKFILL_ENABLED=false
+Environment=RUNTIME_NAME=linux_web
+Environment=RUNTIME_LABEL=Linux Web
+Environment=WORKER_RUNTIME_NAME=linux_worker
+ExecStart=/opt/degen/app/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGINT
+
+# Hardening: keep modest for first migration; tighten after cutover is stable.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/degen /var/log/degen
+
+[Install]
+WantedBy=multi-user.target

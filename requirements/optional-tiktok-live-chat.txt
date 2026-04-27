@@ -1,0 +1,9 @@
+# Optional TikTok Live chat integration.
+#
+# The app handles this package being absent by disabling TikTok live chat
+# at runtime (`app/tiktok_live_chat.py`). Keep it out of core
+# requirements so Linux deploys do not fail when the package is unavailable
+# from public PyPI. If/when a private package source is configured, install
+# this file explicitly in the Green/prod environment.
+
+tiksync

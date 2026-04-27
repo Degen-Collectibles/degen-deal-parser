@@ -1,0 +1,32 @@
+# Copy to /etc/systemd/system/degen-worker.service on the Green Linux host.
+# Keep disabled during staging unless deliberately testing worker ingest.
+[Unit]
+Description=Degen Ops worker service (Discord/parser/backfill)
+After=network-online.target postgresql.service degen-web.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=degen
+Group=degen
+WorkingDirectory=/opt/degen/app
+EnvironmentFile=/opt/degen/.env
+Environment=DISCORD_INGEST_ENABLED=true
+Environment=PARSER_WORKER_ENABLED=true
+Environment=STARTUP_BACKFILL_ENABLED=true
+Environment=STARTUP_BACKFILL_LOOKBACK_HOURS=24
+Environment=RUNTIME_NAME=linux_worker
+Environment=RUNTIME_LABEL=Linux Worker
+ExecStart=/opt/degen/app/.venv/bin/python -m app.worker_service
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGINT
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/degen /var/log/degen
+
+[Install]
+WantedBy=multi-user.target

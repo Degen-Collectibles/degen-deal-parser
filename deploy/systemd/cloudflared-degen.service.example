@@ -1,0 +1,22 @@
+# Optional template for final cutover/staging tunnel.
+# Prefer creating a new Green tunnel + staging hostname first, not reusing Blue blindly.
+[Unit]
+Description=Cloudflare Tunnel for Degen Ops
+After=network-online.target degen-web.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=degen
+Group=degen
+ExecStart=/usr/local/bin/cloudflared tunnel --config /opt/degen/cloudflared/config.yml run
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/degen/cloudflared /var/log/degen
+
+[Install]
+WantedBy=multi-user.target
