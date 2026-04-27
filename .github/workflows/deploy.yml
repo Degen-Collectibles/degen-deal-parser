@@ -1,4 +1,4 @@
-name: Deploy to Machine B
+name: Deploy to Degen Prod
 
 on:
   push:
@@ -6,40 +6,14 @@ on:
 
 jobs:
   deploy:
-    runs-on: self-hosted
+    runs-on: [self-hosted, degen-prod]
     defaults:
       run:
-        working-directory: C:\Users\Degen\degen-deal-parser
+        working-directory: /opt/degen/app
 
     steps:
-      - name: Pull latest code
-        run: git pull origin main
-
-      - name: Install dependencies
-        run: .\.venv\Scripts\pip.exe install -r requirements.txt
-
       - name: Redeploy app
-        run: powershell -ExecutionPolicy Bypass -File .\scripts\redeploy.ps1
+        run: ./scripts/redeploy-linux.sh
 
       - name: Verify health
-        shell: powershell
-        run: |
-          $maxWait = 120
-          $interval = 5
-          $elapsed = 0
-          Start-Sleep -Seconds 10
-          $elapsed = 10
-          while ($elapsed -lt $maxWait) {
-            try {
-              $r = Invoke-WebRequest -Uri http://127.0.0.1:8000/health -UseBasicParsing -TimeoutSec 10
-              if ($r.StatusCode -ge 200 -and $r.StatusCode -lt 500) {
-                Write-Host "Health check passed after ${elapsed}s (status $($r.StatusCode))."
-                exit 0
-              }
-            } catch {
-              Write-Host "Health check attempt at ${elapsed}s - not ready yet..."
-            }
-            Start-Sleep -Seconds $interval
-            $elapsed += $interval
-          }
-          throw "Health check failed: server did not respond within ${maxWait}s"
+        run: curl -fsS http://127.0.0.1:8000/health >/dev/null

@@ -1,0 +1,31 @@
+[Unit]
+Description=Degen Ops Web
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=degen
+Group=degen
+WorkingDirectory=/opt/degen/app
+EnvironmentFile=/opt/degen/.env
+Environment=DISCORD_INGEST_ENABLED=false
+Environment=PARSER_WORKER_ENABLED=false
+Environment=STARTUP_BACKFILL_ENABLED=false
+Environment=RUNTIME_NAME=hosted_web
+Environment="RUNTIME_LABEL=Hosted Web"
+Environment=WORKER_RUNTIME_NAME=hosted_worker
+Environment="WORKER_RUNTIME_LABEL=Hosted Worker"
+ExecStart=/opt/degen/app/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --log-level info
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ReadWritePaths=/opt/degen /var/log/degen
+StandardOutput=append:/var/log/degen/web.log
+StandardError=append:/var/log/degen/web.log
+
+[Install]
+WantedBy=multi-user.target

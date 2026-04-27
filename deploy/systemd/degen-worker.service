@@ -1,0 +1,30 @@
+[Unit]
+Description=Degen Ops Worker
+After=network-online.target postgresql.service degen-web.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=degen
+Group=degen
+WorkingDirectory=/opt/degen/app
+EnvironmentFile=/opt/degen/.env
+Environment=DISCORD_INGEST_ENABLED=true
+Environment=PARSER_WORKER_ENABLED=true
+Environment=STARTUP_BACKFILL_ENABLED=true
+Environment=STARTUP_BACKFILL_LOOKBACK_HOURS=24
+Environment=RUNTIME_NAME=hosted_worker
+Environment="RUNTIME_LABEL=Hosted Worker"
+ExecStart=/opt/degen/app/.venv/bin/python -m app.worker_service
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ReadWritePaths=/opt/degen /var/log/degen
+StandardOutput=append:/var/log/degen/worker.log
+StandardError=append:/var/log/degen/worker.log
+
+[Install]
+WantedBy=multi-user.target

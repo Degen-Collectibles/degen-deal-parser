@@ -1,0 +1,5 @@
+# Install as /etc/sudoers.d/degen-actions-runner with mode 0440.
+# This lets the GitHub Actions runner restart only the Degen units without a TTY/password.
+# Adjust the username if the runner is installed under a different Linux user.
+ubuntu ALL=(root) NOPASSWD: /bin/systemctl restart degen-web.service, /bin/systemctl restart degen-worker.service, /bin/systemctl status degen-web.service
+ubuntu ALL=(root) NOPASSWD: /usr/bin/systemctl restart degen-web.service, /usr/bin/systemctl restart degen-worker.service, /usr/bin/systemctl status degen-web.service
