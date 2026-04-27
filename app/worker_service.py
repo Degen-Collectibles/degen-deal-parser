@@ -158,12 +158,13 @@ async def run_worker_service() -> None:
                 name="backfill-queue",
             )
         )
-        background_tasks.append(
-            asyncio.create_task(
-                recent_message_audit_loop(stop_event, get_discord_client),
-                name="recent-message-audit",
+        if settings.periodic_offline_audit_enabled:
+            background_tasks.append(
+                asyncio.create_task(
+                    recent_message_audit_loop(stop_event, get_discord_client),
+                    name="recent-message-audit",
+                )
             )
-        )
     if settings.discord_ingest_enabled and settings.parser_worker_enabled:
         background_tasks.append(
             asyncio.create_task(

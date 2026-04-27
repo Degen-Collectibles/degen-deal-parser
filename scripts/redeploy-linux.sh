@@ -62,7 +62,7 @@ git_branch="$(git rev-parse --abbrev-ref HEAD)"
 python3 - <<PY
 import json, os, socket, datetime
 stamp = {
-    "timestamp_utc": datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z"),
+    "timestamp_utc": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
     "git_sha": "$git_sha",
     "git_branch": "$git_branch",
     "host": socket.gethostname(),
