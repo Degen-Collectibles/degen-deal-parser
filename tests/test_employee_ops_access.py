@@ -9,7 +9,7 @@ Employees must NOT be able to:
   - Hit the inventory list (`/inventory`) or item detail (shows cost basis).
   - Hit the ops dashboard, reports, bookkeeping, or admin surfaces.
 
-The portal sidebar should expose a "Tools" group with Live Stream + Degen Eye
+The portal sidebar should expose an "Ops" group with Live Stream + Degen Eye
 for every authenticated user (rank employees included).
 
 The TikTok streamer template's hamburger nav should hide ops / admin links
@@ -122,16 +122,16 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         r = self.client.get("/team/", follow_redirects=False)
         self.assertEqual(r.status_code, 200)
         html = r.text
-        self.assertIn('<div class="pt-side-group">Tools</div>', html)
+        self.assertIn('<div class="pt-side-group">Ops</div>', html)
         self.assertIn('href="/tiktok/streamer"', html)
-        self.assertIn('href="/degen_eye"', html)
+        self.assertIn('href="/degen_eye/v2"', html)
 
     def test_admin_also_sees_tools_group(self):
         self._login_as("admin", user_id=202, username="adm1")
         html = self.client.get("/team/", follow_redirects=False).text
-        self.assertIn('<div class="pt-side-group">Tools</div>', html)
+        self.assertIn('<div class="pt-side-group">Ops</div>', html)
         self.assertIn('href="/tiktok/streamer"', html)
-        self.assertIn('href="/degen_eye"', html)
+        self.assertIn('href="/degen_eye/v2"', html)
 
     # ---------- Degen Eye + scanner access ----------
 
@@ -180,7 +180,7 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         html = self.client.get("/tiktok/streamer", follow_redirects=False).text
         # Employee-safe tiles: the Team Portal + Degen Eye must be there.
         self.assertIn('href="/team/">Team Portal</a>', html)
-        self.assertIn('href="/degen_eye">Degen Eye</a>', html)
+        self.assertIn('href="/degen_eye/v2">Degen Eye</a>', html)
         # Ops-only subgroup labels only render inside {% if _is_ops %}. Their
         # absence is the clean signal that the whole ops block was skipped.
         self.assertNotIn(

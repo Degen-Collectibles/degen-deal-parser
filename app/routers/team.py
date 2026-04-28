@@ -493,9 +493,9 @@ def _nav_context(session: Session, user: User) -> dict:
     # Ops shortcuts are safe employee-facing tools and should sit apart from
     # HR/self-service links.
     ops_nav = [
-        {"name": "inventory", "href": "/team/tools/inventory"},
-        {"name": "degen-eye", "href": "/team/tools/degen-eye"},
-        {"name": "live-stream", "href": "/team/tools/live-stream"},
+        {"name": "inventory", "href": "/inventory/scan"},
+        {"name": "degen-eye", "href": "/degen_eye/v2"},
+        {"name": "live-stream", "href": "/tiktok/streamer"},
     ]
 
     return {
@@ -1171,37 +1171,7 @@ def team_help(
     )
 
 
-def _team_tool_response(
-    request: Request,
-    session: Session,
-    *,
-    user: User,
-    active: str,
-    title: str,
-    tool_title: str,
-    tool_subtitle: str,
-    tool_url: str,
-    open_url: str,
-) -> HTMLResponse:
-    return templates.TemplateResponse(
-        request,
-        "team/tool_frame.html",
-        {
-            "request": request,
-            "title": title,
-            "active": active,
-            "current_user": user,
-            "tool_title": tool_title,
-            "tool_subtitle": tool_subtitle,
-            "tool_url": tool_url,
-            "open_url": open_url,
-            "csrf_token": issue_token(request),
-            **_nav_context(session, user),
-        },
-    )
-
-
-@router.get("/team/tools/inventory", response_class=HTMLResponse)
+@router.get("/team/tools/inventory")
 def team_tool_inventory(
     request: Request,
     session: Session = Depends(get_session),
@@ -1209,20 +1179,10 @@ def team_tool_inventory(
     denial, user = _require_employee(request, session, resource_key="page.dashboard")
     if denial:
         return denial
-    return _team_tool_response(
-        request,
-        session,
-        user=user,
-        active="inventory",
-        title="Inventory",
-        tool_title="Inventory scan",
-        tool_subtitle="Scan a barcode or look up inventory without leaving the team portal.",
-        tool_url="/inventory/scan?team_shell=1",
-        open_url="/inventory/scan",
-    )
+    return RedirectResponse("/inventory/scan", status_code=303)
 
 
-@router.get("/team/tools/degen-eye", response_class=HTMLResponse)
+@router.get("/team/tools/degen-eye")
 def team_tool_degen_eye(
     request: Request,
     session: Session = Depends(get_session),
@@ -1230,20 +1190,10 @@ def team_tool_degen_eye(
     denial, user = _require_employee(request, session, resource_key="page.dashboard")
     if denial:
         return denial
-    return _team_tool_response(
-        request,
-        session,
-        user=user,
-        active="degen-eye",
-        title="Degen Eye",
-        tool_title="Card scanner",
-        tool_subtitle="Use the scanner from inside the employee portal shell.",
-        tool_url="/degen_eye/v2?team_shell=1",
-        open_url="/degen_eye/v2",
-    )
+    return RedirectResponse("/degen_eye/v2", status_code=303)
 
 
-@router.get("/team/tools/live-stream", response_class=HTMLResponse)
+@router.get("/team/tools/live-stream")
 def team_tool_live_stream(
     request: Request,
     session: Session = Depends(get_session),
@@ -1251,17 +1201,7 @@ def team_tool_live_stream(
     denial, user = _require_employee(request, session, resource_key="page.dashboard")
     if denial:
         return denial
-    return _team_tool_response(
-        request,
-        session,
-        user=user,
-        active="live-stream",
-        title="Live Stream",
-        tool_title="TikTok live stream",
-        tool_subtitle="Watch live orders, goals, and chat while staying in the employee portal.",
-        tool_url="/tiktok/streamer?team_shell=1",
-        open_url="/tiktok/streamer",
-    )
+    return RedirectResponse("/tiktok/streamer", status_code=303)
 
 
 _SHIFT_START_RE = re.compile(

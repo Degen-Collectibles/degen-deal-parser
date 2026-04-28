@@ -115,14 +115,14 @@ class MobileNavTests(unittest.TestCase):
         # Five expected bottom-nav destinations for a plain employee:
         for needle in (
             'href="/team/"',
-            'href="/team/tools/live-stream"',
-            'href="/team/tools/degen-eye"',
+            'href="/tiktok/streamer"',
+            'href="/degen_eye/v2"',
             'href="/team/schedule"',
             'href="/team/profile"',
         ):
             self.assertIn(needle, html, f"missing bottom-nav link: {needle}")
         self.assertNotIn('href="/team/admin/schedule"', html)
-        # Center FAB still exists, and now points to Degen Eye in the team shell.
+        # Center FAB still exists, and now points straight to Degen Eye.
         self.assertIn('class="pt-mbn-fab"', html)
         self.assertIn('pt-mbn-item-center', html)
 
@@ -131,8 +131,8 @@ class MobileNavTests(unittest.TestCase):
         html = self._dashboard_html()
         for needle in (
             'href="/team/"',
-            'href="/team/tools/live-stream"',
-            'href="/team/tools/degen-eye"',
+            'href="/tiktok/streamer"',
+            'href="/degen_eye/v2"',
             'href="/team/admin/schedule"',
             'href="/team/profile"',
         ):
