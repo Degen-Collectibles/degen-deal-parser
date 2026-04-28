@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from cryptography.fernet import Fernet
+from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, create_engine, select
 
 os.environ.setdefault("EMPLOYEE_PORTAL_ENABLED", "true")
@@ -148,6 +149,19 @@ class PermissionsMatrixTests(unittest.TestCase):
 class RouteGatingTests(unittest.TestCase):
     """End-to-end: /team/admin requires admin + feature flag + CSRF on POST."""
 
+    def setUp(self):
+        from app.models import SQLModel
+        from app.db import seed_employee_portal_defaults
+
+        self.engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        SQLModel.metadata.create_all(self.engine)
+        with Session(self.engine) as s:
+            seed_employee_portal_defaults(s)
+
     def _build_client(self, *, portal_enabled: bool = True):
         # Reload the app with the desired EMPLOYEE_PORTAL_ENABLED env.
         prev = os.environ.get("EMPLOYEE_PORTAL_ENABLED")
@@ -160,15 +174,30 @@ class RouteGatingTests(unittest.TestCase):
         import app.main as app_main
         importlib.reload(app_main)
 
+        from app.db import get_session
+
+        engine = self.engine
+
+        def _override_get_session():
+            s = Session(engine)
+            try:
+                yield s
+            finally:
+                s.close()
+
+        app_main.app.dependency_overrides[get_session] = _override_get_session
+
         from fastapi.testclient import TestClient
 
         client = TestClient(app_main.app)
 
-        # Restore env for isolation.
+        # Restore env for isolation and clear the settings cache so the
+        # restored env value is picked up by subsequent test code.
         if prev is None:
             os.environ.pop("EMPLOYEE_PORTAL_ENABLED", None)
         else:
             os.environ["EMPLOYEE_PORTAL_ENABLED"] = prev
+        cfg.get_settings.cache_clear()
         return client, app_main
 
     def _login_as(self, client, role):

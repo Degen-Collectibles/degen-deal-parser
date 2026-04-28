@@ -246,6 +246,19 @@ class TeamAnnouncementTests(unittest.TestCase):
             "can_create": True,
             "csrf_token": "test-token",
             "flash": None,
+            "team_admin_nav_sections": [
+                {
+                    "group": "People",
+                    "items": [
+                        {
+                            "active": "announcements",
+                            "label": "Announcements",
+                            "href": "/team/admin/announcements",
+                            "resource_key": "admin.announcements.view",
+                        }
+                    ],
+                }
+            ],
         }
         return templates.env.get_template(
             "team/admin/announcements.html"
@@ -349,7 +362,7 @@ class TeamAnnouncementTests(unittest.TestCase):
         html = self._dashboard_html(employee)
 
         self.assertIn("Store meeting", html)
-        self.assertIn("pt-announcements-preview", html)
+        self.assertIn("pt-list-stack", html)
 
     def test_archived_announcement_hidden_from_employee_dashboard(self):
         admin = self._seed_user(7, role="admin", username="poster2")
@@ -429,7 +442,7 @@ class TeamAnnouncementTests(unittest.TestCase):
 
         html = self._dashboard_html(employee)
 
-        self.assertNotIn("pt-announcements-preview", html)
+        self.assertNotIn("pt-list-stack", html)
 
     def test_sidebar_shows_announcements_for_employee(self):
         employee = self._seed_user(16, role="employee", username="reader6")

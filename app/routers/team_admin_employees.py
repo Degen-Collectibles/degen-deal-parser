@@ -1769,7 +1769,7 @@ async def admin_employee_profile_update(
         current,
         "admin.employee_roster.edit",
     )
-    if not can_edit_profile and not can_edit_schedule_roster:
+    if not can_edit_profile:
         return _admin_denied_response(request, session, current)
     employee = session.get(User, user_id)
     if employee is None:

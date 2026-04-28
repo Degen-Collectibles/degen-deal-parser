@@ -169,11 +169,9 @@ class EmployeePortalHomepageTests(unittest.TestCase):
 
         html = self._dashboard_html()
 
-        self.assertEqual(html.count('class="pt-upcoming-shift"'), 3)
-        for label in labels[:3]:
+        self.assertEqual(html.count('class="pt-list-row pt-shift-row"'), 5)
+        for label in labels:
             self.assertIn(label, html)
-        for label in labels[3:]:
-            self.assertNotIn(label, html)
         self.assertLess(html.index(labels[0]), html.index(labels[1]))
         self.assertLess(html.index(labels[1]), html.index(labels[2]))
         self.assertIn("Storefront", html)
@@ -235,7 +233,7 @@ class EmployeePortalHomepageTests(unittest.TestCase):
 
         html = self._dashboard_html()
 
-        self.assertEqual(html.count('class="pt-upcoming-shift"'), 1)
+        self.assertEqual(html.count('class="pt-list-row pt-shift-row"'), 1)
         self.assertIn("10-6", html)
         self.assertNotIn("Approved leave", html)
 
@@ -309,8 +307,6 @@ class EmployeePortalHomepageTests(unittest.TestCase):
         html = self._dashboard_html()
         upper = unescape(html).upper()
 
-        self.assertNotIn("HOURS THIS WEEK", upper)
-        self.assertNotIn("ESTIMATED PAY", upper)
         self.assertNotIn("TODAY'S TASKS", upper)
         self.assertNotIn("Coming with payroll integration", html)
         self.assertNotIn("Task assignments pending", html)

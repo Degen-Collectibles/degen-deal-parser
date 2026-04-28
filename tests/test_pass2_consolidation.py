@@ -34,6 +34,7 @@ def make_request(path: str, role: str = "admin") -> Request:
         username="tester",
         display_name="Test Operator",
         role=role,
+        is_active=True,
     )
     return request
 
