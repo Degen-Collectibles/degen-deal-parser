@@ -1691,7 +1691,7 @@
                                 {% set _is_admin_like = current_user and current_user.role in ("reviewer", "admin") %}
                                 <div class="nav-dropdown-label">Workspace</div>
                                 <a href="/team/">Team Portal</a>
-                                <a href="/degen_eye/v2">Degen Eye</a>
+                                <a href="{% if team_shell %}/degen_eye/v2?team_shell=1{% else %}/degen_eye/v2{% endif %}">Degen Eye</a>
                                 {% if _is_ops %}
                                 <a href="/dashboard">Dashboard</a>
                                 <a href="/tiktok/orders">TikTok Orders</a>

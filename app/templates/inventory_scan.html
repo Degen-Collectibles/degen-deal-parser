@@ -67,8 +67,10 @@
     <link rel="stylesheet" href="/static/safe-area.css?v=1776747800">
 </head>
 <body>
+{% set can_manage_inventory = current_user and current_user.role in ("admin", "reviewer", "viewer") %}
+{% set limited_inventory_scan = team_shell or not can_manage_inventory %}
 <div class="page">
-    {% if not team_shell %}
+    {% if not limited_inventory_scan %}
     {% include "_linear_sidebar.html" %}
     <a href="/inventory" class="back-link">← Back to Inventory</a>
     {% endif %}
@@ -77,12 +79,18 @@
         <span class="eyebrow">Inventory</span>
         <div class="icon">&#9641;</div>
         <h1>Scan Mode</h1>
+        {% if limited_inventory_scan %}
+        <p>Scan a barcode to confirm whether it exists. If you need item details, ask a manager.</p>
+        {% else %}
         <p>Focus the input below and scan a barcode with your USB scanner. The page will redirect automatically.</p>
+        {% endif %}
 
         <div class="scan-wrap">
             <input id="scan-input" class="scan-input" type="text" placeholder="DGN-000001" autocomplete="off" autofocus>
             <div id="status" class="status-msg"></div>
+            {% if can_manage_inventory %}
             <a href="/inventory/new" class="button">+ Add New Item</a>
+            {% endif %}
         </div>
     </div>
 </div>
@@ -92,6 +100,7 @@
     var input = document.getElementById('scan-input');
     var status = document.getElementById('status');
     var searching = false;
+    var limitedInventoryScan = {{ 'true' if limited_inventory_scan else 'false' }};
 
     function setStatus(msg, cls) {
         status.textContent = msg;
@@ -112,6 +121,12 @@
             .then(function(data) {
                 searching = false;
                 if (data.found) {
+                    if (limitedInventoryScan) {
+                        setStatus('Found item #' + data.item_id + '. Ask a manager to open details.', 'found');
+                        input.value = '';
+                        input.focus();
+                        return;
+                    }
                     setStatus('Found! Redirecting…', 'found');
                     setTimeout(function() { window.location.href = data.redirect; }, 300);
                 } else {

@@ -115,8 +115,8 @@ class MobileNavTests(unittest.TestCase):
         # Five expected bottom-nav destinations for a plain employee:
         for needle in (
             'href="/team/"',
-            'href="/tiktok/streamer"',
-            'href="/degen_eye/v2"',
+            'href="/tiktok/streamer?team_shell=1"',
+            'href="/degen_eye/v2?team_shell=1"',
             'href="/team/schedule"',
             'href="/team/profile"',
         ):
@@ -131,8 +131,8 @@ class MobileNavTests(unittest.TestCase):
         html = self._dashboard_html()
         for needle in (
             'href="/team/"',
-            'href="/tiktok/streamer"',
-            'href="/degen_eye/v2"',
+            'href="/tiktok/streamer?team_shell=1"',
+            'href="/degen_eye/v2?team_shell=1"',
             'href="/team/admin/schedule"',
             'href="/team/profile"',
         ):

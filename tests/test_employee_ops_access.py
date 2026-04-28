@@ -123,15 +123,16 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         html = r.text
         self.assertIn('<div class="pt-side-group">Ops</div>', html)
-        self.assertIn('href="/tiktok/streamer"', html)
-        self.assertIn('href="/degen_eye/v2"', html)
+        self.assertIn('href="/tiktok/streamer?team_shell=1"', html)
+        self.assertIn('href="/degen_eye/v2?team_shell=1"', html)
+        self.assertIn('href="/inventory/scan?team_shell=1"', html)
 
     def test_admin_also_sees_tools_group(self):
         self._login_as("admin", user_id=202, username="adm1")
         html = self.client.get("/team/", follow_redirects=False).text
         self.assertIn('<div class="pt-side-group">Ops</div>', html)
-        self.assertIn('href="/tiktok/streamer"', html)
-        self.assertIn('href="/degen_eye/v2"', html)
+        self.assertIn('href="/tiktok/streamer?team_shell=1"', html)
+        self.assertIn('href="/degen_eye/v2?team_shell=1"', html)
 
     # ---------- Degen Eye + scanner access ----------
 
@@ -155,6 +156,14 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         self._login_as("employee", user_id=206, username="emp5")
         r = self.client.get("/inventory/scan", follow_redirects=False)
         self.assertEqual(r.status_code, 200)
+
+    def test_employee_scan_shell_hides_inventory_admin_actions(self):
+        self._login_as("employee", user_id=216, username="emp16")
+        r = self.client.get("/inventory/scan?team_shell=1", follow_redirects=False)
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn("Back to Inventory", r.text)
+        self.assertNotIn("+ Add New Item", r.text)
+        self.assertIn("ask a manager", r.text)
 
     # ---------- Pages that should STAY gated above employee ----------
 

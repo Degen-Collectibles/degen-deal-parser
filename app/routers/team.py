@@ -493,9 +493,9 @@ def _nav_context(session: Session, user: User) -> dict:
     # Ops shortcuts are safe employee-facing tools and should sit apart from
     # HR/self-service links.
     ops_nav = [
-        {"name": "inventory", "href": "/inventory/scan"},
-        {"name": "degen-eye", "href": "/degen_eye/v2"},
-        {"name": "live-stream", "href": "/tiktok/streamer"},
+        {"name": "inventory", "href": "/inventory/scan?team_shell=1"},
+        {"name": "degen-eye", "href": "/degen_eye/v2?team_shell=1"},
+        {"name": "live-stream", "href": "/tiktok/streamer?team_shell=1"},
     ]
 
     return {
@@ -1179,7 +1179,7 @@ def team_tool_inventory(
     denial, user = _require_employee(request, session, resource_key="page.dashboard")
     if denial:
         return denial
-    return RedirectResponse("/inventory/scan", status_code=303)
+    return RedirectResponse("/inventory/scan?team_shell=1", status_code=303)
 
 
 @router.get("/team/tools/degen-eye")
@@ -1190,7 +1190,7 @@ def team_tool_degen_eye(
     denial, user = _require_employee(request, session, resource_key="page.dashboard")
     if denial:
         return denial
-    return RedirectResponse("/degen_eye/v2", status_code=303)
+    return RedirectResponse("/degen_eye/v2?team_shell=1", status_code=303)
 
 
 @router.get("/team/tools/live-stream")
@@ -1201,7 +1201,7 @@ def team_tool_live_stream(
     denial, user = _require_employee(request, session, resource_key="page.dashboard")
     if denial:
         return denial
-    return RedirectResponse("/tiktok/streamer", status_code=303)
+    return RedirectResponse("/tiktok/streamer?team_shell=1", status_code=303)
 
 
 _SHIFT_START_RE = re.compile(
