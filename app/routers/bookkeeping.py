@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlmodel import Session
 
+from ..csrf import CSRFProtectedRoute
 from ..shared import *  # noqa: F401,F403 — shared helpers, constants, state
 from ..bookkeeping import (
     extract_google_sheet_url,
@@ -23,7 +24,7 @@ from ..bookkeeping import (
 )
 from ..db import get_session
 
-router = APIRouter()
+router = APIRouter(route_class=CSRFProtectedRoute)
 
 
 @router.get("/bookkeeping", response_class=HTMLResponse)

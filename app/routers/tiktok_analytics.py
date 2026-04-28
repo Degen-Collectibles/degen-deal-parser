@@ -231,15 +231,14 @@ def _build_daily_from_local_orders(session: Session, days: int) -> list[dict]:
 @router.get("/tiktok/analytics/api/debug")
 def tiktok_analytics_debug(request: Request):
     """Diagnostic endpoint -- shows what credentials and data sources are available."""
+    if denial := require_role_response(request, "admin"):
+        return denial
     settings = get_settings()
     access_token, shop_cipher, app_key = _resolve_tiktok_api_creds()
     return {
         "has_access_token": bool(access_token),
-        "access_token_preview": (access_token[:8] + "...") if access_token else "",
         "has_shop_cipher": bool(shop_cipher),
-        "shop_cipher_preview": (shop_cipher[:8] + "...") if shop_cipher else "",
         "has_app_key": bool(app_key),
-        "app_key_preview": (app_key[:8] + "...") if app_key else "",
         "app_secret_set": bool((settings.tiktok_app_secret or "").strip()),
         "base_url": resolve_tiktok_shop_pull_base_url(),
         "cached_sessions_count": len(_get_live_sessions_list()),

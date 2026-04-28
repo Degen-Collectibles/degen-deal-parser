@@ -28,6 +28,11 @@ from .models import (
 settings = get_settings()
 log = logging.getLogger(__name__)
 
+LEGACY_OPS_PERMISSION = "legacy.ops.view"
+EMPLOYEE_PORTAL_ROLES = {"employee", "viewer", "manager"}
+LEGACY_VIEWER_ROLES = {"admin", "reviewer"}
+LEGACY_REVIEWER_ROLES = {"admin", "reviewer"}
+
 
 class AuthError(RuntimeError):
     """Raised when an account cannot be authenticated safely."""
@@ -274,13 +279,9 @@ def seed_default_users(session: Session) -> None:
 
 
 def role_rank(role: Optional[str]) -> int:
-    # Managers and reviewers share the same rank on purpose: a store
-    # manager is trusted to do everything a deal-reviewer can (approve
-    # messages, access bookkeeping, etc.) but nothing an admin can (seed
-    # users, configure integrations, wipe data). Keeping them at the same
-    # tier means route gates written as `require_role_response(..., "reviewer")`
-    # naturally cover both without having to list the role explicitly at
-    # every call site.
+    # Portal permissions are checked with explicit RolePermission rows.
+    # Legacy ops routes use has_legacy_role() so portal managers/viewers do
+    # not inherit old reviewer/viewer route gates from this compatibility rank.
     return {
         "employee": 1,
         "viewer": 2,
@@ -292,6 +293,39 @@ def role_rank(role: Optional[str]) -> int:
 
 def has_role(user: Optional[User], minimum_role: str) -> bool:
     return role_rank(user.role if user else None) >= role_rank(minimum_role)
+
+
+def has_legacy_role(
+    session: Optional[Session],
+    user: Optional[User],
+    minimum_role: str,
+    *,
+    cache: Optional[dict] = None,
+) -> bool:
+    """Authorize old ops/admin pages without treating portal roles as ops roles.
+
+    The employee portal reuses persisted role names like "viewer" and "manager".
+    Legacy ops routes historically used rank checks such as minimum_role="viewer";
+    this helper keeps employee-portal roles out of those pages unless a specific
+    RolePermission grant exists.
+    """
+    if user is None or not user.is_active:
+        return False
+    role = (user.role or "").strip().lower()
+    minimum = (minimum_role or "").strip().lower()
+    if minimum == "employee":
+        return has_role(user, "employee")
+    if minimum == "admin":
+        return role == "admin"
+    if minimum == "reviewer":
+        return role in LEGACY_REVIEWER_ROLES
+    if minimum == "viewer":
+        if role in LEGACY_VIEWER_ROLES:
+            return True
+        if session is None:
+            return False
+        return has_permission(session, user, LEGACY_OPS_PERMISSION, cache=cache)
+    return has_role(user, minimum)
 
 
 # ---------------------------------------------------------------------------

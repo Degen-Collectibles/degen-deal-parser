@@ -1,0 +1,63 @@
+{% if csrf_token %}
+<script>
+(function () {
+  var token = {{ csrf_token|tojson }};
+  if (!token) return;
+  document.addEventListener("submit", function (event) {
+    var form = event.target;
+    if (!form || String(form.method || "").toLowerCase() !== "post") return;
+    if (form.querySelector('input[name="csrf_token"]')) return;
+    var input = document.createElement("input");
+    input.type = "hidden";
+    input.name = "csrf_token";
+    input.value = token;
+    form.appendChild(input);
+  }, true);
+  if (window.fetch) {
+    var originalFetch = window.fetch;
+    window.fetch = function (resource, init) {
+      init = init || {};
+      var method = String(init.method || "GET").toUpperCase();
+      if (!/^(GET|HEAD|OPTIONS|TRACE)$/.test(method)) {
+        var headers = new Headers(init.headers || {});
+        if (!headers.has("X-CSRF-Token")) headers.set("X-CSRF-Token", token);
+        init.headers = headers;
+      }
+      return originalFetch(resource, init);
+    };
+    document.addEventListener("submit", function (event) {
+      var form = event.target;
+      if (!form || String(form.method || "").toLowerCase() !== "post") return;
+      if (form.dataset.nativeSubmit === "1") return;
+      event.preventDefault();
+      var submitter = event.submitter;
+      var action = (submitter && submitter.getAttribute("formaction")) || form.action || window.location.href;
+      var method = ((submitter && submitter.getAttribute("formmethod")) || form.method || "POST").toUpperCase();
+      var body = new FormData(form);
+      if (submitter && submitter.name && !body.has(submitter.name)) {
+        body.append(submitter.name, submitter.value || "");
+      }
+      originalFetch(action, {
+        method: method,
+        body: body,
+        credentials: "same-origin",
+        headers: {"X-CSRF-Token": token}
+      }).then(function (response) {
+        if (response.redirected) {
+          window.location.assign(response.url);
+          return null;
+        }
+        return response.text().then(function (html) {
+          document.open();
+          document.write(html);
+          document.close();
+        });
+      }).catch(function () {
+        form.dataset.nativeSubmit = "1";
+        form.submit();
+      });
+    });
+  }
+})();
+</script>
+{% endif %}

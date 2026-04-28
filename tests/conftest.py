@@ -26,6 +26,7 @@ os.environ.setdefault("SESSION_HTTPS_ONLY", "false")
 os.environ.setdefault("SESSION_DOMAIN", "")
 os.environ.setdefault("SESSION_SAME_SITE", "lax")
 os.environ.setdefault("SESSION_SECRET", "pytest-session-secret-" + "x" * 32)
+os.environ.setdefault("ADMIN_PASSWORD", "pytest-admin-password-" + "x" * 24)
 
 # Database — force a local SQLite so tests that hit `get_session` /
 # `managed_session` (e.g. the `attach_current_user` middleware) never

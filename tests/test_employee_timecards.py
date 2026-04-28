@@ -350,6 +350,45 @@ class EmployeeTimecardsTests(unittest.TestCase):
         self.assertIn("Approved", body)
         self.assertIn("checked with payroll", body)
 
+    def test_timecards_reject_future_status_before_insert(self):
+        from app.models import TimecardApproval
+        from app.routers import team_admin_employees_timecards as mod
+
+        with self.assertRaises(ValueError):
+            mod.set_timecard_day_status(
+                self.session,
+                current_user=self.admin,
+                user_id=self.employee.id,
+                work_date=date(2099, 1, 1),
+                status=mod.TIMECARD_STATUS_APPROVED,
+            )
+        self.assertIsNone(self.session.exec(select(TimecardApproval)).first())
+
+    def test_timecards_reject_locked_status_before_mutation(self):
+        from app.models import TimecardApproval
+        from app.routers import team_admin_employees_timecards as mod
+
+        locked = mod.set_timecard_day_status(
+            self.session,
+            current_user=self.admin,
+            user_id=self.employee.id,
+            work_date=date(2026, 4, 20),
+            status=mod.TIMECARD_STATUS_LOCKED,
+            note="closed",
+        )
+        with self.assertRaises(ValueError):
+            mod.set_timecard_day_status(
+                self.session,
+                current_user=self.admin,
+                user_id=self.employee.id,
+                work_date=date(2026, 4, 20),
+                status=mod.TIMECARD_STATUS_APPROVED,
+                note="mutate",
+            )
+        persisted = self.session.get(TimecardApproval, locked.id)
+        self.assertEqual(persisted.status, mod.TIMECARD_STATUS_LOCKED)
+        self.assertEqual(persisted.note, "closed")
+
     def test_timecards_permission_gate_denies_employee(self):
         # Employee role does NOT have admin.employees.view permission.
         response, _ = self._render(actor=self.employee, configured=False)

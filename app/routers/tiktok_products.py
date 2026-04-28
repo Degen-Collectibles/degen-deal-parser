@@ -15,6 +15,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import func
 from sqlmodel import Session, select
 
+from ..csrf import CSRFProtectedRoute
 from ..shared import *  # noqa: F401,F403 -- shared helpers, constants, state
 from ..shared import (  # noqa: F401 - explicit imports for underscore-prefixed names
     _resolve_tiktok_pull_credentials,
@@ -47,7 +48,7 @@ except Exception:  # pragma: no cover - fallback if the script module is unavail
 
 settings = get_settings()
 
-router = APIRouter()
+router = APIRouter(route_class=CSRFProtectedRoute)
 
 
 # ---------------------------------------------------------------------------

@@ -134,6 +134,9 @@ class TikTokRegressionTests(unittest.TestCase):
         self.engine.dispose()
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
+    async def _immediate_to_thread(self, func, /, *args, **kwargs):
+        return func(*args, **kwargs)
+
     def _reset_tiktok_state(self) -> None:
         main_module.update_tiktok_integration_state(
             last_callback=None,
@@ -498,6 +501,10 @@ class TikTokRegressionTests(unittest.TestCase):
             "run_write_with_retry",
             return_value=("inserted", {"tiktok_order_id": "tt-3", "shop_id": "shop-1"}),
         ), patch.object(
+            tiktok_orders_module.asyncio,
+            "to_thread",
+            side_effect=self._immediate_to_thread,
+        ), patch.object(
             tiktok_orders_module,
             "_start_tiktok_webhook_enrichment",
         ) as start_tiktok_webhook_enrichment, patch.object(
@@ -532,6 +539,10 @@ class TikTokRegressionTests(unittest.TestCase):
             tiktok_orders_module,
             "run_write_with_retry",
             return_value=("updated", {"tiktok_order_id": "tt-2", "shop_id": "shop-1"}),
+        ), patch.object(
+            tiktok_orders_module.asyncio,
+            "to_thread",
+            side_effect=self._immediate_to_thread,
         ), patch.object(
             tiktok_orders_module,
             "_start_tiktok_webhook_enrichment",
@@ -2275,9 +2286,14 @@ class TikTokRegressionTests(unittest.TestCase):
                 "detail_calls": 1,
             }
 
+        async def immediate_to_thread(func, /, *args, **kwargs):
+            return func(*args, **kwargs)
+
         import app.shared as _shared_module
         with patch.object(_shared_module, "run_tiktok_pull_cycle", side_effect=fake_run_tiktok_pull_cycle), patch.object(
             _shared_module, "pull_tiktok_orders", object()
+        ), patch.object(
+            _shared_module.asyncio, "to_thread", side_effect=immediate_to_thread
         ), patch.object(main_module.settings, "tiktok_sync_enabled", True), patch.object(
             main_module.settings, "tiktok_app_key", "app-key"
         ), patch.object(

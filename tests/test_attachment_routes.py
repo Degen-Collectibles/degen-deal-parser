@@ -73,7 +73,7 @@ class AttachmentRouteTests(unittest.TestCase):
                 response = attachment_asset(request=req, asset_id=asset.id, session=session)
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.headers["cache-control"], "public, max-age=31536000, immutable")
+        self.assertEqual(response.headers["cache-control"], "private, max-age=3600")
         self.assertIn("etag", response.headers)
         self.assertTrue(expected_path.exists())
         self.assertEqual(expected_path.read_bytes(), b"cached-image-bytes")

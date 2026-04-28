@@ -19,6 +19,11 @@ from .db import is_sqlite_lock_error, managed_session
 from .models import AttachmentAsset, DiscordMessage
 
 logger = logging.getLogger(__name__)
+MAX_ATTACHMENT_DOWNLOAD_BYTES = 15 * 1024 * 1024
+ALLOWED_ATTACHMENT_HOSTS = {
+    "cdn.discordapp.com",
+    "media.discordapp.net",
+}
 
 
 @dataclass(frozen=True)
@@ -212,11 +217,33 @@ def is_image_attachment(filename: str, content_type: Optional[str]) -> bool:
     return ext in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 
 
+def _validate_attachment_download_url(url: str) -> None:
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or hostname not in ALLOWED_ATTACHMENT_HOSTS:
+        raise ValueError("Unsupported attachment host")
+
+
 def download_attachment(url: str) -> tuple[bytes, Optional[str]]:
-    with httpx.Client(follow_redirects=True, timeout=30.0) as client:
-        response = client.get(url)
-        response.raise_for_status()
-        return response.content, response.headers.get("content-type")
+    _validate_attachment_download_url(url)
+    with httpx.Client(follow_redirects=False, timeout=30.0) as client:
+        with client.stream("GET", url) as response:
+            response.raise_for_status()
+            if 300 <= response.status_code < 400:
+                raise ValueError("Attachment redirects are not allowed")
+            content_length = response.headers.get("content-length")
+            if content_length and int(content_length) > MAX_ATTACHMENT_DOWNLOAD_BYTES:
+                raise ValueError("Attachment exceeds download size limit")
+            chunks: list[bytes] = []
+            total = 0
+            for chunk in response.iter_bytes():
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > MAX_ATTACHMENT_DOWNLOAD_BYTES:
+                    raise ValueError("Attachment exceeds download size limit")
+                chunks.append(chunk)
+            return b"".join(chunks), response.headers.get("content-type")
 
 
 def row_status_snapshot(message_id: int) -> tuple[int, int]:

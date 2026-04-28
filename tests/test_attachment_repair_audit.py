@@ -257,9 +257,9 @@ class AttachmentRepairAuditTests(unittest.TestCase):
             "run_write_with_retry",
             side_effect=fake_run_write_with_retry,
         ), patch.object(
-            discord_ingest.httpx,
-            "Client",
-            return_value=_FakeHTTPClient(b"retry-bytes"),
+            discord_ingest,
+            "download_attachment",
+            return_value=(b"retry-bytes", "image/png"),
         ), patch.object(
             discord_ingest,
             "write_attachment_cache_file",

@@ -18,10 +18,11 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy import distinct
 from sqlmodel import Session, select
 
+from ..csrf import CSRFProtectedRoute
 from ..shared import *  # noqa: F401,F403 -- shared helpers, constants, state
 from ..db import get_session
 
-router = APIRouter()
+router = APIRouter(route_class=CSRFProtectedRoute)
 
 TIKTOK_SHOP_OAUTH_AUTHORIZE_URL = "https://auth.tiktok-shops.com/oauth/authorize"
 TIKTOK_CREATOR_OAUTH_AUTHORIZE_URL = "https://www.tiktok.com/v2/auth/authorize/"

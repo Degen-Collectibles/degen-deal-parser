@@ -10,8 +10,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_DB = BASE_DIR / "data" / "degen_live.db"
-DEFAULT_SESSION_SECRET = "degen-dev-session-secret"
-DEFAULT_ADMIN_PASSWORD = "degen1234"
+DEFAULT_SESSION_SECRET = ""
+DEFAULT_ADMIN_PASSWORD = ""
+INSECURE_SESSION_SECRET_VALUES = {"", "degen-dev-session-secret"}
+INSECURE_ADMIN_PASSWORD_VALUES = {"", "degen1234"}
 
 
 def _resolve_root(value: str, fallback_subdir: str) -> Path:
@@ -35,8 +37,7 @@ class Settings(BaseSettings):
     session_https_only: bool = Field(default=True, alias="SESSION_HTTPS_ONLY")
     session_same_site: str = Field(default="strict", alias="SESSION_SAME_SITE")
     session_domain: str = Field(default="", alias="SESSION_DOMAIN")
-    # 30 days — keeps iOS PWA launches logged in across Safari cookie sweeps.
-    session_max_age_seconds: int = Field(default=30 * 24 * 60 * 60, alias="SESSION_MAX_AGE_SECONDS")
+    session_max_age_seconds: int = Field(default=8 * 60 * 60, alias="SESSION_MAX_AGE_SECONDS")
     log_to_file: bool = Field(default=True, alias="LOG_TO_FILE")
     log_dir: str = Field(default="logs", alias="LOG_DIR")
 
@@ -352,14 +353,10 @@ class Settings(BaseSettings):
         return any(address in network for network in self.trusted_proxy_networks)
 
     def validate_runtime_secrets(self) -> None:
-        requires_hardened_runtime = self.public_host_mode or self.employee_portal_enabled
-        if not requires_hardened_runtime:
-            return
-
         insecure_fields: list[str] = []
-        if not self.session_secret or self.session_secret == DEFAULT_SESSION_SECRET:
+        if (self.session_secret or "").strip() in INSECURE_SESSION_SECRET_VALUES:
             insecure_fields.append("SESSION_SECRET")
-        if not self.admin_password or self.admin_password == DEFAULT_ADMIN_PASSWORD:
+        if (self.admin_password or "").strip() in INSECURE_ADMIN_PASSWORD_VALUES:
             insecure_fields.append("ADMIN_PASSWORD")
         if self.employee_portal_enabled:
             if not self.employee_token_hmac_key:
@@ -369,9 +366,8 @@ class Settings(BaseSettings):
 
         if insecure_fields:
             fields_text = ", ".join(insecure_fields)
-            mode_label = "employee portal" if self.employee_portal_enabled else "public host mode"
             raise RuntimeError(
-                f"Insecure configuration for {mode_label}: set real values for {fields_text} in .env before booting."
+                f"Insecure configuration: set real values for {fields_text} before booting."
             )
 
 

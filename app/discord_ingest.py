@@ -6,12 +6,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable, Optional
 
 import discord
-import httpx
 from sqlalchemy.exc import ProgrammingError
 from sqlmodel import Session, select
 
 from .attachment_repair import (
     attachment_repair_candidate_query,
+    download_attachment,
     restore_missing_assets_from_urls,
     row_status_snapshot,
 )
@@ -282,30 +282,28 @@ def _download_missing_attachments(missing_payloads: list[dict], message_id: int)
     downloaded: list[dict] = []
     if not missing_payloads:
         return downloaded
-    with httpx.Client(follow_redirects=True, timeout=20.0) as client:
-        for payload in missing_payloads:
-            try:
-                response = client.get(payload["url"])
-                response.raise_for_status()
-            except Exception as exc:
-                ingest_log(
-                    action="attachment_cache_failed",
-                    level="error",
-                    success=False,
-                    error=str(exc),
-                    message_id=message_id,
-                    attachment_url=payload["url"],
-                )
-                continue
-            downloaded.append(
-                {
-                    "source_url": payload["url"],
-                    "filename": payload.get("filename"),
-                    "content_type": payload.get("content_type") or response.headers.get("content-type"),
-                    "is_image": bool(payload.get("is_image")),
-                    "data": response.content,
-                }
+    for payload in missing_payloads:
+        try:
+            data, content_type = download_attachment(payload["url"])
+        except Exception as exc:
+            ingest_log(
+                action="attachment_cache_failed",
+                level="error",
+                success=False,
+                error=str(exc),
+                message_id=message_id,
+                attachment_url=payload["url"],
             )
+            continue
+        downloaded.append(
+            {
+                "source_url": payload["url"],
+                "filename": payload.get("filename"),
+                "content_type": payload.get("content_type") or content_type,
+                "is_image": bool(payload.get("is_image")),
+                "data": data,
+            }
+        )
     return downloaded
 
 

@@ -151,7 +151,7 @@
 <body>
 <div class="scanner-app" id="scanner-app">
     <div class="top-bar">
-        {% set can_manage_inventory = current_user and current_user.role in ("admin", "reviewer", "viewer") %}
+        {% set can_manage_inventory = current_user and current_user.role in ("admin", "reviewer") %}
         <a class="top-bar-back" href="{% if team_shell or not can_manage_inventory %}/team/{% else %}/inventory{% endif %}">&larr;</a>
         <span class="top-bar-title">Degen Eye<span class="v2-badge">V2</span></span>
         <div class="mode-toggle" id="mode-toggle" role="tablist" aria-label="Capture mode">
@@ -810,5 +810,6 @@ var V2 = (function() {
     };
 })();
 </script>
+{% include "_csrf_bootstrap.html" %}
 </body>
 </html>

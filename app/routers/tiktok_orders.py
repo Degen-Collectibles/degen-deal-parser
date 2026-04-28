@@ -19,6 +19,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy import func
 from sqlmodel import Session, select
 
+from ..csrf import CSRFProtectedRoute
 from ..shared import *  # noqa: F401,F403 -- shared helpers, constants, state
 from ..shared import (  # noqa: F401 - explicit imports for underscore-prefixed names
     _get_app_setting,
@@ -42,7 +43,7 @@ from ..tiktok_alerts import alert_ghost_cancellation, alert_reverse_order
 
 settings = get_settings()
 
-router = APIRouter()
+router = APIRouter(route_class=CSRFProtectedRoute)
 
 
 # TikTok Shop webhook envelope "type" values. Unlike most platforms, TikTok

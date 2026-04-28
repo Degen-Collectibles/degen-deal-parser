@@ -280,6 +280,38 @@ class PayrollOpsTests(unittest.TestCase):
         self.assertIn("Unscheduled clock-in", categories)
         self.assertIn("Possible no-show", categories)
 
+    def test_pay_rate_scope_rejects_inactive_rows_unless_requested(self):
+        from app.routers.team_admin_employees import _pay_rate_scope_user_ids
+
+        inactive = self._seed_user(4, role="employee", username="inactive")
+        inactive.is_active = False
+        inactive.password_hash = "x"
+        self.session.add(inactive)
+        self.session.commit()
+
+        active_scope = _pay_rate_scope_user_ids(self.session, include_inactive=False)
+        inactive_scope = _pay_rate_scope_user_ids(self.session, include_inactive=True)
+        self.assertNotIn(inactive.id, active_scope)
+        self.assertIn(inactive.id, inactive_scope)
+
+    def test_compensation_decrypt_failure_raises(self):
+        from app.routers.team_admin_employees import (
+            CompensationDecryptError,
+            _decrypt_hourly_rate_cents,
+        )
+
+        profile = self._seed_profile(
+            self.employee.id,
+            clockify_user_id="ck-1",
+            hourly_rate_cents=2000,
+        )
+        profile.hourly_rate_cents_enc = b"not-fernet"
+        self.session.add(profile)
+        self.session.commit()
+
+        with self.assertRaises(CompensationDecryptError):
+            _decrypt_hourly_rate_cents(profile)
+
     def test_new_admin_pages_render(self):
         from app.routers import team_admin_clockify as mod
 

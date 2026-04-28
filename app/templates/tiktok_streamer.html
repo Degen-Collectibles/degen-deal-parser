@@ -1638,7 +1638,7 @@
                                 {# Role gating: rank-and-file employees only get the employee portal
                                    + Degen Eye. Anything that shows cost basis / profit / ops internals
                                    is hidden unless the viewer is at least role=viewer. #}
-                                {% set _is_ops = current_user and current_user.role in ("viewer", "manager", "reviewer", "admin") %}
+                                {% set _is_ops = current_user and current_user.role in ("reviewer", "admin") %}
                                 {% set _is_admin_like = current_user and current_user.role in ("reviewer", "admin") %}
                                 <div class="nav-dropdown-label">Workspace</div>
                                 <a href="/team/">Team Portal</a>
@@ -3800,5 +3800,6 @@
     </script>
 
     {% include '_mobile_bottom_nav.html' %}
+{% include "_csrf_bootstrap.html" %}
 </body>
 </html>

@@ -53,8 +53,10 @@ from ..pii import decrypt_pii
 from ..shared import templates
 from .team_admin import _permission_gate
 from .team_admin_employees import (
+    CompensationDecryptError,
     compensation_history_rows_for_users,
     compensation_snapshot_for_day,
+    _employee_in_payroll_scope,
 )
 
 
@@ -221,15 +223,15 @@ def _encrypted_cents(blob: Optional[bytes]) -> tuple[int, bool]:
         return 0, True
     try:
         raw = decrypt_pii(blob)
-    except Exception:
-        return 0, True
+    except Exception as exc:
+        raise CompensationDecryptError("Compensation value could not be decrypted") from exc
     raw = (raw or "").strip()
     if not raw:
         return 0, True
     try:
         cents = int(raw)
-    except (TypeError, ValueError):
-        return 0, True
+    except (TypeError, ValueError) as exc:
+        raise CompensationDecryptError("Compensation value could not be parsed") from exc
     return (cents if cents >= 0 else 0), False
 
 
@@ -611,12 +613,16 @@ def set_timecard_day_status(
     if status not in TIMECARD_STATUS_VALUES:
         raise ValueError("Unsupported timecard status")
     note = (note or "").strip()[:1000]
+    if work_date > datetime.now(_tz()).date():
+        raise ValueError("Cannot edit future timecards")
     approval = session.exec(
         select(TimecardApproval).where(
             TimecardApproval.user_id == user_id,
             TimecardApproval.work_date == work_date,
         )
     ).first()
+    if approval is not None and approval.status == TIMECARD_STATUS_LOCKED:
+        raise ValueError("Timecard period is locked")
     old_status = approval.status if approval else None
     now = utcnow()
     if approval is None:
@@ -669,6 +675,8 @@ def admin_employee_timecard_day_status(
     employee = session.get(User, user_id)
     if employee is None:
         return HTMLResponse("Employee not found", status_code=404)
+    if not _employee_in_payroll_scope(employee):
+        return HTMLResponse("Employee is outside editable timecard scope", status_code=403)
     try:
         parsed_date = _parse_iso_date(work_date)
     except ValueError:
@@ -717,6 +725,8 @@ def admin_employee_timecard_bulk_approve(
     employee = session.get(User, user_id)
     if employee is None:
         return HTMLResponse("Employee not found", status_code=404)
+    if not _employee_in_payroll_scope(employee):
+        return HTMLResponse("Employee is outside editable timecard scope", status_code=403)
     today = datetime.now(_tz()).date()
     week_start = _week_start_for(week, today)
     parsed_dates: list[date] = []
@@ -730,17 +740,27 @@ def admin_employee_timecard_bulk_approve(
             _timecard_redirect_url(user_id, week_start, error="No active days to approve"),
             status_code=303,
         )
+    unique_dates = sorted(set(parsed_dates))
+    if any(work_day > today for work_day in unique_dates):
+        return RedirectResponse(
+            _timecard_redirect_url(user_id, week_start, error="Cannot edit future timecards"),
+            status_code=303,
+        )
+    locked_days = session.exec(
+        select(TimecardApproval.work_date).where(
+            TimecardApproval.user_id == user_id,
+            TimecardApproval.work_date.in_(unique_dates),
+            TimecardApproval.status == TIMECARD_STATUS_LOCKED,
+        )
+    ).all()
+    if locked_days:
+        return RedirectResponse(
+            _timecard_redirect_url(user_id, week_start, error="Timecard period is locked"),
+            status_code=303,
+        )
 
     approved_count = 0
-    for work_day in sorted(set(parsed_dates)):
-        existing = session.exec(
-            select(TimecardApproval).where(
-                TimecardApproval.user_id == user_id,
-                TimecardApproval.work_date == work_day,
-            )
-        ).first()
-        if existing and existing.status == TIMECARD_STATUS_LOCKED:
-            continue
+    for work_day in unique_dates:
         set_timecard_day_status(
             session,
             current_user=current,

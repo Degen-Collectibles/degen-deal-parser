@@ -40,6 +40,7 @@ Thumbs.db
 
 # Temp test artifacts
 tests/.tmp_*/
+tests/.tmp_probe*/
 .forge-scratch/
 .worktrees/
 

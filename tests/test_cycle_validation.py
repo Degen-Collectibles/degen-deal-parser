@@ -239,7 +239,7 @@ class CycleValidationTests(unittest.TestCase):
         self.assertIn("SESSION_SECRET", str(exc.exception))
         self.assertIn("ADMIN_PASSWORD", str(exc.exception))
 
-    def test_settings_do_not_raise_on_local_defaults(self) -> None:
+    def test_settings_raise_on_local_defaults_outside_tests(self) -> None:
         settings = config_module.Settings(
             EMPLOYEE_PORTAL_ENABLED="false",
             EMPLOYEE_PII_KEY="",
@@ -251,7 +251,8 @@ class CycleValidationTests(unittest.TestCase):
         settings.session_domain = ""
         settings.session_secret = config_module.DEFAULT_SESSION_SECRET
         settings.admin_password = config_module.DEFAULT_ADMIN_PASSWORD
-        settings.validate_runtime_secrets()
+        with self.assertRaises(RuntimeError):
+            settings.validate_runtime_secrets()
 
     def test_backfill_cancellation_interval_is_five_messages_or_fewer(self) -> None:
         self.assertLessEqual(discord_ingest_module.BACKFILL_PROGRESS_EVERY_MESSAGES, 5)

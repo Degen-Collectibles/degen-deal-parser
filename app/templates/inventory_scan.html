@@ -67,7 +67,7 @@
     <link rel="stylesheet" href="/static/safe-area.css?v=1776747800">
 </head>
 <body>
-{% set can_manage_inventory = current_user and current_user.role in ("admin", "reviewer", "viewer") %}
+{% set can_manage_inventory = current_user and current_user.role in ("admin", "reviewer") %}
 {% set limited_inventory_scan = team_shell or not can_manage_inventory %}
 <div class="page">
     {% if not limited_inventory_scan %}
@@ -148,5 +148,6 @@
 })();
 </script>
     {% include '_mobile_bottom_nav.html' %}
+{% include "_csrf_bootstrap.html" %}
 </body>
 </html>

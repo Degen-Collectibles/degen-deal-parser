@@ -16,10 +16,11 @@ from sqlalchemy import or_
 from sqlmodel import Session, select
 
 from ..config import get_settings
+from ..csrf import CSRFProtectedRoute
 from ..shared import *  # noqa: F401,F403 -- shared helpers, constants, state
 from ..db import get_session
 
-router = APIRouter()
+router = APIRouter(route_class=CSRFProtectedRoute)
 
 
 def _hit_images_dir() -> Path:

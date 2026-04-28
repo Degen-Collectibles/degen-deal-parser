@@ -11,10 +11,11 @@ from fastapi import APIRouter, Depends, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlmodel import Session, select
 
+from ..csrf import CSRFProtectedRoute
 from ..shared import *  # noqa: F401,F403 — shared helpers, constants, state
 from ..db import get_session
 
-router = APIRouter()
+router = APIRouter(route_class=CSRFProtectedRoute)
 
 
 @router.get("/admin", response_class=HTMLResponse)

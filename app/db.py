@@ -980,6 +980,7 @@ DEFAULT_ROLE_PERMISSIONS: tuple[tuple[str, str, bool], ...] = tuple(
         ("admin.labor_financials.view", (False, False, False, False, True)),
         ("admin.payroll.view", (False, False, False, False, True)),
         ("admin.payroll.lock", (False, False, False, False, True)),
+        ("legacy.ops.view", (False, False, False, True, True)),
         # Wave C — announcements comms hub.
         ("admin.announcements.view", (False, False, True, True, True)),
         ("admin.announcements.create", (False, False, True, False, True)),

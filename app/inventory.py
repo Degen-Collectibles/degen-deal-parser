@@ -28,7 +28,7 @@ from sqlmodel import Session, select, func
 # filter env and any {{ x | money }} in the template would 500.
 from .shared import templates as _templates
 
-from .auth import has_role
+from .auth import has_legacy_role, has_role
 from .card_scanner import identify_card_from_image, lookup_card_image_and_price
 from .cert_lookup import lookup_cert
 from .pokemon_scanner import run_pipeline as run_pokemon_pipeline, get_scan_history, fetch_tcg_categories, get_validation_result, text_search_cards
@@ -47,7 +47,8 @@ from .phash_scanner import (
 )
 from .price_cache import get_warm_stats as price_cache_stats, warm_price_cache
 from .config import get_settings
-from .db import get_session
+from .csrf import CSRFProtectedRoute
+from .db import get_session, managed_session
 from .inventory_barcode import (
     generate_barcode_value,
     label_context_for_items,
@@ -75,7 +76,7 @@ from .models import (
     utcnow,
 )
 
-router = APIRouter()
+router = APIRouter(route_class=CSRFProtectedRoute)
 settings = get_settings()
 logger = logging.getLogger(__name__)
 
@@ -104,7 +105,15 @@ def _check_role(request: Request, min_role: str) -> Optional[Response]:
     if not user:
         next_path = request.url.path
         return RedirectResponse(url=f"/login?next={next_path}", status_code=303)
-    if not has_role(user, min_role):
+    if min_role in {"viewer", "reviewer", "admin"}:
+        try:
+            with managed_session() as session:
+                allowed = has_legacy_role(session, user, min_role)
+        except Exception:
+            allowed = has_legacy_role(None, user, min_role)
+    else:
+        allowed = has_role(user, min_role)
+    if not allowed:
         return HTMLResponse("You do not have permission to view this page.", status_code=403)
     return None
 

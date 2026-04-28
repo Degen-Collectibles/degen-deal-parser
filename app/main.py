@@ -611,7 +611,7 @@ def attachment_asset(request: Request, asset_id: int, session: Session = Depends
     etag = f'"{asset_id}"'
     if_none_match = request.headers.get("if-none-match")
     if if_none_match and if_none_match.strip() == etag:
-        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "public, max-age=31536000, immutable"})
+        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "private, max-age=3600"})
 
     file_path = attachment_cache_path(
         asset_id,
@@ -631,7 +631,7 @@ def attachment_asset(request: Request, asset_id: int, session: Session = Depends
 
     media_type = content_type or "application/octet-stream"
     headers = {
-        "Cache-Control": "public, max-age=31536000, immutable",
+        "Cache-Control": "private, max-age=3600",
         "ETag": etag,
     }
     if filename:
@@ -645,7 +645,7 @@ def attachment_thumbnail(request: Request, asset_id: int, session: Session = Dep
     etag = f'"thumb-{asset_id}"'
     if_none_match = request.headers.get("if-none-match")
     if if_none_match and if_none_match.strip() == etag:
-        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "public, max-age=31536000, immutable"})
+        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "private, max-age=3600"})
 
     asset_meta = session.exec(
         select(AttachmentAsset.id, AttachmentAsset.filename, AttachmentAsset.content_type, AttachmentAsset.is_image)
@@ -672,12 +672,12 @@ def attachment_thumbnail(request: Request, asset_id: int, session: Session = Dep
         return FileResponse(
             path=thumb_path,
             media_type="image/jpeg",
-            headers={"Cache-Control": "public, max-age=31536000, immutable", "ETag": etag},
+            headers={"Cache-Control": "private, max-age=3600", "ETag": etag},
         )
     return FileResponse(
         path=file_path,
         media_type=content_type or "application/octet-stream",
-        headers={"Cache-Control": "public, max-age=31536000, immutable", "ETag": etag},
+        headers={"Cache-Control": "private, max-age=3600", "ETag": etag},
     )
 
 @app.get("/messages/{message_id}/attachments/{attachment_index}")
@@ -723,9 +723,10 @@ async def message_attachment_fallback(
 
     return RedirectResponse(url=attachment_urls[attachment_index], status_code=307)
 
+
 @app.middleware("http")
 async def attach_current_user(request: Request, call_next):
-    if request.url.path.startswith(PUBLIC_PATH_PREFIXES):
+    if is_public_path(request.url.path):
         request.state.current_user = None
         return await call_next(request)
     request.state.current_user = get_request_user(request)

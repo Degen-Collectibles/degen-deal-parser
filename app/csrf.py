@@ -6,8 +6,10 @@ from typing import Optional
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 
 SESSION_KEY = "csrf_token"
+CSRF_EXEMPT_PREFIXES = ("/webhooks/",)
 
 
 def issue_token(request: Request) -> str:
@@ -47,3 +49,31 @@ async def require_csrf(request: Request) -> None:
         # Use HTTPException for cleaner 403.
         from fastapi import HTTPException
         raise HTTPException(status_code=403, detail="csrf_invalid")
+
+
+class CSRFProtectedRoute(APIRoute):
+    """APIRoute that applies CSRF checks to unsafe methods."""
+
+    def get_route_handler(self):
+        original_route_handler = super().get_route_handler()
+
+        async def custom_route_handler(request: Request):
+            path = request.url.path
+            if (
+                request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}
+                and not any(path == prefix.rstrip("/") or path.startswith(prefix) for prefix in CSRF_EXEMPT_PREFIXES)
+            ):
+                from fastapi import HTTPException
+
+                submitted = request.headers.get("x-csrf-token")
+                if not submitted:
+                    try:
+                        form = await request.form()
+                        submitted = str(form.get("csrf_token") or "")
+                    except Exception:
+                        submitted = ""
+                if not verify_token(request, submitted):
+                    raise HTTPException(status_code=403, detail="csrf_invalid")
+            return await original_route_handler(request)
+
+        return custom_route_handler

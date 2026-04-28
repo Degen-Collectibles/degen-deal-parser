@@ -17,6 +17,7 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy import func
 from sqlmodel import Session, select
 
+from ..csrf import CSRFProtectedRoute
 from ..shared import *  # noqa: F401,F403 -- shared helpers, constants, state
 from ..shared import (  # noqa: F401 - explicit imports for underscore-prefixed names
     _BUILD_VERSION,
@@ -37,7 +38,7 @@ from ..shared import (  # noqa: F401 - explicit imports for underscore-prefixed 
 from ..db import get_session
 from ..reporting import TIKTOK_PAID_STATUSES
 
-router = APIRouter()
+router = APIRouter(route_class=CSRFProtectedRoute)
 
 STREAM_CREATOR_CHOICES: tuple[dict[str, str], ...] = (
     {"id": "degencollectibles", "label": "Main", "handle": "degencollectibles"},

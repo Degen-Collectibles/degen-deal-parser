@@ -29,7 +29,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlmodel import Session, select
 
-from .auth import authenticate_user, has_role
+from .auth import authenticate_user, has_legacy_role, has_role
 from .attachment_storage import attachment_cache_path, generate_thumbnail, warm_attachment_cache, write_attachment_cache_file
 from .bookkeeping import (
     get_bookkeeping_status_by_message_ids,
@@ -400,7 +400,21 @@ def normalize_filesystem_path(path: Path) -> str:
 
 
 BASE_DIR = Path(__file__).resolve().parent
-templates = Jinja2Templates(directory=normalize_filesystem_path(BASE_DIR / "templates"))
+
+
+def _csrf_template_context(request: Request) -> dict[str, str]:
+    try:
+        from .csrf import issue_token
+
+        return {"csrf_token": issue_token(request)}
+    except Exception:
+        return {"csrf_token": ""}
+
+
+templates = Jinja2Templates(
+    directory=normalize_filesystem_path(BASE_DIR / "templates"),
+    context_processors=[_csrf_template_context],
+)
 PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
 
 _live_analytics_cache: dict[str, object] = {}
@@ -2402,6 +2416,8 @@ async def periodic_tiktok_pull_loop(stop_event: asyncio.Event) -> None:
                     detail_calls=result.get("detail_calls"),
                 )
             )
+            if stop_event.is_set():
+                break
         except Exception as exc:
             update_tiktok_integration_state(
                 last_pull_at=utcnow(),
@@ -3806,6 +3822,15 @@ PUBLIC_PATH_PREFIXES = (
 )
 
 
+def is_public_path(path: str) -> bool:
+    normalized = path or "/"
+    for prefix in PUBLIC_PATH_PREFIXES:
+        clean = prefix.rstrip("/") or "/"
+        if normalized == clean or normalized.startswith(f"{clean}/"):
+            return True
+    return False
+
+
 def user_role_for_path(path: str) -> Optional[str]:
     if path.startswith("/table") or path.startswith("/review-table") or path.startswith("/bookkeeping") or path.startswith("/admin"):
         return "admin"
@@ -3894,7 +3919,24 @@ def require_role_response(request: Request, minimum_role: str) -> Optional[Respo
         user = get_request_user(request)
     if not user:
         return redirect_to_login(request)
-    if not has_role(user, minimum_role):
+    if minimum_role in {"viewer", "reviewer", "admin"}:
+        permission_cache = getattr(request.state, "permission_cache", None)
+        if permission_cache is None:
+            permission_cache = {}
+            request.state.permission_cache = permission_cache
+        try:
+            with managed_session() as session:
+                allowed = has_legacy_role(
+                    session,
+                    user,
+                    minimum_role,
+                    cache=permission_cache,
+                )
+        except Exception:
+            allowed = has_legacy_role(None, user, minimum_role)
+    else:
+        allowed = has_role(user, minimum_role)
+    if not allowed:
         return HTMLResponse("You do not have permission to view this page.", status_code=403)
     request.state.current_user = user
     return None

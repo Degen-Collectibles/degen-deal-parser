@@ -80,6 +80,10 @@ COMPENSATION_HISTORY_FIELDS = {
 }
 
 
+class CompensationDecryptError(ValueError):
+    """Raised when encrypted compensation cannot be decrypted or parsed."""
+
+
 def _normalize_compensation_type(value: str) -> str:
     value = (value or "").strip().lower()
     return value if value in COMPENSATION_TYPES else COMPENSATION_TYPE_HOURLY
@@ -106,8 +110,8 @@ def _decrypt_money_cents(blob: Optional[bytes]) -> Optional[int]:
     try:
         raw = decrypt_pii(blob) or ""
         return max(0, int(raw))
-    except (TypeError, ValueError):
-        return None
+    except Exception as exc:
+        raise CompensationDecryptError("Compensation value could not be decrypted") from exc
 
 
 def _decrypt_hourly_rate_cents(profile: Optional[EmployeeProfile]) -> Optional[int]:
@@ -1151,6 +1155,13 @@ def _pay_rate_rows(session: Session, *, include_inactive: bool = False) -> list[
     return rows
 
 
+def _pay_rate_scope_user_ids(session: Session, *, include_inactive: bool = False) -> set[int]:
+    stmt = select(User.id)
+    if not include_inactive:
+        stmt = stmt.where((User.is_active == True) | (User.password_hash == ""))  # noqa: E712
+    return {int(user_id) for user_id in session.exec(stmt).all() if user_id is not None}
+
+
 def _employee_in_payroll_scope(user: User) -> bool:
     return bool(user.is_active or is_draft_user(user))
 
@@ -1407,6 +1418,18 @@ async def admin_employee_pay_rates_post(
             except (IndexError, ValueError):
                 continue
 
+    include_inactive = show_inactive in ("1", "true", "yes", "on")
+    allowed_user_ids = _pay_rate_scope_user_ids(
+        session,
+        include_inactive=include_inactive,
+    )
+    submitted_out_of_scope = sorted(user_ids - allowed_user_ids)
+    if submitted_out_of_scope:
+        return HTMLResponse(
+            "Submitted employee is outside your editable payroll scope.",
+            status_code=400,
+        )
+
     changed_user_ids: set[int] = set()
     history_updates = 0
     compensation_changes = 0
@@ -1565,7 +1588,7 @@ async def admin_employee_pay_rates_post(
             f"{invalid_rates + invalid_salaries + invalid_pay_days} invalid compensation value(s) "
             "were ignored."
         )
-    if show_inactive in ("1", "true", "yes", "on"):
+    if include_inactive:
         qs["show_inactive"] = "1"
     return RedirectResponse(
         "/team/admin/employees/pay-rates?" + urlencode(qs),

@@ -177,6 +177,50 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         self.assertNotEqual(r.status_code, 200,
                             "employee must not see the inventory list (cost basis visible)")
 
+    def test_portal_viewer_blocked_from_legacy_reports(self):
+        self._login_as("viewer", user_id=217, username="viewer1")
+        r = self.client.get("/reports", follow_redirects=False)
+        self.assertEqual(r.status_code, 403)
+
+    def test_portal_manager_blocked_from_legacy_reviewer_pages(self):
+        self._login_as("manager", user_id=218, username="manager1")
+        r = self.client.get("/bookkeeping", follow_redirects=False)
+        self.assertEqual(r.status_code, 403)
+
+    def test_legacy_ops_permission_is_explicit(self):
+        from app.auth import LEGACY_OPS_PERMISSION, has_legacy_role
+        from app.models import RolePermission, User
+        from sqlmodel import select
+
+        viewer = User(
+            id=219,
+            username="viewer2",
+            password_hash="x",
+            password_salt="x",
+            display_name="viewer2",
+            role="viewer",
+            is_active=True,
+        )
+        self.session.add(viewer)
+        self.session.commit()
+
+        self.assertFalse(has_legacy_role(self.session, viewer, "viewer"))
+        permission = self.session.exec(
+            select(RolePermission).where(
+                RolePermission.role == "viewer",
+                RolePermission.resource_key == LEGACY_OPS_PERMISSION,
+            )
+        ).first()
+        if permission is None:
+            permission = RolePermission(
+                role="viewer",
+                resource_key=LEGACY_OPS_PERMISSION,
+            )
+        permission.is_allowed = True
+        self.session.add(permission)
+        self.session.commit()
+        self.assertTrue(has_legacy_role(self.session, viewer, "viewer"))
+
     # ---------- TikTok streamer access ----------
 
     def test_employee_can_open_tiktok_streamer_dashboard(self):

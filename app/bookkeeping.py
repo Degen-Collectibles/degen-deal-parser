@@ -8,6 +8,7 @@ from datetime import datetime, time, timedelta, timezone
 from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import httpx
 from openpyxl import load_workbook
@@ -83,6 +84,7 @@ SHEET_ENTRY_KIND_HINTS = {
     "trade": "trade",
     "overview": None,
 }
+MAX_GOOGLE_SHEET_EXPORT_BYTES = 8 * 1024 * 1024
 
 
 def extract_google_sheet_url(text: str) -> Optional[str]:
@@ -102,7 +104,33 @@ def extract_google_sheet_gid(sheet_url: str) -> Optional[str]:
 def build_google_sheet_export_url(sheet_url: str) -> tuple[str, str]:
     normalized = normalize_google_sheet_url(sheet_url)
     normalized = re.sub(r"/edit(?:\?.*)?$", "", normalized)
+    parsed = urlparse(normalized)
+    if parsed.scheme != "https" or (parsed.hostname or "").lower() != "docs.google.com":
+        raise ValueError("Unsupported Google Sheets URL")
+    if not parsed.path.startswith("/spreadsheets/"):
+        raise ValueError("Unsupported Google Sheets URL")
     return f"{normalized}/export?format=xlsx", ".xlsx"
+
+
+async def fetch_google_sheet_export(export_url: str) -> bytes:
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
+        async with client.stream("GET", export_url) as response:
+            if 300 <= response.status_code < 400:
+                raise ValueError("Google Sheet export redirects are not allowed")
+            response.raise_for_status()
+            content_length = response.headers.get("content-length")
+            if content_length and int(content_length) > MAX_GOOGLE_SHEET_EXPORT_BYTES:
+                raise ValueError("Google Sheet export exceeds size limit")
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in response.aiter_bytes():
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > MAX_GOOGLE_SHEET_EXPORT_BYTES:
+                    raise ValueError("Google Sheet export exceeds size limit")
+                chunks.append(chunk)
+            return b"".join(chunks)
 
 
 def infer_show_label_from_message(message_text: str, fallback_name: str) -> str:
@@ -674,10 +702,7 @@ async def auto_import_public_google_sheet(
     range_start = show_date.replace(hour=0, minute=0, second=0, microsecond=0) if show_date else None
     range_end = show_date.replace(hour=23, minute=59, second=59, microsecond=999999) if show_date else None
 
-    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-        response = await client.get(export_url)
-        response.raise_for_status()
-        content = response.content
+    content = await fetch_google_sheet_export(export_url)
 
     filename = f"{re.sub(r'[^a-zA-Z0-9._-]+', '-', show_label).strip('-') or 'bookkeeping-import'}{suffix}"
 
@@ -722,10 +747,7 @@ async def refresh_bookkeeping_import_from_source(bookkeeping_import_id: int) -> 
         session.commit()
 
     export_url, suffix = build_google_sheet_export_url(source_url)
-    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-        response = await client.get(export_url)
-        response.raise_for_status()
-        content = response.content
+    content = await fetch_google_sheet_export(export_url)
 
     filename = source_name
     if not filename.lower().endswith((".xlsx", ".csv")):

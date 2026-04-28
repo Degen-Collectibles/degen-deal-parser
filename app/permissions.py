@@ -72,6 +72,8 @@ RESOURCE_KEYS: List[str] = [
     "admin.labor_financials.view",
     "admin.payroll.view",
     "admin.payroll.lock",
+    # Explicit escape hatch for legacy ops pages that still use role gates.
+    "legacy.ops.view",
     # Wave C — announcements admin surface
     "admin.announcements.view",
     "admin.announcements.create",
@@ -124,6 +126,7 @@ _LABEL_OVERRIDES: Dict[str, str] = {
     "admin.labor_financials.view": "Admin · View compensation and labor costs",
     "admin.payroll.view": "Admin · View payroll export",
     "admin.payroll.lock": "Admin · Lock payroll export window",
+    "legacy.ops.view": "Legacy ops pages",
     "admin.announcements.view": "Admin · View announcements management",
     "admin.announcements.create": "Admin · Create/archive announcements",
     "page.admin.schedule": "Admin · Schedule",

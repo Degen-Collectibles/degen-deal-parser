@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlmodel import Session, select
 
+from ..csrf import CSRFProtectedRoute
 from ..models import STAFF_KIND_STREAM, User
 from ..shared import (
     STREAMER_COLORS,
@@ -26,7 +27,7 @@ from ..shared import (
     utcnow,
 )
 
-router = APIRouter()
+router = APIRouter(route_class=CSRFProtectedRoute)
 
 # ---------------------------------------------------------------------------
 # Private helpers (only used by stream-manager routes)

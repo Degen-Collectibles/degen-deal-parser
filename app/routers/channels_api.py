@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlmodel import Session
 
+from ..csrf import CSRFProtectedRoute
 from ..shared import *  # noqa: F401,F403 -- shared helpers, constants, state
 from ..channels import get_channel_filter_choices
 from ..corrections import promote_correction_pattern, save_review_correction, snapshot_message_parse
@@ -27,7 +28,7 @@ from ..models import (
 )
 from ..transactions import sync_transaction_from_message
 
-router = APIRouter()
+router = APIRouter(route_class=CSRFProtectedRoute)
 
 
 @router.get("/channels")
