@@ -407,6 +407,43 @@ class ClockifyAdminPerfPrivacyTests(unittest.TestCase):
         self.assertEqual(cached.clockify_user_id, "clock-1")
         self.assertEqual(cached.user_id, 20)
 
+    def test_shift_tracker_manual_refresh_keeps_cached_today_entries_when_api_returns_empty(self):
+        from app.models import ClockifyTimeEntry
+        from app.routers import team_admin_clockify as mod
+
+        self._seed_linked_employee()
+        self.session.add(
+            ClockifyTimeEntry(
+                clockify_entry_id="today-existing",
+                clockify_user_id="clock-1",
+                user_id=20,
+                description="Cached today shift",
+                start_at=datetime(2026, 4, 24, 18, 0, tzinfo=timezone.utc),
+                end_at=datetime(2026, 4, 24, 22, 0, tzinfo=timezone.utc),
+                duration_seconds=14400,
+                is_running=False,
+                is_deleted=False,
+            )
+        )
+        self.session.commit()
+
+        result = mod.refresh_clockify_shift_tracker_cache(
+            self.session,
+            _FakeClockifyClient(entries=[]),
+            settings=self._settings(),
+            today=date(2026, 4, 24),
+        )
+        cached = self.session.exec(
+            mod.select(ClockifyTimeEntry).where(
+                ClockifyTimeEntry.clockify_entry_id == "today-existing"
+            )
+        ).first()
+
+        self.assertEqual(result["cached_entries"], 0)
+        self.assertIsNotNone(cached)
+        self.assertFalse(cached.is_deleted)
+        self.assertEqual(cached.duration_seconds, 14400)
+
     def test_labor_stats_use_clockify_hours_and_salary_not_schedule(self):
         from app.models import ClockifyTimeEntry, EmployeeProfile, User
         from app.pii import encrypt_pii

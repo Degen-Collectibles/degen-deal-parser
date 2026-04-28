@@ -429,6 +429,12 @@ def _clockify_day_bounds(
     return start_local, start_local + timedelta(days=1)
 
 
+def _clockify_today(*, settings=None, now: Optional[datetime] = None) -> date:
+    now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    week_start_local, _ = clockify_week_bounds(now_utc.date(), settings=settings)
+    return now_utc.astimezone(week_start_local.tzinfo).date()
+
+
 def _format_clockify_time(value: Optional[datetime]) -> str:
     if value is None:
         return "-"
@@ -2773,7 +2779,7 @@ def refresh_clockify_shift_tracker_cache(
     today: Optional[date] = None,
     employee_rows: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
-    day = today or date.today()
+    day = today or _clockify_today(settings=settings)
     start_local, end_local = _clockify_day_bounds(day, settings=settings)
     start_utc = start_local.astimezone(timezone.utc)
     end_utc = end_local.astimezone(timezone.utc)
@@ -2804,15 +2810,11 @@ def refresh_clockify_shift_tracker_cache(
             errors.append(f"{employee_name}: {exc}")
             continue
 
-        seen_entry_ids: set[str] = set()
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
             entry_payload = dict(entry)
             entry_payload.setdefault("userId", clockify_user_id)
-            entry_id = str(entry.get("id") or "").strip()
-            if entry_id:
-                seen_entry_ids.add(entry_id)
             cached = _upsert_clockify_time_entry_from_payload(
                 session,
                 {
@@ -2826,20 +2828,6 @@ def refresh_clockify_shift_tracker_cache(
             if cached is not None:
                 cached_entries += 1
 
-        existing_rows = session.exec(
-            select(ClockifyTimeEntry).where(
-                ClockifyTimeEntry.clockify_user_id == clockify_user_id,
-                ClockifyTimeEntry.is_deleted == False,  # noqa: E712
-                ClockifyTimeEntry.start_at < end_utc,
-                or_(ClockifyTimeEntry.end_at == None, ClockifyTimeEntry.end_at > start_utc),  # noqa: E711
-            )
-        ).all()
-        for existing in existing_rows:
-            if existing.clockify_entry_id not in seen_entry_ids:
-                existing.is_deleted = True
-                existing.is_running = False
-                existing.updated_at = received_at
-                session.add(existing)
         refreshed_users += 1
 
     session.commit()
