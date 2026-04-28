@@ -5,6 +5,8 @@ import importlib
 import json
 import os
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from cryptography.fernet import Fernet
@@ -318,6 +320,57 @@ class AdminProfileUpdateHardeningTests(unittest.TestCase, _W4Harness):
     def setUp(self): self._setup()
     def tearDown(self): self._teardown()
 
+    def test_employee_detail_hourly_rate_uses_dollars_not_cents(self):
+        from app.models import EmployeeProfile
+        from app.pii import encrypt_pii
+        from app.routers.team_admin_employees import _detail_context
+
+        admin = self._login(role="admin", user_id=519, username="adm519")
+        emp = self._seed_employee(user_id=819, username="emp819")
+        profile = self.session.get(EmployeeProfile, emp.id)
+        profile.hourly_rate_cents_enc = encrypt_pii("2300")
+        self.session.add(profile)
+        self.session.commit()
+
+        ctx = _detail_context(
+            SimpleNamespace(session={}),
+            self.session,
+            admin,
+            emp,
+            profile,
+        )
+        template = Path("app/templates/team/admin/employee_detail.html").read_text()
+
+        self.assertEqual(ctx["hourly_rate_value"], "23.00")
+        self.assertIn('name="hourly_rate_dollars"', template)
+        self.assertNotIn("hourly_rate_cents", template)
+        self.assertNotIn("cents", template.lower())
+
+    def test_profile_hourly_rate_parser_accepts_dollars(self):
+        from app.routers.team_admin_employees import _parse_profile_hourly_rate
+
+        self.assertEqual(
+            _parse_profile_hourly_rate(
+                hourly_rate_dollars="27.50",
+                hourly_rate_cents="",
+            ),
+            (2750, False),
+        )
+        self.assertEqual(
+            _parse_profile_hourly_rate(
+                hourly_rate_dollars="$25.00",
+                hourly_rate_cents="",
+            ),
+            (2500, False),
+        )
+        self.assertEqual(
+            _parse_profile_hourly_rate(
+                hourly_rate_dollars="12..50",
+                hourly_rate_cents="",
+            ),
+            (None, True),
+        )
+
     def test_hourly_rate_rejects_invalid_inputs_without_mutating_existing_value(self):
         from app.models import AuditLog, EmployeeProfile
         from app.pii import decrypt_pii, encrypt_pii
@@ -330,21 +383,21 @@ class AdminProfileUpdateHardeningTests(unittest.TestCase, _W4Harness):
         self.session.commit()
         csrf = self._csrf()
 
-        for bad in ("abc", "12.5", "-1"):
+        for bad in ("abc", "12..50", "-1"):
             r = self.client.post(
                 f"/team/admin/employees/{emp.id}/profile-update",
-                data={"hourly_rate_cents": bad, "csrf_token": csrf},
+                data={"hourly_rate_dollars": bad, "csrf_token": csrf},
                 follow_redirects=False,
             )
             self.assertEqual(r.status_code, 303)
-            self.assertIn("Invalid+hourly_rate_cents+ignored", r.headers["location"])
+            self.assertIn("Invalid+hourly+rate+ignored", r.headers["location"])
             self.session.expire_all()
             refreshed = self.session.get(EmployeeProfile, emp.id)
             self.assertEqual(decrypt_pii(refreshed.hourly_rate_cents_enc), "2300")
 
         r = self.client.post(
             f"/team/admin/employees/{emp.id}/profile-update",
-            data={"hourly_rate_cents": "99999999", "csrf_token": csrf},
+            data={"hourly_rate_dollars": "999999.99", "csrf_token": csrf},
             follow_redirects=False,
         )
         self.assertEqual(r.status_code, 303)
@@ -368,7 +421,7 @@ class AdminProfileUpdateHardeningTests(unittest.TestCase, _W4Harness):
         csrf = self._csrf()
         r = self.client.post(
             f"/team/admin/employees/{emp.id}/profile-update",
-            data={"hourly_rate_cents": "2750", "csrf_token": csrf},
+            data={"hourly_rate_dollars": "27.50", "csrf_token": csrf},
             follow_redirects=False,
         )
         self.assertEqual(r.status_code, 303)
@@ -683,6 +736,29 @@ class AdminProfileUpdateHardeningTests(unittest.TestCase, _W4Harness):
 class ResetPasswordTests(unittest.TestCase, _W4Harness):
     def setUp(self): self._setup()
     def tearDown(self): self._teardown()
+
+    def test_admin_reset_request_queue_lists_open_requests(self):
+        from app.models import AuditLog
+        from app.routers.team_admin import _pending_password_reset_request_rows
+
+        self._login(role="admin", user_id=300, username="adm-reset-queue")
+        emp = self._seed_employee(user_id=700, username="emp700")
+        self.session.add(
+            AuditLog(
+                target_user_id=emp.id,
+                action="password.reset_manager_request",
+                resource_key="admin.employees.reset_password",
+                details_json=json.dumps({"source": "http_forgot"}),
+            )
+        )
+        self.session.commit()
+
+        rows = _pending_password_reset_request_rows(self.session)
+        template = Path("app/templates/team/admin/password_reset_requests.html").read_text()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["user"].username, "emp700")
+        self.assertIn("/team/admin/employees/{{ employee.id }}/reset-password", template)
 
     def test_admin_reset_shows_link_once_and_audits(self):
         from app.models import AuditLog

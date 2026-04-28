@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import os
 import unittest
+import asyncio
+from types import SimpleNamespace
 
 from cryptography.fernet import Fernet
 from sqlmodel import select
@@ -109,24 +111,33 @@ class AuditLogOnAuthEventsTests(unittest.TestCase, _PortalHarness):
         self.assertEqual(r.status_code, 303)
         self.assertGreaterEqual(self._count("password.reset_consumed"), 1)
 
-    def test_forgot_always_stores_target_none(self):
+    def test_forgot_confirmation_is_neutral_and_queues_matched_accounts(self):
         from app.auth import hash_password
         from app.models import AuditLog, User
 
         ph, salt = hash_password("xxxxx")
-        self.session.add(User(
+        real = User(
             username="realuser", password_hash=ph, password_salt=salt,
             display_name="R", role="employee", is_active=True,
-        ))
+        )
+        self.session.add(real)
         self.session.commit()
+        self.session.refresh(real)
+        from app.routers.team import team_password_forgot_post
+
+        request = SimpleNamespace(
+            client=SimpleNamespace(host="testclient"),
+            headers={},
+            url=SimpleNamespace(scheme="http", netloc="testserver"),
+        )
         for probe in ("realuser", "doesnotexist"):
-            csrf = self._csrf()
-            r = self.client.post(
-                "/team/password/forgot",
-                data={"identifier": probe, "csrf_token": csrf},
-                follow_redirects=False,
+            r = asyncio.run(
+                team_password_forgot_post(
+                    request, identifier=probe, session=self.session
+                )
             )
             self.assertEqual(r.status_code, 303)
+            self.assertIn("If+that+account+exists", r.headers["location"])
         rows = self.session.exec(
             select(AuditLog).where(AuditLog.action == "password.reset_requested")
         ).all()
@@ -137,6 +148,12 @@ class AuditLogOnAuthEventsTests(unittest.TestCase, _PortalHarness):
         self.assertGreaterEqual(len(http_rows), 2)
         for row in http_rows:
             self.assertIsNone(row.target_user_id)
+        manager_rows = self.session.exec(
+            select(AuditLog).where(AuditLog.action == "password.reset_manager_request")
+        ).all()
+        self.assertEqual(len(manager_rows), 1)
+        self.assertEqual(manager_rows[0].target_user_id, real.id)
+        self.assertNotIn("realuser", manager_rows[0].details_json or "")
 
 
 class LogoutPostTests(unittest.TestCase, _PortalHarness):

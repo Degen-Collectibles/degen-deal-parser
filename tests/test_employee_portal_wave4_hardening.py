@@ -364,10 +364,10 @@ class PasswordResetActionSplitTests(unittest.TestCase, _Harness):
         self.session.commit()
         csrf = self._csrf()
 
-        for bad in ("abc", "12.5", "-1"):
+        for bad in ("abc", "12..50", "-1"):
             r = self.client.post(
                 f"/team/admin/employees/{emp.id}/profile-update",
-                data={"hourly_rate_cents": bad, "csrf_token": csrf},
+                data={"hourly_rate_dollars": bad, "csrf_token": csrf},
                 follow_redirects=False,
             )
             self.assertEqual(r.status_code, 303)
@@ -390,7 +390,7 @@ class PasswordResetActionSplitTests(unittest.TestCase, _Harness):
         csrf = self._csrf()
         r = self.client.post(
             f"/team/admin/employees/{emp.id}/profile-update",
-            data={"hourly_rate_cents": "99999999", "csrf_token": csrf},
+            data={"hourly_rate_dollars": "999999.99", "csrf_token": csrf},
             follow_redirects=False,
         )
         self.assertEqual(r.status_code, 303)

@@ -254,6 +254,14 @@
             <span class="ta-count-pill{% if pending_timecards %} warn{% endif %}">{{ pending_timecards }}</span>
             <span class="ta-btn">Review</span>
         </a>
+        <a class="ta-attention-row" href="/team/admin/password-reset-requests">
+            <span>
+                <span class="ta-attention-title">Password reset requests</span>
+                <span class="ta-attention-sub">Employees who asked for help getting back in.</span>
+            </span>
+            <span class="ta-count-pill{% if pending_password_resets %} warn{% endif %}">{{ pending_password_resets }}</span>
+            <span class="ta-btn">Review</span>
+        </a>
         <a class="ta-attention-row" href="/team/admin/invites">
             <span>
                 <span class="ta-attention-title">Invites and drafts</span>
@@ -280,6 +288,7 @@
             <p>Add staff, set rates, issue invite links, and export payroll.</p>
             <div class="ta-workflow-links">
                 <a class="ta-btn" href="/team/admin/employees">Employees</a>
+                <a class="ta-btn" href="/team/admin/password-reset-requests">Reset requests</a>
                 <a class="ta-btn" href="/team/admin/employees/pay-rates">Compensation</a>
                 <a class="ta-btn" href="/team/admin/payroll">Payroll export</a>
                 <a class="ta-btn" href="/team/admin/invites">Invites</a>

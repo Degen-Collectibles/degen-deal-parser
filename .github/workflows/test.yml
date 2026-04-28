@@ -9,6 +9,16 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      SESSION_HTTPS_ONLY: "false"
+      SESSION_DOMAIN: ""
+      SESSION_SAME_SITE: "lax"
+      SESSION_SECRET: "pytest-session-secret-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      ADMIN_PASSWORD: "pytest-admin-password-xxxxxxxxxxxxxxxxxxxxxxxx"
+      EMPLOYEE_PII_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      EMPLOYEE_EMAIL_HASH_SALT: "pytest-email-salt"
+      EMPLOYEE_TOKEN_HMAC_KEY: "pytest-token-hmac-key-xxxxxxxxxxxxxxxxxxxxxxxx"
+      DATABASE_URL: "sqlite:////tmp/degen_ci_tests_${{ github.run_id }}.db"
 
     steps:
       - uses: actions/checkout@v4

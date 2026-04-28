@@ -602,9 +602,7 @@ def _detail_context(
         "current_compensation_type": _normalize_compensation_type(
             profile.compensation_type if profile is not None else ""
         ),
-        "hourly_rate_cents_value": (
-            "" if hourly_rate_cents is None else str(hourly_rate_cents)
-        ),
+        "hourly_rate_value": _format_money_dollars(hourly_rate_cents),
         "hourly_rate_display": _format_money_dollars(hourly_rate_cents),
         "monthly_salary_value": _format_money_dollars(monthly_salary_cents),
         "monthly_salary_pay_day_value": profile.monthly_salary_pay_day or "",
@@ -1738,6 +1736,18 @@ def _clamp_hourly_rate_cents(value: str) -> tuple[Optional[int], bool]:
     return min(max(parsed, 0), 1_000_000), False
 
 
+def _parse_profile_hourly_rate(
+    *,
+    hourly_rate_dollars: str,
+    hourly_rate_cents: str,
+) -> tuple[Optional[int], bool]:
+    if (hourly_rate_dollars or "").strip():
+        return _parse_hourly_rate_dollars(hourly_rate_dollars)
+    # Backward compatibility for older tests/tools that still submit the
+    # internal cents field. The manager UI no longer renders this name.
+    return _clamp_hourly_rate_cents(hourly_rate_cents)
+
+
 @router.post(
     "/team/admin/employees/{user_id}/profile-update",
     dependencies=[Depends(require_csrf)],
@@ -1751,6 +1761,7 @@ async def admin_employee_profile_update(
     is_schedulable: str = Form(default=""),
     compensation_type: str = Form(default=""),
     compensation_effective_date: str = Form(default=""),
+    hourly_rate_dollars: str = Form(default=""),
     hourly_rate_cents: str = Form(default=""),
     monthly_salary_dollars: str = Form(default=""),
     monthly_salary_pay_day: str = Form(default=""),
@@ -1843,7 +1854,10 @@ async def admin_employee_profile_update(
         )
 
         if effective_compensation == COMPENSATION_TYPE_HOURLY:
-            rate_int, rate_invalid = _clamp_hourly_rate_cents(hourly_rate_cents)
+            rate_int, rate_invalid = _parse_profile_hourly_rate(
+                hourly_rate_dollars=hourly_rate_dollars,
+                hourly_rate_cents=hourly_rate_cents,
+            )
         else:
             rate_int = None
         if rate_int is not None:
@@ -1939,7 +1953,7 @@ async def admin_employee_profile_update(
         session.commit()
     flash = "Saved."
     if rate_invalid and not salary_invalid and not pay_day_invalid:
-        flash = "Saved.+Invalid+hourly_rate_cents+ignored."
+        flash = "Saved.+Invalid+hourly+rate+ignored."
     elif salary_invalid or rate_invalid or pay_day_invalid:
         flash = "Saved.+Invalid+compensation+value+ignored."
     return RedirectResponse(

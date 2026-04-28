@@ -33,6 +33,7 @@ from ..auth import (
     change_user_password,
     consume_invite_token,
     consume_password_reset_token,
+    generate_password_reset_token,
     has_permission,
     validate_password_strength,
 )
@@ -68,6 +69,7 @@ from ..models import (
 from ..pii import PIIDecryptError, decrypt_pii, encrypt_pii
 from ..rate_limit import rate_limited_or_429
 from ..shared import templates
+from ..sms import mask_sms_phone, normalize_sms_phone, send_sms, sms_phone_fingerprint
 from ..team_notifications import EMPLOYEE_NOTIFICATION_ACTION
 
 router = APIRouter()
@@ -160,6 +162,149 @@ def _password_changed_session_value(user: User) -> Optional[str]:
 def _session_invalidated_session_value(user: User) -> Optional[str]:
     invalidated_at = getattr(user, "session_invalidated_at", None)
     return invalidated_at.isoformat() if invalidated_at is not None else None
+
+
+def _public_base_url(request: Request) -> str:
+    configured = (get_settings().public_base_url or "").strip().rstrip("/")
+    if configured:
+        return configured
+    return f"{request.url.scheme}://{request.url.netloc}"
+
+
+def _password_reset_url(request: Request, raw_token: str) -> str:
+    return f"{_public_base_url(request)}/team/password/reset/{raw_token}"
+
+
+def _password_reset_sms_body(reset_url: str) -> str:
+    return (
+        "Degen Team password reset: "
+        f"{reset_url}\n"
+        "Expires in 60 minutes. Ignore this if you did not request it."
+    )
+
+
+def _sms_provider_can_deliver() -> bool:
+    provider = (get_settings().sms_provider or "dry_run").strip().lower()
+    return provider not in {
+        "",
+        "dryrun",
+        "dry_run",
+        "log",
+        "console",
+        "disabled",
+        "off",
+        "none",
+    }
+
+
+def _find_password_reset_user(session: Session, identifier: str) -> Optional[User]:
+    probe = (identifier or "").strip()
+    if not probe:
+        return None
+    normalized = probe.lower()
+    user = session.exec(
+        select(User).where(func.lower(User.username) == normalized)
+    ).first()
+    if user is not None and user.is_active:
+        return user
+    if "@" in normalized:
+        from ..pii import email_lookup_hash
+
+        digest = email_lookup_hash(normalized)
+        profile = session.exec(
+            select(EmployeeProfile).where(EmployeeProfile.email_lookup_hash == digest)
+        ).first()
+        if profile is not None:
+            user = session.get(User, profile.user_id)
+            if user is not None and user.is_active:
+                return user
+    return None
+
+
+def _queue_password_reset_request(
+    session: Session,
+    *,
+    request: Request,
+    user: User,
+    probe_hash: str,
+    reason: str,
+) -> None:
+    session.add(
+        AuditLog(
+            target_user_id=user.id,
+            action="password.reset_manager_request",
+            resource_key="admin.employees.reset_password",
+            details_json=json.dumps(
+                {
+                    "source": "http_forgot",
+                    "identifier_hash": probe_hash,
+                    "reason": reason,
+                },
+                sort_keys=True,
+            ),
+            ip_address=(request.client.host if request.client else None),
+        )
+    )
+
+
+def _try_send_password_reset_sms(
+    session: Session,
+    *,
+    request: Request,
+    user: User,
+    probe_hash: str,
+) -> bool:
+    if not _sms_provider_can_deliver():
+        return False
+    profile = session.get(EmployeeProfile, user.id)
+    if profile is None or not profile.phone_enc:
+        return False
+    try:
+        phone_plain = decrypt_pii(profile.phone_enc) or ""
+    except (PIIDecryptError, ValueError):
+        return False
+    to_phone = normalize_sms_phone(phone_plain)
+    if not to_phone:
+        return False
+    raw_token = generate_password_reset_token(
+        session,
+        user_id=user.id,
+        issued_by_user_id=user.id,
+    )
+    result = send_sms(
+        to_phone=to_phone,
+        body=_password_reset_sms_body(_password_reset_url(request, raw_token)),
+        settings=get_settings(),
+    )
+    details = {
+        "provider": result.provider,
+        "status": result.status,
+        "dry_run": result.dry_run,
+        "success": result.success and not result.dry_run,
+        "phone": mask_sms_phone(to_phone),
+        "phone_fingerprint": sms_phone_fingerprint(to_phone),
+        "identifier_hash": probe_hash,
+    }
+    if result.message_id:
+        details["message_id"] = result.message_id
+    if result.error:
+        details["error"] = result.error[:240]
+    session.add(
+        AuditLog(
+            actor_user_id=user.id,
+            target_user_id=user.id,
+            action=(
+                "password.reset_sms_sent"
+                if result.success and not result.dry_run
+                else "password.reset_sms_failed"
+            ),
+            details_json=json.dumps(details, sort_keys=True),
+            ip_address=(request.client.host if request.client else None),
+        )
+    )
+    if result.success and not result.dry_run:
+        return True
+    return False
 
 
 @router.get("/team/login", response_class=HTMLResponse)
@@ -375,31 +520,60 @@ async def team_password_forgot_post(
         request, key_prefix="team:forgot", max_requests=3, window_seconds=900.0
     ):
         return limited
-    # No enumeration: target_user_id is always None so admins reading the
-    # audit log cannot trivially distinguish exists-vs-not. A hashed probe
-    # goes into details_json for investigation without revealing structure.
     probe = (identifier or "").strip().lower()
-    matched = False
-    if probe:
-        existing = session.exec(select(User).where(User.username == probe)).first()
-        if existing is not None and existing.is_active:
-            matched = True
     probe_hash = (
         hashlib.sha256(probe.encode("utf-8")).hexdigest() if probe else ""
     )
+    if probe_hash:
+        if limited := rate_limited_or_429(
+            request,
+            key_prefix=f"team:forgot:{probe_hash[:16]}",
+            max_requests=3,
+            window_seconds=900.0,
+        ):
+            return limited
+    matched_user = _find_password_reset_user(session, probe)
+    delivered = False
+    if matched_user is not None:
+        delivered = _try_send_password_reset_sms(
+            session,
+            request=request,
+            user=matched_user,
+            probe_hash=probe_hash,
+        )
+        if not delivered:
+            _queue_password_reset_request(
+                session,
+                request=request,
+                user=matched_user,
+                probe_hash=probe_hash,
+                reason="manager_action_required",
+            )
     session.add(
         AuditLog(
             action="password.reset_requested",
             target_user_id=None,
             details_json=json.dumps(
-                {"username_hash": probe_hash, "matched": matched, "source": "http_forgot"}
+                {
+                    "identifier_hash": probe_hash,
+                    "matched": matched_user is not None,
+                    "delivery": (
+                        "sms"
+                        if delivered
+                        else "manager_queue"
+                        if matched_user is not None
+                        else "none"
+                    ),
+                    "source": "http_forgot",
+                },
+                sort_keys=True,
             ),
             ip_address=(request.client.host if request.client else None),
         )
     )
     session.commit()
     return RedirectResponse(
-        "/team/password/forgot?flash=If+your+account+exists%2C+ask+an+admin+for+a+reset+link.",
+        "/team/password/forgot?flash=If+that+account+exists%2C+we%27ll+send+a+reset+link+or+put+it+in+the+admin+reset+queue.",
         status_code=303,
     )
 

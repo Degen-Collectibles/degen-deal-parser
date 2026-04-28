@@ -6,6 +6,7 @@ supply-queue content live in Wave 4.
 """
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 from typing import Any, Optional
 
@@ -19,6 +20,7 @@ from ..config import get_settings
 from ..csrf import issue_token, require_csrf
 from ..db import get_session
 from ..models import (
+    AuditLog,
     EmployeeProfile,
     InviteToken,
     ShiftEntry,
@@ -47,6 +49,12 @@ TEAM_ADMIN_NAV_SECTIONS: tuple[tuple[str, tuple[tuple[str, str, str, str], ...]]
         "People",
         (
             ("employees", "Employees", "/team/admin/employees", "admin.employees.view"),
+            (
+                "password-resets",
+                "Reset requests",
+                "/team/admin/password-reset-requests",
+                "admin.employees.reset_password",
+            ),
             ("pay-rates", "Compensation", "/team/admin/employees/pay-rates", "admin.labor_financials.view"),
             ("clockify", "Clockify", "/team/admin/clockify", "admin.employees.view"),
             ("shift-tracker", "Shift Tracker", "/team/admin/shift-tracker", "admin.employees.view"),
@@ -213,6 +221,70 @@ def _first_allowed_admin_href(request: Request) -> str:
     return visible[0] if visible else "/team/"
 
 
+def _pending_password_reset_request_rows(
+    session: Session,
+    *,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    relevant_actions = (
+        "password.reset_manager_request",
+        "password.reset_issued",
+        "password.reset_consumed",
+        "password.reset_sms_sent",
+    )
+    logs = list(
+        session.exec(
+            select(AuditLog)
+            .where(AuditLog.action.in_(relevant_actions))
+            .where(AuditLog.target_user_id.is_not(None))
+            .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+            .limit(300)
+        ).all()
+    )
+    latest_by_user: dict[int, AuditLog] = {}
+    for row in logs:
+        if row.target_user_id is None:
+            continue
+        latest_by_user.setdefault(int(row.target_user_id), row)
+    open_logs = [
+        row
+        for row in latest_by_user.values()
+        if row.action == "password.reset_manager_request"
+    ][:limit]
+    user_ids = [
+        int(row.target_user_id)
+        for row in open_logs
+        if row.target_user_id is not None
+    ]
+    users = (
+        {
+            user.id: user
+            for user in session.exec(select(User).where(User.id.in_(user_ids))).all()
+            if user.id is not None
+        }
+        if user_ids
+        else {}
+    )
+    out: list[dict[str, Any]] = []
+    for row in open_logs:
+        user = users.get(int(row.target_user_id or 0))
+        if user is None:
+            continue
+        try:
+            details = json.loads(row.details_json or "{}")
+        except json.JSONDecodeError:
+            details = {}
+        out.append(
+            {
+                "log": row,
+                "user": user,
+                "reason": str(details.get("reason") or "manager_action_required"),
+                "requested_at": row.created_at,
+            }
+        )
+    return out
+
+
 @router.get("/team/admin", response_class=HTMLResponse)
 def team_admin_home(
     request: Request,
@@ -268,6 +340,7 @@ def team_admin_home(
             ).all()
         )
     )
+    pending_password_resets = len(_pending_password_reset_request_rows(session))
     active_announcements = len(
         list(
             session.exec(
@@ -295,7 +368,9 @@ def team_admin_home(
             ).all()
         )
     )
-    needs_attention_count = pending_supply + pending_timeoff + pending_timecards
+    needs_attention_count = (
+        pending_supply + pending_timeoff + pending_timecards + pending_password_resets
+    )
     return templates.TemplateResponse(
         request,
         "team/admin/index.html",
@@ -310,11 +385,34 @@ def team_admin_home(
             "pending_supply": pending_supply,
             "pending_timeoff": pending_timeoff,
             "pending_timecards": pending_timecards,
+            "pending_password_resets": pending_password_resets,
             "active_announcements": active_announcements,
             "clockify_mapped": clockify_mapped,
             "clockify_unmapped": clockify_unmapped,
             "upcoming_shift_count": upcoming_shift_count,
             "needs_attention_count": needs_attention_count,
+            "csrf_token": issue_token(request),
+        },
+    )
+
+
+@router.get("/team/admin/password-reset-requests", response_class=HTMLResponse)
+def team_admin_password_reset_requests(
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    denial, user = _admin_gate(request, session, "admin.employees.reset_password")
+    if denial:
+        return denial
+    rows = _pending_password_reset_request_rows(session)
+    return templates.TemplateResponse(
+        request,
+        "team/admin/password_reset_requests.html",
+        {
+            "request": request,
+            "title": "Password Reset Requests",
+            "current_user": user,
+            "rows": rows,
             "csrf_token": issue_token(request),
         },
     )

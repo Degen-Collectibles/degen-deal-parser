@@ -70,14 +70,17 @@ class _PortalHarness:
 
         self.client = TestClient(self.app_main.app)
 
-    def _teardown_portal(self):
-        self.app_main.app.dependency_overrides.clear()
-        self.session.close()
+    def _stop_user_patchers(self):
         for attr in ("_user_patcher", "_user_patcher_main"):
             patcher = getattr(self, attr, None)
             if patcher:
                 patcher.stop()
                 setattr(self, attr, None)
+
+    def _teardown_portal(self):
+        self.app_main.app.dependency_overrides.clear()
+        self.session.close()
+        self._stop_user_patchers()
 
     def _login_as(self, role: str, user_id: int = 10, username: str = "emp_t"):
         from app import shared
@@ -93,9 +96,13 @@ class _PortalHarness:
             is_active=True,
         )
         # Patch BOTH shared and main — the middleware pulls via `from .shared import *`
-        # which creates a bound name in app.main.
+        # which creates a bound name in app.main. Stop any prior patch first;
+        # some tests intentionally switch from employee to admin in one method.
+        # If we overwrite the patcher handle without stopping it, the old mock
+        # leaks into later modules during full-suite runs.
         import app.main as app_main
 
+        self._stop_user_patchers()
         self._user_patcher = patch.object(shared, "get_request_user", return_value=user)
         self._user_patcher.start()
         self._user_patcher_main = patch.object(app_main, "get_request_user", return_value=user)

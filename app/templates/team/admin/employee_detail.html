@@ -170,9 +170,10 @@
                 </td>
             </tr>
             <tr>
-                <td style="padding:6px 0; color:var(--lx-muted);">Hourly rate (cents)</td>
+                <td style="padding:6px 0; color:var(--lx-muted);">Hourly rate</td>
                 <td>
-                    <input type="text" name="hourly_rate_cents" value="{{ hourly_rate_cents_value }}" placeholder="e.g. 2500 for $25.00" style="width:200px; padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/>
+                    <span style="color:var(--lx-muted); margin-right:4px;">$</span>
+                    <input type="text" name="hourly_rate_dollars" value="{{ hourly_rate_value }}" inputmode="decimal" placeholder="25.00" style="width:200px; padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/>
                     {% if hourly_rate_display %}
                     <span style="font-size:11px; color:var(--lx-muted); margin-left:8px;">current ${{ hourly_rate_display }}/hr</span>
                     {% endif %}

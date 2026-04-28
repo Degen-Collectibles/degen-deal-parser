@@ -121,6 +121,17 @@ class TikTokRegressionTests(unittest.TestCase):
     def setUp(self) -> None:
         import app.cache as cache_module
         cache_module._cache.clear()
+        # Other portal tests reload app.main; router modules keep their own
+        # imported `settings` name. Re-bind those names so patches on
+        # main_module.settings affect the modules under test.
+        for module in (
+            shared_module,
+            reports_module,
+            dashboard_module,
+            shopify_module,
+            tiktok_orders_module,
+        ):
+            module.settings = main_module.settings
         self.temp_dir = Path.cwd() / "tests" / ".tmp_tiktok_reporting" / str(uuid.uuid4())
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         db_path = self.temp_dir / "tiktok_reporting.db"
