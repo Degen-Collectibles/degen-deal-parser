@@ -124,7 +124,7 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         html = r.text
         self.assertIn('<div class="pt-side-group">Ops</div>', html)
         self.assertIn('href="/tiktok/streamer?team_shell=1"', html)
-        self.assertIn('href="/degen_eye/v2?team_shell=1"', html)
+        self.assertIn('href="/degen_eye?team_shell=1"', html)
         self.assertIn('href="/inventory/scan?team_shell=1"', html)
 
     def test_admin_also_sees_tools_group(self):
@@ -132,7 +132,7 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         html = self.client.get("/team/", follow_redirects=False).text
         self.assertIn('<div class="pt-side-group">Ops</div>', html)
         self.assertIn('href="/tiktok/streamer?team_shell=1"', html)
-        self.assertIn('href="/degen_eye/v2?team_shell=1"', html)
+        self.assertIn('href="/degen_eye?team_shell=1"', html)
 
     # ---------- Degen Eye + scanner access ----------
 
@@ -189,7 +189,7 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         html = self.client.get("/tiktok/streamer", follow_redirects=False).text
         # Employee-safe tiles: the Team Portal + Degen Eye must be there.
         self.assertIn('href="/team/">Team Portal</a>', html)
-        self.assertIn('href="/degen_eye/v2">Degen Eye</a>', html)
+        self.assertIn('href="/degen_eye">Degen Eye</a>', html)
         # Ops-only subgroup labels only render inside {% if _is_ops %}. Their
         # absence is the clean signal that the whole ops block was skipped.
         self.assertNotIn(

@@ -116,7 +116,7 @@ class MobileNavTests(unittest.TestCase):
         for needle in (
             'href="/team/"',
             'href="/tiktok/streamer?team_shell=1"',
-            'href="/degen_eye/v2?team_shell=1"',
+            'href="/degen_eye?team_shell=1"',
             'href="/team/schedule"',
             'href="/team/profile"',
         ):
@@ -132,7 +132,7 @@ class MobileNavTests(unittest.TestCase):
         for needle in (
             'href="/team/"',
             'href="/tiktok/streamer?team_shell=1"',
-            'href="/degen_eye/v2?team_shell=1"',
+            'href="/degen_eye?team_shell=1"',
             'href="/team/admin/schedule"',
             'href="/team/profile"',
         ):

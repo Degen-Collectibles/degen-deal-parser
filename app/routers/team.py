@@ -494,7 +494,7 @@ def _nav_context(session: Session, user: User) -> dict:
     # HR/self-service links.
     ops_nav = [
         {"name": "inventory", "href": "/inventory/scan?team_shell=1"},
-        {"name": "degen-eye", "href": "/degen_eye/v2?team_shell=1"},
+        {"name": "degen-eye", "href": "/degen_eye?team_shell=1"},
         {"name": "live-stream", "href": "/tiktok/streamer?team_shell=1"},
     ]
 
@@ -1190,7 +1190,7 @@ def team_tool_degen_eye(
     denial, user = _require_employee(request, session, resource_key="page.dashboard")
     if denial:
         return denial
-    return RedirectResponse("/degen_eye/v2?team_shell=1", status_code=303)
+    return RedirectResponse("/degen_eye?team_shell=1", status_code=303)
 
 
 @router.get("/team/tools/live-stream")
