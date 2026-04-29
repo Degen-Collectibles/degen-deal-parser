@@ -1,0 +1,37 @@
+{
+  "name": "Degen",
+  "short_name": "Degen",
+  "description": "Degen Collectibles employee portal",
+  "start_url": "/team/",
+  "scope": "/team/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "theme_color": "#08090a",
+  "background_color": "#0a0a0a",
+  "icons": [
+    {
+      "src": "/static/icons/degen-collectibles-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/static/icons/degen-collectibles-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/static/icons/degen-collectibles-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/static/icons/degen-collectibles-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

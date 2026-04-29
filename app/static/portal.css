@@ -604,6 +604,13 @@ a { color: inherit; text-decoration: none; }
   font-size: 13px;
 }
 .onb-brand { display: flex; align-items: center; gap: 10px; font-weight: 600; }
+.onb-brand-logo {
+  width: 30px;
+  height: 30px;
+  object-fit: contain;
+  flex-shrink: 0;
+  filter: drop-shadow(0 6px 14px rgba(255, 98, 83, 0.24));
+}
 
 .onb-progress {
   display: flex;
@@ -783,6 +790,147 @@ a { color: inherit; text-decoration: none; }
   border-radius: var(--pt-radius-sm);
 }
 
+.onb-ios-card {
+  display: grid;
+  grid-template-columns: 170px 1fr;
+  gap: 22px;
+  align-items: center;
+  padding: 18px;
+  border: 1px solid var(--pt-border);
+  border-radius: var(--pt-radius-md);
+  background: rgba(255, 255, 255, 0.02);
+}
+.onb-ios-phone {
+  width: 150px;
+  height: 238px;
+  margin: 0 auto;
+  border-radius: 28px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.03));
+  padding: 12px;
+  box-shadow: inset 0 0 0 4px rgba(0, 0, 0, 0.35), 0 18px 46px -28px var(--pt-accent-glow);
+  position: relative;
+}
+.onb-ios-notch {
+  width: 54px;
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.58);
+  margin: 0 auto 14px;
+}
+.onb-ios-screen {
+  min-height: 186px;
+  border-radius: 20px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.01)),
+    rgba(8, 9, 10, 0.92);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+.onb-ios-app-icon {
+  width: 58px;
+  height: 58px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--pt-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.onb-ios-app-logo {
+  width: 52px;
+  height: 52px;
+  object-fit: contain;
+}
+.onb-ios-app-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--pt-text);
+}
+.onb-ios-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.onb-ios-step {
+  display: grid;
+  grid-template-columns: 34px 1fr;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 12px;
+  border-radius: var(--pt-radius-sm);
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+.onb-ios-num {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--pt-accent);
+  color: var(--pt-accent-ink);
+  font-weight: 700;
+  font-size: 13px;
+}
+.onb-ios-step strong {
+  font-size: 14px;
+  margin-bottom: 3px;
+}
+.onb-ios-step-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.onb-ios-share-icon {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  color: #9ec5ff;
+  background: rgba(96, 165, 250, 0.1);
+  border: 1px solid rgba(96, 165, 250, 0.38);
+  box-shadow: 0 8px 22px -18px rgba(96, 165, 250, 0.8);
+  flex-shrink: 0;
+}
+.onb-ios-share-icon svg {
+  width: 18px;
+  height: 18px;
+}
+.onb-ios-more-icon {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  border-radius: 8px;
+  color: #d8b4fe;
+  background: rgba(168, 85, 247, 0.1);
+  border: 1px solid rgba(168, 85, 247, 0.35);
+  box-shadow: 0 8px 22px -18px rgba(168, 85, 247, 0.8);
+  flex-shrink: 0;
+}
+.onb-ios-more-icon span {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.onb-ios-step > div > span:last-child {
+  display: block;
+  color: var(--pt-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 /* Finale / celebration */
 .onb-finale { text-align: center; padding: 40px 20px; }
 .onb-finale .pokeball {
@@ -917,6 +1065,17 @@ a { color: inherit; text-decoration: none; }
   .onb-btn.ghost { padding: 12px 14px; }
   .onb-review-row { align-items: flex-start; }
   .onb-review-row .v { max-width: 58%; }
+  .onb-ios-card {
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+  .onb-ios-phone {
+    width: 132px;
+    height: 210px;
+  }
+  .onb-ios-screen {
+    min-height: 162px;
+  }
 
   /* Auth card on phones — fill width, gentle edges */
   .pt-auth-body { padding: 16px; }
@@ -1476,6 +1635,10 @@ a { color: inherit; text-decoration: none; }
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
   margin-top: 18px;
+}
+.pt-help-install .onb-ios-card {
+  margin-top: 18px;
+  max-width: 760px;
 }
 .pt-copy-box {
   padding: 14px;

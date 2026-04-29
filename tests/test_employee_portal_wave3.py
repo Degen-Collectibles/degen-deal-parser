@@ -280,6 +280,41 @@ class InviteAcceptTests(unittest.TestCase, _PortalHarness):
     def tearDown(self):
         self._teardown_portal()
 
+    def test_invite_accept_page_includes_ios_install_guidance(self):
+        from app.auth import generate_invite_token, hash_password
+        from app.models import User
+
+        ph, salt = hash_password("AdminPass1!")
+        admin = User(
+            username="inviteadmin",
+            password_hash=ph,
+            password_salt=salt,
+            display_name="Invite Admin",
+            role="admin",
+            is_active=True,
+        )
+        self.session.add(admin)
+        self.session.commit()
+        self.session.refresh(admin)
+        raw = generate_invite_token(
+            self.session,
+            role="employee",
+            created_by_user_id=admin.id,
+        )
+
+        r = self.client.get(f"/team/invite/accept/{raw}")
+
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.text.count('class="onb-progress-dot'), 7)
+        self.assertIn("Add this to your phone.", r.text)
+        self.assertIn("degen-collectibles-180.png", r.text)
+        self.assertIn("keep the name Degen", r.text)
+        self.assertIn("Use Safari on iPhone or Chrome on Android", r.text)
+        self.assertIn("Add Degen to your Home Screen", r.text)
+        self.assertIn("onb-ios-share-icon", r.text)
+        self.assertIn("onb-ios-more-icon", r.text)
+        self.assertIn('/static/team.webmanifest', r.text)
+
     def test_invite_accept_creates_user_and_profile(self):
         from app.auth import generate_invite_token, hash_password
         from app.models import EmployeeProfile, User
@@ -505,6 +540,20 @@ class SupplyAndPoliciesTests(unittest.TestCase, _PortalHarness):
             )
         ).all()
         self.assertEqual(len(rows), 1)
+
+    def test_help_page_includes_phone_install_guide(self):
+        self._seed_employee(user_id=45, username="emp_help")
+
+        page = self.client.get("/team/help")
+
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("Install Degen on your phone", page.text)
+        self.assertIn("Use Safari on iPhone or Chrome on Android", page.text)
+        self.assertIn("On iPhone, tap Share. On Android, tap the three-dot menu.", page.text)
+        self.assertIn("Add Degen to your Home Screen", page.text)
+        self.assertIn("degen-collectibles-180.png", page.text)
+        self.assertIn("onb-ios-share-icon", page.text)
+        self.assertIn("onb-ios-more-icon", page.text)
 
     def test_profile_post_updates_preferred_name_not_role(self):
         uid = self._seed_employee(user_id=43, username="emp_pr")

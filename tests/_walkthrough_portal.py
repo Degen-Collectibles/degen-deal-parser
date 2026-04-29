@@ -121,8 +121,8 @@ def main() -> int:
     check("shows friendly 'Welcome' copy", "Welcome" in page)
     check("has Start button", "Start" in page)
     check(
-        "renders 6 progress dots",
-        page.count('class="onb-progress-dot') == 6,
+        "renders 7 progress dots",
+        page.count('class="onb-progress-dot') == 7,
     )
     check("username input present", 'name="new_username"' in page)
     check("password input present", 'name="new_password"' in page)
@@ -141,10 +141,13 @@ def main() -> int:
         all(f'name="{n}"' in page for n in
             ("emergency_contact_name", "emergency_contact_phone")),
     )
+    check("phone web-app guidance present", "Add this to your phone." in page)
+    check("Degen logo present", "degen-collectibles-180.png" in page)
+    check("team portal manifest present", "/static/team.webmanifest" in page)
     check(
         "css cache-buster matches base.html",
-        "/static/portal.css?v=2026042025" in page,
-        "base.html is on v=2026042025",
+        "/static/portal.css?v=2026042606" in page,
+        "onboarding page is on v=2026042606",
     )
     tok = csrf(page)
 
