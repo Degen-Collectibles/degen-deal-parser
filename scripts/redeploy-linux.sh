@@ -26,6 +26,60 @@ require_cmd git
 require_cmd systemctl
 require_cmd curl
 
+set_env_var() {
+  local env_file="$1"
+  local key="$2"
+  local value="$3"
+  if [[ ! -f "$env_file" ]]; then
+    log "Env file $env_file not present; skipping $key sync"
+    return 0
+  fi
+
+  # Keep secrets out of logs. This only prints the key/file, never values.
+  log "Ensuring $key is set in $env_file"
+  if [[ -w "$env_file" ]]; then
+    python3 - "$env_file" "$key" "$value" <<'PYENV'
+import os, sys
+path, key, value = sys.argv[1:4]
+with open(path, 'r', encoding='utf-8') as f:
+    lines = f.read().splitlines()
+out = []
+seen = False
+for line in lines:
+    if line.startswith(f"{key}="):
+        if not seen:
+            out.append(f"{key}={value}")
+            seen = True
+        continue
+    out.append(line)
+if not seen:
+    out.append(f"{key}={value}")
+with open(path, 'w', encoding='utf-8') as f:
+    f.write("\n".join(out) + "\n")
+PYENV
+  else
+    sudo -n python3 - "$env_file" "$key" "$value" <<'PYENV'
+import os, sys
+path, key, value = sys.argv[1:4]
+with open(path, 'r', encoding='utf-8') as f:
+    lines = f.read().splitlines()
+out = []
+seen = False
+for line in lines:
+    if line.startswith(f"{key}="):
+        if not seen:
+            out.append(f"{key}={value}")
+            seen = True
+        continue
+    out.append(line)
+if not seen:
+    out.append(f"{key}={value}")
+with open(path, 'w', encoding='utf-8') as f:
+    f.write("\n".join(out) + "\n")
+PYENV
+  fi
+}
+
 if [[ ! -d "$APP_DIR/.git" ]]; then
   echo "ERROR: APP_DIR is not a git checkout: $APP_DIR" >&2
   exit 2
@@ -74,6 +128,14 @@ with open("$stamp_path", "w", encoding="utf-8") as f:
     f.write("\n")
 PY
 log "Wrote deploy stamp: $APP_DIR/$stamp_path ($git_sha)"
+
+# Keep production web/worker on the intended heavy model. This intentionally
+# updates only the model selector in env files and never prints secret values.
+PRIMARY_NVIDIA_MODEL="${DEGEN_PRIMARY_NVIDIA_MODEL:-openai/openai/gpt-5.5}"
+set_env_var /opt/degen/web.env NVIDIA_MODEL "$PRIMARY_NVIDIA_MODEL"
+set_env_var /opt/degen/worker.env NVIDIA_MODEL "$PRIMARY_NVIDIA_MODEL"
+# Older service templates used /opt/degen/.env; keep it aligned if present.
+set_env_var /opt/degen/.env NVIDIA_MODEL "$PRIMARY_NVIDIA_MODEL"
 
 log "Restarting $WEB_UNIT"
 sudo -n systemctl restart "$WEB_UNIT"

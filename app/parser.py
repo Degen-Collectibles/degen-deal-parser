@@ -21,6 +21,11 @@ MODEL_PRICING_PER_MILLION = {
         "cached_input": 0.005,
         "output": 0.40,
     },
+    "openai/openai/gpt-5.5": {
+        "input": 1.25,
+        "cached_input": 0.125,
+        "output": 10.00,
+    },
     "aws/anthropic/bedrock-claude-opus-4-7": {
         "input": 15.00,
         "cached_input": 1.50,

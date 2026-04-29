@@ -3,7 +3,7 @@ Centralized AI client factory.
 
 Supports two providers controlled by AI_PROVIDER env var:
   - "nvidia" (default) — uses NVIDIA_API_KEY + NVIDIA_BASE_URL, OpenAI-compatible
-    endpoint. Default heavy model is Claude Opus 4.6 via AWS Bedrock; default
+    endpoint. Default heavy model is GPT-5.5 via NVIDIA/OpenAI; default
     fast model is Claude Haiku 4.5.
   - "openai"  — uses OPENAI_API_KEY, models like gpt-5-nano
 
@@ -66,7 +66,7 @@ def get_model(*, default: str = "gpt-5-nano") -> str:
     """Return the model name for the active provider."""
     s = get_settings()
     if _provider() == "nvidia":
-        return s.nvidia_model or "aws/anthropic/bedrock-claude-opus-4-7"
+        return s.nvidia_model or "openai/openai/gpt-5.5"
     return default
 
 

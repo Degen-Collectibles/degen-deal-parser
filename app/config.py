@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     # the NVIDIA catalog — required for multimodal (image) chat completions.
     # integrate.api.nvidia.com accepts text-only chat but 404s on multimodal.
     nvidia_base_url: str = Field(default="https://inference-api.nvidia.com/v1", alias="NVIDIA_BASE_URL")
-    nvidia_model: str = Field(default="aws/anthropic/bedrock-claude-opus-4-7", alias="NVIDIA_MODEL")
+    nvidia_model: str = Field(default="openai/openai/gpt-5.5", alias="NVIDIA_MODEL")
     nvidia_fast_model: str = Field(default="aws/anthropic/claude-haiku-4-5-v1", alias="NVIDIA_FAST_MODEL")
     # Tiebreaker is only invoked when Ximilar and the vision model disagree on a
     # LOW/MEDIUM-confidence scan, so there is no per-scan cost when scans go
