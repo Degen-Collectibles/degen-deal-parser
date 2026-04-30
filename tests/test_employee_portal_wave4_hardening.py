@@ -593,14 +593,14 @@ class PurgeIdempotencyTests(unittest.TestCase, _Harness):
         csrf = self._csrf()
         r1 = self.client.post(
             f"/team/admin/employees/{emp.id}/purge",
-            data={"csrf_token": csrf, "confirm_username": "PURGE"},
+            data={"csrf_token": csrf, "confirm_username": emp.username},
             follow_redirects=False,
         )
         self.assertEqual(r1.status_code, 303)
         # Second purge: should still "succeed" but not add new PII (already None).
         r2 = self.client.post(
             f"/team/admin/employees/{emp.id}/purge",
-            data={"csrf_token": csrf, "confirm_username": "PURGE"},
+            data={"csrf_token": csrf, "confirm_username": emp.username},
             follow_redirects=False,
         )
         # Either 303 (noop) or a redirect — but MUST NOT 500.
@@ -617,14 +617,14 @@ class PurgeIdempotencyTests(unittest.TestCase, _Harness):
         ).all())
         self.assertGreaterEqual(len(rows), 1)
 
-    def test_purge_rejects_lowercase_and_username_with_400(self):
+    def test_purge_rejects_static_or_wrong_confirmation_with_400(self):
         from app.models import AuditLog, EmployeeProfile
 
         self._login(role="admin", user_id=41, username="adm_purge_guard")
         emp = self._seed_employee(user_id=1402, username="emp1402")
         csrf = self._csrf()
 
-        for confirmation in ("purge", "emp1402"):
+        for confirmation in ("PURGE", "emp1402x"):
             r = self.client.post(
                 f"/team/admin/employees/{emp.id}/purge",
                 data={"csrf_token": csrf, "confirm_username": confirmation},
@@ -749,6 +749,8 @@ class SafeNextTests(unittest.TestCase):
         from app.routers.team import _safe_next
 
         self.assertEqual(_safe_next("//evil.example"), "")
+        self.assertEqual(_safe_next("/%2Fevil.example"), "")
+        self.assertEqual(_safe_next("/.evil.example"), "")
         self.assertEqual(_safe_next("/\\evil.example"), "")
         self.assertEqual(_safe_next("\\/evil.example"), "")
         self.assertEqual(_safe_next("/team/profile"), "/team/profile")
@@ -896,7 +898,16 @@ class ProxyAwareRateLimitTests(unittest.TestCase):
             request, key_prefix="login", max_requests=1, window_seconds=60
         )
         self.assertEqual(limited.status_code, 429)
-        self.assertIn("login:198.51.100.10", getattr(rate_limit, "_BUCKETS"))
+        from app.db import managed_session
+        from app.models import RateLimitHit
+
+        with managed_session() as session:
+            stored = session.exec(
+                select(RateLimitHit).where(
+                    RateLimitHit.bucket_key == "login:198.51.100.10"
+                )
+            ).first()
+        self.assertIsNotNone(stored)
 
     def test_untrusted_proxy_ignores_forwarded_for_header(self):
         from app import config as cfg

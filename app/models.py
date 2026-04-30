@@ -493,6 +493,15 @@ class EmployeeProfile(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utcnow, index=True)
 
 
+class RateLimitHit(SQLModel, table=True):
+    __tablename__ = "rate_limit_hit"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    bucket_key: str = Field(index=True)
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+    expires_at: datetime = Field(index=True)
+
+
 class EmployeePurgeTombstone(SQLModel, table=True):
     __tablename__ = "employee_purge_tombstone"
 

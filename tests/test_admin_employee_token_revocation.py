@@ -138,7 +138,7 @@ class EmployeeTokenRevocationTests(unittest.TestCase):
             admin_employee_purge_post(
                 self._request(),
                 self.employee.id,
-                confirm_username="PURGE",
+                confirm_username=self.employee.username,
                 session=self.session,
             )
         )
@@ -221,6 +221,18 @@ class EmployeeTokenRevocationTests(unittest.TestCase):
         self.assertFalse(user.is_active)
         self.assertIsNotNone(user.session_invalidated_at)
 
+    def test_admin_cannot_terminate_self(self):
+        from app.routers.team_admin_employees import admin_employee_terminate_post
+
+        request = self._request()
+        request.url = SimpleNamespace(path=f"/team/admin/employees/{self.admin.id}", query="")
+        response = asyncio.run(
+            admin_employee_terminate_post(request, self.admin.id, session=self.session)
+        )
+        self.assertEqual(response.status_code, 303)
+        self.session.expire_all()
+        self.assertTrue(self.session.get(type(self.admin), self.admin.id).is_active)
+
     def test_terminate_does_not_touch_already_used_tokens(self):
         from app.models import InviteToken, utcnow
 
@@ -269,6 +281,23 @@ class EmployeeTokenRevocationTests(unittest.TestCase):
         details = json.loads(row.details_json)
         self.assertEqual(details["invite_tokens_revoked"], 1)
         self.assertEqual(details["reset_tokens_revoked"], 1)
+
+    def test_admin_cannot_purge_self(self):
+        from app.routers.team_admin_employees import admin_employee_purge_post
+
+        request = self._request()
+        request.url = SimpleNamespace(path=f"/team/admin/employees/{self.admin.id}", query="")
+        response = asyncio.run(
+            admin_employee_purge_post(
+                request,
+                self.admin.id,
+                confirm_username=self.admin.username,
+                session=self.session,
+            )
+        )
+        self.assertEqual(response.status_code, 303)
+        self.session.expire_all()
+        self.assertEqual(self.session.get(type(self.admin), self.admin.id).username, "admin-token")
 
     def test_purge_creates_restorable_tombstone_before_wiping_pii(self):
         from app.models import AuditLog, EmployeeProfile, EmployeePurgeTombstone, User

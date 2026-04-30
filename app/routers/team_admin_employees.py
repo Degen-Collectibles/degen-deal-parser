@@ -499,6 +499,7 @@ def _audit_then_commit(session: Session, row: AuditLog) -> None:
     """Flush audit row first so a DB failure aborts the caller."""
     session.add(row)
     session.flush()
+    session.commit()
 
 
 def _pii_fingerprint(value: str) -> str:
@@ -548,6 +549,13 @@ def _employee_detail_redirect(user_id: int, flash: str) -> RedirectResponse:
     return RedirectResponse(
         f"/team/admin/employees/{user_id}?{urlencode({'flash': flash})}",
         status_code=303,
+    )
+
+
+def _admin_self_action_redirect(user_id: int, action: str) -> RedirectResponse:
+    return _employee_detail_redirect(
+        user_id,
+        f"You cannot {action} your own admin account.",
     )
 
 
@@ -789,7 +797,6 @@ async def admin_employee_schedulable_toggle(
                 ip_address=(request.client.host if request.client else None),
             ),
         )
-        session.commit()
 
     from urllib.parse import urlencode
 
@@ -983,7 +990,6 @@ async def admin_employee_text_invite(
             ip_address=ip_address,
         ),
     )
-    session.commit()
 
     try:
         phone_plain = _safe_decrypt(profile.phone_enc) or ""
@@ -1573,7 +1579,6 @@ async def admin_employee_pay_rates_post(
                 ip_address=(request.client.host if request.client else None),
             ),
         )
-        session.commit()
 
     from urllib.parse import urlencode
 
@@ -1956,7 +1961,6 @@ async def admin_employee_profile_update(
             ),
 
         )
-        session.commit()
     flash = "Saved."
     if rate_invalid and not salary_invalid and not pay_day_invalid:
         flash = "Saved.+Invalid+hourly+rate+ignored."
@@ -2141,7 +2145,6 @@ async def admin_employee_pii_update(
                 ip_address=(request.client.host if request.client else None),
             ),
         )
-        session.commit()
         return RedirectResponse(
             f"/team/admin/employees/{user_id}?flash=PII+updated+({len(changed)}+field{'s' if len(changed) != 1 else ''}).",
             status_code=303,
@@ -2164,6 +2167,13 @@ async def admin_employee_reset_password(
     denial, current = _admin_gate(request, session, "admin.employees.reset_password")
     if denial:
         return denial
+    if limited := rate_limited_or_429(
+        request,
+        key_prefix=f"admin_reset:{current.id}",
+        max_requests=20,
+        window_seconds=900,
+    ):
+        return limited
     employee = session.get(User, user_id)
     if employee is None:
         return HTMLResponse("Employee not found", status_code=404)
@@ -2197,6 +2207,8 @@ def admin_employee_terminate_page(
     denial, current = _admin_gate(request, session, "admin.employees.terminate")
     if denial:
         return denial
+    if current.id == user_id:
+        return _admin_self_action_redirect(user_id, "terminate")
     employee = session.get(User, user_id)
     if employee is None:
         return HTMLResponse("Employee not found", status_code=404)
@@ -2225,6 +2237,8 @@ async def admin_employee_terminate_post(
     denial, current = _admin_gate(request, session, "admin.employees.terminate")
     if denial:
         return denial
+    if current.id == user_id:
+        return _admin_self_action_redirect(user_id, "terminate")
     employee = session.get(User, user_id)
     if employee is None:
         return HTMLResponse("Employee not found", status_code=404)
@@ -2257,7 +2271,6 @@ async def admin_employee_terminate_post(
             ip_address=(request.client.host if request.client else None),
         ),
     )
-    session.commit()
     return RedirectResponse(
         f"/team/admin/employees/{user_id}?flash=Terminated.", status_code=303
     )
@@ -2497,6 +2510,8 @@ def admin_employee_purge_page(
     denial, current = _admin_gate(request, session, "admin.employees.purge")
     if denial:
         return denial
+    if current.id == user_id:
+        return _admin_self_action_redirect(user_id, "purge")
     employee = session.get(User, user_id)
     if employee is None:
         return HTMLResponse("Employee not found", status_code=404)
@@ -2527,12 +2542,15 @@ async def admin_employee_purge_post(
     denial, current = _admin_gate(request, session, "admin.employees.purge")
     if denial:
         return denial
+    if current.id == user_id:
+        return _admin_self_action_redirect(user_id, "purge")
     employee = session.get(User, user_id)
     if employee is None:
         return HTMLResponse("Employee not found", status_code=404)
-    if (confirm_username or "").strip() != "PURGE":
+    expected_username = employee.username
+    if (confirm_username or "").strip() != expected_username:
         return HTMLResponse(
-            "Confirmation did not match PURGE.",
+            "Confirmation did not match the employee username.",
             status_code=400,
         )
     profile = session.get(EmployeeProfile, user_id)
@@ -2591,7 +2609,6 @@ async def admin_employee_purge_post(
             ip_address=(request.client.host if request.client else None),
         ),
     )
-    session.commit()
     return RedirectResponse(
         f"/team/admin/employees/{user_id}?flash=PII+purged.", status_code=303
     )

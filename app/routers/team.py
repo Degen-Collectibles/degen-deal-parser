@@ -18,6 +18,7 @@ import re
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Optional, Tuple
+from urllib.parse import unquote, urlparse
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -149,12 +150,18 @@ def _safe_next(value: Optional[str]) -> str:
     value = (value or "").strip()
     if not value:
         return ""
-    if value.startswith("\\"):
+    decoded = unquote(value).strip()
+    if decoded.startswith("\\"):
         return ""
-    if value.startswith("/") and not (
-        value.startswith("//") or (len(value) > 1 and value[1] == "\\")
+    parsed = urlparse(decoded)
+    if parsed.netloc or parsed.scheme:
+        return ""
+    if decoded.startswith("/.") or decoded.startswith("/%2e"):
+        return ""
+    if decoded.startswith("/") and not (
+        decoded.startswith("//") or (len(decoded) > 1 and decoded[1] == "\\")
     ):
-        return value
+        return decoded
     return ""
 
 
@@ -734,13 +741,15 @@ def team_dashboard(
         return denial
     widgets = perms.allowed_widgets_for(session, user)
     clockify_ready = clockify_is_configured()
-    supply_queue_count = int(
-        session.exec(
-            select(func.count())
-            .select_from(SupplyRequest)
-            .where(SupplyRequest.status.in_(("pending", "submitted")))
-        ).one()
-    )
+    supply_queue_count = 0
+    if has_permission(session, user, "admin.supply.view"):
+        supply_queue_count = int(
+            session.exec(
+                select(func.count())
+                .select_from(SupplyRequest)
+                .where(SupplyRequest.status.in_(("pending", "submitted")))
+            ).one()
+        )
     today = date.today()
     today_shifts = _today_shifts_for(session, user, today=today)
     upcoming_shifts = _upcoming_shifts_for(session, user, today=today, limit=5)

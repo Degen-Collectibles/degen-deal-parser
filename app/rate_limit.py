@@ -2,44 +2,88 @@ from __future__ import annotations
 
 import ipaddress
 import threading
-import time
-from collections import defaultdict, deque
+from datetime import timedelta
 from typing import Optional
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
+from sqlalchemy import delete, func
+from sqlalchemy.exc import OperationalError
+from sqlmodel import select
 
 from .config import get_settings
+from .models import RateLimitHit, utcnow
 
-_BUCKETS: dict[str, deque[float]] = defaultdict(deque)
-_LOCK = threading.Lock()
+_TABLE_READY = False
+_TABLE_LOCK = threading.Lock()
+
+
+def _ensure_table() -> None:
+    global _TABLE_READY
+    if _TABLE_READY:
+        return
+    with _TABLE_LOCK:
+        if _TABLE_READY:
+            return
+        from .db import engine
+
+        RateLimitHit.__table__.create(engine, checkfirst=True)
+        _TABLE_READY = True
 
 
 def check(key: str, *, max_requests: int, window_seconds: float) -> bool:
-    """Return True if allowed; False if rate-limited. Prunes old timestamps."""
-    now = time.monotonic()
-    cutoff = now - window_seconds
-    with _LOCK:
-        dq = _BUCKETS[key]
-        while dq and dq[0] < cutoff:
-            dq.popleft()
-        # m3: opportunistically prune any other keys whose deques drained to
-        # empty so silent clients don't leak an entry forever. Bounded O(k) on
-        # the outstanding bucket count, which is already small.
-        for stale_key in [k for k, v in _BUCKETS.items() if k != key and not v]:
-            _BUCKETS.pop(stale_key, None)
-        if len(dq) >= max_requests:
-            return False
-        dq.append(now)
-        return True
+    """Return True if allowed; False if rate-limited.
+
+    Hits are stored in the application database so auth-facing limits survive
+    process restarts and multi-worker rotation.
+    """
+    if max_requests <= 0:
+        return False
+    _ensure_table()
+    from .db import managed_session
+
+    now = utcnow()
+    window = timedelta(seconds=max(float(window_seconds), 0.0))
+    cutoff = now - window
+    try:
+        with managed_session() as session:
+            session.exec(delete(RateLimitHit).where(RateLimitHit.expires_at <= now))
+            hits = int(
+                session.exec(
+                    select(func.count())
+                    .select_from(RateLimitHit)
+                    .where(
+                        RateLimitHit.bucket_key == key,
+                        RateLimitHit.created_at >= cutoff,
+                    )
+                ).one()
+            )
+            if hits >= max_requests:
+                session.commit()
+                return False
+            session.add(
+                RateLimitHit(
+                    bucket_key=key,
+                    created_at=now,
+                    expires_at=now + window,
+                )
+            )
+            session.commit()
+            return True
+    except OperationalError:
+        return False
 
 
 def reset(key: Optional[str] = None) -> None:
-    with _LOCK:
-        if key is None:
-            _BUCKETS.clear()
-        else:
-            _BUCKETS.pop(key, None)
+    _ensure_table()
+    from .db import managed_session
+
+    with managed_session() as session:
+        stmt = delete(RateLimitHit)
+        if key is not None:
+            stmt = stmt.where(RateLimitHit.bucket_key == key)
+        session.exec(stmt)
+        session.commit()
 
 
 def _client_ip(request: Request) -> str:

@@ -233,6 +233,14 @@ class RateLimiterTests(unittest.TestCase):
         time.sleep(0.1)
         self.assertTrue(check(key, max_requests=1, window_seconds=0.05))
 
+    def test_limit_survives_module_reload(self):
+        from app import rate_limit
+
+        key = "login:reload"
+        self.assertTrue(rate_limit.check(key, max_requests=1, window_seconds=60))
+        importlib.reload(rate_limit)
+        self.assertFalse(rate_limit.check(key, max_requests=1, window_seconds=60))
+
 
 class SeedDefaultsTests(unittest.TestCase):
     def test_seed_is_idempotent(self):

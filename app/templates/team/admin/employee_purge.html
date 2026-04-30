@@ -9,14 +9,14 @@
         deactivates the account. The AuditLog is retained. This is
         <strong>not reversible</strong>.
     </p>
-    <p style="font-size:13px;">Type <code>PURGE</code> (uppercase) to confirm.</p>
+    <p style="font-size:13px;">Type <code>{{ employee.username }}</code> to confirm.</p>
     <form method="post" action="/team/admin/employees/{{ employee.id }}/purge">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
         <input
             type="text"
             name="confirm_username"
             autocomplete="off"
-            placeholder="PURGE"
+            placeholder="{{ employee.username }}"
             style="padding:8px 10px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text); width:280px;"
         />
         <button class="ta-btn danger" type="submit" style="margin-left:8px;">Purge PII</button>

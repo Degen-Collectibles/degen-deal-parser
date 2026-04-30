@@ -12,6 +12,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
+from sqlalchemy import func
 from sqlmodel import Session
 
 from .. import permissions as perms
@@ -394,6 +395,10 @@ def _pending_password_reset_request_rows(
     return out
 
 
+def _count(session: Session, statement) -> int:
+    return int(session.exec(statement).one())
+
+
 @router.get("/team/admin", response_class=HTMLResponse)
 def team_admin_home(
     request: Request,
@@ -405,76 +410,75 @@ def team_admin_home(
     if not has_permission(session, user, "admin.permissions.view"):
         return RedirectResponse(_first_allowed_admin_href(request), status_code=303)
     now = utcnow()
-    all_users = list(session.exec(select(User)).all())
-    active_users = [row for row in all_users if row.is_active]
-    staff_users = [
-        row for row in active_users if row.role in {"employee", "manager", "viewer"}
-    ]
-    employee_count = len(all_users)
-    active_employee_count = len(staff_users)
-    outstanding_invites = len(
-        list(
-            session.exec(
-                select(InviteToken).where(
-                    InviteToken.used_at.is_(None), InviteToken.expires_at > now
-                )
-            ).all()
-        )
+    staff_roles = ("employee", "manager", "viewer")
+    employee_count = _count(session, select(func.count()).select_from(User))
+    active_employee_count = _count(
+        session,
+        select(func.count())
+        .select_from(User)
+        .where(User.is_active == True, User.role.in_(staff_roles)),  # noqa: E712
     )
-    draft_employee_count = len(
-        [
-            row
-            for row in all_users
-            if not row.is_active and row.username.startswith("__draft_")
-        ]
+    outstanding_invites = _count(
+        session,
+        select(func.count())
+        .select_from(InviteToken)
+        .where(InviteToken.used_at.is_(None), InviteToken.expires_at > now),
     )
-    pending_supply = len(
-        list(
-            session.exec(
-                select(SupplyRequest).where(SupplyRequest.status == "submitted")
-            ).all()
-        )
+    draft_employee_count = _count(
+        session,
+        select(func.count())
+        .select_from(User)
+        .where(
+            User.is_active == False,  # noqa: E712
+            User.username.like(r"\_\_draft\_%", escape="\\"),
+        ),
     )
-    pending_timeoff = len(
-        list(
-            session.exec(
-                select(TimeOffRequest).where(TimeOffRequest.status == "submitted")
-            ).all()
-        )
+    pending_supply = _count(
+        session,
+        select(func.count())
+        .select_from(SupplyRequest)
+        .where(SupplyRequest.status == "submitted"),
     )
-    pending_timecards = len(
-        list(
-            session.exec(
-                select(TimecardApproval).where(TimecardApproval.status == "pending")
-            ).all()
-        )
+    pending_timeoff = _count(
+        session,
+        select(func.count())
+        .select_from(TimeOffRequest)
+        .where(TimeOffRequest.status == "submitted"),
+    )
+    pending_timecards = _count(
+        session,
+        select(func.count())
+        .select_from(TimecardApproval)
+        .where(TimecardApproval.status == "pending"),
     )
     pending_password_resets = len(_pending_password_reset_request_rows(session))
-    active_announcements = len(
-        list(
-            session.exec(
-                select(TeamAnnouncement).where(TeamAnnouncement.is_active == True)  # noqa: E712
-            ).all()
-        )
+    active_announcements = _count(
+        session,
+        select(func.count())
+        .select_from(TeamAnnouncement)
+        .where(TeamAnnouncement.is_active == True),  # noqa: E712
     )
-    profile_rows = {
-        row.user_id: row for row in session.exec(select(EmployeeProfile)).all()
-    }
-    clockify_mapped = sum(
-        1
-        for row in staff_users
-        if (profile_rows.get(row.id).clockify_user_id if row.id in profile_rows else "")
+    clockify_mapped = _count(
+        session,
+        select(func.count())
+        .select_from(EmployeeProfile)
+        .join(User, EmployeeProfile.user_id == User.id)
+        .where(
+            User.is_active == True,  # noqa: E712
+            User.role.in_(staff_roles),
+            EmployeeProfile.clockify_user_id.is_not(None),
+            EmployeeProfile.clockify_user_id != "",
+        )
     )
     clockify_unmapped = max(active_employee_count - clockify_mapped, 0)
     today = now.date()
-    upcoming_shift_count = len(
-        list(
-            session.exec(
-                select(ShiftEntry).where(
-                    ShiftEntry.shift_date >= today,
-                    ShiftEntry.shift_date <= today + timedelta(days=6),
-                )
-            ).all()
+    upcoming_shift_count = _count(
+        session,
+        select(func.count())
+        .select_from(ShiftEntry)
+        .where(
+            ShiftEntry.shift_date >= today,
+            ShiftEntry.shift_date <= today + timedelta(days=6),
         )
     )
     needs_attention_count = (
