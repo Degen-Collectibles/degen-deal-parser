@@ -112,6 +112,7 @@ SQLITE_ADDITIVE_MIGRATIONS = {
         "sheet_name": "TEXT",
     },
     "parseattempt": {
+        "provider_used": "TEXT",
         "input_tokens": "INTEGER",
         "cached_input_tokens": "INTEGER",
         "output_tokens": "INTEGER",
@@ -338,6 +339,7 @@ POSTGRES_ADDITIVE_MIGRATIONS = {
         "sheet_name": "TEXT",
     },
     "parseattempt": {
+        "provider_used": "TEXT",
         "input_tokens": "INTEGER",
         "cached_input_tokens": "INTEGER",
         "output_tokens": "INTEGER",

@@ -196,6 +196,7 @@ class ParseAttempt(SQLModel, table=True):
     success: bool = False
     error: Optional[str] = None
     model_used: Optional[str] = None
+    provider_used: Optional[str] = None
     input_tokens: Optional[int] = None
     cached_input_tokens: Optional[int] = None
     output_tokens: Optional[int] = None

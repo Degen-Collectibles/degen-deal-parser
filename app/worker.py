@@ -40,7 +40,7 @@ from .models import (
     expand_parse_status_filter_values,
     normalize_parse_status,
 )
-from .ai_client import get_model
+from .ai_client import get_model, get_provider
 from .parser import parse_message, TimedOutRowError
 from .reparse_runs import safe_record_reparse_run_outcome
 from .runtime_logging import structured_log_line
@@ -821,6 +821,7 @@ async def process_once():
                     message_id=row.id,
                     attempt_number=row.parse_attempts,
                     model_used=get_model(),
+                    provider_used=get_provider(),
                 )
             )
 
@@ -1238,6 +1239,7 @@ async def process_row(row_id: int):
             learned_rule_event = result.pop("_learned_rule_event", None)
             usage = result.pop("_openai_usage", None) or {}
             model_used = result.pop("_openai_model", None)
+            provider_used = result.pop("_ai_provider", None)
             parse_disagreement = result.pop("_parse_disagreement", None)
             parse_agreement = result.pop("_parse_agreement", False)
             if parse_disagreement:
@@ -1327,6 +1329,7 @@ async def process_row(row_id: int):
                 attempt.error = None
                 attempt.finished_at = utcnow()
                 attempt.model_used = model_used or attempt.model_used
+                attempt.provider_used = provider_used or attempt.provider_used
                 attempt.input_tokens = usage.get("input_tokens")
                 attempt.cached_input_tokens = usage.get("cached_input_tokens")
                 attempt.output_tokens = usage.get("output_tokens")

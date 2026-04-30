@@ -30,6 +30,11 @@ def _provider() -> str:
     return (s.ai_provider or "openai").strip().lower()
 
 
+def get_provider() -> str:
+    """Return the normalized provider name used for AI calls."""
+    return _provider()
+
+
 _DEFAULT_AI_TIMEOUT = 60.0
 
 

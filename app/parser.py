@@ -1,10 +1,10 @@
-import json
 import asyncio
+import json
 import logging
 import re
 from typing import Any, Dict, List
 
-from .ai_client import get_ai_client, get_model, is_nvidia
+from .ai_client import get_ai_client, get_model, get_provider, is_nvidia
 from .config import get_settings
 from .corrections import get_exact_correction_match, get_learned_rule_match, get_relevant_correction_hints
 
@@ -26,17 +26,22 @@ MODEL_PRICING_PER_MILLION = {
         "cached_input": 0.125,
         "output": 10.00,
     },
+    "openai/gpt-5.5": {
+        "input": 1.25,
+        "cached_input": 0.125,
+        "output": 10.00,
+    },
+    "gpt-5.5": {
+        "input": 1.25,
+        "cached_input": 0.125,
+        "output": 10.00,
+    },
     "aws/anthropic/bedrock-claude-opus-4-7": {
         "input": 15.00,
         "cached_input": 1.50,
         "output": 75.00,
     },
     "aws/anthropic/bedrock-claude-opus-4-6": {
-        "input": 15.00,
-        "cached_input": 1.50,
-        "output": 75.00,
-    },
-    "aws/anthropic/bedrock-claude-opus-4-7": {
         "input": 15.00,
         "cached_input": 1.50,
         "output": 75.00,
@@ -72,8 +77,88 @@ def estimate_usage_cost_usd(
     return round(cost, 6)
 
 
+def _get_field(source: Any, *names: str) -> Any:
+    if source is None:
+        return None
+    for name in names:
+        if isinstance(source, dict) and name in source:
+            return source.get(name)
+        value = getattr(source, name, None)
+        if value is not None:
+            return value
+    return None
+
+
+def _to_plain_mapping(source: Any) -> Any:
+    if source is None or isinstance(source, (dict, list, tuple)):
+        return source
+    for method_name in ("model_dump", "to_dict", "dict"):
+        method = getattr(source, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            return method()
+        except TypeError:
+            continue
+    return source
+
+
+def _find_usage_payload(source: Any, *, depth: int = 0) -> Any:
+    if source is None or depth > 4:
+        return None
+    usage = _get_field(source, "usage")
+    if usage is not None:
+        return usage
+    plain = _to_plain_mapping(source)
+    if plain is not source:
+        found = _find_usage_payload(plain, depth=depth + 1)
+        if found is not None:
+            return found
+    if isinstance(plain, dict):
+        for value in plain.values():
+            found = _find_usage_payload(value, depth=depth + 1)
+            if found is not None:
+                return found
+    elif isinstance(plain, (list, tuple)):
+        for value in plain:
+            found = _find_usage_payload(value, depth=depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
+def _coerce_token_count(value: Any) -> int:
+    try:
+        if value is None or value == "":
+            return 0
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _first_token_count(source: Any, *names: str) -> int:
+    for name in names:
+        value = _get_field(source, name)
+        if value is not None:
+            return _coerce_token_count(value)
+    return 0
+
+
+def _nested_token_count(source: Any, *paths: tuple[str, ...]) -> int:
+    for path in paths:
+        current = source
+        for key in path:
+            current = _get_field(current, key)
+            if current is None:
+                break
+        value = _coerce_token_count(current)
+        if value:
+            return value
+    return 0
+
+
 def extract_usage_metrics(response: Any, *, model: str) -> Dict[str, Any]:
-    usage = getattr(response, "usage", None)
+    usage = _find_usage_payload(response)
     if usage is None:
         return {
             "input_tokens": 0,
@@ -83,12 +168,44 @@ def extract_usage_metrics(response: Any, *, model: str) -> Dict[str, Any]:
             "estimated_cost_usd": 0.0,
         }
 
-    input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
-    output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
-    total_tokens = int(getattr(usage, "total_tokens", input_tokens + output_tokens) or (input_tokens + output_tokens))
+    input_tokens = _first_token_count(usage, "input_tokens", "prompt_tokens")
+    output_tokens = _first_token_count(usage, "output_tokens", "completion_tokens")
+    total_tokens = _first_token_count(usage, "total_tokens")
 
-    input_details = getattr(usage, "input_tokens_details", None)
-    cached_input_tokens = int(getattr(input_details, "cached_tokens", 0) or 0) if input_details else 0
+    if not input_tokens:
+        input_tokens = _nested_token_count(
+            usage,
+            ("input", "tokens"),
+            ("prompt", "tokens"),
+            ("input_tokens", "total_tokens"),
+        )
+    if not output_tokens:
+        output_tokens = _nested_token_count(
+            usage,
+            ("output", "tokens"),
+            ("completion", "tokens"),
+            ("output_tokens", "total_tokens"),
+        )
+    if not total_tokens:
+        total_tokens = input_tokens + output_tokens
+    if total_tokens and not input_tokens and not output_tokens:
+        input_tokens = total_tokens
+
+    cached_input_tokens = _first_token_count(
+        usage,
+        "cached_input_tokens",
+        "cache_read_input_tokens",
+    )
+    if not cached_input_tokens:
+        cached_input_tokens = _nested_token_count(
+            usage,
+            ("input_tokens_details", "cached_tokens"),
+            ("prompt_tokens_details", "cached_tokens"),
+            ("input_token_details", "cached_tokens"),
+            ("prompt_token_details", "cached_tokens"),
+            ("input", "cached_tokens"),
+            ("prompt", "cached_tokens"),
+        )
 
     return {
         "input_tokens": input_tokens,
@@ -1506,7 +1623,7 @@ def parse_deal_with_ai(
         parsed=parsed,
         rule_hint=rule_hint,
         channel_name=channel_name,
-    ) | {"_openai_usage": usage_metrics, "_openai_model": MODEL}
+    ) | {"_openai_usage": usage_metrics, "_openai_model": MODEL, "_ai_provider": get_provider()}
 
 
 async def parse_deal_with_ai_async(
