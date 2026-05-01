@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from datetime import datetime, timezone
 from html import unescape
 from types import SimpleNamespace
 
@@ -104,6 +105,26 @@ class AdminSidebarVisibilityTests(unittest.TestCase):
         response = team_dashboard_alias()
         self.assertEqual(response.status_code, 303)
         self.assertEqual(response.headers.get("location"), "/team/")
+
+    def test_portal_today_uses_clockify_business_timezone(self):
+        from app.routers.team import _portal_today
+
+        settings = SimpleNamespace(clockify_timezone="America/Los_Angeles")
+
+        self.assertEqual(
+            _portal_today(
+                settings=settings,
+                now=datetime(2026, 5, 1, 1, 6, tzinfo=timezone.utc),
+            ).isoformat(),
+            "2026-04-30",
+        )
+        self.assertEqual(
+            _portal_today(
+                settings=settings,
+                now=datetime(2026, 5, 1, 8, 1, tzinfo=timezone.utc),
+            ).isoformat(),
+            "2026-05-01",
+        )
 
     def test_admin_sees_all_privileged_sidebar_links(self):
         self._current_user = self._login_as("admin", user_id=101, username="adm")

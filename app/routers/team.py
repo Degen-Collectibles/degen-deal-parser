@@ -725,6 +725,19 @@ def _nav_context(session: Session, user: User) -> dict:
     }
 
 
+def _portal_today(*, settings=None, now: Optional[datetime] = None) -> date:
+    """Return the business-local date used by Clockify/team scheduling.
+
+    The app server runs in UTC, but Degen's staff schedule and Clockify day
+    are Pacific time. Employee-facing "today" widgets must not roll over at
+    5 PM PT just because UTC is already tomorrow.
+    """
+    settings = settings or get_settings()
+    now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    week_start_local, _ = clockify_week_bounds(now_utc.date(), settings=settings)
+    return now_utc.astimezone(week_start_local.tzinfo).date()
+
+
 @router.get("/team/dashboard")
 def team_dashboard_alias():
     # Unauthenticated-safe: this only redirects to /team/, which is auth-gated.
@@ -740,7 +753,8 @@ def team_dashboard(
     if denial:
         return denial
     widgets = perms.allowed_widgets_for(session, user)
-    clockify_ready = clockify_is_configured()
+    settings = get_settings()
+    clockify_ready = clockify_is_configured(settings)
     supply_queue_count = 0
     if has_permission(session, user, "admin.supply.view"):
         supply_queue_count = int(
@@ -750,7 +764,7 @@ def team_dashboard(
                 .where(SupplyRequest.status.in_(("pending", "submitted")))
             ).one()
         )
-    today = date.today()
+    today = _portal_today(settings=settings)
     today_shifts = _today_shifts_for(session, user, today=today)
     upcoming_shifts = _upcoming_shifts_for(session, user, today=today, limit=5)
     next_shift = next(
@@ -836,7 +850,7 @@ def _employee_dashboard_pay_summary(
     *,
     today: Optional[date] = None,
 ) -> dict[str, Any]:
-    today = today or date.today()
+    today = today or _portal_today()
     profile = session.get(EmployeeProfile, user.id)
     clockify_user_id = (profile.clockify_user_id or "").strip() if profile else ""
     base: dict[str, Any] = {
@@ -1528,7 +1542,7 @@ def _today_shifts_for(
     *,
     today: Optional[date] = None,
 ) -> list[dict[str, Any]]:
-    today = today or date.today()
+    today = today or _portal_today()
     shifts = list(
         session.exec(
             select(ShiftEntry)
@@ -1573,7 +1587,7 @@ def _upcoming_shifts_for(
     today: Optional[date] = None,
     limit: int = 5,
 ) -> list[dict[str, Any]]:
-    today = today or date.today()
+    today = today or _portal_today()
     shifts = list(
         session.exec(
             select(ShiftEntry)
@@ -1624,7 +1638,7 @@ def _today_staffing_for(
     *,
     today: Optional[date] = None,
 ) -> list[dict[str, Any]]:
-    today = today or date.today()
+    today = today or _portal_today()
     shifts = list(
         session.exec(
             select(ShiftEntry)
@@ -2042,7 +2056,7 @@ def team_hours(
         try:
             clockify_summary = clockify_client_from_settings(settings).user_week_summary(
                 clockify_user_id,
-                today=date.today(),
+                today=_portal_today(settings=settings),
                 settings=settings,
             )
         except (ClockifyApiError, ClockifyConfigError) as exc:
@@ -2079,7 +2093,6 @@ def team_schedule(
     # same visual — no translation layer, no "my shifts" fork. Everyone
     # sees the published grid the same way; only the top-level wrapper
     # differs (admin has inputs, employee has static cells).
-    from datetime import date as _date
     from .team_admin_schedule import (
         _build_cell_key,
         _build_day_loc_key,
@@ -2115,7 +2128,7 @@ def team_schedule(
             "next_week": storefront_ctx["next_week"],
             "this_week": storefront_ctx["this_week"],
             "is_current_week": storefront_ctx["is_current_week"],
-            "today": _date.today(),
+            "today": _portal_today(),
             **_nav_context(session, user),
         },
     )
