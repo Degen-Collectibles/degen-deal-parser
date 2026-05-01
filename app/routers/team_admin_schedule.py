@@ -25,6 +25,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlmodel import Session, select
 
 from ..auth import has_permission
+from ..clockify import clockify_today
 from ..csrf import issue_token, require_csrf
 from ..db import get_session
 from ..models import (
@@ -67,7 +68,7 @@ def _parse_week_start(raw: Optional[str]) -> date:
             return _monday_of(datetime.strptime(raw, "%Y-%m-%d").date())
         except ValueError:
             pass
-    return _monday_of(date.today())
+    return _monday_of(clockify_today())
 
 
 def _week_dates(start_monday: date) -> list[date]:
@@ -591,7 +592,7 @@ def _grid_context(
     prev_week_date = week_start - timedelta(days=7)
     prev_week = prev_week_date.isoformat()
     next_week = (week_start + timedelta(days=7)).isoformat()
-    this_week = _monday_of(date.today()).isoformat()
+    this_week = _monday_of(clockify_today()).isoformat()
 
     # Is there a previous-week roster we could copy in one click?
     # When a staff_kind filter is active, only count users of that
@@ -704,7 +705,7 @@ def _grid_context(
         "next_week": next_week,
         "this_week": this_week,
         "prev_roster_count": prev_roster_count,
-        "is_current_week": week_start == _monday_of(date.today()),
+        "is_current_week": week_start == _monday_of(clockify_today()),
         "staff_kind": staff_kind or "",
         "flash": flash,
         "user_hours": user_hours,
@@ -753,7 +754,7 @@ def _stream_grid_context(
 
     prev_week = (week_start - timedelta(days=7)).isoformat()
     next_week = (week_start + timedelta(days=7)).isoformat()
-    this_week = _monday_of(date.today()).isoformat()
+    this_week = _monday_of(clockify_today()).isoformat()
 
     closure_map = _closure_map_for_range(session, week_days[0], week_days[-1])
 
@@ -776,7 +777,7 @@ def _stream_grid_context(
         "next_week": next_week,
         "this_week": this_week,
         "prev_roster_count": 0,
-        "is_current_week": week_start == _monday_of(date.today()),
+        "is_current_week": week_start == _monday_of(clockify_today()),
         "staff_kind": STAFF_KIND_STREAM,
         "flash": flash,
         # Stream grid is a mirror of StreamSchedule, not tracked as
@@ -896,7 +897,7 @@ def admin_schedule_view(
     holiday_options: list[dict] = []
     custom_closures: list[StoreClosure] = []
     if edit_mode:
-        today = date.today()
+        today = clockify_today()
         first_year = min(today.year, week_start.year)
         years_to_show = [first_year, first_year + 1]
         # All existing closures across both modal years — used to
@@ -961,7 +962,7 @@ def admin_schedule_view(
             "next_week": storefront_ctx["next_week"],
             "this_week": storefront_ctx["this_week"],
             "is_current_week": storefront_ctx["is_current_week"],
-            "today": date.today(),
+            "today": clockify_today(),
             "flash": flash,
         },
     )

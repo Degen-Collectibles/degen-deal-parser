@@ -32,6 +32,7 @@ from dataclasses import asdict
 from pathlib import Path
 from threading import Lock
 from typing import Any, AsyncIterator, Optional
+from zoneinfo import ZoneInfo
 
 from .card_detect import detect_and_crop
 from .config import get_settings
@@ -94,7 +95,9 @@ def _save_v2_history(result: dict) -> None:
     ef = result.get("extracted_fields") or {}
     dbg = result.get("debug") or {}
     entry = {
-        "timestamp": _dt.datetime.now().isoformat(timespec="seconds"),
+        "timestamp": _dt.datetime.now(ZoneInfo("America/Los_Angeles")).isoformat(
+            timespec="seconds"
+        ),
         "status": result.get("status"),
         "best_match_name": bm.get("name"),
         "best_match_number": bm.get("number"),

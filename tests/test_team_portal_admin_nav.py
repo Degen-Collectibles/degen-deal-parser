@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import os
 import unittest
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from html import unescape
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from cryptography.fernet import Fernet
 from sqlalchemy.pool import StaticPool
@@ -125,6 +126,32 @@ class AdminSidebarVisibilityTests(unittest.TestCase):
             ).isoformat(),
             "2026-05-01",
         )
+
+    def test_clockify_today_uses_configured_business_timezone(self):
+        from app.clockify import clockify_today
+
+        settings = SimpleNamespace(clockify_timezone="America/Los_Angeles")
+
+        self.assertEqual(
+            clockify_today(
+                settings=settings,
+                now=datetime(2026, 5, 1, 1, 6, tzinfo=timezone.utc),
+            ),
+            date(2026, 4, 30),
+        )
+
+    def test_schedule_default_week_uses_business_timezone_today(self):
+        from app.routers import team_admin_schedule
+
+        with patch.object(
+            team_admin_schedule,
+            "clockify_today",
+            return_value=date(2026, 4, 30),
+        ):
+            self.assertEqual(
+                team_admin_schedule._parse_week_start(None),
+                date(2026, 4, 27),
+            )
 
     def test_admin_sees_all_privileged_sidebar_links(self):
         self._current_user = self._login_as("admin", user_id=101, username="adm")

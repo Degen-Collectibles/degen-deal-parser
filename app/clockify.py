@@ -88,14 +88,24 @@ def _clockify_timezone_name(settings: Optional[Settings] = None) -> str:
     return str(tz.key)
 
 
+def clockify_today(
+    *,
+    settings: Optional[Settings] = None,
+    now: Optional[datetime] = None,
+) -> date:
+    """Return today's date in the configured business/Clockify timezone."""
+    now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    return now_utc.astimezone(_clockify_timezone(settings)).date()
+
+
 def clockify_week_bounds(
     day: Optional[date] = None,
     *,
     settings: Optional[Settings] = None,
 ) -> tuple[datetime, datetime]:
     """Return Monday-to-Monday local week bounds converted to aware datetimes."""
-    day = day or date.today()
     tz = _clockify_timezone(settings)
+    day = day or clockify_today(settings=settings)
     week_start = day - timedelta(days=day.weekday())
     start_local = datetime.combine(week_start, time.min, tzinfo=tz)
     end_local = start_local + timedelta(days=7)

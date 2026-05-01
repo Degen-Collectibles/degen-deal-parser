@@ -10,6 +10,7 @@ import os
 import unittest
 from datetime import date, timedelta
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from cryptography.fernet import Fernet
 from sqlalchemy import update
@@ -226,13 +227,32 @@ class TeamTimeOffTests(unittest.TestCase):
 
     def test_submit_rejects_past_start(self):
         from app.models import TimeOffRequest
+        from app.routers import team_timeoff
 
         user = self._seed_user(3)
-        start = date.today() - timedelta(days=1)
+        business_today = date(2026, 4, 30)
+        start = business_today - timedelta(days=1)
 
-        self._submit(user, start=start, end=date.today() + timedelta(days=1))
+        with patch.object(team_timeoff, "clockify_today", return_value=business_today):
+            self._submit(user, start=start, end=business_today + timedelta(days=1))
 
         self.assertEqual(self.session.exec(select(TimeOffRequest)).all(), [])
+
+    def test_submit_past_check_uses_business_timezone_today(self):
+        from app.models import TimeOffRequest
+        from app.routers import team_timeoff
+
+        user = self._seed_user(30)
+        business_today = date(2026, 4, 30)
+
+        with patch.object(team_timeoff, "clockify_today", return_value=business_today):
+            response = self._submit(user, start=business_today, end=business_today)
+
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(
+            self.session.exec(select(TimeOffRequest)).one().start_date,
+            business_today,
+        )
 
     def test_submit_rejects_range_too_long(self):
         from app.models import TimeOffRequest

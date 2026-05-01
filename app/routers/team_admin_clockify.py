@@ -28,6 +28,7 @@ from ..clockify import (
     ClockifyWeekSummary,
     build_week_summary,
     clockify_week_bounds,
+    clockify_today,
     clockify_client_from_settings,
     clockify_is_configured,
     format_hours,
@@ -383,7 +384,7 @@ def build_clockify_roster_preview(
 ) -> list[dict[str, Any]]:
     """Build admin-safe rows for Clockify people and optional hour previews."""
     rows: list[dict[str, Any]] = []
-    today = today or date.today()
+    today = today or clockify_today(settings=settings)
     for row in clockify_users[: max(0, limit)]:
         clockify_id = _clockify_user_id(row)
         preview = {
@@ -422,7 +423,7 @@ def _clockify_day_bounds(
     *,
     settings=None,
 ) -> tuple[datetime, datetime]:
-    day = today or date.today()
+    day = today or clockify_today(settings=settings)
     week_start_local, _week_end_local = clockify_week_bounds(day, settings=settings)
     day_offset = (day - week_start_local.date()).days
     start_local = week_start_local + timedelta(days=day_offset)
@@ -430,9 +431,7 @@ def _clockify_day_bounds(
 
 
 def _clockify_today(*, settings=None, now: Optional[datetime] = None) -> date:
-    now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    week_start_local, _ = clockify_week_bounds(now_utc.date(), settings=settings)
-    return now_utc.astimezone(week_start_local.tzinfo).date()
+    return clockify_today(settings=settings, now=now)
 
 
 def _format_clockify_time(value: Optional[datetime]) -> str:
@@ -1126,9 +1125,10 @@ def build_shift_tracker_pay_summary(
     *,
     employee_rows: Optional[list[dict[str, Any]]] = None,
     today: Optional[date] = None,
+    settings=None,
 ) -> dict[str, Any]:
     """Attach pay data to cached Clockify rows and build today's labor total."""
-    day = today or date.today()
+    day = today or clockify_today(settings=settings)
     employees = employee_rows if employee_rows is not None else _employee_rows(session)
     salary_today_cents = 0
     hourly_today_cents = 0
@@ -1359,8 +1359,9 @@ def _labor_stats_window(
     start: Optional[str] = None,
     end: Optional[str] = None,
     today: Optional[date] = None,
+    settings=None,
 ) -> dict[str, Any]:
-    today = today or date.today()
+    today = today or clockify_today(settings=settings)
     key = (range_key or _LABOR_STATS_DEFAULT_RANGE).strip().lower()
     preset_keys = {row["key"] for row in _LABOR_STATS_PRESETS}
     if key not in preset_keys:
@@ -2026,7 +2027,7 @@ def build_labor_stats_summary(
     include_financials: bool = True,
     now: Optional[datetime] = None,
 ) -> dict[str, Any]:
-    today = (now.astimezone(timezone.utc).date() if now else date.today())
+    today = _clockify_today(settings=settings, now=now)
     selected = _labor_stats_core(
         session,
         start_day=start_day,
@@ -2436,7 +2437,7 @@ def build_timecard_exceptions(
     now: Optional[datetime] = None,
 ) -> dict[str, Any]:
     week_end = week_start + timedelta(days=6)
-    today = (now.astimezone(timezone.utc).date() if now else date.today())
+    today = _clockify_today(settings=settings, now=now)
     employees = _employee_rows(session, include_inactive=include_inactive)
     users_by_id: dict[int, User] = {}
     profiles_by_id: dict[int, EmployeeProfile] = {}
@@ -3151,6 +3152,7 @@ def admin_shift_tracker_page(
             session,
             live,
             employee_rows=employees,
+            settings=settings,
         )
         if can_view_labor_financials
         else _build_shift_tracker_operational_summary(live)
@@ -3245,7 +3247,7 @@ def admin_labor_stats_page(
         "admin.labor_financials.view",
     )
     include_inactive = _parse_boolish(show_inactive, default=True)
-    window = _labor_stats_window(range_key, start=start, end=end)
+    window = _labor_stats_window(range_key, start=start, end=end, settings=settings)
     employees = _employee_rows(session, include_inactive=include_inactive)
     stats = build_labor_stats_summary(
         session,
@@ -3296,7 +3298,7 @@ async def admin_labor_stats_refresh(
         return denial
     settings = get_settings()
     include_inactive = _parse_boolish(show_inactive, default=True)
-    window = _labor_stats_window(range_key, start=start, end=end)
+    window = _labor_stats_window(range_key, start=start, end=end, settings=settings)
     qs_base = {
         "range": window["range_key"],
         "start": window["start_value"],
@@ -3363,7 +3365,7 @@ def admin_payroll_page(
         return denial
     settings = get_settings()
     include_inactive = _parse_boolish(show_inactive, default=True)
-    window = _labor_stats_window(range_key, start=start, end=end)
+    window = _labor_stats_window(range_key, start=start, end=end, settings=settings)
     payroll = build_payroll_export_summary(
         session,
         start_day=window["start_day"],
@@ -3404,7 +3406,7 @@ def admin_payroll_export_csv(
         return denial
     settings = get_settings()
     include_inactive = _parse_boolish(show_inactive, default=True)
-    window = _labor_stats_window(range_key, start=start, end=end)
+    window = _labor_stats_window(range_key, start=start, end=end, settings=settings)
     payroll = build_payroll_export_summary(
         session,
         start_day=window["start_day"],
@@ -3440,7 +3442,7 @@ async def admin_payroll_lock(
         return denial
     settings = get_settings()
     include_inactive = _parse_boolish(show_inactive, default=True)
-    window = _labor_stats_window(range_key, start=start, end=end)
+    window = _labor_stats_window(range_key, start=start, end=end, settings=settings)
     result = lock_payroll_window(
         session,
         current_user=user,
@@ -3483,8 +3485,12 @@ def admin_exceptions_page(
         user,
         "admin.labor_financials.view",
     )
-    today = date.today()
-    week_start = _labor_stats_window("custom", start=week, end=week)["start_day"] if week else today - timedelta(days=today.weekday())
+    today = clockify_today(settings=settings)
+    week_start = (
+        _labor_stats_window("custom", start=week, end=week, settings=settings)["start_day"]
+        if week
+        else today - timedelta(days=today.weekday())
+    )
     week_start = week_start - timedelta(days=week_start.weekday())
     exceptions = build_timecard_exceptions(
         session,

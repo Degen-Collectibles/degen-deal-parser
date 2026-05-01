@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlmodel import Session, select
 
+from ..clockify import clockify_today
 from ..csrf import issue_token, require_csrf
 from ..db import get_session
 from ..models import AuditLog, TimeOffRequest
@@ -72,7 +73,7 @@ def team_timeoff(
             "requests": list(rows),
             "flash": flash,
             "error": error,
-            "today": date.today().isoformat(),
+            "today": clockify_today().isoformat(),
             "csrf_token": issue_token(request),
             **_nav_context(session, user),
         },
@@ -107,7 +108,7 @@ async def team_timeoff_post(
         return _timeoff_redirect("Start and end dates must be valid.", error=True)
     if parsed_start > parsed_end:
         return _timeoff_redirect("End date must be on or after start date.", error=True)
-    if parsed_start < date.today():
+    if parsed_start < clockify_today():
         return _timeoff_redirect("Start date cannot be in the past.", error=True)
     if (parsed_end - parsed_start).days > 90:
         return _timeoff_redirect("Time-off requests cannot span more than 90 days.", error=True)

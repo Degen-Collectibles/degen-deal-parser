@@ -20,6 +20,8 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field, asdict
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Any, Optional
 
 import httpx
@@ -3895,9 +3897,10 @@ def get_validation_result(scan_id: str, ack: bool = False) -> dict | None:
 
 def _save_to_history(result: dict) -> None:
     """Save a scan result to the in-memory history ring buffer."""
-    import datetime
     entry = {
-        "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+        "timestamp": datetime.now(ZoneInfo("America/Los_Angeles")).isoformat(
+            timespec="seconds"
+        ),
         "status": result.get("status"),
         "best_match_name": (result.get("best_match") or {}).get("name"),
         "best_match_number": (result.get("best_match") or {}).get("number"),

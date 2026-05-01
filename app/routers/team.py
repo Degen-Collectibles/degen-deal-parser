@@ -725,6 +725,14 @@ def _nav_context(session: Session, user: User) -> dict:
     }
 
 
+def _portal_now(*, settings=None, now: Optional[datetime] = None) -> datetime:
+    """Return the current time in the configured business/Clockify timezone."""
+    settings = settings or get_settings()
+    now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    week_start_local, _ = clockify_week_bounds(now_utc.date(), settings=settings)
+    return now_utc.astimezone(week_start_local.tzinfo)
+
+
 def _portal_today(*, settings=None, now: Optional[datetime] = None) -> date:
     """Return the business-local date used by Clockify/team scheduling.
 
@@ -732,10 +740,7 @@ def _portal_today(*, settings=None, now: Optional[datetime] = None) -> date:
     are Pacific time. Employee-facing "today" widgets must not roll over at
     5 PM PT just because UTC is already tomorrow.
     """
-    settings = settings or get_settings()
-    now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    week_start_local, _ = clockify_week_bounds(now_utc.date(), settings=settings)
-    return now_utc.astimezone(week_start_local.tzinfo).date()
+    return _portal_now(settings=settings, now=now).date()
 
 
 @router.get("/team/dashboard")
@@ -805,7 +810,7 @@ def team_dashboard(
                 schedule_href=nav_ctx["schedule_href"],
             ),
             "today_date": today,
-            "now_hour": utcnow().hour,
+            "now_hour": _portal_now(settings=settings).hour,
             "csrf_token": issue_token(request),
             **nav_ctx,
         },

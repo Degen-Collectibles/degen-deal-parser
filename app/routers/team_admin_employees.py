@@ -21,6 +21,7 @@ from sqlalchemy import or_, update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
+from ..clockify import clockify_today
 from ..auth import (
     create_draft_employee,
     generate_invite_token,
@@ -620,9 +621,9 @@ def _detail_context(
         "monthly_salary_value": _format_money_dollars(monthly_salary_cents),
         "monthly_salary_pay_day_value": profile.monthly_salary_pay_day or "",
         "monthly_salary_pay_date_label": _format_date_label(
-            _next_monthly_pay_date(utcnow().date(), profile.monthly_salary_pay_day)
+            _next_monthly_pay_date(clockify_today(), profile.monthly_salary_pay_day)
         ),
-        "today_iso": utcnow().date().isoformat(),
+        "today_iso": clockify_today().isoformat(),
         "payment_methods": PAYMENT_METHODS,
         "payment_method_labels": PAYMENT_METHOD_LABELS,
         "reveal_field": None,
@@ -1156,7 +1157,7 @@ def _pay_rate_rows(session: Session, *, include_inactive: bool = False) -> list[
                 "has_salary": salary_cents is not None,
                 "monthly_pay_day": pay_day or "",
                 "monthly_pay_date_label": _format_date_label(
-                    _next_monthly_pay_date(utcnow().date(), pay_day)
+                    _next_monthly_pay_date(clockify_today(), pay_day)
                 ),
                 "payment_method": payment_method,
             }
@@ -1215,7 +1216,7 @@ def _cents_for_minutes(minutes: int, rate_cents: int) -> int:
 
 
 def _payroll_cost_summary(session: Session, *, today: Optional[date] = None) -> dict:
-    today = today or utcnow().date()
+    today = today or clockify_today()
     week_start = today - timedelta(days=today.weekday())
     month_start = today.replace(day=1)
     periods = {
@@ -1380,7 +1381,7 @@ def admin_employee_pay_rates_page(
             "compensation_type_labels": COMPENSATION_TYPE_LABELS,
             "payment_methods": PAYMENT_METHODS,
             "payment_method_labels": PAYMENT_METHOD_LABELS,
-            "today_iso": utcnow().date().isoformat(),
+            "today_iso": clockify_today().isoformat(),
             "show_inactive": include_inactive,
             "flash": flash,
             "error": error,
