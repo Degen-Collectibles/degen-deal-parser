@@ -514,6 +514,81 @@ class ClockifyAdminSyncTests(unittest.TestCase):
         self.assertIn("Clockify people and data access", html)
         self.assertIn("Clock One", html)
         self.assertIn("3h", html)
+        self.assertIn('action="/team/admin/clockify/manual-link"', html)
+        self.assertIn(">Save</button>", html)
+
+    def test_clockify_manager_template_hides_mapping_save_controls(self):
+        from types import SimpleNamespace
+
+        from app.models import EmployeeProfile, User
+        from app.shared import templates
+
+        employee = User(
+            id=7,
+            username="manager-view-user",
+            display_name="Manager View User",
+            password_hash="x",
+            password_salt="x",
+            role="employee",
+            is_active=True,
+        )
+        profile = EmployeeProfile(user_id=employee.id, clockify_user_id="clock-1")
+        html = templates.env.get_template("team/admin/clockify.html").render(
+            {
+                "request": SimpleNamespace(
+                    state=SimpleNamespace(),
+                    url=SimpleNamespace(path="/team/admin/clockify"),
+                ),
+                "title": "Clockify",
+                "current_user": SimpleNamespace(role="manager"),
+                "configured": True,
+                "workspace": {"name": "Degen Collectibles"},
+                "workspace_id_masked": "68a3...34d5",
+                "status_error": None,
+                "clockify_users": [
+                    {
+                        "id": "clock-1",
+                        "name": "Clock One",
+                        "email": "clock1@example.com",
+                    }
+                ],
+                "clockify_user_map": {
+                    "clock-1": {
+                        "id": "clock-1",
+                        "name": "Clock One",
+                        "email": "clock1@example.com",
+                    }
+                },
+                "roster_preview": [],
+                "preview_capped": False,
+                "include_hours": False,
+                "employees": [
+                    {
+                        "user": employee,
+                        "profile": profile,
+                        "clockify_user_id": "clock-1",
+                    }
+                ],
+                "linked_by_clockify": {"clock-1": employee},
+                "counts": {
+                    "active_profiles": 1,
+                    "mapped": 1,
+                    "unmapped": 0,
+                    "with_email": 0,
+                },
+                "can_sync": False,
+                "can_edit_employee_links": False,
+                "mask_id": lambda value: value,
+                "flash": None,
+                "error": None,
+                "csrf_token": "token",
+            }
+        )
+
+        self.assertIn("an admin must update Clockify mappings", html)
+        self.assertIn("Admin required to change this mapping.", html)
+        self.assertNotIn('action="/team/admin/clockify/manual-link"', html)
+        self.assertNotIn(">Save</button>", html)
 
 
 if __name__ == "__main__":

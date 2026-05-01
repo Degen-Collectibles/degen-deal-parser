@@ -458,6 +458,17 @@ class TeamAnnouncementTests(unittest.TestCase):
 
         self.assertIn('href="/team/admin/announcements"', html)
 
+    def test_publish_form_shows_scope_and_confirm_guard(self):
+        admin = self._seed_user(18, role="admin", username="admin18")
+
+        html = self._admin_announcements_html(admin)
+
+        self.assertIn("Active team members who can view announcements", html)
+        self.assertIn("Publishing also sends portal notifications", html)
+        self.assertIn('data-recipient-scope="active team members"', html)
+        self.assertIn("window.confirm", html)
+        self.assertIn('Publish "', html)
+
 
 if __name__ == "__main__":
     unittest.main()

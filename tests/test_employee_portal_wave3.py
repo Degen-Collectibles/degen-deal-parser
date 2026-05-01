@@ -673,6 +673,17 @@ class SupplyAndPoliciesTests(unittest.TestCase, _PortalHarness):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].title, "printer ink")
 
+    def test_supply_page_explains_manager_review_and_no_auto_order(self):
+        self._seed_employee(user_id=43, username="emp_supply_help")
+
+        page = self.client.get("/team/supply")
+
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("What happens next:", page.text)
+        self.assertIn("manager supply queue", page.text)
+        self.assertIn("does not place an order by itself", page.text)
+        self.assertIn("approve, deny, or mark it ordered", page.text)
+
     def test_policy_acknowledge_writes_audit_log(self):
         uid = self._seed_employee(user_id=42, username="emp_p")
         csrf = self._csrf()

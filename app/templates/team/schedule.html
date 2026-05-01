@@ -12,6 +12,7 @@
         border: 1px solid var(--pt-border);
         border-radius: 12px;
         padding: 10px;
+        -webkit-overflow-scrolling: touch;
     }
     .sch-table {
         border-collapse: collapse;
@@ -153,9 +154,22 @@
     .sch-toolbar { display: flex; justify-content: space-between; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
     .sch-week-btns { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
     .sch-wk-label { font-size: 14px; font-weight: 600; margin: 0 10px; }
-    .sch-legend { display: flex; flex-wrap: wrap; gap: 8px 14px; font-size: 11.5px; color: var(--pt-muted); margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--pt-border); }
+    .sch-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 14px;
+        align-items: center;
+        font-size: 11.5px;
+        color: var(--pt-muted);
+        margin: 0 0 14px;
+        padding: 10px 12px;
+        border: 1px solid var(--pt-border);
+        border-radius: 10px;
+        background: var(--pt-card);
+    }
     .sch-legend-chip { display: inline-flex; align-items: center; gap: 4px; }
     .sch-legend-sw { display: inline-block; width: 14px; height: 14px; border-radius: 3px; border: 1px solid var(--pt-border); }
+    .sch-scroll-hint { display: none; }
     .sch-grid-title { margin: 24px 0 10px; font-size: 15px; font-weight: 700; color: var(--pt-text); display:flex; align-items:center; gap:10px; flex-wrap: wrap; }
     .sch-kind-chip { font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 500; }
     .sch-kind-chip.is-storefront { background: rgba(251,146,60,0.18); color: #fdba74; }
@@ -191,10 +205,26 @@
     /* Mobile legibility: sticky name column, smaller cells. Read-only
        view so no save bar needed. */
     @media (max-width: 600px) {
+        main.pt-main { padding-bottom: calc(112px + env(safe-area-inset-bottom, 0px)); }
         .sch-table { min-width: 760px; font-size: 11.5px; }
         .sch-cell { min-width: 84px; height: 48px; padding: 2px; }
         .sch-cell .sch-block { padding: 2px 4px; font-size: 11.5px; }
         .sch-block-note { font-size: 9.5px; }
+        .sch-wrap {
+            box-shadow: inset -18px 0 18px -18px rgba(255,255,255,0.45);
+            scrollbar-color: #ff8a3d rgba(148,163,184,0.18);
+        }
+        .sch-scroll-hint {
+            display: block;
+            margin: -2px 0 8px;
+            color: var(--pt-muted);
+            font-size: 12px;
+        }
+        .sch-head-row th {
+            position: sticky;
+            top: 0;
+            z-index: 1;
+        }
         .sch-name-col {
             width: 108px;
             padding: 6px 8px;
@@ -206,7 +236,7 @@
         .sch-loc-row th:first-child {
             position: sticky;
             left: 0;
-            z-index: 3;
+            z-index: 4;
             background: var(--pt-soft);
         }
         .sch-foot-row td.sch-foot-label { position: sticky; left: 0; z-index: 2; }
@@ -244,6 +274,7 @@
 </div>
 {% endif %}
 
+<div class="sch-scroll-hint">Swipe sideways to see all days and totals.</div>
 <div class="sch-wrap">
     <table class="sch-table">
         <thead>
@@ -393,12 +424,8 @@
     </div>
 </div>
 
-{{ render_grid(storefront, 'Storefront', 'storefront', True) }}
-
-{{ render_grid(stream, 'Stream', 'stream', False) }}
-
 <div class="sch-legend">
-    <strong style="color:var(--pt-text);">Storefront colors:</strong>
+    <strong style="color:var(--pt-text);">Status colors:</strong>
     <span class="sch-legend-chip"><span class="sch-legend-sw" style="background:#86efac;"></span> Scheduled shift</span>
     <span class="sch-legend-chip"><span class="sch-legend-sw" style="background:#a8a29e;"></span> OFF</span>
     <span class="sch-legend-chip"><span class="sch-legend-sw" style="background:#60a5fa;"></span> SHOW</span>
@@ -406,7 +433,11 @@
     <span class="sch-legend-chip"><span class="sch-legend-sw" style="background:#bbf7d0;"></span> Stream / IF NEEDED</span>
 </div>
 
-<p style="font-size:12px; color:var(--pt-muted); margin-top:14px;">
+<p style="font-size:12px; color:var(--pt-muted); margin:-4px 0 14px;">
     Your row is outlined in orange so you can spot yourself fast. If a cell looks wrong, message your manager — the schedule is the source of truth.
 </p>
+
+{{ render_grid(storefront, 'Storefront', 'storefront', True) }}
+
+{{ render_grid(stream, 'Stream', 'stream', False) }}
 {% endblock %}

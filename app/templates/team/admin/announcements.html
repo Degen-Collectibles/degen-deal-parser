@@ -7,7 +7,11 @@
 {% if can_create %}
 <div class="ta-card">
     <h2>Post announcement</h2>
-    <form id="announcement-form" method="post" action="/team/admin/announcements" style="display:grid; gap:14px;">
+    <div style="margin:0 0 14px; padding:10px 12px; border:1px solid var(--lx-br); border-radius:10px; background:var(--lx-s2); color:var(--lx-muted); font-size:13px; line-height:1.45;">
+        <strong style="color:var(--lx-text);">Recipients:</strong>
+        Active team members who can view announcements. Publishing also sends portal notifications.
+    </div>
+    <form id="announcement-form" method="post" action="/team/admin/announcements" data-recipient-scope="active team members" style="display:grid; gap:14px;">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
         <input type="hidden" name="tz_offset_minutes" id="tz-offset-minutes">
         <label style="display:grid; gap:6px; font-size:12px; color:var(--lx-muted);">
@@ -91,9 +95,15 @@
   (function() {
     var form = document.getElementById('announcement-form');
     if (!form) return;
-    form.addEventListener('submit', function() {
+    form.addEventListener('submit', function(event) {
       var off = document.getElementById('tz-offset-minutes');
       if (off) off.value = String(new Date().getTimezoneOffset());
+      var titleInput = form.querySelector('[name="title"]');
+      var title = titleInput && titleInput.value.trim() ? titleInput.value.trim() : 'this announcement';
+      var scope = form.getAttribute('data-recipient-scope') || 'active team members';
+      if (!window.confirm('Publish "' + title + '" to ' + scope + '?')) {
+        event.preventDefault();
+      }
     });
   })();
 </script>

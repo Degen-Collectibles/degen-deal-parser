@@ -192,6 +192,25 @@ class TeamTimeOffTests(unittest.TestCase):
         }
         return templates.env.get_template("team/dashboard.html").render(context)
 
+    def _timeoff_html(self, user) -> str:
+        from app.routers.team import _nav_context
+        from app.shared import templates
+
+        request = _FakeRequest(user, path="/team/timeoff")
+        context = {
+            "request": request,
+            "title": "Time off",
+            "active": "time-off",
+            "current_user": user,
+            "requests": [],
+            "today": date.today().isoformat(),
+            "flash": None,
+            "error": None,
+            "csrf_token": "test-token",
+            **_nav_context(self.session, user),
+        }
+        return templates.env.get_template("team/timeoff.html").render(context)
+
     def test_submit_valid_request(self):
         from app.models import AuditLog, TimeOffRequest
 
@@ -212,6 +231,15 @@ class TeamTimeOffTests(unittest.TestCase):
             select(AuditLog).where(AuditLog.action == "timeoff.submitted")
         ).one()
         self.assertEqual(audit.actor_user_id, user.id)
+
+    def test_timeoff_form_explains_manager_review_flow(self):
+        user = self._seed_user(20, username="emp_timeoff_help")
+
+        html = self._timeoff_html(user)
+
+        self.assertIn("What happens next:", html)
+        self.assertIn("Managers review requests", html)
+        self.assertIn("pending until a manager approves or denies it", html)
 
     def test_submit_rejects_end_before_start(self):
         from app.models import TimeOffRequest

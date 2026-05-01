@@ -19,6 +19,7 @@ import threading
 import time
 import unittest
 from datetime import date, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -773,6 +774,27 @@ class ScheduleMobileSummaryRenderTests(unittest.TestCase):
         self.assertIn("sch-total-head", html)
         self.assertIn("sch-total-col", html)
         self.assertIn("Daily hours", html)
+
+    def test_admin_schedule_legend_and_mobile_affordances_render_before_grid(self):
+        html = self._render_direct()
+
+        self.assertLess(
+            html.index("Status colors:"),
+            html.index('form method="post" action="/team/admin/schedule" data-schgrid="storefront"'),
+        )
+        self.assertIn("Swipe sideways to see all days and totals.", html)
+        self.assertIn("padding-bottom: calc(120px", html)
+        self.assertIn("scrollbar-color: #ff8a3d", html)
+
+    def test_employee_schedule_template_moves_legend_above_first_grid(self):
+        source = Path("app/templates/team/schedule.html").read_text()
+
+        self.assertLess(
+            source.index('<div class="sch-legend">'),
+            source.index("{{ render_grid(storefront"),
+        )
+        self.assertIn("Swipe sideways to see all days and totals.", source)
+        self.assertIn("padding-bottom: calc(112px", source)
 
 
 if __name__ == "__main__":

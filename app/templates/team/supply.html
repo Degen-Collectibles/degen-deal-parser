@@ -4,9 +4,13 @@
 {% endblock %}
 {% block content %}
 <div class="pt-two-col alt-wide">
-  <div>
+    <div>
     <div class="pt-card">
         <h2>New request</h2>
+        <div style="margin:0 0 14px; padding:10px 12px; border:1px solid var(--pt-border); border-radius:10px; background:var(--pt-card); color:var(--pt-muted); font-size:13px; line-height:1.45;">
+            <strong style="color:var(--pt-text);">What happens next:</strong>
+            Requests go to the manager supply queue for review. Submitting this does not place an order by itself; a manager decides whether to approve, deny, or mark it ordered.
+        </div>
         <form method="post" action="/team/supply">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <div class="pt-field">

@@ -4,9 +4,13 @@
 {% endblock %}
 {% block content %}
 <div class="pt-two-col alt-wide">
-  <div>
+    <div>
     <div class="pt-card">
         <h2>New time-off request</h2>
+        <div style="margin:0 0 14px; padding:10px 12px; border:1px solid var(--pt-border); border-radius:10px; background:var(--pt-card); color:var(--pt-muted); font-size:13px; line-height:1.45;">
+            <strong style="color:var(--pt-text);">What happens next:</strong>
+            Submit as early as you can. Managers review requests before the schedule is final, and the request stays pending until a manager approves or denies it.
+        </div>
         <form method="post" action="/team/timeoff">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <div class="pt-field">
