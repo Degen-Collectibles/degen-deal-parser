@@ -2272,7 +2272,7 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(payload["total_count"], 5)
         self.assertEqual(payload["stream_top_sellers"][0]["title"], "Main Pack")
 
-    def test_tiktok_streamer_poll_routes_unattributed_shop_orders_to_main_creator(self) -> None:
+    def test_tiktok_streamer_poll_uses_live_product_ids_for_main_creator(self) -> None:
         import app.routers.tiktok_streamer as streamer_module
         from starlette.requests import Request as _Request
 
@@ -2390,12 +2390,12 @@ class TikTokRegressionTests(unittest.TestCase):
 
         self.assertEqual(
             {row["tiktok_order_id"] for row in payload["orders"]},
-            {"main-live-order-0", "main-live-order-1", "shop-order"},
+            {"main-live-order-0", "main-live-order-1"},
         )
-        self.assertEqual(payload["total_count"], 3)
-        self.assertEqual(payload["stream_gmv"], 125.0)
-        self.assertEqual(payload["stream_orders"], 3)
-        self.assertEqual(payload["stream_items"], 3)
+        self.assertEqual(payload["total_count"], 2)
+        self.assertEqual(payload["stream_gmv"], 100.0)
+        self.assertEqual(payload["stream_orders"], 2)
+        self.assertEqual(payload["stream_items"], 2)
         self.assertEqual(payload["tiktok_gmv"], 999.0)
         self.assertIsNone(payload["stream_metric_source"])
 

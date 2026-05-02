@@ -621,6 +621,11 @@ def _filter_orders_to_live_products(
         if explicit_live_product_ids:
             exclude_product_ids -= explicit_live_product_ids
             scope = {**scope, "exclude_product_ids": exclude_product_ids}
+            return [
+                order
+                for order in orders
+                if (not _order_product_ids(order)) or (_order_product_ids(order) & explicit_live_product_ids)
+            ], scope
         if exclude_product_ids:
             return [order for order in orders if not (_order_product_ids(order) & exclude_product_ids)], scope
         return orders, scope
