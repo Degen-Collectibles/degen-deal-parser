@@ -10,10 +10,14 @@ from ..db import get_session
 from ..pack_station import (
     PACK_SOURCES,
     PACK_QUEUE_EXCEPTION_FILTERS,
+    PACK_SHIPMENT_GATE_FILTERS,
     load_pack_exception_queue,
     load_pack_queue,
+    load_pack_shipment_gate_order,
+    load_pack_shipment_gate_queue,
     pack_exception_summary,
     pack_queue_summary,
+    pack_shipment_gate_summary,
     record_pack_override,
     record_pack_reopen,
     record_pack_scan,
@@ -99,6 +103,46 @@ def pack_exception_queue_page(
     )
 
 
+@router.get("/pack-station/shipment-gate", response_class=HTMLResponse)
+def pack_shipment_gate_page(
+    request: Request,
+    source: str = Query(default="all"),
+    gate: str = Query(default="blocked"),
+    search: str = Query(default=""),
+    days: int = Query(default=30, ge=1, le=120),
+    limit: int = Query(default=75, ge=1, le=200),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "viewer"):
+        return denial
+    selected_source = source if source in (PACK_SOURCES | {"all"}) else "all"
+    selected_gate = gate if gate in PACK_SHIPMENT_GATE_FILTERS else "blocked"
+    rows = load_pack_shipment_gate_queue(
+        session,
+        source=selected_source,
+        gate_filter=selected_gate,
+        search=search,
+        days=days,
+        limit=limit,
+    )
+    return templates.TemplateResponse(
+        request,
+        "pack_shipment_gate.html",
+        {
+            "request": request,
+            "title": "Shipment Gate",
+            "current_user": getattr(request.state, "current_user", None),
+            "orders": rows,
+            "summary": pack_shipment_gate_summary(rows),
+            "selected_source": selected_source,
+            "selected_gate": selected_gate,
+            "selected_search": search,
+            "selected_days": days,
+            "selected_limit": limit,
+        },
+    )
+
+
 @router.post("/pack-station/api/scan", response_class=JSONResponse)
 async def pack_station_scan(
     request: Request,
@@ -145,6 +189,37 @@ async def pack_station_scan(
             "order": order_row,
         }
     ))
+
+
+@router.get("/pack-station/api/shipment-gate", response_class=JSONResponse)
+def pack_shipment_gate_check(
+    request: Request,
+    source: str = Query(...),
+    order_id: str = Query(...),
+    require_release: bool = Query(default=False),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "viewer"):
+        return denial
+    try:
+        order_row = load_pack_shipment_gate_order(
+            session,
+            source=source,
+            order_id=order_id,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    gate = order_row["shipment_gate"]
+    payload = {
+        "ok": bool(gate["can_ship"]) if require_release else True,
+        "gate": gate,
+        "order": order_row,
+    }
+    status_code = 409 if require_release and not bool(gate["can_ship"]) else 200
+    return JSONResponse(jsonable_encoder(payload), status_code=status_code)
 
 
 def _redirect_back(request: Request) -> RedirectResponse:

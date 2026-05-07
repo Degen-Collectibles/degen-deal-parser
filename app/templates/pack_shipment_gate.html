@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>{{ title }}</title>
+    <link rel="stylesheet" href="/static/linear.css?v=1776749171">
+    <link rel="stylesheet" href="/static/safe-area.css?v=1776747800">
+    <style>
+        .gate-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
+        .gate-metric { border: 1px solid var(--lx-br); border-radius: 8px; background: var(--lx-s1); padding: 10px 12px; }
+        .gate-metric-value { color: var(--lx-text); font-size: 22px; font-weight: 700; line-height: 1; }
+        .gate-metric-label { color: var(--lx-muted); font-size: 11px; text-transform: uppercase; letter-spacing: .07em; margin-top: 6px; }
+        .gate-filters { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)) auto; gap: 10px; align-items: end; margin-bottom: 14px; }
+        .gate-list { display: grid; gap: 10px; }
+        .gate-card { border: 1px solid var(--lx-br); border-radius: 8px; background: var(--lx-s1); padding: 12px; }
+        .gate-card.is-blocked { border-color: rgba(239,68,68,.32); }
+        .gate-card.is-released { border-color: rgba(34,197,94,.32); }
+        .gate-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: start; }
+        .gate-title { margin: 0; color: var(--lx-text); font-size: 15px; }
+        .gate-meta { margin-top: 4px; color: var(--lx-muted); font-size: 12px; display: flex; flex-wrap: wrap; gap: 8px; }
+        .gate-pill { display: inline-flex; align-items: center; border-radius: 5px; padding: 3px 8px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; white-space: nowrap; }
+        .gate-pill.released { color: #86efac; background: rgba(34,197,94,.12); border: 1px solid rgba(34,197,94,.28); }
+        .gate-pill.blocked { color: #fca5a5; background: rgba(239,68,68,.12); border: 1px solid rgba(239,68,68,.28); }
+        .gate-reason { margin-top: 10px; color: var(--lx-muted); font-size: 13px; }
+        .gate-items { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+        .gate-chip { border: 1px solid var(--lx-br); border-radius: 5px; padding: 4px 7px; color: var(--lx-muted); font-size: 12px; }
+        .gate-chip strong { color: var(--lx-text); font-weight: 700; }
+        .gate-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+        .gate-actions code { color: var(--lx-muted); border: 1px solid var(--lx-br); border-radius: 5px; padding: 5px 7px; font-size: 12px; overflow-wrap: anywhere; }
+        @media (max-width: 980px) {
+            .gate-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .gate-filters { grid-template-columns: 1fr 1fr; }
+        }
+        @media (max-width: 640px) {
+            .gate-head, .gate-filters { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+<div class="page">
+    {% include "_linear_sidebar.html" %}
+    <div class="lx-page-head">
+        <div class="lx-head-row">
+            <div>
+                <p class="lx-eyebrow">Fulfillment</p>
+                <h1 class="lx-h1">{{ title }}</h1>
+                <p class="lx-subtitle">Shipping release status for paid open orders. Only verified scans or active reviewer overrides are released.</p>
+            </div>
+            <div class="lx-head-actions">
+                <a class="lx-btn" href="/pack-station">Pack Station</a>
+                <a class="lx-btn" href="/pack-station/exceptions">Exceptions</a>
+                <span class="lx-pill">{{ summary.blocked }} blocked</span>
+                <span class="lx-pill">{{ summary.released }} released</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="gate-grid">
+        <div class="gate-metric"><div class="gate-metric-value">{{ summary.blocked }}</div><div class="gate-metric-label">Blocked</div></div>
+        <div class="gate-metric"><div class="gate-metric-value">{{ summary.released }}</div><div class="gate-metric-label">Released</div></div>
+        <div class="gate-metric"><div class="gate-metric-value">{{ summary.verified }}</div><div class="gate-metric-label">Verified</div></div>
+        <div class="gate-metric"><div class="gate-metric-value">{{ summary.override }}</div><div class="gate-metric-label">Override</div></div>
+        <div class="gate-metric"><div class="gate-metric-value">{{ summary.exception + summary.needs_item_link }}</div><div class="gate-metric-label">Exceptions</div></div>
+    </div>
+
+    <form method="get" action="/pack-station/shipment-gate" class="gate-filters">
+        <label class="lx-label">Source
+            <select class="lx-select" name="source">
+                <option value="all" {% if selected_source == "all" %}selected{% endif %}>All</option>
+                <option value="tiktok" {% if selected_source == "tiktok" %}selected{% endif %}>TikTok</option>
+                <option value="shopify" {% if selected_source == "shopify" %}selected{% endif %}>Shopify</option>
+            </select>
+        </label>
+        <label class="lx-label">Gate
+            <select class="lx-select" name="gate">
+                <option value="blocked" {% if selected_gate == "blocked" %}selected{% endif %}>Blocked</option>
+                <option value="released" {% if selected_gate == "released" %}selected{% endif %}>Released</option>
+                <option value="verified" {% if selected_gate == "verified" %}selected{% endif %}>Verified</option>
+                <option value="override" {% if selected_gate == "override" %}selected{% endif %}>Override</option>
+                <option value="ready_to_scan" {% if selected_gate == "ready_to_scan" %}selected{% endif %}>Ready to scan</option>
+                <option value="in_progress" {% if selected_gate == "in_progress" %}selected{% endif %}>In progress</option>
+                <option value="exception" {% if selected_gate == "exception" %}selected{% endif %}>Scan exception</option>
+                <option value="needs_item_link" {% if selected_gate == "needs_item_link" %}selected{% endif %}>Needs item link</option>
+                <option value="all" {% if selected_gate == "all" %}selected{% endif %}>All</option>
+            </select>
+        </label>
+        <label class="lx-label">Search
+            <input class="lx-input" name="search" value="{{ selected_search }}" placeholder="Order, customer, item, barcode">
+        </label>
+        <label class="lx-label">Days
+            <input class="lx-input" type="number" name="days" min="1" max="120" value="{{ selected_days }}">
+        </label>
+        <label class="lx-label">Limit
+            <input class="lx-input" type="number" name="limit" min="1" max="200" value="{{ selected_limit }}">
+        </label>
+        <button class="lx-btn" type="submit">Apply</button>
+    </form>
+
+    <main class="gate-list">
+        {% for order in orders %}
+        <article class="gate-card is-{{ order.shipment_gate.state }}">
+            <div class="gate-head">
+                <div>
+                    <h2 class="gate-title">{{ order.source|upper }} {{ order.order_number }} · {{ order.customer_name }}</h2>
+                    <div class="gate-meta">
+                        <span>${{ "%.2f"|format(order.total) }}</span>
+                        <span>{{ order.created_at | pacific_datetime }}</span>
+                        <span>{{ order.progress_label }} scans</span>
+                        <span>{{ order.pack_status.replace("_", " ") }}</span>
+                    </div>
+                </div>
+                <span class="gate-pill {{ order.shipment_gate.state }}">{{ order.shipment_gate.label }}</span>
+            </div>
+            <div class="gate-reason">{{ order.shipment_gate.reason }}</div>
+            <div class="gate-items">
+                {% for item in order.expected_items[:6] %}
+                <span class="gate-chip"><strong>{{ item.barcode }}</strong> x {{ item.quantity }}</span>
+                {% endfor %}
+                {% if not order.expected_items %}
+                <span class="gate-chip"><strong>No DGN SKU detected</strong></span>
+                {% endif %}
+                {% if order.latest_control and order.latest_control.notes %}
+                <span class="gate-chip"><strong>Control note</strong> {{ order.latest_control.notes }}</span>
+                {% endif %}
+            </div>
+            <div class="gate-actions">
+                <code>/pack-station/api/shipment-gate?source={{ order.source }}&amp;order_id={{ order.order_id }}&amp;require_release=true</code>
+            </div>
+        </article>
+        {% else %}
+        <div class="lx-empty">No orders matched the selected shipment gate filter.</div>
+        {% endfor %}
+    </main>
+</div>
+{% include "_csrf_bootstrap.html" %}
+</body>
+</html>
