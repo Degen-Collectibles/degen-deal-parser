@@ -38,6 +38,17 @@ PACK_EXCEPTION_STATUSES = {
 }
 PACK_CONTROL_STATUSES = {PACK_SCAN_OVERRIDE, PACK_SCAN_REOPENED}
 PACK_QUEUE_EXCEPTION_FILTERS = {"all", "blocked", "exception", "needs_item_link", "override"}
+PACK_SHIPMENT_GATE_FILTERS = {
+    "all",
+    "blocked",
+    "released",
+    "verified",
+    "override",
+    "ready_to_scan",
+    "in_progress",
+    "exception",
+    "needs_item_link",
+}
 
 _BARCODE_RE = re.compile(r"^DGN-\d{6}$", re.IGNORECASE)
 
@@ -184,6 +195,57 @@ def pack_status_for(expected_items: list[dict[str, Any]], scans: list[PackScanEv
     return "ready_to_scan"
 
 
+def shipment_gate_for_status(pack_status: str) -> dict[str, Any]:
+    status = str(pack_status or "").strip().lower()
+    if status == "verified":
+        return {
+            "state": "released",
+            "can_ship": True,
+            "gate_status": "released_verified",
+            "label": "Released",
+            "reason": "All expected DGN barcode items have been matched.",
+        }
+    if status == "override":
+        return {
+            "state": "released",
+            "can_ship": True,
+            "gate_status": "released_override",
+            "label": "Override release",
+            "reason": "A reviewer override is active for this order.",
+        }
+    if status == "needs_item_link":
+        return {
+            "state": "blocked",
+            "can_ship": False,
+            "gate_status": "blocked_item_link",
+            "label": "Hold",
+            "reason": "No expected DGN barcode item is linked to this order.",
+        }
+    if status == "exception":
+        return {
+            "state": "blocked",
+            "can_ship": False,
+            "gate_status": "blocked_exception",
+            "label": "Hold",
+            "reason": "A scan exception must be resolved or overridden.",
+        }
+    if status == "in_progress":
+        return {
+            "state": "blocked",
+            "can_ship": False,
+            "gate_status": "blocked_partial_scan",
+            "label": "Hold",
+            "reason": "Expected DGN barcode items are only partially scanned.",
+        }
+    return {
+        "state": "blocked",
+        "can_ship": False,
+        "gate_status": "blocked_not_scanned",
+        "label": "Hold",
+        "reason": "Expected DGN barcode items have not been scanned yet.",
+    }
+
+
 def _order_identity(order: TikTokOrder | ShopifyOrder, source: str) -> tuple[str, str]:
     if source == PACK_SOURCE_TIKTOK:
         return order.tiktok_order_id, order.order_number
@@ -246,7 +308,7 @@ def build_pack_order_row(
     )
     latest_exception = _latest_scan_with_status(scans, PACK_EXCEPTION_STATUSES)
     latest_control = _latest_scan_with_status(scans, PACK_CONTROL_STATUSES)
-    return {
+    row = {
         "source": source,
         "order_id": order_id,
         "order_number": order_number,
@@ -269,6 +331,8 @@ def build_pack_order_row(
         "latest_exception": latest_exception,
         "latest_control": latest_control,
     }
+    row["shipment_gate"] = shipment_gate_for_status(status)
+    return row
 
 
 def _load_scans_for_orders(session: Session, source: str, order_ids: list[str]) -> dict[str, list[PackScanEvent]]:
@@ -603,6 +667,102 @@ def load_pack_exception_queue(
         reverse=True,
     )
     return queue_rows[: max(limit, 1)]
+
+
+def _shipment_gate_filter_matches(row: dict[str, Any], gate_filter: str) -> bool:
+    pack_status = str(row.get("pack_status") or "")
+    gate = row.get("shipment_gate") or {}
+    can_ship = bool(gate.get("can_ship"))
+    if gate_filter == "all":
+        return True
+    if gate_filter == "released":
+        return can_ship
+    if gate_filter == "blocked":
+        return not can_ship
+    return pack_status == gate_filter
+
+
+def load_pack_shipment_gate_queue(
+    session: Session,
+    *,
+    source: str = "all",
+    gate_filter: str = "blocked",
+    days: int = 30,
+    limit: int = 75,
+    search: str = "",
+) -> list[dict[str, Any]]:
+    selected_filter = gate_filter if gate_filter in PACK_SHIPMENT_GATE_FILTERS else "blocked"
+    rows = load_pack_queue(
+        session,
+        source=source,
+        days=days,
+        limit=max(limit * 4, limit),
+        search=search,
+    )
+    gate_rows = [row for row in rows if _shipment_gate_filter_matches(row, selected_filter)]
+    gate_rows.sort(
+        key=lambda row: (
+            0 if bool((row.get("shipment_gate") or {}).get("can_ship")) else 1,
+            row["created_at"],
+        ),
+        reverse=True,
+    )
+    return gate_rows[: max(limit, 1)]
+
+
+def load_pack_shipment_gate_order(
+    session: Session,
+    *,
+    source: str,
+    order_id: str,
+) -> dict[str, Any]:
+    clean_source = str(source or "").strip().lower()
+    if clean_source not in PACK_SOURCES:
+        raise ValueError("Unknown pack source")
+    order = _get_order(session, clean_source, str(order_id or "").strip())
+    if order is None:
+        raise LookupError("Order not found")
+    order_id_value, _order_number = _order_identity(order, clean_source)
+    scans = _load_scans_for_orders(session, clean_source, [order_id_value]).get(order_id_value, [])
+    row = build_pack_order_row(order, source=clean_source, scans=scans)
+    is_candidate = (
+        is_tiktok_pack_candidate(order)
+        if clean_source == PACK_SOURCE_TIKTOK
+        else is_shopify_pack_candidate(order)
+    )
+    if not is_candidate:
+        row["shipment_gate"] = {
+            "state": "blocked",
+            "can_ship": False,
+            "gate_status": "blocked_not_open_paid",
+            "label": "Hold",
+            "reason": "Order is not an open paid shipment candidate.",
+        }
+    return row
+
+
+def pack_shipment_gate_summary(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {
+        "total": len(rows),
+        "released": 0,
+        "blocked": 0,
+        "verified": 0,
+        "override": 0,
+        "ready_to_scan": 0,
+        "in_progress": 0,
+        "exception": 0,
+        "needs_item_link": 0,
+    }
+    for row in rows:
+        pack_status = str(row.get("pack_status") or "")
+        gate = row.get("shipment_gate") or {}
+        if bool(gate.get("can_ship")):
+            counts["released"] += 1
+        else:
+            counts["blocked"] += 1
+        if pack_status in counts:
+            counts[pack_status] += 1
+    return counts
 
 
 def pack_exception_summary(rows: list[dict[str, Any]]) -> dict[str, int]:

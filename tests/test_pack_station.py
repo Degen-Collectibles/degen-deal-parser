@@ -21,12 +21,19 @@ from app.pack_station import (
     extract_expected_pack_items,
     load_pack_exception_queue,
     load_pack_queue,
+    load_pack_shipment_gate_queue,
     pack_queue_summary,
+    pack_shipment_gate_summary,
     record_pack_override,
     record_pack_reopen,
     record_pack_scan,
 )
-from app.routers.pack_station import pack_exception_queue_page, pack_station_page
+from app.routers.pack_station import (
+    pack_exception_queue_page,
+    pack_shipment_gate_check,
+    pack_shipment_gate_page,
+    pack_station_page,
+)
 
 
 def make_request(path: str = "/pack-station") -> Request:
@@ -216,9 +223,85 @@ class PackStationTests(unittest.TestCase):
         self.assertEqual(blocked[0]["exception_reasons"][0]["status"], PACK_SCAN_UNEXPECTED)
         self.assertEqual(override.status, PACK_SCAN_OVERRIDE)
         self.assertEqual(overridden[0]["pack_status"], "override")
+        self.assertTrue(overridden[0]["shipment_gate"]["can_ship"])
+        self.assertEqual(overridden[0]["shipment_gate"]["gate_status"], "released_override")
         self.assertEqual(overridden[0]["exception_reasons"][0]["notes"], "Verified item against order photo")
         self.assertEqual(reopened_event.status, PACK_SCAN_REOPENED)
         self.assertEqual(reopened[0]["pack_status"], "exception")
+        self.assertFalse(reopened[0]["shipment_gate"]["can_ship"])
+
+    def test_shipment_gate_blocks_until_all_expected_items_are_verified(self) -> None:
+        now = datetime.now(timezone.utc)
+        with Session(self.engine) as session:
+            session.add(
+                InventoryItem(
+                    barcode="DGN-000010",
+                    item_type="single",
+                    game="Pokemon",
+                    card_name="Eevee",
+                    status="sold",
+                )
+            )
+            session.add(
+                ShopifyOrder(
+                    shopify_order_id="sh-gate",
+                    order_number="#3001",
+                    created_at=now,
+                    updated_at=now,
+                    customer_name="Gary",
+                    total_price=18.0,
+                    subtotal_price=18.0,
+                    financial_status="paid",
+                    fulfillment_status="unfulfilled",
+                    line_items_summary_json='[{"title":"Eevee","quantity":1,"sku":"DGN-000010"}]',
+                )
+            )
+            session.commit()
+
+            blocked = load_pack_shipment_gate_queue(session, source="shopify", gate_filter="blocked", days=1, limit=10)
+            record_pack_scan(session, source="shopify", order_id="sh-gate", barcode="DGN-000010")
+            released = load_pack_shipment_gate_queue(session, source="shopify", gate_filter="released", days=1, limit=10)
+            summary = pack_shipment_gate_summary(released)
+
+        self.assertEqual(blocked[0]["pack_status"], "ready_to_scan")
+        self.assertFalse(blocked[0]["shipment_gate"]["can_ship"])
+        self.assertEqual(blocked[0]["shipment_gate"]["gate_status"], "blocked_not_scanned")
+        self.assertEqual(released[0]["pack_status"], "verified")
+        self.assertTrue(released[0]["shipment_gate"]["can_ship"])
+        self.assertEqual(released[0]["shipment_gate"]["gate_status"], "released_verified")
+        self.assertEqual(summary["released"], 1)
+        self.assertEqual(summary["blocked"], 0)
+
+    def test_shipment_gate_api_returns_conflict_when_required_release_is_blocked(self) -> None:
+        now = datetime.now(timezone.utc)
+        with Session(self.engine) as session:
+            session.add(
+                ShopifyOrder(
+                    shopify_order_id="sh-blocked",
+                    order_number="#3002",
+                    created_at=now,
+                    updated_at=now,
+                    customer_name="May",
+                    total_price=12.0,
+                    subtotal_price=12.0,
+                    financial_status="paid",
+                    fulfillment_status="unfulfilled",
+                    line_items_summary_json='[{"title":"Mystery Pull","quantity":1,"sku":"DGN-999999"}]',
+                )
+            )
+            session.commit()
+            with patch("app.routers.pack_station.require_role_response", return_value=None):
+                response = pack_shipment_gate_check(
+                    make_request("/pack-station/api/shipment-gate"),
+                    source="shopify",
+                    order_id="sh-blocked",
+                    require_release=True,
+                    session=session,
+                )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn(b'"ok":false', response.body)
+        self.assertIn(b"blocked_not_scanned", response.body)
 
     def test_pack_station_page_renders_empty_queue(self) -> None:
         with Session(self.engine) as session, patch(
@@ -273,6 +356,41 @@ class PackStationTests(unittest.TestCase):
         self.assertIn("Pack Exceptions", body)
         self.assertIn("#2001", body)
         self.assertIn("Needs item link", body)
+
+    def test_pack_shipment_gate_page_renders_blocked_order(self) -> None:
+        now = datetime.now(timezone.utc)
+        with Session(self.engine) as session:
+            session.add(
+                ShopifyOrder(
+                    shopify_order_id="sh-gate-page",
+                    order_number="#4001",
+                    created_at=now,
+                    updated_at=now,
+                    customer_name="Dawn",
+                    total_price=21.0,
+                    subtotal_price=21.0,
+                    financial_status="paid",
+                    fulfillment_status="unfulfilled",
+                    line_items_summary_json='[{"title":"Unlinked Pull","quantity":1,"sku":"SKU-1"}]',
+                )
+            )
+            session.commit()
+            with patch("app.routers.pack_station.require_role_response", return_value=None):
+                response = pack_shipment_gate_page(
+                    make_request("/pack-station/shipment-gate"),
+                    source="shopify",
+                    gate="blocked",
+                    search="",
+                    days=30,
+                    limit=75,
+                    session=session,
+                )
+
+        body = response.body.decode("utf-8")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Shipment Gate", body)
+        self.assertIn("#4001", body)
+        self.assertIn("No expected DGN barcode item is linked", body)
 
 
 if __name__ == "__main__":
