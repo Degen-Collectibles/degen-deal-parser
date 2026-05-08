@@ -22,10 +22,13 @@
         .gate-pill { display: inline-flex; align-items: center; border-radius: 5px; padding: 3px 8px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; white-space: nowrap; }
         .gate-pill.released { color: #86efac; background: rgba(34,197,94,.12); border: 1px solid rgba(34,197,94,.28); }
         .gate-pill.blocked { color: #fca5a5; background: rgba(239,68,68,.12); border: 1px solid rgba(239,68,68,.28); }
+        .gate-pill.ready_to_ship { color: #bfdbfe; background: rgba(59,130,246,.12); border: 1px solid rgba(59,130,246,.28); }
+        .gate-pill.awaiting_release { color: #fde68a; background: rgba(245,158,11,.12); border: 1px solid rgba(245,158,11,.28); }
         .gate-reason { margin-top: 10px; color: var(--lx-muted); font-size: 13px; }
         .gate-items { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
         .gate-chip { border: 1px solid var(--lx-br); border-radius: 5px; padding: 4px 7px; color: var(--lx-muted); font-size: 12px; }
         .gate-chip strong { color: var(--lx-text); font-weight: 700; }
+        .gate-status-stack { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
         .gate-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
         .gate-actions code { color: var(--lx-muted); border: 1px solid var(--lx-br); border-radius: 5px; padding: 5px 7px; font-size: 12px; overflow-wrap: anywhere; }
         @media (max-width: 980px) {
@@ -51,16 +54,17 @@
                 <a class="lx-btn" href="/pack-station">Pack Station</a>
                 <a class="lx-btn" href="/pack-station/exceptions">Exceptions</a>
                 <span class="lx-pill">{{ summary.blocked }} blocked</span>
-                <span class="lx-pill">{{ summary.released }} released</span>
+                <span class="lx-pill">{{ summary.released }} gate pass</span>
+                <span class="lx-pill">{{ summary.ready_to_ship }} ready to ship</span>
             </div>
         </div>
     </div>
 
     <div class="gate-grid">
         <div class="gate-metric"><div class="gate-metric-value">{{ summary.blocked }}</div><div class="gate-metric-label">Blocked</div></div>
-        <div class="gate-metric"><div class="gate-metric-value">{{ summary.released }}</div><div class="gate-metric-label">Released</div></div>
-        <div class="gate-metric"><div class="gate-metric-value">{{ summary.verified }}</div><div class="gate-metric-label">Verified</div></div>
-        <div class="gate-metric"><div class="gate-metric-value">{{ summary.override }}</div><div class="gate-metric-label">Override</div></div>
+        <div class="gate-metric"><div class="gate-metric-value">{{ summary.released }}</div><div class="gate-metric-label">Gate pass</div></div>
+        <div class="gate-metric"><div class="gate-metric-value">{{ summary.ready_to_ship }}</div><div class="gate-metric-label">Released to ship</div></div>
+        <div class="gate-metric"><div class="gate-metric-value">{{ summary.awaiting_release }}</div><div class="gate-metric-label">Awaiting release</div></div>
         <div class="gate-metric"><div class="gate-metric-value">{{ summary.exception + summary.needs_item_link }}</div><div class="gate-metric-label">Exceptions</div></div>
     </div>
 
@@ -75,7 +79,9 @@
         <label class="lx-label">Gate
             <select class="lx-select" name="gate">
                 <option value="blocked" {% if selected_gate == "blocked" %}selected{% endif %}>Blocked</option>
-                <option value="released" {% if selected_gate == "released" %}selected{% endif %}>Released</option>
+                <option value="released" {% if selected_gate == "released" %}selected{% endif %}>Gate pass</option>
+                <option value="ready_to_ship" {% if selected_gate == "ready_to_ship" %}selected{% endif %}>Released to ship</option>
+                <option value="awaiting_release" {% if selected_gate == "awaiting_release" %}selected{% endif %}>Awaiting release</option>
                 <option value="verified" {% if selected_gate == "verified" %}selected{% endif %}>Verified</option>
                 <option value="override" {% if selected_gate == "override" %}selected{% endif %}>Override</option>
                 <option value="ready_to_scan" {% if selected_gate == "ready_to_scan" %}selected{% endif %}>Ready to scan</option>
@@ -110,7 +116,10 @@
                         <span>{{ order.pack_status.replace("_", " ") }}</span>
                     </div>
                 </div>
-                <span class="gate-pill {{ order.shipment_gate.state }}">{{ order.shipment_gate.label }}</span>
+                <div class="gate-status-stack">
+                    <span class="gate-pill {{ order.shipment_gate.state }}">{{ order.shipment_gate.label }}</span>
+                    <span class="gate-pill {{ order.shipment_gate.release_status }}">{{ order.shipment_gate.release_label }}</span>
+                </div>
             </div>
             <div class="gate-reason">{{ order.shipment_gate.reason }}</div>
             <div class="gate-items">
@@ -123,9 +132,21 @@
                 {% if order.latest_control and order.latest_control.notes %}
                 <span class="gate-chip"><strong>Control note</strong> {{ order.latest_control.notes }}</span>
                 {% endif %}
+                {% if order.latest_release %}
+                <span class="gate-chip"><strong>Released</strong> {{ order.latest_release.created_at | pacific_datetime }}{% if order.latest_release.scanned_by_label %} by {{ order.latest_release.scanned_by_label }}{% endif %}</span>
+                {% endif %}
             </div>
             <div class="gate-actions">
                 <code>/pack-station/api/shipment-gate?source={{ order.source }}&amp;order_id={{ order.order_id }}&amp;require_release=true</code>
+                {% if order.shipment_gate.can_ship and not order.shipment_gate.released_to_ship %}
+                <form method="post" action="/pack-station/release-to-ship">
+                    <input type="hidden" name="source" value="{{ order.source }}">
+                    <input type="hidden" name="order_id" value="{{ order.order_id }}">
+                    <button class="lx-btn lx-btn-primary" type="submit">Release to Ship</button>
+                </form>
+                {% elif order.shipment_gate.released_to_ship %}
+                <span class="gate-chip"><strong>Internal label release recorded</strong></span>
+                {% endif %}
             </div>
         </article>
         {% else %}

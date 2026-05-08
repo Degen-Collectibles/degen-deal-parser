@@ -11,6 +11,7 @@ from ..pack_station import (
     PACK_SOURCES,
     PACK_QUEUE_EXCEPTION_FILTERS,
     PACK_SHIPMENT_GATE_FILTERS,
+    PackShipmentGateBlocked,
     load_pack_exception_queue,
     load_pack_queue,
     load_pack_shipment_gate_order,
@@ -19,6 +20,7 @@ from ..pack_station import (
     pack_queue_summary,
     pack_shipment_gate_summary,
     record_pack_override,
+    record_pack_release_to_ship,
     record_pack_reopen,
     record_pack_scan,
 )
@@ -220,6 +222,93 @@ def pack_shipment_gate_check(
     }
     status_code = 409 if require_release and not bool(gate["can_ship"]) else 200
     return JSONResponse(jsonable_encoder(payload), status_code=status_code)
+
+
+@router.post("/pack-station/api/release-to-ship", response_class=JSONResponse)
+async def pack_release_to_ship_api(
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "viewer"):
+        return denial
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+    try:
+        event = record_pack_release_to_ship(
+            session,
+            source=str(payload.get("source") or ""),
+            order_id=str(payload.get("order_id") or ""),
+            notes=payload.get("notes"),
+            user=getattr(request.state, "current_user", None),
+        )
+        order_row = load_pack_shipment_gate_order(
+            session,
+            source=event.order_source,
+            order_id=event.order_id,
+        )
+    except PackShipmentGateBlocked as exc:
+        return JSONResponse(
+            jsonable_encoder(
+                {
+                    "ok": False,
+                    "gate": exc.order_row.get("shipment_gate"),
+                    "order": exc.order_row,
+                }
+            ),
+            status_code=409,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return JSONResponse(
+        jsonable_encoder(
+            {
+                "ok": True,
+                "event": {
+                    "id": event.id,
+                    "source": event.order_source,
+                    "order_id": event.order_id,
+                    "order_number": event.order_number,
+                    "status": event.status,
+                    "notes": event.notes,
+                    "created_at": event.created_at.isoformat(),
+                },
+                "gate": order_row["shipment_gate"],
+                "order": order_row,
+            }
+        )
+    )
+
+
+@router.post("/pack-station/release-to-ship")
+def pack_release_to_ship(
+    request: Request,
+    source: str = Form(...),
+    order_id: str = Form(...),
+    notes: str = Form(default=""),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "viewer"):
+        return denial
+    try:
+        record_pack_release_to_ship(
+            session,
+            source=source,
+            order_id=order_id,
+            notes=notes,
+            user=getattr(request.state, "current_user", None),
+        )
+    except PackShipmentGateBlocked as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _redirect_back(request)
 
 
 def _redirect_back(request: Request) -> RedirectResponse:

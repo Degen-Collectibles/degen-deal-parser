@@ -14,17 +14,21 @@ from app.pack_station import (
     PACK_SCAN_DUPLICATE,
     PACK_SCAN_MATCHED,
     PACK_SCAN_OVERRIDE,
+    PACK_SCAN_RELEASED_TO_SHIP,
     PACK_SCAN_REOPENED,
     PACK_SCAN_UNEXPECTED,
     PACK_SCAN_UNLINKED_ORDER,
+    PackShipmentGateBlocked,
     build_pack_order_row,
     extract_expected_pack_items,
+    load_pack_shipment_gate_order,
     load_pack_exception_queue,
     load_pack_queue,
     load_pack_shipment_gate_queue,
     pack_queue_summary,
     pack_shipment_gate_summary,
     record_pack_override,
+    record_pack_release_to_ship,
     record_pack_reopen,
     record_pack_scan,
 )
@@ -271,6 +275,83 @@ class PackStationTests(unittest.TestCase):
         self.assertEqual(released[0]["shipment_gate"]["gate_status"], "released_verified")
         self.assertEqual(summary["released"], 1)
         self.assertEqual(summary["blocked"], 0)
+        self.assertEqual(summary["awaiting_release"], 1)
+        self.assertEqual(summary["ready_to_ship"], 0)
+
+    def test_release_to_ship_requires_green_gate_and_records_internal_release(self) -> None:
+        now = datetime.now(timezone.utc)
+        user = SimpleNamespace(id=9, username="packer", display_name="Pack Lead")
+        with Session(self.engine) as session:
+            session.add(
+                InventoryItem(
+                    barcode="DGN-000011",
+                    item_type="single",
+                    game="Pokemon",
+                    card_name="Snorlax",
+                    status="sold",
+                )
+            )
+            session.add(
+                ShopifyOrder(
+                    shopify_order_id="sh-release",
+                    order_number="#3003",
+                    created_at=now,
+                    updated_at=now,
+                    customer_name="Red",
+                    total_price=30.0,
+                    subtotal_price=30.0,
+                    financial_status="paid",
+                    fulfillment_status="unfulfilled",
+                    line_items_summary_json='[{"title":"Snorlax","quantity":1,"sku":"DGN-000011"}]',
+                )
+            )
+            session.commit()
+
+            with self.assertRaises(PackShipmentGateBlocked):
+                record_pack_release_to_ship(
+                    session,
+                    source="shopify",
+                    order_id="sh-release",
+                    user=user,
+                )
+
+            record_pack_scan(session, source="shopify", order_id="sh-release", barcode="DGN-000011")
+            release = record_pack_release_to_ship(
+                session,
+                source="shopify",
+                order_id="sh-release",
+                notes="Moving to label desk",
+                user=user,
+            )
+            duplicate_click = record_pack_release_to_ship(
+                session,
+                source="shopify",
+                order_id="sh-release",
+                user=user,
+            )
+            order_row = load_pack_shipment_gate_order(
+                session,
+                source="shopify",
+                order_id="sh-release",
+            )
+            ready = load_pack_shipment_gate_queue(
+                session,
+                source="shopify",
+                gate_filter="ready_to_ship",
+                days=1,
+                limit=10,
+            )
+            summary = pack_shipment_gate_summary(ready)
+
+        self.assertEqual(release.status, PACK_SCAN_RELEASED_TO_SHIP)
+        self.assertEqual(release.notes, "Moving to label desk")
+        self.assertEqual(duplicate_click.id, release.id)
+        self.assertTrue(order_row["shipment_gate"]["can_ship"])
+        self.assertTrue(order_row["shipment_gate"]["released_to_ship"])
+        self.assertEqual(order_row["shipment_gate"]["release_status"], "ready_to_ship")
+        self.assertEqual(order_row["latest_release"].scanned_by_label, "Pack Lead")
+        self.assertEqual(summary["ready_to_ship"], 1)
+        self.assertEqual(summary["awaiting_release"], 0)
 
     def test_shipment_gate_api_returns_conflict_when_required_release_is_blocked(self) -> None:
         now = datetime.now(timezone.utc)

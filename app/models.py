@@ -428,7 +428,7 @@ class PackScanEvent(SQLModel, table=True):
     barcode: str = Field(index=True)
     inventory_item_id: Optional[int] = Field(default=None, foreign_key="inventory_items.id", index=True)
     expected: bool = Field(default=False, index=True)
-    status: str = Field(index=True)        # matched | duplicate | unexpected | unknown_barcode | unlinked_order
+    status: str = Field(index=True)        # matched | duplicate | unexpected | control/release statuses
     item_snapshot_json: str = Field(default="{}")
     scanned_by_user_id: Optional[int] = Field(default=None, index=True)
     scanned_by_label: Optional[str] = Field(default=None, index=True)

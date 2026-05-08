@@ -29,6 +29,7 @@ PACK_SCAN_UNKNOWN_BARCODE = "unknown_barcode"
 PACK_SCAN_UNLINKED_ORDER = "unlinked_order"
 PACK_SCAN_OVERRIDE = "override"
 PACK_SCAN_REOPENED = "reopened"
+PACK_SCAN_RELEASED_TO_SHIP = "released_to_ship"
 
 PACK_EXCEPTION_STATUSES = {
     PACK_SCAN_DUPLICATE,
@@ -37,11 +38,14 @@ PACK_EXCEPTION_STATUSES = {
     PACK_SCAN_UNLINKED_ORDER,
 }
 PACK_CONTROL_STATUSES = {PACK_SCAN_OVERRIDE, PACK_SCAN_REOPENED}
+PACK_RELEASE_STATUSES = {PACK_SCAN_RELEASED_TO_SHIP}
 PACK_QUEUE_EXCEPTION_FILTERS = {"all", "blocked", "exception", "needs_item_link", "override"}
 PACK_SHIPMENT_GATE_FILTERS = {
     "all",
     "blocked",
     "released",
+    "ready_to_ship",
+    "awaiting_release",
     "verified",
     "override",
     "ready_to_scan",
@@ -51,6 +55,13 @@ PACK_SHIPMENT_GATE_FILTERS = {
 }
 
 _BARCODE_RE = re.compile(r"^DGN-\d{6}$", re.IGNORECASE)
+
+
+class PackShipmentGateBlocked(Exception):
+    def __init__(self, order_row: dict[str, Any]):
+        self.order_row = order_row
+        gate = order_row.get("shipment_gate") or {}
+        super().__init__(str(gate.get("reason") or "Shipment gate is blocked"))
 
 
 def normalize_pack_barcode(value: str | None) -> str:
@@ -180,6 +191,20 @@ def _has_active_override(scans: list[PackScanEvent]) -> bool:
     return True
 
 
+def _active_ship_release(scans: list[PackScanEvent]) -> PackScanEvent | None:
+    latest_release = _latest_scan_with_status(scans, PACK_RELEASE_STATUSES)
+    if latest_release is None:
+        return None
+    release_key = _scan_sort_key(latest_release)
+    latest_reopen = _latest_scan_with_status(scans, {PACK_SCAN_REOPENED})
+    latest_exception = _latest_scan_with_status(scans, PACK_EXCEPTION_STATUSES)
+    if latest_reopen is not None and _scan_sort_key(latest_reopen) > release_key:
+        return None
+    if latest_exception is not None and _scan_sort_key(latest_exception) > release_key:
+        return None
+    return latest_release
+
+
 def pack_status_for(expected_items: list[dict[str, Any]], scans: list[PackScanEvent]) -> str:
     if _has_active_override(scans):
         return "override"
@@ -246,6 +271,24 @@ def shipment_gate_for_status(pack_status: str) -> dict[str, Any]:
     }
 
 
+def _apply_release_state(row: dict[str, Any]) -> None:
+    gate = row.get("shipment_gate") or {}
+    latest_release = row.get("latest_release")
+    can_ship = bool(gate.get("can_ship"))
+    released_to_ship = bool(can_ship and latest_release is not None)
+    gate["released_to_ship"] = released_to_ship
+    if released_to_ship:
+        gate["release_status"] = "ready_to_ship"
+        gate["release_label"] = "Released to ship"
+    elif can_ship:
+        gate["release_status"] = "awaiting_release"
+        gate["release_label"] = "Awaiting release"
+    else:
+        gate["release_status"] = "blocked"
+        gate["release_label"] = "Blocked"
+    row["shipment_gate"] = gate
+
+
 def _order_identity(order: TikTokOrder | ShopifyOrder, source: str) -> tuple[str, str]:
     if source == PACK_SOURCE_TIKTOK:
         return order.tiktok_order_id, order.order_number
@@ -308,6 +351,7 @@ def build_pack_order_row(
     )
     latest_exception = _latest_scan_with_status(scans, PACK_EXCEPTION_STATUSES)
     latest_control = _latest_scan_with_status(scans, PACK_CONTROL_STATUSES)
+    latest_release = _active_ship_release(scans)
     row = {
         "source": source,
         "order_id": order_id,
@@ -330,8 +374,10 @@ def build_pack_order_row(
         "exception_scans": exception_scans,
         "latest_exception": latest_exception,
         "latest_control": latest_control,
+        "latest_release": latest_release,
     }
     row["shipment_gate"] = shipment_gate_for_status(status)
+    _apply_release_state(row)
     return row
 
 
@@ -539,11 +585,17 @@ def _record_pack_control_event(
         user_id = user.id
         label = (user.display_name or user.username or "").strip()
 
+    control_barcode = {
+        PACK_SCAN_OVERRIDE: "OVERRIDE",
+        PACK_SCAN_REOPENED: "REOPEN",
+        PACK_SCAN_RELEASED_TO_SHIP: "RELEASE",
+    }.get(status, "CONTROL")
+
     event = PackScanEvent(
         order_source=source,
         order_id=order_id_value,
         order_number=order_number,
-        barcode="OVERRIDE" if status == PACK_SCAN_OVERRIDE else "REOPEN",
+        barcode=control_barcode,
         inventory_item_id=None,
         expected=False,
         status=status,
@@ -557,6 +609,35 @@ def _record_pack_control_event(
     session.commit()
     session.refresh(event)
     return event
+
+
+def record_pack_release_to_ship(
+    session: Session,
+    *,
+    source: str,
+    order_id: str,
+    notes: str | None = None,
+    user: Optional[User] = None,
+) -> PackScanEvent:
+    row = load_pack_shipment_gate_order(session, source=source, order_id=order_id)
+    gate = row.get("shipment_gate") or {}
+    if not bool(gate.get("can_ship")):
+        raise PackShipmentGateBlocked(row)
+
+    latest_release = row.get("latest_release")
+    if latest_release is not None and bool(gate.get("released_to_ship")):
+        return latest_release
+
+    clean_notes = str(notes or "").strip()
+    audit_note = clean_notes or f"Internal release after {gate.get('gate_status') or 'pack_gate_pass'}"
+    return _record_pack_control_event(
+        session,
+        source=source,
+        order_id=row["order_id"],
+        status=PACK_SCAN_RELEASED_TO_SHIP,
+        user=user,
+        notes=audit_note,
+    )
 
 
 def record_pack_override(
@@ -677,6 +758,10 @@ def _shipment_gate_filter_matches(row: dict[str, Any], gate_filter: str) -> bool
         return True
     if gate_filter == "released":
         return can_ship
+    if gate_filter == "ready_to_ship":
+        return can_ship and bool(gate.get("released_to_ship"))
+    if gate_filter == "awaiting_release":
+        return can_ship and not bool(gate.get("released_to_ship"))
     if gate_filter == "blocked":
         return not can_ship
     return pack_status == gate_filter
@@ -738,6 +823,7 @@ def load_pack_shipment_gate_order(
             "label": "Hold",
             "reason": "Order is not an open paid shipment candidate.",
         }
+        _apply_release_state(row)
     return row
 
 
@@ -745,6 +831,8 @@ def pack_shipment_gate_summary(rows: list[dict[str, Any]]) -> dict[str, int]:
     counts = {
         "total": len(rows),
         "released": 0,
+        "ready_to_ship": 0,
+        "awaiting_release": 0,
         "blocked": 0,
         "verified": 0,
         "override": 0,
@@ -758,6 +846,10 @@ def pack_shipment_gate_summary(rows: list[dict[str, Any]]) -> dict[str, int]:
         gate = row.get("shipment_gate") or {}
         if bool(gate.get("can_ship")):
             counts["released"] += 1
+            if bool(gate.get("released_to_ship")):
+                counts["ready_to_ship"] += 1
+            else:
+                counts["awaiting_release"] += 1
         else:
             counts["blocked"] += 1
         if pack_status in counts:
