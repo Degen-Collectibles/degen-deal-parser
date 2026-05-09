@@ -51,13 +51,77 @@
                 <span class="lx-pill {% if summary['failed'] > 0 %}lx-pill-danger{% endif %}">Failed {{ summary["failed"] }}</span>
                 <span class="lx-pill">With images {{ summary["with_images"] }}</span>
             </div>
+            <div class="rq-status-legend" aria-label="Queue status legend">
+                <span class="lx-pill lx-pill-danger">Failed parse</span>
+                <span class="lx-pill lx-pill-warn">Needs review</span>
+                <span class="lx-pill lx-pill-ok">Parsed OK</span>
+                <span class="lx-pill">Ignored</span>
+                <span class="lx-pill lx-pill-ok">Transaction synced</span>
+            </div>
             <div style="margin-top:10px;">
                 <a href="/review-table" style="font-size:12px;font-weight:600;color:var(--lx-dim);">Advanced: open the bulk admin review table &rarr;</a>
             </div>
         </div>
 
         <div class="lx-card">
-            <form method="get" action="/review" class="lx-filters">
+            <details class="rq-mobile-filter-panel">
+                <summary><span>Filters</span><span class="lx-pill">{{ pagination["total_rows"] }} rows</span></summary>
+                <div class="rq-mobile-filter-body">
+                    <form method="get" action="/review" class="lx-filters">
+                        <label class="lx-label">Channel
+                            <select class="lx-select" name="channel_id">
+                                <option value="">All review channels</option>
+                                {% for ch in channels %}
+                                <option value="{{ ch['channel_id'] }}" {% if selected_channel_id == ch['channel_id'] %}selected{% endif %}>{{ ch["channel_name"] }}</option>
+                                {% endfor %}
+                            </select>
+                        </label>
+                        <label class="lx-label">Expense Category
+                            <select class="lx-select" name="expense_category">
+                                <option value="">All expense categories</option>
+                                {% for option in expense_category_options %}
+                                <option value="{{ option }}" {% if selected_expense_category == option %}selected{% endif %}>{{ option }}</option>
+                                {% endfor %}
+                            </select>
+                        </label>
+                        <label class="lx-label">After
+                            <input class="lx-input" type="date" name="after" value="{{ selected_after }}">
+                        </label>
+                        <label class="lx-label">Before
+                            <input class="lx-input" type="date" name="before" value="{{ selected_before }}">
+                        </label>
+                        <label class="lx-label">Rows
+                            <select class="lx-select" name="limit">
+                                {% for option in [10,25,50,100] %}
+                                <option value="{{ option }}" {% if selected_limit == option %}selected{% endif %}>{{ option }}</option>
+                                {% endfor %}
+                            </select>
+                        </label>
+                        <input type="hidden" name="sort_by" value="{{ selected_sort_by }}">
+                        <input type="hidden" name="sort_dir" value="{{ selected_sort_dir }}">
+                        <button type="submit" class="lx-btn">Apply</button>
+                    </form>
+                    <details class="rq-secondary-tools">
+                        <summary>Secondary controls</summary>
+                        <div class="rq-secondary-tools-body">
+                            <form method="post" action="/messages/bulk/reparse-filtered-form" onsubmit="return confirm('Reparse all currently filtered review rows?');">
+                                <input type="hidden" name="return_path" value="/review">
+                                <input type="hidden" name="status" value="review_queue">
+                                <input type="hidden" name="channel_id" value="{{ selected_channel_id }}">
+                                <input type="hidden" name="expense_category" value="{{ selected_expense_category }}">
+                                <input type="hidden" name="after" value="{{ selected_after }}">
+                                <input type="hidden" name="before" value="{{ selected_before }}">
+                                <input type="hidden" name="sort_by" value="{{ selected_sort_by }}">
+                                <input type="hidden" name="sort_dir" value="{{ selected_sort_dir }}">
+                                <input type="hidden" name="page" value="{{ pagination['page'] }}">
+                                <input type="hidden" name="limit" value="{{ selected_limit }}">
+                                <button type="submit" class="lx-btn">Reparse Filtered Review Rows</button>
+                            </form>
+                        </div>
+                    </details>
+                </div>
+            </details>
+            <form method="get" action="/review" class="lx-filters rq-desktop-filter-form">
                 <label class="lx-label">Channel
                     <select class="lx-select" name="channel_id">
                         <option value="">All review channels</option>
@@ -87,11 +151,13 @@
                         {% endfor %}
                     </select>
                 </label>
+                <input type="hidden" name="sort_by" value="{{ selected_sort_by }}">
+                <input type="hidden" name="sort_dir" value="{{ selected_sort_dir }}">
                 <div style="display:flex;align-items:flex-end;">
                     <button type="submit" class="lx-btn" style="width:100%;">Apply Filters</button>
                 </div>
             </form>
-            <div class="lx-scope-strip">
+            <div class="lx-scope-strip rq-desktop-tools">
                 <p class="lx-note">Reparse the currently filtered review rows with the latest deterministic rules, learned corrections, and stitch heuristics.</p>
                 <form method="post" action="/messages/bulk/reparse-filtered-form" onsubmit="return confirm('Reparse all currently filtered review rows?');">
                     <input type="hidden" name="return_path" value="/review">
@@ -109,7 +175,7 @@
             </div>
         </div>
 
-        <div class="lx-metrics-4">
+        <div class="lx-metrics-4 rq-desktop-metrics">
             <div class="lx-metric">
                 <div class="lx-metric-lbl">Queue Size</div>
                 <div class="lx-metric-val">{{ summary["needs_review"] + summary["failed"] }}</div>
@@ -136,7 +202,8 @@
         <div class="lx-review-list">
             {% for row in rows %}
             <div class="lx-review-card">
-                <div>
+                <div class="rq-card-media">
+                    <div>
                     {% if row["first_image_url"] %}
                     <a href="{{ row['first_image_url'] }}" target="_blank" rel="noopener noreferrer">
                         <img class="lx-thumb" src="{{ row['first_thumb_url'] or row['first_image_url'] }}" alt="deal image" loading="lazy">
@@ -144,20 +211,28 @@
                     {% else %}
                     <div class="lx-thumb-ph">No image</div>
                     {% endif %}
+                    </div>
                     <div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:10px;">
-                        <span class="lx-pill {% if row['status'] == 'failed' %}lx-pill-danger{% elif row['status'] == 'review_required' %}lx-pill-warn{% else %}lx-pill-ok{% endif %}">{{ row["status"]|replace("_", " ") }}</span>
+                        <span class="lx-pill {% if row['status_state']['tone'] == 'danger' %}lx-pill-danger{% elif row['status_state']['tone'] == 'warn' %}lx-pill-warn{% elif row['status_state']['tone'] == 'success' %}lx-pill-ok{% endif %}">{{ row["status_state"]["label"] }}</span>
+                        <span class="lx-pill {% if row['transaction_state']['tone'] == 'success' %}lx-pill-ok{% elif row['transaction_state']['tone'] == 'warn' %}lx-pill-warn{% endif %}">{{ row["transaction_state"]["label"] }}</span>
                         {% if row["learning"]["promoted_rule"] %}<span class="lx-pill lx-pill-ok">promoted rule</span>{% elif row["learning"]["exact_match"] %}<span class="lx-pill lx-pill-ok">learned exact</span>{% elif row["learning"]["similar_count"] %}<span class="lx-pill">memory {{ row["learning"]["similar_count"] }}</span>{% endif %}
                     </div>
                 </div>
 
-                <div>
-                    <div style="font-size:14px;font-weight:600;color:var(--lx-text);">{{ row["channel"] or row["channel_id"] }}</div>
-                    <div style="font-size:12px;color:var(--lx-muted);margin-top:3px;">{{ row["time"] }}</div>
-                    {% if row["author"] %}<div style="font-size:12px;color:var(--lx-muted);">{{ row["author"] }}</div>{% endif %}
+                <div class="rq-card-context">
+                    <div class="rq-card-head">
+                        <div style="font-size:14px;font-weight:600;color:var(--lx-text);">{{ row["channel"] or row["channel_id"] }}</div>
+                        <span class="lx-pill">Row {{ row["id"] }}</span>
+                    </div>
+                    <div class="rq-card-meta">
+                        <span>{{ row["time"] }}</span>
+                        {% if row["author"] %}<span>{{ row["author"] }}</span>{% endif %}
+                        {% if row["first_image_url"] %}<span>image attached</span>{% elif row["possible_missing_image"] %}<span>nearby image clue</span>{% else %}<span>text only</span>{% endif %}
+                    </div>
                     {% if row["reviewed_by"] or row["reviewed_at"] %}
                     <div style="font-size:12px;color:var(--lx-dim);margin-top:3px;">Last reviewed{% if row["reviewed_by"] %} by {{ row["reviewed_by"] }}{% endif %}{% if row["reviewed_at"] %} on {{ row["reviewed_at"] }}{% endif %}</div>
                     {% endif %}
-                    <div class="lx-msg-lbl">Primary message</div>
+                    <div class="lx-msg-lbl">Original Discord Message</div>
                     <div class="lx-msg-box">{{ row["message"] or "(image-only message)" }}</div>
                     {% if row["grouped_messages"] %}
                     <div class="lx-group-box">
@@ -170,6 +245,12 @@
                         {% endfor %}
                     </div>
                     {% endif %}
+                    <div class="rq-state-grid">
+                        <div class="rq-state-cell"><div class="rq-state-lbl">Parsed Kind</div><div class="rq-state-val">{{ row["entry_kind"] or row["type"] or "unknown" }}</div></div>
+                        <div class="rq-state-cell"><div class="rq-state-lbl">Cash</div><div class="rq-state-val">{{ row["amount_display"] or "no amount" }}</div></div>
+                        <div class="rq-state-cell"><div class="rq-state-lbl">Payment</div><div class="rq-state-val">{{ row["payment_display"] or "blank" }}</div></div>
+                        <div class="rq-state-cell"><div class="rq-state-lbl">Bookkeeping</div><div class="rq-state-val">{{ row["bookkeeping"]["label"] }}</div></div>
+                    </div>
                 </div>
 
                 <div class="lx-form-panel">
@@ -213,12 +294,12 @@
                                 <textarea class="lx-textarea" name="notes">{{ row["notes"] or "" }}</textarea>
                             </label>
                         </div>
-                        <div class="lx-action-row">
+                        <div class="lx-action-row rq-card-actions">
+                            <a class="lx-btn rq-card-primary-action" href="/review/focus/{{ row['id'] }}?channel_id={{ selected_channel_id }}&expense_category={{ selected_expense_category }}&after={{ selected_after }}&before={{ selected_before }}&sort_by={{ selected_sort_by }}&sort_dir={{ selected_sort_dir }}&page={{ pagination['page'] }}&limit={{ selected_limit }}">Open Sheet</a>
                             <button type="submit" class="lx-btn lx-btn-ok" formaction="/messages/{{ row['id'] }}/approve-form" formmethod="post">Approve</button>
                             <button type="submit" class="lx-btn">Save</button>
                             <button type="submit" name="approve_after_save" value="true" class="lx-btn lx-btn-primary">Save &amp; Approve</button>
                             <button type="submit" class="lx-btn" formaction="/messages/{{ row['id'] }}/disregard-form" formmethod="post">Ignore</button>
-                            <a class="lx-btn" href="/review/focus/{{ row['id'] }}?channel_id={{ selected_channel_id }}&expense_category={{ selected_expense_category }}&after={{ selected_after }}&before={{ selected_before }}&sort_by={{ selected_sort_by }}&sort_dir={{ selected_sort_dir }}&page={{ pagination['page'] }}&limit={{ selected_limit }}">Focus View</a>
                             {% if pagination["has_next"] or pagination["page"] > 0 %}<a class="lx-btn" href="/review?channel_id={{ selected_channel_id }}&expense_category={{ selected_expense_category }}&after={{ selected_after }}&before={{ selected_before }}&sort_by={{ selected_sort_by }}&sort_dir={{ selected_sort_dir }}&page={{ pagination['page'] }}&limit={{ selected_limit }}">Next in Queue</a>{% endif %}
                         </div>
                     </form>

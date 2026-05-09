@@ -257,10 +257,16 @@ def edit_message_form(
     items_out_text: Optional[str] = Form(default=None),
     approve_after_save: Optional[str] = Form(default=None),
     stay_on_detail: Optional[str] = Form(default=None),
+    review_action: Optional[str] = Form(default=None),
+    next_message_id: Optional[int] = Form(default=None),
     session: Session = Depends(get_session),
 ):
     if denial := require_role_response(request, "reviewer"):
         return denial
+    if not isinstance(review_action, str):
+        review_action = None
+    if not isinstance(next_message_id, int):
+        next_message_id = None
     reviewer_label = current_user_label(request)
     row = session.get(DiscordMessage, message_id)
     if not row:
@@ -343,12 +349,32 @@ def edit_message_form(
         row.reviewed_at = None
     row.last_error = None if row.parse_status in {PARSE_PARSED, PARSE_REVIEW_REQUIRED} else row.last_error
 
+    normalized_review_action = (review_action or "").strip().lower()
+    if normalized_review_action == "approve_next":
+        approve_after_save = "true"
+        row.parse_status = PARSE_PARSED
+        row.needs_review = False
+        row.reviewed_by = reviewer_label
+        row.reviewed_at = utcnow()
+
     session.add(row)
     save_review_correction(session, row, parsed_before=parsed_before)
     sync_transaction_from_message(session, row)
     session.commit()
 
-    if stay_on_detail:
+    if normalized_review_action in {"save_next", "approve_next"} and next_message_id:
+        redirect_target = build_return_url(
+            f"/review/focus/{next_message_id}",
+            channel_id=channel_id,
+            expense_category=filter_expense_category,
+            after=after,
+            before=before,
+            sort_by=sort_by,
+            sort_dir=sort_dir,
+            page=page,
+            limit=limit,
+        )
+    elif stay_on_detail:
         redirect_target = build_message_detail_url(
             message_id,
             return_path=return_path,

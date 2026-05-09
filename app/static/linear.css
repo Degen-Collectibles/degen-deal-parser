@@ -1249,6 +1249,80 @@ details.db-panel[open] > summary::after { transform: rotate(-90deg); }
 }
 .lx-review-card:hover { border-color: var(--lx-br2); }
 
+.rq-mobile-filter-panel { display: none; }
+.rq-status-legend,
+.rq-card-head,
+.rq-card-meta,
+.rq-state-grid,
+.rq-focus-state-grid,
+.rq-attachment-row {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+.rq-status-legend { margin-top: 12px; }
+.rq-card-head {
+    justify-content: space-between;
+    margin-bottom: 8px;
+}
+.rq-card-meta {
+    color: var(--lx-muted);
+    font-size: 12px;
+    margin-bottom: 10px;
+}
+.rq-state-grid,
+.rq-focus-state-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin: 10px 0 0;
+}
+.rq-state-cell {
+    background: var(--lx-s2);
+    border: 1px solid var(--lx-br);
+    border-radius: 8px;
+    padding: 8px 10px;
+    min-width: 0;
+}
+.rq-state-lbl {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .07em;
+    color: var(--lx-dim);
+    margin-bottom: 3px;
+}
+.rq-state-val {
+    color: var(--lx-text);
+    font-size: 13px;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+.rq-card-context { min-width: 0; }
+.rq-card-primary-action { width: 100%; justify-content: center; }
+.rq-secondary-tools { margin-top: 10px; }
+.rq-secondary-tools summary {
+    cursor: pointer;
+    color: var(--lx-muted);
+    font-size: 12px;
+    font-weight: 600;
+    list-style: none;
+}
+.rq-secondary-tools summary::-webkit-details-marker { display: none; }
+.rq-secondary-tools-body {
+    border-top: 1px solid var(--lx-br);
+    margin-top: 10px;
+    padding-top: 10px;
+}
+.rq-focus-form .lx-action-row { align-items: stretch; }
+.rq-focus-form .lx-action-row .lx-btn { justify-content: center; }
+.rq-attachment-row {
+    margin: 8px 0 12px;
+    color: var(--lx-muted);
+    font-size: 12px;
+}
+
 /* ── Form panel (inside review cards) ────────────────────────────────── */
 .lx-form-panel {
     background: var(--lx-s2);
@@ -1539,6 +1613,102 @@ details.lx-details[open] > summary::after { transform: rotate(-90deg); }
     .lx-sticky-col { position: static; }
     .lx-metric-val { font-size: 20px; }
     .lx-h1 { font-size: 22px; }
+    .rq-desktop-filter-form,
+    .rq-desktop-tools,
+    .rq-desktop-metrics {
+        display: none !important;
+    }
+    .rq-mobile-filter-panel {
+        display: block;
+        margin-bottom: 12px;
+    }
+    .rq-mobile-filter-panel summary {
+        min-height: 44px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 10px 12px;
+        border: 1px solid var(--lx-br);
+        border-radius: 8px;
+        background: var(--lx-s2);
+        color: var(--lx-text);
+        font-size: 13px;
+        font-weight: 700;
+        list-style: none;
+    }
+    .rq-mobile-filter-panel summary::-webkit-details-marker { display: none; }
+    .rq-mobile-filter-body {
+        padding: 12px;
+        border: 1px solid var(--lx-br);
+        border-top: 0;
+        border-radius: 0 0 8px 8px;
+        background: var(--lx-s1);
+    }
+    .rq-status-legend {
+        overflow-x: auto;
+        flex-wrap: nowrap;
+        padding-bottom: 2px;
+        scrollbar-width: none;
+    }
+    .rq-status-legend::-webkit-scrollbar { display: none; }
+    .lx-review-list { gap: 14px; }
+    .lx-review-card {
+        padding: 0;
+        gap: 0;
+        overflow: hidden;
+    }
+    .rq-card-media {
+        display: grid;
+        grid-template-columns: 88px minmax(0, 1fr);
+        gap: 12px;
+        align-items: start;
+        padding: 12px;
+        border-bottom: 1px solid var(--lx-br);
+    }
+    .rq-card-media .lx-thumb,
+    .rq-card-media .lx-thumb-ph {
+        height: 112px;
+    }
+    .rq-card-context {
+        padding: 12px;
+    }
+    .rq-card-context .lx-msg-box {
+        margin-top: 8px;
+        max-height: 150px;
+        overflow: auto;
+    }
+    .rq-state-grid,
+    .rq-focus-state-grid {
+        grid-template-columns: 1fr 1fr;
+    }
+    .lx-review-card .lx-form-panel {
+        border-radius: 0;
+        border-left: 0;
+        border-right: 0;
+        border-bottom: 0;
+        padding: 12px;
+    }
+    .rq-card-actions .lx-btn,
+    .rq-focus-form .lx-action-row .lx-btn {
+        flex: 1 1 140px;
+        min-height: 44px;
+    }
+    .rq-focus-form .lx-action-row {
+        position: sticky;
+        bottom: calc(72px + env(safe-area-inset-bottom, 0px));
+        z-index: 8;
+        padding: 10px;
+        margin: 14px -12px -12px;
+        background: rgba(17,18,20,.96);
+        border-top: 1px solid var(--lx-br);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+    }
+    .rq-focus-header-actions {
+        width: 100%;
+        justify-content: space-between;
+    }
 }
 
 @media (max-width: 480px) {
@@ -1842,4 +2012,3 @@ details.lx-details[open] > summary::after { transform: rotate(-90deg); }
         padding-left: 0 !important;
     }
 }
-

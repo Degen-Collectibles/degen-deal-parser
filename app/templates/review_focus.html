@@ -56,8 +56,9 @@
             <p class="lx-subtitle" style="margin-top:4px;">Last reviewed{% if message["reviewed_by"] %} by {{ message["reviewed_by"] }}{% endif %}{% if message["reviewed_at"] %} on {{ message["reviewed_at"] }}{% endif %}</p>
             {% endif %}
             <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px;">
-                <span class="lx-pill {% if message['status'] == 'failed' %}lx-pill-danger{% endif %}">{{ message["status"] }}</span>
-                <span class="lx-pill">{{ message["entry_kind"] or "unknown" }}</span>
+                <span class="lx-pill {% if message['status_state']['tone'] == 'danger' %}lx-pill-danger{% elif message['status_state']['tone'] == 'warn' %}lx-pill-warn{% elif message['status_state']['tone'] == 'success' %}lx-pill-ok{% endif %}">{{ message["status_state"]["label"] }}</span>
+                <span class="lx-pill {% if message['transaction_state']['tone'] == 'success' %}lx-pill-ok{% elif message['transaction_state']['tone'] == 'warn' %}lx-pill-warn{% endif %}">{{ message["transaction_state"]["label"] }}</span>
+                <span class="lx-pill">{{ message["entry_kind"] or message["type"] or "unknown" }}</span>
                 <span class="lx-pill">{{ message["amount_display"] or "no amount" }}</span>
                 {% if message["payment_display"] %}<span class="lx-pill">{{ message["payment_display"] }}</span>{% endif %}
             </div>
@@ -66,7 +67,7 @@
         <div class="lx-layout-2">
             <div class="lx-card" style="margin-bottom:0;">
                 <div class="lx-sh" style="margin-bottom:10px;">
-                    <h2 class="lx-sh-title">Context</h2>
+                    <h2 class="lx-sh-title">Original Discord Message</h2>
                     <span class="lx-sh-meta">Images · message · grouped context</span>
                 </div>
                 <div class="lx-media">
@@ -77,6 +78,16 @@
                     {% else %}
                     <p class="lx-note">No image attached to this deal.</p>
                     {% endif %}
+                </div>
+                <div class="rq-attachment-row">
+                    {% if message["image_urls"] %}
+                    <span class="lx-pill lx-pill-ok">{{ message["image_urls"]|length }} image{% if message["image_urls"]|length != 1 %}s{% endif %}</span>
+                    {% elif message["possible_missing_image"] %}
+                    <span class="lx-pill lx-pill-warn">Nearby image clue</span>
+                    {% else %}
+                    <span class="lx-pill">Text only</span>
+                    {% endif %}
+                    {% if message["grouped_messages"] %}<span class="lx-pill">Grouped {{ message["grouped_messages"]|length }}</span>{% endif %}
                 </div>
                 <div class="lx-msg-box">{{ message["message"] or "(image-only message)" }}</div>
                 {% if message["grouped_messages"] %}
@@ -97,8 +108,15 @@
                     <div class="lx-sh" style="margin-bottom:12px;">
                         <h2 class="lx-sh-title">Review Decision</h2>
                     </div>
-                    <p class="lx-note" style="margin-bottom:12px;">Save for a draft correction. Use Save &amp; Approve when the row is done.</p>
-                    <form method="post" action="/messages/{{ message['id'] }}/edit-form">
+                    <div class="rq-focus-state-grid">
+                        <div class="rq-state-cell"><div class="rq-state-lbl">Parsed Type</div><div class="rq-state-val">{{ message["type"] or "blank" }}</div></div>
+                        <div class="rq-state-cell"><div class="rq-state-lbl">Financial Kind</div><div class="rq-state-val">{{ message["entry_kind"] or "auto" }}</div></div>
+                        <div class="rq-state-cell"><div class="rq-state-lbl">Cash</div><div class="rq-state-val">{{ message["amount_display"] or "no amount" }}</div></div>
+                        <div class="rq-state-cell"><div class="rq-state-lbl">Payment</div><div class="rq-state-val">{{ message["payment_display"] or "blank" }}</div></div>
+                        <div class="rq-state-cell"><div class="rq-state-lbl">Bookkeeping</div><div class="rq-state-val">{{ message["bookkeeping"]["label"] }}</div></div>
+                        <div class="rq-state-cell"><div class="rq-state-lbl">Confidence</div><div class="rq-state-val">{{ message["confidence"] if message["confidence"] is not none else "blank" }}</div></div>
+                    </div>
+                    <form method="post" action="/messages/{{ message['id'] }}/edit-form" class="rq-focus-form">
                         <input type="hidden" name="return_path" value="/review/focus/{{ message['id'] }}">
                         <input type="hidden" name="status" value="review_queue">
                         <input type="hidden" name="channel_id" value="{{ selected_channel_id }}">
@@ -111,6 +129,7 @@
                         <input type="hidden" name="limit" value="{{ selected_limit }}">
                         <input type="hidden" name="parse_status" value="needs_review">
                         <input type="hidden" name="needs_review" value="true">
+                        {% if next_message_id %}<input type="hidden" name="next_message_id" value="{{ next_message_id }}">{% endif %}
                         <div class="lx-edit-grid">
                             <label class="lx-label">Financial Kind
                                 <select class="lx-select" name="entry_kind">{% for option in entry_kind_options %}<option value="{{ option }}" {% if (message["entry_kind"] or "") == option %}selected{% endif %}>{{ option or "auto" }}</option>{% endfor %}</select>
@@ -138,9 +157,11 @@
                             </label>
                         </div>
                         <div class="lx-action-row" style="margin-top:14px;">
-                            <button type="submit" class="lx-btn lx-btn-ok" formaction="/messages/{{ message['id'] }}/approve-form" formmethod="post">Approve</button>
                             <button type="submit" class="lx-btn">Save</button>
-                            <button type="submit" name="approve_after_save" value="true" class="lx-btn lx-btn-primary">Save &amp; Approve</button>
+                            {% if next_message_id %}<button type="submit" name="review_action" value="save_next" class="lx-btn">Save &amp; Next</button>{% endif %}
+                            <button type="submit" name="approve_after_save" value="true" class="lx-btn lx-btn-ok">Save &amp; Approve</button>
+                            {% if next_message_id %}<button type="submit" name="review_action" value="approve_next" class="lx-btn lx-btn-primary">Save, Approve &amp; Next</button>{% endif %}
+                            <button type="submit" class="lx-btn" formaction="/messages/{{ message['id'] }}/approve-form" formmethod="post">Approve Current</button>
                             <button type="submit" class="lx-btn" formaction="/messages/{{ message['id'] }}/disregard-form" formmethod="post">Disregard</button>
                             {% if next_url %}<a class="lx-btn" href="{{ next_url }}">Skip to Next</a>{% endif %}
                         </div>

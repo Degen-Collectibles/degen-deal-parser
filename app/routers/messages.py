@@ -817,6 +817,7 @@ def reviewer_focus_page(
                 page=page,
                 limit=limit,
             ) if next_id else None,
+            "next_message_id": next_id,
             "current_position": current_index + 1 if current_index >= 0 else None,
             "queue_size": len(ordered_ids),
             "current_user": getattr(request.state, "current_user", None),

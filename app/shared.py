@@ -93,6 +93,7 @@ from .models import (
     TikTokOrder,
     TikTokProduct,
     TikTokSyncState,
+    Transaction,
     User,
     WatchedChannel,
     normalize_money_value,
@@ -2970,15 +2971,26 @@ def build_message_list_items(
 ) -> list[dict]:
     items = [message_list_item(row) for row in rows]
     row_by_id = {row.id: row for row in rows if row.id is not None}
+    item_ids = [item["id"] for item in items if item.get("id") is not None]
     nearby_image_candidates = find_nearby_image_candidates(session, rows)
     bookkeeping_status_by_message_id = get_bookkeeping_status_by_message_ids(
         session,
-        [item["id"] for item in items if item.get("id") is not None],
+        item_ids,
     )
     learning_signals_by_message = get_learning_signals(
         session,
         [item["message"] or "" for item in items],
     )
+    transaction_by_message_id: dict[int, Transaction] = {}
+    if item_ids:
+        transaction_rows = session.exec(
+            select(Transaction).where(Transaction.source_message_id.in_(item_ids))
+        ).all()
+        transaction_by_message_id = {
+            transaction.source_message_id: transaction
+            for transaction in transaction_rows
+            if transaction.source_message_id is not None
+        }
 
     grouped_ids: set[int] = set()
     for item in items:
@@ -3100,6 +3112,11 @@ def build_message_list_items(
         ) if item.get("id") is not None else ""
 
         source_row = row_by_id.get(item["id"])
+        item["transaction_state"] = build_transaction_state(
+            item,
+            transaction_by_message_id.get(item["id"]),
+        )
+        item["status_state"] = build_queue_status_state(item)
         item["action_links"] = build_row_action_links(
             item["id"],
             channel_id=item["channel_id"],
@@ -3110,6 +3127,76 @@ def build_message_list_items(
         item["attention"] = build_row_attention(item)
 
     return items
+
+
+def build_queue_status_state(item: dict) -> dict[str, str]:
+    status = item.get("status") or ""
+    if status == PARSE_FAILED:
+        return {
+            "label": "Failed parse",
+            "tone": "danger",
+            "detail": "Parser stopped before producing a clean row.",
+        }
+    if status == PARSE_REVIEW_REQUIRED or item.get("needs_review"):
+        return {
+            "label": "Needs review",
+            "tone": "warn",
+            "detail": "Human correction is required before reporting.",
+        }
+    if status == PARSE_PARSED:
+        return {
+            "label": "Parsed OK",
+            "tone": "success",
+            "detail": "Ready for reports unless a reviewer flags it.",
+        }
+    if status == PARSE_IGNORED:
+        return {
+            "label": "Ignored",
+            "tone": "muted",
+            "detail": "Excluded from transaction reporting.",
+        }
+    if status == PARSE_PROCESSING:
+        return {
+            "label": "Processing",
+            "tone": "warn",
+            "detail": "Worker has claimed this row.",
+        }
+    return {
+        "label": "Queued",
+        "tone": "info",
+        "detail": "Waiting for the parser.",
+    }
+
+
+def build_transaction_state(item: dict, transaction: Optional[Transaction]) -> dict[str, object]:
+    if transaction:
+        return {
+            "has_transaction": True,
+            "label": "Transaction synced",
+            "tone": "success",
+            "transaction_id": transaction.id,
+        }
+    status = item.get("status")
+    if status == PARSE_PARSED:
+        return {
+            "has_transaction": False,
+            "label": "No transaction row",
+            "tone": "warn",
+            "transaction_id": None,
+        }
+    if status == PARSE_IGNORED:
+        return {
+            "has_transaction": False,
+            "label": "Not imported",
+            "tone": "muted",
+            "transaction_id": None,
+        }
+    return {
+        "has_transaction": False,
+        "label": "Not imported yet",
+        "tone": "muted",
+        "transaction_id": None,
+    }
 
 
 def message_detail_item(row: DiscordMessage) -> dict:

@@ -240,6 +240,58 @@
         .new-updates-button { display:none; background:rgba(234,179,8,.16); color:#fbbf24; border-color:rgba(234,179,8,.35); }
         .new-updates-button.is-visible { display:inline-flex; }
         .mobile-card-list { display:none; }
+        .mobile-filter-card {
+            display:none;
+            border:1px solid var(--lx-br);
+            border-radius:12px;
+            background:var(--lx-s1);
+            margin-bottom:12px;
+            overflow:hidden;
+        }
+        .mobile-filter-card summary {
+            min-height:44px;
+            padding:10px 12px;
+            display:flex;
+            align-items:center;
+            justify-content:space-between;
+            gap:10px;
+            color:var(--lx-text);
+            font-weight:700;
+            cursor:pointer;
+            list-style:none;
+        }
+        .mobile-filter-card summary::-webkit-details-marker { display:none; }
+        .mobile-filter-body { border-top:1px solid var(--lx-br); padding:12px; }
+        .mobile-filter-form { display:grid; grid-template-columns:1fr; gap:10px; }
+        .mobile-filter-actions { display:flex; gap:8px; flex-wrap:wrap; }
+        .mobile-state-strip {
+            display:grid;
+            grid-template-columns:repeat(2,minmax(0,1fr));
+            gap:8px;
+            margin:10px 0;
+        }
+        .mobile-state-chip {
+            border:1px solid var(--lx-br);
+            border-radius:10px;
+            background:var(--lx-s2);
+            padding:8px 10px;
+            min-width:0;
+        }
+        .mobile-state-chip strong {
+            display:block;
+            color:var(--lx-muted);
+            font-size:10px;
+            text-transform:uppercase;
+            letter-spacing:.06em;
+            margin-bottom:3px;
+        }
+        .mobile-state-chip span {
+            display:block;
+            color:var(--lx-text);
+            font-size:13px;
+            font-weight:600;
+            overflow-wrap:anywhere;
+        }
         .mobile-row-card {
             border:1px solid var(--lx-br);
             border-radius:14px;
@@ -364,7 +416,7 @@
             .hero-actions .button, .hero-actions button{min-height:44px; flex:1 1 150px;}
             .top-grid{display:none;}
             .dashboard{display:flex; flex-direction:column; gap:12px;}
-            .sidebar{gap:10px; order:1;}
+            .sidebar{display:none;}
             main{order:2;}
             .card, details.panel{border-radius:14px;}
             .card{padding:12px;}
@@ -375,6 +427,7 @@
             .queue-strip{position:static; padding:12px; border-radius:12px;}
             .desktop-table{display:none;}
             .mobile-only{display:flex !important;}
+            .mobile-filter-card{display:block;}
             .mobile-card-list{display:grid; gap:12px;}
             .mobile-bulk-select{display:inline-flex;}
             .mobile-card-money{grid-template-columns:1fr;}
@@ -583,6 +636,28 @@
                             <div class="section-subtitle">{% if is_review_page %}Use this denser table when you want more rows on screen, bulk actions, and inline edits without leaving the page.{% else %}Keep an eye on parser state, scan raw message flow, and drop into deeper actions only when you need them.{% endif %}</div>
                         </div>
                     </div>
+                    <details class="mobile-filter-card">
+                        <summary><span>Filters</span><span class="count-pill">{{ pagination["total_rows"] }} rows</span></summary>
+                        <div class="mobile-filter-body">
+                            <form method="get" action="{{ return_path }}" class="mobile-filter-form">
+                                <div class="form-row"><label for="mobile_channel_id">Channel</label><select name="channel_id" id="mobile_channel_id"><option value="">All channels</option>{% for ch in channels %}<option value="{{ ch['channel_id'] }}" {% if selected_channel_id == ch['channel_id'] %}selected{% endif %}>{{ ch["channel_name"] }}</option>{% endfor %}</select></div>
+                                {% if is_review_page %}
+                                <input type="hidden" name="status" value="review_queue">
+                                {% else %}
+                                <div class="form-row"><label for="mobile_source">Source</label><select name="source" id="mobile_source"><option value="all" {% if selected_source == "all" %}selected{% endif %}>All sources</option><option value="discord" {% if selected_source == "discord" %}selected{% endif %}>Discord only</option><option value="shopify" {% if selected_source == "shopify" %}selected{% endif %}>Shopify only</option></select></div>
+                                <div class="form-row"><label for="mobile_status">Status</label><select name="status" id="mobile_status"><option value="" {% if selected_status == "" %}selected{% endif %}>All statuses</option><option value="queued" {% if selected_status == "queued" %}selected{% endif %}>pending</option><option value="processing" {% if selected_status == "processing" %}selected{% endif %}>processing</option><option value="parsed" {% if selected_status == "parsed" %}selected{% endif %}>parsed OK</option><option value="needs_review" {% if selected_status == "needs_review" %}selected{% endif %}>needs review</option><option value="failed" {% if selected_status == "failed" %}selected{% endif %}>failed parse</option><option value="ignored" {% if selected_status == "ignored" %}selected{% endif %}>ignored</option></select></div>
+                                {% endif %}
+                                <div class="form-row"><label for="mobile_expense_category">Expense Category</label><select name="expense_category" id="mobile_expense_category"><option value="" {% if selected_expense_category == "" %}selected{% endif %}>All expense categories</option>{% for option in expense_category_options %}<option value="{{ option }}" {% if selected_expense_category == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></div>
+                                <div class="form-row"><label for="mobile_after_filter">After</label><input type="date" name="after" id="mobile_after_filter" value="{{ selected_after }}"></div>
+                                <div class="form-row"><label for="mobile_before_filter">Before</label><input type="date" name="before" id="mobile_before_filter" value="{{ selected_before }}"></div>
+                                <div class="form-row"><label for="mobile_sort_dir">Time Sort</label><select name="sort_dir" id="mobile_sort_dir"><option value="desc" {% if selected_sort_dir == "desc" %}selected{% endif %}>Newest first</option><option value="asc" {% if selected_sort_dir == "asc" %}selected{% endif %}>Oldest first</option></select></div>
+                                <div class="form-row"><label for="mobile_limit">Rows Per Page</label><select name="limit" id="mobile_limit"><option value="25" {% if selected_limit == 25 %}selected{% endif %}>25</option><option value="50" {% if selected_limit == 50 %}selected{% endif %}>50</option><option value="100" {% if selected_limit == 100 %}selected{% endif %}>100</option><option value="200" {% if selected_limit == 200 %}selected{% endif %}>200</option><option value="500" {% if selected_limit == 500 %}selected{% endif %}>500</option></select></div>
+                                <input type="hidden" name="sort_by" value="{{ selected_sort_by }}">
+                                <input type="hidden" name="page" value="1">
+                                <div class="mobile-filter-actions"><button type="submit" class="primary-button">Apply</button><a href="{{ return_path }}" class="button secondary-button" style="width:auto;">Reset</a></div>
+                            </form>
+                        </div>
+                    </details>
                     <div class="table-toolbar">
                         <div class="scope-stack"><h2 class="scope-title">{% if is_review_page %}Review Queue{% else %}Transaction Feed{% endif %}</h2><div class="muted">Showing {{ pagination["start_row"] }}-{{ pagination["end_row"] }} of {{ pagination["total_rows"] }}{% if selected_after or selected_before %} for the selected date range{% endif %}</div></div>
                         <div class="toolbar-actions"><span class="pill">{{ selected_status if selected_status else "all visible statuses" }}</span><span class="pill">{{ selected_expense_category if selected_expense_category else "all expense categories" }}</span>{% if not is_review_page %}<span class="pill">{{ selected_source }}</span>{% endif %}<span class="pill">{{ selected_limit }} rows/page</span><button type="button" id="auto-refresh-toggle" class="pill active" style="border:none; cursor:pointer;">Auto Refresh On</button><button type="button" id="new-updates-button" class="pill new-updates-button" aria-live="polite">New updates ready</button>{% if is_review_page %}<span class="hotkey-pill">Ctrl/Cmd+S saves focused row</span>{% endif %}</div>
@@ -924,7 +999,7 @@
                         <article class="mobile-row-card{% if row['needs_review'] %} row-needs-review{% endif %}{% if row['status'] == 'failed' %} row-failed{% endif %}" data-row-id="{{ row['id'] }}">
                             <div class="mobile-card-top">
                                 <label class="mobile-row-check"><input type="checkbox" name="message_ids" value="{{ row['id'] }}" data-row-id="{{ row['id'] }}" class="row-selector mobile-row-selector" form="bulk-reparse-form"> Row {{ row["id"] }}</label>
-                                <span class="status-pill status-{{ row['status'] }}">{{ (row["status"] or "")|replace("_", " ") }}</span>
+                                <span class="status-pill status-{{ row['status'] }}">{{ row["status_state"]["label"] }}</span>
                             </div>
                             <div class="mobile-card-meta">
                                 <strong>{{ row["channel"] or row["channel_id"] }}</strong>
@@ -948,6 +1023,12 @@
                                 <div class="mobile-fact"><strong>Kind</strong><span>{{ row["entry_kind"] or row["type"] or "—" }}</span></div>
                                 <div class="mobile-fact"><strong>Category</strong><span>{{ row["expense_category"] or row["category"] or "—" }}</span></div>
                             </div>
+                            <div class="mobile-state-strip">
+                                <div class="mobile-state-chip"><strong>Queue</strong><span>{{ row["status_state"]["label"] }}</span></div>
+                                <div class="mobile-state-chip"><strong>Import</strong><span>{{ row["transaction_state"]["label"] }}</span></div>
+                                <div class="mobile-state-chip"><strong>Bookkeeping</strong><span>{{ row["bookkeeping"]["label"] }}</span></div>
+                                <div class="mobile-state-chip"><strong>Review</strong><span>{{ "Required" if row["needs_review"] else "Clear" }}</span></div>
+                            </div>
                             {% if row["attention"]["has_attention"] %}
                             <div class="attention-box{% if row['attention']['level'] == 'danger' %} danger{% endif %}">
                                 <div class="attention-title">Needs attention</div>
@@ -956,8 +1037,12 @@
                             </div>
                             {% endif %}
                             <div class="mobile-card-actions">
+                                {% if is_review_page or row["needs_review"] or row["status"] == "failed" %}
+                                <a class="button primary-button tiny-button" href="/review/focus/{{ row['id'] }}?channel_id={{ selected_channel_id }}&expense_category={{ selected_expense_category }}&after={{ selected_after }}&before={{ selected_before }}&sort_by={{ selected_sort_by }}&sort_dir={{ selected_sort_dir }}&page={{ pagination['page'] }}&limit={{ selected_limit }}">Correct</a>
+                                <a class="button secondary-button tiny-button" href="{{ row['detail_url'] }}">Open Detail</a>
+                                {% else %}
                                 <a class="button secondary-button tiny-button" href="{{ row['detail_url'] }}">Open</a>
-                                {% if not is_review_page %}<a class="button secondary-button tiny-button" href="{{ row['detail_url'] }}">Correct</a>{% endif %}
+                                {% endif %}
                                 {% if not is_review_page %}<form method="post" action="/messages/{{ row['id'] }}/mark-incorrect-form"><input type="hidden" name="return_path" value="{{ return_path }}"><input type="hidden" name="status" value="{{ selected_status }}"><input type="hidden" name="channel_id" value="{{ selected_channel_id }}"><input type="hidden" name="expense_category" value="{{ selected_expense_category }}"><input type="hidden" name="after" value="{{ selected_after }}"><input type="hidden" name="before" value="{{ selected_before }}"><input type="hidden" name="sort_by" value="{{ selected_sort_by }}"><input type="hidden" name="sort_dir" value="{{ selected_sort_dir }}"><input type="hidden" name="page" value="{{ pagination['page'] }}"><input type="hidden" name="limit" value="{{ selected_limit }}"><button type="submit" class="secondary-button tiny-button">Mark Incorrect</button></form>{% endif %}
                                 {% if is_review_page %}<form method="post" action="/messages/{{ row['id'] }}/approve-form"><input type="hidden" name="return_path" value="{{ return_path }}"><input type="hidden" name="status" value="{{ selected_status }}"><input type="hidden" name="channel_id" value="{{ selected_channel_id }}"><input type="hidden" name="expense_category" value="{{ selected_expense_category }}"><input type="hidden" name="after" value="{{ selected_after }}"><input type="hidden" name="before" value="{{ selected_before }}"><input type="hidden" name="sort_by" value="{{ selected_sort_by }}"><input type="hidden" name="sort_dir" value="{{ selected_sort_dir }}"><input type="hidden" name="page" value="{{ pagination['page'] }}"><input type="hidden" name="limit" value="{{ selected_limit }}"><button type="submit" class="secondary-button tiny-button">Approve</button></form>{% endif %}
                                 {% if is_review_page %}<form method="post" action="/messages/{{ row['id'] }}/disregard-form"><input type="hidden" name="return_path" value="{{ return_path }}"><input type="hidden" name="status" value="{{ selected_status }}"><input type="hidden" name="channel_id" value="{{ selected_channel_id }}"><input type="hidden" name="expense_category" value="{{ selected_expense_category }}"><input type="hidden" name="after" value="{{ selected_after }}"><input type="hidden" name="before" value="{{ selected_before }}"><input type="hidden" name="sort_by" value="{{ selected_sort_by }}"><input type="hidden" name="sort_dir" value="{{ selected_sort_dir }}"><input type="hidden" name="page" value="{{ pagination['page'] }}"><input type="hidden" name="limit" value="{{ selected_limit }}"><button type="submit" class="secondary-button tiny-button">Disregard</button></form>{% endif %}
