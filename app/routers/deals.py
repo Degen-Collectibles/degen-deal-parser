@@ -24,6 +24,10 @@ _DEALS_DEFAULT_TZ = ZoneInfo("America/Los_Angeles")
 router = APIRouter()
 
 
+def _is_admin_message_detail_return_path(return_path: str) -> bool:
+    return return_path in {"/table", "/review-table"}
+
+
 @router.get("/deals", response_class=HTMLResponse)
 def deals_page(
     request: Request,
@@ -114,17 +118,27 @@ def deal_detail_page(
     error: Optional[str] = Query(default=None),
     session: Session = Depends(get_session),
 ):
-    if denial := require_role_response(request, "viewer"):
+    admin_message_detail = _is_admin_message_detail_return_path(return_path)
+    if denial := require_role_response(request, "admin" if admin_message_detail else "viewer"):
         return denial
 
-    watched_channel_ids = {
-        row.channel_id
-        for row in get_watched_channels(session)
-        if row.is_enabled
-    }
     row = session.get(DiscordMessage, message_id)
-    if not row or row.channel_id not in watched_channel_ids or normalize_parse_status(row.parse_status, is_deleted=row.is_deleted, needs_review=row.needs_review) != PARSE_PARSED:
+    if not row:
         raise HTTPException(status_code=404, detail="Deal not found")
+
+    normalized_status = normalize_parse_status(
+        row.parse_status,
+        is_deleted=row.is_deleted,
+        needs_review=row.needs_review,
+    )
+    if not admin_message_detail:
+        watched_channel_ids = {
+            row.channel_id
+            for row in get_watched_channels(session)
+            if row.is_enabled
+        }
+        if row.channel_id not in watched_channel_ids or normalized_status != PARSE_PARSED:
+            raise HTTPException(status_code=404, detail="Deal not found")
 
     item = build_message_list_items(session, [row])[0]
     item["trade_summary"] = row.trade_summary
@@ -132,7 +146,7 @@ def deal_detail_page(
     item["image_summary"] = row.image_summary
     item["reviewed_by"] = row.reviewed_by
     item["reviewed_at"] = format_pacific_datetime(row.reviewed_at)
-    item["parse_status"] = normalize_parse_status(row.parse_status, is_deleted=row.is_deleted, needs_review=row.needs_review)
+    item["parse_status"] = normalized_status
     item["needs_review"] = row.needs_review
     item["is_deleted"] = row.is_deleted
     item["confidence"] = row.confidence

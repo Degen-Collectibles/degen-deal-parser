@@ -271,8 +271,9 @@ def edit_message_form(
         parsed_amount = parse_optional_float(amount)
         parsed_confidence = parse_optional_float(confidence)
     except ValueError:
-        detail_url = build_return_url(
-            f"/deals/{message_id}",
+        detail_url = build_message_detail_url(
+            message_id,
+            return_path=return_path,
             status=status,
             channel_id=channel_id,
             expense_category=filter_expense_category,
@@ -347,18 +348,33 @@ def edit_message_form(
     sync_transaction_from_message(session, row)
     session.commit()
 
-    redirect_target = build_return_url(
-        f"/deals/{message_id}" if stay_on_detail else return_path,
-        status=status,
-        channel_id=channel_id,
-        expense_category=filter_expense_category,
-        after=after,
-        before=before,
-        sort_by=sort_by,
-        sort_dir=sort_dir,
-        page=page,
-        limit=limit,
-    )
+    if stay_on_detail:
+        redirect_target = build_message_detail_url(
+            message_id,
+            return_path=return_path,
+            status=status,
+            channel_id=channel_id,
+            expense_category=filter_expense_category,
+            after=after,
+            before=before,
+            sort_by=sort_by,
+            sort_dir=sort_dir,
+            page=page,
+            limit=limit,
+        )
+    else:
+        redirect_target = build_return_url(
+            return_path,
+            status=status,
+            channel_id=channel_id,
+            expense_category=filter_expense_category,
+            after=after,
+            before=before,
+            sort_by=sort_by,
+            sort_dir=sort_dir,
+            page=page,
+            limit=limit,
+        )
     separator = "&" if "?" in redirect_target else "?"
     success_message = (
         f"Saved+manual+correction+and+approved+message+{message_id}"

@@ -156,7 +156,7 @@
                     </div>
                     <p class="lx-note" style="margin-bottom:14px;">Use this full form when inline review fields are not enough and you need to correct item flow or detail.</p>
                     <form method="post" action="/messages/{{ deal['id'] }}/edit-form" id="edit-form">
-                        <input type="hidden" name="return_path" value="/deals/{{ deal['id'] }}">
+                        <input type="hidden" name="return_path" value="{{ return_path }}">
                         <input type="hidden" name="stay_on_detail" value="true">
                         <input type="hidden" name="status" value="{{ selected_status }}">
                         <input type="hidden" name="channel_id" value="{{ selected_channel_id }}">

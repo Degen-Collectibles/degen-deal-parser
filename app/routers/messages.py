@@ -337,8 +337,9 @@ def mark_incorrect_message_form(
     session.commit()
 
     selected_expense_category = filter_expense_category or expense_category
-    detail_url = build_return_url(
-        f"/deals/{message_id}",
+    detail_url = build_message_detail_url(
+        message_id,
+        return_path=return_path,
         status="review_queue" if return_path == "/review-table" else status,
         channel_id=channel_id,
         expense_category=selected_expense_category,

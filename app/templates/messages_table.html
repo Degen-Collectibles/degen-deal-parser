@@ -236,6 +236,114 @@
         }
         .bulk-status { justify-content:flex-start; }
         .selection-count { font-weight:700; color:var(--lx-text); }
+        .mobile-only { display:none !important; }
+        .new-updates-button { display:none; background:rgba(234,179,8,.16); color:#fbbf24; border-color:rgba(234,179,8,.35); }
+        .new-updates-button.is-visible { display:inline-flex; }
+        .mobile-card-list { display:none; }
+        .mobile-row-card {
+            border:1px solid var(--lx-br);
+            border-radius:14px;
+            background:var(--lx-s1);
+            padding:14px;
+            box-shadow:var(--shadow);
+        }
+        .mobile-row-card.row-needs-review { box-shadow:inset 4px 0 0 var(--lx-red), var(--shadow); }
+        .mobile-row-card.row-failed { box-shadow:inset 4px 0 0 #b91c1c, var(--shadow); }
+        .mobile-card-top, .mobile-card-meta, .mobile-card-money, .mobile-card-actions, .channel-picker-meta, .channel-picker-chips, .channel-picker-results {
+            display:flex;
+            gap:8px;
+            flex-wrap:wrap;
+            align-items:center;
+        }
+        .mobile-card-top { justify-content:space-between; margin-bottom:10px; }
+        .mobile-card-meta { color:var(--lx-muted); font-size:12px; line-height:1.45; margin-bottom:10px; }
+        .mobile-card-message {
+            white-space:pre-wrap;
+            overflow-wrap:anywhere;
+            color:var(--lx-text);
+            font-size:14px;
+            line-height:1.45;
+            margin:10px 0;
+        }
+        .mobile-card-money {
+            display:grid;
+            grid-template-columns:repeat(2,minmax(0,1fr));
+            gap:8px;
+            margin:10px 0;
+        }
+        .mobile-fact {
+            border:1px solid var(--lx-br);
+            border-radius:10px;
+            background:var(--lx-s2);
+            padding:9px 10px;
+            min-width:0;
+        }
+        .mobile-fact strong {
+            display:block;
+            color:var(--lx-muted);
+            font-size:10px;
+            text-transform:uppercase;
+            letter-spacing:.06em;
+            margin-bottom:3px;
+        }
+        .mobile-fact span { color:var(--lx-text); font-weight:600; overflow-wrap:anywhere; }
+        .mobile-row-check {
+            min-height:44px;
+            display:inline-flex;
+            gap:8px;
+            align-items:center;
+            margin:0;
+            color:var(--lx-text);
+            text-transform:none;
+            letter-spacing:0;
+            font-size:13px;
+        }
+        .mobile-row-check input { width:22px; height:22px; margin:0; }
+        .mobile-card-actions { justify-content:flex-start; margin-top:12px; }
+        .mobile-card-actions form { margin:0; }
+        .mobile-card-actions .button, .mobile-card-actions button { min-height:44px; }
+        .mobile-thumb-row { display:flex; align-items:center; gap:10px; margin:8px 0; }
+        .mobile-thumb-row .thumb { width:44px; height:58px; }
+        .mobile-bulk-select {
+            display:none;
+            min-height:44px;
+            align-items:center;
+            gap:8px;
+            margin:0;
+            color:var(--lx-text);
+            text-transform:none;
+            letter-spacing:0;
+            font-size:13px;
+        }
+        .mobile-bulk-select input { width:22px; height:22px; margin:0; }
+        .channel-picker-mobile {
+            display:none;
+            border:1px solid var(--lx-br);
+            border-radius:12px;
+            background:var(--lx-s1);
+            padding:10px;
+            margin-top:8px;
+        }
+        .channel-picker-meta { justify-content:space-between; color:var(--lx-muted); font-size:12px; margin:8px 0; }
+        .channel-picker-chips { margin-bottom:8px; }
+        .channel-chip, .channel-result-button {
+            border:1px solid var(--lx-br);
+            background:var(--lx-s2);
+            color:var(--lx-text);
+            border-radius:999px;
+            padding:8px 10px;
+            font-size:12px;
+            font-weight:600;
+            min-height:36px;
+        }
+        .channel-result-button {
+            width:100%;
+            justify-content:flex-start;
+            border-radius:10px;
+            text-align:left;
+        }
+        .channel-result-button.is-selected { border-color:rgba(34,197,94,.45); background:rgba(34,197,94,.12); color:#4ade80; }
+        .channel-picker-results { flex-direction:column; align-items:stretch; max-height:260px; overflow:auto; }
         .review-rail { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:12px; margin-bottom:14px; }
         .review-note { padding:12px 14px; border:1px solid var(--lx-br); border-radius:12px; background: var(--lx-s1); color: var(--lx-text); }
         .review-note strong { display:block; margin-bottom:4px; }
@@ -246,7 +354,44 @@
         @keyframes panelFade { from { opacity:0; transform:translateY(-4px); } to { opacity:1; transform:translateY(0); } }
         @media (max-width:1200px){.top-grid,.dashboard{grid-template-columns:1fr}.sidebar{position:static}}
         @media (max-width:900px){.page{padding:16px 14px 28px}.hero{grid-template-columns:1fr;text-align:center}.eyebrow{margin:0 auto}.hero-actions{justify-content:center}.summary-grid,.financial-grid,.detail-grid,.chart-row,.review-rail{grid-template-columns:1fr}.inline-review-grid{grid-template-columns:1fr}.queue-strip{position:static}}
+        @media (max-width:760px){
+            .page{padding:10px 10px 80px; max-width:100%; overflow-x:hidden;}
+            .hero{padding:14px; margin-bottom:10px; text-align:left; border-radius:14px; gap:10px;}
+            .eyebrow{margin:0;}
+            h1{font-size:28px; letter-spacing:0; line-height:1.05;}
+            .hero p, .hero-meta, .section-header, .scope-strip, .queue-strip .helper, .hotkey-pill, .desktop-only, .desktop-heavy-action{display:none !important;}
+            .hero-actions{justify-content:flex-start;}
+            .hero-actions .button, .hero-actions button{min-height:44px; flex:1 1 150px;}
+            .top-grid{display:none;}
+            .dashboard{display:flex; flex-direction:column; gap:12px;}
+            .sidebar{gap:10px; order:1;}
+            main{order:2;}
+            .card, details.panel{border-radius:14px;}
+            .card{padding:12px;}
+            summary{min-height:44px; padding:12px 14px;}
+            .panel-body{padding:0 12px 12px;}
+            .table-toolbar, .pagination-bar, .bulk-bar{align-items:flex-start;}
+            .toolbar-actions{justify-content:flex-start;}
+            .queue-strip{position:static; padding:12px; border-radius:12px;}
+            .desktop-table{display:none;}
+            .mobile-only{display:flex !important;}
+            .mobile-card-list{display:grid; gap:12px;}
+            .mobile-bulk-select{display:inline-flex;}
+            .mobile-card-money{grid-template-columns:1fr;}
+            .channel-picker-mobile{display:block;}
+            #new_channel_id{display:none;}
+            .button, button, input, select, textarea{min-height:44px;}
+            .tiny-button{padding:10px 12px; min-height:44px; font-size:13px;}
+            .inline-actions{width:100%; justify-content:flex-start;}
+            .inline-actions .button, .inline-actions button{width:auto;}
+            .pagination-controls{width:100%; justify-content:space-between;}
+        }
         @media (max-width:640px){.summary-grid,.financial-grid,.detail-grid,.chart-row{grid-template-columns:1fr}}
+        @media (hover:none), (pointer:coarse){
+            .button, button, input, select, textarea{min-height:44px;}
+            input[type="checkbox"]{min-width:22px; min-height:22px;}
+            .tiny-button{min-height:44px;}
+        }
     </style>
     <link rel="stylesheet" href="/static/linear.css?v=1776749171">
     <link rel="stylesheet" href="/static/safe-area.css?v=1776747800">
@@ -270,8 +415,8 @@
                     {% if not is_review_page %}
                     <a href="/admin" class="button primary-button" style="width:auto;">Back to Admin Hub</a>
                     <a href="/bookkeeping" class="button secondary-button" style="width:auto;">Bookkeeping</a>
-                    <a href="/messages/export.csv?status={{ selected_status }}&channel_id={{ selected_channel_id }}&expense_category={{ selected_expense_category }}&source={{ selected_source }}&after={{ selected_after }}&before={{ selected_before }}&sort_by={{ selected_sort_by }}&sort_dir={{ selected_sort_dir }}" class="button secondary-button" style="width:auto;">Export Table CSV</a>
-                    <form method="post" action="/admin/parser/reprocess-form" style="display:inline-flex; gap:8px; flex-wrap:wrap;">
+                    <a href="/messages/export.csv?status={{ selected_status }}&channel_id={{ selected_channel_id }}&expense_category={{ selected_expense_category }}&source={{ selected_source }}&after={{ selected_after }}&before={{ selected_before }}&sort_by={{ selected_sort_by }}&sort_dir={{ selected_sort_dir }}" class="button secondary-button desktop-heavy-action" style="width:auto;">Export Table CSV</a>
+                    <form method="post" action="/admin/parser/reprocess-form" class="desktop-heavy-action" style="display:inline-flex; gap:8px; flex-wrap:wrap;">
                         <input type="hidden" name="return_path" value="{{ return_path }}">
                         <button type="submit" class="button secondary-button" style="width:auto;">Run Parser Recheck</button>
                         <button type="submit" name="force" value="true" class="button secondary-button" style="width:auto;">Force Recheck</button>
@@ -394,11 +539,11 @@
                         <form id="channel-rescan-form" method="post" action="/admin/channels/rescan" style="display:none;"></form>
                         <form method="post" action="/admin/channels/add" style="margin-bottom:14px;">
                             <div class="form-row"><label for="available_channel_sort">Channel Sort</label><select id="available_channel_sort"><option value="last_message_desc">Last message (newest)</option><option value="created_desc">Date created (newest)</option><option value="name_asc">Name</option></select></div>
-                            <div class="form-row"><label for="new_channel_id">Available Discord Channels <button type="submit" form="channel-rescan-form" class="secondary-button tiny-button" style="margin-left:8px;" title="Re-scan Discord for new channels">↻ Refresh</button></label><select name="channel_ids" id="new_channel_id" multiple size="6">{% for ch in available_discord_channels %}<option value="{{ ch['channel_id'] }}" data-label="{{ ch['label'] }}" data-created-at="{{ ch['created_at'] or '' }}" data-last-message-at="{{ ch['last_message_at'] or '' }}">{{ ch["label"] }}</option>{% endfor %}</select></div>
+                            <div class="form-row"><label for="new_channel_id">Available Discord Channels <button type="submit" form="channel-rescan-form" class="secondary-button tiny-button" style="margin-left:8px;" title="Re-scan Discord for new channels">↻ Refresh</button></label><select name="channel_ids" id="new_channel_id" multiple size="6">{% for ch in available_discord_channels %}<option value="{{ ch['channel_id'] }}" data-label="{{ ch['label'] }}" data-created-at="{{ ch['created_at'] or '' }}" data-last-message-at="{{ ch['last_message_at'] or '' }}">{{ ch["label"] }}</option>{% endfor %}</select><div class="channel-picker-mobile" id="channel-picker-mobile"><label for="channel-picker-search">Search channels</label><input type="search" id="channel-picker-search" placeholder="Search by channel name or ID" autocomplete="off"><div class="channel-picker-meta"><span id="channel-picker-count">0 selected</span><span>Tap to select</span></div><div class="channel-picker-chips" id="channel-picker-chips"></div><div class="channel-picker-results" id="channel-picker-results"></div></div></div>
                             {% if not has_live_available_discord_channels %}
                             <div class="helper" style="margin-top:-4px; margin-bottom:10px;">Live Discord inventory is unavailable on this page right now, so this list is falling back to channels already known in the database. You can still paste channel IDs below.</div>
                             {% endif %}
-                            <div class="helper" style="margin-top:-4px; margin-bottom:10px;">Hold Ctrl or Shift to select multiple channels.</div>
+                            <div class="helper desktop-only" style="margin-top:-4px; margin-bottom:10px;">Hold Ctrl or Shift to select multiple channels.</div>
                             <div class="form-row"><label for="manual_channel_ids">Manual Channel IDs (optional)</label><textarea name="manual_channel_ids" id="manual_channel_ids" rows="3" placeholder="Paste one or more Discord channel IDs, separated by commas or new lines"></textarea></div>
                             <div class="form-row"><label for="new_channel_name">Saved Name (optional)</label><input type="text" name="channel_name" id="new_channel_name" placeholder="Only used when one channel is selected"></div>
                             <div class="form-row"><label for="new_channel_backfill_after">Initial Backfill After (optional)</label><input type="date" name="backfill_after" id="new_channel_backfill_after"></div>
@@ -440,7 +585,7 @@
                     </div>
                     <div class="table-toolbar">
                         <div class="scope-stack"><h2 class="scope-title">{% if is_review_page %}Review Queue{% else %}Transaction Feed{% endif %}</h2><div class="muted">Showing {{ pagination["start_row"] }}-{{ pagination["end_row"] }} of {{ pagination["total_rows"] }}{% if selected_after or selected_before %} for the selected date range{% endif %}</div></div>
-                        <div class="toolbar-actions"><span class="pill">{{ selected_status if selected_status else "all visible statuses" }}</span><span class="pill">{{ selected_expense_category if selected_expense_category else "all expense categories" }}</span>{% if not is_review_page %}<span class="pill">{{ selected_source }}</span>{% endif %}<span class="pill">{{ selected_limit }} rows/page</span><button type="button" id="auto-refresh-toggle" class="pill active" style="border:none; cursor:pointer;">Auto Refresh On</button>{% if is_review_page %}<span class="hotkey-pill">Ctrl/Cmd+S saves focused row</span>{% endif %}</div>
+                        <div class="toolbar-actions"><span class="pill">{{ selected_status if selected_status else "all visible statuses" }}</span><span class="pill">{{ selected_expense_category if selected_expense_category else "all expense categories" }}</span>{% if not is_review_page %}<span class="pill">{{ selected_source }}</span>{% endif %}<span class="pill">{{ selected_limit }} rows/page</span><button type="button" id="auto-refresh-toggle" class="pill active" style="border:none; cursor:pointer;">Auto Refresh On</button><button type="button" id="new-updates-button" class="pill new-updates-button" aria-live="polite">New updates ready</button>{% if is_review_page %}<span class="hotkey-pill">Ctrl/Cmd+S saves focused row</span>{% endif %}</div>
                     </div>
                     <div class="scope-strip">
                         <div class="subtle">{% if selected_channel_id %}Scoped to one channel.{% else %}Across all visible channels.{% endif %}{% if selected_expense_category %} Expense category filter is active.{% endif %}{% if selected_after or selected_before %} Date filters are active.{% else %} No date range filters applied.{% endif %}{% if not is_review_page %} Source: {{ selected_source }}.{% endif %}</div>
@@ -509,8 +654,8 @@
                             <form method="post" action="/admin/backfill/form" style="margin-bottom:14px;">
                                 <div class="helper" style="margin-bottom:10px;">Backfill pulls older Discord messages into the system for the channel and date range you choose. Use it when messages are missing, not when the messages are already here but parsed wrong.</div>
                                 <div class="form-row"><label for="backfill_channel_id">Channel</label><select name="channel_id" id="backfill_channel_id"><option value="">All backfill-enabled watched channels</option>{% for ch in available_discord_channels %}<option value="{{ ch['channel_id'] }}">{{ ch["label"] }}</option>{% endfor %}</select></div>
-                                <div class="form-row"><label for="after">After</label><input type="text" name="after" id="after" placeholder="2026-03-01"></div>
-                                <div class="form-row"><label for="before">Before</label><input type="text" name="before" id="before" placeholder="2026-03-31"></div>
+                                <div class="form-row"><label for="after">After</label><input type="date" name="after" id="after"></div>
+                                <div class="form-row"><label for="before">Before</label><input type="date" name="before" id="before"></div>
                                 <div class="form-row"><label for="backfill_limit">Limit per run</label><input type="number" name="limit" id="backfill_limit" placeholder="500"></div>
                                 <div class="form-row"><label for="oldest_first">Order</label><select name="oldest_first" id="oldest_first"><option value="true">Oldest first</option><option value="false">Newest first</option></select></div>
                                 <button type="submit" class="primary-button">Run Backfill</button>
@@ -561,16 +706,17 @@
                     <form id="bulk-approve-form" method="post" action="/messages/bulk/approve-form"><input type="hidden" name="return_path" value="{{ return_path }}"><input type="hidden" name="status" value="{{ selected_status }}"><input type="hidden" name="channel_id" value="{{ selected_channel_id }}"><input type="hidden" name="expense_category" value="{{ selected_expense_category }}"><input type="hidden" name="source" value="{{ selected_source }}"><input type="hidden" name="after" value="{{ selected_after }}"><input type="hidden" name="before" value="{{ selected_before }}"><input type="hidden" name="sort_by" value="{{ selected_sort_by }}"><input type="hidden" name="sort_dir" value="{{ selected_sort_dir }}"><input type="hidden" name="page" value="{{ pagination['page'] }}"><input type="hidden" name="limit" value="{{ selected_limit }}"></form>
                     <div class="bulk-bar">
                         <div class="bulk-status">
+                            <label class="mobile-bulk-select"><input type="checkbox" id="select-all-rows-mobile"> Select visible</label>
                             <span class="selection-count" id="selected-count">0 selected</span>
                             <span class="helper">{% if is_review_page %}Select review rows and approve or re-queue them together.{% else %}Select rows and re-queue them together when you want another parsing pass.{% endif %}</span>
                         </div>
                         <div class="inline-actions">{% if is_review_page %}<button type="submit" form="bulk-approve-form" class="secondary-button tiny-button">Approve Selected</button>{% endif %}<button type="submit" form="bulk-reparse-form" class="secondary-button tiny-button">Reparse Selected</button></div>
                     </div>
                     
-                    <div class="table-scroll-top" id="table-scroll-top" aria-label="Horizontal table scrollbar">
+                    <div class="table-scroll-top desktop-table" id="table-scroll-top" aria-label="Horizontal table scrollbar">
                         <div class="table-scroll-top-inner" id="table-scroll-top-inner"></div>
                     </div>
-                    <div class="table-shell" id="table-shell">
+                    <div class="table-shell desktop-table" id="table-shell">
                         <table>
                             <thead>
                                 <tr>
@@ -593,7 +739,7 @@
                             <tbody>
                                 {% for row in rows %}
                                 <tr class="{% if row['needs_review'] %}row-needs-review {% endif %}{% if row['status'] == 'failed' %}row-failed {% endif %}{% if row['stitched_count'] and row['stitched_count'] > 1 %}row-grouped{% endif %}" data-row-id="{{ row['id'] }}" data-shortcut-failed="{{ 'true' if row['attention']['is_failed'] else 'false' }}" data-shortcut-image="{{ 'true' if row['attention']['has_image_clue'] else 'false' }}" data-shortcut-grouped="{{ 'true' if row['attention']['is_grouped'] else 'false' }}" data-shortcut-bookkeeping="{{ 'true' if row['attention']['has_bookkeeping_mismatch'] else 'false' }}">
-                                    <td class="check-col"><input type="checkbox" name="message_ids" value="{{ row['id'] }}" class="row-selector" form="bulk-reparse-form" style="width:auto;"></td>
+                                    <td class="check-col"><input type="checkbox" name="message_ids" value="{{ row['id'] }}" data-row-id="{{ row['id'] }}" class="row-selector desktop-row-selector" form="bulk-reparse-form" style="width:auto;"></td>
                                     <td class="quick-col">
                                         {% if is_review_page %}
                                         <form id="inline-edit-{{ row['id'] }}" method="post" action="/messages/{{ row['id'] }}/edit-form" style="display:none;">
@@ -773,6 +919,53 @@
                             </tbody>
                         </table>
                     </div>
+                    <div class="mobile-card-list" id="mobile-card-list">
+                        {% for row in rows %}
+                        <article class="mobile-row-card{% if row['needs_review'] %} row-needs-review{% endif %}{% if row['status'] == 'failed' %} row-failed{% endif %}" data-row-id="{{ row['id'] }}">
+                            <div class="mobile-card-top">
+                                <label class="mobile-row-check"><input type="checkbox" name="message_ids" value="{{ row['id'] }}" data-row-id="{{ row['id'] }}" class="row-selector mobile-row-selector" form="bulk-reparse-form"> Row {{ row["id"] }}</label>
+                                <span class="status-pill status-{{ row['status'] }}">{{ (row["status"] or "")|replace("_", " ") }}</span>
+                            </div>
+                            <div class="mobile-card-meta">
+                                <strong>{{ row["channel"] or row["channel_id"] }}</strong>
+                                <span>{{ row["time"] or "" }}</span>
+                                {% if row["author"] %}<span>{{ row["author"] }}</span>{% endif %}
+                            </div>
+                            <div class="message-meta">
+                                {% if row["first_image_url"] %}<span class="meta-pill success">image</span>{% elif row["nearby_image"] %}<span class="meta-pill warn">nearby image</span>{% else %}<span class="meta-pill">no image</span>{% endif %}
+                                {% if row["possible_missing_image"] %}<span class="meta-pill warn">possible missing image</span>{% endif %}
+                                {% if row["stitched_count"] and row["stitched_count"] > 1 %}<span class="meta-pill warn">group {{ row["stitched_count"] }}</span>{% endif %}
+                                {% if row["parse_attempts"] %}<span class="meta-pill">attempts {{ row["parse_attempts"] }}</span>{% endif %}
+                                {% if row["needs_review"] %}<span class="meta-pill danger">review</span>{% endif %}
+                            </div>
+                            {% if row["first_image_url"] %}
+                            <div class="mobile-thumb-row"><a href="{{ row['first_image_url'] }}" target="_blank" rel="noopener noreferrer"><img class="thumb" src="{{ row['first_thumb_url'] or row['first_image_url'] }}" alt="attachment image" loading="lazy"></a><span class="subtle">Attachment available</span></div>
+                            {% endif %}
+                            <div class="mobile-card-message">{{ row["message"] or "(image-only message)" }}</div>
+                            <div class="mobile-card-money">
+                                <div class="mobile-fact"><strong>Amount</strong><span>{{ row["amount_display"] or "—" }}</span></div>
+                                <div class="mobile-fact"><strong>Payment</strong><span>{{ row["payment_display"] or "—" }}</span></div>
+                                <div class="mobile-fact"><strong>Kind</strong><span>{{ row["entry_kind"] or row["type"] or "—" }}</span></div>
+                                <div class="mobile-fact"><strong>Category</strong><span>{{ row["expense_category"] or row["category"] or "—" }}</span></div>
+                            </div>
+                            {% if row["attention"]["has_attention"] %}
+                            <div class="attention-box{% if row['attention']['level'] == 'danger' %} danger{% endif %}">
+                                <div class="attention-title">Needs attention</div>
+                                {% if row["attention"]["summary"] %}<div>{{ row["attention"]["summary"] }}</div>{% endif %}
+                                {% if row["attention"]["error_snippet"] %}<div class="subtle" style="margin-top:4px;">{{ row["attention"]["error_snippet"] }}</div>{% endif %}
+                            </div>
+                            {% endif %}
+                            <div class="mobile-card-actions">
+                                <a class="button secondary-button tiny-button" href="{{ row['detail_url'] }}">Open</a>
+                                {% if not is_review_page %}<a class="button secondary-button tiny-button" href="{{ row['detail_url'] }}">Correct</a>{% endif %}
+                                {% if not is_review_page %}<form method="post" action="/messages/{{ row['id'] }}/mark-incorrect-form"><input type="hidden" name="return_path" value="{{ return_path }}"><input type="hidden" name="status" value="{{ selected_status }}"><input type="hidden" name="channel_id" value="{{ selected_channel_id }}"><input type="hidden" name="expense_category" value="{{ selected_expense_category }}"><input type="hidden" name="after" value="{{ selected_after }}"><input type="hidden" name="before" value="{{ selected_before }}"><input type="hidden" name="sort_by" value="{{ selected_sort_by }}"><input type="hidden" name="sort_dir" value="{{ selected_sort_dir }}"><input type="hidden" name="page" value="{{ pagination['page'] }}"><input type="hidden" name="limit" value="{{ selected_limit }}"><button type="submit" class="secondary-button tiny-button">Mark Incorrect</button></form>{% endif %}
+                                {% if is_review_page %}<form method="post" action="/messages/{{ row['id'] }}/approve-form"><input type="hidden" name="return_path" value="{{ return_path }}"><input type="hidden" name="status" value="{{ selected_status }}"><input type="hidden" name="channel_id" value="{{ selected_channel_id }}"><input type="hidden" name="expense_category" value="{{ selected_expense_category }}"><input type="hidden" name="after" value="{{ selected_after }}"><input type="hidden" name="before" value="{{ selected_before }}"><input type="hidden" name="sort_by" value="{{ selected_sort_by }}"><input type="hidden" name="sort_dir" value="{{ selected_sort_dir }}"><input type="hidden" name="page" value="{{ pagination['page'] }}"><input type="hidden" name="limit" value="{{ selected_limit }}"><button type="submit" class="secondary-button tiny-button">Approve</button></form>{% endif %}
+                                {% if is_review_page %}<form method="post" action="/messages/{{ row['id'] }}/disregard-form"><input type="hidden" name="return_path" value="{{ return_path }}"><input type="hidden" name="status" value="{{ selected_status }}"><input type="hidden" name="channel_id" value="{{ selected_channel_id }}"><input type="hidden" name="expense_category" value="{{ selected_expense_category }}"><input type="hidden" name="after" value="{{ selected_after }}"><input type="hidden" name="before" value="{{ selected_before }}"><input type="hidden" name="sort_by" value="{{ selected_sort_by }}"><input type="hidden" name="sort_dir" value="{{ selected_sort_dir }}"><input type="hidden" name="page" value="{{ pagination['page'] }}"><input type="hidden" name="limit" value="{{ selected_limit }}"><button type="submit" class="secondary-button tiny-button">Disregard</button></form>{% endif %}
+                                <form method="post" action="/messages/{{ row['id'] }}/reparse-form"><input type="hidden" name="return_path" value="{{ return_path }}"><input type="hidden" name="status" value="{{ selected_status }}"><input type="hidden" name="channel_id" value="{{ selected_channel_id }}"><input type="hidden" name="expense_category" value="{{ selected_expense_category }}"><input type="hidden" name="after" value="{{ selected_after }}"><input type="hidden" name="before" value="{{ selected_before }}"><input type="hidden" name="sort_by" value="{{ selected_sort_by }}"><input type="hidden" name="sort_dir" value="{{ selected_sort_dir }}"><input type="hidden" name="page" value="{{ pagination['page'] }}"><input type="hidden" name="limit" value="{{ selected_limit }}"><button type="submit" class="secondary-button tiny-button">Reparse</button></form>
+                            </div>
+                        </article>
+                        {% endfor %}
+                    </div>
                     {% endif %}
                 </div>
             </main>
@@ -828,12 +1021,19 @@
             return null;
         }
         const selectAllRows = document.getElementById("select-all-rows");
+        const selectAllRowsMobile = document.getElementById("select-all-rows-mobile");
+        const bulkReparseForm = document.getElementById("bulk-reparse-form");
         const bulkApproveForm = document.getElementById("bulk-approve-form");
         const availableChannelSort = document.getElementById("available_channel_sort");
         const availableChannelSelect = document.getElementById("new_channel_id");
+        const channelPickerSearch = document.getElementById("channel-picker-search");
+        const channelPickerCount = document.getElementById("channel-picker-count");
+        const channelPickerChips = document.getElementById("channel-picker-chips");
+        const channelPickerResults = document.getElementById("channel-picker-results");
         const selectedCount = document.getElementById("selected-count");
         const dirtyCount = document.getElementById("dirty-count");
         const autoRefreshToggle = document.getElementById("auto-refresh-toggle");
+        const newUpdatesButton = document.getElementById("new-updates-button");
         const compactReviewToggle = document.getElementById("compact-review-toggle");
         const sidebarToggle = document.getElementById("sidebar-toggle");
         const messagesPage = document.getElementById("messages-page");
@@ -844,11 +1044,16 @@
         const AUTO_REFRESH_STORAGE_KEY = "degen_auto_refresh_enabled";
         const COMPACT_REVIEW_STORAGE_KEY = "degen_compact_review_enabled";
         const SIDEBAR_COLLAPSED_STORAGE_KEY = "degen_review_sidebar_collapsed";
+        const SCROLL_RESTORE_STORAGE_KEY = "degen_table_scroll_restore";
+        const MOBILE_BREAKPOINT = window.matchMedia("(max-width: 760px)");
+        const AUTO_REFRESH_IDLE_RELOAD_MS = 30000;
         let autoRefreshEnabled = true;
         let compactReviewEnabled = {{ "true" if is_review_page else "false" }};
         let sidebarCollapsed = false;
         let syncingTopScroll = false;
         let syncingMainScroll = false;
+        let lastUserActivityAt = Date.now();
+        let pendingRefreshNotice = false;
         const shortcutSelectors = {
             failed: 'tr[data-shortcut-failed="true"]',
             image: 'tr[data-shortcut-image="true"]',
@@ -883,17 +1088,101 @@
             options.forEach((option) => availableChannelSelect.appendChild(option));
         }
 
-        if (availableChannelSort && availableChannelSelect) {
-            sortAvailableChannels(availableChannelSort.value);
-            availableChannelSort.addEventListener("change", (event) => {
-                sortAvailableChannels(event.target.value);
+        function availableChannelOptions() {
+            return availableChannelSelect ? Array.from(availableChannelSelect.options) : [];
+        }
+
+        function updateMobileChannelPicker() {
+            if (!channelPickerResults || !availableChannelSelect) return;
+            const query = (channelPickerSearch?.value || "").trim().toLowerCase();
+            const options = availableChannelOptions();
+            const selectedOptions = options.filter((option) => option.selected);
+            if (channelPickerCount) {
+                channelPickerCount.textContent = `${selectedOptions.length} selected`;
+            }
+            if (channelPickerChips) {
+                channelPickerChips.innerHTML = "";
+                selectedOptions.slice(0, 8).forEach((option) => {
+                    const chip = document.createElement("button");
+                    chip.type = "button";
+                    chip.className = "channel-chip";
+                    chip.textContent = option.dataset.label || option.text;
+                    chip.addEventListener("click", () => {
+                        option.selected = false;
+                        updateMobileChannelPicker();
+                    });
+                    channelPickerChips.appendChild(chip);
+                });
+                if (selectedOptions.length > 8) {
+                    const more = document.createElement("span");
+                    more.className = "meta-pill";
+                    more.textContent = `+${selectedOptions.length - 8} more`;
+                    channelPickerChips.appendChild(more);
+                }
+            }
+            channelPickerResults.innerHTML = "";
+            const matches = options
+                .filter((option) => {
+                    const text = `${option.dataset.label || option.text} ${option.value}`.toLowerCase();
+                    return !query || text.includes(query);
+                })
+                .slice(0, 40);
+            if (!matches.length) {
+                const empty = document.createElement("div");
+                empty.className = "helper";
+                empty.textContent = "No matching channels.";
+                channelPickerResults.appendChild(empty);
+                return;
+            }
+            matches.forEach((option) => {
+                const button = document.createElement("button");
+                button.type = "button";
+                button.className = `channel-result-button${option.selected ? " is-selected" : ""}`;
+                button.textContent = option.dataset.label || option.text;
+                button.addEventListener("click", () => {
+                    option.selected = !option.selected;
+                    updateMobileChannelPicker();
+                });
+                channelPickerResults.appendChild(button);
             });
         }
 
+        if (availableChannelSort && availableChannelSelect) {
+            sortAvailableChannels(availableChannelSort.value);
+            updateMobileChannelPicker();
+            availableChannelSort.addEventListener("change", (event) => {
+                sortAvailableChannels(event.target.value);
+                updateMobileChannelPicker();
+            });
+        }
+        if (availableChannelSelect) availableChannelSelect.addEventListener("change", updateMobileChannelPicker);
+        if (channelPickerSearch) channelPickerSearch.addEventListener("input", updateMobileChannelPicker);
+
         function updateSelectedCount() {
             if (!selectedCount) return;
-            const checked = document.querySelectorAll(".row-selector:checked").length;
-            selectedCount.textContent = `${checked} selected`;
+            const checkedIds = new Set(Array.from(document.querySelectorAll(".row-selector:checked")).map((checkbox) => checkbox.value));
+            selectedCount.textContent = `${checkedIds.size} selected`;
+        }
+
+        function visibleRowSelectors() {
+            const mobile = MOBILE_BREAKPOINT.matches;
+            return Array.from(document.querySelectorAll(".row-selector")).filter((checkbox) => (
+                mobile ? checkbox.classList.contains("mobile-row-selector") : checkbox.classList.contains("desktop-row-selector")
+            ));
+        }
+
+        function setVisibleRowSelection(checked) {
+            document.querySelectorAll(".row-selector").forEach((checkbox) => {
+                checkbox.checked = false;
+            });
+            visibleRowSelectors().forEach((checkbox) => {
+                checkbox.checked = checked;
+            });
+            updateSelectedCount();
+        }
+
+        function checkedRowIds() {
+            return Array.from(new Set(Array.from(document.querySelectorAll(".row-selector:checked")).map((checkbox) => checkbox.value)));
         }
 
         function updateDirtyCount() {
@@ -982,8 +1271,51 @@
             return hasUnsavedReviewChanges() || Boolean(editingField);
         }
 
+        function markUserActivity() {
+            lastUserActivityAt = Date.now();
+        }
+
+        function canAutoReloadNow() {
+            const idleLongEnough = Date.now() - lastUserActivityAt > AUTO_REFRESH_IDLE_RELOAD_MS;
+            const nearTop = window.scrollY < 120;
+            return idleLongEnough && nearTop;
+        }
+
+        function showNewUpdatesNotice() {
+            pendingRefreshNotice = true;
+            if (!newUpdatesButton) return;
+            newUpdatesButton.classList.add("is-visible");
+            newUpdatesButton.textContent = "New updates ready";
+        }
+
+        function rememberScrollAndReload() {
+            try {
+                window.sessionStorage.setItem(SCROLL_RESTORE_STORAGE_KEY, JSON.stringify({
+                    path: window.location.pathname + window.location.search,
+                    scrollY: window.scrollY,
+                }));
+            } catch (error) {
+                console.warn("Unable to save table scroll position", error);
+            }
+            window.location.reload();
+        }
+
+        function restoreScrollAfterReload() {
+            try {
+                const raw = window.sessionStorage.getItem(SCROLL_RESTORE_STORAGE_KEY);
+                if (!raw) return;
+                window.sessionStorage.removeItem(SCROLL_RESTORE_STORAGE_KEY);
+                const saved = JSON.parse(raw);
+                if (saved.path === window.location.pathname + window.location.search && Number.isFinite(saved.scrollY)) {
+                    window.scrollTo(0, saved.scrollY);
+                }
+            } catch (error) {
+                console.warn("Unable to restore table scroll position", error);
+            }
+        }
+
         async function refreshTableIfChanged() {
-            if (!autoRefreshEnabled || shouldPauseAutoRefresh() || document.hidden) {
+            if (!autoRefreshEnabled || document.hidden) {
                 return;
             }
 
@@ -1011,7 +1343,11 @@
             };
 
             if (hasChanged) {
-                window.location.reload();
+                if (shouldPauseAutoRefresh() || !canAutoReloadNow()) {
+                    showNewUpdatesNotice();
+                    return;
+                }
+                rememberScrollAndReload();
             }
         }
 
@@ -1100,22 +1436,39 @@
         });
 
         document.querySelectorAll(".row-selector").forEach((checkbox) => {
-            checkbox.addEventListener("change", updateSelectedCount);
+            checkbox.addEventListener("change", () => {
+                markUserActivity();
+                updateSelectedCount();
+            });
         });
 
         if (selectAllRows) selectAllRows.addEventListener("change", (event) => {
-            document.querySelectorAll(".row-selector").forEach((checkbox) => {
-                checkbox.checked = event.target.checked;
-            });
-            updateSelectedCount();
+            setVisibleRowSelection(event.target.checked);
         });
-        if (bulkApproveForm) bulkApproveForm.addEventListener("submit", () => {
-            bulkApproveForm.querySelectorAll(".bulk-approve-id").forEach((input) => input.remove());
-            document.querySelectorAll(".row-selector:checked").forEach((checkbox) => {
+        if (selectAllRowsMobile) selectAllRowsMobile.addEventListener("change", (event) => {
+            setVisibleRowSelection(event.target.checked);
+        });
+        if (bulkReparseForm) bulkReparseForm.addEventListener("submit", () => {
+            bulkReparseForm.querySelectorAll(".bulk-reparse-id").forEach((input) => input.remove());
+            checkedRowIds().forEach((rowId) => {
                 const input = document.createElement("input");
                 input.type = "hidden";
                 input.name = "message_ids";
-                input.value = checkbox.value;
+                input.value = rowId;
+                input.className = "bulk-reparse-id";
+                bulkReparseForm.appendChild(input);
+            });
+            document.querySelectorAll(".row-selector").forEach((checkbox) => {
+                checkbox.disabled = true;
+            });
+        });
+        if (bulkApproveForm) bulkApproveForm.addEventListener("submit", () => {
+            bulkApproveForm.querySelectorAll(".bulk-approve-id").forEach((input) => input.remove());
+            checkedRowIds().forEach((rowId) => {
+                const input = document.createElement("input");
+                input.type = "hidden";
+                input.name = "message_ids";
+                input.value = rowId;
                 input.className = "bulk-approve-id";
                 bulkApproveForm.appendChild(input);
             });
@@ -1149,6 +1502,12 @@
                 updateAutoRefreshLabel();
             });
         }
+        if (newUpdatesButton) {
+            newUpdatesButton.addEventListener("click", () => {
+                pendingRefreshNotice = false;
+                rememberScrollAndReload();
+            });
+        }
         if (messagesPage?.classList.contains("review-page")) {
             loadReviewLayoutPreference();
             applyReviewLayoutState();
@@ -1167,6 +1526,24 @@
                 applyReviewLayoutState();
             });
         }
+        function collapseMobileAdminChrome() {
+            if (!MOBILE_BREAKPOINT.matches) return;
+            document.querySelectorAll("details.panel").forEach((panel, index) => {
+                if (index > 0) panel.open = false;
+            });
+        }
+        ["pointerdown", "keydown", "focusin", "input", "touchstart"].forEach((eventName) => {
+            document.addEventListener(eventName, markUserActivity, { passive: true });
+        });
+        window.addEventListener("scroll", markUserActivity, { passive: true });
+        MOBILE_BREAKPOINT.addEventListener?.("change", () => {
+            syncTopScrollbarWidth();
+            updateMobileChannelPicker();
+            updateSelectedCount();
+        });
+        restoreScrollAfterReload();
+        collapseMobileAdminChrome();
+        updateMobileChannelPicker();
         updateSelectedCount();
         updateDirtyCount();
         syncTopScrollbarWidth();
