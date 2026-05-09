@@ -57,6 +57,7 @@ ALLOWED_CHANNEL_CATEGORIES = {
     "Past Shows",
     "Offline Deals",
 }
+AUTO_WATCHED_CHANNEL_CATEGORY = "Show Deals"
 # Backfill cancellation is enforced from progress callbacks, so keep this
 # cadence small enough to react promptly without adding a database check for
 # every single message fetched from Discord history.
@@ -219,6 +220,70 @@ def get_attachment_payloads(message: discord.Message) -> list[dict]:
     return payloads
 
 
+def _show_deals_watched_channel_name(channel: dict) -> str:
+    return (
+        str(channel.get("label") or "").strip()
+        or f"{channel.get('category_name')} / #{channel.get('channel_name')}"
+    )
+
+
+def _sync_show_deals_watched_channels(
+    session: Session,
+    channels: list[dict],
+    *,
+    now: datetime,
+) -> None:
+    show_deals_channels = [
+        channel
+        for channel in channels
+        if str(channel.get("category_name") or "").strip() == AUTO_WATCHED_CHANNEL_CATEGORY
+        and looks_like_transaction_channel(
+            str(channel.get("channel_name") or ""),
+            str(channel.get("category_name") or ""),
+        )
+    ]
+    if not show_deals_channels:
+        return
+
+    existing_rows = session.exec(select(WatchedChannel)).all()
+    watched_by_channel_id = {row.channel_id: row for row in existing_rows}
+    changed_count = 0
+    created_count = 0
+
+    for channel in show_deals_channels:
+        channel_id = str(channel.get("channel_id") or "").strip()
+        if not channel_id:
+            continue
+
+        channel_name = _show_deals_watched_channel_name(channel)
+        existing = watched_by_channel_id.get(channel_id)
+        if existing:
+            if channel_name and existing.channel_name != channel_name:
+                existing.channel_name = channel_name
+                existing.updated_at = now
+                session.add(existing)
+                changed_count += 1
+            continue
+
+        row = WatchedChannel(
+            channel_id=channel_id,
+            channel_name=channel_name,
+            is_enabled=True,
+            backfill_enabled=True,
+            created_at=now,
+            updated_at=now,
+        )
+        watched_by_channel_id[channel_id] = row
+        session.add(row)
+        created_count += 1
+
+    if created_count or changed_count:
+        print(
+            "[discord] synced Show Deals watched channels: "
+            f"created={created_count}, renamed={changed_count}"
+        )
+
+
 def persist_available_discord_channels(channels: list[dict], *, remove_missing: bool = True) -> None:
     now = utcnow()
     try:
@@ -246,6 +311,7 @@ def persist_available_discord_channels(channels: list[dict], *, remove_missing: 
                 row.updated_at = now
                 session.add(row)
 
+            _sync_show_deals_watched_channels(session, channels, now=now)
             session.commit()
     except ProgrammingError:
         return

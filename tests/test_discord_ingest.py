@@ -18,9 +18,17 @@ from app.discord_ingest import (
     insert_or_update_message,
     list_available_discord_channels,
     mark_message_deleted_row,
+    persist_available_discord_channels,
 )
 from app.channels import get_available_channel_choices
-from app.models import DiscordMessage, PARSE_IGNORED, PARSE_PARSED, PARSE_PENDING
+from app.models import (
+    AvailableDiscordChannel,
+    DiscordMessage,
+    PARSE_IGNORED,
+    PARSE_PARSED,
+    PARSE_PENDING,
+    WatchedChannel,
+)
 
 
 def _utcnow():
@@ -442,6 +450,117 @@ class AvailableDiscordChannelInventoryTests(unittest.TestCase):
 
         self.assertTrue(authoritative)
         self.assertEqual(pairs, [(guild, text_channel, "Show Deals")])
+
+
+class AvailableDiscordChannelPersistenceTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = Path.cwd() / "tests" / ".tmp_channel_inventory" / str(uuid.uuid4())
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
+        db_path = self.temp_dir / "channels.db"
+        self.engine = create_engine(
+            f"sqlite:///{db_path.as_posix()}",
+            connect_args={"check_same_thread": False},
+        )
+        SQLModel.metadata.create_all(self.engine)
+
+    def tearDown(self):
+        self.engine.dispose()
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    @contextmanager
+    def _managed_session(self):
+        with Session(self.engine) as session:
+            yield session
+
+    def _channel(self, channel_id: str, *, category_name: str, channel_name: str) -> dict:
+        return {
+            "guild_id": "1",
+            "guild_name": "Degen Guild",
+            "channel_id": channel_id,
+            "channel_name": channel_name,
+            "category_name": category_name,
+            "label": f"{category_name} / #{channel_name}",
+            "created_at": None,
+            "last_message_at": None,
+        }
+
+    def _persist(self, channels: list[dict]) -> None:
+        with patch("app.discord_ingest.managed_session", self._managed_session):
+            persist_available_discord_channels(channels)
+
+    def test_auto_adds_new_show_deals_channel_as_backfill_ready(self):
+        self._persist([
+            self._channel("1001", category_name="Show Deals", channel_name="2026-may-eastbaycardshow")
+        ])
+
+        with Session(self.engine) as session:
+            available = session.exec(select(AvailableDiscordChannel)).one()
+            watched = session.exec(select(WatchedChannel)).one()
+
+        self.assertEqual(available.channel_id, "1001")
+        self.assertEqual(watched.channel_id, "1001")
+        self.assertEqual(watched.channel_name, "Show Deals / #2026-may-eastbaycardshow")
+        self.assertTrue(watched.is_enabled)
+        self.assertTrue(watched.backfill_enabled)
+        self.assertIsNone(watched.backfill_after)
+        self.assertIsNone(watched.backfill_before)
+
+    def test_does_not_auto_add_other_deal_categories(self):
+        self._persist([
+            self._channel("2001", category_name="Past Shows", channel_name="2025-show-deals"),
+            self._channel("2002", category_name="Offline Deals", channel_name="offline-deals"),
+            self._channel("2003", category_name="Employees", channel_name="employee-deals"),
+        ])
+
+        with Session(self.engine) as session:
+            watched_rows = session.exec(select(WatchedChannel)).all()
+            available_rows = session.exec(select(AvailableDiscordChannel)).all()
+
+        self.assertEqual(watched_rows, [])
+        self.assertEqual({row.channel_id for row in available_rows}, {"2001", "2002", "2003"})
+
+    def test_preserves_existing_channel_flags_and_backfill_windows(self):
+        after = datetime(2026, 4, 1, tzinfo=timezone.utc)
+        before = datetime(2026, 4, 30, tzinfo=timezone.utc)
+        with Session(self.engine) as session:
+            session.add(
+                WatchedChannel(
+                    channel_id="3001",
+                    channel_name="Old Label",
+                    is_enabled=False,
+                    backfill_enabled=False,
+                    backfill_after=after,
+                    backfill_before=before,
+                )
+            )
+            session.commit()
+
+        self._persist([
+            self._channel("3001", category_name="Show Deals", channel_name="renamed-cardshow-deals")
+        ])
+
+        with Session(self.engine) as session:
+            watched = session.exec(select(WatchedChannel)).one()
+
+        self.assertEqual(watched.channel_name, "Show Deals / #renamed-cardshow-deals")
+        self.assertFalse(watched.is_enabled)
+        self.assertFalse(watched.backfill_enabled)
+        self.assertEqual(watched.backfill_after, after.replace(tzinfo=None))
+        self.assertEqual(watched.backfill_before, before.replace(tzinfo=None))
+
+    def test_show_deals_auto_add_is_idempotent(self):
+        channel = self._channel("4001", category_name="Show Deals", channel_name="2026-show-deals")
+
+        self._persist([channel])
+        self._persist([channel])
+
+        with Session(self.engine) as session:
+            watched_rows = session.exec(select(WatchedChannel)).all()
+            available_rows = session.exec(select(AvailableDiscordChannel)).all()
+
+        self.assertEqual(len(watched_rows), 1)
+        self.assertEqual(watched_rows[0].channel_id, "4001")
+        self.assertEqual(len(available_rows), 1)
 
 
 class AvailableChannelChoiceTests(unittest.TestCase):

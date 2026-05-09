@@ -602,7 +602,7 @@
                             <div class="form-row"><label for="new_channel_backfill_after">Initial Backfill After (optional)</label><input type="date" name="backfill_after" id="new_channel_backfill_after"></div>
                             <div class="form-row"><label for="new_channel_backfill_before">Initial Backfill Before (optional)</label><input type="date" name="backfill_before" id="new_channel_backfill_before"></div>
                             <div class="form-row"><label><input type="checkbox" name="backfill_enabled" value="true" style="width:auto; margin-right:8px;">Include this channel in future batch/startup backfill runs using the saved range</label></div>
-                            <div class="helper" style="margin-bottom:10px;">Leave dates blank for live-only watching. If you enter a range here, that same range is backfilled immediately for every selected channel.</div>
+                            <div class="helper" style="margin-bottom:10px;">Show Deals channels are auto-saved as enabled and backfill-ready when this list refreshes. Use this form for other channels or custom backfill date ranges. Leave dates blank for live-only watching; entering a range backfills it immediately for every selected channel.</div>
                             <button type="submit" class="primary-button">Add Channel(s)</button>
                         </form>
                         {% for group in watched_channel_groups %}
