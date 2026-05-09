@@ -47,6 +47,8 @@ _available_channels_cache = {
     "expires_at": 0.0,
     "channels": [],
 }
+AVAILABLE_CHANNELS_CACHE_SECONDS = 30.0
+AVAILABLE_CHANNELS_REST_TIMEOUT_SECONDS = 15.0
 DISCORD_RETRY_MIN_SECONDS = 15
 DISCORD_RETRY_MAX_SECONDS = 900
 ALLOWED_CHANNEL_CATEGORIES = {
@@ -217,7 +219,7 @@ def get_attachment_payloads(message: discord.Message) -> list[dict]:
     return payloads
 
 
-def persist_available_discord_channels(channels: list[dict]) -> None:
+def persist_available_discord_channels(channels: list[dict], *, remove_missing: bool = True) -> None:
     now = utcnow()
     try:
         with managed_session() as session:
@@ -225,9 +227,10 @@ def persist_available_discord_channels(channels: list[dict]) -> None:
             existing_by_channel_id = {row.channel_id: row for row in existing_rows}
             keep_channel_ids = {channel["channel_id"] for channel in channels}
 
-            for row in existing_rows:
-                if row.channel_id not in keep_channel_ids:
-                    session.delete(row)
+            if remove_missing:
+                for row in existing_rows:
+                    if row.channel_id not in keep_channel_ids:
+                        session.delete(row)
 
             for channel in channels:
                 row = existing_by_channel_id.get(channel["channel_id"])
@@ -246,6 +249,27 @@ def persist_available_discord_channels(channels: list[dict]) -> None:
             session.commit()
     except ProgrammingError:
         return
+
+
+def merge_available_discord_channel_rows(*channel_lists: list[dict]) -> list[dict]:
+    merged: dict[str, dict] = {}
+    for channels in channel_lists:
+        for channel in channels:
+            channel_id = str(channel.get("channel_id") or "").strip()
+            if not channel_id:
+                continue
+            if channel_id not in merged:
+                merged[channel_id] = dict(channel)
+
+    rows = list(merged.values())
+    rows.sort(
+        key=lambda x: (
+            (x.get("guild_name") or "").lower(),
+            (x.get("category_name") or "").lower(),
+            (x.get("channel_name") or x.get("label") or "").lower(),
+        )
+    )
+    return rows
 
 
 def get_cached_available_discord_channels() -> list[dict]:
@@ -1094,7 +1118,20 @@ class DealIngestBot(discord.Client):
         discord_runtime_state["status"] = "ready"
         discord_runtime_state["error"] = None
         try:
-            persist_available_discord_channels(list_available_discord_channels())
+            guild_channel_pairs, authoritative = await _fetch_live_guild_channels_rest(self)
+            if not guild_channel_pairs:
+                guild_channel_pairs = _gateway_guild_channel_pairs(self)
+                authoritative = False
+            channels = _build_available_discord_channel_rows(guild_channel_pairs)
+            if not authoritative:
+                channels = merge_available_discord_channel_rows(
+                    channels,
+                    get_cached_available_discord_channels(),
+                )
+            _cache_and_persist_available_discord_channels(
+                channels,
+                remove_missing=authoritative,
+            )
         except Exception as exc:
             print(f"[discord] failed to cache channel inventory: {exc}")
 
@@ -1540,72 +1577,48 @@ def invalidate_available_channels_cache() -> None:
         _available_channels_cache["channels"] = []
 
 
-async def _fetch_live_guild_channels_rest(client) -> list:
-    """REST-authoritative channel walk. Bypasses discord.py's gateway cache,
-    which can miss private channels the bot was added to after creation
-    (no GUILD_CHANNEL_CREATE was delivered at creation time)."""
-    live: list = []
-    for guild in list(client.guilds):
+def _resolve_channel_category_name(channel, category_by_id: dict | None = None) -> Optional[str]:
+    category = getattr(channel, "category", None)
+    if category is not None:
+        name = getattr(category, "name", None)
+        if name:
+            return name
+
+    category_id = getattr(channel, "category_id", None)
+    if category_id is None:
+        return None
+
+    if category_by_id:
+        category = category_by_id.get(category_id) or category_by_id.get(str(category_id))
+        if category is not None:
+            name = getattr(category, "name", None)
+            if name:
+                return name
+
+    guild = getattr(channel, "guild", None)
+    get_channel = getattr(guild, "get_channel", None)
+    if callable(get_channel):
         try:
-            fetched = await guild.fetch_channels()
-        except Exception as exc:
-            print(f"[discord] fetch_channels failed for guild {guild.id}: {exc}")
-            # Fall back to cached text_channels for this guild so we don't
-            # regress when one guild's REST call hiccups.
-            fetched = list(guild.text_channels)
-        for channel in fetched:
-            # Only text-channel-like objects carry .category and a name we
-            # can match against our hints. Skip voice/stage/forum/etc.
-            if not isinstance(channel, discord.TextChannel):
-                continue
-            live.append((guild, channel))
-    return live
+            category = get_channel(int(category_id))
+        except (TypeError, ValueError):
+            category = get_channel(category_id)
+        if category is not None:
+            return getattr(category, "name", None)
+
+    return None
 
 
-def list_available_discord_channels(*, force_refresh: bool = False) -> list[dict]:
-    now = time.monotonic()
-    if not force_refresh:
-        with _available_channels_cache_lock:
-            if float(_available_channels_cache["expires_at"]) > now:
-                return list(_available_channels_cache["channels"])
+def _gateway_guild_channel_pairs(client) -> list[tuple]:
+    return [
+        (guild, channel, _resolve_channel_category_name(channel))
+        for guild in list(client.guilds)
+        for channel in getattr(guild, "text_channels", [])
+    ]
 
-    client = get_discord_client()
-    if client is None or client.is_closed() or not client.is_ready():
-        cached_channels = get_cached_available_discord_channels()
-        with _available_channels_cache_lock:
-            _available_channels_cache["channels"] = list(cached_channels)
-            _available_channels_cache["expires_at"] = now + 30.0
-        return cached_channels
 
-    # When forced (admin clicked Refresh), hit Discord's REST API to pick up
-    # channels the gateway cache missed (e.g. private channels created without
-    # the bot in perm overrides, then granted access later).
-    guild_channel_pairs: list = []
-    if force_refresh and client.loop is not None and not client.loop.is_closed():
-        try:
-            import asyncio as _asyncio
-            future = _asyncio.run_coroutine_threadsafe(
-                _fetch_live_guild_channels_rest(client),
-                client.loop,
-            )
-            guild_channel_pairs = future.result(timeout=15)
-        except Exception as exc:
-            print(f"[discord] force_refresh REST walk failed, falling back to gateway cache: {exc}")
-            guild_channel_pairs = []
-
-    if not guild_channel_pairs:
-        # Default / fallback: walk the gateway-cached guilds in-process.
-        guild_channel_pairs = [
-            (guild, channel)
-            for guild in client.guilds
-            for channel in guild.text_channels
-        ]
-
+def _build_available_discord_channel_rows(guild_channel_pairs: list[tuple]) -> list[dict]:
     channels: list[dict] = []
-    for guild, channel in guild_channel_pairs:
-        category = getattr(channel, "category", None)
-        category_name = category.name if category else None
-
+    for guild, channel, category_name in guild_channel_pairs:
         if category_name not in ALLOWED_CHANNEL_CATEGORIES:
             continue
         if not looks_like_transaction_channel(channel.name, category_name):
@@ -1627,18 +1640,123 @@ def list_available_discord_channels(*, force_refresh: bool = False) -> list[dict
             }
         )
 
-    channels.sort(
-        key=lambda x: (
-            x["guild_name"].lower(),
-            (x["category_name"] or "").lower(),
-            x["channel_name"].lower(),
-        )
-    )
+    return merge_available_discord_channel_rows(channels)
+
+
+def _cache_and_persist_available_discord_channels(
+    channels: list[dict],
+    *,
+    now: float | None = None,
+    remove_missing: bool,
+) -> list[dict]:
+    cache_now = time.monotonic() if now is None else now
     with _available_channels_cache_lock:
         _available_channels_cache["channels"] = list(channels)
-        _available_channels_cache["expires_at"] = now + 30.0
+        _available_channels_cache["expires_at"] = cache_now + AVAILABLE_CHANNELS_CACHE_SECONDS
     try:
-        persist_available_discord_channels(channels)
+        persist_available_discord_channels(channels, remove_missing=remove_missing)
     except Exception as exc:
         print(f"[discord] failed to cache channel inventory: {exc}")
     return channels
+
+
+async def _fetch_live_guild_channels_rest(client) -> tuple[list[tuple], bool]:
+    """REST-authoritative channel walk. Bypasses discord.py's gateway cache,
+    which can miss private channels the bot was added to after creation
+    (no GUILD_CHANNEL_CREATE was delivered at creation time)."""
+    live: list = []
+    authoritative = True
+    for guild in list(client.guilds):
+        try:
+            fetched = await guild.fetch_channels()
+        except Exception as exc:
+            authoritative = False
+            print(f"[discord] fetch_channels failed for guild {guild.id}: {exc}")
+            # Fall back to cached text_channels for this guild so we don't
+            # regress when one guild's REST call hiccups.
+            for channel in getattr(guild, "text_channels", []):
+                live.append((guild, channel, _resolve_channel_category_name(channel)))
+            continue
+
+        category_by_id = {
+            getattr(channel, "id", None): channel
+            for channel in fetched
+            if isinstance(channel, discord.CategoryChannel)
+        }
+        category_by_id.update(
+            {
+                str(channel_id): channel
+                for channel_id, channel in list(category_by_id.items())
+                if channel_id is not None
+            }
+        )
+        for channel in fetched:
+            # Only text-channel-like objects carry .category and a name we
+            # can match against our hints. Skip voice/stage/forum/etc.
+            if not isinstance(channel, discord.TextChannel):
+                continue
+            live.append((guild, channel, _resolve_channel_category_name(channel, category_by_id)))
+    return live, authoritative
+
+
+def list_available_discord_channels(*, force_refresh: bool = False) -> list[dict]:
+    now = time.monotonic()
+    if not force_refresh:
+        with _available_channels_cache_lock:
+            if float(_available_channels_cache["expires_at"]) > now:
+                return list(_available_channels_cache["channels"])
+
+    client = get_discord_client()
+    if client is None or client.is_closed() or not client.is_ready():
+        cached_channels = get_cached_available_discord_channels()
+        with _available_channels_cache_lock:
+            _available_channels_cache["channels"] = list(cached_channels)
+            _available_channels_cache["expires_at"] = now + AVAILABLE_CHANNELS_CACHE_SECONDS
+        return cached_channels
+
+    guild_channel_pairs: list = []
+    authoritative = False
+    client_loop = getattr(client, "loop", None)
+    running_on_client_loop = False
+    try:
+        running_on_client_loop = asyncio.get_running_loop() is client_loop
+    except RuntimeError:
+        running_on_client_loop = False
+
+    # Normal admin/table loads also use REST once the in-memory cache expires.
+    # The gateway cache can miss private channels that were created before the
+    # bot gained access, while Guild.fetch_channels reflects current grants.
+    if (
+        client_loop is not None
+        and not client_loop.is_closed()
+        and not running_on_client_loop
+    ):
+        future = None
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                _fetch_live_guild_channels_rest(client),
+                client_loop,
+            )
+            guild_channel_pairs, authoritative = future.result(timeout=AVAILABLE_CHANNELS_REST_TIMEOUT_SECONDS)
+        except Exception as exc:
+            if future is not None:
+                future.cancel()
+            print(f"[discord] REST channel inventory failed, falling back to gateway cache: {exc}")
+            guild_channel_pairs = []
+            authoritative = False
+
+    if not guild_channel_pairs:
+        # Default / fallback: walk the gateway-cached guilds in-process.
+        guild_channel_pairs = _gateway_guild_channel_pairs(client)
+
+    channels = _build_available_discord_channel_rows(guild_channel_pairs)
+    if not authoritative:
+        channels = merge_available_discord_channel_rows(
+            channels,
+            get_cached_available_discord_channels(),
+        )
+    return _cache_and_persist_available_discord_channels(
+        channels,
+        now=now,
+        remove_missing=authoritative,
+    )

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import shutil
 import types
@@ -10,11 +11,15 @@ from unittest.mock import patch
 
 from sqlmodel import SQLModel, Session, create_engine, select
 
+import app.discord_ingest as discord_ingest_module
 from app.discord_ingest import (
     get_attachment_payloads,
+    invalidate_available_channels_cache,
     insert_or_update_message,
+    list_available_discord_channels,
     mark_message_deleted_row,
 )
+from app.channels import get_available_channel_choices
 from app.models import DiscordMessage, PARSE_IGNORED, PARSE_PARSED, PARSE_PENDING
 
 
@@ -278,6 +283,224 @@ class GetAttachmentPayloadsTests(unittest.TestCase):
         self.assertEqual(len(payloads), 2)
         self.assertTrue(payloads[0]["is_image"])
         self.assertFalse(payloads[1]["is_image"])
+
+
+class AvailableDiscordChannelInventoryTests(unittest.TestCase):
+    def setUp(self):
+        invalidate_available_channels_cache()
+
+    def tearDown(self):
+        invalidate_available_channels_cache()
+
+    def _fake_client(self, guild=None):
+        class FakeLoop:
+            def is_closed(self):
+                return False
+
+        return types.SimpleNamespace(
+            guilds=[guild or types.SimpleNamespace(id=1, name="Degen", text_channels=[])],
+            loop=FakeLoop(),
+            is_closed=lambda: False,
+            is_ready=lambda: True,
+        )
+
+    def _fake_rest_channel(self, channel_id="222", name="2026-may-9-10-eastbaycardshow"):
+        guild = types.SimpleNamespace(id=111, name="Degen Guild", text_channels=[])
+        channel = types.SimpleNamespace(
+            id=int(channel_id),
+            name=name,
+            created_at=datetime(2026, 5, 9, tzinfo=timezone.utc),
+            last_message_id=None,
+        )
+        return guild, channel
+
+    def _run_coroutine_threadsafe_immediately(self, coro, _loop):
+        class FakeFuture:
+            def __init__(self, value):
+                self.value = value
+                self.cancelled = False
+
+            def result(self, timeout=None):
+                return self.value
+
+            def cancel(self):
+                self.cancelled = True
+
+        return FakeFuture(asyncio.run(coro))
+
+    def test_normal_cache_miss_uses_rest_channel_inventory(self):
+        guild, channel = self._fake_rest_channel()
+
+        async def fake_fetch(_client):
+            return [(guild, channel, "Show Deals")], True
+
+        with patch("app.discord_ingest.get_discord_client", return_value=self._fake_client(guild)), patch(
+            "app.discord_ingest._fetch_live_guild_channels_rest", side_effect=fake_fetch
+        ) as fetch_mock, patch(
+            "app.discord_ingest.asyncio.run_coroutine_threadsafe",
+            side_effect=self._run_coroutine_threadsafe_immediately,
+        ), patch(
+            "app.discord_ingest.persist_available_discord_channels"
+        ) as persist_mock, patch(
+            "app.discord_ingest.get_cached_available_discord_channels", return_value=[]
+        ):
+            channels = list_available_discord_channels()
+
+        self.assertEqual(fetch_mock.call_count, 1)
+        self.assertEqual([row["channel_id"] for row in channels], ["222"])
+        self.assertEqual(channels[0]["label"], "Show Deals / #2026-may-9-10-eastbaycardshow")
+        persist_mock.assert_called_once()
+        self.assertTrue(persist_mock.call_args.kwargs["remove_missing"])
+
+    def test_in_memory_cache_prevents_repeated_rest_fetch_until_forced(self):
+        guild, channel = self._fake_rest_channel()
+
+        async def fake_fetch(_client):
+            return [(guild, channel, "Show Deals")], True
+
+        with patch("app.discord_ingest.get_discord_client", return_value=self._fake_client(guild)), patch(
+            "app.discord_ingest._fetch_live_guild_channels_rest", side_effect=fake_fetch
+        ) as fetch_mock, patch(
+            "app.discord_ingest.asyncio.run_coroutine_threadsafe",
+            side_effect=self._run_coroutine_threadsafe_immediately,
+        ), patch(
+            "app.discord_ingest.persist_available_discord_channels"
+        ), patch(
+            "app.discord_ingest.get_cached_available_discord_channels", return_value=[]
+        ):
+            first = list_available_discord_channels()
+            second = list_available_discord_channels()
+            forced = list_available_discord_channels(force_refresh=True)
+
+        self.assertEqual(fetch_mock.call_count, 2)
+        self.assertEqual(first, second)
+        self.assertEqual(forced, first)
+
+    def test_non_authoritative_fallback_keeps_persisted_inventory(self):
+        guild, channel = self._fake_rest_channel(channel_id="333", name="offline-deals")
+        cached_private_channel = {
+            "guild_id": "111",
+            "guild_name": "Degen Guild",
+            "channel_id": "444",
+            "channel_name": "2026-may-9-10-eastbaycardshow",
+            "category_name": "Show Deals",
+            "label": "Show Deals / #2026-may-9-10-eastbaycardshow",
+            "created_at": None,
+            "last_message_at": None,
+        }
+
+        async def fake_fetch(_client):
+            return [(guild, channel, "Offline Deals")], False
+
+        with patch("app.discord_ingest.get_discord_client", return_value=self._fake_client(guild)), patch(
+            "app.discord_ingest._fetch_live_guild_channels_rest", side_effect=fake_fetch
+        ), patch(
+            "app.discord_ingest.asyncio.run_coroutine_threadsafe",
+            side_effect=self._run_coroutine_threadsafe_immediately,
+        ), patch(
+            "app.discord_ingest.persist_available_discord_channels"
+        ) as persist_mock, patch(
+            "app.discord_ingest.get_cached_available_discord_channels", return_value=[cached_private_channel]
+        ):
+            channels = list_available_discord_channels()
+
+        self.assertEqual({row["channel_id"] for row in channels}, {"333", "444"})
+        self.assertFalse(persist_mock.call_args.kwargs["remove_missing"])
+
+    def test_rest_fetch_resolves_category_name_from_fetched_categories(self):
+        class FakeCategory:
+            def __init__(self):
+                self.id = 10
+                self.name = "Show Deals"
+
+        class FakeTextChannel:
+            def __init__(self):
+                self.id = 555
+                self.name = "2026-may-9-10-eastbaycardshow"
+                self.category = None
+                self.category_id = 10
+
+        category = FakeCategory()
+        text_channel = FakeTextChannel()
+
+        class FakeGuild:
+            id = 111
+            text_channels = []
+
+            async def fetch_channels(self):
+                return [category, text_channel]
+
+        guild = FakeGuild()
+        with patch.object(discord_ingest_module.discord, "CategoryChannel", FakeCategory), patch.object(
+            discord_ingest_module.discord, "TextChannel", FakeTextChannel
+        ):
+            pairs, authoritative = asyncio.run(
+                discord_ingest_module._fetch_live_guild_channels_rest(
+                    types.SimpleNamespace(guilds=[guild])
+                )
+            )
+
+        self.assertTrue(authoritative)
+        self.assertEqual(pairs, [(guild, text_channel, "Show Deals")])
+
+
+class AvailableChannelChoiceTests(unittest.TestCase):
+    def setUp(self):
+        self.engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+        SQLModel.metadata.create_all(self.engine)
+
+    def tearDown(self):
+        self.engine.dispose()
+
+    def test_admin_choices_merge_live_and_cached_available_inventory(self):
+        live_channel = {
+            "guild_id": "1",
+            "guild_name": "Degen Guild",
+            "channel_id": "111",
+            "channel_name": "offline-deals",
+            "category_name": "Offline Deals",
+            "label": "Offline Deals / #offline-deals",
+            "created_at": None,
+            "last_message_at": None,
+        }
+        cached_channel = {
+            "guild_id": "1",
+            "guild_name": "Degen Guild",
+            "channel_id": "222",
+            "channel_name": "2026-may-9-10-eastbaycardshow",
+            "category_name": "Show Deals",
+            "label": "Show Deals / #2026-may-9-10-eastbaycardshow",
+            "created_at": None,
+            "last_message_at": None,
+        }
+
+        with Session(self.engine) as session, patch(
+            "app.channels.list_available_discord_channels", return_value=[live_channel]
+        ), patch("app.channels.get_cached_available_discord_channels", return_value=[cached_channel]):
+            choices, has_live = get_available_channel_choices(session)
+
+        self.assertTrue(has_live)
+        self.assertEqual({row["channel_id"] for row in choices}, {"111", "222"})
+
+    def test_admin_choices_use_cached_available_inventory_before_generic_fallback(self):
+        cached_channel = {
+            "guild_id": "1",
+            "guild_name": "Degen Guild",
+            "channel_id": "222",
+            "channel_name": "2026-may-9-10-eastbaycardshow",
+            "category_name": "Show Deals",
+            "label": "Show Deals / #2026-may-9-10-eastbaycardshow",
+            "created_at": None,
+            "last_message_at": None,
+        }
+
+        with Session(self.engine) as session, patch(
+            "app.channels.list_available_discord_channels", return_value=[]
+        ), patch("app.channels.get_cached_available_discord_channels", return_value=[cached_channel]):
+            choices, has_live = get_available_channel_choices(session)
+
+        self.assertFalse(has_live)
+        self.assertEqual(choices, [cached_channel])
 
 
 if __name__ == "__main__":

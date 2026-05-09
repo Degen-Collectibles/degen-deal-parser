@@ -5,7 +5,11 @@ from typing import Optional
 
 from sqlmodel import Session, select
 
-from .discord_ingest import list_available_discord_channels
+from .discord_ingest import (
+    get_cached_available_discord_channels,
+    list_available_discord_channels,
+    merge_available_discord_channel_rows,
+)
 from .models import DiscordMessage, WatchedChannel, utcnow
 
 
@@ -161,8 +165,12 @@ def get_expense_category_filter_choices(session: Session) -> list[str]:
 
 def get_available_channel_choices(session: Session) -> tuple[list[dict], bool]:
     available = list_available_discord_channels()
+    cached_available = get_cached_available_discord_channels()
     if available:
-        return available, True
+        return merge_available_discord_channel_rows(available, cached_available), True
+
+    if cached_available:
+        return cached_available, False
 
     fallback = [
         {
