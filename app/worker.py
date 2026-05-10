@@ -1611,6 +1611,8 @@ def is_explicit_buy_sell_text(text: str) -> bool:
 
 def is_short_fragment(row: DiscordMessage) -> bool:
     text = normalize_text(row.content)
+    if is_explicit_buy_sell_text(text):
+        return False
     if has_images(row) and len(text) <= 20:
         return True
     if is_payment_only_text(text):
@@ -1716,6 +1718,9 @@ def should_force_stitch(base_row: DiscordMessage, candidate_rows: list[DiscordMe
     first_row, second_row = sorted_rows
     first_text = normalize_text(first_row.content)
     second_text = normalize_text(second_row.content)
+
+    if has_images(first_row) and has_images(second_row):
+        return False
 
     def _has_deal_text(text: str) -> bool:
         return is_explicit_buy_sell_text(text) or is_trade_fragment_text(text) or is_payment_only_text(text)
