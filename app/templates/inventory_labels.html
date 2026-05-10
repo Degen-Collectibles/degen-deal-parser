@@ -77,6 +77,23 @@
         .label-price { font-size:20px; font-weight:900; line-height:1; color:#fff; margin-top:2px; }
         .label-type { font-size:10px; color:var(--lx-muted); text-transform:uppercase; letter-spacing:.08em; font-weight:800; max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
         .empty-state { text-align:center; padding:48px 24px; color: var(--lx-muted); }
+        body.label-layout-thermal .labels-grid {
+            grid-template-columns:repeat(auto-fill, minmax(2.25in, 2.25in));
+            justify-content:start;
+        }
+        body.label-layout-thermal .label-card {
+            width:2.25in;
+            min-height:1.25in;
+            border-radius:6pt;
+            padding:6pt;
+            gap:2pt;
+        }
+        body.label-layout-thermal .label-barcode svg { max-width:2.05in; max-height:.42in; }
+        body.label-layout-thermal .label-code { font-size:7pt; }
+        body.label-layout-thermal .label-price { font-size:14pt; }
+        body.label-layout-thermal .label-name { max-width:2.05in; font-size:8pt; }
+        body.label-layout-thermal .label-type,
+        body.label-layout-thermal .label-sub { max-width:2.05in; font-size:6.5pt; }
 
         /* Print styles */
         @media print {
@@ -97,12 +114,36 @@
                 page-break-inside:avoid;
             }
             .label-barcode svg { max-width:100%; }
+            body.label-layout-thermal { background:#fff; }
+            body.label-layout-thermal .labels-grid {
+                display:block;
+                padding:0;
+            }
+            body.label-layout-thermal .label-card {
+                width:2.25in;
+                height:1.25in;
+                border:0;
+                border-radius:0;
+                padding:.07in;
+                margin:0;
+                color:#000;
+                background:#fff;
+                box-shadow:none;
+                page-break-after:always;
+            }
+            body.label-layout-thermal .label-barcode svg { max-width:2.05in; max-height:.42in; }
+            body.label-layout-thermal .label-code,
+            body.label-layout-thermal .label-name,
+            body.label-layout-thermal .label-price,
+            body.label-layout-thermal .label-type,
+            body.label-layout-thermal .label-sub { color:#000; }
+            body.label-layout-thermal .label-card:last-child { page-break-after:auto; }
         }
     </style>
     <link rel="stylesheet" href="/static/linear.css?v=1776749171">
     <link rel="stylesheet" href="/static/safe-area.css?v=1776747800">
 </head>
-<body>
+<body class="label-layout-{{ layout|default('sheet') }}">
 <div class="page">
     <div class="no-print">
         {% include "_linear_sidebar.html" %}
@@ -113,6 +154,8 @@
             <p>{{ labels|length }} label{% if labels|length != 1 %}s{% endif %} ready to print. Each label includes the Code 128 barcode, barcode number, product name, type/condition, and customer-facing price.</p>
             <div class="toolbar">
                 <button onclick="window.print()" class="primary-button">Print Labels</button>
+                <a href="{{ request.url.include_query_params(layout='sheet') }}" class="button secondary-button">Sheet Labels</a>
+                <a href="{{ request.url.include_query_params(layout='thermal') }}" class="button secondary-button">2.25&quot; Thermal</a>
                 <a href="/inventory" class="button secondary-button">Back</a>
             </div>
         </div>

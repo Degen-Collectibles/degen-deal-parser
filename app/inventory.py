@@ -2064,6 +2064,7 @@ async def inventory_labels(
     session: Session = Depends(get_session),
     ids: str = Query(default=""),
     status: str = Query(default=""),
+    layout: str = Query(default="sheet"),
 ):
     if denial := _require_employee_permission(request, "ops.inventory.view", session):
         return denial
@@ -2081,10 +2082,11 @@ async def inventory_labels(
         ).all()
 
     labels = label_context_for_items(items)
+    layout = layout if layout in {"sheet", "thermal"} else "sheet"
     return _templates.TemplateResponse(
         request,
         "inventory_labels.html",
-        {"current_user": _current_user(request), "labels": labels},
+        {"current_user": _current_user(request), "labels": labels, "layout": layout},
     )
 
 

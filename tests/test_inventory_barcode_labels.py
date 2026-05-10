@@ -5,6 +5,24 @@ from app.inventory_barcode import (
     render_barcode_svg,
 )
 from app.models import InventoryItem
+from app.shared import templates
+
+
+class _FakeUrl:
+    path = "/inventory/labels"
+
+    def include_query_params(self, **params):
+        return "/inventory/labels?" + "&".join(f"{key}={value}" for key, value in params.items())
+
+
+class _FakeRequest:
+    url = _FakeUrl()
+
+
+class _FakeUser:
+    role = "admin"
+    display_name = "Admin"
+    username = "admin"
 
 
 def test_generate_barcode_value_uses_stable_shop_prefix():
@@ -58,3 +76,29 @@ def test_label_context_falls_back_to_market_price():
     assert label["product_type"] == "Single"
     assert label["price_text"] == "$12.35"
     assert label["price_source"] == "Market price"
+
+
+def test_label_template_has_sheet_and_thermal_layouts():
+    item = InventoryItem(
+        id=44,
+        barcode="DGN-000044",
+        item_type="sealed",
+        game="Pokemon",
+        card_name="Test Booster Box",
+        sealed_product_kind="Booster Box",
+        auto_price=119.99,
+    )
+    label = label_context_for_items([item])[0]
+
+    html = templates.env.get_template("inventory_labels.html").render(
+        request=_FakeRequest(),
+        current_user=_FakeUser(),
+        csrf_token="",
+        labels=[label],
+        layout="thermal",
+    )
+
+    assert 'class="label-layout-thermal"' in html
+    assert "2.25&quot; Thermal" in html
+    assert "$119.99" in html
+    assert "Test Booster Box" in html
