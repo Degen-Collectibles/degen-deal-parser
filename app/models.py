@@ -968,6 +968,12 @@ class InventoryItem(SQLModel, table=True):
     auto_price: Optional[float] = Field(default=None)     # latest price lookup
     list_price: Optional[float] = Field(default=None)     # manual override
     last_priced_at: Optional[datetime] = Field(default=None, index=True)
+    resticker_alert_active: bool = Field(default=False, index=True)
+    resticker_alerted_at: Optional[datetime] = Field(default=None, index=True)
+    resticker_resolved_at: Optional[datetime] = Field(default=None, index=True)
+    resticker_reference_price: Optional[float] = Field(default=None)
+    resticker_alert_price: Optional[float] = Field(default=None)
+    resticker_alert_reason: Optional[str] = Field(default=None)
 
     # Shopify
     shopify_product_id: Optional[str] = Field(default=None, index=True)
@@ -979,6 +985,9 @@ class InventoryItem(SQLModel, table=True):
     image_url: Optional[str] = Field(default=None)
     sold_at: Optional[datetime] = Field(default=None, index=True)
     sold_price: Optional[float] = Field(default=None)
+    archived_at: Optional[datetime] = Field(default=None, index=True)
+    archived_by: Optional[str] = Field(default=None, index=True)
+    archive_reason: Optional[str] = Field(default=None)
 
     created_at: datetime = Field(default_factory=utcnow, index=True)
     updated_at: Optional[datetime] = Field(default=None)

@@ -28,7 +28,14 @@ from app.inventory import (
     inventory_sealed_receive,
     inventory_singles_receive,
 )
-from app.models import InventoryItem, InventoryStockMovement, ITEM_TYPE_SEALED, ITEM_TYPE_SINGLE, PriceHistory
+from app.models import (
+    INVENTORY_SOLD,
+    InventoryItem,
+    InventoryStockMovement,
+    ITEM_TYPE_SEALED,
+    ITEM_TYPE_SINGLE,
+    PriceHistory,
+)
 
 
 class SealedInventoryTests(unittest.TestCase):
@@ -632,6 +639,60 @@ class SealedInventoryTests(unittest.TestCase):
             self.assertEqual(item.variant, "Holofoil")
             self.assertEqual(item.condition, "LP")
             self.assertEqual(item.auto_price, 386.73)
+
+    def test_shopify_sale_decrements_sealed_quantity_and_logs_movement(self) -> None:
+        from app.shopify_ingest import mark_inventory_sold_from_shopify_order
+
+        with Session(self.engine) as session:
+            item = InventoryItem(
+                barcode="DGN-SHOP1",
+                item_type=ITEM_TYPE_SEALED,
+                game="Pokemon",
+                card_name="Prismatic Evolutions Booster Bundle",
+                quantity=5,
+            )
+            session.add(item)
+            session.commit()
+            session.refresh(item)
+
+            marked = mark_inventory_sold_from_shopify_order(
+                session,
+                {
+                    "id": "shop-order-1",
+                    "line_items": [
+                        {"sku": "DGN-SHOP1", "quantity": 2, "price": "39.99"},
+                    ],
+                },
+                runtime_name="unit-test",
+            )
+
+            self.assertEqual(marked, 1)
+            session.refresh(item)
+            self.assertEqual(item.quantity, 3)
+            self.assertNotEqual(item.status, INVENTORY_SOLD)
+            movement = session.exec(
+                select(InventoryStockMovement).where(InventoryStockMovement.item_id == item.id)
+            ).one()
+            self.assertEqual(movement.reason, "sale")
+            self.assertEqual(movement.quantity_delta, -2)
+            self.assertEqual(movement.quantity_before, 5)
+            self.assertEqual(movement.quantity_after, 3)
+
+            marked_again = mark_inventory_sold_from_shopify_order(
+                session,
+                {
+                    "id": "shop-order-2",
+                    "line_items": [
+                        {"sku": "DGN-SHOP1", "quantity": 3, "price": "39.99"},
+                    ],
+                },
+                runtime_name="unit-test",
+            )
+
+            self.assertEqual(marked_again, 1)
+            session.refresh(item)
+            self.assertEqual(item.quantity, 0)
+            self.assertEqual(item.status, INVENTORY_SOLD)
 
 
 if __name__ == "__main__":

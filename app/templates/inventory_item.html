@@ -55,6 +55,10 @@
         .primary-button:hover { background:#dc2626; border-color:#dc2626; }
         .secondary-button { background: var(--lx-s1); color:var(--text); border:1px solid var(--line); }
         .danger-button { background:#fff0ef; color:#9d2f2b; border:1px solid #efb8b4; }
+        .danger-zone { border-color:rgba(239,68,68,.4); background:linear-gradient(180deg,rgba(239,68,68,.08),var(--card)); }
+        .danger-copy { margin:0 0 12px;color:var(--lx-muted);font-size:13px;line-height:1.45; }
+        .resticker-alert { border-color:rgba(234,179,8,.38); background:linear-gradient(180deg,rgba(234,179,8,.11),var(--card)); }
+        .manager-actions { display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end; }
         h2 { margin:0 0 16px; font-size:20px; font-weight:800; letter-spacing:-.03em; }
         .eyebrow { display:inline-flex; align-items:center; padding:5px 10px; border-radius:999px; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.08em; background:var(--lx-s2); color:var(--lx-muted); }
         .badge { display:inline-flex; align-items:center; padding:4px 9px; border-radius:999px; font-size:12px; font-weight:700; }
@@ -63,6 +67,7 @@
         .badge-sold { background: rgba(139,143,152,.14); color: var(--lx-muted); border: 1px solid var(--lx-br); }
         .badge-held { background:#fff5df; color:#8a580d; }
         .badge-sealed { background:var(--blue-bg); color:var(--blue); border:1px solid rgba(96,165,250,.25); }
+        .badge-resticker { background:var(--yellow-bg); color:#fef3c7; border:1px solid rgba(234,179,8,.35); }
         .price-big { font-size:32px; font-weight:800; letter-spacing:-.04em; color:#166647; font-variant-numeric:tabular-nums; }
         .price-row { display:flex; gap:16px; align-items:baseline; flex-wrap:wrap; margin-bottom:12px; }
         .price-label { font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; color: var(--lx-muted); }
@@ -76,6 +81,7 @@
         .history-table { width:100%; border-collapse:collapse; font-size:12px; }
         .history-table th { text-align:left; padding:6px 8px; color: var(--lx-muted); font-weight:800; text-transform:uppercase; letter-spacing:.07em; border-bottom:1px solid var(--line); }
         .history-table td { padding:6px 8px; border-bottom:1px solid #f0ebe3; font-variant-numeric:tabular-nums; }
+        .comp-title { max-width:340px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
         .action-row { display:flex; gap:10px; flex-wrap:wrap; margin-top:16px; }
         .back-link { color: var(--lx-muted); font-size:13px; font-weight:600; margin-bottom:12px; display:inline-block; }
         .back-link:hover { color:var(--text); }
@@ -90,7 +96,8 @@
 <body>
 <div class="page">
     {% include "_linear_sidebar.html" %}
-    {% set can_manage_inventory = current_user and current_user.role in ["admin", "reviewer"] %}
+    {% set can_manage_inventory = can_manage_inventory|default(false) %}
+    {% set is_archived = item.archived_at is not none %}
 
     <a href="/inventory" class="back-link">← Back to Inventory</a>
 
@@ -103,6 +110,8 @@
                 {% if item.set_name %}<p style="color: var(--lx-muted);margin:4px 0;">{{ item.set_name }}{% if item.card_number %} · #{{ item.card_number }}{% endif %}</p>{% endif %}
                 <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
                     <span class="badge badge-{{ item.status }}">{{ item.status.replace("_"," ").title() }}</span>
+                    {% if item.resticker_alert_active %}<span class="badge badge-resticker">Resticker Needed</span>{% endif %}
+                    {% if is_archived %}<span class="badge badge-held">Archived</span>{% endif %}
                     <span style="font-size:12px;color: var(--lx-muted);">{{ item.game }}</span>
                     {% if item.item_type == "sealed" and item.sealed_product_kind %}<span class="badge badge-sealed">{{ item.sealed_product_kind }}</span>{% endif %}
                     {% if item.item_type == "single" and item.variant %}<span class="badge badge-single">{{ item.variant }}</span>{% endif %}
@@ -113,14 +122,61 @@
                     <span style="font-family:monospace;font-size:12px;color: var(--lx-muted);">{{ item.barcode }}</span>
                 </div>
             </div>
-            <!-- Barcode -->
-            <div class="barcode-section">
-                <div class="barcode-svg-wrap">{{ barcode_svg | safe }}</div>
-                <span class="barcode-code">{{ item.barcode }}</span>
-                <a href="/inventory/{{ item.id }}/barcode.svg" download="{{ item.barcode }}.svg" class="secondary-button button" style="font-size:12px;padding:6px 12px;">Download SVG</a>
+            <div style="display:flex;flex-direction:column;gap:10px;align-items:flex-end;">
+                <!-- Barcode -->
+                <div class="barcode-section">
+                    <div class="barcode-svg-wrap">{{ barcode_svg | safe }}</div>
+                    <span class="barcode-code">{{ item.barcode }}</span>
+                    <a href="/inventory/{{ item.id }}/barcode.svg" download="{{ item.barcode }}.svg" class="secondary-button button" style="font-size:12px;padding:6px 12px;">Download SVG</a>
+                </div>
+                {% if can_manage_inventory %}
+                <div class="manager-actions">
+                    {% if not is_archived %}
+                    <a href="#edit-item" class="button primary-button">Edit Item</a>
+                    <a href="#adjust-stock" class="button secondary-button">Adjust Stock</a>
+                    <a href="#delete-item" class="button danger-button">Archive</a>
+                    {% else %}
+                    <form method="post" action="/inventory/{{ item.id }}/restore" style="display:inline;">
+                        <button type="submit" class="primary-button">Restore Item</button>
+                    </form>
+                    {% endif %}
+                </div>
+                {% endif %}
             </div>
         </div>
+        {% if is_archived %}
+        <div style="margin-top:14px;padding:12px 14px;border:1px solid rgba(234,179,8,.38);border-radius:14px;background:var(--yellow-bg);color:#fef3c7;font-weight:800;">
+            Archived{% if item.archived_by %} by {{ item.archived_by }}{% endif %}{% if item.archive_reason %}: {{ item.archive_reason }}{% endif %}
+        </div>
+        {% endif %}
     </div>
+
+    {% if item.resticker_alert_active %}
+    <div class="card resticker-alert">
+        <h2 class="section-divider">Resticker Alert</h2>
+        <div class="price-row">
+            <div>
+                <div class="price-label">Current Sticker</div>
+                <div class="price-val">{% if item.resticker_reference_price is not none %}${{ "%.2f"|format(item.resticker_reference_price) }}{% else %}<span class="price-none">Unknown</span>{% endif %}</div>
+            </div>
+            <div>
+                <div class="price-label">Card Ladder Suggested</div>
+                <div class="price-val">{% if item.resticker_alert_price is not none %}${{ "%.2f"|format(item.resticker_alert_price) }}{% else %}<span class="price-none">Unknown</span>{% endif %}</div>
+            </div>
+        </div>
+        {% if item.resticker_alert_reason %}<p style="margin:0 0 12px;color:#fef3c7;font-weight:800;">{{ item.resticker_alert_reason }}</p>{% endif %}
+        {% if can_manage_inventory and not is_archived %}
+        <div class="action-row">
+            <form method="post" action="/inventory/{{ item.id }}/resticker/apply">
+                <button class="primary-button" type="submit">Update Price and Print Label</button>
+            </form>
+            <form method="post" action="/inventory/{{ item.id }}/resticker/dismiss">
+                <button class="secondary-button" type="submit">Dismiss</button>
+            </form>
+        </div>
+        {% endif %}
+    </div>
+    {% endif %}
 
     <div class="two-col">
         <!-- Pricing card -->
@@ -145,10 +201,31 @@
                 {% endif %}
             </div>
             {% if item.last_priced_at %}<p style="font-size:12px;margin:0 0 12px;">Last priced: {{ item.last_priced_at.strftime("%b %d, %Y %H:%M") }} UTC</p>{% endif %}
-            {% if can_manage_inventory %}
+            {% if can_manage_inventory and not is_archived %}
             <form method="post" action="/inventory/{{ item.id }}/reprice" style="display:inline;">
                 <button type="submit" class="secondary-button">Refresh Price</button>
             </form>
+            {% endif %}
+
+            {% if item.item_type == "slab" and card_ladder_history.sales %}
+            <hr style="border:none;border-top:1px solid var(--line);margin:16px 0;">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
+                <h2 style="font-size:14px;margin:0;">Card Ladder Last Solds</h2>
+                {% if card_ladder_history.sales_history_url %}<a class="secondary-button button" style="font-size:12px;padding:6px 10px;" href="{{ card_ladder_history.sales_history_url }}" target="_blank" rel="noopener">Open Search</a>{% endif %}
+            </div>
+            <table class="history-table">
+                <thead><tr><th>Date</th><th>Price</th><th>Platform</th><th>Listing</th></tr></thead>
+                <tbody>
+                {% for sale in card_ladder_history.sales %}
+                <tr>
+                    <td>{{ sale.sold_date or sale.date or "" }}</td>
+                    <td>{% if sale.price is not none %}${{ "%.2f"|format(sale.price) }}{% else %}â€”{% endif %}</td>
+                    <td>{{ sale.platform or "" }}</td>
+                    <td><div class="comp-title" title="{{ sale.title or '' }}">{{ sale.title or "" }}</div></td>
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
             {% endif %}
 
             {% if price_history %}
@@ -171,7 +248,7 @@
             {% endif %}
         </div>
 
-        {% if can_manage_inventory %}
+        {% if can_manage_inventory and not is_archived %}
         <!-- Shopify card -->
         <div class="card">
             <h2 class="section-divider">Shopify</h2>
@@ -228,8 +305,39 @@
     {% endif %}
 
     <!-- Edit form -->
-    {% if can_manage_inventory %}
-    <div class="card">
+    {% if can_manage_inventory and not is_archived %}
+    <div id="adjust-stock" class="card">
+        <h2 class="section-divider">Adjust Stock</h2>
+        <form method="post" action="/inventory/{{ item.id }}/adjust-stock">
+            <div class="two-col">
+                <div>
+                    <label>Change In Quantity <input type="number" name="quantity_delta" value="-1" step="1" required></label>
+                    <label>Reason
+                        <select name="reason">
+                            <option value="correction">Correction</option>
+                            <option value="damage">Damage</option>
+                            <option value="missing">Missing</option>
+                            <option value="return">Return</option>
+                            <option value="sale">Sale</option>
+                            <option value="transfer">Transfer</option>
+                            <option value="adjustment">Other Adjustment</option>
+                        </select>
+                    </label>
+                </div>
+                <div>
+                    <label>Location <input type="text" name="location" value="{{ item.location or '' }}" placeholder="Shelf A"></label>
+                    <label>Source <input type="text" name="source" value="Manual Adjustment"></label>
+                    <label>Notes <textarea name="notes" placeholder="Why are we changing this quantity?"></textarea></label>
+                </div>
+            </div>
+            <div class="action-row">
+                <button type="submit" class="primary-button">Save Stock Adjustment</button>
+                <span style="color:var(--lx-muted);font-size:13px;font-weight:700;">Current quantity: {{ item.quantity }}</span>
+            </div>
+        </form>
+    </div>
+
+    <div id="edit-item" class="card">
         <h2 class="section-divider">Edit Item</h2>
         <form method="post" action="/inventory/{{ item.id }}/edit">
             <div class="two-col">
@@ -259,7 +367,7 @@
                             {% for c in conditions %}<option value="{{ c }}" {% if item.condition == c %}selected{% endif %}>{{ c }}</option>{% endfor %}
                         </select>
                     </label>
-                    <label>Quantity <input type="number" name="quantity" value="{{ item.quantity }}" min="1"></label>
+                    <div style="margin:0 0 12px;color:var(--lx-muted);font-size:13px;font-weight:800;">Quantity: {{ item.quantity }}. Use Adjust Stock to change it.</div>
                 </div>
                 <div>
                     <!-- Slab section -->
@@ -287,6 +395,15 @@
                 <a href="/inventory/{{ item.id }}/barcode.svg" download="{{ item.barcode }}.svg" class="button secondary-button">Download Barcode</a>
                 <a href="/inventory/labels?ids={{ item.id }}" class="button secondary-button">Print Label</a>
             </div>
+        </form>
+    </div>
+
+    <div id="delete-item" class="card danger-zone">
+        <h2 class="section-divider">Archive Item</h2>
+        <p class="danger-copy">Hide this product from active inventory while keeping its price history and stock activity. Shopify listings are not deleted from here.</p>
+        <form method="post" action="/inventory/{{ item.id }}/delete" onsubmit='return confirm({{ ("Archive " ~ item.card_name ~ " from active inventory?")|tojson }});'>
+            <label>Reason <input type="text" name="archive_reason" placeholder="Duplicate, entered by mistake, no longer tracked..."></label>
+            <button type="submit" class="danger-button">Archive Item</button>
         </form>
     </div>
     {% endif %}
