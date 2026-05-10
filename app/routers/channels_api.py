@@ -191,8 +191,9 @@ def message_detail_page(
     row = session.get(DiscordMessage, message_id)
     target = "/deals"
     if row:
-        target = build_return_url(
-            f"/deals/{message_id}",
+        target = build_message_detail_url(
+            message_id,
+            return_path=return_path,
             status=status,
             channel_id=channel_id,
             expense_category=expense_category,

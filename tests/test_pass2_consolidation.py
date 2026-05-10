@@ -132,7 +132,7 @@ class Pass2ConsolidationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 301)
         self.assertEqual(response.headers["location"], f"/deals/{row.id}")
 
-    def test_deal_detail_page_renders_technical_details_in_details_element(self) -> None:
+    def test_deal_detail_page_hides_operator_details_from_public_viewer(self) -> None:
         with Session(self.engine) as session, patch("app.routers.deals.require_role_response", return_value=None), patch(
             "app.routers.deals.get_watched_channels",
             return_value=[WatchedChannel(channel_id="chan-1", channel_name="deals", is_enabled=True)],
@@ -174,11 +174,34 @@ class Pass2ConsolidationTests(unittest.TestCase):
                 error=None,
                 session=session,
             )
+            admin_response = deal_detail_page(
+                message_id=row.id,
+                request=make_request(f"/deals/{row.id}", role="admin"),
+                return_path="/table",
+                status=None,
+                channel_id=None,
+                entry_kind=None,
+                expense_category=None,
+                after=None,
+                before=None,
+                sort_by=None,
+                sort_dir=None,
+                page=1,
+                limit=25,
+                success=None,
+                error=None,
+                session=session,
+            )
 
         body = response.body.decode("utf-8")
         self.assertEqual(response.status_code, 200)
-        self.assertIn("Technical Details (Operator)", body)
-        self.assertIn('<details class="card tech-details">', body)
+        self.assertNotIn("Technical Details (Operator)", body)
+        self.assertNotIn('<details class="card tech-details">', body)
+
+        admin_body = admin_response.body.decode("utf-8")
+        self.assertEqual(admin_response.status_code, 200)
+        self.assertIn("Technical Details (Operator)", admin_body)
+        self.assertIn('<details class="card tech-details">', admin_body)
 
     def test_no_orphaned_redirect_hrefs_remain_in_templates(self) -> None:
         matches = []

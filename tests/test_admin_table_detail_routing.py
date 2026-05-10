@@ -18,6 +18,7 @@ from app.models import (
     WatchedChannel,
     utcnow,
 )
+from app.routers.channels_api import message_detail_page
 from app.routers.deals import deal_detail_page
 from app.routers.messages import mark_incorrect_message_form
 
@@ -89,10 +90,11 @@ class AdminTableDetailRoutingTests(unittest.TestCase):
         row: DiscordMessage,
         *,
         return_path: str,
+        role: str = "admin",
     ):
         return deal_detail_page(
             message_id=row.id,
-            request=make_request(f"/deals/{row.id}"),
+            request=make_request(f"/deals/{row.id}", role=role),
             return_path=return_path,
             status=None,
             channel_id=None,
@@ -128,6 +130,7 @@ class AdminTableDetailRoutingTests(unittest.TestCase):
                 response = self._detail(session, row, return_path="/table")
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(response.context["deal"]["id"], row.id)
+                self.assertTrue(response.context["can_view_operator_controls"])
 
         self.assertTrue(any(call.args[1] == "admin" for call in require_role.call_args_list))
 
@@ -141,15 +144,47 @@ class AdminTableDetailRoutingTests(unittest.TestCase):
             return_value=watched,
         ):
             parsed = self._message(session, parse_status=PARSE_PARSED, channel_id="chan-public")
-            response = self._detail(session, parsed, return_path="/deals")
+            response = self._detail(session, parsed, return_path="/deals", role="viewer")
             self.assertEqual(response.status_code, 200)
+            self.assertFalse(response.context["can_view_operator_controls"])
+            self.assertEqual(response.context["correction_patterns"], [])
 
             pending = self._message(session, parse_status=PARSE_PENDING, channel_id="chan-public")
             with self.assertRaises(HTTPException) as exc:
-                self._detail(session, pending, return_path="/deals")
+                self._detail(session, pending, return_path="/deals", role="viewer")
             self.assertEqual(exc.exception.status_code, 404)
 
         self.assertTrue(any(call.args[1] == "viewer" for call in require_role.call_args_list))
+
+    def test_legacy_table_message_redirect_preserves_admin_return_path(self) -> None:
+        with Session(self.engine) as session, patch(
+            "app.routers.channels_api.require_role_response",
+            return_value=None,
+        ):
+            row = self._message(session, parse_status=PARSE_PENDING)
+            response = message_detail_page(
+                message_id=row.id,
+                request=make_request(f"/table/messages/{row.id}"),
+                return_path="/table",
+                status="pending",
+                channel_id="chan-stored-only",
+                expense_category=None,
+                after=None,
+                before=None,
+                sort_by="time",
+                sort_dir="desc",
+                page=1,
+                limit=100,
+                success=None,
+                error=None,
+                session=session,
+            )
+
+        self.assertEqual(response.status_code, 301)
+        location = response.headers["location"]
+        self.assertIn(f"/deals/{row.id}?", location)
+        self.assertIn("return_path=%2Ftable", location)
+        self.assertIn("status=pending", location)
 
     def test_mark_incorrect_redirect_keeps_admin_detail_return_path(self) -> None:
         with Session(self.engine) as session, patch(

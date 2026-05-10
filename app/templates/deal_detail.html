@@ -92,6 +92,7 @@
             </div>
         </div>
 
+        {% if can_view_operator_controls %}
         <details class="card tech-details">
             <summary>Technical Details (Operator)</summary>
             <div class="lx-details-body">
@@ -224,6 +225,7 @@
                 </div>
             </div>
         </details>
+        {% endif %}
     </div>
     {% include '_mobile_bottom_nav.html' %}
 {% include "_csrf_bootstrap.html" %}

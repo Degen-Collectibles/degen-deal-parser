@@ -28,6 +28,14 @@ def _is_admin_message_detail_return_path(return_path: str) -> bool:
     return return_path in {"/table", "/review-table"}
 
 
+def _can_view_operator_controls(request: Request, *, admin_message_detail: bool) -> bool:
+    if admin_message_detail:
+        return True
+    user = getattr(request.state, "current_user", None)
+    role = (getattr(user, "role", "") or "").strip().lower()
+    return role in {"admin", "reviewer"}
+
+
 @router.get("/deals", response_class=HTMLResponse)
 def deals_page(
     request: Request,
@@ -173,6 +181,10 @@ def deal_detail_page(
         separator = "&" if "?" in back_url else "?"
         back_url = f"{back_url}{separator}entry_kind={entry_kind}"
     learning_signal = get_learning_signal(session, row.content or "")
+    can_view_operator_controls = _can_view_operator_controls(
+        request,
+        admin_message_detail=admin_message_detail,
+    )
 
     return templates.TemplateResponse(
         request,
@@ -191,7 +203,12 @@ def deal_detail_page(
             "payment_method_options": PAYMENT_METHOD_OPTIONS,
             "cash_direction_options": CASH_DIRECTION_OPTIONS,
             "category_options": CATEGORY_OPTIONS,
-            "correction_patterns": get_correction_pattern_counts(session=session),
+            "can_view_operator_controls": can_view_operator_controls,
+            "correction_patterns": (
+                get_correction_pattern_counts(session=session)
+                if can_view_operator_controls
+                else []
+            ),
             "learning_signal": learning_signal,
             "return_path": return_path,
             "selected_status": status or "",
