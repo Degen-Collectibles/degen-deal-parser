@@ -462,6 +462,140 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         self.assertEqual(len(movements), 2)
         self.assertEqual({row.reason for row in movements}, {"bulk_location"})
 
+    def test_archived_item_hidden_from_default_inventory_list(self):
+        self._login_as("admin", user_id=227, username="adm27")
+        from app.models import InventoryItem
+        from datetime import datetime, timezone
+
+        active = InventoryItem(barcode="DGN-ACTIVE1", item_type="sealed", game="Pokemon", card_name="Active ETB")
+        archived = InventoryItem(
+            barcode="DGN-ARCH1",
+            item_type="sealed",
+            game="Pokemon",
+            card_name="Archived ETB",
+            archived_at=datetime.now(timezone.utc),
+            archived_by="adm27",
+            archive_reason="duplicate",
+        )
+        self.session.add_all([active, archived])
+        self.session.commit()
+
+        default_list = self.client.get("/inventory", follow_redirects=False)
+        self.assertEqual(default_list.status_code, 200)
+        self.assertIn("Active ETB", default_list.text)
+        self.assertNotIn("Archived ETB", default_list.text)
+
+        archived_list = self.client.get("/inventory?archived=1", follow_redirects=False)
+        self.assertEqual(archived_list.status_code, 200)
+        self.assertNotIn("Active ETB", archived_list.text)
+        self.assertIn("Archived ETB", archived_list.text)
+
+        all_list = self.client.get("/inventory?archived=all", follow_redirects=False)
+        self.assertEqual(all_list.status_code, 200)
+        self.assertIn("Active ETB", all_list.text)
+        self.assertIn("Archived ETB", all_list.text)
+
+    def test_receive_stock_unarchives_item(self):
+        self._login_as("manager", user_id=228, username="mgr28")
+        from app.models import InventoryItem
+        from datetime import datetime, timezone
+
+        item = InventoryItem(
+            barcode="DGN-UNARCH1",
+            item_type="sealed",
+            game="Pokemon",
+            card_name="Revived Booster Box",
+            set_name="Test Set",
+            quantity=0,
+            archived_at=datetime.now(timezone.utc),
+            archived_by="adm27",
+            archive_reason="out of stock",
+        )
+        self.session.add(item)
+        self.session.commit()
+        self.session.refresh(item)
+        item_id = item.id
+
+        page = self.client.get("/inventory/add-stock", follow_redirects=False)
+        csrf = self._csrf_from_html(page.text)
+        response = self.client.post(
+            "/inventory/sealed/receive",
+            headers={"X-CSRF-Token": csrf},
+            data={
+                "item_id": str(item_id),
+                "game": "Pokemon",
+                "product_name": "Revived Booster Box",
+                "quantity": "2",
+                "unit_cost": "80",
+            },
+            follow_redirects=False,
+        )
+        self.assertIn(response.status_code, (200, 303))
+        self.session.expire_all()
+        refreshed = self.session.get(InventoryItem, item_id)
+        self.assertIsNone(refreshed.archived_at)
+        self.assertIsNone(refreshed.archive_reason)
+
+    def test_employee_without_manage_permission_blocked_from_inventory_new(self):
+        self._login_as("employee", user_id=229, username="emp29")
+        r = self.client.get("/inventory/new", follow_redirects=False)
+        self.assertEqual(r.status_code, 403)
+
+    def test_resticker_apply_and_dismiss_routes(self):
+        self._login_as("admin", user_id=230, username="adm30")
+        from app.models import InventoryItem
+
+        item = InventoryItem(
+            barcode="DGN-RST1",
+            item_type="slab",
+            game="Pokemon",
+            card_name="Charizard",
+            grading_company="PSA",
+            grade="10",
+            list_price=500.0,
+            resticker_alert_active=True,
+            resticker_reference_price=500.0,
+            resticker_alert_price=625.0,
+            resticker_alert_reason="Card Ladder price up 25%",
+        )
+        self.session.add(item)
+        self.session.commit()
+        self.session.refresh(item)
+        item_id = item.id
+
+        # dismiss clears the alert without changing list_price
+        detail = self.client.get(f"/inventory/{item_id}", follow_redirects=False)
+        csrf = self._csrf_from_html(detail.text)
+        dismiss = self.client.post(
+            f"/inventory/{item_id}/resticker/dismiss",
+            headers={"X-CSRF-Token": csrf},
+            follow_redirects=False,
+        )
+        self.assertIn(dismiss.status_code, (200, 303))
+        self.session.expire_all()
+        dismissed = self.session.get(InventoryItem, item_id)
+        self.assertFalse(dismissed.resticker_alert_active)
+        self.assertEqual(dismissed.list_price, 500.0)
+
+        # re-arm the alert and test apply (updates list_price to alert_price)
+        dismissed.resticker_alert_active = True
+        dismissed.resticker_alert_price = 625.0
+        self.session.add(dismissed)
+        self.session.commit()
+
+        detail2 = self.client.get(f"/inventory/{item_id}", follow_redirects=False)
+        csrf2 = self._csrf_from_html(detail2.text)
+        apply = self.client.post(
+            f"/inventory/{item_id}/resticker/apply",
+            headers={"X-CSRF-Token": csrf2},
+            follow_redirects=False,
+        )
+        self.assertIn(apply.status_code, (200, 303))
+        self.session.expire_all()
+        applied = self.session.get(InventoryItem, item_id)
+        self.assertFalse(applied.resticker_alert_active)
+        self.assertEqual(applied.list_price, 625.0)
+
     def test_portal_viewer_blocked_from_legacy_reports(self):
         self._login_as("viewer", user_id=217, username="viewer1")
         r = self.client.get("/reports", follow_redirects=False)
