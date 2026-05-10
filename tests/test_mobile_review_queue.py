@@ -115,6 +115,34 @@ class MobileReviewQueueTests(unittest.TestCase):
         self.assertIn("Not imported yet", body)
         self.assertIn("Bookkeeping", body)
 
+    def test_review_queue_defaults_to_open_backlog_not_today_only(self) -> None:
+        with Session(self.engine) as session, patch("app.routers.messages.require_role_response", return_value=None):
+            older = self._review_row(session, content="old sell 25 cash")
+            older.created_at = utcnow() - timedelta(days=30)
+            session.add(older)
+            session.commit()
+
+            response = reviewer_queue_page(
+                make_request("/review"),
+                channel_id=None,
+                expense_category=None,
+                after=None,
+                before=None,
+                sort_by="time",
+                sort_dir="desc",
+                page=1,
+                limit=25,
+                success=None,
+                error=None,
+                session=session,
+            )
+
+        body = response.body.decode("utf-8")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["selected_after"], "")
+        self.assertIn("old sell 25 cash", body)
+        self.assertIn("Review required 1", body)
+
     def test_focus_page_preserves_queue_navigation_for_next_correction(self) -> None:
         with Session(self.engine) as session, patch("app.routers.messages.require_role_response", return_value=None):
             first = self._review_row(session, content="first sell 25 cash", created_offset=1)

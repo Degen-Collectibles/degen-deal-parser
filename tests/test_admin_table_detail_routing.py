@@ -20,7 +20,7 @@ from app.models import (
 )
 from app.routers.channels_api import message_detail_page
 from app.routers.deals import deal_detail_page
-from app.routers.messages import mark_incorrect_message_form
+from app.routers.messages import mark_incorrect_message_form, messages_table
 
 
 def make_request(path: str, *, role: str = "admin") -> Request:
@@ -185,6 +185,51 @@ class AdminTableDetailRoutingTests(unittest.TestCase):
         self.assertIn(f"/deals/{row.id}?", location)
         self.assertIn("return_path=%2Ftable", location)
         self.assertIn("status=pending", location)
+
+    def test_main_table_mobile_detail_url_keeps_current_table_context(self) -> None:
+        with Session(self.engine) as session, patch(
+            "app.routers.messages.require_role_response",
+            return_value=None,
+        ), patch(
+            "app.routers.messages.get_available_channel_choices",
+            return_value=([], False),
+        ):
+            row = self._message(
+                session,
+                parse_status=PARSE_REVIEW_REQUIRED,
+                needs_review=True,
+            )
+            response = messages_table(
+                make_request("/table?status=review_required"),
+                status=PARSE_REVIEW_REQUIRED,
+                channel_id=None,
+                expense_category=None,
+                source="all",
+                after=None,
+                before=None,
+                sort_by="time",
+                sort_dir="desc",
+                page=1,
+                limit=100,
+                success=None,
+                error=None,
+                session=session,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        [item] = response.context["rows"]
+        self.assertEqual(item["id"], row.id)
+        self.assertIn(f"/deals/{row.id}?", item["detail_url"])
+        self.assertIn("return_path=%2Ftable", item["detail_url"])
+        self.assertIn("status=review_required", item["detail_url"])
+        self.assertNotIn("return_path=%2Freview-table", item["detail_url"])
+        body = response.body.decode("utf-8")
+        self.assertIn('class="page table-page sidebar-collapsed"', body)
+        self.assertIn("System & Financial Snapshot", body)
+        self.assertIn('id="sidebar-toggle"', body)
+        self.assertIn("Show Filters", body)
+        self.assertIn("table-admin-panel", body)
+        self.assertIn("TABLE_SIDEBAR_COLLAPSED_STORAGE_KEY", body)
 
     def test_mark_incorrect_redirect_keeps_admin_detail_return_path(self) -> None:
         with Session(self.engine) as session, patch(

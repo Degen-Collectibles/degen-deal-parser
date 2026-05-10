@@ -5,12 +5,7 @@ Extracted from app/main.py -- /messages/*, /table, /review-table, /review, /revi
 """
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Optional
-from urllib.parse import parse_qsl
-from zoneinfo import ZoneInfo
-
-_REVIEW_DEFAULT_TZ = ZoneInfo("America/Los_Angeles")
 
 from fastapi import APIRouter, Depends, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -24,6 +19,40 @@ from ..corrections import save_review_correction, snapshot_message_parse
 from ..db import get_session
 
 router = APIRouter(route_class=CSRFProtectedRoute)
+
+
+def _apply_table_detail_urls(
+    items: list[dict],
+    *,
+    return_path: str,
+    status: Optional[str],
+    channel_id: Optional[str],
+    expense_category: Optional[str],
+    after: Optional[str],
+    before: Optional[str],
+    sort_by: str,
+    sort_dir: str,
+    page: int,
+    limit: int,
+) -> None:
+    for item in items:
+        message_id = item.get("id")
+        if message_id is None:
+            item["detail_url"] = ""
+            continue
+        item["detail_url"] = build_message_detail_url(
+            message_id,
+            return_path=return_path,
+            status=status,
+            channel_id=channel_id,
+            expense_category=expense_category,
+            after=after,
+            before=before,
+            sort_by=sort_by,
+            sort_dir=sort_dir,
+            page=page,
+            limit=limit,
+        )
 
 
 @router.post("/messages/{message_id}/retry")
@@ -454,6 +483,19 @@ def messages_table(
             limit=limit,
         )
         items = build_message_list_items(session, rows, expense_category=expense_category)
+        _apply_table_detail_urls(
+            items,
+            return_path="/table",
+            status=status,
+            channel_id=channel_id,
+            expense_category=expense_category,
+            after=after,
+            before=before,
+            sort_by=sort_by,
+            sort_dir=sort_dir,
+            page=page,
+            limit=limit,
+        )
     channels = get_channel_filter_choices(session)
     expense_category_options = get_expense_category_filter_choices(session)
     summary = (
@@ -571,6 +613,19 @@ def review_table(
         limit=limit,
     )
     items = build_message_list_items(session, rows, expense_category=expense_category)
+    _apply_table_detail_urls(
+        items,
+        return_path="/review-table",
+        status="review_queue",
+        channel_id=channel_id,
+        expense_category=expense_category,
+        after=after,
+        before=before,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        page=page,
+        limit=limit,
+    )
     channels = get_channel_filter_choices(session)
     expense_category_options = get_expense_category_filter_choices(session)
     summary = get_summary(
@@ -660,17 +715,6 @@ def reviewer_queue_page(
 ):
     if denial := require_role_response(request, "reviewer"):
         return denial
-    scope_query_string = request.scope.get("query_string")
-    has_scope_query_string = scope_query_string is not None
-    if has_scope_query_string:
-        query_pairs = parse_qsl(scope_query_string.decode("latin-1"), keep_blank_values=True)
-        explicit_after = any(key == "after" for key, _ in query_pairs)
-        explicit_before = any(key == "before" for key, _ in query_pairs)
-    else:
-        explicit_after = after is not None
-        explicit_before = before is not None
-    if not explicit_after and not explicit_before and after is None and before is None:
-        after = datetime.now(_REVIEW_DEFAULT_TZ).strftime("%Y-%m-%d")
     rows, total_rows = get_message_rows(
         session,
         status="review_queue",

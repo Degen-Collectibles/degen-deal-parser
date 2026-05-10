@@ -34,6 +34,7 @@
         html { scroll-behavior: smooth; }
         a { color:inherit; text-decoration:none; }
         .page { max-width:1660px; margin:0 auto; padding:22px; }
+        .page.table-page { display:flex; flex-direction:column; }
         .page.compact-review { max-width:1520px; }
         .nav-links, .hero-meta, .section-header, .scope-strip { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
         .nav-links { justify-content:flex-end; }
@@ -56,6 +57,8 @@
         .secondary-button:hover { background: var(--lx-s2); border-color: var(--lx-br2); }
         .tiny-button { width:auto; min-width:0; padding:6px 10px; border-radius:10px; font-size:12px; }
         .top-grid { display:grid; grid-template-columns:1.35fr .95fr; gap:18px; margin-bottom:18px; }
+        .ops-summary-panel { margin-top:18px; }
+        .ops-summary-panel .top-grid { margin-bottom:0; }
         .dashboard { display:grid; grid-template-columns:340px minmax(0,1fr); gap:18px; align-items:start; }
         .page.sidebar-collapsed .dashboard { grid-template-columns:minmax(0,1fr); }
         .sidebar { display:flex; flex-direction:column; gap:16px; position:sticky; top:18px; }
@@ -237,8 +240,28 @@
         .bulk-status { justify-content:flex-start; }
         .selection-count { font-weight:700; color:var(--lx-text); }
         .mobile-only { display:none !important; }
-        .new-updates-button { display:none; background:rgba(234,179,8,.16); color:#fbbf24; border-color:rgba(234,179,8,.35); }
-        .new-updates-button.is-visible { display:inline-flex; }
+        .table-page .hero { padding:18px 22px; margin-bottom:14px; }
+        .table-page .hero p { display:none; }
+        .table-page .hero-actions { justify-content:flex-start; }
+        .table-page .hero-actions .subtle { display:none; }
+        .table-page h1 { font-size:34px; line-height:1.05; letter-spacing:0; }
+        .table-page .hero-meta { margin-top:8px; }
+        .table-page .dashboard { order:10; }
+        .table-page .ops-summary-panel { order:20; }
+        .table-page main > .card { display:flex; flex-direction:column; }
+        .table-page .section-header { margin-bottom:8px; }
+        .table-page .table-toolbar { order:1; }
+        .table-page .mobile-filter-card { order:2; }
+        .table-page .scope-strip { order:3; }
+        .table-page .pagination-bar { order:4; }
+        .table-page .queue-strip { order:5; position:static; }
+        .table-page .bulk-bar { order:10; }
+        .table-page .table-scroll-top { order:20; }
+        .table-page .table-shell { order:21; }
+        .table-page .mobile-card-list { order:21; }
+        .table-page .table-admin-panel { order:40; margin:14px 0 0 !important; box-shadow:none; }
+        .new-updates-button { display:none !important; background:rgba(234,179,8,.16); color:#fbbf24; border-color:rgba(234,179,8,.35); }
+        .new-updates-button.is-visible { display:inline-flex !important; }
         .mobile-card-list { display:none; }
         .mobile-filter-card {
             display:none;
@@ -450,7 +473,7 @@
     <link rel="stylesheet" href="/static/safe-area.css?v=1776747800">
 </head>
 <body>
-    <div class="page{% if is_review_page %} review-page{% endif %}" id="messages-page">
+    <div class="page{% if is_review_page %} review-page{% else %} table-page sidebar-collapsed{% endif %}" id="messages-page">
         {% include "_linear_sidebar.html" %}
         {% if success %}<div class="banner banner-success">{{ success }}</div>{% endif %}
         {% if error %}<div class="banner banner-error">{{ error }}</div>{% endif %}
@@ -468,15 +491,6 @@
                     {% if not is_review_page %}
                     <a href="/admin" class="button primary-button" style="width:auto;">Back to Admin Hub</a>
                     <a href="/bookkeeping" class="button secondary-button" style="width:auto;">Bookkeeping</a>
-                    <a href="/messages/export.csv?status={{ selected_status }}&channel_id={{ selected_channel_id }}&expense_category={{ selected_expense_category }}&source={{ selected_source }}&after={{ selected_after }}&before={{ selected_before }}&sort_by={{ selected_sort_by }}&sort_dir={{ selected_sort_dir }}" class="button secondary-button desktop-heavy-action" style="width:auto;">Export Table CSV</a>
-                    <form method="post" action="/admin/parser/reprocess-form" class="desktop-heavy-action" style="display:inline-flex; gap:8px; flex-wrap:wrap;">
-                        <input type="hidden" name="return_path" value="{{ return_path }}">
-                        <button type="submit" class="button secondary-button" style="width:auto;">Run Parser Recheck</button>
-                        <button type="submit" name="force" value="true" class="button secondary-button" style="width:auto;">Force Recheck</button>
-                    </form>
-                    <div class="subtle" style="flex-basis:100%; margin-top:2px;">
-                        Reparse reruns messages that are already in the system with today's parser rules. Use the normal button for a safe pass; use force only if you also want to include rows that were already reviewed by a person.
-                    </div>
                     {% else %}
                     <a href="/review" class="button primary-button" style="width:auto;">Open Primary Review Queue</a>
                     <a href="/table" class="button secondary-button" style="width:auto;">Back to Main Table</a>
@@ -484,7 +498,7 @@
                     {% endif %}
                 </div>
                 <div class="hero-meta">
-                    <span class="mode-chip">{% if is_review_page %}dense review mode{% else %}admin controls visible{% endif %}</span>
+                    <span class="mode-chip">{% if is_review_page %}dense review mode{% else %}rows-first admin{% endif %}</span>
                     <span class="mode-chip">{{ selected_status if selected_status else "all visible statuses" }}</span>
                     {% if not is_review_page %}<span class="mode-chip">{{ selected_source }}</span>{% endif %}
                     <span class="mode-chip">{{ selected_limit }} rows per page</span>
@@ -502,6 +516,11 @@
         {% endif %}
 
         {% if not shopify_source_notice %}
+        {% if not is_review_page %}
+        <details class="panel ops-summary-panel">
+            <summary>System & Financial Snapshot<span>+</span></summary>
+            <div class="panel-body">
+        {% endif %}
         <section class="top-grid">
             <div class="card">
                 <h2>Queue Snapshot</h2>
@@ -559,6 +578,10 @@
                 </div>
             </div>
         </section>
+        {% if not is_review_page %}
+            </div>
+        </details>
+        {% endif %}
         {% endif %}
         <section class="dashboard">
             <aside class="sidebar">
@@ -586,7 +609,7 @@
                     </div>
                 </details>
 
-                <details class="panel" open>
+                <details class="panel"{% if is_review_page %} open{% endif %}>
                     <summary>Watched Channels<span>+</span></summary>
                     <div class="panel-body">
                         <form id="channel-rescan-form" method="post" action="/admin/channels/rescan" style="display:none;"></form>
@@ -683,7 +706,7 @@
                         <div class="queue-strip-actions">
                             <span class="count-pill">Visible {{ pagination["total_rows"] }}</span>
                             {% if is_review_page %}<span class="count-pill">Review required {{ summary["needs_review"] }}</span><span class="count-pill">Failed {{ summary["failed"] }}</span><span class="count-pill" id="dirty-count">Changed 0</span>{% endif %}
-                            {% if is_review_page %}<button type="button" class="toggle-pill" id="compact-review-toggle">Compact Columns</button><button type="button" class="toggle-pill" id="sidebar-toggle">Hide Sidebar</button>{% endif %}
+                            {% if is_review_page %}<button type="button" class="toggle-pill" id="compact-review-toggle">Compact Columns</button>{% endif %}<button type="button" class="toggle-pill" id="sidebar-toggle">{% if is_review_page %}Hide Sidebar{% else %}Show Filters{% endif %}</button>
                         </div>
                     </div>
                     {% if shopify_source_notice %}
@@ -723,9 +746,23 @@
                     </div>
                     {% endif %}
 
-                    <details class="panel" style="margin-bottom:14px; box-shadow:none;">
+                    <details class="panel table-admin-panel" style="margin-bottom:14px; box-shadow:none;">
                         <summary>Backfill & Admin<span>+</span></summary>
                         <div class="panel-body">
+                            {% if not is_review_page %}
+                            <div style="margin-bottom:16px;">
+                                <div class="side-summary" style="text-transform:uppercase; letter-spacing:.08em;">Table Maintenance</div>
+                                <div class="inline-actions" style="margin-top:10px;">
+                                    <a href="/messages/export.csv?status={{ selected_status }}&channel_id={{ selected_channel_id }}&expense_category={{ selected_expense_category }}&source={{ selected_source }}&after={{ selected_after }}&before={{ selected_before }}&sort_by={{ selected_sort_by }}&sort_dir={{ selected_sort_dir }}" class="button secondary-button" style="width:auto;">Export Current CSV</a>
+                                    <form method="post" action="/admin/parser/reprocess-form" style="display:inline-flex; gap:8px; flex-wrap:wrap;">
+                                        <input type="hidden" name="return_path" value="{{ return_path }}">
+                                        <button type="submit" class="button secondary-button" style="width:auto;">Run Parser Recheck</button>
+                                        <button type="submit" name="force" value="true" class="button secondary-button" style="width:auto;">Force Recheck</button>
+                                    </form>
+                                </div>
+                                <div class="helper" style="margin-top:8px;">Reparse uses today's parser rules against messages already in the system. Force includes rows that were already reviewed by a person.</div>
+                            </div>
+                            {% endif %}
                             <form method="post" action="/admin/backfill/form" style="margin-bottom:14px;">
                                 <div class="helper" style="margin-bottom:10px;">Backfill pulls older Discord messages into the system for the channel and date range you choose. Use it when messages are missing, not when the messages are already here but parsed wrong.</div>
                                 <div class="form-row"><label for="backfill_channel_id">Channel</label><select name="channel_id" id="backfill_channel_id"><option value="">All backfill-enabled watched channels</option>{% for ch in available_discord_channels %}<option value="{{ ch['channel_id'] }}">{{ ch["label"] }}</option>{% endfor %}</select></div>
@@ -1126,15 +1163,17 @@
         const tableScrollTop = document.getElementById("table-scroll-top");
         const tableScrollTopInner = document.getElementById("table-scroll-top-inner");
         let focusedRowId = null;
+        const IS_REVIEW_PAGE = {{ "true" if is_review_page else "false" }};
         const AUTO_REFRESH_STORAGE_KEY = "degen_auto_refresh_enabled";
         const COMPACT_REVIEW_STORAGE_KEY = "degen_compact_review_enabled";
         const SIDEBAR_COLLAPSED_STORAGE_KEY = "degen_review_sidebar_collapsed";
+        const TABLE_SIDEBAR_COLLAPSED_STORAGE_KEY = "degen_table_sidebar_collapsed";
         const SCROLL_RESTORE_STORAGE_KEY = "degen_table_scroll_restore";
         const MOBILE_BREAKPOINT = window.matchMedia("(max-width: 760px)");
         const AUTO_REFRESH_IDLE_RELOAD_MS = 30000;
         let autoRefreshEnabled = true;
         let compactReviewEnabled = {{ "true" if is_review_page else "false" }};
-        let sidebarCollapsed = false;
+        let sidebarCollapsed = {{ "false" if is_review_page else "true" }};
         let syncingTopScroll = false;
         let syncingMainScroll = false;
         let lastUserActivityAt = Date.now();
@@ -1298,40 +1337,53 @@
 
         function applyReviewLayoutState() {
             if (!messagesPage) return;
-            messagesPage.classList.toggle("compact-review", Boolean(compactReviewEnabled));
+            messagesPage.classList.toggle("compact-review", IS_REVIEW_PAGE && Boolean(compactReviewEnabled));
             messagesPage.classList.toggle("sidebar-collapsed", Boolean(sidebarCollapsed));
             if (compactReviewToggle) compactReviewToggle.classList.toggle("is-active", Boolean(compactReviewEnabled));
             if (sidebarToggle) sidebarToggle.classList.toggle("is-active", Boolean(sidebarCollapsed));
             if (compactReviewToggle) compactReviewToggle.textContent = compactReviewEnabled ? "Compact Columns On" : "Compact Columns Off";
-            if (sidebarToggle) sidebarToggle.textContent = sidebarCollapsed ? "Sidebar Hidden" : "Hide Sidebar";
+            if (sidebarToggle) {
+                const hiddenLabel = IS_REVIEW_PAGE ? "Show Sidebar" : "Show Filters";
+                const visibleLabel = IS_REVIEW_PAGE ? "Hide Sidebar" : "Hide Filters";
+                sidebarToggle.textContent = sidebarCollapsed ? hiddenLabel : visibleLabel;
+            }
             syncTopScrollbarWidth();
         }
 
         function loadReviewLayoutPreference() {
-            if (!messagesPage?.classList.contains("review-page")) return;
             try {
-                const compactStored = window.localStorage.getItem(COMPACT_REVIEW_STORAGE_KEY);
-                const sidebarStored = window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY);
-                if (compactStored === null) {
-                    compactReviewEnabled = true;
+                if (IS_REVIEW_PAGE) {
+                    const compactStored = window.localStorage.getItem(COMPACT_REVIEW_STORAGE_KEY);
+                    const sidebarStored = window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY);
+                    if (compactStored === null) {
+                        compactReviewEnabled = true;
+                    } else {
+                        compactReviewEnabled = compactStored === "true";
+                    }
+                    if (sidebarStored !== null) {
+                        sidebarCollapsed = sidebarStored === "true";
+                    }
                 } else {
-                    compactReviewEnabled = compactStored === "true";
-                }
-                if (sidebarStored !== null) {
-                    sidebarCollapsed = sidebarStored === "true";
+                    const sidebarStored = window.localStorage.getItem(TABLE_SIDEBAR_COLLAPSED_STORAGE_KEY);
+                    sidebarCollapsed = sidebarStored === null ? true : sidebarStored === "true";
                 }
             } catch (error) {
-                console.warn("Unable to load review layout preference", error);
-                compactReviewEnabled = true;
+                console.warn("Unable to load table layout preference", error);
+                compactReviewEnabled = IS_REVIEW_PAGE;
+                sidebarCollapsed = !IS_REVIEW_PAGE;
             }
         }
 
         function saveReviewLayoutPreference() {
             try {
-                window.localStorage.setItem(COMPACT_REVIEW_STORAGE_KEY, String(compactReviewEnabled));
-                window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, String(sidebarCollapsed));
+                if (IS_REVIEW_PAGE) {
+                    window.localStorage.setItem(COMPACT_REVIEW_STORAGE_KEY, String(compactReviewEnabled));
+                    window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, String(sidebarCollapsed));
+                } else {
+                    window.localStorage.setItem(TABLE_SIDEBAR_COLLAPSED_STORAGE_KEY, String(sidebarCollapsed));
+                }
             } catch (error) {
-                console.warn("Unable to save review layout preference", error);
+                console.warn("Unable to save table layout preference", error);
             }
         }
 
@@ -1593,10 +1645,8 @@
                 rememberScrollAndReload();
             });
         }
-        if (messagesPage?.classList.contains("review-page")) {
-            loadReviewLayoutPreference();
-            applyReviewLayoutState();
-        }
+        loadReviewLayoutPreference();
+        applyReviewLayoutState();
         if (compactReviewToggle) {
             compactReviewToggle.addEventListener("click", () => {
                 compactReviewEnabled = !compactReviewEnabled;
