@@ -219,6 +219,12 @@ SQLITE_ADDITIVE_MIGRATIONS = {
         "monthly_salary_pay_day": "INTEGER",
         "payment_method": "TEXT DEFAULT 'cash'",
     },
+    "inventory_items": {
+        "variant": "TEXT",
+        "sealed_product_kind": "TEXT",
+        "upc": "TEXT",
+        "location": "TEXT",
+    },
 }
 
 
@@ -290,6 +296,16 @@ SQLITE_INDEX_MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS idx_employeeprofile_compensation_type ON employeeprofile (compensation_type)",
     "CREATE INDEX IF NOT EXISTS idx_employeeprofile_monthly_salary_pay_day ON employeeprofile (monthly_salary_pay_day)",
     "CREATE INDEX IF NOT EXISTS idx_employeeprofile_payment_method ON employeeprofile (payment_method)",
+    "CREATE INDEX IF NOT EXISTS idx_inventory_items_sealed_product_kind ON inventory_items (sealed_product_kind)",
+    "CREATE INDEX IF NOT EXISTS idx_inventory_items_variant ON inventory_items (variant)",
+    "CREATE INDEX IF NOT EXISTS idx_inventory_items_upc ON inventory_items (upc)",
+    "CREATE INDEX IF NOT EXISTS idx_inventory_items_location ON inventory_items (location)",
+    "CREATE INDEX IF NOT EXISTS idx_inventory_stock_movements_item_id ON inventory_stock_movements (item_id)",
+    "CREATE INDEX IF NOT EXISTS idx_inventory_stock_movements_reason ON inventory_stock_movements (reason)",
+    "CREATE INDEX IF NOT EXISTS idx_inventory_stock_movements_location ON inventory_stock_movements (location)",
+    "CREATE INDEX IF NOT EXISTS idx_inventory_stock_movements_source ON inventory_stock_movements (source)",
+    "CREATE INDEX IF NOT EXISTS idx_inventory_stock_movements_created_by ON inventory_stock_movements (created_by)",
+    "CREATE INDEX IF NOT EXISTS idx_inventory_stock_movements_created_at ON inventory_stock_movements (created_at)",
 ]
 
 
@@ -438,6 +454,12 @@ POSTGRES_ADDITIVE_MIGRATIONS = {
         "monthly_salary_pay_day": "INTEGER",
         "payment_method": "TEXT DEFAULT 'cash'",
     },
+    "inventory_items": {
+        "variant": "TEXT",
+        "sealed_product_kind": "TEXT",
+        "upc": "TEXT",
+        "location": "TEXT",
+    },
 }
 
 
@@ -509,6 +531,16 @@ POSTGRES_INDEX_MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS idx_employeeprofile_compensation_type ON employeeprofile (compensation_type)",
     "CREATE INDEX IF NOT EXISTS idx_employeeprofile_monthly_salary_pay_day ON employeeprofile (monthly_salary_pay_day)",
     "CREATE INDEX IF NOT EXISTS idx_employeeprofile_payment_method ON employeeprofile (payment_method)",
+    "CREATE INDEX IF NOT EXISTS idx_inventory_items_sealed_product_kind ON inventory_items (sealed_product_kind)",
+    "CREATE INDEX IF NOT EXISTS idx_inventory_items_variant ON inventory_items (variant)",
+    "CREATE INDEX IF NOT EXISTS idx_inventory_items_upc ON inventory_items (upc)",
+    "CREATE INDEX IF NOT EXISTS idx_inventory_items_location ON inventory_items (location)",
+    "CREATE INDEX IF NOT EXISTS idx_inventory_stock_movements_item_id ON inventory_stock_movements (item_id)",
+    "CREATE INDEX IF NOT EXISTS idx_inventory_stock_movements_reason ON inventory_stock_movements (reason)",
+    "CREATE INDEX IF NOT EXISTS idx_inventory_stock_movements_location ON inventory_stock_movements (location)",
+    "CREATE INDEX IF NOT EXISTS idx_inventory_stock_movements_source ON inventory_stock_movements (source)",
+    "CREATE INDEX IF NOT EXISTS idx_inventory_stock_movements_created_by ON inventory_stock_movements (created_by)",
+    "CREATE INDEX IF NOT EXISTS idx_inventory_stock_movements_created_at ON inventory_stock_movements (created_at)",
 ]
 
 

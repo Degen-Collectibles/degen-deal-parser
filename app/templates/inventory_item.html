@@ -62,6 +62,7 @@
         .badge-listed { background:#e7f0ff; color:#30548c; }
         .badge-sold { background: rgba(139,143,152,.14); color: var(--lx-muted); border: 1px solid var(--lx-br); }
         .badge-held { background:#fff5df; color:#8a580d; }
+        .badge-sealed { background:var(--blue-bg); color:var(--blue); border:1px solid rgba(96,165,250,.25); }
         .price-big { font-size:32px; font-weight:800; letter-spacing:-.04em; color:#166647; font-variant-numeric:tabular-nums; }
         .price-row { display:flex; gap:16px; align-items:baseline; flex-wrap:wrap; margin-bottom:12px; }
         .price-label { font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; color: var(--lx-muted); }
@@ -102,6 +103,11 @@
                 <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
                     <span class="badge badge-{{ item.status }}">{{ item.status.replace("_"," ").title() }}</span>
                     <span style="font-size:12px;color: var(--lx-muted);">{{ item.game }}</span>
+                    {% if item.item_type == "sealed" and item.sealed_product_kind %}<span class="badge badge-sealed">{{ item.sealed_product_kind }}</span>{% endif %}
+                    {% if item.item_type == "single" and item.variant %}<span class="badge badge-single">{{ item.variant }}</span>{% endif %}
+                    {% if item.item_type == "single" and item.condition %}<span style="font-size:12px;color: var(--lx-muted);">{{ item.condition }}</span>{% endif %}
+                    {% if item.item_type == "sealed" and item.location %}<span style="font-size:12px;color: var(--lx-muted);">{{ item.location }}</span>{% endif %}
+                    {% if item.item_type == "sealed" and item.upc %}<span style="font-family:monospace;font-size:12px;color: var(--lx-muted);">UPC {{ item.upc }}</span>{% endif %}
                     {% if item.language and item.language != "English" %}<span style="font-size:12px;color: var(--lx-muted);">{{ item.language }}</span>{% endif %}
                     <span style="font-family:monospace;font-size:12px;color: var(--lx-muted);">{{ item.barcode }}</span>
                 </div>
@@ -191,6 +197,29 @@
         </div>
     </div>
 
+    {% if stock_movements %}
+    <div class="card">
+        <h2 class="section-divider">Stock Activity</h2>
+        <table class="history-table">
+            <thead><tr><th>Date</th><th>Reason</th><th>Qty</th><th>After</th><th>Unit Cost</th><th>Location</th><th>Source</th><th>By</th></tr></thead>
+            <tbody>
+            {% for row in stock_movements %}
+            <tr>
+                <td>{{ row.created_at.strftime("%b %d %H:%M") }}</td>
+                <td>{{ row.reason.replace("_"," ").title() }}</td>
+                <td>{% if row.quantity_delta > 0 %}+{% endif %}{{ row.quantity_delta }}</td>
+                <td>{{ row.quantity_after }}</td>
+                <td>{{ row.unit_cost | money }}</td>
+                <td>{{ row.location or "" }}</td>
+                <td>{{ row.source or "" }}</td>
+                <td>{{ row.created_by or "" }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
     <!-- Edit form -->
     <div class="card">
         <h2 class="section-divider">Edit Item</h2>
@@ -211,6 +240,10 @@
                     <label>Set Name <input type="text" name="set_name" value="{{ item.set_name or '' }}"></label>
                     <label>Set Code <input type="text" name="set_code" value="{{ item.set_code or '' }}" placeholder="e.g. base1"></label>
                     <label>Card Number <input type="text" name="card_number" value="{{ item.card_number or '' }}"></label>
+                    <label>Variant <input type="text" name="variant" value="{{ item.variant or '' }}" placeholder="Normal, Holofoil, Reverse Holofoil"></label>
+                    <label>Sealed Product Type <input type="text" name="sealed_product_kind" value="{{ item.sealed_product_kind or '' }}" placeholder="Booster Box, ETB, Tin"></label>
+                    <label>UPC <input type="text" name="upc" value="{{ item.upc or '' }}"></label>
+                    <label>Location <input type="text" name="location" value="{{ item.location or '' }}" placeholder="Shelf A"></label>
                     <label>Language <input type="text" name="language" value="{{ item.language or 'English' }}"></label>
                     <label>Condition
                         <select name="condition">

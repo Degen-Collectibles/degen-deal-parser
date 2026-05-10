@@ -14,7 +14,7 @@ from typing import Any, Optional
 
 import httpx
 
-from .models import InventoryItem, ITEM_TYPE_SLAB, utcnow
+from .models import InventoryItem, ITEM_TYPE_SEALED, ITEM_TYPE_SLAB, utcnow
 from .inventory_pricing import effective_price
 
 logger = logging.getLogger(__name__)
@@ -43,8 +43,13 @@ def _build_product_title(item: InventoryItem) -> str:
         parts.append(item.set_name)
     if item.item_type == ITEM_TYPE_SLAB and item.grading_company and item.grade:
         parts.append(f"{item.grading_company} {item.grade}")
-    elif item.condition:
-        parts.append(item.condition)
+    elif item.item_type == ITEM_TYPE_SEALED and item.sealed_product_kind:
+        parts.append(item.sealed_product_kind)
+    else:
+        if item.variant:
+            parts.append(item.variant)
+        if item.condition:
+            parts.append(item.condition)
     if item.language and item.language != "English":
         parts.append(item.language)
     return " — ".join(parts)
@@ -65,7 +70,16 @@ def _build_product_body(item: InventoryItem) -> str:
             lines.append(f"Grade: {item.grade}")
         if item.cert_number:
             lines.append(f"Cert #: {item.cert_number}")
+    elif item.item_type == ITEM_TYPE_SEALED:
+        if item.sealed_product_kind:
+            lines.append(f"Product Type: {item.sealed_product_kind}")
+        if item.upc:
+            lines.append(f"UPC: {item.upc}")
+        if item.location:
+            lines.append(f"Location: {item.location}")
     else:
+        if item.variant:
+            lines.append(f"Variant: {item.variant}")
         if item.condition:
             lines.append(f"Condition: {item.condition}")
     if item.language and item.language != "English":
@@ -82,7 +96,12 @@ def _build_product_tags(item: InventoryItem) -> list[str]:
             tags.append(item.grading_company)
         if item.grade:
             tags.append(f"Grade {item.grade}")
+    elif item.item_type == ITEM_TYPE_SEALED:
+        if item.sealed_product_kind:
+            tags.append(item.sealed_product_kind)
     else:
+        if item.variant:
+            tags.append(item.variant)
         if item.condition:
             tags.append(item.condition)
     if item.set_name:
@@ -97,7 +116,7 @@ def build_shopify_product_payload(item: InventoryItem) -> dict[str, Any]:
         "product": {
             "title": _build_product_title(item),
             "body_html": _build_product_body(item),
-            "product_type": "Slabs" if item.item_type == ITEM_TYPE_SLAB else "Singles",
+            "product_type": "Sealed Product" if item.item_type == ITEM_TYPE_SEALED else ("Slabs" if item.item_type == ITEM_TYPE_SLAB else "Singles"),
             "tags": ", ".join(_build_product_tags(item)),
             "variants": [
                 {

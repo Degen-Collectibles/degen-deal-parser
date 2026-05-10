@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <link rel="manifest" href="/static/manifest.webmanifest">
+    <meta name="theme-color" content="#08090a">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="Degen">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="mobile-web-app-capable" content="yes">
+    <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon-180.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/icon-192.png">
+    <link rel="icon" type="image/png" sizes="512x512" href="/static/icons/icon-512.png">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <title>Add Stock</title>
+    <style>
+        :root {
+            --card: var(--lx-s1);
+            --card-strong: var(--lx-s2);
+            --line: var(--lx-br);
+            --text: var(--lx-text);
+            --muted: var(--lx-muted);
+            --accent: #ef4444;
+            --accent-strong: #dc2626;
+            --green: #22c55e;
+            --green-bg: rgba(34,197,94,.14);
+            --blue: #60a5fa;
+            --blue-bg: rgba(96,165,250,.14);
+            --yellow: #eab308;
+            --yellow-bg: rgba(234,179,8,.14);
+        }
+        * { box-sizing:border-box; }
+        body { margin:0; font-family:"Inter",-apple-system,BlinkMacSystemFont,sans-serif; color:var(--text); background:var(--lx-bg); -webkit-font-smoothing:antialiased; }
+        a { color:inherit; text-decoration:none; }
+        .page { max-width:1480px; margin:0 auto; padding:28px 28px 72px; }
+        .panel { padding:18px; margin-bottom:18px; background:linear-gradient(180deg,var(--card-strong),var(--card)); border:1px solid var(--line); border-radius:18px; box-shadow:0 1px 3px rgba(0,0,0,.35); }
+        .topbar { display:flex; justify-content:space-between; gap:14px; align-items:flex-start; flex-wrap:wrap; }
+        .eyebrow { display:inline-flex; align-items:center; padding:6px 10px; border-radius:999px; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.08em; background:var(--lx-s2); color:var(--muted); }
+        h1 { margin:10px 0 6px; font-size:clamp(30px,4vw,48px); line-height:1; letter-spacing:-.04em; font-weight:800; color:#fff; }
+        h2 { margin:0; font-size:20px; font-weight:800; letter-spacing:-.03em; }
+        h3 { margin:0; font-size:16px; line-height:1.15; font-weight:800; letter-spacing:-.02em; color:#fff; }
+        p { margin:0; color:var(--muted); }
+        .button, button { appearance:none; border:none; border-radius:12px; padding:10px 14px; font:inherit; font-weight:800; cursor:pointer; transition:transform .15s, border-color .15s, background .15s; }
+        .button:hover, button:hover { transform:translateY(-1px); }
+        .primary { background:var(--accent); color:#fff; border:1px solid var(--accent); }
+        .primary:hover { background:var(--accent-strong); border-color:var(--accent-strong); }
+        .secondary { background:var(--lx-s1); color:var(--text); border:1px solid var(--line); }
+        .search-form { display:grid; grid-template-columns:minmax(150px,220px) minmax(220px,1fr) auto; gap:10px; align-items:end; margin-top:16px; }
+        .batch-defaults { margin-top:12px; border:1px solid var(--line); border-radius:14px; background:rgba(255,255,255,.02); padding:11px 12px; }
+        .batch-defaults summary { cursor:pointer; color:var(--muted); font-size:13px; font-weight:800; }
+        .batch-default-grid { display:grid; grid-template-columns:1fr 1fr 1.4fr auto; gap:10px; align-items:end; margin-top:12px; }
+        label { display:flex; flex-direction:column; gap:6px; color:var(--muted); font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; }
+        input, select, textarea { width:100%; padding:11px 12px; border-radius:12px; border:1px solid var(--line); background:var(--lx-s1); color:var(--text); font:inherit; }
+        textarea { min-height:44px; resize:vertical; }
+        input:focus, select:focus, textarea:focus { outline:none; border-color:rgba(96,165,250,.8); box-shadow:0 0 0 3px rgba(96,165,250,.14); }
+        .notice { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:14px 16px; border-radius:14px; margin-top:14px; border:1px solid rgba(34,197,94,.32); background:var(--green-bg); color:#dffbea; }
+        .error { padding:12px 14px; border-radius:14px; margin-top:14px; border:1px solid rgba(239,68,68,.4); background:rgba(239,68,68,.14); color:#fecaca; font-weight:800; }
+        .warning { padding:12px 14px; border-radius:14px; margin-top:14px; border:1px solid rgba(234,179,8,.38); background:var(--yellow-bg); color:#fef3c7; font-weight:800; }
+        .single-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(380px,1fr)); gap:12px; margin-top:12px; }
+        .single-card { border:1px solid var(--line); border-radius:16px; background:var(--lx-s1); padding:14px; display:grid; gap:12px; }
+        .single-main { display:grid; grid-template-columns:74px 1fr; gap:12px; min-width:0; align-items:start; }
+        .price-grid { display:grid; grid-template-columns:repeat(5,1fr); gap:6px; }
+        .price-pill { border:1px solid var(--line); border-radius:10px; background:var(--lx-s2); padding:7px 6px; text-align:center; min-height:50px; }
+        .price-pill strong { display:block; color:#fff; font-size:11px; }
+        .price-pill span { display:block; color:var(--muted); font-size:11px; margin-top:3px; }
+        .single-receive-grid { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; align-items:end; }
+        .single-receive-grid .wide { grid-column:1 / -1; }
+        .section-head { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:12px; flex-wrap:wrap; }
+        .count { color:var(--muted); font-size:12px; font-weight:800; }
+        .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(360px,1fr)); gap:12px; }
+        .product { border:1px solid var(--line); border-radius:16px; background:var(--lx-s1); padding:14px; display:grid; gap:12px; }
+        .product-main { display:grid; grid-template-columns:74px 1fr; gap:12px; align-items:start; min-width:0; }
+        .thumb { width:74px; aspect-ratio:1; border-radius:14px; background:linear-gradient(135deg,var(--blue-bg),rgba(34,197,94,.12)); border:1px solid var(--line); display:flex; align-items:center; justify-content:center; color:var(--blue); font-weight:900; font-size:18px; overflow:hidden; }
+        .thumb:empty::before { content:attr(data-fallback); }
+        .thumb img { width:100%; height:100%; object-fit:contain; display:block; background:#fff; }
+        .meta { display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin-top:7px; }
+        .chip { display:inline-flex; align-items:center; border-radius:999px; padding:4px 8px; font-size:11px; font-weight:800; background:var(--lx-s2); color:var(--muted); border:1px solid var(--line); }
+        .chip.good { background:var(--green-bg); color:var(--green); border-color:rgba(34,197,94,.28); }
+        .chip.blue { background:var(--blue-bg); color:var(--blue); border-color:rgba(96,165,250,.28); }
+        .receive-grid { display:grid; grid-template-columns:82px 1fr 1fr; gap:8px; align-items:end; }
+        .receive-grid .wide { grid-column:span 3; }
+        .receive-grid .half { grid-column:span 1; }
+        .actions { display:flex; justify-content:space-between; gap:10px; align-items:center; flex-wrap:wrap; }
+        .qty-now { color:var(--muted); font-size:12px; font-weight:800; }
+        .bulk-form { display:grid; gap:12px; }
+        .bulk-input-grid { display:grid; grid-template-columns:1fr 180px 180px; gap:10px; align-items:end; }
+        .bulk-input-grid .full { grid-column:1 / -1; }
+        .bulk-preview { overflow:auto; border:1px solid var(--line); border-radius:14px; background:var(--lx-s1); }
+        .bulk-preview table { min-width:900px; }
+        .bulk-product { display:grid; grid-template-columns:52px 1fr; gap:10px; align-items:center; min-width:0; }
+        .bulk-thumb { width:52px; aspect-ratio:1; border-radius:10px; overflow:hidden; border:1px solid var(--line); background:#fff; display:flex; align-items:center; justify-content:center; color:var(--blue); font-weight:900; }
+        .bulk-thumb img { width:100%; height:100%; object-fit:contain; display:block; }
+        .checkline { display:flex; align-items:center; gap:8px; color:var(--text); text-transform:none; letter-spacing:0; font-size:13px; }
+        .checkline input { width:auto; }
+        .create-grid { display:grid; grid-template-columns:1.5fr 1fr 1fr 1fr; gap:10px; align-items:end; }
+        .create-grid .full { grid-column:1 / -1; }
+        .manual-details { border:1px dashed var(--line); border-radius:14px; background:rgba(255,255,255,.02); padding:12px 14px; }
+        .manual-details summary { cursor:pointer; color:var(--muted); font-size:13px; font-weight:800; }
+        .manual-details summary strong { color:#fff; margin-left:6px; }
+        .manual-details .create-grid { margin-top:14px; }
+        .activity { overflow:auto; border:1px solid var(--line); border-radius:14px; background:var(--lx-s1); }
+        table { width:100%; border-collapse:separate; border-spacing:0; min-width:760px; }
+        th, td { padding:10px 12px; border-bottom:1px solid var(--line); text-align:left; vertical-align:middle; font-size:13px; }
+        th { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.08em; font-weight:800; background:var(--lx-s2); }
+        tr:last-child td { border-bottom:none; }
+        .empty { padding:24px; border:1px dashed var(--line); border-radius:16px; color:var(--muted); text-align:center; background:rgba(255,255,255,.02); }
+        @media(max-width:980px) {
+            .page { padding:16px 14px 80px; }
+            .grid { grid-template-columns:1fr; }
+            .search-form, .create-grid, .bulk-input-grid, .single-grid, .batch-default-grid { grid-template-columns:1fr; }
+            .create-grid .full { grid-column:auto; }
+            .bulk-input-grid .full { grid-column:auto; }
+        }
+        @media(max-width:520px) {
+            .product-main { grid-template-columns:58px 1fr; }
+            .single-main { grid-template-columns:58px 1fr; }
+            .thumb { width:58px; border-radius:12px; }
+            .receive-grid { grid-template-columns:1fr 1fr; }
+            .single-receive-grid { grid-template-columns:1fr 1fr; }
+            .price-grid { grid-template-columns:repeat(2,1fr); }
+            .receive-grid .wide { grid-column:span 2; }
+            .single-receive-grid .wide { grid-column:span 2; }
+            .actions { align-items:stretch; }
+            .actions button, .actions .button { width:100%; text-align:center; }
+        }
+    </style>
+    <link rel="stylesheet" href="/static/linear.css?v=1776749171">
+    <link rel="stylesheet" href="/static/safe-area.css?v=1776747800">
+    <style>
+        @media(max-width:980px) {
+            .linear-mobile-topbar { margin:-16px -14px 12px; width:calc(100% + 28px); }
+        }
+    </style>
+</head>
+<body>
+<div class="page">
+    {% include "_linear_sidebar.html" %}
+
+    <div class="panel">
+        <div class="topbar">
+            <div>
+                <span class="eyebrow">Inventory</span>
+                <h1>Add Stock</h1>
+                <p>Search once, then add sealed product or singles from the results.</p>
+            </div>
+            {% if current_user and current_user.role in ["admin", "reviewer", "viewer"] %}
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <a href="/inventory?item_type=sealed&game={{ selected_game|urlencode }}" class="button secondary">View Sealed</a>
+                <a href="/inventory" class="button secondary">All Inventory</a>
+                <a href="{{ scan_url }}" class="button secondary">Scan Singles</a>
+            </div>
+            {% else %}
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <a href="{{ scan_url }}" class="button secondary">Scan Singles</a>
+            </div>
+            {% endif %}
+        </div>
+        <form method="get" action="/inventory/add-stock" class="search-form">
+            <label>Game
+                <select name="game">
+                    {% for option in game_options %}
+                    <option value="{{ option.game }}" {% if option.game == selected_game %}selected{% endif %}>{{ option.label }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label>Search
+                <input type="search" name="q" value="{{ q }}" placeholder="Evolving Skies Booster Box, Final Fantasy Bundle, Charizard ex 151 199..." autocomplete="off" autofocus>
+            </label>
+            <button class="primary" type="submit">Search</button>
+        </form>
+        <details class="batch-defaults" id="batch-defaults">
+            <summary>Receiving Defaults</summary>
+            <div class="batch-default-grid">
+                <label>Location
+                    <input type="text" id="batch-default-location" placeholder="Shelf A">
+                </label>
+                <label>Source
+                    <input type="text" id="batch-default-source" placeholder="Distributor">
+                </label>
+                <label>Notes
+                    <input type="text" id="batch-default-notes" placeholder="Optional">
+                </label>
+                <button class="secondary" type="button" id="batch-default-clear">Clear</button>
+            </div>
+        </details>
+        {% if received_item %}
+        <div class="notice">
+            <div>
+                <strong>{{ received_item.card_name }}</strong>
+                <span style="color:var(--muted);margin-left:8px;">{{ received_item.quantity }} in stock{% if received_item.location %} at {{ received_item.location }}{% endif %}</span>
+            </div>
+            {% if current_user and current_user.role in ["admin", "reviewer", "viewer"] %}<a class="button secondary" href="/inventory/{{ received_item.id }}">Open Item</a>{% endif %}
+        </div>
+        {% endif %}
+        {% if single_received_item %}
+        <div class="notice">
+            <div>
+                <strong>{{ single_received_item.card_name }}</strong>
+                <span style="color:var(--muted);margin-left:8px;">{{ single_received_item.quantity }} in stock{% if single_received_item.condition %} - {{ single_received_item.condition }}{% endif %}</span>
+            </div>
+            {% if current_user and current_user.role in ["admin", "reviewer", "viewer"] %}<a class="button secondary" href="/inventory/{{ single_received_item.id }}">Open Item</a>{% endif %}
+        </div>
+        {% endif %}
+        {% if bulk_message %}<div class="notice"><strong>{{ bulk_message }}</strong></div>{% endif %}
+        {% if error %}<div class="error">{{ error }}</div>{% endif %}
+        {% if single_error %}<div class="error">{{ single_error }}</div>{% endif %}
+        {% if catalog_error %}<div class="warning">{{ catalog_error }}</div>{% endif %}
+    </div>
+
+    {% if has_search and single_results %}
+    <div class="panel">
+        <div class="section-head">
+            <h2>Single Card Matches</h2>
+            <span class="count">{{ single_results|length }} matches</span>
+        </div>
+
+        <div class="single-grid">
+            {% for card in single_results %}
+            {% set default_prices = card.default_variant.condition_prices if card.default_variant else {} %}
+            <form method="post" action="/inventory/singles/receive" class="single-card" data-single-card data-variants="{{ card.variants|tojson|forceescape }}">
+                <input type="hidden" name="game" value="{{ card.game }}">
+                <input type="hidden" name="card_name" value="{{ card.name }}">
+                <input type="hidden" name="set_name" value="{{ card.set_name }}">
+                <input type="hidden" name="set_code" value="{{ card.set_code }}">
+                <input type="hidden" name="card_number" value="{{ card.card_number }}">
+                <input type="hidden" name="image_url" value="{{ card.image_url }}">
+                <input type="hidden" name="variants_json" value="{{ card.variants|tojson|forceescape }}">
+                <input type="hidden" name="source" value="Manual Lookup" data-default-source>
+                <div class="single-main">
+                    <div class="thumb" data-fallback="{{ card.name[:2].upper() }}">{% if card.image_url %}<img src="{{ card.image_url }}" alt="" onerror="this.remove()">{% endif %}</div>
+                    <div style="min-width:0;">
+                        <h3>{{ card.name }}</h3>
+                        <div class="meta">
+                            {% if card.set_name %}<span class="chip blue">{{ card.set_name }}</span>{% endif %}
+                            {% if card.card_number %}<span class="chip">#{{ card.card_number }}</span>{% endif %}
+                            {% if card.default_variant %}<span class="chip">{{ card.default_variant.name }}</span>{% endif %}
+                            {% if card.tcgplayer_url %}<a class="chip" href="{{ card.tcgplayer_url }}" target="_blank" rel="noopener">TCGPlayer</a>{% endif %}
+                        </div>
+                    </div>
+                </div>
+
+                <div class="price-grid" data-price-grid>
+                    {% for cond in conditions %}
+                    {% set price_row = default_prices.get(cond) if default_prices else none %}
+                    <div class="price-pill" data-cond-pill="{{ cond }}">
+                        <strong>{{ cond }}</strong>
+                        <span>{% if price_row and price_row.market is not none %}{{ price_row.market | money }}{% else %}-{% endif %}</span>
+                    </div>
+                    {% endfor %}
+                </div>
+
+                <div class="single-receive-grid">
+                    <label>Variant
+                        <select name="variant" data-variant-select>
+                            {% for variant in card.variants %}
+                            <option value="{{ variant.name }}" {% if variant.name == card.default_variant.name %}selected{% endif %}>{{ variant.name }}</option>
+                            {% endfor %}
+                        </select>
+                    </label>
+                    <label>Condition
+                        <select name="condition" data-condition-select>
+                            {% for cond in conditions %}<option value="{{ cond }}" {% if cond == card.default_condition %}selected{% endif %}>{{ cond }}</option>{% endfor %}
+                        </select>
+                    </label>
+                    <label>Qty
+                        <input type="number" name="quantity" min="1" step="1" value="1" inputmode="numeric">
+                    </label>
+                    <label>Unit Cost
+                        <input type="number" name="unit_cost" min="0" step="0.01" placeholder="0.00" inputmode="decimal">
+                    </label>
+                    <label>Sell Price
+                        <input type="number" name="list_price" min="0" step="0.01" value="{{ '%.2f'|format(card.default_price) if card.default_price is not none else '' }}" placeholder="Optional" inputmode="decimal" data-price-input>
+                    </label>
+                    <label>Location
+                        <input type="text" name="location" placeholder="Case A">
+                    </label>
+                    <label class="wide">Notes
+                        <textarea name="notes" placeholder="Optional"></textarea>
+                    </label>
+                </div>
+                <div class="actions">
+                    <span class="qty-now">Condition prices from TCGPlayer market when available</span>
+                    <button class="primary" type="submit">Add Stock</button>
+                </div>
+            </form>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+
+    {% if not has_search %}
+    <div class="panel">
+        <div class="empty">Search for a {{ selected_game }} sealed product or single card above, or use Scan Singles for camera entry.</div>
+    </div>
+    {% endif %}
+
+    {% if has_search and existing_items %}
+    <div class="panel">
+        <div class="section-head">
+            <h2>Existing Stock Matches</h2>
+            <span class="count">{{ existing_items|length }} stocked</span>
+        </div>
+        <div class="grid">
+            {% for item in existing_items %}
+            <form method="post" action="/inventory/sealed/receive" class="product">
+                <input type="hidden" name="item_id" value="{{ item.id }}">
+                <input type="hidden" name="game" value="{{ item.game }}">
+                <input type="hidden" name="product_name" value="{{ item.card_name }}">
+                <input type="hidden" name="set_name" value="{{ item.set_name or '' }}">
+                <input type="hidden" name="sealed_product_kind" value="{{ item.sealed_product_kind or '' }}">
+                <input type="hidden" name="upc" value="{{ item.upc or '' }}">
+                <div class="product-main">
+                    <div class="thumb" data-fallback="{{ (item.sealed_product_kind or "Box")[:2].upper() }}">{% if item.image_url %}<img src="{{ item.image_url }}" alt="" onerror="this.remove()">{% endif %}</div>
+                    <div style="min-width:0;">
+                        <h3>{{ item.card_name }}</h3>
+                        <div class="meta">
+                            <span class="chip blue">{{ item.set_name or item.game }}</span>
+                            {% if item.sealed_product_kind %}<span class="chip">{{ item.sealed_product_kind }}</span>{% endif %}
+                            {% if item.upc %}<span class="chip">{{ item.upc }}</span>{% endif %}
+                            {% if item.location %}<span class="chip good">{{ item.location }}</span>{% endif %}
+                        </div>
+                    </div>
+                </div>
+                <div class="receive-grid">
+                    <label>Qty
+                        <input type="number" name="quantity" min="1" step="1" value="1" inputmode="numeric">
+                    </label>
+                    <label>Unit Cost
+                        <input type="number" name="unit_cost" min="0" step="0.01" placeholder="0.00" inputmode="decimal">
+                    </label>
+                    <label>Sell Price
+                        <input type="number" name="list_price" min="0" step="0.01" value="{{ '%.2f'|format(item.list_price) if item.list_price is not none else '' }}" placeholder="Optional" inputmode="decimal">
+                    </label>
+                    <label class="half">Location
+                        <input type="text" name="location" value="{{ item.location or '' }}" placeholder="Shelf A">
+                    </label>
+                    <label class="half">Source
+                        <input type="text" name="source" placeholder="Distributor">
+                    </label>
+                    <label class="wide">Notes
+                        <textarea name="notes" placeholder="Optional"></textarea>
+                    </label>
+                </div>
+                <div class="actions">
+                    <span class="qty-now">{{ item.quantity }} currently in stock</span>
+                    <button class="primary" type="submit">Add Stock</button>
+                </div>
+            </form>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+
+    {% if has_search and suggestions %}
+    <div class="panel">
+        <div class="section-head">
+            <h2>{{ selected_game }} Product Matches</h2>
+            <span class="count">{{ suggestions|length }} suggestions</span>
+        </div>
+        <div class="grid">
+            {% for product in suggestions %}
+            <form method="post" action="/inventory/sealed/receive" class="product">
+                <input type="hidden" name="game" value="{{ product.game or selected_game }}">
+                <input type="hidden" name="product_name" value="{{ product.name }}">
+                <input type="hidden" name="set_name" value="{{ product.set_name }}">
+                <input type="hidden" name="sealed_product_kind" value="{{ product.kind }}">
+                <input type="hidden" name="upc" value="{{ product.upc }}">
+                <input type="hidden" name="image_url" value="{{ product.image_url }}">
+                <div class="product-main">
+                    <div class="thumb" data-fallback="{{ product.kind[:2].upper() }}">{% if product.image_url %}<img src="{{ product.image_url }}" alt="" onerror="this.remove()">{% endif %}</div>
+                    <div style="min-width:0;">
+                        <h3>{{ product.name }}</h3>
+                        <div class="meta">
+                            <span class="chip blue">{{ product.set_name }}</span>
+                            <span class="chip">{{ product.kind }}</span>
+                            {% if product.source_name %}<span class="chip">{{ product.source_name }}</span>{% endif %}
+                            {% if product.market_price %}<span class="chip good">TCG market {{ product.market_price | money }}</span>{% endif %}
+                            {% if product.upc %}<span class="chip">{{ product.upc }}</span>{% endif %}
+                        </div>
+                    </div>
+                </div>
+                <div class="receive-grid">
+                    <label>Qty
+                        <input type="number" name="quantity" min="1" step="1" value="1" inputmode="numeric">
+                    </label>
+                    <label>Unit Cost
+                        <input type="number" name="unit_cost" min="0" step="0.01" placeholder="0.00" inputmode="decimal">
+                    </label>
+                    <label>Sell Price
+                        <input type="number" name="list_price" min="0" step="0.01" value="{{ '%.2f'|format(product.market_price) if product.market_price else '' }}" placeholder="Optional" inputmode="decimal">
+                    </label>
+                    <label class="half">Location
+                        <input type="text" name="location" placeholder="Shelf A">
+                    </label>
+                    <label class="half">Source
+                        <input type="text" name="source" placeholder="Distributor">
+                    </label>
+                    <label class="wide">Notes
+                        <textarea name="notes" placeholder="Optional"></textarea>
+                    </label>
+                </div>
+                <div class="actions">
+                    <span class="qty-now">New stock item</span>
+                    <button class="primary" type="submit">Add Stock</button>
+                </div>
+            </form>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+
+    {% if has_search %}
+    {% set has_matches = single_results or existing_items or suggestions %}
+    <div class="panel">
+        {% if has_matches %}
+        <details class="manual-details">
+            <summary>Can't find it?<strong>Create custom sealed product</strong></summary>
+        {% else %}
+        <div class="section-head">
+            <h2>No Matches Found</h2>
+            <span class="count">Manual sealed fallback</span>
+        </div>
+        <div class="empty" style="margin-bottom:12px;">No {{ selected_game }} single or sealed matches came back. You can create a sealed product manually below.</div>
+        {% endif %}
+        <form method="post" action="/inventory/sealed/receive" class="create-grid">
+            <input type="hidden" name="game" value="{{ selected_game }}">
+            <label>Product Name
+                <input type="text" name="product_name" value="{{ q }}" required placeholder="Product name">
+            </label>
+            <label>Set
+                <input type="text" name="set_name" placeholder="Scarlet & Violet 151">
+            </label>
+            <label>Product Type
+                <select name="sealed_product_kind">
+                    {% for kind in product_kinds %}<option value="{{ kind }}">{{ kind }}</option>{% endfor %}
+                </select>
+            </label>
+            <label>UPC
+                <input type="text" name="upc" placeholder="Optional">
+            </label>
+            <label>Qty
+                <input type="number" name="quantity" min="1" step="1" value="1" inputmode="numeric">
+            </label>
+            <label>Unit Cost
+                <input type="number" name="unit_cost" min="0" step="0.01" placeholder="0.00" inputmode="decimal">
+            </label>
+            <label>Sell Price
+                <input type="number" name="list_price" min="0" step="0.01" placeholder="Optional" inputmode="decimal">
+            </label>
+            <label>Location
+                <input type="text" name="location" placeholder="Shelf A">
+            </label>
+            <label class="full">Notes
+                <textarea name="notes" placeholder="Optional"></textarea>
+            </label>
+            <div class="full" style="display:flex;justify-content:flex-end;">
+                <button class="primary" type="submit">Create and Add Stock</button>
+            </div>
+        </form>
+        {% if has_matches %}
+        </details>
+        {% endif %}
+    </div>
+    {% endif %}
+
+    <div class="panel">
+        <div class="section-head">
+            <h2>Recent Receipts</h2>
+            <span class="count">{{ recent_movements|length }} latest</span>
+        </div>
+        <div class="activity">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Product</th>
+                        <th>Qty</th>
+                        <th>After</th>
+                        <th>Unit Cost</th>
+                        <th>Location</th>
+                        <th>Source</th>
+                        <th>By</th>
+                        <th>When</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in recent_movements %}
+                    {% set item = movement_items.get(row.item_id) %}
+                    <tr>
+                        <td>{% if item and current_user and current_user.role in ["admin", "reviewer", "viewer"] %}<a href="/inventory/{{ item.id }}" style="font-weight:800;">{{ item.card_name }}</a>{% elif item %}<span style="font-weight:800;">{{ item.card_name }}</span>{% else %}#{{ row.item_id }}{% endif %}</td>
+                        <td>+{{ row.quantity_delta }}</td>
+                        <td>{{ row.quantity_after }}</td>
+                        <td>{{ row.unit_cost | money }}</td>
+                        <td>{{ row.location or "" }}</td>
+                        <td>{{ row.source or "" }}</td>
+                        <td>{{ row.created_by or "" }}</td>
+                        <td>{{ row.created_at.strftime("%b %d %H:%M") }}</td>
+                    </tr>
+                    {% else %}
+                    <tr><td colspan="8" style="text-align:center;color:var(--muted);padding:24px;">No receipts yet.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% include '_mobile_bottom_nav.html' %}
+<script>
+(function () {
+    var defaultsKey = "inventory_add_stock_defaults";
+
+    function money(value) {
+        var num = Number(value);
+        return Number.isFinite(num) ? "$" + num.toFixed(2) : "-";
+    }
+    function loadDefaults() {
+        try { return JSON.parse(localStorage.getItem(defaultsKey) || "{}") || {}; } catch (e) { return {}; }
+    }
+    function saveDefaults(defaults) {
+        localStorage.setItem(defaultsKey, JSON.stringify(defaults || {}));
+    }
+    function defaultValue(defaults, fieldName) {
+        if (fieldName === "location") return defaults.location || "";
+        if (fieldName === "source") return defaults.source || "";
+        if (fieldName === "notes") return defaults.notes || "";
+        return "";
+    }
+    function applyReceivingDefaults() {
+        var defaults = loadDefaults();
+        document.querySelectorAll('form').forEach(function (form) {
+            form.querySelectorAll('input[name="location"], input[name="source"], textarea[name="notes"]').forEach(function (field) {
+                var nextValue = defaultValue(defaults, field.name);
+                if (!nextValue) return;
+                if (field.name === "source" && field.type === "hidden" && field.hasAttribute("data-default-source")) {
+                    field.value = nextValue;
+                    field.dataset.defaultManaged = "1";
+                    return;
+                }
+                if (!field.value || field.dataset.defaultManaged === "1") {
+                    field.value = nextValue;
+                    field.dataset.defaultManaged = "1";
+                }
+            });
+        });
+    }
+    function bindReceivingDefaults() {
+        var locationInput = document.getElementById("batch-default-location");
+        var sourceInput = document.getElementById("batch-default-source");
+        var notesInput = document.getElementById("batch-default-notes");
+        var clearButton = document.getElementById("batch-default-clear");
+        var defaultsDetails = document.getElementById("batch-defaults");
+        if (!locationInput || !sourceInput || !notesInput) return;
+        var defaults = loadDefaults();
+        locationInput.value = defaults.location || "";
+        sourceInput.value = defaults.source || "";
+        notesInput.value = defaults.notes || "";
+        if (defaultsDetails && (defaults.location || defaults.source || defaults.notes)) {
+            defaultsDetails.open = true;
+        }
+        function persist() {
+            saveDefaults({
+                location: locationInput.value.trim(),
+                source: sourceInput.value.trim(),
+                notes: notesInput.value.trim()
+            });
+            applyReceivingDefaults();
+        }
+        [locationInput, sourceInput, notesInput].forEach(function (input) {
+            input.addEventListener("input", persist);
+        });
+        if (clearButton) {
+            clearButton.addEventListener("click", function () {
+                locationInput.value = "";
+                sourceInput.value = "";
+                notesInput.value = "";
+                saveDefaults({});
+                document.querySelectorAll('[data-default-managed="1"]').forEach(function (field) {
+                    if (field.name === "source" && field.type === "hidden" && field.hasAttribute("data-default-source")) {
+                        field.value = "Manual Lookup";
+                    } else {
+                        field.value = "";
+                    }
+                    delete field.dataset.defaultManaged;
+                });
+            });
+        }
+        document.querySelectorAll('form input[name="location"], form input[name="source"], form textarea[name="notes"]').forEach(function (field) {
+            if (field.type === "hidden") return;
+            field.addEventListener("input", function () {
+                delete field.dataset.defaultManaged;
+            });
+        });
+        applyReceivingDefaults();
+    }
+    function findVariant(variants, name) {
+        for (var i = 0; i < variants.length; i++) {
+            if (variants[i].name === name) return variants[i];
+        }
+        return variants[0] || null;
+    }
+    document.querySelectorAll("[data-single-card]").forEach(function (card) {
+        var variants = [];
+        try { variants = JSON.parse(card.getAttribute("data-variants") || "[]"); } catch (e) { variants = []; }
+        var variantSelect = card.querySelector("[data-variant-select]");
+        var conditionSelect = card.querySelector("[data-condition-select]");
+        var priceInput = card.querySelector("[data-price-input]");
+        var grid = card.querySelector("[data-price-grid]");
+        function renderPrices() {
+            var variant = findVariant(variants, variantSelect ? variantSelect.value : "");
+            var prices = variant && variant.condition_prices ? variant.condition_prices : {};
+            if (grid) {
+                grid.querySelectorAll("[data-cond-pill]").forEach(function (pill) {
+                    var cond = pill.getAttribute("data-cond-pill");
+                    var row = prices[cond] || {};
+                    var span = pill.querySelector("span");
+                    if (span) span.textContent = money(row.market);
+                });
+            }
+            var selectedCond = conditionSelect ? conditionSelect.value : "NM";
+            var selectedRow = prices[selectedCond] || {};
+            var fallback = variant ? variant.market_price : null;
+            var selectedPrice = selectedRow.market != null ? selectedRow.market : fallback;
+            if (priceInput) {
+                priceInput.value = selectedPrice != null ? Number(selectedPrice).toFixed(2) : "";
+            }
+        }
+        if (variantSelect) variantSelect.addEventListener("change", renderPrices);
+        if (conditionSelect) conditionSelect.addEventListener("change", renderPrices);
+        renderPrices();
+    });
+    bindReceivingDefaults();
+})();
+
+document.addEventListener("submit", function (event) {
+    var form = event.target;
+    if (!form || !form.matches("form")) return;
+    var button = event.submitter || form.querySelector('button[type="submit"]');
+    if (!button) return;
+    if (button.dataset.submitting === "1") {
+        event.preventDefault();
+        return;
+    }
+    button.dataset.submitting = "1";
+    button.disabled = true;
+});
+</script>
+{% include "_csrf_bootstrap.html" %}
+</body>
+</html>

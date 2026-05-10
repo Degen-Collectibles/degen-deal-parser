@@ -11,11 +11,13 @@ import html
 import json
 import logging
 import math
+import re
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import unquote, urlencode
 
 import httpx
 from fastapi import APIRouter, Depends, Form, Query, Request
@@ -31,7 +33,14 @@ from .shared import templates as _templates
 from .auth import has_legacy_role, has_role
 from .card_scanner import identify_card_from_image, lookup_card_image_and_price
 from .cert_lookup import lookup_cert
-from .pokemon_scanner import run_pipeline as run_pokemon_pipeline, get_scan_history, fetch_tcg_categories, get_validation_result, text_search_cards
+from .pokemon_scanner import (
+    TCGTRACKING_BASE,
+    fetch_tcg_categories,
+    get_scan_history,
+    get_validation_result,
+    run_pipeline as run_pokemon_pipeline,
+    text_search_cards,
+)
 from .degen_eye_v2 import get_v2_scan_history, run_v2_pipeline, run_v2_pipeline_stream
 from .degen_eye_v2_training import (
     attach_confirmed_label,
@@ -47,7 +56,7 @@ from .phash_scanner import (
 )
 from .price_cache import get_warm_stats as price_cache_stats, warm_price_cache
 from .config import get_settings
-from .csrf import CSRFProtectedRoute
+from .csrf import CSRFProtectedRoute, issue_token
 from .db import get_session, managed_session
 from .inventory_barcode import (
     generate_barcode_value,
@@ -70,8 +79,10 @@ from .models import (
     INVENTORY_HELD,
     ITEM_TYPE_SINGLE,
     ITEM_TYPE_SLAB,
+    ITEM_TYPE_SEALED,
     ALL_INVENTORY_STATUSES,
     InventoryItem,
+    InventoryStockMovement,
     PriceHistory,
     utcnow,
 )
@@ -84,6 +95,155 @@ logger = logging.getLogger(__name__)
 _CLIENT_LOG_RATE: dict[str, list[float]] = {}
 
 PAGE_SIZE = 50
+
+SEALED_PRODUCT_KINDS: tuple[str, ...] = (
+    "Booster Box Case",
+    "Booster Box",
+    "Booster Display Case",
+    "Booster Display",
+    "Collector Booster Box",
+    "Play Booster Box",
+    "Draft Booster Box",
+    "Set Booster Box",
+    "Booster Bundle",
+    "Bundle",
+    "Booster Pack",
+    "Sleeved Booster Pack",
+    "Blister Pack",
+    "Elite Trainer Box",
+    "Pokemon Center Elite Trainer Box",
+    "Ultra Premium Collection",
+    "Super Premium Collection",
+    "Build & Battle Box",
+    "Collection Box",
+    "Illumineer's Trove",
+    "Gift Set",
+    "Tin",
+    "Commander Deck",
+    "Structure Deck",
+    "Starter Kit",
+    "Starter Deck",
+    "Battle Deck",
+    "Deck",
+    "Prerelease Kit",
+    "Other",
+)
+
+_SEALED_KIND_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Pokemon Center Elite Trainer Box", ("pokemon center elite trainer box", "pokemon center etb", "pc etb")),
+    ("Elite Trainer Box", ("elite trainer box", "etb")),
+    ("Ultra Premium Collection", ("ultra premium collection", "upc")),
+    ("Super Premium Collection", ("super premium collection", "super-premium collection", "superpremium collection", "superpremium", "super premium", "spc")),
+    ("Collector Booster Box", ("collector booster box", "collector booster display", "collector booster")),
+    ("Play Booster Box", ("play booster box", "play booster display")),
+    ("Draft Booster Box", ("draft booster box", "draft booster display")),
+    ("Set Booster Box", ("set booster box", "set booster display")),
+    ("Booster Box Case", ("booster box case", "booster case")),
+    ("Booster Display Case", ("booster display case", "display case")),
+    ("Booster Display", ("booster display",)),
+    ("Booster Box", ("booster box",)),
+    ("Booster Bundle", ("booster bundle",)),
+    ("Bundle", ("bundle",)),
+    ("Sleeved Booster Pack", ("sleeved booster pack",)),
+    ("Build & Battle Box", ("build and battle box", "build & battle box", "build battle box")),
+    ("Blister Pack", ("3 pack blister", "three pack blister", "single pack blister", "blister pack", "blister")),
+    ("Booster Pack", ("booster pack", "pack", "packs")),
+    ("Collection Box", ("collection box", "special collection", "premium collection", "poster collection", "binder collection", "ex box", "v box", "v union")),
+    ("Illumineer's Trove", ("illumineer's trove", "illumineer s trove", "illumineers trove", "trove")),
+    ("Gift Set", ("gift set",)),
+    ("Tin", ("tin", "mini tin")),
+    ("Commander Deck", ("commander deck", "commander precon", "precon")),
+    ("Structure Deck", ("structure deck",)),
+    ("Battle Deck", ("battle deck",)),
+    ("Starter Kit", ("starter kit", "intro kit")),
+    ("Starter Deck", ("starter deck", "theme deck")),
+    ("Deck", ("deck", "preconstructed deck")),
+    ("Prerelease Kit", ("prerelease kit", "pre-release kit", "pre release kit", "prerelease pack", "release event deck")),
+)
+_SEALED_SEARCH_REMOVE_TERMS: tuple[str, ...] = tuple(
+    alias
+    for _kind, aliases in _SEALED_KIND_ALIASES
+    for alias in aliases
+)
+_SEALED_GENERIC_QUERY_TOKENS = {"pokemon", "tcg", "sealed", "product", "products", "s"}
+_SEALED_SEARCH_NOISE_TOKENS = _SEALED_GENERIC_QUERY_TOKENS | {
+    "card",
+    "cards",
+    "english",
+    "game",
+    "games",
+    "language",
+    "trading",
+}
+_SEALED_EXCLUDE_TERMS = ("code card",)
+_SEALED_KIND_COMPATIBLE_HINTS = {
+    "Booster Box": {"Booster Display"},
+    "Booster Display": {"Booster Box"},
+    "Booster Box Case": {"Booster Display Case"},
+    "Booster Display Case": {"Booster Box Case"},
+}
+_TCGPLAYER_PRODUCT_RE = re.compile(
+    r"(?:https?://)?(?:www\.)?tcgplayer\.com/product/(\d+)(?:/([^\s?#]+))?",
+    flags=re.IGNORECASE,
+)
+_ADD_STOCK_SEARCH_CACHE_TTL_SECONDS = 300.0
+_ADD_STOCK_SEALED_CACHE: dict[str, tuple[float, list[dict[str, Any]], str]] = {}
+_ADD_STOCK_SINGLE_CACHE: dict[str, tuple[float, list[dict[str, Any]], str]] = {}
+
+ADD_STOCK_GAME_OPTIONS: tuple[dict[str, Any], ...] = (
+    {"game": "Pokemon", "label": "Pokemon", "category_ids": ("3", "85"), "single_category_id": "3"},
+    {"game": "Magic", "label": "Magic", "category_ids": ("1",), "single_category_id": "1"},
+    {"game": "Yu-Gi-Oh", "label": "Yu-Gi-Oh", "category_ids": ("2",), "single_category_id": "2"},
+    {"game": "One Piece", "label": "One Piece", "category_ids": ("68",), "single_category_id": "68"},
+    {"game": "Lorcana", "label": "Lorcana", "category_ids": ("71",), "single_category_id": "71"},
+    {"game": "Riftbound", "label": "Riftbound", "category_ids": ("89",), "single_category_id": "89"},
+    {"game": "Dragon Ball", "label": "Dragon Ball", "category_ids": ("80", "27", "23"), "single_category_id": "80"},
+    {"game": "Digimon", "label": "Digimon", "category_ids": ("57",), "single_category_id": "57"},
+    {"game": "Flesh and Blood", "label": "Flesh and Blood", "category_ids": ("62",), "single_category_id": "62"},
+    {"game": "Weiss Schwarz", "label": "Weiss Schwarz", "category_ids": ("19",), "single_category_id": "19"},
+    {"game": "Cardfight Vanguard", "label": "Cardfight Vanguard", "category_ids": ("16",), "single_category_id": "16"},
+    {"game": "Union Arena", "label": "Union Arena", "category_ids": ("82",), "single_category_id": "82"},
+    {"game": "Other", "label": "Other", "category_ids": (), "single_category_id": ""},
+)
+_ADD_STOCK_GAME_BY_NAME = {str(option["game"]).lower(): option for option in ADD_STOCK_GAME_OPTIONS}
+_ADD_STOCK_GAME_ALIASES = {
+    "mtg": "Magic",
+    "magic the gathering": "Magic",
+    "magic: the gathering": "Magic",
+    "yugioh": "Yu-Gi-Oh",
+    "yu gi oh": "Yu-Gi-Oh",
+    "yu-gi-oh": "Yu-Gi-Oh",
+    "op": "One Piece",
+    "opcg": "One Piece",
+    "one piece card game": "One Piece",
+    "disney lorcana": "Lorcana",
+    "league of legends": "Riftbound",
+    "league of legends tcg": "Riftbound",
+    "lol tcg": "Riftbound",
+    "dragon ball super": "Dragon Ball",
+    "dbs": "Dragon Ball",
+    "fab": "Flesh and Blood",
+    "flesh & blood": "Flesh and Blood",
+    "weiss": "Weiss Schwarz",
+    "vanguard": "Cardfight Vanguard",
+}
+_ADD_STOCK_CATEGORY_TO_GAME = {
+    str(category_id): str(option["game"])
+    for option in ADD_STOCK_GAME_OPTIONS
+    for category_id in option["category_ids"]
+}
+_ADD_STOCK_GAME_SEARCH_NOISE_TOKENS: dict[str, set[str]] = {
+    "Magic": {"magic", "the", "gathering", "mtg"},
+    "Yu-Gi-Oh": {"yugioh", "yu", "gi", "oh"},
+    "One Piece": {"one", "piece", "card", "game"},
+    "Lorcana": {"disney", "lorcana"},
+    "Riftbound": {"riftbound", "league", "of", "legends", "lol"},
+    "Dragon Ball": {"dragon", "ball", "super", "fusion", "world"},
+    "Flesh and Blood": {"flesh", "blood", "fab"},
+    "Weiss Schwarz": {"weiss", "schwarz"},
+    "Cardfight Vanguard": {"cardfight", "vanguard"},
+    "Union Arena": {"union", "arena"},
+}
 
 
 
@@ -135,6 +295,1238 @@ def _require_reviewer(request: Request) -> Optional[Response]:
 
 def _current_user(request: Request):
     return _get_user(request)
+
+
+def _current_user_label(request: Request) -> Optional[str]:
+    user = _current_user(request)
+    if not user:
+        return None
+    return (
+        getattr(user, "display_name", None)
+        or getattr(user, "username", None)
+        or str(getattr(user, "id", ""))
+        or None
+    )
+
+
+def _normalize_lookup(value: str | None) -> str:
+    return " ".join((value or "").strip().lower().split())
+
+
+def _normalize_add_stock_game(value: str | None) -> str:
+    raw = _normalize_lookup(value).replace("&", "and")
+    if not raw:
+        return "Pokemon"
+    alias = _ADD_STOCK_GAME_ALIASES.get(raw)
+    if alias:
+        return alias
+    for option in ADD_STOCK_GAME_OPTIONS:
+        game = str(option["game"])
+        label = str(option["label"])
+        if raw in {_normalize_lookup(game).replace("&", "and"), _normalize_lookup(label).replace("&", "and")}:
+            return game
+    return "Pokemon"
+
+
+def _add_stock_game_option(game: str | None) -> dict[str, Any]:
+    selected_game = _normalize_add_stock_game(game)
+    return _ADD_STOCK_GAME_BY_NAME.get(selected_game.lower(), _ADD_STOCK_GAME_BY_NAME["pokemon"])
+
+
+def _add_stock_category_ids_for_game(game: str | None) -> tuple[str, ...]:
+    option = _add_stock_game_option(game)
+    return tuple(str(category_id) for category_id in option.get("category_ids") or ())
+
+
+def _add_stock_single_category_id(game: str | None) -> str:
+    option = _add_stock_game_option(game)
+    return str(option.get("single_category_id") or "")
+
+
+def _add_stock_game_for_category_id(category_id: str | int | None) -> str:
+    return _ADD_STOCK_CATEGORY_TO_GAME.get(str(category_id or ""), "Other")
+
+
+def _add_stock_existing_game_values(game: str | None) -> tuple[str, ...]:
+    selected_game = _normalize_add_stock_game(game)
+    if selected_game == "Magic":
+        return ("Magic", "MTG")
+    return (selected_game,)
+
+
+def _normalize_product_text(value: str | None) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9&]+", " ", (value or "").lower())).strip()
+
+
+def _sealed_catalog_key(product: dict[str, str]) -> str:
+    return "|".join(
+        [
+            _normalize_lookup(product.get("name")),
+            _normalize_lookup(product.get("set_name")),
+            _normalize_lookup(product.get("upc")),
+        ]
+    )
+
+
+def _sealed_kind_from_name(product_name: str) -> str:
+    product_norm = _normalize_product_text(product_name).replace("&", "and")
+    for kind, aliases in _SEALED_KIND_ALIASES:
+        if any(alias.replace("&", "and") in product_norm for alias in aliases):
+            return kind
+    return ""
+
+
+def _sealed_kind_hints_from_query(query: str) -> set[str]:
+    query_norm = _normalize_product_text(query).replace("&", "and")
+    hints: set[str] = set()
+    for kind, aliases in _SEALED_KIND_ALIASES:
+        if any(alias.replace("&", "and") in query_norm for alias in aliases):
+            hints.add(kind)
+    return hints
+
+
+def _tcgplayer_product_ids_from_query(query: str | None) -> set[str]:
+    decoded = unquote(query or "")
+    return {match.group(1) for match in _TCGPLAYER_PRODUCT_RE.finditer(decoded) if match.group(1)}
+
+
+def _tcgplayer_slug_terms_from_query(query: str | None) -> list[str]:
+    decoded = unquote(query or "")
+    terms: list[str] = []
+    for match in _TCGPLAYER_PRODUCT_RE.finditer(decoded):
+        slug = (match.group(2) or "").strip()
+        if not slug:
+            continue
+        term = slug.replace("-", " ")
+        if term and term not in terms:
+            terms.append(term)
+    return terms
+
+
+def _sealed_kind_matches_query_hint(
+    kind: str,
+    query_kind_hints: set[str],
+    product_norm: str,
+) -> bool:
+    if not query_kind_hints:
+        return True
+    if kind in query_kind_hints:
+        return True
+    for hint in query_kind_hints:
+        if kind in _SEALED_KIND_COMPATIBLE_HINTS.get(hint, set()):
+            return True
+        if _normalize_product_text(hint) in product_norm:
+            return True
+    return False
+
+
+def _add_stock_cache_key(
+    query: str,
+    *,
+    game: str | None = None,
+    category_id: str | None = None,
+    limit: Optional[int] = None,
+) -> str:
+    key = _normalize_lookup(query)
+    parts = []
+    if game is not None:
+        parts.append(_normalize_add_stock_game(game))
+    if category_id:
+        parts.append(str(category_id))
+    if limit is not None:
+        parts.append(str(limit))
+    parts.append(key)
+    return ":".join(parts)
+
+
+def _add_stock_cache_is_fresh(created_at: float) -> bool:
+    return (time.monotonic() - created_at) < _ADD_STOCK_SEARCH_CACHE_TTL_SECONDS
+
+
+def _add_stock_query_looks_sealed(query: str) -> bool:
+    query_norm = _normalize_product_text(query).replace("&", "and")
+    if not query_norm:
+        return False
+    if _sealed_kind_hints_from_query(query_norm):
+        return True
+    sealed_terms = (
+        "booster",
+        "bundle",
+        "box",
+        "case",
+        "collection",
+        "display",
+        "elite trainer",
+        "etb",
+        "pack",
+        "packs",
+        "sleeved",
+        "spc",
+        "super premium",
+        "tin",
+        "ultra premium",
+        "upc",
+    )
+    return any(term in query_norm for term in sealed_terms)
+
+
+def _strip_sealed_product_terms(query: str) -> str:
+    stripped = f" {_normalize_lookup(query)} "
+    for term in sorted(_SEALED_SEARCH_REMOVE_TERMS, key=len, reverse=True):
+        stripped = re.sub(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", " ", stripped)
+    return re.sub(r"\s+", " ", stripped).strip()
+
+
+def _sealed_set_search_queries(query: str, *, game: str = "Pokemon") -> list[str]:
+    query_clean = _normalize_lookup(query)
+    if len(query_clean) < 2:
+        return []
+
+    candidates: list[str] = []
+    selected_game = _normalize_add_stock_game(game)
+    noise_tokens = _SEALED_SEARCH_NOISE_TOKENS | _ADD_STOCK_GAME_SEARCH_NOISE_TOKENS.get(selected_game, set())
+
+    def add(candidate: str) -> None:
+        candidate = re.sub(r"\s+", " ", candidate).strip(" -:/")
+        if len(candidate) >= 2 and candidate not in candidates:
+            candidates.append(candidate)
+
+    query_variants: list[str] = []
+    for slug_term in _tcgplayer_slug_terms_from_query(query):
+        slug_clean = _normalize_lookup(slug_term)
+        if slug_clean and slug_clean not in query_variants:
+            query_variants.append(slug_clean)
+    if query_clean not in query_variants:
+        query_variants.append(query_clean)
+
+    for query_variant in query_variants:
+        add(query_variant)
+        stripped = _strip_sealed_product_terms(query_variant)
+        add(stripped)
+        generic_stripped = re.sub(r"[^a-z0-9]+", " ", stripped)
+        generic_tokens = [tok for tok in generic_stripped.split() if tok not in noise_tokens]
+        deduped_tokens: list[str] = []
+        for token in generic_tokens:
+            if deduped_tokens and deduped_tokens[-1] == token:
+                continue
+            deduped_tokens.append(token)
+        add(" ".join(deduped_tokens))
+        for size in range(min(4, len(deduped_tokens)), 1, -1):
+            add(" ".join(deduped_tokens[:size]))
+        for token in deduped_tokens:
+            if (token.isdigit() and len(token) >= 2) or len(token) >= 5:
+                add(token)
+    return candidates[:8]
+
+
+def _pokemon_set_search_queries(query: str) -> list[str]:
+    return _sealed_set_search_queries(query, game="Pokemon")
+
+
+def _tcgtracking_large_image(image_url: str | None) -> str:
+    image = (image_url or "").strip()
+    if not image:
+        return ""
+    return image.replace("_200w.jpg", "_400w.jpg")
+
+
+def _tcgtracking_market_price(product_id: str, pricing: dict[str, Any] | None) -> Optional[float]:
+    product_prices = (pricing or {}).get(str(product_id), {}).get("tcg", {})
+    if not isinstance(product_prices, dict):
+        return None
+    preferred_order = ("Normal", "Holofoil", "Reverse Holofoil")
+    subtype_items = list(product_prices.items())
+    subtype_items.sort(
+        key=lambda item: preferred_order.index(item[0]) if item[0] in preferred_order else len(preferred_order)
+    )
+    for _subtype_name, subtype_data in subtype_items:
+        if not isinstance(subtype_data, dict):
+            continue
+        market = subtype_data.get("market")
+        if market is None:
+            continue
+        try:
+            return round(float(market), 2)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _tcgtracking_sealed_product(
+    *,
+    product: dict[str, Any],
+    set_info: dict[str, Any],
+    category_id: str,
+    query_kind_hints: set[str],
+    pricing: dict[str, Any] | None = None,
+    game: str = "",
+) -> Optional[dict[str, Any]]:
+    product_name = str(product.get("clean_name") or product.get("name") or "").strip()
+    if not product_name:
+        return None
+    product_norm = _normalize_product_text(product_name)
+    if any(term in product_norm for term in _SEALED_EXCLUDE_TERMS):
+        return None
+
+    kind = _sealed_kind_from_name(product_name)
+    if not kind:
+        return None
+    if not _sealed_kind_matches_query_hint(kind, query_kind_hints, product_norm):
+        return None
+
+    set_name = str(set_info.get("name") or set_info.get("set_name") or "").strip()
+    external_id = str(product.get("id") or "").strip()
+    image_url = _tcgtracking_large_image(str(product.get("image_url") or ""))
+    market_price = _tcgtracking_market_price(external_id, pricing)
+    return {
+        "name": product_name,
+        "set_name": set_name,
+        "kind": kind,
+        "upc": "",
+        "image_url": image_url,
+        "image_url_small": str(product.get("image_url") or "").strip(),
+        "source": "tcgtracking",
+        "source_name": "TCGTracking",
+        "external_id": external_id,
+        "external_url": str(product.get("tcgplayer_url") or "").strip(),
+        "category_id": str(category_id),
+        "game": game.strip() or _add_stock_game_for_category_id(category_id),
+        "market_price": market_price,
+        "market_price_source": "TCGPlayer Market" if market_price is not None else "",
+    }
+
+
+def _match_token(token: str, haystack: str) -> bool:
+    if token in haystack:
+        return True
+    if len(token) > 3 and token.endswith("s") and token[:-1] in haystack:
+        return True
+    return False
+
+
+def _sealed_product_query_score(query: str, product: dict[str, Any]) -> int:
+    query_norm = _normalize_product_text(query).replace("&", "and")
+    name_norm = _normalize_product_text(product.get("name")).replace("&", "and")
+    set_norm = _normalize_product_text(product.get("set_name")).replace("&", "and")
+    kind_norm = _normalize_product_text(product.get("kind")).replace("&", "and")
+    haystack = f"{name_norm} {set_norm} {kind_norm}"
+    tokens = [
+        token
+        for token in query_norm.split()
+        if token not in _SEALED_SEARCH_NOISE_TOKENS and len(token) > 1
+    ]
+
+    score = 0
+    kind_hints = _sealed_kind_hints_from_query(query)
+    if kind_hints:
+        if product.get("kind") in kind_hints:
+            score += 30
+        elif any(product.get("kind") in _SEALED_KIND_COMPATIBLE_HINTS.get(hint, set()) for hint in kind_hints):
+            score += 18
+        else:
+            score -= 30
+    product_ids = _tcgplayer_product_ids_from_query(query)
+    if product_ids and str(product.get("external_id") or "") in product_ids:
+        score += 100
+    for token in tokens:
+        if _match_token(token, name_norm):
+            score += 6
+        elif _match_token(token, set_norm):
+            score += 4
+        elif _match_token(token, kind_norm):
+            score += 2
+        elif _match_token(token, haystack):
+            score += 1
+
+    if all(_match_token(token, haystack) for token in tokens):
+        score += 8
+    if " case" in f" {name_norm}" and "case" not in query_norm:
+        score -= 12
+    if " display" in f" {name_norm}" and "display" not in query_norm:
+        score -= 8
+    if "pokemon center" in name_norm and "pokemon center" not in query_norm and "pc" not in query_norm:
+        score -= 8
+    if "half booster box" in name_norm and "half" not in query_norm:
+        score -= 10
+    if name_norm == query_norm:
+        score += 40
+    return score
+
+
+def _best_sealed_product_match(
+    query: str,
+    products: list[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+    if not products:
+        return None
+    return max(products, key=lambda product: _sealed_product_query_score(query, product))
+
+
+def _sealed_catalog_suggestions(
+    products: list[dict[str, Any]],
+    existing_items: list[InventoryItem],
+    *,
+    limit: int = 12,
+) -> list[dict[str, Any]]:
+    existing_keys = {
+        "|".join(
+            [
+                _normalize_lookup(item.card_name),
+                _normalize_lookup(item.set_name),
+                _normalize_lookup(item.upc),
+            ]
+        )
+        for item in existing_items
+    }
+    suggestions: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    for product in products:
+        key = _sealed_catalog_key(product)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        if _sealed_catalog_key(product) in existing_keys:
+            continue
+        suggestions.append(dict(product))
+        if len(suggestions) >= limit:
+            break
+    return suggestions
+
+
+async def _search_sealed_products(
+    query: str,
+    *,
+    game: str = "Pokemon",
+    limit: int = 24,
+) -> tuple[list[dict[str, Any]], str]:
+    selected_game = _normalize_add_stock_game(game)
+    category_ids = _add_stock_category_ids_for_game(selected_game)
+    if not category_ids:
+        return [], f"Product search is not set up for {selected_game} yet. You can still create the product below."
+
+    search_queries = _sealed_set_search_queries(query, game=selected_game)
+    if not search_queries:
+        return [], ""
+
+    query_kind_hints = _sealed_kind_hints_from_query(query)
+    products: list[dict[str, Any]] = []
+    seen_sets: set[tuple[str, str]] = set()
+    successful_search = False
+    found_sets = False
+    errors: list[str] = []
+    timeout = httpx.Timeout(12.0, connect=5.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        for category_id in category_ids:
+            for search_query in search_queries:
+                search_url = f"{TCGTRACKING_BASE}/{category_id}/search"
+                try:
+                    search_resp = await client.get(search_url, params={"q": search_query})
+                    if search_resp.status_code != 200:
+                        errors.append(f"{category_id} search HTTP {search_resp.status_code}")
+                        logger.warning(
+                            "[inventory] TCGTracking sealed set search HTTP %s for %s q=%r: %s",
+                            search_resp.status_code,
+                            search_url,
+                            search_query,
+                            search_resp.text[:200],
+                        )
+                        continue
+                    successful_search = True
+                    sets = search_resp.json().get("sets") or []
+                    if sets:
+                        found_sets = True
+                except Exception as exc:
+                    errors.append(f"{category_id} search failed")
+                    logger.warning(
+                        "[inventory] TCGTracking sealed set search failed for category=%s q=%r: %s",
+                        category_id,
+                        search_query,
+                        exc,
+                    )
+                    continue
+
+                for set_info in sets[:3]:
+                    set_id = str(set_info.get("id") or "").strip()
+                    if not set_id:
+                        continue
+                    set_key = (str(category_id), set_id)
+                    if set_key in seen_sets:
+                        continue
+                    seen_sets.add(set_key)
+                    products_url = f"{TCGTRACKING_BASE}/{category_id}/sets/{set_id}"
+                    try:
+                        products_resp, pricing_resp = await asyncio.gather(
+                            client.get(products_url),
+                            client.get(f"{products_url}/pricing"),
+                        )
+                        if products_resp.status_code != 200:
+                            errors.append(f"{category_id}/{set_id} products HTTP {products_resp.status_code}")
+                            logger.warning(
+                                "[inventory] TCGTracking sealed products HTTP %s for %s: %s",
+                                products_resp.status_code,
+                                products_url,
+                                products_resp.text[:200],
+                            )
+                            continue
+                        raw_products = products_resp.json().get("products") or []
+                        pricing = pricing_resp.json().get("prices", {}) if pricing_resp.status_code == 200 else {}
+                    except Exception as exc:
+                        errors.append(f"{category_id}/{set_id} products failed")
+                        logger.warning(
+                            "[inventory] TCGTracking sealed products failed for category=%s set=%s: %s",
+                            category_id,
+                            set_id,
+                            exc,
+                        )
+                        continue
+
+                    for raw_product in raw_products:
+                        sealed = _tcgtracking_sealed_product(
+                            product=raw_product,
+                            set_info=set_info,
+                            category_id=str(category_id),
+                            query_kind_hints=query_kind_hints,
+                            pricing=pricing,
+                            game=_add_stock_game_for_category_id(category_id) or selected_game,
+                        )
+                        if not sealed:
+                            continue
+                        products.append(sealed)
+
+    if products:
+        products.sort(key=lambda product: _sealed_product_query_score(query, product), reverse=True)
+    warning = ""
+    if errors and (not successful_search or (found_sets and not products)):
+        warning = f"{selected_game} product search is unavailable right now. You can still create the product below."
+    return products[:limit], warning
+
+
+async def _search_pokemon_sealed_products(
+    query: str,
+    *,
+    limit: int = 24,
+) -> tuple[list[dict[str, Any]], str]:
+    return await _search_sealed_products(query, game="Pokemon", limit=limit)
+
+
+def _parse_bulk_sealed_lines(bulk_text: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for idx, raw_line in enumerate((bulk_text or "").splitlines()):
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = re.match(r"^\s*(\d+)\s*(?:x|×)?\s+(.+?)\s*$", line, flags=re.IGNORECASE)
+        if match:
+            quantity = int(match.group(1))
+            query = match.group(2).strip()
+        else:
+            quantity = 1
+            query = line
+        rows.append(
+            {
+                "row_index": idx,
+                "line": line,
+                "quantity": quantity,
+                "query": query,
+                "error": "" if query and quantity > 0 else "Needs a product name and quantity.",
+            }
+        )
+    return rows
+
+
+async def _build_bulk_sealed_preview(bulk_text: str, *, game: str = "Pokemon") -> list[dict[str, Any]]:
+    rows = _parse_bulk_sealed_lines(bulk_text)
+    selected_game = _normalize_add_stock_game(game)
+    for row in rows:
+        row["product"] = None
+        row["matches"] = []
+        row["warning"] = ""
+        if row.get("error"):
+            continue
+        products, warning = await _search_sealed_products(str(row["query"]), game=selected_game, limit=16)
+        row["warning"] = warning
+        row["matches"] = products[:5]
+        row["product"] = _best_sealed_product_match(str(row["query"]), products)
+        if not row["product"]:
+            row["error"] = "No API match. Search this one manually below."
+    return rows
+
+
+def _bulk_received_message(count: int, units: int) -> str:
+    if count <= 0:
+        return ""
+    product_word = "product" if count == 1 else "products"
+    unit_word = "unit" if units == 1 else "units"
+    return f"Added {units} {unit_word} across {count} {product_word}."
+
+
+def _safe_price(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return round(float(value), 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def _condition_code(value: str | None) -> str:
+    clean = _normalize_lookup(value).replace(" ", "_")
+    aliases = {
+        "near_mint": "NM",
+        "nm": "NM",
+        "lightly_played": "LP",
+        "lp": "LP",
+        "moderately_played": "MP",
+        "mp": "MP",
+        "heavily_played": "HP",
+        "hp": "HP",
+        "damaged": "DMG",
+        "dmg": "DMG",
+        "dm": "DMG",
+    }
+    return aliases.get(clean, (value or "").strip().upper())
+
+
+def _single_variant_condition_prices(variant: dict[str, Any]) -> dict[str, dict[str, Optional[float]]]:
+    prices: dict[str, dict[str, Optional[float]]] = {}
+    raw_conditions = variant.get("conditions") or {}
+    if isinstance(raw_conditions, dict):
+        for raw_condition, raw_prices in raw_conditions.items():
+            code = _condition_code(str(raw_condition))
+            if code not in CONDITIONS or not isinstance(raw_prices, dict):
+                continue
+            market = _safe_price(raw_prices.get("mkt") or raw_prices.get("market") or raw_prices.get("price"))
+            low = _safe_price(raw_prices.get("low") or raw_prices.get("low_price"))
+            if market is not None or low is not None:
+                prices[code] = {"market": market, "low": low}
+
+    variant_market = _safe_price(variant.get("price") or variant.get("market_price"))
+    variant_low = _safe_price(variant.get("low_price") or variant.get("low"))
+    if "NM" not in prices and (variant_market is not None or variant_low is not None):
+        prices["NM"] = {"market": variant_market, "low": variant_low}
+    return {condition: prices[condition] for condition in CONDITIONS if condition in prices}
+
+
+def _single_lookup_variants(match: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_variants = match.get("available_variants") or []
+    variants: list[dict[str, Any]] = []
+    if isinstance(raw_variants, list):
+        for raw_variant in raw_variants:
+            if not isinstance(raw_variant, dict):
+                continue
+            name = str(raw_variant.get("name") or "Market").strip() or "Market"
+            condition_prices = _single_variant_condition_prices(raw_variant)
+            market_price = _safe_price(raw_variant.get("price") or raw_variant.get("market_price"))
+            low_price = _safe_price(raw_variant.get("low_price") or raw_variant.get("low"))
+            if market_price is None and condition_prices:
+                market_price = next(
+                    (row.get("market") for row in condition_prices.values() if row.get("market") is not None),
+                    None,
+                )
+            variants.append(
+                {
+                    "name": name,
+                    "market_price": market_price,
+                    "low_price": low_price,
+                    "condition_prices": condition_prices,
+                }
+            )
+
+    if not variants:
+        market_price = _safe_price(match.get("market_price"))
+        variants.append(
+            {
+                "name": "Market",
+                "market_price": market_price,
+                "low_price": None,
+                "condition_prices": {"NM": {"market": market_price, "low": None}} if market_price is not None else {},
+            }
+        )
+    return variants
+
+
+def _single_lookup_suggestions(search_result: dict[str, Any]) -> list[dict[str, Any]]:
+    game = search_result.get("game") or "Pokemon"
+    raw_matches: list[dict[str, Any]] = []
+    best = search_result.get("best_match")
+    if isinstance(best, dict):
+        raw_matches.append(best)
+    for candidate in search_result.get("candidates") or []:
+        if isinstance(candidate, dict):
+            raw_matches.append(candidate)
+
+    suggestions: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for match in raw_matches:
+        name = str(match.get("name") or match.get("card_name") or "").strip()
+        if not name:
+            continue
+        card_number = str(match.get("number") or match.get("card_number") or "").strip()
+        set_name = str(match.get("set_name") or "").strip()
+        key = (_normalize_lookup(name), _normalize_lookup(set_name), _normalize_lookup(card_number))
+        if key in seen:
+            continue
+        seen.add(key)
+        variants = _single_lookup_variants(match)
+        default_variant = variants[0] if variants else {}
+        default_price = None
+        default_prices = default_variant.get("condition_prices") or {}
+        if isinstance(default_prices, dict):
+            default_price = (default_prices.get("NM") or {}).get("market")
+        if default_price is None:
+            default_price = default_variant.get("market_price")
+        suggestions.append(
+            {
+                "name": name,
+                "game": game,
+                "set_name": set_name,
+                "set_code": str(match.get("set_id") or match.get("set_code") or "").strip(),
+                "card_number": card_number,
+                "image_url": str(match.get("image_url") or match.get("image_url_small") or "").strip(),
+                "tcgplayer_url": str(match.get("tcgplayer_url") or "").strip(),
+                "variants": variants,
+                "default_variant": default_variant.get("name") or "",
+                "default_condition": "NM",
+                "default_price": default_price,
+            }
+        )
+    return suggestions[:8]
+
+
+async def _cached_add_stock_sealed_search(
+    query: str,
+    *,
+    game: str = "Pokemon",
+    limit: int = 24,
+) -> tuple[list[dict[str, Any]], str]:
+    selected_game = _normalize_add_stock_game(game)
+    cache_key = _add_stock_cache_key(query, game=selected_game, limit=limit)
+    cached = _ADD_STOCK_SEALED_CACHE.get(cache_key)
+    if cached and _add_stock_cache_is_fresh(cached[0]):
+        return [dict(product) for product in cached[1]], cached[2]
+
+    products, warning = await _search_sealed_products(query, game=selected_game, limit=limit)
+    _ADD_STOCK_SEALED_CACHE[cache_key] = (
+        time.monotonic(),
+        [dict(product) for product in products],
+        warning,
+    )
+    return products, warning
+
+
+async def _cached_add_stock_single_search(
+    query: str,
+    *,
+    game: str = "Pokemon",
+) -> tuple[list[dict[str, Any]], str]:
+    selected_game = _normalize_add_stock_game(game)
+    category_id = _add_stock_single_category_id(selected_game)
+    if not category_id:
+        return [], f"Manual single lookup is not set up for {selected_game} yet."
+
+    cache_key = _add_stock_cache_key(query, game=selected_game, category_id=category_id)
+    cached = _ADD_STOCK_SINGLE_CACHE.get(cache_key)
+    if cached and _add_stock_cache_is_fresh(cached[0]):
+        return [dict(card) for card in cached[1]], cached[2]
+
+    try:
+        single_search = await text_search_cards(
+            query,
+            category_id=category_id,
+            use_ai_parse=False,
+            max_results=6,
+            include_pokemontcg_supplement=False,
+        )
+    except Exception as exc:
+        logger.warning("[inventory] single lookup failed for %r: %r", query, exc)
+        error = f"{selected_game} single lookup is unavailable right now. Try again in a minute."
+        _ADD_STOCK_SINGLE_CACHE[cache_key] = (time.monotonic(), [], error)
+        return [], error
+
+    suggestions: list[dict[str, Any]] = []
+    error = ""
+    if single_search.get("status") in {"MATCHED", "AMBIGUOUS"}:
+        suggestions = _single_lookup_suggestions(single_search)
+    if not suggestions:
+        error = single_search.get("error") or f"No {selected_game} singles found for '{query}'."
+    _ADD_STOCK_SINGLE_CACHE[cache_key] = (
+        time.monotonic(),
+        [dict(card) for card in suggestions],
+        error,
+    )
+    return suggestions, error
+
+
+def _variant_price_for_condition(
+    variants: list[dict[str, Any]],
+    *,
+    variant_name: str,
+    condition: str,
+) -> tuple[Optional[float], Optional[float], dict[str, Any]]:
+    selected = None
+    for variant in variants:
+        if str(variant.get("name") or "") == variant_name:
+            selected = variant
+            break
+    if selected is None and variants:
+        selected = variants[0]
+    if selected is None:
+        return None, None, {}
+    condition_prices = selected.get("condition_prices") or {}
+    row = condition_prices.get(_condition_code(condition)) if isinstance(condition_prices, dict) else None
+    if isinstance(row, dict):
+        market = _safe_price(row.get("market"))
+        low = _safe_price(row.get("low"))
+    else:
+        market = None
+        low = None
+    if market is None:
+        market = _safe_price(selected.get("market_price"))
+    if low is None:
+        low = _safe_price(selected.get("low_price"))
+    return market, low, selected
+
+
+async def _inventory_sealed_template_context(
+    request: Request,
+    session: Session,
+    *,
+    game: str = "Pokemon",
+    q: str = "",
+    single_q: str = "",
+    received: int = 0,
+    single_received: int = 0,
+    error: str = "",
+    single_error: str = "",
+    bulk_text: str = "",
+    bulk_rows: Optional[list[dict[str, Any]]] = None,
+    bulk_location: str = "",
+    bulk_source: str = "",
+    bulk_notes: str = "",
+    bulk_received: int = 0,
+    bulk_units: int = 0,
+) -> dict[str, Any]:
+    selected_game = _normalize_add_stock_game(game)
+    search_text = (single_q or q or "").strip()
+    game_values = _add_stock_existing_game_values(selected_game)
+    query = select(InventoryItem).where(
+        InventoryItem.item_type == ITEM_TYPE_SEALED,
+        InventoryItem.game.in_(game_values),
+    )
+    if search_text:
+        like = f"%{search_text}%"
+        query = query.where(
+            InventoryItem.card_name.ilike(like)
+            | InventoryItem.set_name.ilike(like)
+            | InventoryItem.upc.ilike(like)
+            | InventoryItem.sealed_product_kind.ilike(like)
+            | InventoryItem.location.ilike(like)
+        )
+        existing_items = session.exec(
+            query.order_by(InventoryItem.updated_at.desc(), InventoryItem.created_at.desc()).limit(12)
+        ).all()
+    else:
+        existing_items = []
+
+    api_products: list[dict[str, Any]] = []
+    catalog_error = ""
+    single_results: list[dict[str, Any]] = []
+    single_lookup_error = ""
+
+    if search_text:
+        looks_sealed = _add_stock_query_looks_sealed(search_text)
+        if looks_sealed:
+            api_products, catalog_error = await _cached_add_stock_sealed_search(
+                search_text,
+                game=selected_game,
+                limit=24,
+            )
+        else:
+            (api_products, catalog_error), (single_results, single_lookup_error_candidate) = await asyncio.gather(
+                _cached_add_stock_sealed_search(search_text, game=selected_game, limit=24),
+                _cached_add_stock_single_search(search_text, game=selected_game),
+            )
+            if single_results:
+                api_products = []
+                catalog_error = ""
+            if single_lookup_error_candidate and not single_results and not existing_items and not api_products:
+                single_lookup_error = single_lookup_error_candidate
+
+    suggestions = _sealed_catalog_suggestions(api_products, existing_items, limit=12)
+    received_item = session.get(InventoryItem, received) if received else None
+    if received_item and received_item.item_type != ITEM_TYPE_SEALED:
+        received_item = None
+    single_received_item = session.get(InventoryItem, single_received) if single_received else None
+    if single_received_item and single_received_item.item_type != ITEM_TYPE_SINGLE:
+        single_received_item = None
+
+    recent_movements = session.exec(
+        select(InventoryStockMovement)
+        .where(InventoryStockMovement.reason == "receive")
+        .order_by(InventoryStockMovement.created_at.desc())
+        .limit(12)
+    ).all()
+    movement_item_ids = {row.item_id for row in recent_movements}
+    movement_items = {}
+    if movement_item_ids:
+        movement_items = {
+            item.id: item
+            for item in session.exec(
+                select(InventoryItem).where(InventoryItem.id.in_(movement_item_ids))
+            ).all()
+        }
+
+    return {
+        "current_user": _current_user(request),
+        "csrf_token": issue_token(request),
+        "selected_game": selected_game,
+        "game_options": ADD_STOCK_GAME_OPTIONS,
+        "scan_url": "/degen_eye/v2" if selected_game == "Pokemon" else "/degen_eye",
+        "q": search_text,
+        "single_q": search_text,
+        "has_search": bool(search_text),
+        "error": error,
+        "single_error": single_error or single_lookup_error,
+        "catalog_error": catalog_error,
+        "received_item": received_item,
+        "single_received_item": single_received_item,
+        "bulk_message": _bulk_received_message(bulk_received, bulk_units),
+        "bulk_text": bulk_text,
+        "bulk_rows": bulk_rows or [],
+        "bulk_location": bulk_location,
+        "bulk_source": bulk_source,
+        "bulk_notes": bulk_notes,
+        "existing_items": existing_items,
+        "suggestions": suggestions,
+        "recent_movements": recent_movements,
+        "movement_items": movement_items,
+        "product_kinds": SEALED_PRODUCT_KINDS,
+        "single_results": single_results,
+        "conditions": CONDITIONS,
+    }
+
+
+def _find_existing_sealed_item(
+    session: Session,
+    *,
+    game: str,
+    product_name: str,
+    set_name: str = "",
+    upc: str = "",
+) -> Optional[InventoryItem]:
+    upc_clean = upc.strip()
+    if upc_clean:
+        found = session.exec(
+            select(InventoryItem).where(
+                InventoryItem.item_type == ITEM_TYPE_SEALED,
+                InventoryItem.game == game,
+                InventoryItem.upc == upc_clean,
+            )
+        ).first()
+        if found:
+            return found
+
+    name_norm = _normalize_lookup(product_name)
+    set_norm = _normalize_lookup(set_name)
+    if not name_norm:
+        return None
+    candidates = session.exec(
+        select(InventoryItem).where(
+            InventoryItem.item_type == ITEM_TYPE_SEALED,
+            InventoryItem.game == game,
+        )
+    ).all()
+    for item in candidates:
+        if _normalize_lookup(item.card_name) != name_norm:
+            continue
+        if set_norm and _normalize_lookup(item.set_name) != set_norm:
+            continue
+        return item
+    return None
+
+
+def _receive_sealed_stock(
+    session: Session,
+    *,
+    item_id: Optional[int] = None,
+    game: str = "Pokemon",
+    product_name: str,
+    set_name: str = "",
+    sealed_product_kind: str = "",
+    upc: str = "",
+    image_url: str = "",
+    quantity: int,
+    unit_cost: Optional[float] = None,
+    list_price: Optional[float] = None,
+    location: str = "",
+    source: str = "",
+    notes: str = "",
+    actor_label: Optional[str] = None,
+) -> tuple[InventoryItem, InventoryStockMovement, bool]:
+    if quantity < 1:
+        raise ValueError("Quantity must be at least 1.")
+    product_name = product_name.strip()
+    if not product_name:
+        raise ValueError("Product name is required.")
+
+    created = False
+    item: Optional[InventoryItem] = session.get(InventoryItem, item_id) if item_id else None
+    if item and item.item_type != ITEM_TYPE_SEALED:
+        raise ValueError("Selected item is not a sealed product.")
+
+    if item is None:
+        item = _find_existing_sealed_item(
+            session,
+            game=game,
+            product_name=product_name,
+            set_name=set_name,
+            upc=upc,
+        )
+
+    if item is None:
+        item = InventoryItem(
+            barcode="PENDING",
+            item_type=ITEM_TYPE_SEALED,
+            game=game,
+            card_name=product_name,
+            set_name=set_name.strip() or None,
+            sealed_product_kind=sealed_product_kind.strip() or None,
+            upc=upc.strip() or None,
+            location=location.strip() or None,
+            language="English",
+            condition="Sealed",
+            quantity=0,
+            cost_basis=unit_cost,
+            list_price=list_price,
+            image_url=image_url.strip() or None,
+            status=INVENTORY_IN_STOCK,
+            created_at=utcnow(),
+        )
+        session.add(item)
+        session.commit()
+        session.refresh(item)
+        item.barcode = generate_barcode_value(item.id)
+        created = True
+    else:
+        if sealed_product_kind.strip() and not item.sealed_product_kind:
+            item.sealed_product_kind = sealed_product_kind.strip()
+        if upc.strip() and not item.upc:
+            item.upc = upc.strip()
+        if image_url.strip() and not item.image_url:
+            item.image_url = image_url.strip()
+        if set_name.strip() and not item.set_name:
+            item.set_name = set_name.strip()
+        if list_price is not None:
+            item.list_price = list_price
+
+    before_qty = max(0, item.quantity or 0)
+    after_qty = before_qty + quantity
+    if unit_cost is not None:
+        if item.cost_basis is not None and before_qty > 0:
+            item.cost_basis = round(
+                ((item.cost_basis * before_qty) + (unit_cost * quantity)) / after_qty,
+                2,
+            )
+        else:
+            item.cost_basis = unit_cost
+    if location.strip():
+        item.location = location.strip()
+    item.quantity = after_qty
+    item.status = INVENTORY_IN_STOCK
+    item.updated_at = utcnow()
+    session.add(item)
+    movement = InventoryStockMovement(
+        item_id=item.id,
+        reason="receive",
+        quantity_delta=quantity,
+        quantity_before=before_qty,
+        quantity_after=after_qty,
+        unit_cost=unit_cost,
+        total_cost=round(unit_cost * quantity, 2) if unit_cost is not None else None,
+        location=location.strip() or item.location,
+        source=source.strip() or None,
+        notes=notes.strip() or None,
+        created_by=actor_label,
+        created_at=utcnow(),
+    )
+    session.add(movement)
+    session.commit()
+    session.refresh(item)
+    session.refresh(movement)
+    return item, movement, created
+
+
+def _find_existing_single_item(
+    session: Session,
+    *,
+    game: str,
+    card_name: str,
+    set_name: str = "",
+    card_number: str = "",
+    variant: str = "",
+    condition: str = "",
+) -> Optional[InventoryItem]:
+    name_norm = _normalize_lookup(card_name)
+    if not name_norm:
+        return None
+    candidates = session.exec(
+        select(InventoryItem).where(
+            InventoryItem.item_type == ITEM_TYPE_SINGLE,
+            InventoryItem.game == game,
+        )
+    ).all()
+    set_norm = _normalize_lookup(set_name)
+    number_norm = _normalize_lookup(card_number)
+    variant_norm = _normalize_lookup(variant)
+    condition_norm = _normalize_lookup(condition)
+    for item in candidates:
+        if _normalize_lookup(item.card_name) != name_norm:
+            continue
+        if _normalize_lookup(item.set_name) != set_norm:
+            continue
+        if _normalize_lookup(item.card_number) != number_norm:
+            continue
+        if _normalize_lookup(item.variant) != variant_norm:
+            continue
+        if _normalize_lookup(item.condition) != condition_norm:
+            continue
+        return item
+    return None
+
+
+def _receive_single_stock(
+    session: Session,
+    *,
+    game: str = "Pokemon",
+    card_name: str,
+    set_name: str = "",
+    set_code: str = "",
+    card_number: str = "",
+    variant: str = "",
+    condition: str = "NM",
+    image_url: str = "",
+    quantity: int,
+    unit_cost: Optional[float] = None,
+    list_price: Optional[float] = None,
+    auto_price: Optional[float] = None,
+    low_price: Optional[float] = None,
+    location: str = "",
+    source: str = "",
+    notes: str = "",
+    price_payload: Optional[dict[str, Any]] = None,
+    actor_label: Optional[str] = None,
+) -> tuple[InventoryItem, InventoryStockMovement, bool]:
+    if quantity < 1:
+        raise ValueError("Quantity must be at least 1.")
+    card_name = card_name.strip()
+    if not card_name:
+        raise ValueError("Card name is required.")
+    condition = _condition_code(condition or "NM")
+    if condition not in CONDITIONS:
+        raise ValueError("Choose a valid condition.")
+
+    item = _find_existing_single_item(
+        session,
+        game=game,
+        card_name=card_name,
+        set_name=set_name,
+        card_number=card_number,
+        variant=variant,
+        condition=condition,
+    )
+    created = False
+    if item is None:
+        item = InventoryItem(
+            barcode="PENDING",
+            item_type=ITEM_TYPE_SINGLE,
+            game=game,
+            card_name=card_name,
+            set_name=set_name.strip() or None,
+            set_code=set_code.strip() or None,
+            card_number=card_number.strip() or None,
+            variant=variant.strip() or None,
+            language="English",
+            condition=condition,
+            quantity=0,
+            cost_basis=unit_cost,
+            auto_price=auto_price,
+            list_price=list_price,
+            last_priced_at=utcnow() if auto_price is not None else None,
+            location=location.strip() or None,
+            image_url=image_url.strip() or None,
+            notes=notes.strip() or None,
+            status=INVENTORY_IN_STOCK,
+            created_at=utcnow(),
+        )
+        session.add(item)
+        session.commit()
+        session.refresh(item)
+        item.barcode = generate_barcode_value(item.id)
+        created = True
+    else:
+        if set_code.strip() and not item.set_code:
+            item.set_code = set_code.strip()
+        if image_url.strip() and not item.image_url:
+            item.image_url = image_url.strip()
+        if variant.strip() and not item.variant:
+            item.variant = variant.strip()
+        if auto_price is not None:
+            item.auto_price = auto_price
+            item.last_priced_at = utcnow()
+        if list_price is not None:
+            item.list_price = list_price
+        if notes.strip() and not item.notes:
+            item.notes = notes.strip()
+
+    before_qty = max(0, item.quantity or 0)
+    after_qty = before_qty + quantity
+    if unit_cost is not None:
+        if item.cost_basis is not None and before_qty > 0:
+            item.cost_basis = round(
+                ((item.cost_basis * before_qty) + (unit_cost * quantity)) / after_qty,
+                2,
+            )
+        else:
+            item.cost_basis = unit_cost
+    if location.strip():
+        item.location = location.strip()
+    item.quantity = after_qty
+    item.status = INVENTORY_IN_STOCK
+    item.updated_at = utcnow()
+    session.add(item)
+
+    movement = InventoryStockMovement(
+        item_id=item.id,
+        reason="receive",
+        quantity_delta=quantity,
+        quantity_before=before_qty,
+        quantity_after=after_qty,
+        unit_cost=unit_cost,
+        total_cost=round(unit_cost * quantity, 2) if unit_cost is not None else None,
+        location=location.strip() or item.location,
+        source=source.strip() or None,
+        notes=notes.strip() or None,
+        created_by=actor_label,
+        created_at=utcnow(),
+    )
+    session.add(movement)
+
+    if auto_price is not None or low_price is not None:
+        session.add(
+            PriceHistory(
+                item_id=item.id,
+                source="tcgtracking",
+                market_price=auto_price,
+                low_price=low_price,
+                high_price=None,
+                raw_response_json=json.dumps(price_payload or {}, sort_keys=True),
+            )
+        )
+
+    session.commit()
+    session.refresh(item)
+    session.refresh(movement)
+    return item, movement, created
 
 
 def _capture_user_payload(request: Request) -> dict[str, Any]:
@@ -263,7 +1655,7 @@ async def inventory_list(
         query = query.where(InventoryItem.status == status)
     if game:
         query = query.where(InventoryItem.game == game)
-    if item_type and item_type in (ITEM_TYPE_SINGLE, ITEM_TYPE_SLAB):
+    if item_type and item_type in (ITEM_TYPE_SINGLE, ITEM_TYPE_SLAB, ITEM_TYPE_SEALED):
         query = query.where(InventoryItem.item_type == item_type)
     if q:
         like = f"%{q}%"
@@ -271,7 +1663,10 @@ async def inventory_list(
             InventoryItem.card_name.ilike(like)
             | InventoryItem.barcode.ilike(like)
             | InventoryItem.set_name.ilike(like)
+            | InventoryItem.variant.ilike(like)
             | InventoryItem.cert_number.ilike(like)
+            | InventoryItem.upc.ilike(like)
+            | InventoryItem.location.ilike(like)
         )
 
     total = session.exec(
@@ -284,6 +1679,25 @@ async def inventory_list(
     items = session.exec(
         query.order_by(InventoryItem.created_at.desc()).offset(offset).limit(PAGE_SIZE)
     ).all()
+
+    inventory_summary = {
+        "all": session.exec(select(func.count()).select_from(InventoryItem)).one(),
+        "sealed": session.exec(
+            select(func.count()).where(InventoryItem.item_type == ITEM_TYPE_SEALED)
+        ).one(),
+        "singles": session.exec(
+            select(func.count()).where(InventoryItem.item_type == ITEM_TYPE_SINGLE)
+        ).one(),
+        "slabs": session.exec(
+            select(func.count()).where(InventoryItem.item_type == ITEM_TYPE_SLAB)
+        ).one(),
+        "in_stock": session.exec(
+            select(func.count()).where(InventoryItem.status == INVENTORY_IN_STOCK)
+        ).one(),
+        "listed": session.exec(
+            select(func.count()).where(InventoryItem.status == INVENTORY_LISTED)
+        ).one(),
+    }
 
     return _templates.TemplateResponse(
         request,
@@ -300,6 +1714,7 @@ async def inventory_list(
             "q": q,
             "games": GAMES,
             "statuses": sorted(ALL_INVENTORY_STATUSES),
+            "inventory_summary": inventory_summary,
             "effective_price": effective_price,
         },
     )
@@ -329,6 +1744,272 @@ async def inventory_lookup(
     if not item:
         return JSONResponse({"found": False, "barcode": barcode})
     return JSONResponse({"found": True, "item_id": item.id, "redirect": f"/inventory/{item.id}"})
+
+
+# ---------------------------------------------------------------------------
+# Add stock / receiving
+# ---------------------------------------------------------------------------
+
+@router.get("/inventory/add-stock", response_class=HTMLResponse)
+@router.get("/inventory/sealed", response_class=HTMLResponse)
+async def inventory_sealed_page(
+    request: Request,
+    session: Session = Depends(get_session),
+    game: str = Query(default="Pokemon"),
+    q: str = Query(default=""),
+    single_q: str = Query(default=""),
+    received: int = Query(default=0),
+    single_received: int = Query(default=0),
+    error: str = Query(default=""),
+    single_error: str = Query(default=""),
+    bulk_received: int = Query(default=0),
+    bulk_units: int = Query(default=0),
+):
+    if denial := _require_employee(request):
+        return denial
+
+    return _templates.TemplateResponse(
+        request,
+        "inventory_sealed.html",
+        await _inventory_sealed_template_context(
+            request,
+            session,
+            game=game,
+            q=q,
+            single_q=single_q,
+            received=received,
+            single_received=single_received,
+            error=error,
+            single_error=single_error,
+            bulk_received=bulk_received,
+            bulk_units=bulk_units,
+        ),
+    )
+
+
+@router.post("/inventory/sealed/bulk-preview", response_class=HTMLResponse)
+async def inventory_sealed_bulk_preview(
+    request: Request,
+    session: Session = Depends(get_session),
+    game: str = Form(default="Pokemon"),
+    bulk_text: str = Form(default=""),
+    bulk_location: str = Form(default=""),
+    bulk_source: str = Form(default=""),
+    bulk_notes: str = Form(default=""),
+):
+    if denial := _require_employee(request):
+        return denial
+
+    selected_game = _normalize_add_stock_game(game)
+    bulk_rows = await _build_bulk_sealed_preview(bulk_text, game=selected_game)
+    return _templates.TemplateResponse(
+        request,
+        "inventory_sealed.html",
+        await _inventory_sealed_template_context(
+            request,
+            session,
+            game=selected_game,
+            bulk_text=bulk_text,
+            bulk_rows=bulk_rows,
+            bulk_location=bulk_location,
+            bulk_source=bulk_source,
+            bulk_notes=bulk_notes,
+        ),
+    )
+
+
+@router.post("/inventory/sealed/bulk-receive")
+async def inventory_sealed_bulk_receive(
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    if denial := _require_employee(request):
+        return denial
+
+    form = await request.form()
+    selected_rows = {str(value) for value in form.getlist("receive_row")}
+    payloads = form.getlist("bulk_row")
+    selected_game = _normalize_add_stock_game(str(form.get("game") or "Pokemon"))
+    location = str(form.get("bulk_location") or "").strip()
+    source = str(form.get("bulk_source") or "").strip()
+    notes = str(form.get("bulk_notes") or "").strip()
+    added_products = 0
+    added_units = 0
+    try:
+        for payload in payloads:
+            row = json.loads(str(payload))
+            row_index = str(row.get("row_index", ""))
+            if row_index not in selected_rows:
+                continue
+            quantity_raw = str(form.get(f"bulk_quantity_{row_index}") or row.get("quantity") or "0")
+            quantity = int(quantity_raw) if quantity_raw.isdigit() else 0
+            list_price_raw = form.get(f"bulk_list_price_{row_index}")
+            if list_price_raw is None:
+                list_price_raw = row.get("list_price") or ""
+            item, _movement, _created = _receive_sealed_stock(
+                session,
+                game=selected_game,
+                product_name=str(row.get("product_name") or ""),
+                set_name=str(row.get("set_name") or ""),
+                sealed_product_kind=str(row.get("sealed_product_kind") or ""),
+                upc=str(row.get("upc") or ""),
+                image_url=str(row.get("image_url") or ""),
+                quantity=quantity,
+                list_price=_parse_float(str(list_price_raw)),
+                location=location,
+                source=source,
+                notes=notes,
+                actor_label=_current_user_label(request),
+            )
+            added_products += 1
+            added_units += quantity
+    except (json.JSONDecodeError, ValueError) as exc:
+        params = urlencode({"game": selected_game, "error": str(exc)})
+        return RedirectResponse(f"/inventory/add-stock?{params}", status_code=303)
+
+    params = urlencode({"game": selected_game, "bulk_received": added_products, "bulk_units": added_units})
+    return RedirectResponse(f"/inventory/add-stock?{params}", status_code=303)
+
+
+@router.post("/inventory/sealed/receive")
+async def inventory_sealed_receive(
+    request: Request,
+    session: Session = Depends(get_session),
+    item_id: str = Form(default=""),
+    game: str = Form(default="Pokemon"),
+    product_name: str = Form(default=""),
+    set_name: str = Form(default=""),
+    sealed_product_kind: str = Form(default=""),
+    upc: str = Form(default=""),
+    image_url: str = Form(default=""),
+    quantity: str = Form(default="1"),
+    unit_cost: str = Form(default=""),
+    list_price: str = Form(default=""),
+    location: str = Form(default=""),
+    source: str = Form(default=""),
+    notes: str = Form(default=""),
+):
+    if denial := _require_employee(request):
+        return denial
+
+    selected_game = _normalize_add_stock_game(game)
+    quantity_clean = str(quantity or "").strip()
+    quantity_value = int(quantity_clean) if quantity_clean.isdigit() else 0
+    item_id_int = int(item_id) if item_id.strip().isdigit() else None
+    unit_cost_value = _parse_float(unit_cost)
+    list_price_value = _parse_float(list_price)
+    if unit_cost_value is not None and unit_cost_value < 0:
+        params = urlencode({"game": selected_game, "q": product_name or "", "error": "Unit cost cannot be negative."})
+        return RedirectResponse(f"/inventory/add-stock?{params}", status_code=303)
+    if list_price_value is not None and list_price_value < 0:
+        params = urlencode({"game": selected_game, "q": product_name or "", "error": "Sell price cannot be negative."})
+        return RedirectResponse(f"/inventory/add-stock?{params}", status_code=303)
+    try:
+        item, _movement, _created = _receive_sealed_stock(
+            session,
+            item_id=item_id_int,
+            game=selected_game,
+            product_name=product_name,
+            set_name=set_name,
+            sealed_product_kind=sealed_product_kind,
+            upc=upc,
+            image_url=image_url,
+            quantity=quantity_value,
+            unit_cost=unit_cost_value,
+            list_price=list_price_value,
+            location=location,
+            source=source,
+            notes=notes,
+            actor_label=_current_user_label(request),
+        )
+    except ValueError as exc:
+        params = urlencode({"game": selected_game, "q": product_name or "", "error": str(exc)})
+        return RedirectResponse(f"/inventory/add-stock?{params}", status_code=303)
+
+    params = urlencode({"game": selected_game, "received": item.id, "q": item.card_name})
+    return RedirectResponse(f"/inventory/add-stock?{params}", status_code=303)
+
+
+@router.post("/inventory/singles/receive")
+async def inventory_singles_receive(
+    request: Request,
+    session: Session = Depends(get_session),
+    game: str = Form(default="Pokemon"),
+    card_name: str = Form(default=""),
+    set_name: str = Form(default=""),
+    set_code: str = Form(default=""),
+    card_number: str = Form(default=""),
+    variant: str = Form(default=""),
+    variants_json: str = Form(default="[]"),
+    condition: str = Form(default="NM"),
+    image_url: str = Form(default=""),
+    quantity: str = Form(default="1"),
+    unit_cost: str = Form(default=""),
+    list_price: str = Form(default=""),
+    location: str = Form(default=""),
+    source: str = Form(default="Manual Lookup"),
+    notes: str = Form(default=""),
+):
+    if denial := _require_employee(request):
+        return denial
+
+    selected_game = _normalize_add_stock_game(game)
+    quantity_clean = str(quantity or "").strip()
+    quantity_value = int(quantity_clean) if quantity_clean.isdigit() else 0
+    unit_cost_value = _parse_float(unit_cost)
+    list_price_value = _parse_float(list_price)
+    if unit_cost_value is not None and unit_cost_value < 0:
+        params = urlencode({"game": selected_game, "q": card_name or "", "single_error": "Unit cost cannot be negative."})
+        return RedirectResponse(f"/inventory/add-stock?{params}", status_code=303)
+    if list_price_value is not None and list_price_value < 0:
+        params = urlencode({"game": selected_game, "q": card_name or "", "single_error": "Sell price cannot be negative."})
+        return RedirectResponse(f"/inventory/add-stock?{params}", status_code=303)
+
+    try:
+        parsed_variants = json.loads(variants_json or "[]")
+    except json.JSONDecodeError:
+        parsed_variants = []
+    if not isinstance(parsed_variants, list):
+        parsed_variants = []
+
+    auto_price, low_price, selected_variant = _variant_price_for_condition(
+        parsed_variants,
+        variant_name=variant,
+        condition=condition,
+    )
+
+    try:
+        item, _movement, _created = _receive_single_stock(
+            session,
+            game=selected_game,
+            card_name=card_name,
+            set_name=set_name,
+            set_code=set_code,
+            card_number=card_number,
+            variant=variant,
+            condition=condition,
+            image_url=image_url,
+            quantity=quantity_value,
+            unit_cost=unit_cost_value,
+            list_price=list_price_value,
+            auto_price=auto_price,
+            low_price=low_price,
+            location=location,
+            source=source,
+            notes=notes,
+            price_payload={
+                "selected_variant": selected_variant,
+                "all_variants": parsed_variants,
+                "condition": _condition_code(condition),
+            },
+            actor_label=_current_user_label(request),
+        )
+    except ValueError as exc:
+        params = urlencode({"game": selected_game, "q": card_name or "", "single_error": str(exc)})
+        return RedirectResponse(f"/inventory/add-stock?{params}", status_code=303)
+
+    params = urlencode({"game": selected_game, "single_received": item.id, "q": item.card_name})
+    return RedirectResponse(f"/inventory/add-stock?{params}", status_code=303)
 
 
 # ---------------------------------------------------------------------------
@@ -415,6 +2096,7 @@ async def inventory_new_submit(
     set_name: str = Form(default=""),
     set_code: str = Form(default=""),
     card_number: str = Form(default=""),
+    variant: str = Form(default=""),
     language: str = Form(default="English"),
     condition: str = Form(default=""),
     quantity: int = Form(default=1),
@@ -454,6 +2136,7 @@ async def inventory_new_submit(
         set_name=set_name.strip() or None,
         set_code=set_code.strip() or None,
         card_number=card_number.strip() or None,
+        variant=variant.strip() or None,
         language=language or "English",
         condition=condition.strip() or None,
         quantity=max(1, quantity),
@@ -549,6 +2232,12 @@ async def inventory_item_detail(
         .order_by(PriceHistory.fetched_at.desc())
         .limit(20)
     ).all()
+    stock_movements = session.exec(
+        select(InventoryStockMovement)
+        .where(InventoryStockMovement.item_id == item_id)
+        .order_by(InventoryStockMovement.created_at.desc())
+        .limit(30)
+    ).all()
 
     barcode_svg = render_barcode_svg(item.barcode)
 
@@ -559,12 +2248,13 @@ async def inventory_item_detail(
             "current_user": _current_user(request),
             "item": item,
             "price_history": history,
+            "stock_movements": stock_movements,
             "barcode_svg": barcode_svg,
             "effective_price": effective_price(item),
             "games": GAMES,
             "conditions": CONDITIONS,
             "grading_companies": GRADING_COMPANIES,
-            "item_types": [ITEM_TYPE_SINGLE, ITEM_TYPE_SLAB],
+            "item_types": [ITEM_TYPE_SINGLE, ITEM_TYPE_SLAB, ITEM_TYPE_SEALED],
             "statuses": sorted(ALL_INVENTORY_STATUSES),
         },
     )
@@ -579,9 +2269,13 @@ async def inventory_item_edit(
     set_name: str = Form(default=""),
     set_code: str = Form(default=""),
     card_number: str = Form(default=""),
+    variant: str = Form(default=""),
     game: str = Form(default=""),
     item_type: str = Form(default=""),
     language: str = Form(default="English"),
+    sealed_product_kind: str = Form(default=""),
+    upc: str = Form(default=""),
+    location: str = Form(default=""),
     condition: str = Form(default=""),
     quantity: int = Form(default=1),
     grading_company: str = Form(default=""),
@@ -604,9 +2298,13 @@ async def inventory_item_edit(
     item.set_name = set_name.strip() or None
     item.set_code = set_code.strip() or None
     item.card_number = card_number.strip() or None
+    item.variant = variant.strip() or None
     item.game = game or item.game
     item.item_type = item_type or item.item_type
     item.language = language or "English"
+    item.sealed_product_kind = sealed_product_kind.strip() or None
+    item.upc = upc.strip() or None
+    item.location = location.strip() or None
     item.condition = condition.strip() or None
     item.quantity = max(1, quantity)
     item.grading_company = grading_company.strip() or None
@@ -1664,7 +3362,7 @@ async def inventory_batch_confirm(
 
     Response: {"created": N, "items": [{"id": ..., "barcode": ..., "card_name": ...}]}
     """
-    if denial := _require_reviewer(request):
+    if denial := _require_employee(request):
         return denial
 
     try:
@@ -1692,6 +3390,7 @@ async def inventory_batch_confirm(
             card_name=card_name,
             set_name=(raw.get("set_name") or "").strip() or None,
             card_number=(raw.get("card_number") or "").strip() or None,
+            variant=(raw.get("variant") or "").strip() or None,
             condition=(raw.get("condition") or "").strip() or None,
             image_url=(raw.get("image_url") or "").strip() or None,
             auto_price=_parse_float(str(raw.get("auto_price") or "")),
@@ -1713,6 +3412,7 @@ async def inventory_batch_confirm(
                 "game": item.game,
                 "set_name": item.set_name or "",
                 "card_number": item.card_number or "",
+                "variant": item.variant or "",
                 "condition": item.condition or "",
                 "image_url": item.image_url or "",
                 "auto_price": item.auto_price,

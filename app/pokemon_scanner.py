@@ -471,7 +471,11 @@ async def _pokemontcg_search(
 
     params = {"q": " ".join(q_parts), "pageSize": str(limit)}
 
-    resp = await client.get(f"{POKEMONTCG_BASE}/cards", params=params, headers=headers)
+    try:
+        resp = await client.get(f"{POKEMONTCG_BASE}/cards", params=params, headers=headers)
+    except httpx.RequestError as exc:
+        logger.warning("[pokemon_scanner] PokemonTCG request failed for params=%r: %s", params, exc)
+        return []
     if resp.status_code != 200:
         logger.warning(
             "[pokemon_scanner] PokemonTCG HTTP %s for %s (params=%r): %s",
@@ -1188,13 +1192,21 @@ async def _riftbound_search(
 
 
 async def _lookup_candidates_by_category(
-    fields: ExtractedFields, category_id: str, ptcg_key: str = "",
+    fields: ExtractedFields,
+    category_id: str,
+    ptcg_key: str = "",
+    *,
+    include_pokemontcg_supplement: bool = True,
 ) -> list[CandidateCard]:
     """Route candidate lookup to the appropriate API based on TCG category."""
     is_pokemon = category_id in ("3", "85")
 
     if is_pokemon:
-        return await lookup_candidates(fields, api_key=ptcg_key)
+        return await lookup_candidates(
+            fields,
+            api_key=ptcg_key,
+            include_pokemontcg_supplement=include_pokemontcg_supplement,
+        )
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         if category_id == "1":
@@ -1227,7 +1239,12 @@ async def _lookup_candidates_by_category(
         )
 
 
-async def lookup_candidates(fields: ExtractedFields, api_key: str = "") -> list[CandidateCard]:
+async def lookup_candidates(
+    fields: ExtractedFields,
+    api_key: str = "",
+    *,
+    include_pokemontcg_supplement: bool = True,
+) -> list[CandidateCard]:
     """
     Waterfall lookup strategy:
     Tier 1: Exact collector number + inferred set (TCGdex)
@@ -1273,7 +1290,7 @@ async def lookup_candidates(fields: ExtractedFields, api_key: str = "") -> list[
         # Tier 1.7: When set_name is available, run a PokemonTCG search filtered
         # by set so the target card is guaranteed in the pool even if TCGdex
         # didn't return it in its first N results.
-        if fields.card_name and fields.set_name:
+        if include_pokemontcg_supplement and fields.card_name and fields.set_name:
             set_filtered = await _pokemontcg_search(
                 client, name=fields.card_name, set_name=fields.set_name,
                 api_key=ptcg_key, limit=5,
@@ -1526,6 +1543,7 @@ _PREFERRED_CAT_ORDER = [
 
 # Cache: set_name (lowercase) -> {set_id, products, pricing}
 _tcgtracking_cache: dict[str, dict] = {}
+_tcgtracking_cache_locks: dict[str, asyncio.Lock] = {}
 _TCGTRACKING_CACHE_MAX = 64
 
 
@@ -1535,9 +1553,18 @@ def _cache_tcgtracking(set_key: str, cached: dict) -> None:
         try:
             oldest = next(iter(_tcgtracking_cache))
             _tcgtracking_cache.pop(oldest, None)
+            _tcgtracking_cache_locks.pop(oldest, None)
         except StopIteration:
             pass
     _tcgtracking_cache[set_key] = cached
+
+
+def _tcgtracking_cache_lock(set_key: str) -> asyncio.Lock:
+    lock = _tcgtracking_cache_locks.get(set_key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _tcgtracking_cache_locks[set_key] = lock
+    return lock
 
 # Cache for TCGTracking categories (fetched once per server lifetime)
 _tcg_categories_cache: list[dict] | None = None
@@ -1620,33 +1647,42 @@ async def _enrich_price_fast(
             cached = _tcgtracking_cache.get(set_key)
 
             if not cached:
-                for cat_id in cat_ids_to_try:
-                    search_resp = await client.get(
-                        f"{TCGTRACKING_BASE}/{cat_id}/search",
-                        params={"q": candidate.set_name},
-                    )
-                    if search_resp.status_code != 200:
-                        continue
-                    sets = search_resp.json().get("sets") or []
-                    if not sets:
-                        continue
+                async with _tcgtracking_cache_lock(set_key):
+                    cached = _tcgtracking_cache.get(set_key)
+                    if not cached:
+                        for cat_id in cat_ids_to_try:
+                            search_resp = await client.get(
+                                f"{TCGTRACKING_BASE}/{cat_id}/search",
+                                params={"q": candidate.set_name},
+                            )
+                            if search_resp.status_code != 200:
+                                continue
+                            sets = search_resp.json().get("sets") or []
+                            if not sets:
+                                continue
 
-                    set_info = sets[0]
-                    set_id = set_info["id"]
+                            set_info = sets[0]
+                            set_id = set_info["id"]
 
-                    prod_resp, price_resp, sku_resp = await asyncio.gather(
-                        client.get(f"{TCGTRACKING_BASE}/{cat_id}/sets/{set_id}"),
-                        client.get(f"{TCGTRACKING_BASE}/{cat_id}/sets/{set_id}/pricing"),
-                        client.get(f"{TCGTRACKING_BASE}/{cat_id}/sets/{set_id}/skus"),
-                    )
+                            prod_resp, price_resp, sku_resp = await asyncio.gather(
+                                client.get(f"{TCGTRACKING_BASE}/{cat_id}/sets/{set_id}"),
+                                client.get(f"{TCGTRACKING_BASE}/{cat_id}/sets/{set_id}/pricing"),
+                                client.get(f"{TCGTRACKING_BASE}/{cat_id}/sets/{set_id}/skus"),
+                            )
 
-                    products = prod_resp.json().get("products", []) if prod_resp.status_code == 200 else []
-                    pricing = price_resp.json().get("prices", {}) if price_resp.status_code == 200 else {}
-                    skus = sku_resp.json().get("products", {}) if sku_resp.status_code == 200 else {}
+                            products = prod_resp.json().get("products", []) if prod_resp.status_code == 200 else []
+                            pricing = price_resp.json().get("prices", {}) if price_resp.status_code == 200 else {}
+                            skus = sku_resp.json().get("products", {}) if sku_resp.status_code == 200 else {}
 
-                    cached = {"set_id": set_id, "cat_id": cat_id, "products": products, "pricing": pricing, "skus": skus}
-                    _cache_tcgtracking(set_key, cached)
-                    break
+                            cached = {
+                                "set_id": set_id,
+                                "cat_id": cat_id,
+                                "products": products,
+                                "pricing": pricing,
+                                "skus": skus,
+                            }
+                            _cache_tcgtracking(set_key, cached)
+                            break
 
             if cached and cached["products"]:
                 cand_num_raw = (candidate.number or "").split("/")[0].strip()
@@ -3495,7 +3531,12 @@ def _heuristic_parse_query(query: str, category_id: str) -> ExtractedFields:
     return fields
 
 
-def _parse_search_query(query: str, category_id: str = "3") -> ExtractedFields:
+def _parse_search_query(
+    query: str,
+    category_id: str = "3",
+    *,
+    use_ai: bool = True,
+) -> ExtractedFields:
     """Parse a free-text card search query into structured fields.
 
     Strategy: run the heuristic first (fast, deterministic, covers nicknames
@@ -3505,7 +3546,7 @@ def _parse_search_query(query: str, category_id: str = "3") -> ExtractedFields:
     """
     heur = _heuristic_parse_query(query, category_id)
 
-    if not has_ai_key():
+    if not use_ai or not has_ai_key():
         return heur
 
     try:
@@ -3548,7 +3589,14 @@ def _parse_search_query(query: str, category_id: str = "3") -> ExtractedFields:
         return heur
 
 
-async def text_search_cards(query: str, category_id: str = "3") -> dict[str, Any]:
+async def text_search_cards(
+    query: str,
+    category_id: str = "3",
+    *,
+    use_ai_parse: bool = True,
+    max_results: int = 8,
+    include_pokemontcg_supplement: bool = True,
+) -> dict[str, Any]:
     """Search for cards by text query. Returns same shape as scan pipeline."""
     t_start = time.monotonic()
 
@@ -3557,7 +3605,11 @@ async def text_search_cards(query: str, category_id: str = "3") -> dict[str, Any
     if not query or not query.strip():
         return {**asdict(ScanResult(status="ERROR", error="Empty search query")), "game": game}
 
-    fields = _parse_search_query(query.strip(), category_id=category_id)
+    fields = _parse_search_query(
+        query.strip(),
+        category_id=category_id,
+        use_ai=use_ai_parse,
+    )
     if not fields.card_name and not fields.collector_number:
         return {**asdict(ScanResult(status="NO_MATCH", error="Could not parse search query")), "game": game}
 
@@ -3590,10 +3642,15 @@ async def text_search_cards(query: str, category_id: str = "3") -> dict[str, Any
     settings = get_settings()
     ptcg_key = settings.pokemon_tcg_api_key or ""
 
-    candidates = await _lookup_candidates_by_category(fields, category_id, ptcg_key)
+    candidates = await _lookup_candidates_by_category(
+        fields,
+        category_id,
+        ptcg_key,
+        include_pokemontcg_supplement=include_pokemontcg_supplement,
+    )
 
     # Pokemon-only: supplement with a broad PokemonTCG name search for image coverage
-    if is_pokemon and fields.card_name:
+    if is_pokemon and include_pokemontcg_supplement and fields.card_name:
         async with httpx.AsyncClient(timeout=10.0) as client:
             ptcg_extra = await _pokemontcg_search(
                 client, name=fields.card_name, api_key=ptcg_key, limit=10,
@@ -3645,7 +3702,8 @@ async def text_search_cards(query: str, category_id: str = "3") -> dict[str, Any
 
         scored = sorted(scored, key=_set_rerank_key, reverse=True)
 
-    top_n = scored[:8]
+    result_limit = max(1, min(int(max_results or 8), 12))
+    top_n = scored[:result_limit]
     await asyncio.gather(
         *[_enrich_price_fast(c, ptcg_key=ptcg_key, category_id=category_id) for c in top_n],
     )

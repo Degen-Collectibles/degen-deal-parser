@@ -886,11 +886,23 @@ ALL_INVENTORY_STATUSES = {INVENTORY_IN_STOCK, INVENTORY_LISTED, INVENTORY_SOLD, 
 
 ITEM_TYPE_SINGLE = "single"
 ITEM_TYPE_SLAB = "slab"
+ITEM_TYPE_SEALED = "sealed"
 
 GRADING_COMPANIES: list[str] = ["PSA", "BGS", "CGC", "SGC"]
 GAMES: list[str] = [
     "Pokemon",
+    "Magic",
     "MTG",
+    "Yu-Gi-Oh",
+    "One Piece",
+    "Lorcana",
+    "Riftbound",
+    "Dragon Ball",
+    "Digimon",
+    "Flesh and Blood",
+    "Weiss Schwarz",
+    "Cardfight Vanguard",
+    "Union Arena",
     "Sports - Baseball",
     "Sports - Basketball",
     "Sports - Football",
@@ -906,12 +918,16 @@ class InventoryItem(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     barcode: str = Field(unique=True, index=True)          # e.g. "DGN-000001"
-    item_type: str = Field(index=True)                     # "single" | "slab"
+    item_type: str = Field(index=True)                     # "single" | "slab" | "sealed"
     game: str = Field(index=True)                          # "Pokemon" | "MTG" | ...
     card_name: str = Field(index=True)
     set_name: Optional[str] = Field(default=None)
     set_code: Optional[str] = Field(default=None)          # for API lookup
     card_number: Optional[str] = Field(default=None)
+    variant: Optional[str] = Field(default=None, index=True)  # Normal | Holofoil | Reverse Holofoil | ...
+    sealed_product_kind: Optional[str] = Field(default=None, index=True)
+    upc: Optional[str] = Field(default=None, index=True)
+    location: Optional[str] = Field(default=None, index=True)
     language: str = Field(default="English")
     condition: Optional[str] = Field(default=None)         # singles: NM/LP/MP/HP/DMG
     quantity: int = Field(default=1)
@@ -954,6 +970,24 @@ class PriceHistory(SQLModel, table=True):
     high_price: Optional[float] = Field(default=None)
     fetched_at: datetime = Field(default_factory=utcnow, index=True)
     raw_response_json: str = Field(default="{}")
+
+
+class InventoryStockMovement(SQLModel, table=True):
+    __tablename__ = "inventory_stock_movements"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    item_id: int = Field(foreign_key="inventory_items.id", index=True)
+    reason: str = Field(default="receive", index=True)
+    quantity_delta: int
+    quantity_before: int
+    quantity_after: int
+    unit_cost: Optional[float] = Field(default=None)
+    total_cost: Optional[float] = Field(default=None)
+    location: Optional[str] = Field(default=None, index=True)
+    source: Optional[str] = Field(default=None, index=True)
+    notes: Optional[str] = Field(default=None)
+    created_by: Optional[str] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=utcnow, index=True)
 
 
 # ---------------------------------------------------------------------------

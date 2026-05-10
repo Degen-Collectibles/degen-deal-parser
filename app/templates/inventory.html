@@ -45,7 +45,11 @@
         body { margin:0; font-family:"Inter",-apple-system,BlinkMacSystemFont,sans-serif; -webkit-font-smoothing:antialiased; color:var(--text); background: var(--lx-bg); }
         a { color:inherit; text-decoration:none; }
         .page { max-width:1600px; margin:0 auto; padding:28px 28px 60px; }
-        .card { padding:18px; margin-bottom:18px; background:linear-gradient(180deg,var(--card-strong),var(--card)); border:1px solid var(--line); border-radius:24px; box-shadow:var(--shadow); }
+        .card { padding:18px; margin-bottom:18px; background:linear-gradient(180deg,var(--card-strong),var(--card)); border:1px solid var(--line); border-radius:18px; box-shadow:var(--shadow); }
+        .hero { display:flex; justify-content:space-between; gap:18px; align-items:flex-start; flex-wrap:wrap; }
+        .hero-copy { min-width:280px; flex:1; }
+        .hero-copy p { margin:0; }
+        .hero-actions { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
         h1 { margin:10px 0 8px; font-size:clamp(30px,4vw,48px); line-height:.93; letter-spacing:-.045em; color:#ffffff; font-weight:800; }
         p { color: var(--lx-muted); }
         .eyebrow { display:inline-flex; align-items:center; padding:6px 10px; border-radius:999px; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.08em; background:var(--lx-s2); color:var(--lx-muted); }
@@ -56,8 +60,21 @@
         .secondary-button { background: var(--lx-s1); color:var(--text); border:1px solid var(--line); }
         label { display:flex; flex-direction:column; gap:5px; color: var(--lx-muted); font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; }
         input, select { width:100%; padding:10px 12px; border-radius:12px; border:1px solid var(--line); background: var(--lx-s1); color:var(--text); font:inherit; }
-        .filters { display:grid; grid-template-columns:2fr 1fr 1fr 1fr auto auto; gap:10px; align-items:end; margin-bottom:14px; }
-        .scan-row { display:flex; gap:10px; align-items:center; margin-bottom:14px; }
+        .action-grid { display:grid; grid-template-columns:repeat(4,minmax(180px,1fr)); gap:12px; margin-top:18px; }
+        .action-tile { min-height:118px; padding:16px; border-radius:16px; border:1px solid var(--line); background:var(--lx-s1); display:flex; flex-direction:column; justify-content:space-between; gap:12px; transition:border-color .15s, transform .15s, background .15s; }
+        .action-tile:hover { transform:translateY(-1px); border-color:rgba(239,68,68,.48); background:rgba(255,255,255,.045); }
+        .action-tile.primary { border-color:rgba(239,68,68,.45); background:linear-gradient(180deg,rgba(239,68,68,.14),var(--lx-s1)); }
+        .tile-top { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+        .tile-icon { width:36px; height:36px; border-radius:12px; display:grid; place-items:center; color:#fff; background:var(--lx-red); }
+        .tile-icon svg { width:18px; height:18px; }
+        .tile-title { font-weight:900; font-size:16px; color:#fff; letter-spacing:-.02em; }
+        .tile-meta { color:var(--lx-muted); font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; }
+        .metric-strip { display:grid; grid-template-columns:repeat(6,1fr); gap:10px; margin-top:16px; }
+        .metric { padding:12px; border:1px solid var(--line); border-radius:14px; background:var(--lx-s1); }
+        .metric-value { font-size:22px; line-height:1; font-weight:900; color:#fff; font-variant-numeric:tabular-nums; }
+        .metric-label { margin-top:6px; color:var(--lx-muted); font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; }
+        .filters { display:grid; grid-template-columns:minmax(240px,2fr) 1fr 1fr 1fr auto; gap:10px; align-items:end; margin-top:14px; }
+        .scan-row { display:grid; grid-template-columns:auto minmax(220px,360px) 1fr; gap:10px; align-items:center; }
         .scan-input { flex:1; max-width:320px; padding:11px 14px; border-radius:14px; border:2px solid var(--accent); background: var(--lx-s1); font:inherit; font-size:14px; font-weight:600; }
         .scan-input:focus { outline:none; box-shadow:0 0 0 3px rgba(213,83,56,.2); }
         .scan-label { font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; color: var(--lx-muted); }
@@ -74,6 +91,7 @@
         .badge-held { background:#fff5df; color:#8a580d; }
         .badge-single { background:#f0f4ff; color:#3b4fa8; }
         .badge-slab { background:#fdf0ff; color:#7e3b9a; }
+        .badge-sealed { background:var(--blue-bg); color:var(--blue); border:1px solid rgba(96,165,250,.25); }
         .btn-sm { padding:5px 10px; border-radius:10px; font-size:12px; font-weight:700; border:1px solid var(--line); background: var(--lx-s1); color:var(--text); cursor:pointer; text-decoration:none; display:inline-block; }
         .price-cell { font-variant-numeric:tabular-nums; font-weight:700; color:#166647; }
         .price-none { color: var(--lx-muted); }
@@ -83,11 +101,15 @@
         .section-header { display:flex; gap:10px; align-items:center; justify-content:space-between; margin-bottom:12px; flex-wrap:wrap; }
         .section-title { margin:0; font-size:22px; font-weight:800; letter-spacing:-.04em; }
         .count-badge { font-size:12px; font-weight:700; color: var(--lx-muted); }
+        .table-actions { display:flex;gap:8px;flex-wrap:wrap; }
+        .empty-state { display:flex; flex-direction:column; align-items:center; gap:10px; text-align:center; color:var(--lx-muted); padding:34px 16px; }
         .toast { position:fixed; bottom:24px; right:24px; padding:12px 18px; border-radius:16px; font-weight:700; font-size:14px; background:#1a1206; color:#fff; box-shadow:0 8px 24px rgba(0,0,0,.3); display:none; z-index:99; }
         .toast.error { background:#9d2f2b; }
         @keyframes card-in { from{opacity:0;transform:translateY(16px) scale(.985)} to{opacity:1;transform:none} }
         .card { animation:card-in .45s cubic-bezier(.22,1,.36,1) both; }
-        @media(max-width:900px) { .filters{grid-template-columns:1fr 1fr;} .page{padding:16px 14px 28px;} }
+        @media(max-width:1100px) { .action-grid{grid-template-columns:repeat(2,1fr);} .metric-strip{grid-template-columns:repeat(3,1fr);} }
+        @media(max-width:900px) { .filters{grid-template-columns:1fr 1fr;} .page{padding:16px 14px 28px;} .scan-row{grid-template-columns:1fr;} .hero-actions{justify-content:flex-start;} }
+        @media(max-width:560px) { .action-grid,.metric-strip,.filters{grid-template-columns:1fr;} .button,button{width:100%;text-align:center;} }
     </style>
     <link rel="stylesheet" href="/static/linear.css?v=1776749171">
     <link rel="stylesheet" href="/static/safe-area.css?v=1776747800">
@@ -95,22 +117,89 @@
 <body>
 <div class="page">
     {% include "_linear_sidebar.html" %}
+    {% set can_manage_inventory = current_user and current_user.role in ["admin", "reviewer"] %}
 
     <div class="card">
-        <div class="eyebrow" style="margin-bottom:12px;">Inventory</div>
-        <h1>Inventory</h1>
-        <p>Manage singles and slabs. Scan a barcode to pull up an item instantly.</p>
+        <div class="hero">
+            <div class="hero-copy">
+                <div class="eyebrow" style="margin-bottom:12px;">Inventory</div>
+                <h1>Inventory</h1>
+                <p>Add sealed product or singles, scan cards, print labels, and find anything in stock.</p>
+            </div>
+            <div class="hero-actions">
+                <a href="/inventory/add-stock" class="button primary-button">Add Stock</a>
+                <a href="/degen_eye/v2" class="button secondary-button">Scan Cards</a>
+                {% if can_manage_inventory %}<a href="/inventory/new" class="button secondary-button">Add Manual Item</a>{% endif %}
+            </div>
+        </div>
+
+        <div class="action-grid">
+            <a href="/inventory/add-stock" class="action-tile primary">
+                <div class="tile-top">
+                    <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8l-9-5-9 5v8l9 5 9-5Z"/><path d="M3.3 7 12 12l8.7-5M12 22V12"/></svg></div>
+                    <span class="tile-meta">Sealed + Singles</span>
+                </div>
+                <div class="tile-title">Add Stock</div>
+            </a>
+            <a href="/degen_eye/v2" class="action-tile">
+                <div class="tile-top">
+                    <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2Z"/><circle cx="12" cy="13" r="4"/></svg></div>
+                    <span class="tile-meta">{{ inventory_summary.singles }} singles</span>
+                </div>
+                <div class="tile-title">Scan Cards</div>
+            </a>
+            <a href="/inventory/scan" class="action-tile">
+                <div class="tile-top">
+                    <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 5v14M8 5v14M12 5v14M17 5v14M21 5v14"/></svg></div>
+                    <span class="tile-meta">Lookup</span>
+                </div>
+                <div class="tile-title">Barcode Lookup</div>
+            </a>
+            {% if can_manage_inventory %}
+            <a href="/inventory/new" class="action-tile">
+                <div class="tile-top">
+                    <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg></div>
+                    <span class="tile-meta">Manual</span>
+                </div>
+                <div class="tile-title">Add Item</div>
+            </a>
+            {% else %}
+            <a href="/inventory/labels{% if status_filter %}?status={{ status_filter }}{% endif %}" class="action-tile">
+                <div class="tile-top">
+                    <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9V2h12v7"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><path d="M6 14h12v8H6z"/></svg></div>
+                    <span class="tile-meta">Labels</span>
+                </div>
+                <div class="tile-title">Print Labels</div>
+            </a>
+            {% endif %}
+        </div>
+
+        <div class="metric-strip">
+            <div class="metric"><div class="metric-value">{{ inventory_summary.all }}</div><div class="metric-label">Total</div></div>
+            <div class="metric"><div class="metric-value">{{ inventory_summary.in_stock }}</div><div class="metric-label">In Stock</div></div>
+            <div class="metric"><div class="metric-value">{{ inventory_summary.listed }}</div><div class="metric-label">Listed</div></div>
+            <div class="metric"><div class="metric-value">{{ inventory_summary.sealed }}</div><div class="metric-label">Sealed</div></div>
+            <div class="metric"><div class="metric-value">{{ inventory_summary.singles }}</div><div class="metric-label">Singles</div></div>
+            <div class="metric"><div class="metric-value">{{ inventory_summary.slabs }}</div><div class="metric-label">Slabs</div></div>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="section-header">
+            <h2 class="section-title">Find Inventory</h2>
+        </div>
 
         <!-- Barcode scan row -->
         <div class="scan-row">
             <span class="scan-label">Scan barcode:</span>
             <input id="barcode-scan" class="scan-input" type="text" placeholder="DGN-000001" autocomplete="off" autofocus>
+            <span style="color:var(--lx-muted);font-size:12px;font-weight:700;">Press Enter after scanning.</span>
         </div>
 
         <!-- Filters -->
         <form method="get" action="/inventory" class="filters">
             <label>Search
-                <input type="text" name="q" value="{{ q }}" placeholder="Card name, barcode, cert #…">
+                <input type="text" name="q" value="{{ q }}" placeholder="Card, sealed product, barcode, UPC, cert #...">
             </label>
             <label>Status
                 <select name="status">
@@ -133,22 +222,20 @@
                     <option value="">All</option>
                     <option value="single" {% if type_filter == "single" %}selected{% endif %}>Single</option>
                     <option value="slab" {% if type_filter == "slab" %}selected{% endif %}>Slab</option>
+                    <option value="sealed" {% if type_filter == "sealed" %}selected{% endif %}>Sealed</option>
                 </select>
             </label>
             <label>&nbsp;<button type="submit" class="secondary-button" style="white-space:nowrap;">Filter</button></label>
-            <label>&nbsp;<a href="/inventory/new" class="button primary-button" style="white-space:nowrap;">+ Add Item</a></label>
         </form>
     </div>
 
     <div class="card">
         <div class="section-header">
             <h2 class="section-title">Items <span class="count-badge">{{ total }} total</span></h2>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                <a href="/degen_eye" class="btn-sm" style="background:var(--lx-red);color:#fff;border-color:var(--lx-red);">Scan Pok&eacute;mon</a>
-                <a href="/degen_eye/v2" class="btn-sm" style="background:linear-gradient(135deg,#00c2ff,#0a8acc);color:#fff;border-color:#0a8acc;" title="pHash-based fast scanner (experimental)">Scan V2 &#9889;</a>
+            <div class="table-actions">
+                <a href="/inventory/add-stock" class="btn-sm">Add Stock</a>
                 <a href="/inventory/scan/singles" class="btn-sm">Scan Singles</a>
                 <a href="/inventory/scan/slabs" class="btn-sm">Scan Slabs</a>
-                <a href="/inventory/scan" class="btn-sm">Barcode Lookup</a>
                 <a href="/inventory/labels{% if status_filter %}?status={{ status_filter }}{% endif %}" class="btn-sm">Print Labels</a>
             </div>
         </div>
@@ -178,6 +265,8 @@
                     <td>
                         {% if item.item_type == "slab" %}
                         <span class="badge badge-slab">Slab</span>
+                        {% elif item.item_type == "sealed" %}
+                        <span class="badge badge-sealed">Sealed</span>
                         {% else %}
                         <span class="badge badge-single">Single</span>
                         {% endif %}
@@ -187,7 +276,7 @@
                         {% if item.grading_company and item.grade %}
                             {{ item.grading_company }} {{ item.grade }}
                         {% elif item.condition %}
-                            {{ item.condition }}
+                            {% if item.variant %}{{ item.variant }} - {% endif %}{{ item.condition }}
                         {% else %}—{% endif %}
                     </td>
                     <td class="price-cell">{{ item.cost_basis | money }}</td>
@@ -202,7 +291,7 @@
                     <td><a href="/inventory/{{ item.id }}" class="btn-sm">View</a></td>
                 </tr>
                 {% else %}
-                <tr><td colspan="10" style="text-align:center;color: var(--lx-muted);padding:32px;">No items found.</td></tr>
+                <tr><td colspan="10"><div class="empty-state"><strong>No items found.</strong><span>Try a different filter or add stock.</span><a href="/inventory/add-stock" class="button primary-button" style="width:auto;">Add Stock</a></div></td></tr>
                 {% endfor %}
                 </tbody>
             </table>
