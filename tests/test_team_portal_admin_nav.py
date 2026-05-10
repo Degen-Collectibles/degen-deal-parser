@@ -180,7 +180,7 @@ class AdminSidebarVisibilityTests(unittest.TestCase):
         self.assertNotIn('href="/team/admin/invites"', html)
         self.assertNotIn('href="/team/admin/permissions"', html)
         self.assertNotIn('href="/team/admin/supply"', html)
-        self.assertIn('href="/inventory/scan?team_shell=1"', html)
+        self.assertIn('href="/inventory/add-stock"', html)
         self.assertIn('href="/tiktok/streamer?team_shell=1"', html)
         self.assertIn('href="/degen_eye?team_shell=1"', html)
         self.assertNotIn('href="/dashboard"', html)

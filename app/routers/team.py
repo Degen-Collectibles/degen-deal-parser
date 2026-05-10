@@ -740,7 +740,7 @@ def _nav_context(session: Session, user: User) -> dict:
     # Ops shortcuts are safe employee-facing tools and should sit apart from
     # HR/self-service links.
     ops_nav = [
-        {"name": "inventory", "href": "/inventory/scan?team_shell=1"},
+        {"name": "inventory", "label": "Add Stock", "href": "/inventory/add-stock"},
         {"name": "degen-eye", "href": "/degen_eye?team_shell=1"},
         {"name": "live-stream", "href": "/tiktok/streamer?team_shell=1"},
     ]
@@ -1520,7 +1520,7 @@ def team_tool_inventory(
     denial, user = _require_employee(request, session, resource_key="page.dashboard")
     if denial:
         return denial
-    return RedirectResponse("/inventory/scan?team_shell=1", status_code=303)
+    return RedirectResponse("/inventory/add-stock", status_code=303)
 
 
 @router.get("/team/tools/degen-eye")

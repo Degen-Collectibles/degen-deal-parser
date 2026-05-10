@@ -125,7 +125,7 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         self.assertIn('<div class="pt-side-group">Ops</div>', html)
         self.assertIn('href="/tiktok/streamer?team_shell=1"', html)
         self.assertIn('href="/degen_eye?team_shell=1"', html)
-        self.assertIn('href="/inventory/scan?team_shell=1"', html)
+        self.assertIn('href="/inventory/add-stock"', html)
 
     def test_admin_also_sees_tools_group(self):
         self._login_as("admin", user_id=202, username="adm1")
@@ -157,6 +157,28 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         r = self.client.get("/inventory/scan", follow_redirects=False)
         self.assertEqual(r.status_code, 200)
 
+    def test_employee_can_confirm_scanned_single_batch(self):
+        self._login_as("employee", user_id=221, username="emp21")
+        page = self.client.get("/inventory/add-stock", follow_redirects=False)
+        token = page.text.split("var token = ", 1)[1].split(";", 1)[0].strip().strip('"')
+        r = self.client.post(
+            "/inventory/batch/confirm",
+            headers={"X-CSRF-Token": token},
+            json=[
+                {
+                    "card_name": "Pikachu",
+                    "game": "Pokemon",
+                    "set_name": "Base Set",
+                    "card_number": "58/102",
+                    "variant": "Normal",
+                    "condition": "NM",
+                    "auto_price": 12.34,
+                }
+            ],
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["created"], 1)
+
     def test_employee_scan_shell_hides_inventory_admin_actions(self):
         self._login_as("employee", user_id=216, username="emp16")
         r = self.client.get("/inventory/scan?team_shell=1", follow_redirects=False)
@@ -167,8 +189,14 @@ class EmployeeOpsAccessTests(unittest.TestCase):
 
     # ---------- Pages that should STAY gated above employee ----------
 
-    def test_employee_blocked_from_inventory_list(self):
+    def test_employee_can_open_add_stock(self):
         self._login_as("employee", user_id=207, username="emp6")
+        r = self.client.get("/inventory/add-stock", follow_redirects=False)
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("Add Stock", r.text)
+
+    def test_employee_blocked_from_inventory_list(self):
+        self._login_as("employee", user_id=220, username="emp20")
         r = self.client.get("/inventory", follow_redirects=False)
         # 403 (forbidden HTML) is the explicit deny path; 303 (redirect to
         # login) would mean the login guard kicked in first. Either of those
