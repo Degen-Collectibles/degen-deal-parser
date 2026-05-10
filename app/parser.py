@@ -493,11 +493,16 @@ GRADE_WORDS = ("psa", "bgs", "sgc", "cgc", "grade")
 
 
 _APPLE_PAY_RE = re.compile(r'\bapple\s+pay\b|\bapplepay\b|\bappstd\b', re.I)
+_PAYPAL_RE = re.compile(r'\bpay\s*pal\b', re.I)
+_ZELLED_RE = re.compile(r'\bzelled\b', re.I)
 
 
 def _normalize_payment_tokens(text: str) -> str:
-    """Collapse multi-word / typo Apple Pay variants to the canonical token 'apple_pay'."""
-    return _APPLE_PAY_RE.sub('apple_pay', text)
+    """Collapse common payment variants to canonical one-word tokens."""
+    normalized = _APPLE_PAY_RE.sub('apple_pay', text)
+    normalized = _PAYPAL_RE.sub('paypal', normalized)
+    normalized = _ZELLED_RE.sub('zelle', normalized)
+    return normalized
 
 
 def normalize_payment_method(payment_method: str) -> str:
@@ -531,6 +536,7 @@ def _normalize_amount_text(text: str) -> str:
     # and other multi-group numbers.
     normalized = re.sub(r"(\d),(\d{3})\b", r"\1\2", text)
     normalized = re.sub(r"(\d),(\d{3})\b", r"\1\2", normalized)
+    normalized = re.sub(r"(?<=\d)\s*\$(?=\s|$)", "", normalized)
 
     def _expand(m: re.Match) -> str:
         num = float(m.group(1))
@@ -556,8 +562,7 @@ def extract_payment_segments(text: str) -> list[tuple[float, str]]:
         r"\b(cash|zelle|venmo|paypal|card|tap|cc|dc|apple_pay)\s*\$?\s*(\d+(?:\.\d{1,2})?)\b",
     ]
 
-    segments: list[tuple[float, str]] = []
-    seen: set[tuple[str, str]] = set()
+    candidate_segments: list[tuple[int, int, float, str]] = []
     for pattern in patterns:
         for match in re.finditer(pattern, lower, re.I):
             if match.group(1).replace(".", "", 1).isdigit():
@@ -566,11 +571,21 @@ def extract_payment_segments(text: str) -> list[tuple[float, str]]:
             else:
                 method = normalize_payment_method(match.group(1).lower())
                 amount = float(match.group(2))
-            key = (f"{amount:.2f}", method)
-            if key in seen:
-                continue
-            seen.add(key)
-            segments.append((amount, method))
+            start, end = match.span()
+            candidate_segments.append((start, end, amount, method))
+
+    segments: list[tuple[float, str]] = []
+    seen: set[tuple[str, str]] = set()
+    accepted_spans: list[tuple[int, int]] = []
+    for start, end, amount, method in sorted(candidate_segments, key=lambda item: (item[0], item[1])):
+        if any(start < accepted_end and end > accepted_start for accepted_start, accepted_end in accepted_spans):
+            continue
+        key = (f"{amount:.2f}", method)
+        if key in seen:
+            continue
+        seen.add(key)
+        accepted_spans.append((start, end))
+        segments.append((amount, method))
 
     return segments
 
@@ -821,21 +836,47 @@ def has_reimbursement_buy_signal(message_text: str) -> bool:
 
 
 def parse_by_rules(message_text: str, channel_name: str | None = None) -> Dict[str, Any] | None:
-    text = (message_text or "").strip()
+    raw_text = (message_text or "").strip()
 
-    stitched_hint = parse_stitched_rule_hint(text)
+    stitched_hint = parse_stitched_rule_hint(raw_text)
     if stitched_hint:
         return stitched_hint
+
+    text = normalize_message_part(raw_text).strip()
+    if not text:
+        return None
 
     trade_hint = parse_trade_hint(text)
     if trade_hint:
         return trade_hint
-    lower = _normalize_payment_tokens(text.lower())
+    lower = _normalize_payment_tokens(_normalize_amount_text(text.lower()))
 
     explicit_type = infer_explicit_buy_sell_type(text)
     payment_summary = extract_payment_summary(text)
     multi_payment = extract_multi_payment_summary(text)
     inferred_category = infer_category_from_text(text) or "unknown"
+    if (
+        payment_summary
+        and re.search(r"\bout\b", lower, re.I)
+        and re.search(r"\b(cash|zelle|venmo|paypal|card|apple_pay)\s+in\b", lower, re.I)
+        and not re.search(r"\btrade(?:d)?\b|\bplus\b|(^|\s)\+", lower, re.I)
+    ):
+        return {
+            "parsed_type": "sell",
+            "parsed_amount": payment_summary["amount"],
+            "parsed_payment_method": payment_summary["payment_method"],
+            "parsed_cash_direction": None,
+            "parsed_category": inferred_category,
+            "parsed_items": [],
+            "parsed_items_in": [],
+            "parsed_items_out": [],
+            "parsed_trade_summary": "",
+            "parsed_notes": "rule-based item-out payment-in sale flow",
+            "image_summary": "no image used",
+            "confidence": 0.9,
+            "needs_review": False,
+        }
+
     if explicit_type and payment_summary and not has_explicit_trade_signal(text):
         if payment_summary["payment_method"] == "mixed":
             breakdown = " + ".join(f"${amount:g} {method}" for amount, method in payment_summary["payment_breakdown"])
@@ -893,6 +934,55 @@ def parse_by_rules(message_text: str, channel_name: str | None = None) -> Dict[s
                 "confidence": 0.92,
                 "needs_review": False,
             }
+
+    payment_only_amount, payment_only_method = extract_payment_amount_method(text)
+    if payment_only_amount is not None and payment_only_method is not None:
+        default_type = "buy" if channel_defaults_to_buy(channel_name) else "sell"
+        return {
+            "parsed_type": default_type,
+            "parsed_amount": payment_only_amount,
+            "parsed_payment_method": payment_only_method,
+            "parsed_cash_direction": None,
+            "parsed_category": "unknown",
+            "parsed_items": [],
+            "parsed_items_in": [],
+            "parsed_items_out": [],
+            "parsed_trade_summary": "",
+            "parsed_notes": f"rule-based payment-only {default_type} default",
+            "image_summary": "no image used",
+            "confidence": 0.85,
+            "needs_review": False,
+        }
+
+    if (
+        payment_summary
+        and not explicit_type
+        and not has_explicit_trade_signal(text)
+        and not looks_like_internal_cash_transfer(text)
+    ):
+        default_type = "buy" if channel_defaults_to_buy(channel_name) else "sell"
+        if payment_summary["payment_method"] == "mixed":
+            breakdown = " + ".join(
+                f"${amount:g} {method}" for amount, method in payment_summary["payment_breakdown"]
+            )
+            notes = f"rule-based payment shorthand {default_type} default: {breakdown}"
+        else:
+            notes = f"rule-based payment shorthand {default_type} default"
+        return {
+            "parsed_type": default_type,
+            "parsed_amount": payment_summary["amount"],
+            "parsed_payment_method": payment_summary["payment_method"],
+            "parsed_cash_direction": None,
+            "parsed_category": inferred_category,
+            "parsed_items": [],
+            "parsed_items_in": [],
+            "parsed_items_out": [],
+            "parsed_trade_summary": "",
+            "parsed_notes": notes,
+            "image_summary": "no image used",
+            "confidence": 0.88,
+            "needs_review": False,
+        }
 
     amount_first_match = re.fullmatch(
         r"\$?\s*(\d+(?:\.\d{1,2})?)\s*(zelle|venmo|paypal|cash|card|tap|cc|dc|apple_pay)",
@@ -1003,7 +1093,7 @@ def has_transaction_signal(message_text: str) -> bool:
         return False
 
     transaction_patterns = [
-        r"\b(sold|sell|bought|buy|paid|trade|traded)\b",
+        r"\b(sold|sell|sale|bought|buy|bougjt|baught|paid|trade|traded)\b",
         r"\b(zelle|venmo|paypal|cash|tap|card|cc|dc|apple_pay)\b\s*\$?\d",
         r"\$?\d+(?:\.\d{1,2})?\s*\b(zelle|venmo|paypal|cash|tap|card|cc|dc|apple_pay)\b",
         r"\b(top|bottom|left|right)\b.*\b(in|out)\b",
@@ -1083,6 +1173,9 @@ def _detect_conversational_noise(lower: str, image_urls: List[str] | None = None
 
     if re.search(r"\bwrong\s+(chat|channel|image)\b", lower, re.I):
         return "ignored wrong-channel message"
+
+    if re.fullmatch(r"(?:texted|called|dm(?:ed)?|messaged)\s+\d{1,2}/\d{1,2}/\d{2,4}", lower, re.I):
+        return "ignored contact follow-up note"
 
     is_payment_word = bool(re.fullmatch(
         r"(zelle|venmo|paypal|cash|card|tap|cc|dc|apple_pay)", lower.strip(), re.I,
@@ -1236,7 +1329,9 @@ def has_explicit_buy_signal(message_text: str) -> bool:
     lower = (message_text or "").lower()
     if not lower:
         return False
-    return bool(re.search(r"\b(bought|buy|paid|sold us|bought from)\b", lower, re.I)) or has_reimbursement_buy_signal(lower)
+    return bool(
+        re.search(r"\b(bought|buy|bougjt|baught|paid|sold us|sold to us|customer sold|bought from)\b", lower, re.I)
+    ) or has_reimbursement_buy_signal(lower)
 
 
 def infer_explicit_buy_sell_type(message_text: str) -> str | None:
@@ -1244,19 +1339,19 @@ def infer_explicit_buy_sell_type(message_text: str) -> str | None:
     if not lower:
         return None
 
-    sell_patterns = [
-        r"\b(sold|sell|sold us|customer sold)\b",
-    ]
     buy_patterns = [
-        r"\b(bought|buy|paid|bought from|picked up|picked up from)\b",
+        r"\b(bought|buy|bougjt|baught|paid|bought from|picked up|picked up from|sold us|sold to us|customer sold)\b",
+    ]
+    sell_patterns = [
+        r"\b(sold|sell|sale|sold to)\b",
     ]
 
-    if any(re.search(pattern, lower, re.I) for pattern in sell_patterns):
-        return "sell"
     if has_reimbursement_buy_signal(lower):
         return "buy"
     if any(re.search(pattern, lower, re.I) for pattern in buy_patterns):
         return "buy"
+    if any(re.search(pattern, lower, re.I) for pattern in sell_patterns):
+        return "sell"
     return None
 
 
@@ -1514,6 +1609,7 @@ Interpret shorthand intelligently:
 - trade notes split across 2-3 messages
 
 Rules:
+- Return only valid JSON matching the requested fields. Do not include markdown or explanatory text outside JSON.
 - Infer the deal even if wording is shorthand or inconsistent.
 - If the sequence implies the store bought something, parsed_type should usually be "buy".
 - If the sequence implies the store sold something, parsed_type should usually be "sell".

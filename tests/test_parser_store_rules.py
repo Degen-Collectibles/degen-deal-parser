@@ -2,6 +2,8 @@ import unittest
 
 from app.financials import compute_financials
 from app.parser import (
+    detect_non_transaction_message,
+    build_prompt,
     has_transaction_signal,
     infer_explicit_buy_sell_type,
     looks_like_internal_cash_transfer,
@@ -29,6 +31,90 @@ class ParserStoreRulesTests(unittest.TestCase):
         self.assertIsNotNone(parsed)
         self.assertEqual(parsed["parsed_type"], "sell")
         self.assertIsNone(parsed["parsed_cash_direction"])
+
+    def test_worker_message_prefix_does_not_block_payment_only_default(self):
+        parsed = parse_by_rules("Message 1: 140 cash", channel_name="║store-buys")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["parsed_type"], "buy")
+        self.assertEqual(parsed["parsed_amount"], 140.0)
+        self.assertEqual(parsed["parsed_payment_method"], "cash")
+
+    def test_payment_shorthand_with_context_defaults_by_channel(self):
+        parsed = parse_by_rules(
+            "Message 1: 106 Zelle for Andrew employee discount",
+            channel_name="║store-sales-and-trades",
+        )
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["parsed_type"], "sell")
+        self.assertEqual(parsed["parsed_amount"], 106.0)
+        self.assertEqual(parsed["parsed_payment_method"], "zelle")
+        self.assertFalse(parsed["needs_review"])
+
+    def test_trailing_dollar_payment_shorthand(self):
+        parsed = parse_by_rules("Message 1: 623$ Zelle", channel_name="store-sales-and-trades")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["parsed_type"], "sell")
+        self.assertEqual(parsed["parsed_amount"], 623.0)
+        self.assertEqual(parsed["parsed_payment_method"], "zelle")
+
+    def test_multi_payment_shorthand_does_not_double_count_overlapping_tokens(self):
+        parsed = parse_by_rules("Message 1: 50$ cash 260 Zelle", channel_name="store-sales-and-trades")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["parsed_type"], "sell")
+        self.assertEqual(parsed["parsed_amount"], 310.0)
+        self.assertEqual(parsed["parsed_payment_method"], "mixed")
+
+        parsed = parse_by_rules("Message 1: cash 50 zelle 260", channel_name="store-sales-and-trades")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["parsed_amount"], 310.0)
+        self.assertEqual(parsed["parsed_payment_method"], "mixed")
+
+    def test_zelled_phrase_defaults_to_sale(self):
+        parsed = parse_by_rules("Message 1: my sister zelled 38", channel_name="store-sales-and-trades")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["parsed_type"], "sell")
+        self.assertEqual(parsed["parsed_amount"], 38.0)
+        self.assertEqual(parsed["parsed_payment_method"], "zelle")
+
+    def test_item_out_cash_in_flow_is_sale_not_failed_trade(self):
+        parsed = parse_by_rules(
+            "Message 1: Sealed out, 4750 cash in 95% (eBay comps last sold: 2,515, 1100, 600, 550)",
+            channel_name="║store-sales-and-trades",
+        )
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["parsed_type"], "sell")
+        self.assertEqual(parsed["parsed_amount"], 4750.0)
+        self.assertEqual(parsed["parsed_payment_method"], "cash")
+        self.assertEqual(parsed["parsed_category"], "sealed")
+
+    def test_bougjt_typo_counts_as_buy(self):
+        parsed = parse_by_rules("Message 1: Bougjt for 900 cash", channel_name="║store-buys")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["parsed_type"], "buy")
+        self.assertEqual(parsed["parsed_amount"], 900.0)
+        self.assertEqual(parsed["parsed_payment_method"], "cash")
+
+    def test_sold_us_counts_as_store_buy(self):
+        parsed = parse_by_rules("Message 1: guy came in sold us binder 300 zelle", channel_name="║store-buys")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["parsed_type"], "buy")
+        self.assertEqual(parsed["parsed_amount"], 300.0)
+        self.assertEqual(parsed["parsed_payment_method"], "zelle")
+
+    def test_contact_followup_date_is_ignored(self):
+        parsed = detect_non_transaction_message("TEXTED 5/8/26", image_urls=[])
+        self.assertIsNotNone(parsed)
+        self.assertTrue(parsed["ignore_message"])
+
+    def test_ai_prompt_mentions_json_for_openai_compatible_response_format(self):
+        prompt = build_prompt(
+            author_name="cashier",
+            message_text="Message 1: 125 Zelle",
+            rule_hint=None,
+            has_images=True,
+            channel_name="store-sales-and-trades",
+        )
+        self.assertIn("JSON", prompt)
 
     def test_owe_me_phrase_counts_as_buy_not_internal_transfer(self):
         message_text = "Gts distro 3183$ (owe me)"
