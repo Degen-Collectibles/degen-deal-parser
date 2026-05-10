@@ -61,6 +61,48 @@ def _send_telegram(text: str) -> None:
 # Public alert functions
 # ---------------------------------------------------------------------------
 
+def alert_supply_request(
+    *,
+    request_id: Optional[int],
+    employee_name: str = "",
+    employee_username: str = "",
+    title: str = "",
+    description: str = "",
+    urgency: str = "normal",
+) -> None:
+    """Alert when an employee submits a supply request."""
+    now = datetime.now(timezone.utc).strftime("%H:%M UTC")
+    employee = str(employee_name or "").strip() or str(employee_username or "").strip() or "Unknown employee"
+    username = str(employee_username or "").strip()
+    title_str = str(title or "").strip() or "Untitled request"
+    urgency_str = str(urgency or "normal").strip().lower() or "normal"
+    description_str = str(description or "").strip()
+    if len(description_str) > 700:
+        description_str = description_str[:697].rstrip() + "…"
+    request_part = f"\n🆔 Request: <code>{request_id}</code>" if request_id is not None else ""
+    username_part = f" (@{_esc(username)})" if username else ""
+    description_part = f"\n📝 {_esc(description_str)}" if description_str else ""
+
+    text = (
+        f"🧾 <b>New Supply Request</b>\n"
+        f"🕐 {now}\n"
+        f"👤 {_esc(employee)}{username_part}\n"
+        f"⚡ Urgency: <b>{_esc(urgency_str)}</b>\n"
+        f"📦 {_esc(title_str)}"
+        f"{description_part}"
+        f"{request_part}\n"
+        f'\n<a href="{_esc(_team_supply_queue_url())}">Open supply queue</a>'
+    )
+    _send_telegram(text)
+
+
+def _team_supply_queue_url() -> str:
+    base = _cfg("PUBLIC_BASE_URL", "").rstrip("/")
+    if not base:
+        return "https://ops.degencollectibles.com/team/admin/supply"
+    return f"{base}/team/admin/supply"
+
+
 def alert_reverse_order(
     tiktok_order_id: str,
     customer_name: str = "",

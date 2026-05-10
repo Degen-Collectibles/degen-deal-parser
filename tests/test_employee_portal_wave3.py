@@ -659,11 +659,12 @@ class SupplyAndPoliciesTests(unittest.TestCase, _PortalHarness):
     def test_supply_post_with_csrf_creates_row(self):
         uid = self._seed_employee(user_id=41, username="emp_sc")
         csrf = self._csrf()
-        r = self.client.post(
-            "/team/supply",
-            data={"title": "printer ink", "description": "", "urgency": "normal", "csrf_token": csrf},
-            follow_redirects=False,
-        )
+        with patch("app.routers.team.alert_supply_request") as alert_mock:
+            r = self.client.post(
+                "/team/supply",
+                data={"title": "printer ink", "description": "black cartridge", "urgency": "high", "csrf_token": csrf},
+                follow_redirects=False,
+            )
         self.assertEqual(r.status_code, 303)
         from app.models import SupplyRequest
 
@@ -672,6 +673,14 @@ class SupplyAndPoliciesTests(unittest.TestCase, _PortalHarness):
         ).all()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].title, "printer ink")
+        alert_mock.assert_called_once_with(
+            request_id=rows[0].id,
+            employee_name="emp_sc",
+            employee_username="emp_sc",
+            title="printer ink",
+            description="black cartridge",
+            urgency="high",
+        )
 
     def test_supply_page_explains_manager_review_and_no_auto_order(self):
         self._seed_employee(user_id=43, username="emp_supply_help")

@@ -76,6 +76,7 @@ from ..rate_limit import rate_limited_or_429
 from ..shared import app_home_for_role, templates
 from ..sms import mask_sms_phone, normalize_sms_phone, send_sms, sms_phone_fingerprint
 from ..team_notifications import EMPLOYEE_NOTIFICATION_ACTION
+from ..tiktok_alerts import alert_supply_request
 
 router = APIRouter()
 
@@ -2242,4 +2243,13 @@ async def team_supply_post(
     )
     session.add(row)
     session.commit()
+    session.refresh(row)
+    alert_supply_request(
+        request_id=row.id,
+        employee_name=user.display_name or user.username,
+        employee_username=user.username,
+        title=row.title,
+        description=row.description,
+        urgency=row.urgency,
+    )
     return RedirectResponse("/team/supply?flash=Request+submitted.", status_code=303)
