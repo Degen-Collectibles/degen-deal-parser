@@ -287,7 +287,7 @@ def choose_image_urls(urls: List[str], use_first_image_only: bool = True, max_im
 
 def parse_trade_hint(message_text: str) -> Dict[str, Any] | None:
     text = (message_text or "").strip()
-    lower = _normalize_payment_tokens(text.lower())
+    lower = _normalize_payment_tokens(_normalize_amount_text(text.lower()))
 
     if not lower:
         return None
@@ -308,6 +308,12 @@ def parse_trade_hint(message_text: str) -> Dict[str, Any] | None:
     if not payment_match:
         payment_match = re.search(
             r"\$\s*(\d+(?:\.\d{1,2})?)\s*(zelle|venmo|paypal|cash|card|tap|apple_pay)?",
+            lower,
+            re.I,
+        )
+    if not payment_match:
+        payment_match = re.search(
+            r"\b(\d+(?:\.\d{1,2})?)\s*(zelle|venmo|paypal|cash|card|tap|apple_pay)?\s*(?:on\s+top|top)\b",
             lower,
             re.I,
         )
@@ -633,6 +639,10 @@ def extract_unlabeled_amount(text: str) -> float | None:
 
 def extract_payment_summary(text: str) -> dict[str, Any] | None:
     segments = extract_payment_segments(text)
+    return summarize_payment_breakdown(segments)
+
+
+def summarize_payment_breakdown(segments: list[tuple[float, str]]) -> dict[str, Any] | None:
     if not segments:
         return None
 
@@ -690,8 +700,6 @@ def parse_stitched_rule_hint(message_text: str) -> Dict[str, Any] | None:
     explicit_type: str | None = None
     explicit_part: str | None = None
     trade_part: str | None = None
-    payment_amount: float | None = None
-    payment_method: str | None = None
     payment_breakdown: list[tuple[float, str]] = []
     payment_method_only: str | None = None
     saw_image_only_lead = bool(message_parts and has_no_text_placeholder(message_parts[0]))
@@ -710,12 +718,14 @@ def parse_stitched_rule_hint(message_text: str) -> Dict[str, Any] | None:
             explicit_part = normalized_part
 
         payment_summary = extract_payment_summary(normalized_part)
-        if payment_summary and payment_amount is None:
-            payment_amount = payment_summary["amount"]
-            payment_method = payment_summary["payment_method"]
-            payment_breakdown = payment_summary["payment_breakdown"]
+        if payment_summary:
+            payment_breakdown.extend(payment_summary["payment_breakdown"])
         elif is_payment_method_only_message_text(normalized_part) and payment_method_only is None:
             payment_method_only = normalize_payment_method(normalized_part.lower())
+
+    combined_payment = summarize_payment_breakdown(payment_breakdown)
+    payment_amount = combined_payment["amount"] if combined_payment else None
+    payment_method = combined_payment["payment_method"] if combined_payment else None
 
     if explicit_type and explicit_part and not any(has_explicit_trade_signal(part) for part in nonempty_parts):
         notes = "stitched explicit buy/sell override"
@@ -1319,8 +1329,7 @@ def has_explicit_trade_signal(message_text: str) -> bool:
         r"\bright\b.*\b(out|in)\b",
         r"\b(out)\b.*\b(in)\b",
         r"\b(in)\b.*\b(out)\b",
-        r"\bplus\b",
-        r"^\+\s*\$?\d+",
+        r"^\s*(?:plus|\+)\s*\$?\d+",
     ]
     return any(re.search(pattern, lower, re.I) for pattern in trade_patterns)
 

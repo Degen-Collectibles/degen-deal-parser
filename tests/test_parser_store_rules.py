@@ -69,6 +69,17 @@ class ParserStoreRulesTests(unittest.TestCase):
         self.assertEqual(parsed["parsed_amount"], 310.0)
         self.assertEqual(parsed["parsed_payment_method"], "mixed")
 
+    def test_stitched_multi_payment_fragments_are_summed(self):
+        parsed = parse_by_rules(
+            "Message 1: Sold singles\n\nMessage 2: 50 cash\n\nMessage 3: 260 zelle",
+            channel_name="store-sales-and-trades",
+        )
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["parsed_type"], "sell")
+        self.assertEqual(parsed["parsed_amount"], 310.0)
+        self.assertEqual(parsed["parsed_payment_method"], "mixed")
+        self.assertFalse(parsed["needs_review"])
+
     def test_zelled_phrase_defaults_to_sale(self):
         parsed = parse_by_rules("Message 1: my sister zelled 38", channel_name="store-sales-and-trades")
         self.assertIsNotNone(parsed)
@@ -86,6 +97,23 @@ class ParserStoreRulesTests(unittest.TestCase):
         self.assertEqual(parsed["parsed_amount"], 4750.0)
         self.assertEqual(parsed["parsed_payment_method"], "cash")
         self.assertEqual(parsed["parsed_category"], "sealed")
+
+    def test_plus_in_sale_text_does_not_force_trade_path(self):
+        parsed = parse_by_rules("Message 1: Sold box plus 50 cash", channel_name="store-sales-and-trades")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["parsed_type"], "sell")
+        self.assertEqual(parsed["parsed_amount"], 50.0)
+        self.assertEqual(parsed["parsed_payment_method"], "cash")
+
+    def test_trade_on_top_trailing_dollar_extracts_cash(self):
+        parsed = parse_by_rules(
+            "Message 1: Trade left out, right in with 40$ on top",
+            channel_name="store-sales-and-trades",
+        )
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["parsed_type"], "trade")
+        self.assertEqual(parsed["parsed_amount"], 40.0)
+        self.assertEqual(parsed["parsed_cash_direction"], "to_store")
 
     def test_bougjt_typo_counts_as_buy(self):
         parsed = parse_by_rules("Message 1: Bougjt for 900 cash", channel_name="║store-buys")
