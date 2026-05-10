@@ -225,6 +225,12 @@ SQLITE_ADDITIVE_MIGRATIONS = {
         "upc": "TEXT",
         "location": "TEXT",
     },
+    "bank_transactions": {
+        "expense_category": "TEXT DEFAULT 'uncategorized'",
+        "expense_subcategory": "TEXT",
+        "category_confidence": "TEXT DEFAULT 'low'",
+        "category_reason": "TEXT DEFAULT ''",
+    },
 }
 
 
@@ -300,6 +306,9 @@ SQLITE_INDEX_MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS idx_inventory_items_variant ON inventory_items (variant)",
     "CREATE INDEX IF NOT EXISTS idx_inventory_items_upc ON inventory_items (upc)",
     "CREATE INDEX IF NOT EXISTS idx_inventory_items_location ON inventory_items (location)",
+    "CREATE INDEX IF NOT EXISTS idx_bank_transactions_expense_category ON bank_transactions (expense_category)",
+    "CREATE INDEX IF NOT EXISTS idx_bank_transactions_expense_subcategory ON bank_transactions (expense_subcategory)",
+    "CREATE INDEX IF NOT EXISTS idx_bank_transactions_category_confidence ON bank_transactions (category_confidence)",
     "CREATE INDEX IF NOT EXISTS idx_inventory_stock_movements_item_id ON inventory_stock_movements (item_id)",
     "CREATE INDEX IF NOT EXISTS idx_inventory_stock_movements_reason ON inventory_stock_movements (reason)",
     "CREATE INDEX IF NOT EXISTS idx_inventory_stock_movements_location ON inventory_stock_movements (location)",
@@ -460,6 +469,12 @@ POSTGRES_ADDITIVE_MIGRATIONS = {
         "upc": "TEXT",
         "location": "TEXT",
     },
+    "bank_transactions": {
+        "expense_category": "TEXT DEFAULT 'uncategorized'",
+        "expense_subcategory": "TEXT",
+        "category_confidence": "TEXT DEFAULT 'low'",
+        "category_reason": "TEXT DEFAULT ''",
+    },
 }
 
 
@@ -535,6 +550,9 @@ POSTGRES_INDEX_MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS idx_inventory_items_variant ON inventory_items (variant)",
     "CREATE INDEX IF NOT EXISTS idx_inventory_items_upc ON inventory_items (upc)",
     "CREATE INDEX IF NOT EXISTS idx_inventory_items_location ON inventory_items (location)",
+    "CREATE INDEX IF NOT EXISTS idx_bank_transactions_expense_category ON bank_transactions (expense_category)",
+    "CREATE INDEX IF NOT EXISTS idx_bank_transactions_expense_subcategory ON bank_transactions (expense_subcategory)",
+    "CREATE INDEX IF NOT EXISTS idx_bank_transactions_category_confidence ON bank_transactions (category_confidence)",
     "CREATE INDEX IF NOT EXISTS idx_inventory_stock_movements_item_id ON inventory_stock_movements (item_id)",
     "CREATE INDEX IF NOT EXISTS idx_inventory_stock_movements_reason ON inventory_stock_movements (reason)",
     "CREATE INDEX IF NOT EXISTS idx_inventory_stock_movements_location ON inventory_stock_movements (location)",
@@ -975,6 +993,12 @@ DEFAULT_ROLE_PERMISSIONS: tuple[tuple[str, str, bool], ...] = tuple(
         ("page.announcements", (True, True, True, True, True)),
         ("page.timeoff", (True, True, True, True, True)),
         ("page.supply_requests", (True, False, True, True, True)),
+        ("ops.inventory.view", (True, True, True, True, True)),
+        ("ops.inventory.receive", (True, True, True, True, True)),
+        ("ops.live_hits.view", (True, True, True, True, True)),
+        ("ops.live_stream.view", (True, True, True, True, True)),
+        ("ops.degen_eye.view", (True, True, True, True, True)),
+        ("ops.buylist.view", (True, True, True, True, True)),
         ("page.admin.employees", (False, False, False, False, True)),
         ("page.admin.invites", (False, False, False, False, True)),
         ("page.admin.permissions", (False, False, False, False, True)),

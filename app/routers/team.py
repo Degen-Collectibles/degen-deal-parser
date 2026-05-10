@@ -739,14 +739,20 @@ def _nav_context(session: Session, user: User) -> dict:
         if has_permission(session, user, key, cache=cache):
             admin_nav.append({"name": name, "label": label, "href": href})
 
-    # Ops shortcuts are safe employee-facing tools and should sit apart from
-    # HR/self-service links.
-    ops_nav = [
-        {"name": "inventory", "label": "Add Stock", "href": "/inventory/add-stock"},
-        {"name": "buylist", "label": "Buylist", "href": "/team/buylist"},
-        {"name": "degen-eye", "href": "/degen_eye?team_shell=1"},
-        {"name": "live-stream", "href": "/tiktok/streamer?team_shell=1"},
-    ]
+    # Ops shortcuts are employee-facing tools. Keep them permission-filtered
+    # so the sidebar never advertises a page this user will hit a 403 on.
+    ops_keys = (
+        ("inventory", "Inventory", "ops.inventory.view", "/inventory"),
+        ("add-stock", "Add Stock", "ops.inventory.receive", "/inventory/add-stock"),
+        ("buylist", "Buylist", "ops.buylist.view", "/team/buylist"),
+        ("degen-eye", "Degen Eye", "ops.degen_eye.view", "/degen_eye?team_shell=1"),
+        ("live-stream", "Live Stream", "ops.live_stream.view", "/tiktok/streamer?team_shell=1"),
+        ("live-hits", "Live Hits", "ops.live_hits.view", "/hits"),
+    )
+    ops_nav = []
+    for name, label, key, href in ops_keys:
+        if has_permission(session, user, key, cache=cache):
+            ops_nav.append({"name": name, "label": label, "href": href})
 
     return {
         "nav_items": nav,

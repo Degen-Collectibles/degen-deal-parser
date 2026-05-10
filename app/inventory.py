@@ -30,7 +30,7 @@ from sqlmodel import Session, select, func
 # filter env and any {{ x | money }} in the template would 500.
 from .shared import templates as _templates
 
-from .auth import has_legacy_role, has_role
+from .auth import has_legacy_role, has_permission, has_role
 from .card_scanner import identify_card_from_image, lookup_card_image_and_price
 from .cert_lookup import lookup_cert
 from .pokemon_scanner import (
@@ -287,6 +287,30 @@ def _require_employee(request: Request) -> Optional[Response]:
     # employees to use on the buy counter. These routes show public market
     # prices and buy-offer calculators but NOT internal cost basis / margins.
     return _check_role(request, "employee")
+
+
+def _require_employee_permission(
+    request: Request,
+    resource_key: str,
+    session: Optional[Session] = None,
+) -> Optional[Response]:
+    if denial := _require_employee(request):
+        return denial
+    user = _current_user(request)
+    if not user:
+        next_path = request.url.path
+        return RedirectResponse(url=f"/login?next={next_path}", status_code=303)
+    try:
+        if session is not None:
+            allowed = has_permission(session, user, resource_key)
+        else:
+            with managed_session() as permission_session:
+                allowed = has_permission(permission_session, user, resource_key)
+    except Exception:
+        allowed = False
+    if not allowed:
+        return HTMLResponse("You do not have permission to view this page.", status_code=403)
+    return None
 
 
 def _require_reviewer(request: Request) -> Optional[Response]:
@@ -1647,7 +1671,7 @@ async def inventory_list(
     q: str = Query(default=""),
     page: int = Query(default=1, ge=1),
 ):
-    if denial := _require_viewer(request):
+    if denial := _require_employee_permission(request, "ops.inventory.view", session):
         return denial
 
     query = select(InventoryItem)
@@ -1732,9 +1756,9 @@ async def inventory_lookup(
 ):
     # Scanner barcode probe. Safe for employees — returns only whether a
     # barcode exists + its internal id, not cost basis or price. The returned
-    # redirect URL points at /inventory/{id} which is still viewer-gated, so
+    # redirect URL points at /inventory/{id} which still requires inventory view, so
     # employees scanning a known barcode won't accidentally see cost data.
-    if denial := _require_employee(request):
+    if denial := _require_employee_permission(request, "ops.inventory.view", session):
         return denial
     if not barcode:
         return JSONResponse({"found": False})
@@ -1765,7 +1789,7 @@ async def inventory_sealed_page(
     bulk_received: int = Query(default=0),
     bulk_units: int = Query(default=0),
 ):
-    if denial := _require_employee(request):
+    if denial := _require_employee_permission(request, "ops.inventory.receive", session):
         return denial
 
     return _templates.TemplateResponse(
@@ -1797,7 +1821,7 @@ async def inventory_sealed_bulk_preview(
     bulk_source: str = Form(default=""),
     bulk_notes: str = Form(default=""),
 ):
-    if denial := _require_employee(request):
+    if denial := _require_employee_permission(request, "ops.inventory.receive", session):
         return denial
 
     selected_game = _normalize_add_stock_game(game)
@@ -1823,7 +1847,7 @@ async def inventory_sealed_bulk_receive(
     request: Request,
     session: Session = Depends(get_session),
 ):
-    if denial := _require_employee(request):
+    if denial := _require_employee_permission(request, "ops.inventory.receive", session):
         return denial
 
     form = await request.form()
@@ -1889,7 +1913,7 @@ async def inventory_sealed_receive(
     source: str = Form(default=""),
     notes: str = Form(default=""),
 ):
-    if denial := _require_employee(request):
+    if denial := _require_employee_permission(request, "ops.inventory.receive", session):
         return denial
 
     selected_game = _normalize_add_stock_game(game)
@@ -1950,7 +1974,7 @@ async def inventory_singles_receive(
     source: str = Form(default="Manual Lookup"),
     notes: str = Form(default=""),
 ):
-    if denial := _require_employee(request):
+    if denial := _require_employee_permission(request, "ops.inventory.receive", session):
         return denial
 
     selected_game = _normalize_add_stock_game(game)
@@ -2017,8 +2041,8 @@ async def inventory_singles_receive(
 # ---------------------------------------------------------------------------
 
 @router.get("/inventory/scan", response_class=HTMLResponse)
-async def inventory_scan_page(request: Request):
-    if denial := _require_employee(request):
+async def inventory_scan_page(request: Request, session: Session = Depends(get_session)):
+    if denial := _require_employee_permission(request, "ops.degen_eye.view", session):
         return denial
     return _templates.TemplateResponse(
         request,
@@ -2041,7 +2065,7 @@ async def inventory_labels(
     ids: str = Query(default=""),
     status: str = Query(default=""),
 ):
-    if denial := _require_viewer(request):
+    if denial := _require_employee_permission(request, "ops.inventory.view", session):
         return denial
 
     items: list[InventoryItem] = []
@@ -2219,7 +2243,7 @@ async def inventory_item_detail(
     item_id: int,
     session: Session = Depends(get_session),
 ):
-    if denial := _require_viewer(request):
+    if denial := _require_employee_permission(request, "ops.inventory.view", session):
         return denial
 
     item = session.get(InventoryItem, item_id)
@@ -2431,7 +2455,7 @@ async def inventory_barcode_svg(
     item_id: int,
     session: Session = Depends(get_session),
 ):
-    if denial := _require_viewer(request):
+    if denial := _require_employee_permission(request, "ops.inventory.view", session):
         return denial
     item = session.get(InventoryItem, item_id)
     if not item:
@@ -2445,8 +2469,8 @@ async def inventory_barcode_svg(
 # ---------------------------------------------------------------------------
 
 @router.get("/inventory/scan/singles", response_class=HTMLResponse)
-async def inventory_scan_singles_page(request: Request):
-    if denial := _require_employee(request):
+async def inventory_scan_singles_page(request: Request, session: Session = Depends(get_session)):
+    if denial := _require_employee_permission(request, "ops.degen_eye.view", session):
         return denial
     return _templates.TemplateResponse(
         request,
@@ -2456,8 +2480,8 @@ async def inventory_scan_singles_page(request: Request):
 
 
 @router.get("/inventory/scan/slabs", response_class=HTMLResponse)
-async def inventory_scan_slabs_page(request: Request):
-    if denial := _require_employee(request):
+async def inventory_scan_slabs_page(request: Request, session: Session = Depends(get_session)):
+    if denial := _require_employee_permission(request, "ops.degen_eye.view", session):
         return denial
     return _templates.TemplateResponse(
         request,
@@ -2470,8 +2494,8 @@ async def inventory_scan_slabs_page(request: Request):
 
 
 @router.get("/inventory/scan/batch-review", response_class=HTMLResponse)
-async def inventory_batch_review_page(request: Request):
-    if denial := _require_employee(request):
+async def inventory_batch_review_page(request: Request, session: Session = Depends(get_session)):
+    if denial := _require_employee_permission(request, "ops.degen_eye.view", session):
         return denial
     return _templates.TemplateResponse(
         request,
@@ -2485,8 +2509,8 @@ async def inventory_batch_review_page(request: Request):
 # ---------------------------------------------------------------------------
 
 @router.get("/degen_eye", response_class=HTMLResponse)
-async def inventory_scan_pokemon_page(request: Request):
-    if denial := _require_employee(request):
+async def inventory_scan_pokemon_page(request: Request, session: Session = Depends(get_session)):
+    if denial := _require_employee_permission(request, "ops.degen_eye.view", session):
         return denial
     return _templates.TemplateResponse(
         request,
@@ -2500,23 +2524,23 @@ async def inventory_scan_pokemon_page(request: Request):
 
 
 @router.get("/degen_eye/categories")
-async def inventory_scan_categories(request: Request):
+async def inventory_scan_categories(request: Request, session: Session = Depends(get_session)):
     """Return TCGTracking categories with preferred ordering."""
-    if denial := _require_employee(request):
+    if denial := _require_employee_permission(request, "ops.degen_eye.view", session):
         return denial
     categories = await fetch_tcg_categories()
     return JSONResponse({"categories": categories})
 
 
 @router.post("/degen_eye/identify")
-async def inventory_scan_pokemon_identify(request: Request):
+async def inventory_scan_pokemon_identify(request: Request, session: Session = Depends(get_session)):
     """
     Run the full card scanning pipeline on a base64 image.
 
     Request body: {"image": "<base64 string>", "category_id": "3"}
     Response: ScanResult JSON with best_match, candidates, extracted_fields, debug.
     """
-    if denial := _require_employee(request):
+    if denial := _require_employee_permission(request, "ops.degen_eye.view", session):
         return denial
 
     try:
@@ -2544,7 +2568,7 @@ async def inventory_scan_pokemon_identify(request: Request):
 
 
 @router.post("/degen_eye/client_log")
-async def inventory_scan_pokemon_client_log(request: Request):
+async def inventory_scan_pokemon_client_log(request: Request, session: Session = Depends(get_session)):
     """Append a client-side error report for post-mortem analysis.
 
     Hardened against abuse:
@@ -2553,7 +2577,7 @@ async def inventory_scan_pokemon_client_log(request: Request):
     - log file rotation at 5 MB → .log.1 (1 generation kept)
     - disk errors return 500 (no silent failures)
     """
-    if denial := _require_employee(request):
+    if denial := _require_employee_permission(request, "ops.degen_eye.view", session):
         return denial
 
     # Cap payload before parsing JSON.
@@ -2616,9 +2640,9 @@ async def inventory_scan_pokemon_client_log(request: Request):
 
 
 @router.post("/degen_eye/text-search")
-async def inventory_scan_pokemon_text_search(request: Request):
+async def inventory_scan_pokemon_text_search(request: Request, session: Session = Depends(get_session)):
     """Search for cards by text query (name, set, number)."""
-    if denial := _require_employee(request):
+    if denial := _require_employee_permission(request, "ops.degen_eye.view", session):
         return denial
     try:
         body = await request.json()
@@ -2633,17 +2657,17 @@ async def inventory_scan_pokemon_text_search(request: Request):
 
 
 @router.get("/degen_eye/history")
-async def inventory_scan_pokemon_history(request: Request):
+async def inventory_scan_pokemon_history(request: Request, session: Session = Depends(get_session)):
     """Return recent scan results as JSON for debugging."""
-    if denial := _require_employee(request):
+    if denial := _require_employee_permission(request, "ops.degen_eye.view", session):
         return denial
     return JSONResponse(get_scan_history())
 
 
 @router.get("/degen_eye/validate/{scan_id}")
-async def inventory_scan_pokemon_validate(request: Request, scan_id: str):
+async def inventory_scan_pokemon_validate(request: Request, scan_id: str, session: Session = Depends(get_session)):
     """Poll for background OCR validation result."""
-    if denial := _require_employee(request):
+    if denial := _require_employee_permission(request, "ops.degen_eye.view", session):
         return denial
     result = get_validation_result(scan_id)
     if result is None:
@@ -2652,9 +2676,9 @@ async def inventory_scan_pokemon_validate(request: Request, scan_id: str):
 
 
 @router.get("/degen_eye/debug", response_class=HTMLResponse)
-async def inventory_scan_pokemon_debug_page(request: Request):
+async def inventory_scan_pokemon_debug_page(request: Request, session: Session = Depends(get_session)):
     """Live debug page showing recent scan history — open on desktop while scanning on phone."""
-    if denial := _require_employee(request):
+    if denial := _require_employee_permission(request, "ops.degen_eye.view", session):
         return denial
     return HTMLResponse("""<!DOCTYPE html>
 <html><head>
@@ -2725,8 +2749,8 @@ setInterval(function(){if(document.getElementById('autoRefresh').checked)loadHis
 # untouched — both scanners coexist under /degen_eye.
 
 @router.get("/degen_eye/v2", response_class=HTMLResponse)
-async def degen_eye_v2_page(request: Request):
-    if denial := _require_employee(request):
+async def degen_eye_v2_page(request: Request, session: Session = Depends(get_session)):
+    if denial := _require_employee_permission(request, "ops.degen_eye.view", session):
         return denial
     return _templates.TemplateResponse(
         request,
@@ -2740,14 +2764,14 @@ async def degen_eye_v2_page(request: Request):
 
 
 @router.post("/degen_eye/v2/scan")
-async def degen_eye_v2_scan(request: Request):
+async def degen_eye_v2_scan(request: Request, session: Session = Depends(get_session)):
     """Non-streaming v2 scan — accepts a base64 image, returns a full ScanResult.
 
     Request body: {"image": "<base64>", "category_id": "3"}
     Response shape mirrors v1's /degen_eye/identify so the existing batch
     UI helpers work without changes.
     """
-    if denial := _require_employee(request):
+    if denial := _require_employee_permission(request, "ops.degen_eye.view", session):
         return denial
     try:
         body = await request.json()
@@ -2778,7 +2802,7 @@ async def degen_eye_v2_scan(request: Request):
 
 
 @router.post("/degen_eye/v2/scan-init")
-async def degen_eye_v2_scan_init(request: Request):
+async def degen_eye_v2_scan_init(request: Request, session: Session = Depends(get_session)):
     """Prepare a streaming scan and return a ``scan_id`` to connect via SSE.
 
     We stash the uploaded image in a short-lived file keyed by scan_id; the
@@ -2786,7 +2810,7 @@ async def degen_eye_v2_scan_init(request: Request):
     URL query-string small and works when scan-init and scan-stream land on
     different web workers.
     """
-    if denial := _require_employee(request):
+    if denial := _require_employee_permission(request, "ops.degen_eye.view", session):
         return denial
     try:
         body = await request.json()
@@ -2944,13 +2968,17 @@ def _count_v2_pending_scans() -> int:
 
 
 @router.get("/degen_eye/v2/scan-stream")
-async def degen_eye_v2_scan_stream(request: Request, scan_id: str):
+async def degen_eye_v2_scan_stream(
+    request: Request,
+    scan_id: str,
+    session: Session = Depends(get_session),
+):
     """Server-Sent Events stream of a v2 scan's progressive results.
 
     Events emitted in order: detected, identified, price, variants, done.
     ``event: error`` is emitted on unrecoverable failures before done.
     """
-    if denial := _require_employee(request):
+    if denial := _require_employee_permission(request, "ops.degen_eye.view", session):
         return denial
 
     pending = _claim_v2_pending_scan(scan_id)
@@ -2997,7 +3025,7 @@ async def degen_eye_v2_scan_stream(request: Request, scan_id: str):
 
 
 @router.post("/degen_eye/v2/detect-only")
-async def degen_eye_v2_detect_only(request: Request):
+async def degen_eye_v2_detect_only(request: Request, session: Session = Depends(get_session)):
     """Fast card-edge detection endpoint used by Phase B auto-capture.
 
     Accepts a small thumbnail image (~400px JPEG base64) and runs ONLY the
@@ -3015,7 +3043,7 @@ async def degen_eye_v2_detect_only(request: Request):
             "elapsed_ms": float,
         }
     """
-    if denial := _require_employee(request):
+    if denial := _require_employee_permission(request, "ops.degen_eye.view", session):
         return denial
     import base64 as _b64
     import time as _time
@@ -3045,9 +3073,9 @@ async def degen_eye_v2_detect_only(request: Request):
 
 
 @router.get("/degen_eye/v2/stats")
-async def degen_eye_v2_stats(request: Request):
+async def degen_eye_v2_stats(request: Request, session: Session = Depends(get_session)):
     """Admin-ish JSON: index size, last build, cache warm state."""
-    if denial := _require_employee(request):
+    if denial := _require_employee_permission(request, "ops.degen_eye.view", session):
         return denial
     return JSONResponse({
         "phash_index": phash_index_stats(),
@@ -3099,19 +3127,19 @@ async def degen_eye_v2_train_captures(request: Request):
 
 
 @router.get("/degen_eye/v2/history")
-async def degen_eye_v2_history(request: Request):
+async def degen_eye_v2_history(request: Request, session: Session = Depends(get_session)):
     """v2-only scan history. Separate from v1's /degen_eye/history so v2
     debugging doesn't pollute the v1 ops log and vice versa."""
-    if denial := _require_employee(request):
+    if denial := _require_employee_permission(request, "ops.degen_eye.view", session):
         return denial
     return JSONResponse(get_v2_scan_history())
 
 
 @router.get("/degen_eye/v2/debug", response_class=HTMLResponse)
-async def degen_eye_v2_debug_page(request: Request):
+async def degen_eye_v2_debug_page(request: Request, session: Session = Depends(get_session)):
     """Live debug page for v2 scans only. Mirrors v1's /degen_eye/debug UX
     but points at /degen_eye/v2/history so only v2 entries show up."""
-    if denial := _require_employee(request):
+    if denial := _require_employee_permission(request, "ops.degen_eye.view", session):
         return denial
     return HTMLResponse("""<!DOCTYPE html>
 <html><head>
@@ -3236,7 +3264,7 @@ async def degen_eye_v2_reload_index(request: Request):
 # ---------------------------------------------------------------------------
 
 @router.post("/inventory/scan/identify")
-async def inventory_scan_identify(request: Request):
+async def inventory_scan_identify(request: Request, session: Session = Depends(get_session)):
     """
     Accept a base64-encoded card image, run AI identification, then fetch
     the stock image + market price from Scryfall / Pokemon TCG API.
@@ -3244,7 +3272,7 @@ async def inventory_scan_identify(request: Request):
     Request body: {"image": "<base64 string>"}
     Response: card info + image_url + market_price
     """
-    if denial := _require_employee(request):
+    if denial := _require_employee_permission(request, "ops.degen_eye.view", session):
         return denial
 
     try:
@@ -3300,14 +3328,14 @@ async def inventory_scan_identify(request: Request):
 # ---------------------------------------------------------------------------
 
 @router.post("/inventory/scan/cert")
-async def inventory_scan_cert(request: Request):
+async def inventory_scan_cert(request: Request, session: Session = Depends(get_session)):
     """
     Look up a graded slab by certificate number.
 
     Request body: {"cert_number": "...", "grading_company": "PSA"|"BGS"|"CGC"|"SGC"}
     Response: card details + last_solds + suggested_price
     """
-    if denial := _require_employee(request):
+    if denial := _require_employee_permission(request, "ops.degen_eye.view", session):
         return denial
 
     try:
@@ -3362,7 +3390,7 @@ async def inventory_batch_confirm(
 
     Response: {"created": N, "items": [{"id": ..., "barcode": ..., "card_name": ...}]}
     """
-    if denial := _require_employee(request):
+    if denial := _require_employee_permission(request, "ops.inventory.receive", session):
         return denial
 
     try:

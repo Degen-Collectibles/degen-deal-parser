@@ -90,6 +90,7 @@
 <body>
 <div class="page">
     {% include "_linear_sidebar.html" %}
+    {% set can_manage_inventory = current_user and current_user.role in ["admin", "reviewer"] %}
 
     <a href="/inventory" class="back-link">← Back to Inventory</a>
 
@@ -136,15 +137,19 @@
                 <div><div class="price-label">Effective Price</div><div class="price-val price-none">Not priced</div></div>
                 {% endif %}
             </div>
-            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px;">
+            <div style="display:grid;grid-template-columns:repeat({{ 3 if can_manage_inventory else 2 }},1fr);gap:12px;margin-bottom:16px;">
                 <div><div class="price-label">Auto Price</div><div class="price-val">{% if item.auto_price is not none %}${{ "%.2f"|format(item.auto_price) }}{% else %}<span class="price-none">—</span>{% endif %}</div></div>
                 <div><div class="price-label">List Price</div><div class="price-val">{% if item.list_price is not none %}${{ "%.2f"|format(item.list_price) }}{% else %}<span class="price-none">—</span>{% endif %}</div></div>
+                {% if can_manage_inventory %}
                 <div><div class="price-label">Cost Basis</div><div class="price-val">{% if item.cost_basis is not none %}${{ "%.2f"|format(item.cost_basis) }}{% else %}<span class="price-none">—</span>{% endif %}</div></div>
+                {% endif %}
             </div>
             {% if item.last_priced_at %}<p style="font-size:12px;margin:0 0 12px;">Last priced: {{ item.last_priced_at.strftime("%b %d, %Y %H:%M") }} UTC</p>{% endif %}
+            {% if can_manage_inventory %}
             <form method="post" action="/inventory/{{ item.id }}/reprice" style="display:inline;">
                 <button type="submit" class="secondary-button">Refresh Price</button>
             </form>
+            {% endif %}
 
             {% if price_history %}
             <hr style="border:none;border-top:1px solid var(--line);margin:16px 0;">
@@ -166,6 +171,7 @@
             {% endif %}
         </div>
 
+        {% if can_manage_inventory %}
         <!-- Shopify card -->
         <div class="card">
             <h2 class="section-divider">Shopify</h2>
@@ -195,13 +201,14 @@
             </div>
             {% endif %}
         </div>
+        {% endif %}
     </div>
 
     {% if stock_movements %}
     <div class="card">
         <h2 class="section-divider">Stock Activity</h2>
         <table class="history-table">
-            <thead><tr><th>Date</th><th>Reason</th><th>Qty</th><th>After</th><th>Unit Cost</th><th>Location</th><th>Source</th><th>By</th></tr></thead>
+            <thead><tr><th>Date</th><th>Reason</th><th>Qty</th><th>After</th>{% if can_manage_inventory %}<th>Unit Cost</th>{% endif %}<th>Location</th><th>Source</th><th>By</th></tr></thead>
             <tbody>
             {% for row in stock_movements %}
             <tr>
@@ -209,7 +216,7 @@
                 <td>{{ row.reason.replace("_"," ").title() }}</td>
                 <td>{% if row.quantity_delta > 0 %}+{% endif %}{{ row.quantity_delta }}</td>
                 <td>{{ row.quantity_after }}</td>
-                <td>{{ row.unit_cost | money }}</td>
+                {% if can_manage_inventory %}<td>{{ row.unit_cost | money }}</td>{% endif %}
                 <td>{{ row.location or "" }}</td>
                 <td>{{ row.source or "" }}</td>
                 <td>{{ row.created_by or "" }}</td>
@@ -221,6 +228,7 @@
     {% endif %}
 
     <!-- Edit form -->
+    {% if can_manage_inventory %}
     <div class="card">
         <h2 class="section-divider">Edit Item</h2>
         <form method="post" action="/inventory/{{ item.id }}/edit">
@@ -281,6 +289,7 @@
             </div>
         </form>
     </div>
+    {% endif %}
 </div>
     {% include '_mobile_bottom_nav.html' %}
 {% include "_csrf_bootstrap.html" %}

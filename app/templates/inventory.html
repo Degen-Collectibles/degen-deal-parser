@@ -250,7 +250,7 @@
                         <th>Type</th>
                         <th>Set</th>
                         <th>Grade / Cond</th>
-                        <th>Cost</th>
+                        {% if can_manage_inventory %}<th>Cost</th>{% endif %}
                         <th>Price</th>
                         <th>Status</th>
                         <th>Actions</th>
@@ -279,7 +279,7 @@
                             {% if item.variant %}{{ item.variant }} - {% endif %}{{ item.condition }}
                         {% else %}—{% endif %}
                     </td>
-                    <td class="price-cell">{{ item.cost_basis | money }}</td>
+                    {% if can_manage_inventory %}<td class="price-cell">{{ item.cost_basis | money }}</td>{% endif %}
                     <td class="price-cell">
                         {% set ep = effective_price(item) %}
                         {% if ep is not none %}{{ ep | money }}{% if item.list_price is not none %}<span style="font-size:10px;color: var(--lx-muted);margin-left:3px;">manual</span>{% endif %}
@@ -291,7 +291,7 @@
                     <td><a href="/inventory/{{ item.id }}" class="btn-sm">View</a></td>
                 </tr>
                 {% else %}
-                <tr><td colspan="10"><div class="empty-state"><strong>No items found.</strong><span>Try a different filter or add stock.</span><a href="/inventory/add-stock" class="button primary-button" style="width:auto;">Add Stock</a></div></td></tr>
+                <tr><td colspan="{{ 10 if can_manage_inventory else 9 }}"><div class="empty-state"><strong>No items found.</strong><span>Try a different filter or add stock.</span><a href="/inventory/add-stock" class="button primary-button" style="width:auto;">Add Stock</a></div></td></tr>
                 {% endfor %}
                 </tbody>
             </table>

@@ -9,7 +9,8 @@
             <line x1="3" y1="18" x2="21" y2="18"/>
         </svg>
     </button>
-    <a href="/dashboard" class="linear-mobile-brand" aria-label="Degen dashboard">
+    {% set _lt_role = current_user.role if current_user else "viewer" %}
+    <a href="{% if _lt_role in ['reviewer', 'admin'] %}/dashboard{% else %}/team/{% endif %}" class="linear-mobile-brand" aria-label="Degen dashboard">
         <img class="linear-sidebar-logo" src="/static/degen-logo.png" alt="">
         <span class="linear-sidebar-brand-text">Degen</span>
     </a>

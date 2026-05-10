@@ -1,10 +1,15 @@
 {% set _mbn_path = request.url.path %}
+{% set _mbn_role = current_user.role if current_user else "viewer" %}
+{% set _mbn_is_ops = _mbn_role in ("reviewer", "admin") %}
 {% set _mbn_dashboard = _mbn_path == "/dashboard" %}
 {% set _mbn_streamer = _mbn_path.startswith("/tiktok/streamer") %}
 {% set _mbn_eye = _mbn_path.startswith("/degen_eye") %}
+{% set _mbn_inventory = _mbn_path.startswith("/inventory") %}
+{% set _mbn_hits = _mbn_path.startswith("/hits") %}
 {% set _mbn_deals = _mbn_path.startswith("/deals") %}
 {% set _mbn_review = _mbn_path.startswith("/review") %}
 <nav class="mobile-bottom-nav" aria-label="Primary">
+    {% if _mbn_is_ops %}
     <a href="/dashboard" class="mbn-item{% if _mbn_dashboard %} is-active{% endif %}" aria-label="Dashboard">
         <svg class="mbn-icon" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
             <rect x="3" y="3" width="7" height="9"></rect>
@@ -14,6 +19,17 @@
         </svg>
         <span class="mbn-label">Dashboard</span>
     </a>
+    {% else %}
+    <a href="/team/" class="mbn-item{% if _mbn_path.startswith('/team') %} is-active{% endif %}" aria-label="Team">
+        <svg class="mbn-icon" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+            <circle cx="9" cy="7" r="4"></circle>
+            <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+            <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+        </svg>
+        <span class="mbn-label">Team</span>
+    </a>
+    {% endif %}
     <a href="/tiktok/streamer" class="mbn-item{% if _mbn_streamer %} is-active{% endif %}" aria-label="Streamer">
         <svg class="mbn-icon" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
             <path d="m22 8-6 4 6 4V8Z"></path>
@@ -31,6 +47,7 @@
         </span>
         <span class="mbn-label">Eye</span>
     </a>
+    {% if _mbn_is_ops %}
     <a href="/deals" class="mbn-item{% if _mbn_deals %} is-active{% endif %}" aria-label="Deals">
         <svg class="mbn-icon" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
             <path d="M20.59 13.41 13.42 20.58a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82Z"></path>
@@ -45,4 +62,19 @@
         </svg>
         <span class="mbn-label">Review</span>
     </a>
+    {% else %}
+    <a href="/inventory" class="mbn-item{% if _mbn_inventory %} is-active{% endif %}" aria-label="Inventory">
+        <svg class="mbn-icon" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <path d="M21 16V8l-9-5-9 5v8l9 5 9-5z"></path>
+            <path d="M3.3 7 12 12l8.7-5M12 22V12"></path>
+        </svg>
+        <span class="mbn-label">Inventory</span>
+    </a>
+    <a href="/hits" class="mbn-item{% if _mbn_hits %} is-active{% endif %}" aria-label="Live Hits">
+        <svg class="mbn-icon" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+        </svg>
+        <span class="mbn-label">Hits</span>
+    </a>
+    {% endif %}
 </nav>

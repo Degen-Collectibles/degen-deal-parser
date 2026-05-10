@@ -10,7 +10,12 @@
    run `_nav_context()` still render a usable nav.
    ===================================================================== #}
 {% set _tools = tools_nav_items|default([]) %}
-{% set _has_tools = current_user and _tools and _tools|length > 0 %}
+{% set _tool_flags = namespace(stream=false, eye=false) %}
+{% for item in _tools %}
+    {% if item.name == "live-stream" %}{% set _tool_flags.stream = true %}{% endif %}
+    {% if item.name == "degen-eye" %}{% set _tool_flags.eye = true %}{% endif %}
+{% endfor %}
+{% set _has_primary_tools = current_user and _tool_flags.stream and _tool_flags.eye %}
 {% set _path = request.url.path %}
 {% set _sched_href = schedule_href|default('/team/schedule') %}
 <nav class="pt-mobile-bottom-nav" id="pt-mobile-bottom-nav" aria-label="Primary">
@@ -22,7 +27,7 @@
         </svg>
         <span class="pt-mbn-label">Home</span>
     </a>
-    {% if _has_tools %}
+    {% if _has_primary_tools %}
     <a href="/tiktok/streamer?team_shell=1"
        class="pt-mbn-item{% if _path.startswith('/team/tools/live-stream') or _path.startswith('/tiktok/streamer') %} is-active{% endif %}"
        aria-label="Live stream">

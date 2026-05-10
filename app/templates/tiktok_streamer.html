@@ -1654,6 +1654,8 @@
                                 {% set _is_admin_like = current_user and current_user.role in ("reviewer", "admin") %}
                                 <div class="nav-dropdown-label">Workspace</div>
                                 <a href="/team/">Team Portal</a>
+                                <a href="/inventory">Inventory</a>
+                                <a href="/hits">Live Hits</a>
                                 <a href="{% if team_shell %}/degen_eye?team_shell=1{% else %}/degen_eye{% endif %}">Degen Eye</a>
                                 {% if _is_ops %}
                                 <a href="/dashboard">Dashboard</a>
@@ -1663,7 +1665,6 @@
                                 <a href="/bookkeeping">Bookkeeping</a>
                                 <a href="/review">Review</a>
                                 <a href="/deals">Deals</a>
-                                <a href="/hits">Live Hits</a>
                                 <a href="/stream-manager">Stream Manager</a>
                                 <div class="nav-dropdown-label">TikTok</div>
                                 <a href="/tiktok/analytics">Stream Analytics</a>

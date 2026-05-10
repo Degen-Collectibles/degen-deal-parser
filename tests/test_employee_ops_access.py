@@ -2,11 +2,13 @@
 
 Employees should be able to:
   - Use Degen Eye (`/degen_eye`) and the camera scanner (`/inventory/scan*`).
+  - Search inventory (`/inventory`) through a limited shop-floor view that
+    hides cost basis and manager-only edit/Shopify actions.
+  - Use live hits (`/hits`) to log and review stream hits.
   - Open the TikTok live-stream dashboard (`/tiktok/streamer`) so they can
     chase GMV goals during a live. TikTok numbers are explicitly visible.
 
 Employees must NOT be able to:
-  - Hit the inventory list (`/inventory`) or item detail (shows cost basis).
   - Hit the ops dashboard, reports, bookkeeping, or admin surfaces.
 
 The portal sidebar should expose an "Ops" group with Live Stream + Degen Eye
@@ -123,15 +125,19 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         html = r.text
         self.assertIn('<div class="pt-side-group">Ops</div>', html)
+        self.assertIn('href="/inventory"', html)
         self.assertIn('href="/tiktok/streamer?team_shell=1"', html)
+        self.assertIn('href="/hits"', html)
         self.assertIn('href="/degen_eye?team_shell=1"', html)
         self.assertIn('href="/inventory/add-stock"', html)
 
     def test_admin_also_sees_tools_group(self):
         self._login_as("admin", user_id=202, username="adm1")
         html = self.client.get("/team/", follow_redirects=False).text
+        self.assertIn('href="/inventory"', html)
         self.assertIn('<div class="pt-side-group">Ops</div>', html)
         self.assertIn('href="/tiktok/streamer?team_shell=1"', html)
+        self.assertIn('href="/hits"', html)
         self.assertIn('href="/degen_eye?team_shell=1"', html)
 
     # ---------- Degen Eye + scanner access ----------
@@ -195,15 +201,53 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertIn("Add Stock", r.text)
 
-    def test_employee_blocked_from_inventory_list(self):
+    def test_employee_can_open_limited_inventory_list(self):
         self._login_as("employee", user_id=220, username="emp20")
+        from app.models import InventoryItem
+
+        self.session.add(
+            InventoryItem(
+                barcode="DGN-EMPINV1",
+                item_type="sealed",
+                game="Pokemon",
+                card_name="Employee Visible ETB",
+                set_name="Test Set",
+                cost_basis=12.34,
+                auto_price=49.99,
+            )
+        )
+        self.session.commit()
         r = self.client.get("/inventory", follow_redirects=False)
-        # 403 (forbidden HTML) is the explicit deny path; 303 (redirect to
-        # login) would mean the login guard kicked in first. Either of those
-        # is fine as long as it is NOT a 200 (i.e. employees never see the
-        # cost-basis list).
-        self.assertNotEqual(r.status_code, 200,
-                            "employee must not see the inventory list (cost basis visible)")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("Employee Visible ETB", r.text)
+        self.assertIn("$49.99", r.text)
+        self.assertNotIn("<th>Cost</th>", r.text)
+        self.assertNotIn("$12.34", r.text)
+
+    def test_employee_inventory_detail_hides_manager_fields(self):
+        self._login_as("employee", user_id=222, username="emp22")
+        from app.models import InventoryItem
+
+        item = InventoryItem(
+            barcode="DGN-EMPINV2",
+            item_type="sealed",
+            game="Pokemon",
+            card_name="Employee Detail ETB",
+            set_name="Test Set",
+            cost_basis=23.45,
+            auto_price=59.99,
+        )
+        self.session.add(item)
+        self.session.commit()
+        self.session.refresh(item)
+
+        r = self.client.get(f"/inventory/{item.id}", follow_redirects=False)
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("Employee Detail ETB", r.text)
+        self.assertIn("$59.99", r.text)
+        self.assertNotIn("Cost Basis", r.text)
+        self.assertNotIn("Save Changes", r.text)
+        self.assertNotIn("Push to Shopify", r.text)
 
     def test_portal_viewer_blocked_from_legacy_reports(self):
         self._login_as("viewer", user_id=217, username="viewer1")
@@ -255,6 +299,61 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         self._login_as("employee", user_id=208, username="emp7")
         r = self.client.get("/tiktok/streamer", follow_redirects=False)
         self.assertEqual(r.status_code, 200, f"streamer denied: {r.status_code}")
+
+    def test_employee_can_open_live_hits(self):
+        self._login_as("employee", user_id=223, username="emp23")
+        r = self.client.get("/hits", follow_redirects=False)
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("Live Hits", r.text)
+        self.assertIn('href="/team/"', r.text)
+        self.assertNotIn('href="/dashboard"', r.text)
+        self.assertNotIn('href="/reports"', r.text)
+        self.assertNotIn('href="/bookkeeping"', r.text)
+
+    def test_employee_ops_permissions_gate_direct_urls(self):
+        self._login_as("employee", user_id=224, username="emp24")
+        from app.models import RolePermission
+        from sqlmodel import select
+
+        disabled_keys = (
+            "ops.inventory.view",
+            "ops.inventory.receive",
+            "ops.live_hits.view",
+            "ops.live_stream.view",
+            "ops.degen_eye.view",
+        )
+        for key in disabled_keys:
+            permission = self.session.exec(
+                select(RolePermission).where(
+                    RolePermission.role == "employee",
+                    RolePermission.resource_key == key,
+                )
+            ).first()
+            self.assertIsNotNone(permission, f"missing seeded permission: {key}")
+            permission.is_allowed = False
+            self.session.add(permission)
+        self.session.commit()
+
+        portal = self.client.get("/team/", follow_redirects=False)
+        self.assertEqual(portal.status_code, 200)
+        for hidden_link in (
+            'href="/inventory"',
+            'href="/inventory/add-stock"',
+            'href="/hits"',
+            'href="/tiktok/streamer?team_shell=1"',
+            'href="/degen_eye?team_shell=1"',
+        ):
+            self.assertNotIn(hidden_link, portal.text)
+
+        for url in (
+            "/inventory",
+            "/inventory/add-stock",
+            "/hits",
+            "/tiktok/streamer",
+            "/degen_eye",
+        ):
+            r = self.client.get(url, follow_redirects=False)
+            self.assertEqual(r.status_code, 403, f"{url} should honor ops permissions")
 
     def test_streamer_dashboard_hides_ops_links_for_employees(self):
         self._login_as("employee", user_id=209, username="emp8")

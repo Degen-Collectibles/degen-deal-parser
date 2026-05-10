@@ -15,10 +15,11 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from sqlalchemy import or_
 from sqlmodel import Session, select
 
+from ..auth import has_permission
 from ..config import get_settings
 from ..csrf import CSRFProtectedRoute
 from ..shared import *  # noqa: F401,F403 -- shared helpers, constants, state
-from ..db import get_session
+from ..db import get_session, managed_session
 
 router = APIRouter(route_class=CSRFProtectedRoute)
 
@@ -103,6 +104,25 @@ def _hit_to_dict(h: LiveHit) -> dict:
     }
 
 
+def _require_live_hits(request: Request, session: Optional[Session] = None):
+    if denial := require_role_response(request, "employee"):
+        return denial
+    user = getattr(request.state, "current_user", None) or get_request_user(request)
+    if not user:
+        return redirect_to_login(request)
+    try:
+        if session is not None:
+            allowed = has_permission(session, user, "ops.live_hits.view")
+        else:
+            with managed_session() as permission_session:
+                allowed = has_permission(permission_session, user, "ops.live_hits.view")
+    except Exception:
+        allowed = False
+    if not allowed:
+        return HTMLResponse("You do not have permission to view this page.", status_code=403)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -120,7 +140,7 @@ def hits_list_page(
     limit: int = Query(default=25, ge=1, le=100),
     session: Session = Depends(get_session),
 ):
-    if denial := require_role_response(request, "viewer"):
+    if denial := _require_live_hits(request, session):
         return denial
 
     after_dt: Optional[datetime] = None
@@ -189,7 +209,7 @@ def hits_new_page(
     last_streamer: Optional[str] = Query(default=None),
     session: Session = Depends(get_session),
 ):
-    if denial := require_role_response(request, "viewer"):
+    if denial := _require_live_hits(request, session):
         return denial
 
     recent = session.exec(
@@ -229,7 +249,7 @@ def hits_new_submit(
     image_filename: Optional[str] = Form(default=None),
     session: Session = Depends(get_session),
 ):
-    if denial := require_role_response(request, "viewer"):
+    if denial := _require_live_hits(request, session):
         return denial
 
     img_fn = (image_filename or "").strip() or None
@@ -265,7 +285,7 @@ def hits_edit_page(
     hit_id: int,
     session: Session = Depends(get_session),
 ):
-    if denial := require_role_response(request, "viewer"):
+    if denial := _require_live_hits(request, session):
         return denial
 
     hit = session.get(LiveHit, hit_id)
@@ -300,7 +320,7 @@ def hits_edit_submit(
     image_filename: Optional[str] = Form(default=None),
     session: Session = Depends(get_session),
 ):
-    if denial := require_role_response(request, "viewer"):
+    if denial := _require_live_hits(request, session):
         return denial
 
     hit = session.get(LiveHit, hit_id)
@@ -337,7 +357,7 @@ def hits_delete(
     hit_id: int,
     session: Session = Depends(get_session),
 ):
-    if denial := require_role_response(request, "viewer"):
+    if denial := _require_live_hits(request, session):
         return denial
 
     hit = session.get(LiveHit, hit_id)
@@ -361,7 +381,7 @@ def hits_export_csv(
     min_value: Optional[str] = Query(default=None),
     session: Session = Depends(get_session),
 ):
-    if denial := require_role_response(request, "viewer"):
+    if denial := _require_live_hits(request, session):
         return denial
 
     after_dt: Optional[datetime] = None
@@ -406,7 +426,7 @@ def hits_summary_json(
     before: Optional[str] = Query(default=None),
     session: Session = Depends(get_session),
 ):
-    if denial := require_role_response(request, "viewer"):
+    if denial := _require_live_hits(request, session):
         return denial
 
     after_dt: Optional[datetime] = None
@@ -447,7 +467,7 @@ async def hits_api_create(
     request: Request,
     session: Session = Depends(get_session),
 ):
-    if denial := require_role_response(request, "viewer"):
+    if denial := _require_live_hits(request, session):
         return denial
 
     try:
@@ -491,7 +511,7 @@ def hits_api_recent(
     limit: int = Query(default=5, ge=1, le=50),
     session: Session = Depends(get_session),
 ):
-    if denial := require_role_response(request, "viewer"):
+    if denial := _require_live_hits(request, session):
         return denial
 
     hits = session.exec(
@@ -513,7 +533,7 @@ async def hits_upload_image(
     request: Request,
     file: UploadFile = File(...),
 ):
-    if denial := require_role_response(request, "viewer"):
+    if denial := _require_live_hits(request):
         return denial
 
     content_type = (file.content_type or "").lower()

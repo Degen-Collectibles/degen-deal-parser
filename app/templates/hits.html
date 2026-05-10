@@ -103,6 +103,7 @@
 <body>
     <div class="page">
         {% include "_linear_sidebar.html" %}
+        {% set can_manage_ops = current_user and current_user.role in ["admin", "reviewer"] %}
 
         {% if request.query_params.get("success") %}
         <div class="flash success">Hit saved successfully.</div>
@@ -119,7 +120,10 @@
                 <div class="actions">
                     <a class="button primary-button" href="/hits/new">+ Log a Hit</a>
                     <a class="button secondary-button" href="/api/hits/export?streamer={{ sel_streamer }}&platform={{ sel_platform }}&after={{ sel_after }}&before={{ sel_before }}&search={{ sel_search }}&min_value={{ sel_min_value }}">Export CSV</a>
+                    <a class="button secondary-button" href="/team/">Team Portal</a>
+                    {% if can_manage_ops %}
                     <a class="button secondary-button" href="/dashboard">Dashboard</a>
+                    {% endif %}
                 </div>
                 <div class="hero-meta">
                     <span class="scope-chip">{{ total_rows }} hits</span>

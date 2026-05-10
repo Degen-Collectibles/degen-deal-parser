@@ -18,6 +18,7 @@ from sqlalchemy import and_, func, or_
 from sqlmodel import Session, select
 
 from ..csrf import CSRFProtectedRoute
+from ..auth import has_permission
 from ..shared import *  # noqa: F401,F403 -- shared helpers, constants, state
 from ..shared import (  # noqa: F401 - explicit imports for underscore-prefixed names
     _BUILD_VERSION,
@@ -35,11 +36,30 @@ from ..shared import (  # noqa: F401 - explicit imports for underscore-prefixed 
     _stream_range,
     _stream_range_source,
 )
-from ..db import get_session
+from ..db import get_session, managed_session
 from ..models import TikTokAuth, TikTokOrder
 from ..reporting import TIKTOK_PAID_STATUSES
 
 router = APIRouter(route_class=CSRFProtectedRoute)
+
+
+def _require_live_stream(request: Request, session: Optional[Session] = None):
+    if denial := require_role_response(request, "employee"):
+        return denial
+    user = getattr(request.state, "current_user", None) or get_request_user(request)
+    if not user:
+        return redirect_to_login(request)
+    try:
+        if session is not None:
+            allowed = has_permission(session, user, "ops.live_stream.view")
+        else:
+            with managed_session() as permission_session:
+                allowed = has_permission(permission_session, user, "ops.live_stream.view")
+    except Exception:
+        allowed = False
+    if not allowed:
+        return HTMLResponse("You do not have permission to view this page.", status_code=403)
+    return None
 
 STREAM_CREATOR_CHOICES: tuple[dict[str, str], ...] = (
     {"id": "degencollectibles", "label": "Main", "handle": "degencollectibles"},
@@ -1442,7 +1462,7 @@ def tiktok_streamer_page(
     # Employees can see the live stream dashboard (TikTok GMV + goal bar +
     # order feed). TikTok numbers are explicitly visible to floor staff so
     # they can chase goals during the stream.
-    if denial := require_role_response(request, "employee"):
+    if denial := _require_live_stream(request, session):
         return denial
 
     stream_context = _build_stream_context(creator, legacy_stream_id=stream)
@@ -1548,7 +1568,7 @@ def tiktok_streamer_poll(
     stream: Optional[str] = Query(default=None),
     session: Session = Depends(get_session),
 ):
-    if denial := require_role_response(request, "employee"):
+    if denial := _require_live_stream(request, session):
         return denial
     stream_context = _build_stream_context(creator, legacy_stream_id=stream)
     selected_creator = stream_context.get("selected_creator") or DEFAULT_STREAM_CREATOR
@@ -1645,7 +1665,7 @@ def tiktok_streamer_poll(
 
 @router.get("/tiktok/streamer/goal")
 def get_streamer_goal(request: Request, session: Session = Depends(get_session)):
-    if denial := require_role_response(request, "employee"):
+    if denial := _require_live_stream(request, session):
         return denial
     return {
         "gmv_goal": float(_get_app_setting(session, "stream_gmv_goal", "0") or "0"),
@@ -1903,7 +1923,7 @@ def tiktok_streamer_chat_poll(
     since: int = Query(default=0),
     session: Session = Depends(get_session),
 ):
-    if denial := require_role_response(request, "employee"):
+    if denial := _require_live_stream(request):
         return denial
     messages = get_live_chat_messages(since_idx=since)
     status_info = get_chat_status()
@@ -1969,7 +1989,7 @@ async def tiktok_giveaway_start(request: Request, body: dict = None):
 
 @router.get("/tiktok/streamer/giveaway/status")
 def tiktok_giveaway_status(request: Request):
-    if denial := require_role_response(request, "employee"):
+    if denial := _require_live_stream(request):
         return denial
 
     from ..tiktok_giveaway import get_giveaway_state
