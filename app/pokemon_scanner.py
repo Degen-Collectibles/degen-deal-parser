@@ -243,13 +243,17 @@ async def _fetch_tcgdex_sets() -> list[dict]:
     if _tcgdex_sets_cache is not None:
         return _tcgdex_sets_cache
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.get(f"{TCGDEX_BASE}/sets")
-        if resp.status_code == 200:
-            _tcgdex_sets_cache = resp.json()
-        else:
-            _tcgdex_sets_cache = []
-            logger.warning("[pokemon_scanner] TCGdex sets fetch failed: HTTP %s", resp.status_code)
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{TCGDEX_BASE}/sets")
+            if resp.status_code == 200:
+                _tcgdex_sets_cache = resp.json()
+            else:
+                _tcgdex_sets_cache = []
+                logger.warning("[pokemon_scanner] TCGdex sets fetch failed: HTTP %s", resp.status_code)
+    except httpx.RequestError as exc:
+        _tcgdex_sets_cache = []
+        logger.warning("[pokemon_scanner] TCGdex sets fetch failed: %s", exc)
 
     return _tcgdex_sets_cache
 
@@ -286,7 +290,11 @@ async def _tcgdex_lookup_by_set_and_number(
 ) -> Optional[dict]:
     """Tier 1: exact set + collector number."""
     url = f"{TCGDEX_BASE}/sets/{set_id}/{local_id}"
-    resp = await client.get(url)
+    try:
+        resp = await client.get(url)
+    except httpx.RequestError as exc:
+        logger.warning("[pokemon_scanner] TCGdex exact lookup failed for %s/%s: %s", set_id, local_id, exc)
+        return None
     if resp.status_code == 200:
         return resp.json()
     return None
@@ -302,7 +310,11 @@ async def _tcgdex_search_by_name(
     If prefer_number is given, prioritize results whose localId matches.
     If prefer_set is given, prioritize results whose set name is similar.
     """
-    resp = await client.get(f"{TCGDEX_BASE}/cards", params={"name": name})
+    try:
+        resp = await client.get(f"{TCGDEX_BASE}/cards", params={"name": name})
+    except httpx.RequestError as exc:
+        logger.warning("[pokemon_scanner] TCGdex name search failed for %r: %s", name, exc)
+        return []
     if resp.status_code != 200:
         return []
 
@@ -1754,18 +1766,26 @@ async def _enrich_price_fast(
                             "1H": "1st Edition Holofoil", "1N": "1st Edition Normal",
                         }
                         cond_by_variant: dict[str, dict[str, dict]] = {}
-                        for sku_data in prod_skus.values():
+                        for sku_id, sku_data in prod_skus.items():
                             var_code = sku_data.get("var", "")
                             cnd = sku_data.get("cnd", "")
                             var_name = _VAR_CODE_MAP.get(var_code, var_code)
                             if not cnd:
                                 continue
                             cond_by_variant.setdefault(var_name, {})
-                            entry: dict[str, float] = {}
+                            entry: dict[str, Any] = {}
+                            try:
+                                entry["sku_id"] = str(sku_id)
+                            except Exception:
+                                pass
                             if "mkt" in sku_data and sku_data["mkt"] is not None:
                                 entry["mkt"] = round(float(sku_data["mkt"]), 2)
                             if "low" in sku_data and sku_data["low"] is not None:
                                 entry["low"] = round(float(sku_data["low"]), 2)
+                            if "hi" in sku_data and sku_data["hi"] is not None:
+                                entry["hi"] = round(float(sku_data["hi"]), 2)
+                            if "cnt" in sku_data and sku_data["cnt"] is not None:
+                                entry["cnt"] = int(float(sku_data["cnt"]))
                             if entry:
                                 cond_by_variant[var_name][cnd] = entry
 

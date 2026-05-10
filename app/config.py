@@ -221,6 +221,10 @@ class Settings(BaseSettings):
     inventory_auto_shopify_push: bool = Field(default=False, alias="INVENTORY_AUTO_SHOPIFY_PUSH")
     inventory_price_refresh_interval_hours: float = Field(default=6.0, alias="INVENTORY_PRICE_REFRESH_INTERVAL_HOURS")
     inventory_price_stale_hours: float = Field(default=24.0, alias="INVENTORY_PRICE_STALE_HOURS")
+    inventory_slab_resticker_alert_enabled: bool = Field(default=True, alias="INVENTORY_SLAB_RESTICKER_ALERT_ENABLED")
+    inventory_slab_resticker_threshold_percent: float = Field(default=10.0, alias="INVENTORY_SLAB_RESTICKER_THRESHOLD_PERCENT")
+    inventory_slab_resticker_threshold_dollars: float = Field(default=10.0, alias="INVENTORY_SLAB_RESTICKER_THRESHOLD_DOLLARS")
+    inventory_slab_resticker_sms_enabled: bool = Field(default=False, alias="INVENTORY_SLAB_RESTICKER_SMS_ENABLED")
     # Card scanning
     ximilar_api_token: str = Field(default="", alias="XIMILAR_API_TOKEN")
     psa_api_key: str = Field(default="", alias="PSA_API_KEY")

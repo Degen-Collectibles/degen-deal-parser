@@ -2,7 +2,6 @@
 <html>
 <head>
     <meta charset="utf-8">
-    <!-- PWA -->
     <link rel="manifest" href="/static/manifest.webmanifest">
     <meta name="theme-color" content="#08090a">
     <meta name="apple-mobile-web-app-capable" content="yes">
@@ -15,165 +14,106 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <title>Scan Slab — Inventory</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <title>Add Slabs - Inventory</title>
     <style>
         :root {
-    --card: var(--lx-s1);
-    --card-strong: var(--lx-s2);
-    --line: var(--lx-br);
-    --text: var(--lx-text);
-    --muted: var(--lx-muted);
-    --bg: var(--lx-bg);
-    --bg-deep: var(--lx-bg);
-    --shadow: 0 1px 3px rgba(0,0,0,.4);
-    --accent: #ef4444;
-    --accent-strong: #dc2626;
-    --green: #22c55e;
-    --green-bg: rgba(34,197,94,.14);
-    --yellow: #eab308;
-    --yellow-bg: rgba(234,179,8,.14);
-    --red: #ef4444;
-    --red-bg: rgba(239,68,68,.15);
-    --blue: #60a5fa;
-    --blue-bg: rgba(96,165,250,.14);
-    --grey: #8b8f98;
-    --grey-bg: rgba(139,143,152,.1);
-}
+            --card: var(--lx-s1);
+            --card-strong: var(--lx-s2);
+            --line: var(--lx-br);
+            --text: var(--lx-text);
+            --muted: var(--lx-muted);
+            --accent: #ef4444;
+            --accent-strong: #dc2626;
+            --green: #22c55e;
+            --green-bg: rgba(34,197,94,.14);
+            --blue: #60a5fa;
+            --blue-bg: rgba(96,165,250,.14);
+            --yellow: #eab308;
+            --yellow-bg: rgba(234,179,8,.14);
+            --red-bg: rgba(239,68,68,.15);
+        }
         * { box-sizing:border-box; }
-        body {
-            margin:0; font-family:"Inter",-apple-system,BlinkMacSystemFont,sans-serif;
-            -webkit-font-smoothing:antialiased; color:var(--text);
-            background: var(--lx-bg);
-            min-height:100vh;
-        }
+        body { margin:0; font-family:"Inter",-apple-system,BlinkMacSystemFont,sans-serif; color:var(--text); background:var(--lx-bg); -webkit-font-smoothing:antialiased; }
         a { color:inherit; text-decoration:none; }
-        .page { max-width:720px; margin:0 auto; padding:28px 20px 80px; }
-        .back-link { color:var(--muted); font-size:13px; font-weight:600; margin-bottom:12px; display:inline-block; }
-        .back-link:hover { color:var(--text); }
-
-        .card {
-            background:linear-gradient(180deg,var(--card-strong),var(--card));
-            border:1px solid var(--line); border-radius:24px;
-            box-shadow:var(--shadow); padding:28px; margin-bottom:20px;
-        }
-        .card-title { font-size:20px; font-weight:800; margin:0 0 4px; letter-spacing:-.025em; }
-        .card-sub { font-size:13px; color:var(--muted); font-weight:500; margin:0 0 20px; }
-
-        /* Lookup form */
-        .form-row { display:flex; gap:12px; margin-bottom:14px; flex-wrap:wrap; }
-        .form-group { display:flex; flex-direction:column; gap:5px; }
-        .form-group.grow { flex:1; min-width:140px; }
-        label { font-size:12px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; }
-        input[type=text], input[type=number], select {
-            padding:12px 14px; border-radius:14px; border:1.5px solid var(--line);
-            background: var(--lx-s1); font:inherit; font-size:15px; font-weight:600;
-            color:var(--text); outline:none; transition:border-color .15s, box-shadow .15s;
-            width:100%;
-        }
-        input:focus, select:focus {
-            border-color:var(--accent); box-shadow:0 0 0 3px rgba(213,83,56,.15);
-        }
-        .btn-primary {
-            appearance:none; border:none; border-radius:14px; padding:14px 24px;
-            font:inherit; font-size:15px; font-weight:800;
-            background:linear-gradient(180deg,var(--accent),var(--accent-strong));
-            color:#fff; cursor:pointer; transition:all .15s; width:100%;
-        }
-        .btn-primary:hover { opacity:.9; }
-        .btn-primary:disabled { opacity:.45; cursor:not-allowed; }
-
-        /* Barcode scan toggle */
-        .scan-toggle { margin-bottom:16px; }
-        .scan-toggle-btn {
-            appearance:none; border:1.5px solid var(--line); border-radius:12px;
-            padding:8px 14px; font:inherit; font-size:13px; font-weight:700;
-            background: var(--lx-s1);
-            color:var(--muted); cursor:pointer; transition:all .15s;
-        }
-        .scan-toggle-btn:hover { color:var(--text); border-color:#c9b8a0; }
-
-        /* ZXing camera */
-        .zxing-wrap {
-            display:none; margin-bottom:16px; border-radius:16px; overflow:hidden;
-            background:#1a1208; position:relative; aspect-ratio:4/3;
-        }
+        .page { max-width:1320px; margin:0 auto; padding:28px 28px 78px; }
+        .panel { padding:18px; margin-bottom:18px; background:linear-gradient(180deg,var(--card-strong),var(--card)); border:1px solid var(--line); border-radius:18px; box-shadow:0 1px 3px rgba(0,0,0,.35); }
+        .topbar { display:flex; justify-content:space-between; gap:14px; align-items:flex-start; flex-wrap:wrap; }
+        .eyebrow { display:inline-flex; align-items:center; padding:6px 10px; border-radius:999px; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.08em; background:var(--lx-s2); color:var(--muted); }
+        h1 { margin:10px 0 6px; font-size:clamp(30px,4vw,48px); line-height:1; letter-spacing:-.04em; font-weight:800; color:#fff; }
+        h2 { margin:0; font-size:20px; font-weight:800; letter-spacing:-.03em; }
+        h3 { margin:0; font-size:16px; line-height:1.15; font-weight:800; letter-spacing:0; color:#fff; }
+        p { margin:0; color:var(--muted); }
+        .button, button { appearance:none; border:none; border-radius:12px; padding:10px 14px; font:inherit; font-weight:800; cursor:pointer; transition:transform .15s, border-color .15s, background .15s; }
+        .button:hover, button:hover { transform:translateY(-1px); }
+        .primary { background:var(--accent); color:#fff; border:1px solid var(--accent); }
+        .primary:hover { background:var(--accent-strong); border-color:var(--accent-strong); }
+        .secondary { background:var(--lx-s1); color:var(--text); border:1px solid var(--line); }
+        button:disabled { opacity:.55; cursor:not-allowed; transform:none; }
+        label { display:flex; flex-direction:column; gap:6px; color:var(--muted); font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; }
+        input, select, textarea { width:100%; padding:11px 12px; border-radius:12px; border:1px solid var(--line); background:var(--lx-s1); color:var(--text); font:inherit; }
+        textarea { min-height:42px; resize:vertical; }
+        input:focus, select:focus, textarea:focus { outline:none; border-color:rgba(96,165,250,.8); box-shadow:0 0 0 3px rgba(96,165,250,.14); }
+        .search-form { display:grid; grid-template-columns:minmax(140px,190px) minmax(130px,170px) minmax(260px,1fr) auto auto; gap:10px; align-items:end; margin-top:16px; }
+        .status { display:none; padding:12px 14px; border-radius:14px; margin-top:14px; font-size:13px; font-weight:800; }
+        .status.loading { display:block; border:1px solid rgba(234,179,8,.38); background:var(--yellow-bg); color:#fef3c7; }
+        .status.warning { display:block; border:1px solid rgba(234,179,8,.38); background:var(--yellow-bg); color:#fef3c7; }
+        .status.success { display:block; border:1px solid rgba(34,197,94,.32); background:var(--green-bg); color:#dffbea; }
+        .status.error { display:block; border:1px solid rgba(239,68,68,.42); background:var(--red-bg); color:#fecaca; }
+        .notice { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:14px 16px; border-radius:14px; margin-top:14px; border:1px solid rgba(34,197,94,.32); background:var(--green-bg); color:#dffbea; }
+        .spinner { display:inline-block; width:14px; height:14px; border:2px solid rgba(255,255,255,.35); border-top-color:#fff; border-radius:50%; animation:spin .7s linear infinite; vertical-align:-2px; margin-right:6px; }
+        @keyframes spin { to { transform:rotate(360deg); } }
+        .zxing-wrap { display:none; margin-top:14px; border-radius:16px; overflow:hidden; background:#111; position:relative; aspect-ratio:4/3; max-width:560px; }
         .zxing-wrap.active { display:block; }
         #zxing-video { width:100%; height:100%; object-fit:cover; display:block; }
-        .zxing-hint {
-            position:absolute; bottom:10px; left:50%; transform:translateX(-50%);
-            background:rgba(0,0,0,.6); color:#fff; font-size:12px; font-weight:600;
-            padding:5px 12px; border-radius:999px; white-space:nowrap;
+        .zxing-hint { position:absolute; bottom:10px; left:50%; transform:translateX(-50%); background:rgba(0,0,0,.68); color:#fff; font-size:12px; font-weight:800; padding:5px 12px; border-radius:999px; white-space:nowrap; }
+        .section-head { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:12px; flex-wrap:wrap; }
+        .count { color:var(--muted); font-size:12px; font-weight:800; }
+        .candidate-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(360px,1fr)); gap:12px; }
+        .candidate { border:1px solid var(--line); border-radius:16px; background:var(--lx-s1); padding:14px; display:grid; grid-template-columns:74px 1fr auto; gap:12px; align-items:center; min-width:0; }
+        .thumb { width:74px; aspect-ratio:1; border-radius:14px; background:linear-gradient(135deg,var(--blue-bg),rgba(34,197,94,.12)); border:1px solid var(--line); display:flex; align-items:center; justify-content:center; color:var(--blue); font-weight:900; font-size:18px; overflow:hidden; }
+        .thumb:empty::before { content:attr(data-fallback); }
+        .thumb img { width:100%; height:100%; object-fit:contain; display:block; background:#fff; }
+        .meta { display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin-top:7px; }
+        .chip { display:inline-flex; align-items:center; border-radius:999px; padding:4px 8px; font-size:11px; font-weight:800; background:var(--lx-s2); color:var(--muted); border:1px solid var(--line); }
+        .chip.good { background:var(--green-bg); color:var(--green); border-color:rgba(34,197,94,.28); }
+        .chip.blue { background:var(--blue-bg); color:var(--blue); border-color:rgba(96,165,250,.28); }
+        .manual-grid { display:grid; grid-template-columns:1.3fr 150px 1fr 110px 110px; gap:10px; align-items:end; margin-top:14px; }
+        .selected-card { display:grid; grid-template-columns:86px 1fr; gap:14px; align-items:center; margin-bottom:14px; }
+        .selected-card .thumb { width:86px; }
+        .grade-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(390px,1fr)); gap:12px; }
+        .grade-card { border:1px solid var(--line); border-radius:16px; background:var(--lx-s1); padding:14px; display:grid; gap:12px; }
+        .grade-top { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
+        .import-panel { display:none; border:1px solid var(--line); border-radius:14px; background:rgba(255,255,255,.03); padding:12px; gap:10px; }
+        .import-panel.active { display:grid; }
+        .import-panel textarea { min-height:120px; font-size:13px; text-transform:none; letter-spacing:0; }
+        .grade-badge { width:58px; height:58px; border-radius:14px; background:linear-gradient(135deg,var(--accent),var(--accent-strong)); display:flex; flex-direction:column; align-items:center; justify-content:center; color:#fff; flex-shrink:0; }
+        .grade-badge strong { font-size:20px; line-height:1; }
+        .grade-badge span { font-size:10px; font-weight:900; opacity:.82; }
+        .price { text-align:right; }
+        .price strong { display:block; color:#fff; font-size:24px; letter-spacing:0; }
+        .price span { display:block; color:var(--muted); font-size:12px; font-weight:800; margin-top:2px; }
+        .sales { width:100%; border-collapse:separate; border-spacing:0; }
+        .sales th, .sales td { padding:8px 7px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; font-size:12px; }
+        .sales th { color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.08em; font-weight:800; background:transparent; }
+        .sales tr:last-child td { border-bottom:none; }
+        .sale-title { color:var(--muted); max-width:230px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .receive-grid { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; align-items:end; }
+        .receive-grid .wide { grid-column:1 / -1; }
+        .empty { padding:22px; border:1px dashed var(--line); border-radius:16px; color:var(--muted); text-align:center; background:rgba(255,255,255,.02); }
+        @media(max-width:1000px) {
+            .page { padding:16px 14px 80px; }
+            .search-form, .manual-grid, .grade-grid, .candidate-grid { grid-template-columns:1fr; }
+            .candidate { grid-template-columns:58px 1fr; }
+            .candidate button { grid-column:1 / -1; }
+            .thumb { width:58px; border-radius:12px; }
         }
-
-        /* Status / error */
-        .status-msg {
-            padding:12px 16px; border-radius:14px; font-size:13px; font-weight:700;
-            margin-bottom:16px; display:none;
-        }
-        .status-msg.loading { background:var(--yellow-bg); color:#7a5200; display:block; }
-        .status-msg.error { background:var(--red-bg); color:#9d2f2b; display:block; }
-
-        /* Results card */
-        #result-card { display:none; }
-        .result-header { display:flex; gap:16px; align-items:flex-start; margin-bottom:20px; }
-        .result-grade-badge {
-            width:56px; height:56px; border-radius:14px; flex-shrink:0;
-            background:linear-gradient(135deg,var(--accent),var(--accent-strong));
-            display:flex; flex-direction:column; align-items:center; justify-content:center;
-            color:#fff;
-        }
-        .result-grade-num { font-size:20px; font-weight:700; line-height:1; }
-        .result-grade-co { font-size:9px; font-weight:800; text-transform:uppercase; opacity:.8; }
-        .result-name { font-size:18px; font-weight:800; letter-spacing:-.02em; line-height:1.2; }
-        .result-set { font-size:13px; color:var(--muted); font-weight:500; margin-top:3px; }
-
-        /* Suggested price */
-        .price-suggest {
-            padding:18px 20px; border-radius:18px; background:var(--green-bg);
-            border:1px solid #a6e2bf; margin-bottom:20px; display:flex;
-            align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;
-        }
-        .price-suggest-label { font-size:13px; font-weight:700; color:var(--green); }
-        .price-suggest-amount { font-size:28px; font-weight:700; color:var(--green); letter-spacing:-.03em; }
-        .price-suggest-sub { font-size:11px; color:var(--green); opacity:.7; }
-        .use-price-btn {
-            appearance:none; border:none; border-radius:12px; padding:10px 16px;
-            font:inherit; font-size:13px; font-weight:800;
-            background:var(--green); color:#fff; cursor:pointer;
-        }
-
-        /* Last solds table */
-        .section-title { font-size:14px; font-weight:800; letter-spacing:-.01em; margin:0 0 10px; }
-        .sales-table { width:100%; border-collapse:collapse; font-size:13px; }
-        .sales-table th { font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); padding:0 8px 8px; text-align:left; }
-        .sales-table td { padding:8px 8px; border-top:1px solid var(--line); font-weight:600; }
-        .sales-table tr:first-child td { border-top:none; }
-        .date-cell { color:var(--muted); font-size:12px; }
-        .price-cell { font-weight:800; }
-        .source-pill {
-            display:inline-block; padding:2px 8px; border-radius:999px;
-            font-size:10px; font-weight:800; text-transform:uppercase;
-        }
-        .source-130point { background:#fff5df; color:#7a5200; border:1px solid #f0cda0; }
-        .source-cardladder { background:#f0f9ff; color:#1d5c8a; border:1px solid #93d5f5; }
-        .no-sales { color:var(--muted); font-size:13px; font-style:italic; padding:12px 0; }
-
-        .recency-fresh { color:var(--green); }
-        .recency-stale { color:#9d8070; }
-
-        /* Add to inventory form */
-        .add-form { margin-top:20px; padding-top:20px; border-top:1px solid var(--line); }
-        .add-form-row { display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap; }
-        .add-form-row .form-group { flex:1; min-width:120px; }
-
-        .spinner { display:inline-block; width:16px; height:16px; border:2px solid rgba(255,255,255,.35); border-top-color:#fff; border-radius:50%; animation:spin .7s linear infinite; vertical-align:middle; margin-right:5px; }
-        @keyframes spin { to { transform:rotate(360deg); } }
-
-        .success-banner {
-            padding:16px 18px; border-radius:14px; background:var(--green-bg);
-            border:1px solid #a6e2bf; color:var(--green); font-weight:700;
-            font-size:14px; display:none; margin-top:12px;
+        @media(max-width:560px) {
+            .receive-grid { grid-template-columns:1fr; }
+            .selected-card { grid-template-columns:58px 1fr; }
+            .selected-card .thumb { width:58px; }
+            .grade-top { align-items:stretch; }
+            .price { text-align:left; }
         }
     </style>
     <link rel="stylesheet" href="/static/linear.css?v=1776749171">
@@ -182,134 +122,583 @@
 <body>
 <div class="page">
     {% include "_linear_sidebar.html" %}
-    <a href="/inventory" class="back-link">← Back to Inventory</a>
 
-    <!-- Lookup form -->
-    <div class="card">
-        <div class="card-title">Slab Cert Lookup</div>
-        <div class="card-sub">Enter a certificate number to pull card details and recent sales prices from 130point and Card Ladder.</div>
-
-        <div class="scan-toggle">
-            <button class="scan-toggle-btn" id="barcode-scan-btn" onclick="toggleBarcodeScanner()">&#128247; Scan Barcode</button>
-        </div>
-
-        <div id="zxing-wrap" class="zxing-wrap">
-            <video id="zxing-video" autoplay playsinline muted></video>
-            <div class="zxing-hint">Point at cert barcode</div>
-        </div>
-
-        <div class="form-row">
-            <div class="form-group grow">
-                <label>Certificate Number</label>
-                <input type="text" id="cert-input" placeholder="e.g. 12345678" inputmode="numeric" autocomplete="off">
+    <div class="panel">
+        <div class="topbar">
+            <div>
+                <span class="eyebrow">Inventory</span>
+                <h1>Add Slabs</h1>
+                <p>Search by cert number or graded card name, review sold comps by grade, then add stock.</p>
             </div>
-            <div class="form-group">
-                <label>Grading Co.</label>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <a href="/inventory" class="button secondary">All Inventory</a>
+                <a href="/inventory/add-stock" class="button secondary">Add Stock</a>
+            </div>
+        </div>
+
+        <form class="search-form" onsubmit="event.preventDefault(); runLookup();">
+            <label>Game
+                <select id="game-select">
+                    {% for game in games %}
+                    <option value="{{ game }}" {% if game == "Pokemon" %}selected{% endif %}>{{ game }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label>Grading Co.
                 <select id="company-select">
                     {% for co in grading_companies %}
                     <option value="{{ co }}">{{ co }}</option>
                     {% endfor %}
                 </select>
-            </div>
+            </label>
+            <label>Cert Number Or Card Name
+                <input type="search" id="lookup-input" value="{{ initial_query }}" placeholder="155393445 or Umbreon VMAX Alt Art" autocomplete="off" autofocus>
+            </label>
+            <button class="secondary" id="barcode-scan-btn" type="button" onclick="toggleBarcodeScanner()">Scan Barcode</button>
+            <button class="primary" id="lookup-btn" type="submit">Search</button>
+        </form>
+
+        <div id="zxing-wrap" class="zxing-wrap">
+            <video id="zxing-video" autoplay playsinline muted></video>
+            <div class="zxing-hint">Point at cert barcode</div>
         </div>
-
-        <div id="status-msg" class="status-msg"></div>
-
-        <button class="btn-primary" id="lookup-btn" onclick="doLookup()">Look Up Cert</button>
+        <div id="status-msg" class="status"></div>
+        <div class="notice" id="success-banner" style="display:none;"></div>
     </div>
 
-    <!-- Results -->
-    <div class="card" id="result-card">
-        <div class="result-header">
-            <div class="result-grade-badge">
-                <div class="result-grade-num" id="res-grade">—</div>
-                <div class="result-grade-co" id="res-co"></div>
-            </div>
-            <div>
-                <div class="result-name" id="res-name"></div>
-                <div class="result-set" id="res-set"></div>
-            </div>
+    <div class="panel" id="manual-panel" style="display:none;">
+        <div class="section-head">
+            <h2>Manual Slab Details</h2>
+            <span class="count">Use this when the cert site blocks lookup</span>
         </div>
-
-        <div class="price-suggest" id="price-wrap" style="display:none;">
-            <div>
-                <div class="price-suggest-label">Suggested Price</div>
-                <div class="price-suggest-amount" id="res-suggest"></div>
-                <div class="price-suggest-sub" id="res-dp"></div>
-            </div>
-            <button class="use-price-btn" onclick="usePrice()">Use this price</button>
+        <div class="manual-grid">
+            <label>Card Name
+                <input type="text" id="manual-card-name" placeholder="Umbreon VMAX Alt Art">
+            </label>
+            <label>Game
+                <select id="manual-game">
+                    {% for game in games %}
+                    <option value="{{ game }}" {% if game == "Pokemon" %}selected{% endif %}>{{ game }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label>Set
+                <input type="text" id="manual-set-name" placeholder="Evolving Skies">
+            </label>
+            <label>Card #
+                <input type="text" id="manual-card-number" placeholder="215/203">
+            </label>
+            <label>Grade
+                <input type="text" id="manual-grade" placeholder="10">
+            </label>
         </div>
-
-        <div class="section-title">Recent Sales</div>
-        <table class="sales-table">
-            <thead>
-                <tr>
-                    <th>Date</th>
-                    <th>Price</th>
-                    <th>Source</th>
-                </tr>
-            </thead>
-            <tbody id="sales-body"></tbody>
-        </table>
-        <div id="no-sales" class="no-sales" style="display:none;">No recent sales found on 130point or Card Ladder.</div>
-
-        <!-- Add to inventory -->
-        <div class="add-form">
-            <div class="section-title">Add to Inventory</div>
-            <div class="add-form-row">
-                <div class="form-group grow">
-                    <label>List Price ($)</label>
-                    <input type="text" id="list-price-input" placeholder="0.00" inputmode="decimal">
-                </div>
-                <div class="form-group grow">
-                    <label>Cost Basis ($)</label>
-                    <input type="text" id="cost-basis-input" placeholder="0.00" inputmode="decimal">
-                </div>
-            </div>
-            <div class="form-group" style="margin-top:10px;">
-                <label>Notes</label>
-                <input type="text" id="notes-input" placeholder="optional notes">
-            </div>
-            <button class="btn-primary" id="add-btn" onclick="addToInventory()" style="margin-top:14px;">
-                Add Slab to Inventory
-            </button>
-            <div class="success-banner" id="success-banner"></div>
+        <div style="display:flex;justify-content:flex-end;margin-top:12px;">
+            <button class="primary" type="button" onclick="manualComps()">View Grade Comps</button>
         </div>
+    </div>
+
+    <div class="panel" id="candidate-panel" style="display:none;">
+        <div class="section-head">
+            <h2>Card Matches</h2>
+            <span class="count" id="candidate-count"></span>
+        </div>
+        <div class="candidate-grid" id="candidate-grid"></div>
+    </div>
+
+    <div class="panel" id="grade-panel" style="display:none;">
+        <div class="selected-card" id="selected-card"></div>
+        <div class="section-head">
+            <h2>Last Solds By Grade</h2>
+            <span class="count" id="grade-count"></span>
+        </div>
+        <div class="grade-grid" id="grade-grid"></div>
     </div>
 </div>
 
 <script>
-(function() {
-    var currentResult = null;
+(function () {
+    var currentCandidates = [];
+    var currentCard = null;
+    var currentCert = null;
+    var currentGradeComps = [];
     var zxingActive = false;
     var zxingReader = null;
-    var zxingStream = null;
+    var initialError = {{ initial_error|tojson }};
+    var initialQuery = {{ initial_query|tojson }};
 
-    // ------------------------------------------------------------------
-    // Barcode scanner (ZXing.js)
-    // ------------------------------------------------------------------
-    window.toggleBarcodeScanner = function() {
-        var wrap = document.getElementById('zxing-wrap');
-        if (zxingActive) {
-            stopZxing();
+    window.runLookup = async function () {
+        var query = document.getElementById("lookup-input").value.trim();
+        if (!query) {
+            showStatus("Enter a cert number or graded card name.", "error");
+            return;
+        }
+        clearResults();
+        if (looksLikeCert(query)) {
+            await lookupCert(query);
         } else {
-            startZxing();
+            await searchCardName(query);
         }
     };
 
-    function startZxing() {
-        var wrap = document.getElementById('zxing-wrap');
-        var video = document.getElementById('zxing-video');
-        var btn = document.getElementById('barcode-scan-btn');
+    function looksLikeCert(query) {
+        var digits = query.replace(/\D/g, "");
+        return digits.length >= 6 && digits.length >= query.length - 2;
+    }
 
+    async function lookupCert(query) {
+        var cert = query.replace(/\D/g, "");
+        var company = document.getElementById("company-select").value;
+        setBusy(true, "Looking up cert " + cert + "...");
+        try {
+            var resp = await fetch("/inventory/scan/cert", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({cert_number: cert, grading_company: company})
+            });
+            var data = await resp.json();
+            if (!resp.ok && !data.card_name) {
+                showStatus(data.error || "Cert lookup failed.", "error");
+                return;
+            }
+            currentCert = data;
+            if (!data.card_name) {
+                showManualPanel(data);
+                showStatus(data.lookup_warning || "Cert details were not returned. Enter the card name below.", "warning");
+                return;
+            }
+            var card = cardFromCert(data);
+            currentCandidates = [card];
+            renderCandidates(currentCandidates, "Cert result");
+            await selectCandidate(0, data.grade || "");
+            if (data.lookup_warning) showStatus(data.lookup_warning, "warning");
+        } catch (err) {
+            showStatus("Network error: " + err.message, "error");
+        } finally {
+            setBusy(false);
+        }
+    }
+
+    async function searchCardName(query) {
+        var game = document.getElementById("game-select").value;
+        setBusy(true, "Searching cards...");
+        try {
+            var resp = await fetch("/inventory/scan/slab-search", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({query: query, game: game})
+            });
+            var data = await resp.json();
+            if (!resp.ok) {
+                showStatus(data.error || "Card search failed.", "error");
+                return;
+            }
+            currentCert = null;
+            currentCandidates = data.cards || [];
+            renderCandidates(currentCandidates, "matches");
+            if (!currentCandidates.length) {
+                showManualPanel({card_name: query, game: game});
+                showStatus(data.warning || "No card matches came back. You can enter the slab details manually.", "warning");
+            } else if (data.warning) {
+                showStatus(data.warning, "warning");
+            } else {
+                showStatus("", "");
+            }
+        } catch (err) {
+            showStatus("Network error: " + err.message, "error");
+        } finally {
+            setBusy(false);
+        }
+    }
+
+    function cardFromCert(data) {
+        return {
+            name: data.card_name || "",
+            card_name: data.card_name || "",
+            game: data.game || document.getElementById("game-select").value,
+            set_name: data.set_name || data.series || "",
+            card_number: data.card_number || "",
+            image_url: data.image_url || ""
+        };
+    }
+
+    function renderCandidates(cards, label) {
+        var panel = document.getElementById("candidate-panel");
+        var grid = document.getElementById("candidate-grid");
+        var count = document.getElementById("candidate-count");
+        grid.innerHTML = "";
+        count.textContent = cards.length + " " + label;
+        cards.forEach(function (card, index) {
+            var name = card.name || card.card_name || "";
+            var item = document.createElement("div");
+            item.className = "candidate";
+            var fallback = (name || "??").slice(0, 2).toUpperCase();
+            item.innerHTML =
+                '<div class="thumb" data-fallback="' + escAttr(fallback) + '">' +
+                    (card.image_url ? '<img src="' + escAttr(card.image_url) + '" alt="" onerror="this.remove()">' : "") +
+                '</div>' +
+                '<div style="min-width:0;">' +
+                    '<h3>' + escHtml(name) + '</h3>' +
+                    '<div class="meta">' +
+                        (card.set_name ? '<span class="chip blue">' + escHtml(card.set_name) + '</span>' : "") +
+                        (card.card_number ? '<span class="chip">#' + escHtml(card.card_number) + '</span>' : "") +
+                        (card.game ? '<span class="chip">' + escHtml(card.game) + '</span>' : "") +
+                    '</div>' +
+                '</div>' +
+                '<button class="primary" type="button">View Comps</button>';
+            item.querySelector("button").addEventListener("click", function () {
+                selectCandidate(index, currentCert ? currentCert.grade || "" : "");
+            });
+            grid.appendChild(item);
+        });
+        panel.style.display = cards.length ? "" : "none";
+    }
+
+    window.manualComps = function () {
+        var card = {
+            name: document.getElementById("manual-card-name").value.trim(),
+            card_name: document.getElementById("manual-card-name").value.trim(),
+            game: document.getElementById("manual-game").value,
+            set_name: document.getElementById("manual-set-name").value.trim(),
+            card_number: document.getElementById("manual-card-number").value.trim(),
+            image_url: ""
+        };
+        if (!card.card_name) {
+            showStatus("Enter the card name before fetching grade comps.", "error");
+            document.getElementById("manual-card-name").focus();
+            return;
+        }
+        currentCard = card;
+        renderSelectedCard(card);
+        fetchGradeComps(card, document.getElementById("manual-grade").value.trim());
+    };
+
+    function showManualPanel(data) {
+        document.getElementById("manual-panel").style.display = "";
+        document.getElementById("manual-card-name").value = data.card_name || "";
+        document.getElementById("manual-set-name").value = data.set_name || data.series || "";
+        document.getElementById("manual-card-number").value = data.card_number || "";
+        document.getElementById("manual-grade").value = data.grade || "";
+        if (data.game) document.getElementById("manual-game").value = data.game;
+    }
+
+    function selectCandidate(index, preferredGrade) {
+        var card = currentCandidates[index];
+        if (!card) return;
+        currentCard = card;
+        renderSelectedCard(card);
+        return fetchGradeComps(card, preferredGrade || "");
+    }
+
+    function renderSelectedCard(card) {
+        var name = card.name || card.card_name || "";
+        var fallback = (name || "??").slice(0, 2).toUpperCase();
+        document.getElementById("selected-card").innerHTML =
+            '<div class="thumb" data-fallback="' + escAttr(fallback) + '">' +
+                (card.image_url ? '<img src="' + escAttr(card.image_url) + '" alt="" onerror="this.remove()">' : "") +
+            '</div>' +
+            '<div style="min-width:0;">' +
+                '<h2>' + escHtml(name) + '</h2>' +
+                '<div class="meta">' +
+                    (card.set_name ? '<span class="chip blue">' + escHtml(card.set_name) + '</span>' : "") +
+                    (card.card_number ? '<span class="chip">#' + escHtml(card.card_number) + '</span>' : "") +
+                    '<span class="chip">' + escHtml(document.getElementById("company-select").value) + '</span>' +
+                '</div>' +
+            '</div>';
+    }
+
+    async function fetchGradeComps(card, preferredGrade) {
+        var company = document.getElementById("company-select").value;
+        setBusy(true, "Fetching Card Ladder comps by grade...");
+        document.getElementById("grade-panel").style.display = "";
+        document.getElementById("grade-grid").innerHTML = '<div class="empty"><span class="spinner"></span> Pulling last solds...</div>';
+        try {
+            var resp = await fetch("/inventory/scan/slab-grade-comps", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({
+                    card_name: card.name || card.card_name,
+                    game: card.game || document.getElementById("game-select").value,
+                    set_name: card.set_name || "",
+                    card_number: card.card_number || "",
+                    image_url: card.image_url || "",
+                    grading_company: company,
+                    grade: preferredGrade || "",
+                    cert_number: currentCert ? currentCert.cert_number || "" : ""
+                })
+            });
+            var data = await resp.json();
+            if (!resp.ok) {
+                showStatus(data.error || "Grade comp lookup failed.", "error");
+                return;
+            }
+            currentGradeComps = data.grade_comps || [];
+            renderGradeComps(currentGradeComps);
+            if (data.lookup_warning) showStatus(data.lookup_warning, "warning");
+            else showStatus("", "");
+        } catch (err) {
+            showStatus("Network error: " + err.message, "error");
+        } finally {
+            setBusy(false);
+        }
+    }
+
+    function renderGradeComps(rows) {
+        var grid = document.getElementById("grade-grid");
+        var count = document.getElementById("grade-count");
+        grid.innerHTML = "";
+        count.textContent = rows.length + " grades";
+        if (!rows.length) {
+            grid.innerHTML = '<div class="empty">No grade comps returned.</div>';
+            return;
+        }
+        rows.forEach(function (row, index) {
+            var suggested = numeric(row.suggested_price);
+            var card = document.createElement("div");
+            card.className = "grade-card";
+            card.innerHTML =
+                '<div class="grade-top">' +
+                    '<div style="display:flex;gap:12px;align-items:flex-start;">' +
+                        '<div class="grade-badge"><strong>' + escHtml(row.grade || "-") + '</strong><span>' + escHtml(row.grading_company || "") + '</span></div>' +
+                        '<div>' +
+                            '<h3>' + escHtml((currentCard && (currentCard.name || currentCard.card_name)) || row.card_name || "") + '</h3>' +
+                            '<div class="meta">' +
+                                (row.price_source ? '<span class="chip good">' + escHtml(sourceName(row.price_source)) + '</span>' : "") +
+                                (row.source_detail ? '<span class="chip blue">' + escHtml(sourceDetailName(row.source_detail)) + '</span>' : "") +
+                                '<span class="chip">' + (row.data_points || 0) + ' solds</span>' +
+                                (row.sales_history_url ? '<a class="chip" href="' + escAttr(row.sales_history_url) + '" target="_blank" rel="noopener">Open Search</a>' : "") +
+                            '</div>' +
+                        '</div>' +
+                    '</div>' +
+                    '<div class="price"><strong>' + (suggested != null ? money(suggested) : "-") + '</strong><span>Suggested price</span></div>' +
+                '</div>' +
+                salesTable(row.last_solds || []) +
+                '<div class="receive-grid" id="receive-' + index + '">' +
+                    '<label>Sell Price<input type="number" min="0" step="0.01" value="' + (suggested != null ? suggested.toFixed(2) : "") + '" data-field="list_price" inputmode="decimal"></label>' +
+                    '<label>Unit Cost<input type="number" min="0" step="0.01" placeholder="0.00" data-field="cost_basis" inputmode="decimal"></label>' +
+                    '<label>Location<input type="text" placeholder="Case A" data-field="location"></label>' +
+                    '<label class="wide">Notes<textarea placeholder="Optional" data-field="notes"></textarea></label>' +
+                '</div>' +
+                '<div style="display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap;">' +
+                    '<span class="count">' + certLabelForGrade(row.grade) + '</span>' +
+                    '<div style="display:flex;gap:8px;flex-wrap:wrap;">' +
+                        '<button class="secondary" type="button" data-refresh>Refresh Card Ladder</button>' +
+                        '<button class="secondary" type="button" data-import-toggle>Import Solds</button>' +
+                        '<button class="primary" type="button" data-add>Add ' + escHtml(row.grading_company || "") + ' ' + escHtml(row.grade || "") + ' Slab</button>' +
+                    '</div>' +
+                '</div>' +
+                '<div class="import-panel" id="import-panel-' + index + '">' +
+                    '<label>Paste Sold Rows Or CSV<textarea data-import-text placeholder="Date sold, price, platform, title"></textarea></label>' +
+                    '<div style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;">' +
+                        '<button class="secondary" type="button" data-import-cancel>Cancel</button>' +
+                        '<button class="primary" type="button" data-import-save>Save Imported Solds</button>' +
+                    '</div>' +
+                '</div>';
+            card.querySelector("[data-refresh]").addEventListener("click", function () {
+                refreshCardLadder(index, card.querySelector("[data-refresh]"));
+            });
+            card.querySelector("[data-import-toggle]").addEventListener("click", function () {
+                toggleImportPanel(index);
+            });
+            card.querySelector("[data-import-cancel]").addEventListener("click", function () {
+                toggleImportPanel(index, false);
+            });
+            card.querySelector("[data-import-save]").addEventListener("click", function () {
+                importCardLadderSolds(index, card.querySelector("[data-import-save]"));
+            });
+            card.querySelector("[data-add]").addEventListener("click", function () {
+                addGrade(index, card.querySelector("[data-add]"));
+            });
+            grid.appendChild(card);
+        });
+    }
+
+    function salesTable(solds) {
+        if (!solds.length) return '<div class="empty" style="padding:14px;">No last solds found for this grade.</div>';
+        var rows = solds.slice(0, 5).map(function (sale) {
+            return '<tr>' +
+                '<td>' + escHtml(sale.date || sale.sold_date || "") + '</td>' +
+                '<td><strong>' + (numeric(sale.price) != null ? money(numeric(sale.price)) : "-") + '</strong></td>' +
+                '<td>' + escHtml(sale.platform || sourceName(sale.source || "")) + '</td>' +
+                '<td class="sale-title" title="' + escAttr(sale.title || "") + '">' + escHtml(sale.title || "") + '</td>' +
+            '</tr>';
+        }).join("");
+        return '<table class="sales"><thead><tr><th>Date</th><th>Price</th><th>Source</th><th>Title</th></tr></thead><tbody>' + rows + '</tbody></table>';
+    }
+
+    function toggleImportPanel(index, force) {
+        var panel = document.getElementById("import-panel-" + index);
+        if (!panel) return;
+        var active = typeof force === "boolean" ? force : !panel.classList.contains("active");
+        panel.classList.toggle("active", active);
+    }
+
+    async function refreshCardLadder(index, button) {
+        var row = currentGradeComps[index];
+        if (!row || !currentCard) return;
+        var certNumber = "";
+        if (currentCert && gradesMatch(currentCert.grade, row.grade)) certNumber = currentCert.cert_number || "";
+        button.disabled = true;
+        button.innerHTML = '<span class="spinner"></span> Refreshing...';
+        showStatus("Refreshing Card Ladder through the local CLI browser session...", "loading");
+        try {
+            var resp = await fetch("/inventory/scan/slab-cardladder-refresh", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({
+                    card_name: currentCard.name || currentCard.card_name || row.card_name,
+                    game: currentCard.game || row.game || document.getElementById("game-select").value,
+                    set_name: currentCard.set_name || row.set_name || "",
+                    card_number: currentCard.card_number || row.card_number || "",
+                    image_url: currentCard.image_url || "",
+                    grading_company: row.grading_company || document.getElementById("company-select").value,
+                    grade: row.grade || "",
+                    cert_number: certNumber
+                })
+            });
+            var data = await resp.json();
+            if (!resp.ok) {
+                var message = data.error || "Card Ladder refresh failed.";
+                if (data.login_command) message += " Login command: " + data.login_command;
+                showStatus(escHtml(message), "error");
+                return;
+            }
+            currentGradeComps[index] = Object.assign({}, row, data);
+            renderGradeComps(currentGradeComps);
+            showStatus("Card Ladder comps refreshed for " + (row.grading_company || "") + " " + (row.grade || "") + ".", "success");
+        } catch (err) {
+            showStatus("Network error: " + escHtml(err.message), "error");
+        } finally {
+            if (button && button.isConnected) {
+                button.disabled = false;
+                button.textContent = "Refresh Card Ladder";
+            }
+        }
+    }
+
+    async function importCardLadderSolds(index, button) {
+        var row = currentGradeComps[index];
+        if (!row || !currentCard) return;
+        var panel = document.getElementById("import-panel-" + index);
+        var field = panel ? panel.querySelector("[data-import-text]") : null;
+        var text = field ? field.value.trim() : "";
+        if (!text) {
+            showStatus("Paste the sold rows before importing.", "error");
+            if (field) field.focus();
+            return;
+        }
+        var certNumber = "";
+        if (currentCert && gradesMatch(currentCert.grade, row.grade)) certNumber = currentCert.cert_number || "";
+        button.disabled = true;
+        button.innerHTML = '<span class="spinner"></span> Saving...';
+        try {
+            var resp = await fetch("/inventory/scan/slab-cardladder-import", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({
+                    card_name: currentCard.name || currentCard.card_name || row.card_name,
+                    game: currentCard.game || row.game || document.getElementById("game-select").value,
+                    set_name: currentCard.set_name || row.set_name || "",
+                    card_number: currentCard.card_number || row.card_number || "",
+                    grading_company: row.grading_company || document.getElementById("company-select").value,
+                    grade: row.grade || "",
+                    cert_number: certNumber,
+                    text: text
+                })
+            });
+            var data = await resp.json();
+            if (!resp.ok) {
+                showStatus(escHtml(data.error || "Could not import sold rows."), "error");
+                return;
+            }
+            currentGradeComps[index] = Object.assign({}, row, data);
+            renderGradeComps(currentGradeComps);
+            showStatus("Imported sold rows for " + (row.grading_company || "") + " " + (row.grade || "") + ".", "success");
+        } catch (err) {
+            showStatus("Network error: " + escHtml(err.message), "error");
+        } finally {
+            if (button && button.isConnected) {
+                button.disabled = false;
+                button.textContent = "Save Imported Solds";
+            }
+        }
+    }
+
+    async function addGrade(index, button) {
+        var row = currentGradeComps[index];
+        if (!row || !currentCard) return;
+        var form = document.getElementById("receive-" + index);
+        var listPrice = fieldNumber(form, "list_price");
+        var costBasis = fieldNumber(form, "cost_basis");
+        var location = fieldText(form, "location");
+        var notes = fieldText(form, "notes");
+        var certNumber = "";
+        if (currentCert && gradesMatch(currentCert.grade, row.grade)) certNumber = currentCert.cert_number || "";
+        button.disabled = true;
+        button.innerHTML = '<span class="spinner"></span> Adding...';
+        try {
+            var resp = await fetch("/inventory/batch/confirm", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify([{
+                    item_type: "slab",
+                    card_name: currentCard.name || currentCard.card_name,
+                    game: currentCard.game || document.getElementById("game-select").value,
+                    set_name: currentCard.set_name || "",
+                    card_number: currentCard.card_number || "",
+                    image_url: currentCard.image_url || "",
+                    grading_company: row.grading_company || document.getElementById("company-select").value,
+                    grade: row.grade || "",
+                    cert_number: certNumber,
+                    list_price: listPrice,
+                    cost_basis: costBasis,
+                    auto_price: row.suggested_price,
+                    suggested_price: row.suggested_price,
+                    last_solds: row.last_solds || [],
+                    data_points: row.data_points || 0,
+                    price_source: row.price_source || "card_ladder",
+                    location: location,
+                    source: "Slab Lookup",
+                    notes: notes
+                }])
+            });
+            var data = await resp.json();
+            if (resp.ok && data.created && data.items && data.items.length) {
+                var item = data.items[0];
+                showSuccess(item);
+            } else {
+                showStatus(data.error || "Could not add slab.", "error");
+            }
+        } catch (err) {
+            showStatus("Network error: " + err.message, "error");
+        } finally {
+            button.disabled = false;
+            button.textContent = "Add " + (row.grading_company || "") + " " + (row.grade || "") + " Slab";
+        }
+    }
+
+    function showSuccess(item) {
+        var banner = document.getElementById("success-banner");
+        banner.innerHTML = '<div><strong>' + escHtml(item.card_name) + '</strong><span style="color:var(--muted);margin-left:8px;">added as ' + escHtml(item.barcode) + '</span></div><a class="button secondary" href="/inventory/' + item.id + '">Open Item</a>';
+        banner.style.display = "flex";
+        banner.scrollIntoView({behavior: "smooth", block: "nearest"});
+    }
+
+    window.toggleBarcodeScanner = function () {
+        if (zxingActive) stopZxing();
+        else startZxing();
+    };
+
+    function startZxing() {
+        var wrap = document.getElementById("zxing-wrap");
+        var video = document.getElementById("zxing-video");
+        var btn = document.getElementById("barcode-scan-btn");
         if (!window.ZXing) {
-            // Load ZXing on demand
-            var script = document.createElement('script');
-            script.src = 'https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js';
-            script.onload = function() { initZxing(wrap, video, btn); };
-            script.onerror = function() { showStatus('Could not load barcode library.', 'error'); };
+            var script = document.createElement("script");
+            script.src = "https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js";
+            script.onload = function () { initZxing(wrap, video, btn); };
+            script.onerror = function () { showStatus("Could not load barcode scanner.", "error"); };
             document.head.appendChild(script);
-            btn.textContent = '⏳ Loading…';
+            btn.textContent = "Loading...";
         } else {
             initZxing(wrap, video, btn);
         }
@@ -318,199 +707,108 @@
     function initZxing(wrap, video, btn) {
         try {
             zxingReader = new ZXing.BrowserMultiFormatReader();
-            zxingReader.decodeFromVideoDevice(null, video, function(result, err) {
+            zxingReader.decodeFromVideoDevice(null, video, function (result) {
                 if (result) {
-                    var code = result.getText();
-                    document.getElementById('cert-input').value = code.replace(/\D/g,'');
+                    document.getElementById("lookup-input").value = result.getText().replace(/\D/g, "");
                     stopZxing();
-                    doLookup();
+                    runLookup();
                 }
             });
             zxingActive = true;
-            wrap.classList.add('active');
-            btn.textContent = '✕ Cancel Scan';
-        } catch(e) {
-            showStatus('Could not start barcode scanner: ' + e.message, 'error');
+            wrap.classList.add("active");
+            btn.textContent = "Cancel Scan";
+        } catch (err) {
+            showStatus("Could not start barcode scanner: " + err.message, "error");
         }
     }
 
     function stopZxing() {
-        if (zxingReader) { try { zxingReader.reset(); } catch(e) {} zxingReader = null; }
-        var wrap = document.getElementById('zxing-wrap');
-        wrap.classList.remove('active');
+        if (zxingReader) { try { zxingReader.reset(); } catch (e) {} zxingReader = null; }
+        document.getElementById("zxing-wrap").classList.remove("active");
+        document.getElementById("barcode-scan-btn").textContent = "Scan Barcode";
         zxingActive = false;
-        document.getElementById('barcode-scan-btn').textContent = '📷 Scan Barcode';
     }
 
-    // ------------------------------------------------------------------
-    // Cert lookup
-    // ------------------------------------------------------------------
-    window.doLookup = async function() {
-        var cert = document.getElementById('cert-input').value.trim().replace(/\D/g,'');
-        var company = document.getElementById('company-select').value;
-        if (!cert) {
-            showStatus('Please enter a certificate number.', 'error');
-            return;
-        }
-
-        showStatus('<span class="spinner"></span> Looking up cert ' + cert + '…', 'loading');
-        document.getElementById('lookup-btn').disabled = true;
-        document.getElementById('result-card').style.display = 'none';
-        document.getElementById('success-banner').style.display = 'none';
-
-        try {
-            var resp = await fetch('/inventory/scan/cert', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ cert_number: cert, grading_company: company })
-            });
-            var data = await resp.json();
-
-            if (!resp.ok && !data.card_name) {
-                showStatus(data.error || 'Lookup failed. Check the cert number and try again.', 'error');
-                return;
-            }
-
-            showStatus('', '');
-            currentResult = data;
-            renderResult(data);
-        } catch(e) {
-            showStatus('Network error: ' + e.message, 'error');
-        } finally {
-            document.getElementById('lookup-btn').disabled = false;
-        }
-    };
-
-    function renderResult(data) {
-        document.getElementById('res-grade').textContent = data.grade || '—';
-        document.getElementById('res-co').textContent = data.grading_company || '';
-        document.getElementById('res-name').textContent = data.card_name || 'Unknown Card';
-        document.getElementById('res-set').textContent = [data.series, data.set_name].filter(Boolean).join(' · ') || '';
-
-        var priceWrap = document.getElementById('price-wrap');
-        if (data.suggested_price) {
-            document.getElementById('res-suggest').textContent = '$' + Number(data.suggested_price).toFixed(2);
-            document.getElementById('res-dp').textContent = 'Based on ' + (data.data_points || 0) + ' recent sales';
-            priceWrap.style.display = '';
-            // Pre-fill list price
-            document.getElementById('list-price-input').value = data.suggested_price.toFixed(2);
-        } else {
-            priceWrap.style.display = 'none';
-        }
-
-        var tbody = document.getElementById('sales-body');
-        tbody.innerHTML = '';
-        var solds = data.last_solds || [];
-        if (solds.length) {
-            document.getElementById('no-sales').style.display = 'none';
-            solds.forEach(function(s, i) {
-                var tr = document.createElement('tr');
-                var recencyClass = i < 3 ? 'recency-fresh' : 'recency-stale';
-                var sourceClass = s.source === '130point' ? 'source-130point' : 'source-cardladder';
-                tr.innerHTML =
-                    '<td class="date-cell ' + recencyClass + '">' + escHtml(s.date) + '</td>' +
-                    '<td class="price-cell">' + (s.price != null ? '$' + Number(s.price).toFixed(2) : '—') + '</td>' +
-                    '<td><span class="source-pill ' + sourceClass + '">' + escHtml(s.source) + '</span></td>';
-                tbody.appendChild(tr);
-            });
-        } else {
-            document.getElementById('no-sales').style.display = 'block';
-        }
-
-        document.getElementById('result-card').style.display = 'block';
+    function clearResults() {
+        currentCandidates = [];
+        currentCard = null;
+        currentGradeComps = [];
+        document.getElementById("candidate-panel").style.display = "none";
+        document.getElementById("grade-panel").style.display = "none";
+        document.getElementById("manual-panel").style.display = "none";
+        document.getElementById("success-banner").style.display = "none";
     }
 
-    window.usePrice = function() {
-        if (currentResult && currentResult.suggested_price) {
-            document.getElementById('list-price-input').value = currentResult.suggested_price.toFixed(2);
-            document.getElementById('list-price-input').focus();
-        }
-    };
-
-    // ------------------------------------------------------------------
-    // Add to inventory
-    // ------------------------------------------------------------------
-    window.addToInventory = async function() {
-        if (!currentResult) return;
-
-        var btn = document.getElementById('add-btn');
-        btn.disabled = true;
-        btn.innerHTML = '<span class="spinner"></span> Adding…';
-
-        var listPrice = parseFloat(document.getElementById('list-price-input').value) || null;
-        var costBasis = parseFloat(document.getElementById('cost-basis-input').value) || null;
-        var notes = document.getElementById('notes-input').value.trim();
-
-        var payload = {
-            cert_number: currentResult.cert_number,
-            grading_company: currentResult.grading_company,
-            grade: currentResult.grade,
-            card_name: currentResult.card_name,
-            set_name: currentResult.set_name || currentResult.series || '',
-            game: 'Other',
-            item_type: 'slab',
-            list_price: listPrice,
-            cost_basis: costBasis,
-            notes: notes,
-            suggested_price: currentResult.suggested_price,
-            status: 'in_stock',
-        };
-
-        try {
-            // Use batch confirm with a single-item array (slab variant)
-            var resp = await fetch('/inventory/batch/confirm', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify([{
-                    card_name: payload.card_name,
-                    game: payload.game,
-                    condition: null,
-                    set_name: payload.set_name,
-                    item_type: 'slab',
-                    auto_price: payload.suggested_price,
-                    notes: payload.notes,
-                    // slab extra fields passed through notes since batch/confirm is single-model
-                    // item_type will be corrected below via direct field
-                }])
-            });
-            var data = await resp.json();
-            if (resp.ok && data.created) {
-                var item = data.items[0];
-                var banner = document.getElementById('success-banner');
-                banner.innerHTML = '&#10003; Added to inventory — barcode <strong>' + escHtml(item.barcode) + '</strong>. <a href="/inventory/' + item.id + '" style="color:var(--green);text-decoration:underline;">View item &rarr;</a>';
-                banner.style.display = 'block';
-            } else {
-                alert('Error: ' + (data.error || 'Unknown error'));
-            }
-        } catch(e) {
-            alert('Network error: ' + e.message);
-        } finally {
-            btn.disabled = false;
-            btn.textContent = 'Add Slab to Inventory';
-        }
-    };
-
-    // ------------------------------------------------------------------
-    // Helpers
-    // ------------------------------------------------------------------
-    function showStatus(msg, cls) {
-        var el = document.getElementById('status-msg');
-        el.innerHTML = msg;
-        el.className = 'status-msg ' + (cls || '');
-        el.style.display = msg ? '' : 'none';
+    function setBusy(isBusy, message) {
+        document.getElementById("lookup-btn").disabled = isBusy;
+        if (isBusy) showStatus('<span class="spinner"></span>' + escHtml(message || "Working..."), "loading");
     }
 
-    function escHtml(str) {
-        return String(str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    function showStatus(message, cls) {
+        var el = document.getElementById("status-msg");
+        el.innerHTML = message || "";
+        el.className = "status " + (cls || "");
+        el.style.display = message ? "block" : "none";
     }
 
-    // Allow Enter in cert field to trigger lookup
-    document.getElementById('cert-input').addEventListener('keydown', function(e) {
-        if (e.key === 'Enter') { e.preventDefault(); doLookup(); }
-    });
+    function certLabelForGrade(grade) {
+        if (!currentCert || !currentCert.cert_number) return "No cert attached yet";
+        if (gradesMatch(currentCert.grade, grade)) return "Cert " + currentCert.cert_number + " will be attached";
+        return "Cert applies to grade " + (currentCert.grade || "-") + " only";
+    }
+
+    function gradesMatch(a, b) {
+        return normalizeGrade(a) === normalizeGrade(b);
+    }
+
+    function normalizeGrade(value) {
+        return String(value || "").replace(/[^0-9.]/g, "");
+    }
+
+    function fieldNumber(root, name) {
+        var field = root.querySelector('[data-field="' + name + '"]');
+        var value = field ? Number(field.value) : NaN;
+        return Number.isFinite(value) ? value : null;
+    }
+
+    function fieldText(root, name) {
+        var field = root.querySelector('[data-field="' + name + '"]');
+        return field ? field.value.trim() : "";
+    }
+
+    function numeric(value) {
+        var num = Number(value);
+        return Number.isFinite(num) ? num : null;
+    }
+
+    function money(value) {
+        var num = Number(value);
+        return Number.isFinite(num) ? "$" + num.toFixed(2) : "-";
+    }
+
+    function sourceName(source) {
+        return String(source || "").replace(/_/g, " ").replace(/\b\w/g, function (m) { return m.toUpperCase(); });
+    }
+
+    function sourceDetailName(source) {
+        if (source === "card_ladder_cli_cache") return "CLI cache";
+        if (source === "card_ladder_manual_import") return "Manual import";
+        return sourceName(source);
+    }
+
+    function escHtml(value) {
+        return String(value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    }
+
+    function escAttr(value) {
+        return escHtml(value).replace(/'/g, "&#39;");
+    }
+
+    if (initialError) showStatus(initialError, "warning");
+    if (initialQuery) runLookup();
 })();
 </script>
-    {% include '_mobile_bottom_nav.html' %}
+{% include '_mobile_bottom_nav.html' %}
 {% include "_csrf_bootstrap.html" %}
 </body>
 </html>

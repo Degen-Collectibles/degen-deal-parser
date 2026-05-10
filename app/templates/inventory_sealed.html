@@ -146,7 +146,7 @@
                 <h1>Add Stock</h1>
                 <p>Search once, then add sealed product or singles from the results.</p>
             </div>
-            {% if current_user and current_user.role in ["admin", "reviewer", "viewer"] %}
+            {% if can_view_inventory %}
             <div style="display:flex;gap:8px;flex-wrap:wrap;">
                 <a href="/inventory?item_type=sealed&game={{ selected_game|urlencode }}" class="button secondary">View Sealed</a>
                 <a href="/inventory" class="button secondary">All Inventory</a>
@@ -192,7 +192,7 @@
                 <strong>{{ received_item.card_name }}</strong>
                 <span style="color:var(--muted);margin-left:8px;">{{ received_item.quantity }} in stock{% if received_item.location %} at {{ received_item.location }}{% endif %}</span>
             </div>
-            {% if current_user and current_user.role in ["admin", "reviewer", "viewer"] %}<a class="button secondary" href="/inventory/{{ received_item.id }}">Open Item</a>{% endif %}
+            {% if can_view_inventory %}<a class="button secondary" href="/inventory/{{ received_item.id }}">Open Item</a>{% endif %}
         </div>
         {% endif %}
         {% if single_received_item %}
@@ -201,7 +201,7 @@
                 <strong>{{ single_received_item.card_name }}</strong>
                 <span style="color:var(--muted);margin-left:8px;">{{ single_received_item.quantity }} in stock{% if single_received_item.condition %} - {{ single_received_item.condition }}{% endif %}</span>
             </div>
-            {% if current_user and current_user.role in ["admin", "reviewer", "viewer"] %}<a class="button secondary" href="/inventory/{{ single_received_item.id }}">Open Item</a>{% endif %}
+            {% if can_view_inventory %}<a class="button secondary" href="/inventory/{{ single_received_item.id }}">Open Item</a>{% endif %}
         </div>
         {% endif %}
         {% if bulk_message %}<div class="notice"><strong>{{ bulk_message }}</strong></div>{% endif %}

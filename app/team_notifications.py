@@ -126,6 +126,7 @@ def notify_active_employees(
     link_path: str = "/team/",
     request: Optional[Request] = None,
     exclude_user_ids: Optional[Iterable[int]] = None,
+    send_text: bool = True,
 ) -> int:
     excluded = set(exclude_user_ids or [])
     users = session.exec(select(User).where(User.is_active == True)).all()  # noqa: E712
@@ -144,7 +145,7 @@ def notify_active_employees(
             body=body,
             link_path=link_path,
             request=request,
-            send_text=True,
+            send_text=send_text,
         )
         count += 1
     return count

@@ -69,7 +69,7 @@
         .tile-icon svg { width:18px; height:18px; }
         .tile-title { font-weight:900; font-size:16px; color:#fff; letter-spacing:-.02em; }
         .tile-meta { color:var(--lx-muted); font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; }
-        .metric-strip { display:grid; grid-template-columns:repeat(6,1fr); gap:10px; margin-top:16px; }
+        .metric-strip { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:10px; margin-top:16px; }
         .metric { padding:12px; border:1px solid var(--line); border-radius:14px; background:var(--lx-s1); }
         .metric-value { font-size:22px; line-height:1; font-weight:900; color:#fff; font-variant-numeric:tabular-nums; }
         .metric-label { margin-top:6px; color:var(--lx-muted); font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; }
@@ -92,6 +92,7 @@
         .badge-single { background:#f0f4ff; color:#3b4fa8; }
         .badge-slab { background:#fdf0ff; color:#7e3b9a; }
         .badge-sealed { background:var(--blue-bg); color:var(--blue); border:1px solid rgba(96,165,250,.25); }
+        .badge-resticker { background:var(--yellow-bg); color:#fef3c7; border:1px solid rgba(234,179,8,.35); }
         .btn-sm { padding:5px 10px; border-radius:10px; font-size:12px; font-weight:700; border:1px solid var(--line); background: var(--lx-s1); color:var(--text); cursor:pointer; text-decoration:none; display:inline-block; }
         .price-cell { font-variant-numeric:tabular-nums; font-weight:700; color:#166647; }
         .price-none { color: var(--lx-muted); }
@@ -102,14 +103,19 @@
         .section-title { margin:0; font-size:22px; font-weight:800; letter-spacing:-.04em; }
         .count-badge { font-size:12px; font-weight:700; color: var(--lx-muted); }
         .table-actions { display:flex;gap:8px;flex-wrap:wrap; }
+        .row-actions { display:flex;gap:6px;flex-wrap:wrap;align-items:center; }
+        .bulk-actions { display:grid;grid-template-columns:minmax(150px,220px) minmax(140px,1fr) minmax(160px,1.2fr) auto;gap:8px;align-items:end;margin:0 0 12px; }
+        .bulk-check { width:auto; }
+        .success-banner { margin-top:14px;padding:11px 14px;border:1px solid rgba(34,197,94,.32);border-radius:14px;background:rgba(34,197,94,.12);color:#86efac;font-size:13px;font-weight:800; }
+        .warning-banner { margin-top:14px;padding:12px 14px;border:1px solid rgba(234,179,8,.38);border-radius:14px;background:var(--yellow-bg);color:#fef3c7;font-size:13px;font-weight:800;display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap; }
         .empty-state { display:flex; flex-direction:column; align-items:center; gap:10px; text-align:center; color:var(--lx-muted); padding:34px 16px; }
         .toast { position:fixed; bottom:24px; right:24px; padding:12px 18px; border-radius:16px; font-weight:700; font-size:14px; background:#1a1206; color:#fff; box-shadow:0 8px 24px rgba(0,0,0,.3); display:none; z-index:99; }
         .toast.error { background:#9d2f2b; }
         @keyframes card-in { from{opacity:0;transform:translateY(16px) scale(.985)} to{opacity:1;transform:none} }
         .card { animation:card-in .45s cubic-bezier(.22,1,.36,1) both; }
         @media(max-width:1100px) { .action-grid{grid-template-columns:repeat(2,1fr);} .metric-strip{grid-template-columns:repeat(3,1fr);} }
-        @media(max-width:900px) { .filters{grid-template-columns:1fr 1fr;} .page{padding:16px 14px 28px;} .scan-row{grid-template-columns:1fr;} .hero-actions{justify-content:flex-start;} }
-        @media(max-width:560px) { .action-grid,.metric-strip,.filters{grid-template-columns:1fr;} .button,button{width:100%;text-align:center;} }
+        @media(max-width:900px) { .filters{grid-template-columns:1fr 1fr;} .bulk-actions{grid-template-columns:1fr 1fr;} .page{padding:16px 14px 28px;} .scan-row{grid-template-columns:1fr;} .hero-actions{justify-content:flex-start;} }
+        @media(max-width:560px) { .action-grid,.metric-strip,.filters,.bulk-actions{grid-template-columns:1fr;} .button,button{width:100%;text-align:center;} }
     </style>
     <link rel="stylesheet" href="/static/linear.css?v=1776749171">
     <link rel="stylesheet" href="/static/safe-area.css?v=1776747800">
@@ -117,19 +123,20 @@
 <body>
 <div class="page">
     {% include "_linear_sidebar.html" %}
-    {% set can_manage_inventory = current_user and current_user.role in ["admin", "reviewer"] %}
+    {% set can_manage_inventory = can_manage_inventory|default(false) %}
 
     <div class="card">
         <div class="hero">
             <div class="hero-copy">
                 <div class="eyebrow" style="margin-bottom:12px;">Inventory</div>
                 <h1>Inventory</h1>
-                <p>Add sealed product or singles, scan cards, print labels, and find anything in stock.</p>
+                <p>Add sealed product, singles, or slabs, scan cards, print labels, and find anything in stock.</p>
             </div>
             <div class="hero-actions">
                 <a href="/inventory/add-stock" class="button primary-button">Add Stock</a>
+                <a href="/inventory/scan/slabs" class="button secondary-button">Add Slabs</a>
                 <a href="/degen_eye/v2" class="button secondary-button">Scan Cards</a>
-                {% if can_manage_inventory %}<a href="/inventory/new" class="button secondary-button">Add Manual Item</a>{% endif %}
+                {% if can_manage_inventory %}<a href="/inventory/new" class="button secondary-button">Manual Single</a>{% endif %}
             </div>
         </div>
 
@@ -148,12 +155,12 @@
                 </div>
                 <div class="tile-title">Scan Cards</div>
             </a>
-            <a href="/inventory/scan" class="action-tile">
+            <a href="/inventory/scan/slabs" class="action-tile">
                 <div class="tile-top">
-                    <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 5v14M8 5v14M12 5v14M17 5v14M21 5v14"/></svg></div>
-                    <span class="tile-meta">Lookup</span>
+                    <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8 7h8M8 11h8M8 15h5"/></svg></div>
+                    <span class="tile-meta">Cert + comps</span>
                 </div>
-                <div class="tile-title">Barcode Lookup</div>
+                <div class="tile-title">Add Slabs</div>
             </a>
             {% if can_manage_inventory %}
             <a href="/inventory/new" class="action-tile">
@@ -161,7 +168,7 @@
                     <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg></div>
                     <span class="tile-meta">Manual</span>
                 </div>
-                <div class="tile-title">Add Item</div>
+                <div class="tile-title">Manual Single</div>
             </a>
             {% else %}
             <a href="/inventory/labels{% if status_filter %}?status={{ status_filter }}{% endif %}" class="action-tile">
@@ -181,7 +188,20 @@
             <div class="metric"><div class="metric-value">{{ inventory_summary.sealed }}</div><div class="metric-label">Sealed</div></div>
             <div class="metric"><div class="metric-value">{{ inventory_summary.singles }}</div><div class="metric-label">Singles</div></div>
             <div class="metric"><div class="metric-value">{{ inventory_summary.slabs }}</div><div class="metric-label">Slabs</div></div>
+            <div class="metric"><div class="metric-value">{{ inventory_summary.resticker_alerts }}</div><div class="metric-label">Resticker</div></div>
         </div>
+        {% if deleted %}
+        <div class="success-banner">Archived {{ deleted }} from inventory.</div>
+        {% endif %}
+        {% if updated %}
+        <div class="success-banner">Updated {{ updated }} inventory item{% if updated != 1 %}s{% endif %}.</div>
+        {% endif %}
+        {% if inventory_summary.resticker_alerts %}
+        <div class="warning-banner">
+            <span>{{ inventory_summary.resticker_alerts }} slab{% if inventory_summary.resticker_alerts != 1 %}s{% endif %} need resticker review after Card Ladder moved up.</span>
+            <a href="/inventory?resticker=1&item_type=slab" class="btn-sm">Review Slabs</a>
+        </div>
+        {% endif %}
     </div>
 
     <div class="card">
@@ -198,6 +218,8 @@
 
         <!-- Filters -->
         <form method="get" action="/inventory" class="filters">
+            {% if archived_filter %}<input type="hidden" name="archived" value="{{ archived_filter }}">{% endif %}
+            {% if resticker_filter %}<input type="hidden" name="resticker" value="{{ resticker_filter }}">{% endif %}
             <label>Search
                 <input type="text" name="q" value="{{ q }}" placeholder="Card, sealed product, barcode, UPC, cert #...">
             </label>
@@ -235,15 +257,45 @@
             <div class="table-actions">
                 <a href="/inventory/add-stock" class="btn-sm">Add Stock</a>
                 <a href="/inventory/scan/singles" class="btn-sm">Scan Singles</a>
-                <a href="/inventory/scan/slabs" class="btn-sm">Scan Slabs</a>
+                <a href="/inventory/scan/slabs" class="btn-sm">Add Slabs</a>
                 <a href="/inventory/labels{% if status_filter %}?status={{ status_filter }}{% endif %}" class="btn-sm">Print Labels</a>
+                {% if can_manage_inventory %}
+                    {% if archived_filter == "1" %}
+                    <a href="/inventory" class="btn-sm">Active Items</a>
+                    {% else %}
+                    <a href="/inventory?archived=1" class="btn-sm">Archived ({{ inventory_summary.archived }})</a>
+                    {% endif %}
+                {% endif %}
             </div>
         </div>
+
+        {% if can_manage_inventory %}
+        <form id="bulk-form" method="post" action="/inventory/bulk-action">
+            <div class="bulk-actions">
+                <label>Bulk Action
+                    <select name="bulk_action" required>
+                        <option value="">Choose action</option>
+                        <option value="print_labels">Print Labels</option>
+                        <option value="set_location">Set Location</option>
+                        <option value="mark_held">Mark Held</option>
+                        <option value="archive">Archive</option>
+                    </select>
+                </label>
+                <label>Location
+                    <input type="text" name="bulk_location" placeholder="Shelf A">
+                </label>
+                <label>Reason / Notes
+                    <input type="text" name="bulk_reason" placeholder="Optional">
+                </label>
+                <label>&nbsp;<button type="submit" class="secondary-button">Apply</button></label>
+            </div>
+        {% endif %}
 
         <div class="table-shell">
             <table>
                 <thead>
                     <tr>
+                        {% if can_manage_inventory %}<th><input id="bulk-select-all" class="bulk-check" type="checkbox" aria-label="Select all"></th>{% endif %}
                         <th>Barcode</th>
                         <th>Card Name</th>
                         <th>Game</th>
@@ -259,6 +311,7 @@
                 <tbody>
                 {% for item in items %}
                 <tr>
+                    {% if can_manage_inventory %}<td><input class="bulk-check" type="checkbox" name="item_id" value="{{ item.id }}" form="bulk-form" aria-label="Select {{ item.card_name }}"></td>{% endif %}
                     <td style="font-family:monospace;font-size:12px;">{{ item.barcode }}</td>
                     <td style="font-weight:700;">{{ item.card_name }}</td>
                     <td><span style="font-size:12px;">{{ item.game }}</span></td>
@@ -282,20 +335,31 @@
                     {% if can_manage_inventory %}<td class="price-cell">{{ item.cost_basis | money }}</td>{% endif %}
                     <td class="price-cell">
                         {% set ep = effective_price(item) %}
+                        {% if item.resticker_alert_active %}
+                        <div style="margin-bottom:5px;"><span class="badge badge-resticker">Resticker{% if item.resticker_alert_price is not none %} {{ item.resticker_alert_price | money }}{% endif %}</span></div>
+                        {% endif %}
                         {% if ep is not none %}{{ ep | money }}{% if item.list_price is not none %}<span style="font-size:10px;color: var(--lx-muted);margin-left:3px;">manual</span>{% endif %}
                         {% else %}<span class="price-none">—</span>{% endif %}
                     </td>
                     <td>
                         <span class="badge badge-{{ item.status }}">{{ item.status.replace("_"," ").title() }}</span>
                     </td>
-                    <td><a href="/inventory/{{ item.id }}" class="btn-sm">View</a></td>
+                    <td>
+                        <div class="row-actions">
+                            <a href="/inventory/{{ item.id }}" class="btn-sm">View</a>
+                            {% if can_manage_inventory %}
+                            <a href="/inventory/{{ item.id }}#edit-item" class="btn-sm">Edit</a>
+                            {% endif %}
+                        </div>
+                    </td>
                 </tr>
                 {% else %}
-                <tr><td colspan="{{ 10 if can_manage_inventory else 9 }}"><div class="empty-state"><strong>No items found.</strong><span>Try a different filter or add stock.</span><a href="/inventory/add-stock" class="button primary-button" style="width:auto;">Add Stock</a></div></td></tr>
+                <tr><td colspan="{{ 11 if can_manage_inventory else 9 }}"><div class="empty-state"><strong>No items found.</strong><span>Try a different filter or add stock.</span><a href="/inventory/add-stock" class="button primary-button" style="width:auto;">Add Stock</a></div></td></tr>
                 {% endfor %}
                 </tbody>
             </table>
         </div>
+        {% if can_manage_inventory %}</form>{% endif %}
 
         {% if total_pages > 1 %}
         <div class="pagination">
@@ -344,6 +408,15 @@
                 scanInput.value = '';
             });
     });
+
+    var bulkAll = document.getElementById('bulk-select-all');
+    if (bulkAll) {
+        bulkAll.addEventListener('change', function () {
+            document.querySelectorAll('input[name="item_id"][form="bulk-form"]').forEach(function (box) {
+                box.checked = bulkAll.checked;
+            });
+        });
+    }
 })();
 </script>
     {% include '_mobile_bottom_nav.html' %}

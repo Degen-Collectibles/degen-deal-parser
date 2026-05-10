@@ -1820,8 +1820,9 @@ async def _refresh_inventory_prices_once() -> None:
     """
     from datetime import timedelta
     import httpx
-    from .models import InventoryItem, PriceHistory, INVENTORY_IN_STOCK, INVENTORY_LISTED
-    from .inventory_pricing import fetch_price_for_item, price_result_to_json
+    from .models import InventoryItem, INVENTORY_IN_STOCK, INVENTORY_LISTED
+    from .inventory_pricing import fetch_price_for_item
+    from .inventory_price_updates import record_inventory_price_result
 
     stale_cutoff = utcnow() - timedelta(hours=settings.inventory_price_stale_hours)
 
@@ -1864,21 +1865,20 @@ async def _refresh_inventory_prices_once() -> None:
                         base_url=settings.scrydex_base_url,
                     )
                     if result:
-                        item.auto_price = result.get("market_price")
-                        item.last_priced_at = utcnow()
-                        item.updated_at = utcnow()
-                        session.add(item)
-                        history = PriceHistory(
-                            item_id=item.id,
-                            source=result.get("source", "unknown"),
-                            market_price=result.get("market_price"),
-                            low_price=result.get("low_price"),
-                            high_price=result.get("high_price"),
-                            raw_response_json=price_result_to_json(result),
+                        _history, alert_event = record_inventory_price_result(
+                            session,
+                            item,
+                            result,
                         )
-                        session.add(history)
                         session.commit()
                         refreshed += 1
+                        if alert_event in {"created", "updated"}:
+                            worker_log(
+                                action="inventory.resticker_alert.created",
+                                success=True,
+                                inventory_item_id=item_id,
+                                suggested_price=result.get("market_price"),
+                            )
                 except Exception as exc:
                     worker_log(
                         action="inventory.price_refresh.item_failed",

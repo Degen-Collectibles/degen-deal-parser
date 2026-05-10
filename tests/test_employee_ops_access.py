@@ -20,13 +20,14 @@ for anyone below role=viewer so employees aren't tempted into 403s.
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import unittest
 from unittest.mock import patch
 
 from cryptography.fernet import Fernet
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, create_engine
+from sqlmodel import Session, create_engine, select
 
 os.environ.setdefault("EMPLOYEE_PORTAL_ENABLED", "true")
 os.environ.setdefault("EMPLOYEE_PII_KEY", Fernet.generate_key().decode("ascii"))
@@ -116,6 +117,14 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         self._patcher_main = patch.object(app_main, "get_request_user", return_value=u)
         self._patcher_main.start()
         return u
+
+    def _csrf_from_html(self, html: str) -> str:
+        marker = "var token = "
+        start = html.find(marker)
+        if start == -1:
+            raise AssertionError("no csrf token rendered")
+        raw = html[start + len(marker):].split(";", 1)[0].strip()
+        return json.loads(raw)
 
     # ---------- Sidebar "Tools" group ----------
 
@@ -248,6 +257,210 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         self.assertNotIn("Cost Basis", r.text)
         self.assertNotIn("Save Changes", r.text)
         self.assertNotIn("Push to Shopify", r.text)
+        self.assertNotIn("Archive Item", r.text)
+
+    def test_admin_inventory_management_actions_are_visible(self):
+        self._login_as("admin", user_id=223, username="adm23")
+        from app.models import InventoryItem
+
+        item = InventoryItem(
+            barcode="DGN-ADMIN1",
+            item_type="sealed",
+            game="Pokemon",
+            card_name="Admin Editable ETB",
+            set_name="Test Set",
+            auto_price=59.99,
+        )
+        self.session.add(item)
+        self.session.commit()
+        self.session.refresh(item)
+
+        list_response = self.client.get("/inventory", follow_redirects=False)
+        self.assertEqual(list_response.status_code, 200)
+        self.assertIn(f'href="/inventory/{item.id}#edit-item"', list_response.text)
+
+        detail_response = self.client.get(f"/inventory/{item.id}", follow_redirects=False)
+        self.assertEqual(detail_response.status_code, 200)
+        self.assertIn('id="edit-item"', detail_response.text)
+        self.assertIn('id="adjust-stock"', detail_response.text)
+        self.assertIn(f'action="/inventory/{item.id}/delete"', detail_response.text)
+        self.assertIn("Archive Item", detail_response.text)
+
+    def test_admin_can_archive_and_restore_inventory_item_with_history_intact(self):
+        self._login_as("admin", user_id=224, username="adm24")
+        from app.models import InventoryItem, InventoryStockMovement, PriceHistory
+
+        item = InventoryItem(
+            barcode="DGN-DEL1",
+            item_type="sealed",
+            game="Pokemon",
+            card_name="Delete Me Booster Box",
+            set_name="Test Set",
+            auto_price=199.99,
+        )
+        self.session.add(item)
+        self.session.commit()
+        self.session.refresh(item)
+        item_id = item.id
+        self.session.add(
+            PriceHistory(
+                item_id=item_id,
+                source="tcgplayer",
+                market_price=199.99,
+            )
+        )
+        self.session.add(
+            InventoryStockMovement(
+                item_id=item_id,
+                reason="receive",
+                quantity_delta=1,
+                quantity_before=0,
+                quantity_after=1,
+            )
+        )
+        self.session.commit()
+
+        detail_response = self.client.get(f"/inventory/{item_id}", follow_redirects=False)
+        csrf = self._csrf_from_html(detail_response.text)
+        response = self.client.post(
+            f"/inventory/{item_id}/delete",
+            headers={"X-CSRF-Token": csrf},
+            data={"archive_reason": "duplicate"},
+            follow_redirects=False,
+        )
+
+        self.assertEqual(response.status_code, 303)
+        self.assertIn("/inventory?deleted=Delete+Me+Booster+Box", response.headers["location"])
+        self.session.expire_all()
+        archived = self.session.get(InventoryItem, item_id)
+        self.assertIsNotNone(archived)
+        self.assertIsNotNone(archived.archived_at)
+        self.assertEqual(archived.archive_reason, "duplicate")
+        self.assertEqual(
+            len(self.session.exec(select(PriceHistory).where(PriceHistory.item_id == item_id)).all()),
+            1,
+        )
+        self.assertEqual(
+            len(
+                self.session.exec(
+                    select(InventoryStockMovement).where(InventoryStockMovement.item_id == item_id)
+                ).all()
+            ),
+            1,
+        )
+
+        restore_page = self.client.get(f"/inventory/{item_id}", follow_redirects=False)
+        restore_csrf = self._csrf_from_html(restore_page.text)
+        restore = self.client.post(
+            f"/inventory/{item_id}/restore",
+            headers={"X-CSRF-Token": restore_csrf},
+            follow_redirects=False,
+        )
+        self.assertEqual(restore.status_code, 303)
+        self.session.expire_all()
+        restored = self.session.get(InventoryItem, item_id)
+        self.assertIsNone(restored.archived_at)
+        self.assertIsNone(restored.archive_reason)
+
+    def test_manager_can_adjust_stock_with_movement_log(self):
+        self._login_as("manager", user_id=225, username="mgr25")
+        from app.models import InventoryItem, InventoryStockMovement
+
+        item = InventoryItem(
+            barcode="DGN-MGR1",
+            item_type="sealed",
+            game="Pokemon",
+            card_name="Manager Stock ETB",
+            set_name="Test Set",
+            quantity=5,
+            auto_price=49.99,
+        )
+        self.session.add(item)
+        self.session.commit()
+        self.session.refresh(item)
+        item_id = item.id
+
+        detail_response = self.client.get(f"/inventory/{item_id}", follow_redirects=False)
+        self.assertEqual(detail_response.status_code, 200)
+        self.assertIn('id="adjust-stock"', detail_response.text)
+        csrf = self._csrf_from_html(detail_response.text)
+
+        response = self.client.post(
+            f"/inventory/{item_id}/adjust-stock",
+            headers={"X-CSRF-Token": csrf},
+            data={
+                "quantity_delta": "-2",
+                "reason": "missing",
+                "location": "Shelf B",
+                "source": "Cycle Count",
+                "notes": "Could not find two boxes",
+            },
+            follow_redirects=False,
+        )
+
+        self.assertEqual(response.status_code, 303)
+        self.session.expire_all()
+        adjusted = self.session.get(InventoryItem, item_id)
+        self.assertEqual(adjusted.quantity, 3)
+        self.assertEqual(adjusted.location, "Shelf B")
+        movement = self.session.exec(
+            select(InventoryStockMovement).where(InventoryStockMovement.item_id == item_id)
+        ).one()
+        self.assertEqual(movement.reason, "missing")
+        self.assertEqual(movement.quantity_delta, -2)
+        self.assertEqual(movement.quantity_before, 5)
+        self.assertEqual(movement.quantity_after, 3)
+        self.assertEqual(movement.created_by, "mgr25")
+
+    def test_manager_can_bulk_update_inventory_location(self):
+        self._login_as("manager", user_id=226, username="mgr26")
+        from app.models import InventoryItem, InventoryStockMovement
+
+        items = [
+            InventoryItem(
+                barcode="DGN-BULK1",
+                item_type="sealed",
+                game="Pokemon",
+                card_name="Bulk One",
+                quantity=2,
+            ),
+            InventoryItem(
+                barcode="DGN-BULK2",
+                item_type="sealed",
+                game="Pokemon",
+                card_name="Bulk Two",
+                quantity=4,
+            ),
+        ]
+        self.session.add_all(items)
+        self.session.commit()
+        for item in items:
+            self.session.refresh(item)
+
+        page = self.client.get("/inventory", follow_redirects=False)
+        self.assertIn('action="/inventory/bulk-action"', page.text)
+        csrf = self._csrf_from_html(page.text)
+        response = self.client.post(
+            "/inventory/bulk-action",
+            headers={"X-CSRF-Token": csrf},
+            data={
+                "bulk_action": "set_location",
+                "bulk_location": "Case 3",
+                "bulk_reason": "Moved to showcase",
+                "item_id": [str(items[0].id), str(items[1].id)],
+            },
+            follow_redirects=False,
+        )
+
+        self.assertEqual(response.status_code, 303)
+        self.assertIn("/inventory?updated=2", response.headers["location"])
+        self.session.expire_all()
+        for item in items:
+            refreshed = self.session.get(InventoryItem, item.id)
+            self.assertEqual(refreshed.location, "Case 3")
+        movements = self.session.exec(select(InventoryStockMovement)).all()
+        self.assertEqual(len(movements), 2)
+        self.assertEqual({row.reason for row in movements}, {"bulk_location"})
 
     def test_portal_viewer_blocked_from_legacy_reports(self):
         self._login_as("viewer", user_id=217, username="viewer1")

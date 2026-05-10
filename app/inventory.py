@@ -35,6 +35,7 @@ from .card_scanner import identify_card_from_image, lookup_card_image_and_price
 from .cert_lookup import lookup_cert
 from .pokemon_scanner import (
     TCGTRACKING_BASE,
+    _heuristic_parse_query,
     fetch_tcg_categories,
     get_scan_history,
     get_validation_result,
@@ -64,10 +65,15 @@ from .inventory_barcode import (
     render_barcode_svg,
 )
 from .inventory_pricing import (
+    build_card_ladder_cli_query,
+    card_ladder_cli_status,
+    clear_slab_resticker_alert,
     effective_price,
     fetch_price_for_item,
-    price_result_to_json,
+    import_card_ladder_cli_records_for_item,
+    sync_card_ladder_cli_for_item,
 )
+from .inventory_price_updates import record_inventory_price_result
 from .inventory_shopify import push_item_to_shopify, update_shopify_variant_price
 from .models import (
     GAMES,
@@ -95,6 +101,22 @@ logger = logging.getLogger(__name__)
 _CLIENT_LOG_RATE: dict[str, list[float]] = {}
 
 PAGE_SIZE = 50
+
+SLAB_GRADE_OPTIONS: dict[str, tuple[str, ...]] = {
+    "PSA": ("10", "9", "8", "7"),
+    "SGC": ("10", "9.5", "9", "8.5", "8"),
+    "CGC": ("10", "9.5", "9", "8.5", "8"),
+    "BGS": ("10", "9.5", "9", "8.5", "8"),
+}
+
+
+def _slab_grade_options(grading_company: str | None, preferred_grade: str = "") -> tuple[str, ...]:
+    company = (grading_company or "PSA").strip().upper()
+    grades = list(SLAB_GRADE_OPTIONS.get(company) or SLAB_GRADE_OPTIONS["PSA"])
+    preferred = preferred_grade.strip()
+    if preferred and preferred not in grades:
+        grades.insert(0, preferred)
+    return tuple(grades[:5])
 
 SEALED_PRODUCT_KINDS: tuple[str, ...] = (
     "Booster Box Case",
@@ -313,6 +335,34 @@ def _require_employee_permission(
     return None
 
 
+def _can_inventory_manage(request: Request, session: Session) -> bool:
+    user = _current_user(request)
+    if not user:
+        return False
+    try:
+        return has_permission(session, user, "ops.inventory.manage")
+    except Exception:
+        return False
+
+
+def _can_inventory_view(request: Request, session: Session) -> bool:
+    user = _current_user(request)
+    if not user:
+        return False
+    try:
+        return has_permission(session, user, "ops.inventory.view")
+    except Exception:
+        return False
+
+
+def _require_inventory_manage(request: Request, session: Session) -> Optional[Response]:
+    if denial := _require_employee(request):
+        return denial
+    if not _can_inventory_manage(request, session):
+        return HTMLResponse("You do not have permission to manage inventory.", status_code=403)
+    return None
+
+
 def _require_reviewer(request: Request) -> Optional[Response]:
     return _check_role(request, "reviewer")
 
@@ -335,6 +385,26 @@ def _current_user_label(request: Request) -> Optional[str]:
 
 def _normalize_lookup(value: str | None) -> str:
     return " ".join((value or "").strip().lower().split())
+
+
+def _card_ladder_history_context(history: list[PriceHistory]) -> dict[str, Any]:
+    for row in history:
+        if row.source != "card_ladder":
+            continue
+        try:
+            payload = json.loads(row.raw_response_json or "{}")
+        except json.JSONDecodeError:
+            continue
+        sales = payload.get("sales") if isinstance(payload, dict) else None
+        if not isinstance(sales, list):
+            continue
+        return {
+            "sales": [sale for sale in sales[:8] if isinstance(sale, dict)],
+            "sales_history_url": payload.get("sales_history_url") if isinstance(payload, dict) else "",
+            "sample_count": payload.get("sample_count") if isinstance(payload, dict) else None,
+            "fetched_at": row.fetched_at,
+        }
+    return {"sales": [], "sales_history_url": "", "sample_count": None, "fetched_at": None}
 
 
 def _normalize_add_stock_game(value: str | None) -> str:
@@ -376,6 +446,30 @@ def _add_stock_existing_game_values(game: str | None) -> tuple[str, ...]:
     if selected_game == "Magic":
         return ("Magic", "MTG")
     return (selected_game,)
+
+
+def _slab_search_fallback_suggestion(query: str, game: str = "Pokemon") -> Optional[dict[str, Any]]:
+    selected_game = _normalize_add_stock_game(game)
+    if selected_game != "Pokemon":
+        return None
+    parsed = _heuristic_parse_query(query, "3")
+    card_name = (parsed.card_name or query).strip()
+    if not card_name:
+        return None
+    return {
+        "name": card_name,
+        "game": selected_game,
+        "set_name": (parsed.set_name or "").strip(),
+        "set_code": "",
+        "card_number": (parsed.collector_number or "").strip(),
+        "image_url": "",
+        "tcgplayer_url": "",
+        "variants": [],
+        "default_variant": "",
+        "default_condition": "NM",
+        "default_price": None,
+        "lookup_fallback": True,
+    }
 
 
 def _normalize_product_text(value: str | None) -> str:
@@ -1136,6 +1230,7 @@ async def _inventory_sealed_template_context(
     query = select(InventoryItem).where(
         InventoryItem.item_type == ITEM_TYPE_SEALED,
         InventoryItem.game.in_(game_values),
+        InventoryItem.archived_at == None,  # noqa: E711
     )
     if search_text:
         like = f"%{search_text}%"
@@ -1203,6 +1298,8 @@ async def _inventory_sealed_template_context(
     return {
         "current_user": _current_user(request),
         "csrf_token": issue_token(request),
+        "can_view_inventory": _can_inventory_view(request, session),
+        "can_manage_inventory": _can_inventory_manage(request, session),
         "selected_game": selected_game,
         "game_options": ADD_STOCK_GAME_OPTIONS,
         "scan_url": "/degen_eye/v2" if selected_game == "Pokemon" else "/degen_eye",
@@ -1342,6 +1439,10 @@ def _receive_sealed_stock(
             item.set_name = set_name.strip()
         if list_price is not None:
             item.list_price = list_price
+        if item.archived_at is not None:
+            item.archived_at = None
+            item.archived_by = None
+            item.archive_reason = None
 
     before_qty = max(0, item.quantity or 0)
     after_qty = before_qty + quantity
@@ -1501,6 +1602,10 @@ def _receive_single_stock(
             item.list_price = list_price
         if notes.strip() and not item.notes:
             item.notes = notes.strip()
+        if item.archived_at is not None:
+            item.archived_at = None
+            item.archived_by = None
+            item.archive_reason = None
 
     before_qty = max(0, item.quantity or 0)
     after_qty = before_qty + quantity
@@ -1543,6 +1648,181 @@ def _receive_single_stock(
                 market_price=auto_price,
                 low_price=low_price,
                 high_price=None,
+                raw_response_json=json.dumps(price_payload or {}, sort_keys=True),
+            )
+        )
+
+    session.commit()
+    session.refresh(item)
+    session.refresh(movement)
+    return item, movement, created
+
+
+def _find_existing_slab_item(
+    session: Session,
+    *,
+    card_name: str,
+    grading_company: str = "",
+    grade: str = "",
+    cert_number: str = "",
+) -> Optional[InventoryItem]:
+    cert_clean = (cert_number or "").strip()
+    company_clean = (grading_company or "").strip().upper()
+    if cert_clean and company_clean:
+        found = session.exec(
+            select(InventoryItem).where(
+                InventoryItem.item_type == ITEM_TYPE_SLAB,
+                InventoryItem.grading_company == company_clean,
+                InventoryItem.cert_number == cert_clean,
+            )
+        ).first()
+        if found:
+            return found
+
+    name_norm = _normalize_lookup(card_name)
+    grade_norm = _normalize_lookup(grade)
+    if not name_norm:
+        return None
+    candidates = session.exec(
+        select(InventoryItem).where(InventoryItem.item_type == ITEM_TYPE_SLAB)
+    ).all()
+    for item in candidates:
+        if _normalize_lookup(item.card_name) != name_norm:
+            continue
+        if company_clean and (item.grading_company or "").upper() != company_clean:
+            continue
+        if grade_norm and _normalize_lookup(item.grade) != grade_norm:
+            continue
+        return item
+    return None
+
+
+def _receive_slab_stock(
+    session: Session,
+    *,
+    game: str = "Other",
+    card_name: str,
+    set_name: str = "",
+    card_number: str = "",
+    grading_company: str = "",
+    grade: str = "",
+    cert_number: str = "",
+    quantity: int = 1,
+    unit_cost: Optional[float] = None,
+    list_price: Optional[float] = None,
+    auto_price: Optional[float] = None,
+    location: str = "",
+    source: str = "",
+    notes: str = "",
+    price_payload: Optional[dict[str, Any]] = None,
+    actor_label: Optional[str] = None,
+) -> tuple[InventoryItem, InventoryStockMovement, bool]:
+    if quantity < 1:
+        raise ValueError("Quantity must be at least 1.")
+    card_name = card_name.strip()
+    if not card_name:
+        raise ValueError("Card name is required.")
+    company_clean = grading_company.strip().upper()
+
+    item = _find_existing_slab_item(
+        session,
+        card_name=card_name,
+        grading_company=company_clean,
+        grade=grade,
+        cert_number=cert_number,
+    )
+    created = False
+    if item is None:
+        item = InventoryItem(
+            barcode="PENDING",
+            item_type=ITEM_TYPE_SLAB,
+            game=game.strip() or "Other",
+            card_name=card_name,
+            set_name=set_name.strip() or None,
+            card_number=card_number.strip() or None,
+            language="English",
+            quantity=0,
+            grading_company=company_clean or None,
+            grade=grade.strip() or None,
+            cert_number=cert_number.strip() or None,
+            cost_basis=unit_cost,
+            auto_price=auto_price,
+            list_price=list_price,
+            last_priced_at=utcnow() if auto_price is not None else None,
+            location=location.strip() or None,
+            notes=notes.strip() or None,
+            status=INVENTORY_IN_STOCK,
+            created_at=utcnow(),
+        )
+        session.add(item)
+        session.commit()
+        session.refresh(item)
+        item.barcode = generate_barcode_value(item.id)
+        created = True
+    else:
+        if set_name.strip() and not item.set_name:
+            item.set_name = set_name.strip()
+        if card_number.strip() and not item.card_number:
+            item.card_number = card_number.strip()
+        if company_clean and not item.grading_company:
+            item.grading_company = company_clean
+        if grade.strip() and not item.grade:
+            item.grade = grade.strip()
+        if cert_number.strip() and not item.cert_number:
+            item.cert_number = cert_number.strip()
+        if auto_price is not None:
+            item.auto_price = auto_price
+            item.last_priced_at = utcnow()
+        if list_price is not None:
+            item.list_price = list_price
+        if notes.strip() and not item.notes:
+            item.notes = notes.strip()
+        if item.archived_at is not None:
+            item.archived_at = None
+            item.archived_by = None
+            item.archive_reason = None
+
+    before_qty = max(0, item.quantity or 0)
+    after_qty = before_qty + quantity
+    if unit_cost is not None:
+        if item.cost_basis is not None and before_qty > 0:
+            item.cost_basis = round(
+                ((item.cost_basis * before_qty) + (unit_cost * quantity)) / after_qty,
+                2,
+            )
+        else:
+            item.cost_basis = unit_cost
+    if location.strip():
+        item.location = location.strip()
+    item.quantity = after_qty
+    item.status = INVENTORY_IN_STOCK
+    item.updated_at = utcnow()
+    session.add(item)
+
+    movement = InventoryStockMovement(
+        item_id=item.id,
+        reason="receive",
+        quantity_delta=quantity,
+        quantity_before=before_qty,
+        quantity_after=after_qty,
+        unit_cost=unit_cost,
+        total_cost=round(unit_cost * quantity, 2) if unit_cost is not None else None,
+        location=location.strip() or item.location,
+        source=source.strip() or None,
+        notes=notes.strip() or None,
+        created_by=actor_label,
+        created_at=utcnow(),
+    )
+    session.add(movement)
+
+    if auto_price is not None:
+        session.add(
+            PriceHistory(
+                item_id=item.id,
+                source=(price_payload or {}).get("source") or "card_ladder",
+                market_price=auto_price,
+                low_price=(price_payload or {}).get("low_price"),
+                high_price=(price_payload or {}).get("high_price"),
                 raw_response_json=json.dumps(price_payload or {}, sort_keys=True),
             )
         )
@@ -1669,18 +1949,28 @@ async def inventory_list(
     game: str = Query(default=""),
     item_type: str = Query(default=""),
     q: str = Query(default=""),
+    deleted: str = Query(default=""),
+    updated: int = Query(default=0),
+    archived: str = Query(default=""),
+    resticker: str = Query(default=""),
     page: int = Query(default=1, ge=1),
 ):
     if denial := _require_employee_permission(request, "ops.inventory.view", session):
         return denial
 
     query = select(InventoryItem)
+    if archived == "1":
+        query = query.where(InventoryItem.archived_at != None)  # noqa: E711
+    elif archived != "all":
+        query = query.where(InventoryItem.archived_at == None)  # noqa: E711
     if status and status in ALL_INVENTORY_STATUSES:
         query = query.where(InventoryItem.status == status)
     if game:
         query = query.where(InventoryItem.game == game)
     if item_type and item_type in (ITEM_TYPE_SINGLE, ITEM_TYPE_SLAB, ITEM_TYPE_SEALED):
         query = query.where(InventoryItem.item_type == item_type)
+    if resticker == "1":
+        query = query.where(InventoryItem.resticker_alert_active == True)  # noqa: E712
     if q:
         like = f"%{q}%"
         query = query.where(
@@ -1704,22 +1994,30 @@ async def inventory_list(
         query.order_by(InventoryItem.created_at.desc()).offset(offset).limit(PAGE_SIZE)
     ).all()
 
+    can_manage_inventory = _can_inventory_manage(request, session)
+    active_items = InventoryItem.archived_at == None  # noqa: E711
     inventory_summary = {
-        "all": session.exec(select(func.count()).select_from(InventoryItem)).one(),
+        "all": session.exec(select(func.count()).where(active_items)).one(),
+        "archived": session.exec(
+            select(func.count()).where(InventoryItem.archived_at != None)  # noqa: E711
+        ).one(),
         "sealed": session.exec(
-            select(func.count()).where(InventoryItem.item_type == ITEM_TYPE_SEALED)
+            select(func.count()).where(InventoryItem.item_type == ITEM_TYPE_SEALED, active_items)
         ).one(),
         "singles": session.exec(
-            select(func.count()).where(InventoryItem.item_type == ITEM_TYPE_SINGLE)
+            select(func.count()).where(InventoryItem.item_type == ITEM_TYPE_SINGLE, active_items)
         ).one(),
         "slabs": session.exec(
-            select(func.count()).where(InventoryItem.item_type == ITEM_TYPE_SLAB)
+            select(func.count()).where(InventoryItem.item_type == ITEM_TYPE_SLAB, active_items)
+        ).one(),
+        "resticker_alerts": session.exec(
+            select(func.count()).where(InventoryItem.resticker_alert_active == True, active_items)  # noqa: E712
         ).one(),
         "in_stock": session.exec(
-            select(func.count()).where(InventoryItem.status == INVENTORY_IN_STOCK)
+            select(func.count()).where(InventoryItem.status == INVENTORY_IN_STOCK, active_items)
         ).one(),
         "listed": session.exec(
-            select(func.count()).where(InventoryItem.status == INVENTORY_LISTED)
+            select(func.count()).where(InventoryItem.status == INVENTORY_LISTED, active_items)
         ).one(),
     }
 
@@ -1736,6 +2034,11 @@ async def inventory_list(
             "game_filter": game,
             "type_filter": item_type,
             "q": q,
+            "deleted": deleted,
+            "updated": updated,
+            "archived_filter": archived,
+            "resticker_filter": resticker,
+            "can_manage_inventory": can_manage_inventory,
             "games": GAMES,
             "statuses": sorted(ALL_INVENTORY_STATUSES),
             "inventory_summary": inventory_summary,
@@ -1763,7 +2066,10 @@ async def inventory_lookup(
     if not barcode:
         return JSONResponse({"found": False})
     item = session.exec(
-        select(InventoryItem).where(InventoryItem.barcode == barcode.strip())
+        select(InventoryItem).where(
+            InventoryItem.barcode == barcode.strip(),
+            InventoryItem.archived_at == None,  # noqa: E711
+        )
     ).first()
     if not item:
         return JSONResponse({"found": False, "barcode": barcode})
@@ -2074,11 +2380,17 @@ async def inventory_labels(
         id_list = [int(x) for x in ids.split(",") if x.strip().isdigit()]
         if id_list:
             items = session.exec(
-                select(InventoryItem).where(InventoryItem.id.in_(id_list))
+                select(InventoryItem).where(
+                    InventoryItem.id.in_(id_list),
+                    InventoryItem.archived_at == None,  # noqa: E711
+                )
             ).all()
     elif status and status in ALL_INVENTORY_STATUSES:
         items = session.exec(
-            select(InventoryItem).where(InventoryItem.status == status)
+            select(InventoryItem).where(
+                InventoryItem.status == status,
+                InventoryItem.archived_at == None,  # noqa: E711
+            )
         ).all()
 
     labels = label_context_for_items(items)
@@ -2096,17 +2408,22 @@ async def inventory_labels(
 
 @router.get("/inventory/new", response_class=HTMLResponse)
 async def inventory_new_form(request: Request):
-    if denial := _require_reviewer(request):
-        return denial
+    with managed_session() as permission_session:
+        if denial := _require_inventory_manage(request, permission_session):
+            return denial
+        can_manage_inventory = _can_inventory_manage(request, permission_session)
+        can_view_inventory = _can_inventory_view(request, permission_session)
     return _templates.TemplateResponse(
         request,
         "inventory_new.html",
         {
             "current_user": _current_user(request),
+            "can_manage_inventory": can_manage_inventory,
+            "can_view_inventory": can_view_inventory,
             "games": GAMES,
             "conditions": CONDITIONS,
             "grading_companies": GRADING_COMPANIES,
-            "item_types": [ITEM_TYPE_SINGLE, ITEM_TYPE_SLAB],
+            "item_types": [ITEM_TYPE_SINGLE],
             "error": None,
         },
     )
@@ -2135,8 +2452,19 @@ async def inventory_new_submit(
     auto_price_on_save: str = Form(default=""),
     push_shopify_on_save: str = Form(default=""),
 ):
-    if denial := _require_reviewer(request):
+    if denial := _require_inventory_manage(request, session):
         return denial
+
+    if item_type == ITEM_TYPE_SLAB:
+        params = urlencode(
+            {
+                "error": (
+                    "Use Add Slabs for graded inventory so cert lookup, grade comps, "
+                    "and resticker tracking stay together."
+                )
+            }
+        )
+        return RedirectResponse(f"/inventory/scan/slabs?{params}", status_code=303)
 
     card_name = card_name.strip()
     if not card_name:
@@ -2145,10 +2473,12 @@ async def inventory_new_submit(
             "inventory_new.html",
             {
                 "current_user": _current_user(request),
+                "can_manage_inventory": _can_inventory_manage(request, session),
+                "can_view_inventory": _can_inventory_view(request, session),
                 "games": GAMES,
                 "conditions": CONDITIONS,
                 "grading_companies": GRADING_COMPANIES,
-                "item_types": [ITEM_TYPE_SINGLE, ITEM_TYPE_SLAB],
+                "item_types": [ITEM_TYPE_SINGLE],
                 "error": "Card name is required.",
             },
             status_code=400,
@@ -2196,18 +2526,14 @@ async def inventory_new_submit(
                     base_url=settings.scrydex_base_url,
                 )
             if result:
-                item.auto_price = result.get("market_price")
-                item.last_priced_at = utcnow()
-                session.add(item)
-                history = PriceHistory(
-                    item_id=item.id,
-                    source=result.get("source", "unknown"),
-                    market_price=result.get("market_price"),
-                    low_price=result.get("low_price"),
-                    high_price=result.get("high_price"),
-                    raw_response_json=price_result_to_json(result),
+                actor = _current_user(request)
+                record_inventory_price_result(
+                    session,
+                    item,
+                    result,
+                    request=request,
+                    actor_user_id=getattr(actor, "id", None),
                 )
-                session.add(history)
                 session.commit()
                 session.refresh(item)
         except Exception as exc:
@@ -2235,6 +2561,74 @@ async def inventory_new_submit(
     return RedirectResponse(f"/inventory/{item.id}", status_code=303)
 
 
+@router.post("/inventory/bulk-action")
+async def inventory_bulk_action(
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    if denial := _require_inventory_manage(request, session):
+        return denial
+
+    form = await request.form()
+    item_ids = [int(value) for value in form.getlist("item_id") if str(value).isdigit()]
+    action = str(form.get("bulk_action") or "").strip()
+    if not item_ids:
+        return RedirectResponse("/inventory", status_code=303)
+
+    items = session.exec(select(InventoryItem).where(InventoryItem.id.in_(item_ids))).all()
+    if action == "print_labels":
+        params = urlencode({"ids": ",".join(str(item.id) for item in items if item.archived_at is None)})
+        return RedirectResponse(f"/inventory/labels?{params}", status_code=303)
+
+    now = utcnow()
+    actor = _current_user_label(request)
+    updated_count = 0
+    reason = str(form.get("bulk_reason") or "").strip()
+    location = str(form.get("bulk_location") or "").strip()
+
+    if action == "set_location" and not location:
+        return HTMLResponse("Location is required for bulk location updates.", status_code=400)
+    if action not in {"set_location", "mark_held", "archive"}:
+        return HTMLResponse("Choose a valid bulk action.", status_code=400)
+
+    for item in items:
+        if item.archived_at is not None:
+            continue
+        before_qty = max(0, item.quantity or 0)
+        if action == "set_location":
+            item.location = location
+            movement_reason = "bulk_location"
+        elif action == "mark_held":
+            item.status = INVENTORY_HELD
+            movement_reason = "bulk_status"
+        else:
+            item.archived_at = now
+            item.archived_by = actor
+            item.archive_reason = reason or "Bulk archive"
+            movement_reason = "bulk_archive"
+        item.updated_at = now
+        session.add(item)
+        session.add(
+            InventoryStockMovement(
+                item_id=item.id,
+                reason=movement_reason,
+                quantity_delta=0,
+                quantity_before=before_qty,
+                quantity_after=before_qty,
+                location=location or item.location,
+                source="Bulk Action",
+                notes=reason or None,
+                created_by=actor,
+                created_at=now,
+            )
+        )
+        updated_count += 1
+
+    session.commit()
+    params = urlencode({"updated": updated_count})
+    return RedirectResponse(f"/inventory?{params}", status_code=303)
+
+
 # ---------------------------------------------------------------------------
 # Item detail + edit
 # ---------------------------------------------------------------------------
@@ -2250,6 +2644,9 @@ async def inventory_item_detail(
 
     item = session.get(InventoryItem, item_id)
     if not item:
+        return HTMLResponse("Item not found.", status_code=404)
+    can_manage_inventory = _can_inventory_manage(request, session)
+    if item.archived_at is not None and not can_manage_inventory:
         return HTMLResponse("Item not found.", status_code=404)
 
     history = session.exec(
@@ -2274,9 +2671,12 @@ async def inventory_item_detail(
             "current_user": _current_user(request),
             "item": item,
             "price_history": history,
+            "card_ladder_history": _card_ladder_history_context(history),
             "stock_movements": stock_movements,
             "barcode_svg": barcode_svg,
             "effective_price": effective_price(item),
+            "can_manage_inventory": can_manage_inventory,
+            "can_view_inventory": _can_inventory_view(request, session),
             "games": GAMES,
             "conditions": CONDITIONS,
             "grading_companies": GRADING_COMPANIES,
@@ -2303,7 +2703,7 @@ async def inventory_item_edit(
     upc: str = Form(default=""),
     location: str = Form(default=""),
     condition: str = Form(default=""),
-    quantity: int = Form(default=1),
+    quantity: Optional[int] = Form(default=None),
     grading_company: str = Form(default=""),
     grade: str = Form(default=""),
     cert_number: str = Form(default=""),
@@ -2313,7 +2713,7 @@ async def inventory_item_edit(
     status: str = Form(default=""),
     image_url: str = Form(default=""),
 ):
-    if denial := _require_reviewer(request):
+    if denial := _require_inventory_manage(request, session):
         return denial
 
     item = session.get(InventoryItem, item_id)
@@ -2332,12 +2732,39 @@ async def inventory_item_edit(
     item.upc = upc.strip() or None
     item.location = location.strip() or None
     item.condition = condition.strip() or None
-    item.quantity = max(1, quantity)
+    before_qty = max(0, item.quantity or 0)
+    if quantity is not None:
+        after_qty = max(0, quantity)
+        if after_qty != before_qty:
+            item.quantity = after_qty
+            session.add(
+                InventoryStockMovement(
+                    item_id=item.id,
+                    reason="manual_edit",
+                    quantity_delta=after_qty - before_qty,
+                    quantity_before=before_qty,
+                    quantity_after=after_qty,
+                    location=location.strip() or item.location,
+                    source="Inventory Edit",
+                    notes="Quantity changed from item edit form.",
+                    created_by=_current_user_label(request),
+                    created_at=utcnow(),
+                )
+            )
     item.grading_company = grading_company.strip() or None
     item.grade = grade.strip() or None
     item.cert_number = cert_number.strip() or None
     item.cost_basis = _parse_float(cost_basis)
     item.list_price = _parse_float(list_price)
+    if item.resticker_alert_active and (
+        item.item_type != ITEM_TYPE_SLAB
+        or (
+            item.list_price is not None
+            and item.resticker_alert_price is not None
+            and item.list_price >= item.resticker_alert_price
+        )
+    ):
+        clear_slab_resticker_alert(item, reason="Sticker price updated from inventory edit.")
     item.notes = notes.strip() or None
     if status and status in ALL_INVENTORY_STATUSES:
         item.status = status
@@ -2345,6 +2772,116 @@ async def inventory_item_edit(
     item.updated_at = utcnow()
     session.add(item)
     session.commit()
+    return RedirectResponse(f"/inventory/{item_id}", status_code=303)
+
+
+@router.post("/inventory/{item_id}/adjust-stock")
+async def inventory_item_adjust_stock(
+    request: Request,
+    item_id: int,
+    session: Session = Depends(get_session),
+    quantity_delta: int = Form(...),
+    reason: str = Form(default="adjustment"),
+    location: str = Form(default=""),
+    source: str = Form(default="Manual Adjustment"),
+    notes: str = Form(default=""),
+):
+    if denial := _require_inventory_manage(request, session):
+        return denial
+
+    item = session.get(InventoryItem, item_id)
+    if not item:
+        return HTMLResponse("Item not found.", status_code=404)
+    if item.archived_at is not None:
+        return HTMLResponse("Restore this item before adjusting stock.", status_code=400)
+    if quantity_delta == 0:
+        return HTMLResponse("Adjustment quantity cannot be zero.", status_code=400)
+
+    before_qty = max(0, item.quantity or 0)
+    after_qty = before_qty + quantity_delta
+    if after_qty < 0:
+        return HTMLResponse("Adjustment would make quantity negative.", status_code=400)
+
+    reason_clean = (reason or "adjustment").strip() or "adjustment"
+    location_clean = location.strip() or item.location
+    item.quantity = after_qty
+    if location.strip():
+        item.location = location.strip()
+    if quantity_delta > 0 and item.status == INVENTORY_SOLD:
+        item.status = INVENTORY_IN_STOCK
+        item.sold_at = None
+        item.sold_price = None
+    elif after_qty == 0 and reason_clean in {"sale", "sold"}:
+        item.status = INVENTORY_SOLD
+        item.sold_at = item.sold_at or utcnow()
+    item.updated_at = utcnow()
+    session.add(item)
+    session.add(
+        InventoryStockMovement(
+            item_id=item.id,
+            reason=reason_clean,
+            quantity_delta=quantity_delta,
+            quantity_before=before_qty,
+            quantity_after=after_qty,
+            location=location_clean,
+            source=source.strip() or None,
+            notes=notes.strip() or None,
+            created_by=_current_user_label(request),
+            created_at=utcnow(),
+        )
+    )
+    session.commit()
+    return RedirectResponse(f"/inventory/{item_id}", status_code=303)
+
+
+@router.post("/inventory/{item_id}/delete")
+async def inventory_item_delete(
+    request: Request,
+    item_id: int,
+    session: Session = Depends(get_session),
+):
+    if denial := _require_inventory_manage(request, session):
+        return denial
+
+    item = session.get(InventoryItem, item_id)
+    if not item:
+        return HTMLResponse("Item not found.", status_code=404)
+
+    archived_name = item.card_name
+    form = await request.form()
+    archive_reason = str(form.get("archive_reason") or "").strip()
+    item.archived_at = utcnow()
+    item.archived_by = _current_user_label(request)
+    item.archive_reason = archive_reason or None
+    item.updated_at = utcnow()
+    session.add(item)
+    session.commit()
+    logger.info("[inventory] archived item %s (%s)", item_id, archived_name)
+
+    params = urlencode({"deleted": archived_name})
+    return RedirectResponse(f"/inventory?{params}", status_code=303)
+
+
+@router.post("/inventory/{item_id}/restore")
+async def inventory_item_restore(
+    request: Request,
+    item_id: int,
+    session: Session = Depends(get_session),
+):
+    if denial := _require_inventory_manage(request, session):
+        return denial
+
+    item = session.get(InventoryItem, item_id)
+    if not item:
+        return HTMLResponse("Item not found.", status_code=404)
+
+    item.archived_at = None
+    item.archived_by = None
+    item.archive_reason = None
+    item.updated_at = utcnow()
+    session.add(item)
+    session.commit()
+    logger.info("[inventory] restored archived item %s (%s)", item_id, item.card_name)
     return RedirectResponse(f"/inventory/{item_id}", status_code=303)
 
 
@@ -2358,7 +2895,7 @@ async def inventory_reprice(
     item_id: int,
     session: Session = Depends(get_session),
 ):
-    if denial := _require_reviewer(request):
+    if denial := _require_inventory_manage(request, session):
         return denial
 
     item = session.get(InventoryItem, item_id)
@@ -2374,26 +2911,73 @@ async def inventory_reprice(
                 base_url=settings.scrydex_base_url,
             )
         if result:
-            item.auto_price = result.get("market_price")
-            item.last_priced_at = utcnow()
-            item.updated_at = utcnow()
-            session.add(item)
-            history = PriceHistory(
-                item_id=item.id,
-                source=result.get("source", "unknown"),
-                market_price=result.get("market_price"),
-                low_price=result.get("low_price"),
-                high_price=result.get("high_price"),
-                raw_response_json=price_result_to_json(result),
+            actor = _current_user(request)
+            _history, alert_event = record_inventory_price_result(
+                session,
+                item,
+                result,
+                request=request,
+                actor_user_id=getattr(actor, "id", None),
             )
-            session.add(history)
             session.commit()
-            logger.info("[inventory] repriced item %s: $%.2f", item_id, result.get("market_price") or 0)
+            logger.info(
+                "[inventory] repriced item %s: $%.2f alert=%s",
+                item_id,
+                result.get("market_price") or 0,
+                alert_event,
+            )
         else:
             logger.info("[inventory] reprice returned no result for item %s", item_id)
     except Exception as exc:
         logger.error("[inventory] reprice error for item %s: %s", item_id, exc)
 
+    return RedirectResponse(f"/inventory/{item_id}", status_code=303)
+
+
+@router.post("/inventory/{item_id}/resticker/apply")
+async def inventory_resticker_apply(
+    request: Request,
+    item_id: int,
+    session: Session = Depends(get_session),
+):
+    if denial := _require_inventory_manage(request, session):
+        return denial
+
+    item = session.get(InventoryItem, item_id)
+    if not item:
+        return HTMLResponse("Item not found.", status_code=404)
+    if item.item_type != ITEM_TYPE_SLAB:
+        return HTMLResponse("Resticker alerts are only available for slabs.", status_code=400)
+
+    target = item.resticker_alert_price or item.auto_price
+    if target is None:
+        return RedirectResponse(f"/inventory/{item_id}", status_code=303)
+
+    item.list_price = round(float(target), 2)
+    item.updated_at = utcnow()
+    clear_slab_resticker_alert(item, reason="Sticker price applied.")
+    session.add(item)
+    session.commit()
+    return RedirectResponse(f"/inventory/labels?ids={item_id}&layout=thermal", status_code=303)
+
+
+@router.post("/inventory/{item_id}/resticker/dismiss")
+async def inventory_resticker_dismiss(
+    request: Request,
+    item_id: int,
+    session: Session = Depends(get_session),
+):
+    if denial := _require_inventory_manage(request, session):
+        return denial
+
+    item = session.get(InventoryItem, item_id)
+    if not item:
+        return HTMLResponse("Item not found.", status_code=404)
+
+    clear_slab_resticker_alert(item, reason="Resticker alert dismissed.")
+    item.updated_at = utcnow()
+    session.add(item)
+    session.commit()
     return RedirectResponse(f"/inventory/{item_id}", status_code=303)
 
 
@@ -2407,7 +2991,7 @@ async def inventory_push_shopify(
     item_id: int,
     session: Session = Depends(get_session),
 ):
-    if denial := _require_reviewer(request):
+    if denial := _require_inventory_manage(request, session):
         return denial
 
     item = session.get(InventoryItem, item_id)
@@ -2482,7 +3066,12 @@ async def inventory_scan_singles_page(request: Request, session: Session = Depen
 
 
 @router.get("/inventory/scan/slabs", response_class=HTMLResponse)
-async def inventory_scan_slabs_page(request: Request, session: Session = Depends(get_session)):
+async def inventory_scan_slabs_page(
+    request: Request,
+    session: Session = Depends(get_session),
+    q: str = Query(default=""),
+    error: str = Query(default=""),
+):
     if denial := _require_employee_permission(request, "ops.degen_eye.view", session):
         return denial
     return _templates.TemplateResponse(
@@ -2491,6 +3080,9 @@ async def inventory_scan_slabs_page(request: Request, session: Session = Depends
         {
             "current_user": _current_user(request),
             "grading_companies": GRADING_COMPANIES,
+            "games": GAMES,
+            "initial_query": q,
+            "initial_error": error,
         },
     )
 
@@ -2656,6 +3248,321 @@ async def inventory_scan_pokemon_text_search(request: Request, session: Session 
     category_id = (body.get("category_id") or "3").strip()
     result = await text_search_cards(query, category_id=category_id)
     return JSONResponse(result)
+
+
+@router.post("/inventory/scan/slab-comps")
+async def inventory_scan_slab_comps(request: Request, session: Session = Depends(get_session)):
+    """Fetch slab comps from the pricing chain using manually entered slab details."""
+    if denial := _require_employee_permission(request, "ops.degen_eye.view", session):
+        return denial
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+    card_name = (body.get("card_name") or "").strip()
+    if not card_name:
+        return JSONResponse({"error": "card_name is required"}, status_code=400)
+
+    preview_item = InventoryItem(
+        barcode="PREVIEW",
+        item_type=ITEM_TYPE_SLAB,
+        game=(body.get("game") or "Other").strip() or "Other",
+        card_name=card_name,
+        set_name=(body.get("set_name") or "").strip() or None,
+        card_number=(body.get("card_number") or "").strip() or None,
+        grading_company=(body.get("grading_company") or "").strip().upper() or None,
+        grade=(body.get("grade") or "").strip() or None,
+        cert_number=(body.get("cert_number") or "").strip() or None,
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            result = await fetch_price_for_item(
+                preview_item,
+                client,
+                api_key=settings.scrydex_api_key,
+                base_url=settings.scrydex_base_url,
+            )
+    except Exception as exc:
+        logger.warning("[inventory/scan] slab comps failed for %s: %s", card_name, exc)
+        result = None
+
+    response = _slab_comps_lookup_payload(preview_item, result)
+    if result is None:
+        response["lookup_warning"] = "No Card Ladder comps came back for those slab details."
+    return JSONResponse(response)
+
+
+@router.post("/inventory/scan/slab-search")
+async def inventory_scan_slab_search(request: Request, session: Session = Depends(get_session)):
+    """Find card-name matches for the slab receiving workflow."""
+    if denial := _require_employee_permission(request, "ops.degen_eye.view", session):
+        return denial
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+    query = (body.get("query") or "").strip()
+    if len(query) < 2:
+        return JSONResponse({"error": "Enter a card name or cert number."}, status_code=400)
+
+    game = _normalize_add_stock_game(body.get("game") or "Pokemon")
+    cards, warning = await _cached_add_stock_single_search(query, game=game)
+    if not cards:
+        fallback = _slab_search_fallback_suggestion(query, game=game)
+        if fallback:
+            cards = [fallback]
+            warning = (
+                "Card database lookup timed out, so this is a manual card-name match. "
+                "Click it to pull Card Ladder grade comps."
+            )
+    return JSONResponse(
+        {
+            "query": query,
+            "game": game,
+            "cards": cards,
+            "warning": warning,
+        }
+    )
+
+
+@router.post("/inventory/scan/slab-grade-comps")
+async def inventory_scan_slab_grade_comps(request: Request, session: Session = Depends(get_session)):
+    """Fetch Card Ladder slab comps for the common grades of a selected card."""
+    if denial := _require_employee_permission(request, "ops.degen_eye.view", session):
+        return denial
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+    card_name = (body.get("card_name") or "").strip()
+    if not card_name:
+        return JSONResponse({"error": "card_name is required"}, status_code=400)
+
+    grading_company = (body.get("grading_company") or "PSA").strip().upper() or "PSA"
+    preferred_grade = (body.get("grade") or "").strip()
+    grades = _slab_grade_options(grading_company, preferred_grade=preferred_grade)
+    game = _normalize_add_stock_game(body.get("game") or "Pokemon")
+    set_name = (body.get("set_name") or "").strip()
+    card_number = (body.get("card_number") or "").strip()
+    cert_number = (body.get("cert_number") or "").strip()
+
+    preview_items = [
+        InventoryItem(
+            barcode="PREVIEW",
+            item_type=ITEM_TYPE_SLAB,
+            game=game,
+            card_name=card_name,
+            set_name=set_name or None,
+            card_number=card_number or None,
+            grading_company=grading_company,
+            grade=grade,
+            cert_number=cert_number or None,
+        )
+        for grade in grades
+    ]
+
+    results: list[Any] = []
+    try:
+        async with httpx.AsyncClient(timeout=25.0) as client:
+            results = await asyncio.gather(
+                *[
+                    fetch_price_for_item(
+                        item,
+                        client,
+                        api_key=settings.scrydex_api_key,
+                        base_url=settings.scrydex_base_url,
+                    )
+                    for item in preview_items
+                ],
+                return_exceptions=True,
+            )
+    except Exception as exc:
+        logger.warning("[inventory/scan] slab grade comps failed for %s: %s", card_name, exc)
+        results = [None for _ in preview_items]
+
+    grade_comps: list[dict[str, Any]] = []
+    for item, result in zip(preview_items, results):
+        if isinstance(result, Exception):
+            logger.debug(
+                "[inventory/scan] slab comp failed for %s %s %s: %s",
+                item.card_name,
+                item.grading_company,
+                item.grade,
+                result,
+            )
+            result = None
+        payload = _slab_comps_lookup_payload(item, result)
+        if result is None:
+            payload["lookup_warning"] = "No Card Ladder comps came back for this grade."
+        grade_comps.append(payload)
+
+    response: dict[str, Any] = {
+        "card": {
+            "card_name": card_name,
+            "game": game,
+            "set_name": set_name,
+            "card_number": card_number,
+            "image_url": (body.get("image_url") or "").strip(),
+        },
+        "grading_company": grading_company,
+        "cert_number": cert_number,
+        "grade_comps": grade_comps,
+        "card_ladder_cli": card_ladder_cli_status(),
+    }
+    if not any(row.get("last_solds") or row.get("suggested_price") for row in grade_comps):
+        response["lookup_warning"] = "No Card Ladder comps came back for those slab details."
+    return JSONResponse(response)
+
+
+@router.post("/inventory/scan/slab-cardladder-refresh")
+async def inventory_scan_slab_cardladder_refresh(request: Request, session: Session = Depends(get_session)):
+    """Refresh one selected slab grade through the browser-backed Card Ladder CLI."""
+    if denial := _require_employee_permission(request, "ops.degen_eye.view", session):
+        return denial
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+    card_name = (body.get("card_name") or "").strip()
+    if not card_name:
+        return JSONResponse({"error": "card_name is required"}, status_code=400)
+
+    preview_item = InventoryItem(
+        barcode="PREVIEW",
+        item_type=ITEM_TYPE_SLAB,
+        game=_normalize_add_stock_game(body.get("game") or "Pokemon"),
+        card_name=card_name,
+        set_name=(body.get("set_name") or "").strip() or None,
+        card_number=(body.get("card_number") or "").strip() or None,
+        grading_company=(body.get("grading_company") or "PSA").strip().upper() or "PSA",
+        grade=(body.get("grade") or "").strip() or None,
+        cert_number=(body.get("cert_number") or "").strip() or None,
+    )
+
+    try:
+        result = await sync_card_ladder_cli_for_item(preview_item, timeout_seconds=120, limit=25)
+    except Exception as exc:
+        status = card_ladder_cli_status()
+        return JSONResponse(
+            {
+                "error": str(exc),
+                "lookup_warning": (
+                    "Card Ladder refresh needs the local CLI browser session. "
+                    "Run the login command once if this is the first refresh."
+                ),
+                "card_ladder_cli": status,
+                "login_command": status.get("login_command"),
+            },
+            status_code=502,
+        )
+
+    payload = _slab_comps_lookup_payload(preview_item, result)
+    payload["card_ladder_cli"] = card_ladder_cli_status()
+    return JSONResponse(payload)
+
+
+@router.post("/inventory/scan/slab-cardladder-import")
+async def inventory_scan_slab_cardladder_import(request: Request, session: Session = Depends(get_session)):
+    """Import pasted/exported Card Ladder sold rows into the local comps cache."""
+    if denial := _require_employee_permission(request, "ops.degen_eye.view", session):
+        return denial
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+    card_name = (body.get("card_name") or "").strip()
+    text = (body.get("text") or "").strip()
+    if not card_name:
+        return JSONResponse({"error": "card_name is required"}, status_code=400)
+    if not text:
+        return JSONResponse({"error": "Paste the Card Ladder sold rows first."}, status_code=400)
+
+    preview_item = InventoryItem(
+        barcode="PREVIEW",
+        item_type=ITEM_TYPE_SLAB,
+        game=_normalize_add_stock_game(body.get("game") or "Pokemon"),
+        card_name=card_name,
+        set_name=(body.get("set_name") or "").strip() or None,
+        card_number=(body.get("card_number") or "").strip() or None,
+        grading_company=(body.get("grading_company") or "PSA").strip().upper() or "PSA",
+        grade=(body.get("grade") or "").strip() or None,
+        cert_number=(body.get("cert_number") or "").strip() or None,
+    )
+
+    try:
+        result = import_card_ladder_cli_records_for_item(preview_item, text=text)
+    except Exception as exc:
+        return JSONResponse(
+            {
+                "error": str(exc),
+                "card_ladder_cli": card_ladder_cli_status(),
+            },
+            status_code=422,
+        )
+
+    payload = _slab_comps_lookup_payload(preview_item, result)
+    payload["card_ladder_cli"] = card_ladder_cli_status()
+    return JSONResponse(payload)
+
+
+def _slab_comps_lookup_payload(
+    item: InventoryItem,
+    result: Optional[dict[str, Any]],
+) -> dict[str, Any]:
+    raw = result.get("raw") if isinstance(result, dict) else {}
+    raw = raw if isinstance(raw, dict) else {}
+    last_solds = _lookup_sales_from_price_raw(raw, source=str(result.get("source") if result else ""))
+    source_detail = str(raw.get("source_detail") or "")
+    return {
+        "cert_number": item.cert_number,
+        "grading_company": item.grading_company,
+        "grade": item.grade,
+        "card_name": item.card_name,
+        "set_name": item.set_name,
+        "card_number": item.card_number,
+        "game": item.game,
+        "last_solds": last_solds,
+        "suggested_price": result.get("market_price") if result else None,
+        "data_points": raw.get("sample_count") or len(last_solds),
+        "price_source": result.get("source") if result else None,
+        "source_detail": source_detail,
+        "sales_history_url": str(raw.get("sales_history_url") or raw.get("product_url") or ""),
+        "card_ladder_query": str(raw.get("query") or build_card_ladder_cli_query(item)),
+        "card_ladder_cache_hit": source_detail == "card_ladder_cli_cache",
+    }
+
+
+def _lookup_sales_from_price_raw(raw: dict[str, Any], *, source: str = "") -> list[dict[str, Any]]:
+    sales = raw.get("sales")
+    if not isinstance(sales, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for sale in sales[:20]:
+        if not isinstance(sale, dict):
+            continue
+        out.append(
+            {
+                "date": str(sale.get("sold_date") or sale.get("date") or ""),
+                "price": _parse_float(str(sale.get("price") or "")),
+                "source": source or "card_ladder",
+                "title": str(sale.get("title") or ""),
+                "platform": str(sale.get("platform") or ""),
+                "url": str(sale.get("url") or ""),
+                "image_url": str(sale.get("image_url") or ""),
+            }
+        )
+    return out
 
 
 @router.get("/degen_eye/history")
@@ -3358,7 +4265,12 @@ async def inventory_scan_cert(request: Request, session: Session = Depends(get_s
     )
 
     if result.get("error") and not result.get("card_name"):
-        return JSONResponse(result, status_code=422)
+        result["manual_entry_required"] = True
+        result["lookup_warning"] = (
+            "The grading company blocked automatic cert details. "
+            "Enter the slab details below, then fetch Card Ladder comps."
+        )
+        return JSONResponse(result)
 
     return JSONResponse(result)
 
@@ -3412,27 +4324,57 @@ async def inventory_batch_confirm(
         card_name = (raw.get("card_name") or "").strip()
         if not card_name:
             continue
+        item_type = (raw.get("item_type") or ITEM_TYPE_SINGLE).strip().lower()
 
-        item = InventoryItem(
-            barcode="PENDING",
-            item_type=ITEM_TYPE_SINGLE,
-            game=(raw.get("game") or "Other").strip(),
-            card_name=card_name,
-            set_name=(raw.get("set_name") or "").strip() or None,
-            card_number=(raw.get("card_number") or "").strip() or None,
-            variant=(raw.get("variant") or "").strip() or None,
-            condition=(raw.get("condition") or "").strip() or None,
-            image_url=(raw.get("image_url") or "").strip() or None,
-            auto_price=_parse_float(str(raw.get("auto_price") or "")),
-            notes=(raw.get("notes") or "").strip() or None,
-            status=INVENTORY_IN_STOCK,
-            created_at=utcnow(),
-        )
-        session.add(item)
-        session.flush()  # get item.id without full commit
+        if item_type == ITEM_TYPE_SLAB:
+            auto_price = _parse_float(str(raw.get("auto_price") or raw.get("suggested_price") or ""))
+            source = str(raw.get("price_source") or "card_ladder")
+            item, _movement, _created = _receive_slab_stock(
+                session,
+                game=(raw.get("game") or "Other").strip(),
+                card_name=card_name,
+                set_name=(raw.get("set_name") or "").strip(),
+                card_number=(raw.get("card_number") or "").strip(),
+                grading_company=(raw.get("grading_company") or "").strip(),
+                grade=(raw.get("grade") or "").strip(),
+                cert_number=(raw.get("cert_number") or "").strip(),
+                quantity=1,
+                unit_cost=_parse_float(str(raw.get("cost_basis") or "")),
+                list_price=_parse_float(str(raw.get("list_price") or "")),
+                auto_price=auto_price,
+                location=(raw.get("location") or "").strip(),
+                source=(raw.get("source") or "Slab Lookup").strip(),
+                notes=(raw.get("notes") or "").strip(),
+                price_payload={
+                    "source": source,
+                    "query": raw.get("card_name") or "",
+                    "sales": raw.get("last_solds") if isinstance(raw.get("last_solds"), list) else [],
+                    "sample_count": raw.get("data_points"),
+                    "market_price": auto_price,
+                },
+                actor_label=_current_user_label(request),
+            )
+        else:
+            item = InventoryItem(
+                barcode="PENDING",
+                item_type=ITEM_TYPE_SINGLE,
+                game=(raw.get("game") or "Other").strip(),
+                card_name=card_name,
+                set_name=(raw.get("set_name") or "").strip() or None,
+                card_number=(raw.get("card_number") or "").strip() or None,
+                variant=(raw.get("variant") or "").strip() or None,
+                condition=(raw.get("condition") or "").strip() or None,
+                image_url=(raw.get("image_url") or "").strip() or None,
+                auto_price=_parse_float(str(raw.get("auto_price") or "")),
+                notes=(raw.get("notes") or "").strip() or None,
+                status=INVENTORY_IN_STOCK,
+                created_at=utcnow(),
+            )
+            session.add(item)
+            session.flush()  # get item.id without full commit
 
-        item.barcode = generate_barcode_value(item.id)
-        session.add(item)
+            item.barcode = generate_barcode_value(item.id)
+            session.add(item)
         created.append({"id": item.id, "barcode": item.barcode, "card_name": item.card_name})
         capture_id = (raw.get("_v2_capture_id") or raw.get("capture_id") or "").strip()
         if capture_id:
