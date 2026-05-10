@@ -47,3 +47,4 @@ tests/.tmp_probe*/
 
 # Employee portal secrets (never commit)
 EMPLOYEE_PORTAL_SECRETS.txt
+.claude/settings.local.json
