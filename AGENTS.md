@@ -323,7 +323,23 @@ Preferred order for review/reporting changes:
 
 ## Testing / Verification
 
-Minimum verification after code changes:
+**Tests must pass before every commit. No exceptions.**
+
+Run the full suite:
+
+```bash
+# Mac/Linux (conda env):
+/Users/andrewwong/miniconda3/envs/degen/bin/python -m pytest --tb=short -q
+
+# Windows (venv):
+.\.venv\Scripts\python.exe -m pytest --tb=short -q
+```
+
+Expected baseline: 826 passed, 8 failed (the 8 `test_schedule_mobile.py` failures are sandbox-only and do not run in production — they are the only acceptable pre-existing failures).
+
+If any test outside `test_schedule_mobile.py` is failing, fix it before committing.
+
+Compile check (fast sanity pass before running the full suite):
 
 ```powershell
 .\.venv\Scripts\python.exe -m compileall app

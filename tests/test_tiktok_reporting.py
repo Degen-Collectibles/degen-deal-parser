@@ -1861,7 +1861,7 @@ class TikTokRegressionTests(unittest.TestCase):
                 "server": ("testserver", 80),
             })
             streamer_module._gmv_cache.clear()
-            with patch("app.routers.tiktok_streamer.require_role_response", return_value=None), patch.object(
+            with patch("app.routers.tiktok_streamer._require_live_stream", return_value=None), patch.object(
                 streamer_module,
                 "_get_live_sessions_list",
                 return_value=stream_sessions,
@@ -1981,7 +1981,7 @@ class TikTokRegressionTests(unittest.TestCase):
                 "exclude_product_ids": set(),
                 "source": "",
             }
-            with patch("app.routers.tiktok_streamer.require_role_response", return_value=None), patch.object(
+            with patch("app.routers.tiktok_streamer._require_live_stream", return_value=None), patch.object(
                 streamer_module,
                 "_get_live_sessions_list",
                 return_value=stream_sessions,
@@ -2064,7 +2064,7 @@ class TikTokRegressionTests(unittest.TestCase):
                 "server": ("testserver", 80),
             })
             streamer_module._gmv_cache.clear()
-            with patch("app.routers.tiktok_streamer.require_role_response", return_value=None), patch.object(
+            with patch("app.routers.tiktok_streamer._require_live_stream", return_value=None), patch.object(
                 streamer_module,
                 "_get_live_sessions_list",
                 return_value=stream_sessions,
@@ -2115,7 +2115,7 @@ class TikTokRegressionTests(unittest.TestCase):
                 "server": ("testserver", 80),
             })
             streamer_module._gmv_cache.clear()
-            with patch("app.routers.tiktok_streamer.require_role_response", return_value=None), patch.object(
+            with patch("app.routers.tiktok_streamer._require_live_stream", return_value=None), patch.object(
                 streamer_module,
                 "_get_live_sessions_list",
                 return_value=stream_sessions,
@@ -2209,7 +2209,7 @@ class TikTokRegressionTests(unittest.TestCase):
                 "server": ("testserver", 80),
             })
             streamer_module._gmv_cache.clear()
-            with patch("app.routers.tiktok_streamer.require_role_response", return_value=None), patch.object(
+            with patch("app.routers.tiktok_streamer._require_live_stream", return_value=None), patch.object(
                 streamer_module,
                 "_get_live_sessions_list",
                 return_value=stream_sessions,
@@ -2361,7 +2361,7 @@ class TikTokRegressionTests(unittest.TestCase):
                 "server": ("testserver", 80),
             })
             streamer_module._gmv_cache.clear()
-            with patch("app.routers.tiktok_streamer.require_role_response", return_value=None), patch.object(
+            with patch("app.routers.tiktok_streamer._require_live_stream", return_value=None), patch.object(
                 streamer_module,
                 "_get_live_sessions_list",
                 return_value=stream_sessions,
@@ -2488,7 +2488,7 @@ class TikTokRegressionTests(unittest.TestCase):
                 "server": ("testserver", 80),
             })
             streamer_module._gmv_cache.clear()
-            with patch("app.routers.tiktok_streamer.require_role_response", return_value=None), patch.object(
+            with patch("app.routers.tiktok_streamer._require_live_stream", return_value=None), patch.object(
                 streamer_module,
                 "_get_live_sessions_list",
                 return_value=stream_sessions,

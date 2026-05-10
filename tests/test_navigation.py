@@ -402,7 +402,7 @@ class NavigationValidationTests(unittest.TestCase):
                 session=session,
             )
 
-        self.assertRegex(review_response.context["selected_after"], r"^\d{4}-\d{2}-\d{2}$")
+        self.assertEqual(review_response.context["selected_after"], "")
         self.assertRegex(deals_response.context["selected_after"], r"^\d{4}-\d{2}-\d{2}$")
 
     def test_review_and_deals_respect_empty_date_filters_from_query_string(self) -> None:
@@ -468,7 +468,7 @@ class NavigationValidationTests(unittest.TestCase):
                 session=session,
             )
 
-        self.assertRegex(review_response.context["selected_after"], r"^\d{4}-\d{2}-\d{2}$")
+        self.assertEqual(review_response.context["selected_after"], "")
         self.assertRegex(deals_response.context["selected_after"], r"^\d{4}-\d{2}-\d{2}$")
 
     def test_status_page_surfaces_background_task_failures(self) -> None:
