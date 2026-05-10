@@ -1,0 +1,249 @@
+{% extends "team/admin/base.html" %}
+{% set active = 'buylist-submissions' %}
+{% block extra_head %}
+<style>
+  .buylist-queue-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+  }
+  .buylist-status-tabs {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .buylist-tab {
+    border: 1px solid var(--lx-br);
+    border-radius: 8px;
+    padding: 8px 10px;
+    background: var(--lx-s1);
+    color: var(--lx-muted);
+    font-size: 12px;
+    font-weight: 800;
+  }
+  .buylist-tab.active {
+    border-color: rgba(255, 138, 61, .55);
+    color: #ff8a3d;
+  }
+  .buylist-submissions {
+    display: grid;
+    gap: 12px;
+  }
+  .buylist-submission {
+    border: 1px solid var(--lx-br);
+    border-radius: 10px;
+    background: var(--lx-s1);
+    padding: 14px;
+    display: grid;
+    gap: 12px;
+  }
+  .buylist-submission-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 12px;
+    align-items: start;
+  }
+  .buylist-title {
+    font-weight: 900;
+    font-size: 15px;
+  }
+  .buylist-meta,
+  .buylist-muted {
+    color: var(--lx-muted);
+    font-size: 12px;
+    line-height: 1.45;
+  }
+  .buylist-status {
+    border: 1px solid var(--lx-br);
+    border-radius: 999px;
+    padding: 4px 9px;
+    font-size: 11px;
+    font-weight: 900;
+    text-transform: uppercase;
+  }
+  .buylist-status.submitted { color: #fcd34d; background: rgba(234, 179, 8, .12); }
+  .buylist-status.approved { color: #93c5fd; background: rgba(59, 130, 246, .12); }
+  .buylist-status.paid { color: #86efac; background: rgba(34, 197, 94, .12); }
+  .buylist-status.rejected { color: #fca5a5; background: rgba(239, 68, 68, .12); }
+  .buylist-totals {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+    gap: 8px;
+  }
+  .buylist-total {
+    border: 1px solid var(--lx-br);
+    border-radius: 8px;
+    padding: 9px 10px;
+    background: var(--lx-s2);
+  }
+  .buylist-total span {
+    display: block;
+    color: var(--lx-muted);
+    font-size: 11px;
+    margin-bottom: 3px;
+  }
+  .buylist-total strong {
+    font-size: 17px;
+  }
+  .buylist-lines {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+  .buylist-lines th {
+    color: var(--lx-muted);
+    font-size: 10px;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    text-align: left;
+    padding: 7px 6px;
+  }
+  .buylist-lines td {
+    border-top: 1px solid var(--lx-br);
+    padding: 8px 6px;
+    vertical-align: top;
+  }
+  .buylist-actions {
+    display: flex;
+    gap: 8px;
+    align-items: end;
+    flex-wrap: wrap;
+  }
+  .buylist-action-label {
+    display: grid;
+    gap: 4px;
+    color: var(--lx-muted);
+    font-size: 11px;
+    min-width: 180px;
+  }
+  .buylist-input {
+    min-width: 0;
+    padding: 8px 9px;
+    border: 1px solid var(--lx-br);
+    border-radius: 8px;
+    background: var(--lx-s2);
+    color: var(--lx-text);
+    font: inherit;
+    font-size: 12px;
+  }
+</style>
+{% endblock %}
+{% block content %}
+{% if flash %}
+  <div class="ta-flash" style="margin-bottom:14px;">{{ flash }}</div>
+{% endif %}
+
+<div class="buylist-queue-head">
+  <div>
+    <h2 style="margin:0 0 4px; font-size:18px;">Buylist queue</h2>
+    <div class="buylist-muted">Review submitted customer buylists, approve inventory intake, and mark payouts complete.</div>
+  </div>
+  <div class="buylist-status-tabs">
+    <a class="buylist-tab {% if not filter_status %}active{% endif %}" href="/team/admin/buylist/submissions">All</a>
+    {% for status in statuses %}
+      <a class="buylist-tab {% if filter_status == status %}active{% endif %}" href="/team/admin/buylist/submissions?status={{ status }}">{{ status|title }} ({{ counts.get(status, 0) }})</a>
+    {% endfor %}
+  </div>
+</div>
+
+<div class="buylist-submissions">
+  {% for entry in submissions %}
+    {% set row = entry.row %}
+    {% set totals = entry.totals %}
+    {% set lines = entry.lines %}
+    {% set submitter_name = (entry.submitter.display_name or entry.submitter.username) if entry.submitter else 'Unknown' %}
+    <article class="buylist-submission">
+      <div class="buylist-submission-head">
+        <div>
+          <div class="buylist-title">#{{ row.id }} {{ row.customer_name or 'Customer' }}</div>
+          <div class="buylist-meta">
+            Submitted by {{ submitter_name }}
+            on {{ row.created_at | pacific_datetime }}
+            {% if row.customer_contact %} · {{ row.customer_contact }}{% endif %}
+          </div>
+          {% if row.notes %}
+            <div class="buylist-muted">{{ row.notes }}</div>
+          {% endif %}
+        </div>
+        <span class="buylist-status {{ row.status }}">{{ row.status }}</span>
+      </div>
+
+      <div class="buylist-totals">
+        <div class="buylist-total"><span>Cash</span><strong>{{ totals.get('cash', 0) | money }}</strong></div>
+        <div class="buylist-total"><span>Trade</span><strong>{{ totals.get('trade', 0) | money }}</strong></div>
+        <div class="buylist-total"><span>Selected payout</span><strong>{{ row.payment_view|title }}</strong></div>
+        <div class="buylist-total"><span>Qty</span><strong>{{ totals.get('quantity', 0) }}</strong></div>
+      </div>
+
+      <table class="buylist-lines">
+        <thead>
+          <tr><th>Item</th><th>Type</th><th>Market</th><th>Unit cash</th><th>Unit trade</th><th>Qty</th></tr>
+        </thead>
+        <tbody>
+        {% for line in lines %}
+          <tr>
+            <td>
+              <strong>{{ line.get('name') }}</strong>
+              <div class="buylist-muted">{{ line.get('set_name') }}{% if line.get('number') %} #{{ line.get('number') }}{% endif %}</div>
+            </td>
+            <td>
+              {% if line.get('sealed_product_kind') %}
+                {{ line.get('sealed_product_kind') }}
+              {% else %}
+                {{ line.get('condition') }} {{ line.get('variant') }}
+              {% endif %}
+            </td>
+            <td>{{ line.get('market_price', 0) | money }}</td>
+            <td>{{ line.get('unit_cash', 0) | money }}</td>
+            <td>{{ line.get('unit_trade', 0) | money }}</td>
+            <td>{{ line.get('quantity', 0) }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+
+      {% if entry.inventory_result.get('items') %}
+        <div class="buylist-muted">
+          Inventory received:
+          {% for item in entry.inventory_result.get('items', []) %}
+            #{{ item.get('inventory_item_id') }}{% if not loop.last %}, {% endif %}
+          {% endfor %}
+        </div>
+      {% endif %}
+
+      <div class="buylist-actions">
+        {% if row.status == 'submitted' %}
+          <form method="post" action="/team/admin/buylist/submissions/{{ row.id }}/approve" class="buylist-actions">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <label class="buylist-action-label">Receive location
+              <input class="buylist-input" name="location" value="Buylist intake">
+            </label>
+            <button class="ta-btn primary" type="submit">Approve into inventory</button>
+          </form>
+          <form method="post" action="/team/admin/buylist/submissions/{{ row.id }}/reject" class="buylist-actions">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <label class="buylist-action-label">Reject note
+              <input class="buylist-input" name="decision_notes" placeholder="Optional">
+            </label>
+            <button class="ta-btn" type="submit">Reject</button>
+          </form>
+        {% elif row.status == 'approved' %}
+          <form method="post" action="/team/admin/buylist/submissions/{{ row.id }}/mark-paid">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="ta-btn primary" type="submit">Mark paid</button>
+          </form>
+        {% elif row.decision_notes %}
+          <div class="buylist-muted">Decision note: {{ row.decision_notes }}</div>
+        {% endif %}
+      </div>
+    </article>
+  {% else %}
+    <div class="buylist-submission">
+      <div class="buylist-muted">No buylist submissions found.</div>
+    </div>
+  {% endfor %}
+</div>
+{% endblock %}

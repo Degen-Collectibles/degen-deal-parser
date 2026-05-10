@@ -1,0 +1,1127 @@
+{% extends "team/base.html" %}
+{% block header_sub %}
+<div class="pt-h1-sub">Counter quote builder for customer card buys.</div>
+{% endblock %}
+{% block extra_head %}
+<style>
+  .buylist-shell {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(360px, 430px);
+    gap: 16px;
+    align-items: start;
+  }
+  .buylist-toolbar,
+  .buylist-searchbar,
+  .buylist-filters,
+  .buylist-payment,
+  .buylist-card-actions,
+  .buylist-line-actions,
+  .buylist-totals,
+  .buylist-cart-actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .buylist-toolbar {
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .buylist-searchbar {
+    flex: 1 1 420px;
+  }
+  .buylist-search {
+    flex: 1 1 280px;
+    min-width: 220px;
+  }
+  .buylist-payment {
+    border: 1px solid var(--pt-border);
+    border-radius: 8px;
+    padding: 3px;
+    background: var(--pt-surface-raised);
+  }
+  .buylist-pay-btn {
+    border: 0;
+    border-radius: 6px;
+    padding: 7px 11px;
+    color: var(--pt-muted);
+    background: transparent;
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .buylist-pay-btn.active {
+    color: var(--pt-accent-ink);
+    background: var(--pt-accent);
+    font-weight: 700;
+  }
+  .buylist-results {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+    gap: 10px;
+  }
+  .buylist-result {
+    display: grid;
+    gap: 10px;
+    border: 1px solid var(--pt-border);
+    border-radius: 10px;
+    background: var(--pt-surface-raised);
+    padding: 12px;
+  }
+  .buylist-result.blocked {
+    opacity: .62;
+  }
+  .buylist-card-image {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 170px;
+    border-radius: 8px;
+    background: rgba(255,255,255,.04);
+    overflow: hidden;
+  }
+  .buylist-card-image img {
+    max-width: 100%;
+    max-height: 190px;
+    object-fit: contain;
+  }
+  .buylist-card-title {
+    font-weight: 800;
+    line-height: 1.25;
+  }
+  .buylist-card-sub,
+  .buylist-muted,
+  .buylist-card-note {
+    color: var(--pt-muted);
+    font-size: 12px;
+    line-height: 1.4;
+  }
+  .buylist-price-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(72px, 1fr));
+    gap: 8px;
+    font-size: 12px;
+  }
+  .buylist-price-row strong {
+    display: block;
+    color: var(--pt-text);
+    font-size: 14px;
+    margin-top: 2px;
+  }
+  .buylist-sales {
+    display: none;
+    border: 1px solid var(--pt-border);
+    border-radius: 8px;
+    padding: 10px;
+    background: var(--pt-surface);
+  }
+  .buylist-sales.active {
+    display: grid;
+    gap: 8px;
+  }
+  .buylist-sales-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(86px, 1fr));
+    gap: 8px;
+  }
+  .buylist-sales-metric {
+    border: 1px solid var(--pt-border);
+    border-radius: 7px;
+    padding: 8px;
+    background: var(--pt-surface-raised);
+    color: var(--pt-muted);
+    font-size: 11px;
+  }
+  .buylist-sales-metric strong {
+    display: block;
+    color: var(--pt-text);
+    font-size: 14px;
+    margin-top: 2px;
+  }
+  .buylist-sales-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+  .buylist-sales-table td {
+    border-top: 1px solid var(--pt-border);
+    padding: 6px 3px;
+  }
+  .buylist-sales-table td:last-child {
+    text-align: right;
+    color: var(--pt-text);
+    font-weight: 700;
+  }
+  .buylist-mini-select,
+  .buylist-qty {
+    min-width: 0;
+    padding: 8px 9px;
+    border: 1px solid var(--pt-border);
+    border-radius: 8px;
+    background: var(--pt-surface);
+    color: var(--pt-text);
+    font: inherit;
+    font-size: 13px;
+  }
+  .buylist-mini-select {
+    flex: 1 1 86px;
+  }
+  .buylist-qty {
+    width: 66px;
+  }
+  .buylist-cart {
+    position: sticky;
+    top: 14px;
+  }
+  .buylist-totals {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    margin: 12px 0;
+  }
+  .buylist-total {
+    border: 1px solid var(--pt-border);
+    border-radius: 9px;
+    padding: 10px;
+    background: var(--pt-surface-raised);
+  }
+  .buylist-total span {
+    display: block;
+    color: var(--pt-muted);
+    font-size: 11px;
+    margin-bottom: 4px;
+  }
+  .buylist-total strong {
+    font-size: 20px;
+  }
+  .buylist-lines {
+    display: grid;
+    gap: 8px;
+    max-height: 52vh;
+    overflow: auto;
+    padding-right: 3px;
+  }
+  .buylist-line {
+    border: 1px solid var(--pt-border);
+    border-radius: 10px;
+    background: var(--pt-surface-raised);
+    padding: 10px;
+    display: grid;
+    gap: 8px;
+  }
+  .buylist-line-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: start;
+  }
+  .buylist-remove {
+    border: 1px solid rgba(239,68,68,.35);
+    color: var(--pt-err);
+    background: transparent;
+    border-radius: 7px;
+    padding: 6px 8px;
+    cursor: pointer;
+  }
+  .buylist-empty {
+    padding: 24px 0;
+    text-align: center;
+    color: var(--pt-muted);
+    font-size: 13px;
+  }
+  .buylist-status {
+    min-height: 22px;
+    color: var(--pt-muted);
+    font-size: 13px;
+    margin: 6px 0 12px;
+  }
+  .buylist-status.error {
+    color: var(--pt-err);
+  }
+  @media (max-width: 1080px) {
+    .buylist-shell {
+      grid-template-columns: 1fr;
+    }
+    .buylist-cart {
+      position: static;
+    }
+  }
+  @media print {
+    .pt-side,
+    .pt-header,
+    .buylist-main {
+      display: none !important;
+    }
+    .pt-layout,
+    .pt-main,
+    .buylist-shell {
+      display: block;
+    }
+    .buylist-cart {
+      position: static;
+    }
+  }
+</style>
+{% endblock %}
+{% block content %}
+<div class="buylist-shell"
+     data-config='{{ config|tojson }}'
+     data-conditions='{{ condition_options|list|tojson }}'
+     data-languages='{{ language_options|list|tojson }}'
+     data-csrf="{{ csrf_token }}">
+  <section class="pt-card buylist-main">
+    <div class="buylist-toolbar">
+      <div class="buylist-searchbar">
+        <select class="pt-select" id="buylistGame" style="max-width:190px;">
+          {% for game in game_options %}
+            <option value="{{ game.game }}" {% if game.game == config.default_game %}selected{% endif %}>{{ game.label }}</option>
+          {% endfor %}
+        </select>
+        <select class="pt-select" id="buylistProductType" style="max-width:130px;">
+          <option value="card">Cards</option>
+          <option value="sealed">Sealed</option>
+        </select>
+        <input class="pt-input buylist-search" id="buylistSearch" type="search" placeholder="Search card name, set, or number" autocomplete="off">
+      </div>
+      <div class="buylist-payment" aria-label="Quote payment view">
+        <button class="buylist-pay-btn" type="button" data-payment="cash">Cash</button>
+        <button class="buylist-pay-btn" type="button" data-payment="trade">Trade</button>
+      </div>
+    </div>
+    <div class="buylist-filters">
+      <select class="buylist-mini-select" id="buylistDefaultCondition" aria-label="Default condition">
+        {% for condition in condition_options %}
+          <option value="{{ condition }}">{{ condition }}</option>
+        {% endfor %}
+      </select>
+      <button class="pt-btn" type="button" id="buylistClearSearch">Clear</button>
+      <a class="pt-btn" href="/degen_eye?team_shell=1">Scan</a>
+    </div>
+    <div class="buylist-status" id="buylistStatus"></div>
+    <div class="buylist-results" id="buylistResults"></div>
+  </section>
+
+  <aside class="pt-card buylist-cart" aria-label="Customer buylist quote">
+    <div class="pt-panel-head">
+      <div>
+        <div class="pt-card-title">Customer quote</div>
+        <div class="pt-card-sub" id="buylistCartSub">No cards yet</div>
+      </div>
+      <button class="pt-btn" type="button" id="buylistClearCart">Clear</button>
+    </div>
+
+    <div class="buylist-totals">
+      <div class="buylist-total"><span>Cash</span><strong id="buylistCashTotal">$0.00</strong></div>
+      <div class="buylist-total"><span>Trade</span><strong id="buylistTradeTotal">$0.00</strong></div>
+      <div class="buylist-total"><span>Qty</span><strong id="buylistQtyTotal">0</strong></div>
+    </div>
+
+    <div class="pt-field">
+      <label class="pt-field-label" for="buylistCustomer">Customer</label>
+      <input class="pt-input" id="buylistCustomer" type="text" placeholder="Name">
+    </div>
+    <div class="pt-field">
+      <label class="pt-field-label" for="buylistContact">Contact</label>
+      <input class="pt-input" id="buylistContact" type="text" placeholder="Phone or email">
+    </div>
+    <div class="pt-field">
+      <label class="pt-field-label" for="buylistNotes">Notes</label>
+      <textarea class="pt-textarea" id="buylistNotes" rows="2" placeholder="IDs checked, exceptions, pending approval"></textarea>
+    </div>
+
+    <div class="buylist-lines" id="buylistLines"></div>
+    <div class="buylist-empty" id="buylistEmpty">Search and add cards to build a quote.</div>
+
+    <div class="buylist-cart-actions" style="margin-top:14px;">
+      <button class="pt-btn primary" type="button" id="buylistSave">Save quote</button>
+      <button class="pt-btn primary" type="button" id="buylistCopy">Copy summary</button>
+      <button class="pt-btn" type="button" id="buylistPrint">Print quote</button>
+      <a class="pt-btn" href="/team/admin/buylist">Pricing</a>
+    </div>
+  </aside>
+</div>
+
+<script>
+(() => {
+  const shell = document.querySelector('.buylist-shell');
+  const config = JSON.parse(shell.dataset.config || '{}');
+  const conditions = JSON.parse(shell.dataset.conditions || '["NM","LP","MP","HP","DMG"]');
+  const languages = JSON.parse(shell.dataset.languages || '["English","Japanese","Other"]');
+  const csrfToken = shell.dataset.csrf || '';
+  const state = {
+    payment: (config.default_payment === 'trade') ? 'trade' : 'cash',
+    results: [],
+    items: [],
+    quote: { cash: 0, trade: 0, quantity: 0, items: 0 },
+    sales: {}
+  };
+
+  const els = {
+    game: document.getElementById('buylistGame'),
+    productType: document.getElementById('buylistProductType'),
+    search: document.getElementById('buylistSearch'),
+    defaultCondition: document.getElementById('buylistDefaultCondition'),
+    clearSearch: document.getElementById('buylistClearSearch'),
+    status: document.getElementById('buylistStatus'),
+    results: document.getElementById('buylistResults'),
+    lines: document.getElementById('buylistLines'),
+    empty: document.getElementById('buylistEmpty'),
+    cartSub: document.getElementById('buylistCartSub'),
+    cashTotal: document.getElementById('buylistCashTotal'),
+    tradeTotal: document.getElementById('buylistTradeTotal'),
+    qtyTotal: document.getElementById('buylistQtyTotal'),
+    clearCart: document.getElementById('buylistClearCart'),
+    save: document.getElementById('buylistSave'),
+    copy: document.getElementById('buylistCopy'),
+    print: document.getElementById('buylistPrint')
+  };
+
+  function money(value) {
+    const amount = Number(value || 0);
+    return amount.toLocaleString(undefined, { style: 'currency', currency: 'USD' });
+  }
+
+  function moneyOrNA(value) {
+    const amount = Number(value || 0);
+    return amount > 0 ? money(amount) : 'n/a';
+  }
+
+  function escapeHtml(value) {
+    return String(value || '').replace(/[&<>"']/g, ch => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[ch]));
+  }
+
+  const conditionPricingMode = config.condition_pricing_mode === 'tcgplayer_market' ? 'tcgplayer_market' : 'percentage_modifiers';
+
+  function isSealedProduct(card) {
+    return String(card.item_type || '').toLowerCase() === 'sealed';
+  }
+
+  function normalizeCondition(value) {
+    const raw = String(value || 'NM').trim().toUpperCase();
+    const compact = raw.replace(/[^A-Z]/g, '');
+    if (raw === 'DM') return 'DMG';
+    if (['NM', 'NEARMINT'].includes(compact) || compact.includes('NEARMINT')) return 'NM';
+    if (['LP', 'LIGHTLYPLAYED', 'LIGHTPLAY', 'EXCELLENT'].includes(compact) || compact.includes('LIGHTLYPLAYED')) return 'LP';
+    if (['MP', 'MODERATELYPLAYED', 'MODERATEPLAY', 'PLAYED'].includes(compact) || compact.includes('MODERATELYPLAYED')) return 'MP';
+    if (['HP', 'HEAVILYPLAYED', 'HEAVYPLAY'].includes(compact) || compact.includes('HEAVILYPLAYED')) return 'HP';
+    if (['DMG', 'DM', 'DAMAGED'].includes(compact) || compact.includes('DAMAGED')) return 'DMG';
+    return conditions.includes(raw) ? raw : 'NM';
+  }
+
+  function priceValue(value) {
+    if (value && typeof value === 'object') {
+      for (const key of ['mkt', 'market', 'market_price', 'price']) {
+        const amount = Number(value[key]);
+        if (amount > 0) return amount;
+      }
+      return null;
+    }
+    const amount = Number(value);
+    return amount > 0 ? amount : null;
+  }
+
+  function variantRow(card, variant) {
+    const match = (card.available_variants || []).find(v => String(v.name || '') === String(variant || ''));
+    return match || (card.available_variants || [])[0] || null;
+  }
+
+  function variantBaseMarket(card, variant) {
+    const match = variantRow(card, variant);
+    return Number((match && match.price) || card.base_market_price || card.market_price || 0);
+  }
+
+  function conditionMarketPrices(card, variant) {
+    const row = variantRow(card, variant);
+    const rawPrices = (row && row.conditions) || card.condition_market_prices || {};
+    const prices = {};
+    Object.entries(rawPrices || {}).forEach(([key, value]) => {
+      const condition = normalizeCondition(key);
+      const price = priceValue(value);
+      if (price) prices[condition] = price;
+    });
+    return prices;
+  }
+
+  function metricPrice(value, keys) {
+    if (!value || typeof value !== 'object') return null;
+    for (const key of keys) {
+      const amount = Number(value[key]);
+      if (amount > 0) return amount;
+    }
+    return null;
+  }
+
+  function conditionPriceMetrics(card, variant) {
+    const row = variantRow(card, variant);
+    const rawMetrics = (row && row.conditions) || card.condition_price_metrics || {};
+    const metrics = {};
+    Object.entries(rawMetrics || {}).forEach(([key, value]) => {
+      const condition = normalizeCondition(key);
+      if (value && typeof value === 'object') {
+        const metric = {};
+        const market = metricPrice(value, ['mkt', 'market', 'market_price', 'price']);
+        const low = metricPrice(value, ['low', 'lowest', 'lowest_price', 'low_price']);
+        const high = metricPrice(value, ['hi', 'high', 'highest', 'highest_price', 'high_price']);
+        const listingCount = Number(value.cnt || value.count || value.price_count || value.listing_count || 0);
+        if (market) metric.market = market;
+        if (low) metric.low = low;
+        if (high) metric.high = high;
+        if (listingCount > 0) metric.listing_count = listingCount;
+        if (value.sku_id || value.skuId || value.sku) metric.sku_id = String(value.sku_id || value.skuId || value.sku);
+        if (Object.keys(metric).length) metrics[condition] = metric;
+      } else {
+        const market = priceValue(value);
+        if (market) metrics[condition] = { market };
+      }
+    });
+    return metrics;
+  }
+
+  function selectedListingMetric(card, variant, condition) {
+    if (isSealedProduct(card)) return {};
+    const metrics = conditionPriceMetrics(card, variant);
+    return metrics[normalizeCondition(condition || 'NM')] || {};
+  }
+
+  function selectedMarket(card, variant, condition) {
+    if (isSealedProduct(card)) {
+      return Number(card.base_market_price || card.market_price || 0);
+    }
+    if (conditionPricingMode === 'tcgplayer_market') {
+      const prices = conditionMarketPrices(card, variant);
+      const price = prices[normalizeCondition(condition || 'NM')];
+      if (price) return Number(price);
+    }
+    return variantBaseMarket(card, variant);
+  }
+
+  function rangeOffer(marketPrice, ranges) {
+    const price = Math.max(0, Number(marketPrice || 0));
+    const rows = Array.isArray(ranges) ? ranges : [];
+    let selected = rows.find(row => {
+      const low = Number(row.min ?? 0);
+      const high = Number(row.max ?? 999999);
+      return low <= price && price <= high;
+    }) || rows[rows.length - 1];
+    if (!selected) return { amount: 0, rule: 'No range' };
+    const mode = String(selected.type || 'percentage').toLowerCase();
+    const value = Number(selected.value || 0);
+    if (mode === 'fixed') return { amount: value, rule: `Fixed $${value}` };
+    if (mode === 'by_appointment') return { amount: 0, rule: 'By appointment' };
+    return { amount: price * (value / 100), rule: `${value}%` };
+  }
+
+  function modifierPercent(group, key, fallback = 100) {
+    const options = config[group] || {};
+    if (Object.prototype.hasOwnProperty.call(options, key)) return Number(options[key] || fallback);
+    const normalized = String(key || '').trim().toLowerCase();
+    for (const [optKey, optValue] of Object.entries(options)) {
+      if (String(optKey).trim().toLowerCase() === normalized) return Number(optValue || fallback);
+    }
+    return Number(options.Other || fallback);
+  }
+
+  function patternMatches(pattern, card) {
+    const needle = String(pattern || '').trim().toLowerCase();
+    if (!needle) return false;
+    return [card.id, card.product_id, card.name, card.set_name, card.number]
+      .some(value => String(value || '').toLowerCase().includes(needle));
+  }
+
+  function listAdjustment(card) {
+    let multiplier = 1;
+    const notes = [];
+    let blocked = false;
+    (config.hotlist_rules || []).forEach(rule => {
+      if (!patternMatches(rule.pattern, card)) return;
+      const boost = Number(rule.percent || 0);
+      multiplier *= 1 + (boost / 100);
+      notes.push(`Hotlist +${boost}%`);
+    });
+    (config.darklist_rules || []).forEach(rule => {
+      if (!patternMatches(rule.pattern, card)) return;
+      const penalty = Number(rule.percent || 0);
+      if (penalty >= 100) blocked = true;
+      multiplier *= Math.max(0, 1 - (penalty / 100));
+      notes.push(`Darklist -${penalty}%`);
+    });
+    return { multiplier, notes, blocked };
+  }
+
+  function roundMoney(value) {
+    return Math.round(Math.max(0, Number(value || 0)) * 100 + 1e-7) / 100;
+  }
+
+  function calculateCardOffer(card, selection) {
+    if (isSealedProduct(card)) {
+      const market = Number(card.base_market_price || card.market_price || 0);
+      const cashBase = rangeOffer(market, config.cash_ranges);
+      const tradeBase = rangeOffer(market, config.trade_ranges);
+      const list = listAdjustment(card);
+      const blocked = list.blocked || Boolean(card.blocked);
+      const notes = ['Sealed product TCGPlayer market', ...list.notes];
+      if (blocked) notes.push('Not buying');
+      return {
+        market: roundMoney(market),
+        cash: blocked ? 0 : roundMoney(cashBase.amount * list.multiplier),
+        trade: blocked ? 0 : roundMoney(tradeBase.amount * list.multiplier),
+        notes,
+        blocked
+      };
+    }
+    const condition = normalizeCondition(selection.condition);
+    const language = selection.language || 'English';
+    const variant = selection.variant || card.variant || 'Normal';
+    const baseMarket = variantBaseMarket(card, variant);
+    const conditionPrices = conditionMarketPrices(card, variant);
+    const conditionMarket = conditionPrices[condition];
+    const useConditionMarket = conditionPricingMode === 'tcgplayer_market' && Number(conditionMarket || 0) > 0;
+    const market = useConditionMarket ? Number(conditionMarket) : baseMarket;
+    const cashBase = rangeOffer(market, config.cash_ranges);
+    const tradeBase = rangeOffer(market, config.trade_ranges);
+    const conditionMod = useConditionMarket ? 100 : modifierPercent('condition_modifiers', condition);
+    const languageMod = modifierPercent('language_modifiers', language);
+    const printingMod = modifierPercent('printing_modifiers', variant);
+    const list = listAdjustment(card);
+    const multiplier = (conditionMod / 100) * (languageMod / 100) * (printingMod / 100) * list.multiplier;
+    const blocked = list.blocked || Boolean(card.blocked);
+    const conditionNote = useConditionMarket
+      ? `${condition} TCGPlayer market`
+      : (conditionPricingMode === 'tcgplayer_market' ? `${condition} modifier fallback ${conditionMod}%` : `${condition} ${conditionMod}%`);
+    const notes = [
+      conditionNote,
+      `${language} ${languageMod}%`,
+      `${variant} ${printingMod}%`,
+      ...list.notes
+    ];
+    if (blocked) notes.push('Not buying');
+    return {
+      market: roundMoney(market),
+      cash: blocked ? 0 : roundMoney(cashBase.amount * multiplier),
+      trade: blocked ? 0 : roundMoney(tradeBase.amount * multiplier),
+      notes,
+      blocked
+    };
+  }
+
+  function optionHtml(options, selected) {
+    return options.map(value => {
+      const active = String(value) === String(selected) ? 'selected' : '';
+      return `<option value="${escapeHtml(value)}" ${active}>${escapeHtml(value)}</option>`;
+    }).join('');
+  }
+
+  function variantOptions(card) {
+    const variants = (card.available_variants || [])
+      .filter(v => v && v.name)
+      .map(v => String(v.name));
+    if (!variants.length && card.variant) variants.push(card.variant);
+    if (!variants.length) variants.push('Normal');
+    return [...new Set(variants)];
+  }
+
+  function setPayment(payment) {
+    state.payment = payment === 'trade' ? 'trade' : 'cash';
+    document.querySelectorAll('.buylist-pay-btn').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.payment === state.payment);
+    });
+    renderResults();
+    renderCart();
+  }
+
+  function setStatus(message, isError = false) {
+    els.status.textContent = message || '';
+    els.status.classList.toggle('error', Boolean(isError));
+  }
+
+  function shortDate(value) {
+    if (!value) return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value).slice(0, 10);
+    return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  }
+
+  function salesSelection(cardNode, card) {
+    return {
+      condition: cardNode.querySelector('.js-card-condition').value || (isSealedProduct(card) ? 'Sealed' : 'NM'),
+      language: cardNode.querySelector('.js-card-language').value || (isSealedProduct(card) ? '' : 'English'),
+      variant: cardNode.querySelector('.js-card-variant').value || card.variant || ''
+    };
+  }
+
+  function salesCacheKey(card, selection) {
+    return [
+      card.tcgplayer_product_id || card.product_id || '',
+      selection.condition || '',
+      selection.variant || '',
+      selection.language || ''
+    ].join('|').toLowerCase();
+  }
+
+  function renderSalesPanel(panel, history) {
+    const snapshot = history && history.snapshot ? history.snapshot : {};
+    const sales = Array.isArray(history && history.last_sales) ? history.last_sales : [];
+    const latestSale = sales[0] || {};
+    const rows = sales.map(sale => `
+      <tr>
+        <td>${escapeHtml(shortDate(sale.order_date))}</td>
+        <td>${escapeHtml(sale.condition || '')}${sale.quantity > 1 ? ` x${Number(sale.quantity)}` : ''}</td>
+        <td>${moneyOrNA(sale.purchase_price)}</td>
+      </tr>
+    `).join('');
+    const errors = (history.errors || []).filter(Boolean);
+    panel.innerHTML = `
+      <div class="buylist-sales-grid">
+        <div class="buylist-sales-metric">Most recent<strong>${moneyOrNA(latestSale.purchase_price)}</strong></div>
+        <div class="buylist-sales-metric">Low sold<strong>${moneyOrNA(snapshot.low_sale_price)}</strong></div>
+        <div class="buylist-sales-metric">High sold<strong>${moneyOrNA(snapshot.high_sale_price)}</strong></div>
+        <div class="buylist-sales-metric">Total sold<strong>${Number(snapshot.total_quantity_sold || 0)}</strong></div>
+        <div class="buylist-sales-metric">Daily sold<strong>${Number(snapshot.average_daily_quantity_sold || 0).toFixed(1)}</strong></div>
+        <div class="buylist-sales-metric">Active low<strong>${moneyOrNA(snapshot.active_low_price)}</strong></div>
+      </div>
+      ${rows ? `<table class="buylist-sales-table"><tbody>${rows}</tbody></table>` : '<div class="buylist-card-note">No exact recent solds returned for this selection.</div>'}
+      ${errors.length ? `<div class="buylist-card-note">${errors.map(escapeHtml).join(' | ')}</div>` : ''}
+    `;
+  }
+
+  async function loadSalesHistory(cardNode) {
+    const index = Number(cardNode.dataset.index);
+    const card = state.results[index];
+    const panel = cardNode.querySelector('.js-card-sales-panel');
+    if (!card || !panel) return;
+    const productId = card.tcgplayer_product_id || (/^\d{1,12}$/.test(String(card.product_id || '')) ? card.product_id : '');
+    if (!productId) {
+      panel.classList.add('active');
+      panel.innerHTML = '<div class="buylist-card-note">TCGplayer product id unavailable.</div>';
+      return;
+    }
+    const selection = salesSelection(cardNode, card);
+    const cacheKey = salesCacheKey(card, selection);
+    if (panel.classList.contains('active') && panel.dataset.salesKey === cacheKey) {
+      panel.classList.remove('active');
+      return;
+    }
+    panel.classList.add('active');
+    panel.dataset.salesKey = cacheKey;
+    if (state.sales[cacheKey]) {
+      renderSalesPanel(panel, state.sales[cacheKey]);
+      return;
+    }
+    panel.innerHTML = '<div class="buylist-card-note">Loading TCGplayer sales...</div>';
+    const params = new URLSearchParams({
+      product_id: productId,
+      tcgplayer_url: card.tcgplayer_url || card.external_url || '',
+      condition: selection.condition,
+      variant: selection.variant,
+      language: selection.language
+    });
+    try {
+      const res = await fetch(`/team/buylist/sales-history?${params.toString()}`, {
+        headers: { 'Accept': 'application/json' }
+      });
+      const data = await res.json();
+      const history = data.history || { ok: false, errors: [data.error || 'TCGplayer sales lookup failed'] };
+      state.sales[cacheKey] = history;
+      renderSalesPanel(panel, history);
+    } catch (err) {
+      panel.innerHTML = `<div class="buylist-card-note">${escapeHtml(err.message || 'TCGplayer sales lookup failed')}</div>`;
+    }
+  }
+
+  function syncProductTypeUi() {
+    const sealed = els.productType.value === 'sealed';
+    els.search.placeholder = sealed ? 'Search sealed product, set, UPC, or TCGPlayer URL' : 'Search card name, set, or number';
+    els.defaultCondition.disabled = sealed;
+  }
+
+  async function runSearch() {
+    const query = els.search.value.trim();
+    if (searchAbort) {
+      searchAbort.abort();
+      searchAbort = null;
+    }
+    if (!query || query.length < 2) {
+      state.results = [];
+      els.results.innerHTML = '';
+      setStatus(query ? 'Type at least 2 characters.' : '');
+      return;
+    }
+    setStatus('Searching...');
+    const params = new URLSearchParams({
+      q: query,
+      game: els.game.value,
+      product_type: els.productType.value
+    });
+    searchAbort = new AbortController();
+    const signal = searchAbort.signal;
+    try {
+      const res = await fetch(`/team/buylist/search?${params.toString()}`, {
+        headers: { 'Accept': 'application/json' },
+        signal
+      });
+      const data = await res.json();
+      if (signal.aborted) return;
+      if (!data.ok) throw new Error(data.error || 'Search failed');
+      state.results = data.cards || [];
+      const cacheLabel = data.cached ? ' (cached)' : '';
+      setStatus(state.results.length ? `${state.results.length} matches${cacheLabel}` : (data.message || data.error || 'No matches'));
+      renderResults();
+    } catch (err) {
+      if (err.name === 'AbortError') return;
+      state.results = [];
+      els.results.innerHTML = '';
+      setStatus(err.message || 'Search failed', true);
+    } finally {
+      if (searchAbort && searchAbort.signal === signal) {
+        searchAbort = null;
+      }
+    }
+  }
+
+  let searchTimer = null;
+  let searchAbort = null;
+  function scheduleSearch() {
+    window.clearTimeout(searchTimer);
+    searchTimer = window.setTimeout(runSearch, 250);
+  }
+
+  function renderResults() {
+    if (!state.results.length) {
+      els.results.innerHTML = '';
+      return;
+    }
+    els.results.innerHTML = state.results.map((card, index) => {
+      const sealed = isSealedProduct(card);
+      const variants = variantOptions(card);
+      const selectedVariant = variants.includes(card.variant) ? card.variant : variants[0];
+      const selectedCondition = sealed ? 'Sealed' : els.defaultCondition.value;
+      const selectedLanguage = sealed ? '' : (card.category_id === '85' ? 'Japanese' : 'English');
+      const offer = calculateCardOffer(card, {
+        condition: selectedCondition,
+        language: selectedLanguage,
+        variant: selectedVariant
+      });
+      const quote = state.payment === 'trade' ? offer.trade : offer.cash;
+      const listingMetric = selectedListingMetric(card, selectedVariant, selectedCondition);
+      const productId = card.tcgplayer_product_id || (/^\d{1,12}$/.test(String(card.product_id || '')) ? card.product_id : '');
+      const controls = sealed ? `
+          <div class="buylist-card-actions">
+            <span class="buylist-muted">${escapeHtml(card.sealed_product_kind || 'Sealed Product')}</span>
+            <input type="hidden" class="js-card-condition" value="Sealed">
+            <input type="hidden" class="js-card-language" value="">
+            <input type="hidden" class="js-card-variant" value="Sealed Product">
+          </div>
+        ` : `
+          <div class="buylist-card-actions">
+            <select class="buylist-mini-select js-card-condition" aria-label="Condition">${optionHtml(conditions, els.defaultCondition.value)}</select>
+            <select class="buylist-mini-select js-card-language" aria-label="Language">${optionHtml(languages, selectedLanguage)}</select>
+          </div>
+          <select class="buylist-mini-select js-card-variant" aria-label="Printing">${optionHtml(variants, selectedVariant)}</select>
+        `;
+      return `
+        <article class="buylist-result ${offer.blocked ? 'blocked' : ''}" data-index="${index}">
+          <div class="buylist-card-image">
+            ${card.image_url_small || card.image_url ? `<img src="${escapeHtml(card.image_url_small || card.image_url)}" alt="">` : ''}
+          </div>
+          <div>
+            <div class="buylist-card-title">${escapeHtml(card.name)}</div>
+            <div class="buylist-card-sub">${escapeHtml(card.set_name)}${card.number ? ` #${escapeHtml(card.number)}` : ''}</div>
+          </div>
+          <div class="buylist-price-row">
+            <span>Market<strong class="js-card-market">${money(offer.market)}</strong></span>
+            <span>Low<strong class="js-card-low">${moneyOrNA(listingMetric.low || card.low_price)}</strong></span>
+            <span>Cash<strong class="js-card-cash">${money(offer.cash)}</strong></span>
+            <span>Trade<strong class="js-card-trade">${money(offer.trade)}</strong></span>
+          </div>
+          ${controls}
+          <div class="buylist-card-actions">
+            <input class="buylist-qty js-card-qty" type="number" min="1" max="999" value="1" aria-label="Quantity">
+            ${productId ? '<button class="pt-btn js-card-sales" type="button">More data</button>' : ''}
+            <button class="pt-btn primary js-add-card" type="button" ${offer.blocked ? 'disabled' : ''}>
+              ${offer.blocked ? 'Blocked' : `Add ${money(quote)}`}
+            </button>
+          </div>
+          <div class="buylist-card-note js-card-note">${offer.notes.map(escapeHtml).join(' | ')}</div>
+          <div class="buylist-sales js-card-sales-panel"></div>
+        </article>
+      `;
+    }).join('');
+  }
+
+  function updateResultCard(cardNode) {
+    const index = Number(cardNode.dataset.index);
+    const card = state.results[index];
+    if (!card) return;
+    const offer = calculateCardOffer(card, {
+      condition: cardNode.querySelector('.js-card-condition').value,
+      language: cardNode.querySelector('.js-card-language').value,
+      variant: cardNode.querySelector('.js-card-variant').value
+    });
+    const quote = state.payment === 'trade' ? offer.trade : offer.cash;
+    cardNode.classList.toggle('blocked', offer.blocked);
+    cardNode.querySelector('.js-card-market').textContent = money(offer.market);
+    const metric = selectedListingMetric(
+      card,
+      cardNode.querySelector('.js-card-variant').value,
+      cardNode.querySelector('.js-card-condition').value
+    );
+    const lowNode = cardNode.querySelector('.js-card-low');
+    if (lowNode) lowNode.textContent = moneyOrNA(metric.low || card.low_price);
+    cardNode.querySelector('.js-card-cash').textContent = money(offer.cash);
+    cardNode.querySelector('.js-card-trade').textContent = money(offer.trade);
+    cardNode.querySelector('.js-card-note').textContent = offer.notes.join(' | ');
+    const addButton = cardNode.querySelector('.js-add-card');
+    addButton.disabled = offer.blocked;
+    addButton.textContent = offer.blocked ? 'Blocked' : `Add ${money(quote)}`;
+    const panel = cardNode.querySelector('.js-card-sales-panel');
+    if (panel && panel.classList.contains('active')) {
+      panel.classList.remove('active');
+      panel.innerHTML = '';
+      panel.dataset.salesKey = '';
+    }
+  }
+
+  function addCard(cardNode) {
+    const index = Number(cardNode.dataset.index);
+    const card = state.results[index];
+    if (!card) return;
+    const variant = cardNode.querySelector('.js-card-variant').value;
+    const condition = cardNode.querySelector('.js-card-condition').value;
+    const item = {
+      id: card.id,
+      product_id: card.product_id || card.id,
+      item_type: card.item_type || 'card',
+      category_id: card.category_id,
+      game: card.game,
+      name: card.name,
+      set_name: card.set_name,
+      number: card.number,
+      upc: card.upc || '',
+      sealed_product_kind: card.sealed_product_kind || '',
+      rarity: card.rarity,
+      image_url: card.image_url_small || card.image_url,
+      market_price: selectedMarket(card, variant, condition),
+      base_market_price: variantBaseMarket(card, variant),
+      condition_market_prices: conditionMarketPrices(card, variant),
+      condition_price_metrics: conditionPriceMetrics(card, variant),
+      external_url: card.external_url || '',
+      tcgplayer_url: card.tcgplayer_url || card.external_url || '',
+      tcgplayer_product_id: card.tcgplayer_product_id || '',
+      variant,
+      condition,
+      language: cardNode.querySelector('.js-card-language').value,
+      quantity: Math.max(1, Number(cardNode.querySelector('.js-card-qty').value || 1))
+    };
+    const existing = state.items.find(line =>
+      line.id === item.id &&
+      line.variant === item.variant &&
+      line.condition === item.condition &&
+      line.language === item.language
+    );
+    if (existing) {
+      existing.quantity = Math.min(999, Number(existing.quantity || 1) + item.quantity);
+    } else {
+      state.items.push(item);
+    }
+    repriceCart();
+  }
+
+  async function repriceCart() {
+    if (!state.items.length) {
+      state.quote = { cash: 0, trade: 0, quantity: 0, items: 0 };
+      renderCart();
+      return;
+    }
+    try {
+      const res = await fetch('/team/buylist/quote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({ items: state.items })
+      });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || 'Quote failed');
+      state.items = data.lines || state.items;
+      state.quote = data.totals || state.quote;
+      renderCart();
+    } catch (err) {
+      setStatus(err.message || 'Quote failed', true);
+      renderCart();
+    }
+  }
+
+  function renderCart() {
+    const quote = state.quote || {};
+    els.cashTotal.textContent = money(quote.cash || 0);
+    els.tradeTotal.textContent = money(quote.trade || 0);
+    els.qtyTotal.textContent = String(quote.quantity || 0);
+    els.cartSub.textContent = `${quote.items || 0} unique | ${quote.quantity || 0} total`;
+    els.empty.style.display = state.items.length ? 'none' : '';
+    els.lines.innerHTML = state.items.map((line, index) => {
+      const sealed = isSealedProduct(line);
+      const unit = state.payment === 'trade' ? line.unit_trade : line.unit_cash;
+      const total = state.payment === 'trade' ? line.line_trade : line.line_cash;
+      const controls = sealed ? `
+            <input class="buylist-qty js-line-qty" type="number" min="1" max="999" value="${Number(line.quantity || 1)}" aria-label="Quantity">
+            <span class="buylist-muted">${escapeHtml(line.sealed_product_kind || 'Sealed Product')}</span>
+            <input type="hidden" class="js-line-condition" value="Sealed">
+            <input type="hidden" class="js-line-language" value="">
+          ` : `
+            <input class="buylist-qty js-line-qty" type="number" min="1" max="999" value="${Number(line.quantity || 1)}" aria-label="Quantity">
+            <select class="buylist-mini-select js-line-condition">${optionHtml(conditions, line.condition || 'NM')}</select>
+            <select class="buylist-mini-select js-line-language">${optionHtml(languages, line.language || 'English')}</select>
+          `;
+      return `
+        <article class="buylist-line" data-index="${index}">
+          <div class="buylist-line-head">
+            <div>
+              <div class="buylist-card-title">${escapeHtml(line.name)}</div>
+              <div class="buylist-card-sub">${escapeHtml(line.set_name || '')}${line.number ? ` #${escapeHtml(line.number)}` : ''}</div>
+            </div>
+            <button class="buylist-remove js-remove-line" type="button">Remove</button>
+          </div>
+          <div class="buylist-line-actions">
+            ${controls}
+          </div>
+          <div class="buylist-price-row">
+            <span>Market<strong>${money(line.market_price)}</strong></span>
+            <span>Unit<strong>${money(unit)}</strong></span>
+            <span>Total<strong>${money(total)}</strong></span>
+          </div>
+          <div class="buylist-card-note">${(line.pricing_notes || []).map(escapeHtml).join(' | ')}</div>
+        </article>
+      `;
+    }).join('');
+  }
+
+  function updateLine(lineNode) {
+    const index = Number(lineNode.dataset.index);
+    const line = state.items[index];
+    if (!line) return;
+    line.quantity = Math.max(1, Math.min(999, Number(lineNode.querySelector('.js-line-qty').value || 1)));
+    line.condition = lineNode.querySelector('.js-line-condition').value;
+    line.language = lineNode.querySelector('.js-line-language').value;
+    repriceCart();
+  }
+
+  function quoteSummary() {
+    const customer = document.getElementById('buylistCustomer').value.trim() || 'Customer';
+    const contact = document.getElementById('buylistContact').value.trim();
+    const notes = document.getElementById('buylistNotes').value.trim();
+    const quote = state.quote || {};
+    const lines = state.items.map(line => {
+      const total = state.payment === 'trade' ? line.line_trade : line.line_cash;
+      const detail = isSealedProduct(line)
+        ? (line.sealed_product_kind || 'Sealed Product')
+        : `${line.condition}, ${line.language}, ${line.variant}`;
+      return `${line.quantity}x ${line.name} ${line.number || ''} (${detail}) - ${money(total)}`;
+    }).join('\n');
+    return [
+      `Buylist quote for ${customer}`,
+      contact ? `Contact: ${contact}` : '',
+      `Cash: ${money(quote.cash || 0)} | Trade: ${money(quote.trade || 0)} | Qty: ${quote.quantity || 0}`,
+      '',
+      lines,
+      notes ? `\nNotes: ${notes}` : ''
+    ].filter(Boolean).join('\n');
+  }
+
+  async function saveQuote() {
+    if (!state.items.length) {
+      setStatus('Add at least one card before saving.', true);
+      return;
+    }
+    const payload = {
+      customer_name: document.getElementById('buylistCustomer').value.trim(),
+      customer_contact: document.getElementById('buylistContact').value.trim(),
+      notes: document.getElementById('buylistNotes').value.trim(),
+      payment_view: state.payment,
+      items: state.items
+    };
+    try {
+      const res = await fetch('/team/buylist/save', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'X-CSRF-Token': csrfToken
+        },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || data.detail || 'Save failed');
+      setStatus(data.message || 'Quote saved');
+      els.save.textContent = 'Saved';
+      setTimeout(() => { els.save.textContent = 'Save quote'; }, 1200);
+    } catch (err) {
+      setStatus(err.message || 'Save failed', true);
+    }
+  }
+
+  document.querySelectorAll('.buylist-pay-btn').forEach(btn => {
+    btn.addEventListener('click', () => setPayment(btn.dataset.payment));
+  });
+  els.search.addEventListener('input', scheduleSearch);
+  els.game.addEventListener('change', runSearch);
+  els.productType.addEventListener('change', () => {
+    syncProductTypeUi();
+    runSearch();
+  });
+  els.defaultCondition.addEventListener('change', renderResults);
+  els.clearSearch.addEventListener('click', () => {
+    if (searchAbort) {
+      searchAbort.abort();
+      searchAbort = null;
+    }
+    els.search.value = '';
+    state.results = [];
+    els.results.innerHTML = '';
+    setStatus('');
+  });
+  els.results.addEventListener('click', event => {
+    const sales = event.target.closest('.js-card-sales');
+    if (sales) {
+      loadSalesHistory(sales.closest('.buylist-result'));
+      return;
+    }
+    const add = event.target.closest('.js-add-card');
+    if (add) addCard(add.closest('.buylist-result'));
+  });
+  els.results.addEventListener('change', event => {
+    if (!event.target.closest('.js-card-condition, .js-card-language, .js-card-variant')) return;
+    const cardNode = event.target.closest('.buylist-result');
+    if (cardNode) updateResultCard(cardNode);
+  });
+  els.lines.addEventListener('change', event => {
+    const line = event.target.closest('.buylist-line');
+    if (line) updateLine(line);
+  });
+  els.lines.addEventListener('click', event => {
+    const remove = event.target.closest('.js-remove-line');
+    if (!remove) return;
+    const index = Number(remove.closest('.buylist-line').dataset.index);
+    state.items.splice(index, 1);
+    repriceCart();
+  });
+  els.clearCart.addEventListener('click', () => {
+    state.items = [];
+    repriceCart();
+  });
+  els.save.addEventListener('click', saveQuote);
+  els.copy.addEventListener('click', async () => {
+    const text = quoteSummary();
+    try {
+      await navigator.clipboard.writeText(text);
+      els.copy.textContent = 'Copied';
+      setTimeout(() => { els.copy.textContent = 'Copy summary'; }, 1200);
+    } catch (_err) {
+      setStatus('Copy failed', true);
+    }
+  });
+  els.print.addEventListener('click', () => window.print());
+
+  syncProductTypeUi();
+  setPayment(state.payment);
+})();
+</script>
+{% endblock %}

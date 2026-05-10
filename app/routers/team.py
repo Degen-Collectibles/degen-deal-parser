@@ -724,6 +724,8 @@ def _nav_context(session: Session, user: User) -> dict:
         ("permissions", "Permissions", "page.admin.permissions", "/team/admin/permissions"),
         ("team-schedule", "Team schedule", "admin.schedule.view", "/team/admin/schedule"),
         ("supply-queue", "Supply queue", "page.admin.supply", "/team/admin/supply"),
+        ("buylist-submissions", "Buylist queue", "admin.supply.view", "/team/admin/buylist/submissions"),
+        ("buylist", "Buylist pricing", "admin.supply.view", "/team/admin/buylist"),
         ("time-off-queue", "Time off queue", "admin.timeoff.view", "/team/admin/timeoff"),
         (
             "announcements-admin",
@@ -741,6 +743,7 @@ def _nav_context(session: Session, user: User) -> dict:
     # HR/self-service links.
     ops_nav = [
         {"name": "inventory", "label": "Add Stock", "href": "/inventory/add-stock"},
+        {"name": "buylist", "label": "Buylist", "href": "/team/buylist"},
         {"name": "degen-eye", "href": "/degen_eye?team_shell=1"},
         {"name": "live-stream", "href": "/tiktok/streamer?team_shell=1"},
     ]

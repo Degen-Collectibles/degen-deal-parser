@@ -1,0 +1,279 @@
+{% extends "team/admin/base.html" %}
+{% set active = 'buylist' %}
+{% block extra_head %}
+<style>
+  .buylist-admin-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(300px, 380px);
+    gap: 16px;
+    align-items: start;
+  }
+  .buylist-admin-card {
+    border: 1px solid var(--lx-br);
+    border-radius: 10px;
+    background: var(--lx-s1);
+    padding: 16px;
+    margin-bottom: 14px;
+  }
+  .buylist-admin-title {
+    margin: 0 0 12px;
+    font-size: 15px;
+    font-weight: 800;
+  }
+  .buylist-admin-sub {
+    margin: -6px 0 14px;
+    color: var(--lx-muted);
+    font-size: 12px;
+    line-height: 1.45;
+  }
+  .buylist-game-grid,
+  .buylist-mod-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 8px;
+  }
+  .buylist-check,
+  .buylist-mod {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    border: 1px solid var(--lx-br);
+    border-radius: 8px;
+    background: var(--lx-s2);
+    padding: 9px 10px;
+    font-size: 13px;
+  }
+  .buylist-mod {
+    justify-content: space-between;
+  }
+  .buylist-mod input {
+    width: 78px;
+    text-align: right;
+  }
+  .buylist-field,
+  .buylist-select,
+  .buylist-textarea {
+    width: 100%;
+    min-width: 0;
+    padding: 9px 10px;
+    border: 1px solid var(--lx-br);
+    border-radius: 8px;
+    background: var(--lx-s2);
+    color: var(--lx-text);
+    font: inherit;
+    font-size: 13px;
+  }
+  .buylist-range-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  .buylist-range-table th {
+    padding: 8px 6px;
+    color: var(--lx-muted);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .07em;
+    text-align: left;
+  }
+  .buylist-range-table td {
+    padding: 5px 4px;
+  }
+  .buylist-range-table input,
+  .buylist-range-table select {
+    width: 100%;
+    min-width: 0;
+    padding: 8px 8px;
+    border: 1px solid var(--lx-br);
+    border-radius: 7px;
+    background: var(--lx-s2);
+    color: var(--lx-text);
+    font: inherit;
+    font-size: 12px;
+  }
+  .buylist-settings-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+  .buylist-admin-label {
+    display: grid;
+    gap: 5px;
+    color: var(--lx-muted);
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .buylist-savebar {
+    position: sticky;
+    bottom: 10px;
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    padding: 10px;
+    border: 1px solid var(--lx-br);
+    border-radius: 10px;
+    background: rgba(12, 15, 22, .92);
+    backdrop-filter: blur(10px);
+  }
+  @media (max-width: 980px) {
+    .buylist-admin-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
+{% endblock %}
+{% block content %}
+{% if saved %}
+  <div class="ta-flash" style="margin-bottom:14px;">Buylist pricing saved.</div>
+{% endif %}
+
+<form method="post" action="/team/admin/buylist">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <div class="buylist-admin-grid">
+    <div>
+      <section class="buylist-admin-card">
+        <h2 class="buylist-admin-title">Games</h2>
+        <div class="buylist-settings-row">
+          <label class="buylist-admin-label">Default game
+            <select class="buylist-select" name="default_game">
+              {% for game in game_options %}
+                <option value="{{ game.game }}" {% if game.game == config.default_game %}selected{% endif %}>{{ game.label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="buylist-admin-label">Default payment
+            <select class="buylist-select" name="default_payment">
+              <option value="cash" {% if config.default_payment == 'cash' %}selected{% endif %}>Cash</option>
+              <option value="trade" {% if config.default_payment == 'trade' %}selected{% endif %}>Trade</option>
+            </select>
+          </label>
+        </div>
+        <div class="buylist-game-grid">
+          {% for game in game_options %}
+            <label class="buylist-check">
+              <input type="checkbox" name="enabled_games" value="{{ game.game }}" {% if game.game in config.enabled_games %}checked{% endif %}>
+              <span>{{ game.label }}</span>
+            </label>
+          {% endfor %}
+        </div>
+      </section>
+
+      <section class="buylist-admin-card">
+        <h2 class="buylist-admin-title">Cash Ranges</h2>
+        <table class="buylist-range-table">
+          <thead><tr><th>Min</th><th>Max</th><th>Type</th><th>Value</th></tr></thead>
+          <tbody>
+          {% for i in range(8) %}
+            {% set row = cash_ranges[i] if i < cash_ranges|length else {} %}
+            <tr>
+              <td><input name="cash_min_{{ i }}" value="{{ row.get('min', '') }}"></td>
+              <td><input name="cash_max_{{ i }}" value="{{ row.get('max', '') }}"></td>
+              <td>
+                <select name="cash_type_{{ i }}">
+                  <option value="percentage" {% if row.get('type') == 'percentage' %}selected{% endif %}>Percent</option>
+                  <option value="fixed" {% if row.get('type') == 'fixed' %}selected{% endif %}>Fixed</option>
+                  <option value="by_appointment" {% if row.get('type') == 'by_appointment' %}selected{% endif %}>Review</option>
+                </select>
+              </td>
+              <td><input name="cash_value_{{ i }}" value="{{ row.get('value', '') }}"></td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </section>
+
+      <section class="buylist-admin-card">
+        <h2 class="buylist-admin-title">Trade Ranges</h2>
+        <table class="buylist-range-table">
+          <thead><tr><th>Min</th><th>Max</th><th>Type</th><th>Value</th></tr></thead>
+          <tbody>
+          {% for i in range(8) %}
+            {% set row = trade_ranges[i] if i < trade_ranges|length else {} %}
+            <tr>
+              <td><input name="trade_min_{{ i }}" value="{{ row.get('min', '') }}"></td>
+              <td><input name="trade_max_{{ i }}" value="{{ row.get('max', '') }}"></td>
+              <td>
+                <select name="trade_type_{{ i }}">
+                  <option value="percentage" {% if row.get('type') == 'percentage' %}selected{% endif %}>Percent</option>
+                  <option value="fixed" {% if row.get('type') == 'fixed' %}selected{% endif %}>Fixed</option>
+                  <option value="by_appointment" {% if row.get('type') == 'by_appointment' %}selected{% endif %}>Review</option>
+                </select>
+              </td>
+              <td><input name="trade_value_{{ i }}" value="{{ row.get('value', '') }}"></td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </section>
+    </div>
+
+    <div>
+      <section class="buylist-admin-card">
+        <h2 class="buylist-admin-title">Condition</h2>
+        <label class="buylist-admin-label" style="margin-bottom:12px;">Condition pricing source
+          <select class="buylist-select" name="condition_pricing_mode">
+            <option value="percentage_modifiers" {% if config.condition_pricing_mode != 'tcgplayer_market' %}selected{% endif %}>Percentage modifiers</option>
+            <option value="tcgplayer_market" {% if config.condition_pricing_mode == 'tcgplayer_market' %}selected{% endif %}>TCGPlayer condition market</option>
+          </select>
+        </label>
+        <p class="buylist-admin-sub">TCGPlayer condition market uses condition-specific market prices when available, then falls back to the modifier table.</p>
+        <div class="buylist-mod-grid">
+          {% for label in condition_options %}
+            {% set field = 'condition_' ~ label|lower %}
+            <label class="buylist-mod">{{ label }}
+              <input name="{{ field }}" value="{{ config.condition_modifiers.get(label, 100) }}">
+            </label>
+          {% endfor %}
+        </div>
+      </section>
+
+      <section class="buylist-admin-card">
+        <h2 class="buylist-admin-title">Language</h2>
+        <div class="buylist-mod-grid">
+          {% for label in language_options %}
+            {% set field = 'language_' ~ label|lower|replace(' ', '_')|replace('-', '_') %}
+            <label class="buylist-mod">{{ label }}
+              <input name="{{ field }}" value="{{ config.language_modifiers.get(label, 100) }}">
+            </label>
+          {% endfor %}
+        </div>
+      </section>
+
+      <section class="buylist-admin-card">
+        <h2 class="buylist-admin-title">Printing</h2>
+        <div class="buylist-mod-grid">
+          {% for label, value in config.printing_modifiers.items() %}
+            {% set field = 'printing_' ~ label|lower|replace(' ', '_')|replace('-', '_') %}
+            <label class="buylist-mod">{{ label }}
+              <input name="{{ field }}" value="{{ value }}">
+            </label>
+          {% endfor %}
+        </div>
+      </section>
+
+      <section class="buylist-admin-card">
+        <h2 class="buylist-admin-title">Product Lists</h2>
+        <p class="buylist-admin-sub">Use one rule per line: product name or id, percentage.</p>
+        <label class="buylist-admin-label">Hotlist boosts
+          <textarea class="buylist-textarea" name="hotlist_rules" rows="5">{{ hotlist_text }}</textarea>
+        </label>
+        <div style="height:10px;"></div>
+        <label class="buylist-admin-label">Darklist penalties
+          <textarea class="buylist-textarea" name="darklist_rules" rows="5">{{ darklist_text }}</textarea>
+        </label>
+      </section>
+
+      <section class="buylist-admin-card">
+        <h2 class="buylist-admin-title">Checkout Note</h2>
+        <textarea class="buylist-textarea" name="checkout_note" rows="4">{{ config.checkout_note or '' }}</textarea>
+      </section>
+    </div>
+  </div>
+
+  <div class="buylist-savebar">
+    <a class="ta-btn" href="/team/buylist">Open staff buylist</a>
+    <button class="ta-btn primary" type="submit">Save pricing</button>
+  </div>
+</form>
+{% endblock %}

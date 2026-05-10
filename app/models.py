@@ -662,6 +662,31 @@ class SupplyRequest(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utcnow, index=True)
 
 
+class BuylistSubmission(SQLModel, table=True):
+    __tablename__ = "buylist_submission"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    submitted_by_user_id: int = Field(foreign_key="user.id", index=True)
+    customer_name: str = Field(default="", max_length=200)
+    customer_contact: str = Field(default="", max_length=200)
+    payment_view: str = Field(default="cash", index=True)
+    status: str = Field(default="submitted", index=True)
+    totals_json: str = Field(default="{}")
+    lines_json: str = Field(default="[]")
+    notes: str = Field(default="", max_length=2000)
+    decision_notes: str = Field(default="", max_length=2000)
+    inventory_result_json: str = Field(default="{}")
+    approved_by_user_id: Optional[int] = Field(default=None, foreign_key="user.id")
+    paid_by_user_id: Optional[int] = Field(default=None, foreign_key="user.id")
+    rejected_by_user_id: Optional[int] = Field(default=None, foreign_key="user.id")
+    status_changed_at: Optional[datetime] = Field(default=None, index=True)
+    approved_at: Optional[datetime] = Field(default=None, index=True)
+    paid_at: Optional[datetime] = Field(default=None, index=True)
+    rejected_at: Optional[datetime] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+    updated_at: datetime = Field(default_factory=utcnow, index=True)
+
+
 class TimeOffRequest(SQLModel, table=True):
     __tablename__ = "time_off_request"
 
