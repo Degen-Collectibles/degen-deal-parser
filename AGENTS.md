@@ -4,9 +4,11 @@
 
 Degen Collectibles — Discord deal parser + TikTok Shop livestream platform.
 
-This project has two major verticals:
+This project has four major verticals:
 1. **Discord deal parsing** — ingests Discord deal-log messages, stores raw messages, parses them into structured transactions, normalizes them for financial reporting
 2. **TikTok Shop livestream tools** — order sync, live streamer dashboard, analytics, and product management
+3. **Inventory management (Degen Eye)** — camera-based card scanning (multi-TCG AI pipeline + local pHash), barcode labels, auto-pricing, Shopify sync
+4. **Employee portal** — staff buylist workflows, schedules, Clockify timecard/payroll, PII-encrypted profiles, Twilio SMS invites
 
 Current stack:
 - Python 3.14, FastAPI, Uvicorn
@@ -654,6 +656,31 @@ SQLite uses `REAL` and `BOOLEAN DEFAULT 0`. PostgreSQL uses `DOUBLE PRECISION` a
 | `int` | `INTEGER` | `INTEGER` |
 | `str` | `TEXT` | `TEXT` |
 | `datetime` | `TIMESTAMP` | `TIMESTAMP` |
+
+## Employee Portal
+
+The employee portal (`/team`) provides:
+
+- **Staff buylist** — employees submit buylist requests; admin reviews + approves
+- **Schedule management** — team shifts with date/time, linked to stream accounts
+- **Timecard tracking** — Clockify integration for time entries, approvals, payroll ops
+- **Employee profiles** — PII-encrypted (name, contact, compensation history) via `app/pii.py`
+- **SMS invites** — Twilio-based invite flow (`app/sms.py`); dry-run mode for testing
+- **Supply requests** — employee supply deal workflows via `app/supply_deals.py`
+
+Key files: `app/routers/team*.py` (15+ modules), `app/pii.py`, `app/clockify.py`, `app/sms.py`
+
+Controlled by env var `EMPLOYEE_PORTAL_ENABLED=true`. Requires `EMPLOYEE_PII_KEY`, `CLOCKIFY_API_KEY`, `TWILIO_*` vars.
+
+## Known Tech Debt
+
+- `app/templates/tiktok_streamer.html` — ~3,861 lines with all CSS/JS inline; should be split into separate asset files
+- `app/shared.py` — ~5,000 lines; central hub that has grown unwieldy
+- `scripts/tiktok_backfill.py` — ~1,700 lines; should be modularized
+- TikTok analytics data is delayed ~2 days for the `overview_performance` endpoint
+- TikTok webhook payloads arrive incomplete ($0.00, no items) — app fetches full order details async after receiving
+- Buyer @username not available from TikTok Shop API (only display name + shipping name)
+- No automated end-to-end tests for the streamer dashboard or inventory scanning UI
 
 ## Notes For Future Agents
 
