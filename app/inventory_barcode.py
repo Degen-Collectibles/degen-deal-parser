@@ -21,6 +21,32 @@ if TYPE_CHECKING:
     from .models import InventoryItem
 
 
+def _money(value: float | None) -> str:
+    if value is None:
+        return ""
+    return f"${value:,.2f}"
+
+
+def _label_price(item: "InventoryItem") -> tuple[str, str]:
+    """Return the customer-facing price text plus the source used."""
+    if item.list_price is not None:
+        return _money(round(item.list_price, 2)), "Manual price"
+    if item.auto_price is not None:
+        return _money(round(item.auto_price, 2)), "Market price"
+    return "Price not set", ""
+
+
+def _label_product_type(item: "InventoryItem") -> str:
+    item_type = (item.item_type or "").strip().lower()
+    if item_type == "sealed":
+        return item.sealed_product_kind or "Sealed"
+    if item_type == "slab":
+        return "Graded card"
+    if item_type == "single":
+        return "Single"
+    return item.item_type or "Inventory"
+
+
 def generate_barcode_value(item_id: int) -> str:
     """Return the canonical barcode string for an item, e.g. 'DGN-000042'."""
     return f"DGN-{item_id:06d}"
@@ -77,10 +103,14 @@ def label_context_for_items(items: list) -> list[dict]:
             f"{item.grading_company} {item.grade}" if item.grading_company and item.grade
             else item.condition or ""
         )
+        price_text, price_source = _label_price(item)
         labels.append({
             "item": item,
             "barcode_value": barcode_value,
             "barcode_svg": svg,
             "grade_or_condition": grade_or_condition,
+            "product_type": _label_product_type(item),
+            "price_text": price_text,
+            "price_source": price_source,
         })
     return labels

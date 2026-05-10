@@ -74,6 +74,8 @@
         .label-code { font-family:monospace; font-size:12px; font-weight:700; color: var(--lx-muted); }
         .label-name { font-size:13px; font-weight:800; color:var(--text); max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
         .label-sub { font-size:11px; color: var(--lx-muted); }
+        .label-price { font-size:20px; font-weight:900; line-height:1; color:#fff; margin-top:2px; }
+        .label-type { font-size:10px; color:var(--lx-muted); text-transform:uppercase; letter-spacing:.08em; font-weight:800; max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
         .empty-state { text-align:center; padding:48px 24px; color: var(--lx-muted); }
 
         /* Print styles */
@@ -108,7 +110,7 @@
         <div class="card">
             <span class="eyebrow">Inventory</span>
             <h1>Print Labels</h1>
-            <p>{{ labels|length }} label{% if labels|length != 1 %}s{% endif %} ready to print. Each label includes the Code 128 barcode, barcode number, card name, and grade/condition.</p>
+            <p>{{ labels|length }} label{% if labels|length != 1 %}s{% endif %} ready to print. Each label includes the Code 128 barcode, barcode number, product name, type/condition, and customer-facing price.</p>
             <div class="toolbar">
                 <button onclick="window.print()" class="primary-button">Print Labels</button>
                 <a href="/inventory" class="button secondary-button">Back</a>
@@ -122,7 +124,9 @@
         <div class="label-card">
             <div class="label-barcode">{{ label.barcode_svg | safe }}</div>
             <div class="label-code">{{ label.barcode_value }}</div>
+            <div class="label-price">{{ label.price_text }}</div>
             <div class="label-name" title="{{ label.item.card_name }}">{{ label.item.card_name }}</div>
+            {% if label.product_type %}<div class="label-type">{{ label.product_type }}</div>{% endif %}
             {% if label.item.set_name %}<div class="label-sub">{{ label.item.set_name }}</div>{% endif %}
             {% if label.grade_or_condition %}<div class="label-sub">{{ label.grade_or_condition }}</div>{% endif %}
         </div>

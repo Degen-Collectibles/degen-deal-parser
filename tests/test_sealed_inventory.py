@@ -535,7 +535,7 @@ class SealedInventoryTests(unittest.TestCase):
             }
         )
         with Session(self.engine) as session:
-            with patch("app.inventory._require_employee", return_value=None), patch(
+            with patch("app.inventory._require_employee_permission", return_value=None), patch(
                 "app.inventory._current_user_label", return_value="tester"
             ):
                 response = asyncio.run(
@@ -597,7 +597,7 @@ class SealedInventoryTests(unittest.TestCase):
         ]
         """
         with Session(self.engine) as session:
-            with patch("app.inventory._require_employee", return_value=None), patch(
+            with patch("app.inventory._require_employee_permission", return_value=None), patch(
                 "app.inventory._current_user_label", return_value="tester"
             ):
                 response = asyncio.run(
