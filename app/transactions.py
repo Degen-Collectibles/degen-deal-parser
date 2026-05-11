@@ -263,6 +263,7 @@ def build_transaction_summary(rows: list[Transaction]) -> dict:
         money_in = normalize_money_value(row.money_in)
         money_out = normalize_money_value(row.money_out)
         entry_kind = row.entry_kind or "unknown"
+        expense_category = (row.expense_category or "").strip().lower()
         day_key = row.occurred_at.date().isoformat()
         net_value = signed_money_delta(money_in, money_out)
         reporting_amount = row.amount
@@ -283,15 +284,23 @@ def build_transaction_summary(rows: list[Transaction]) -> dict:
             timeline[day_key]["sales"] += money_in
         elif entry_kind == "buy":
             totals["buys"] += money_out
+            totals["inventory_cash_out"] += money_out
             timeline[day_key]["buys"] += money_out
         elif entry_kind == "expense":
             totals["expenses"] += money_out
+            if expense_category == "inventory":
+                totals["inventory_expenses"] += money_out
+            else:
+                totals["operating_expenses"] += money_out
             timeline[day_key]["expenses"] += money_out
         elif entry_kind == "trade":
             totals["trade_cash_in"] += money_in
             totals["trade_cash_out"] += money_out
+            totals["inventory_cash_out"] += money_out
             timeline[day_key]["trade_in"] += money_in
             timeline[day_key]["trade_out"] += money_out
+        elif money_out:
+            totals["operating_expenses"] += money_out
 
         if row.expense_category:
             expense_categories[row.expense_category] += money_out
@@ -306,7 +315,7 @@ def build_transaction_summary(rows: list[Transaction]) -> dict:
             channels_money_out[channel_key] += money_out
 
     totals["gross_margin"] = totals["sales"] - totals["buys"]
-    totals["inventory_spend"] = expense_categories.get("inventory", 0.0)
+    totals["inventory_spend"] = totals["inventory_cash_out"] + totals["inventory_expenses"]
 
     return {
         "totals": {key: round(value, 2) for key, value in totals.items()},

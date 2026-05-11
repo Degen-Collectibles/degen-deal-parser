@@ -17,6 +17,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <title>{{ title }}</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
     <style>
         :root {
             --card: var(--lx-s1);
@@ -109,7 +110,7 @@
         .section-title,
         .metric-value,
         .hero-value {
-            letter-spacing: -.045em;
+            letter-spacing: 0;
         }
         .hero h1 {
             margin: 16px 0 10px;
@@ -258,6 +259,7 @@
             border-color: var(--lx-br);
         }
         .kpi-grid,
+        .chart-grid,
         .content-grid,
         .data-grid {
             display: grid;
@@ -265,6 +267,60 @@
             margin-bottom: 20px;
         }
         .kpi-grid { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+        .chart-grid { grid-template-columns: minmax(0, 1.3fr) minmax(300px, .7fr); align-items: stretch; }
+        .chart-stack { display: grid; gap: 20px; }
+        .chart-panel-wide { min-height: 390px; }
+        .chart-wrap {
+            position: relative;
+            width: 100%;
+            height: 320px;
+            min-height: 260px;
+        }
+        .chart-wrap.compact {
+            height: 230px;
+            min-height: 210px;
+        }
+        .chart-wrap.monthly {
+            height: 300px;
+        }
+        .chart-stat-row {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 10px;
+            margin: 14px 0 18px;
+        }
+        .chart-stat {
+            border: 1px solid var(--line);
+            background: var(--lx-s2);
+            border-radius: 12px;
+            padding: 12px;
+            min-width: 0;
+        }
+        .chart-stat-label {
+            color: var(--muted);
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: .08em;
+        }
+        .chart-stat-value {
+            margin-top: 6px;
+            color: #fff;
+            font-size: 20px;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+            overflow-wrap: anywhere;
+        }
+        .chart-empty {
+            display: none;
+            min-height: 180px;
+            align-items: center;
+            justify-content: center;
+            color: var(--muted);
+            border: 1px dashed var(--line);
+            border-radius: 12px;
+            font-size: 14px;
+        }
         .content-grid { grid-template-columns: 1.1fr .9fr; }
         .data-grid { grid-template-columns: 1fr 1fr; }
         .metric-card {
@@ -458,7 +514,7 @@
         .channel-net {
             font-size: 16px;
             font-weight: 700;
-            letter-spacing: -.02em;
+            letter-spacing: 0;
             color: #ffffff;
         }
         .empty {
@@ -468,6 +524,7 @@
         }
         @media (max-width: 1280px) {
             .kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+            .chart-grid,
             .content-grid,
             .data-grid,
             .toolbar,
@@ -484,6 +541,9 @@
             .hero { padding: 24px; }
             .hero h1 { font-size: 38px; }
             .kpi-grid { grid-template-columns: 1fr; }
+            .chart-stat-row { grid-template-columns: 1fr 1fr; }
+            .chart-wrap { height: 280px; }
+            .chart-wrap.compact { height: 220px; }
             .bar-row { grid-template-columns: 1fr; }
             .filters { display: grid; grid-template-columns: 1fr; }
             .filters label,
@@ -491,6 +551,9 @@
             .filters .button { width: 100%; }
             .table-shell,
             .statement-table { border-radius: 18px; }
+        }
+        @media (max-width: 480px) {
+            .chart-stat-row { grid-template-columns: 1fr; }
         }
     </style>
     <link rel="stylesheet" href="/static/linear.css?v=1776749171">
@@ -504,10 +567,11 @@
             <div class="hero-copy">
                 <div class="eyebrow">Finance</div>
                 <h1>Financial Pulse</h1>
-                <p>Cash-based operating statement across Discord, Shopify, and TikTok. Revenue in, spend out, every deal accounted for.</p>
+                <p>Cash-based operating view across Discord, Shopify, and TikTok. Paid product revenue, inventory cash out, operating spend, and tax are separated so the headline numbers line up with how the shop actually runs.</p>
                 <div class="hero-meta">
                     <span class="chip">{{ range_data["window_label"] }}</span>
                     <span class="chip">{{ range_data["label"] }}</span>
+                    <span class="chip">Bank: {{ bank_expense_data["account_filter_label"] }}</span>
                     <span class="chip">Updated {{ range_data["as_of_label"] }} PT</span>
                 </div>
             </div>
@@ -515,7 +579,7 @@
                 <div>
                     <div class="hero-label">Operating Profit</div>
                     <div class="hero-value">{{ current_statement["operating_profit_display"] }}</div>
-                    <div class="hero-subline">Revenue {{ current_statement["revenue_display"] }} with {{ current_statement["operating_margin_display"] }} operating margin.</div>
+                    <div class="hero-subline">Product revenue {{ current_statement["revenue_display"] }} with {{ current_statement["operating_margin_display"] }} operating margin.</div>
                     <div class="trend {{ kpi_rows[2]['tone'] }}">{{ kpi_rows[2]["delta_display"] }} vs {{ range_data["previous_label"] }}</div>
                 </div>
                 <div class="hero-foot">
@@ -535,12 +599,14 @@
                     End
                     <input type="date" name="end" value="{{ selected_end }}">
                 </label>
+                <input type="hidden" name="bank_account" value="{{ selected_bank_account }}">
                 <button type="submit" class="primary-button">Apply Range</button>
             </form>
             <div class="quick-row">
                 {% for item in quick_windows %}
                 <a href="{{ item['url'] }}" class="quick-link{% if item['active'] %} active{% endif %}">{{ item["label"] }}</a>
                 {% endfor %}
+                <a href="/bookkeeping/bank" class="quick-link legacy">Bank reconciliation</a>
                 <a href="/reports" class="quick-link legacy">Legacy reports</a>
             </div>
         </section>
@@ -556,12 +622,217 @@
             {% endfor %}
         </section>
 
+        <section class="chart-grid">
+            <article class="panel chart-panel-wide">
+                <div class="section-head">
+                    <div>
+                        <p class="section-kicker">Trend</p>
+                        <h2 class="section-title">Daily Operating View</h2>
+                        <p class="section-copy">Revenue, inventory cash out, operating spend, and profit by day.</p>
+                    </div>
+                    <span class="tag">{{ range_data["day_count"] }} days</span>
+                </div>
+                <div class="chart-stat-row">
+                    <div class="chart-stat">
+                        <div class="chart-stat-label">Revenue</div>
+                        <div class="chart-stat-value">{{ current_statement["revenue_display"] }}</div>
+                    </div>
+                    <div class="chart-stat">
+                        <div class="chart-stat-label">Inventory out</div>
+                        <div class="chart-stat-value">{{ current_statement["inventory_spend_display"] }}</div>
+                    </div>
+                    <div class="chart-stat">
+                        <div class="chart-stat-label">Operating spend</div>
+                        <div class="chart-stat-value">{{ current_statement["operating_expenses_display"] }}</div>
+                    </div>
+                    <div class="chart-stat">
+                        <div class="chart-stat-label">Profit/day</div>
+                        <div class="chart-stat-value">{{ current_statement["avg_daily_profit_display"] }}</div>
+                    </div>
+                </div>
+                <div class="chart-wrap"><canvas id="finance-daily-chart"></canvas></div>
+            </article>
+
+            <div class="chart-stack">
+                <article class="panel">
+                    <div class="section-head">
+                        <div>
+                            <p class="section-kicker">Mix</p>
+                            <h2 class="section-title">Revenue Mix</h2>
+                        </div>
+                    </div>
+                    <div class="chart-wrap compact"><canvas id="finance-source-chart"></canvas></div>
+                    <div class="chart-empty" id="finance-source-empty">No revenue in this range.</div>
+                </article>
+
+                <article class="panel">
+                    <div class="section-head">
+                        <div>
+                            <p class="section-kicker">Outflow</p>
+                            <h2 class="section-title">Cash Out Mix</h2>
+                        </div>
+                    </div>
+                    <div class="chart-wrap compact"><canvas id="finance-spend-chart"></canvas></div>
+                    <div class="chart-empty" id="finance-spend-empty">No cash out in this range.</div>
+                </article>
+            </div>
+        </section>
+
+        <section class="panel">
+            <div class="section-head">
+                <div>
+                    <p class="section-kicker">Bank ledger</p>
+                    <h2 class="section-title">Categorized Bank Expenses</h2>
+                    <p class="section-copy">Checking and credit-card outflows from Chase, reconciled against Discord logs. Rows already matched to Discord transactions are shown separately and excluded from bank-only totals to avoid double counting.</p>
+                </div>
+                <span class="tag">{{ bank_expense_data["row_count"] }} rows</span>
+            </div>
+            <div class="quick-row" style="justify-content:flex-start; margin-bottom:16px;">
+                {% for item in bank_account_views %}
+                <a href="{{ item['url'] }}" class="quick-link{% if item['active'] %} active{% endif %}">{{ item["label"] }}</a>
+                {% endfor %}
+            </div>
+            <div class="chart-stat-row">
+                <div class="chart-stat">
+                    <div class="chart-stat-label">Bank-only outflow</div>
+                    <div class="chart-stat-value">{{ bank_expense_data["bank_only_total_display"] }}</div>
+                </div>
+                <div class="chart-stat">
+                    <div class="chart-stat-label">Already in Discord</div>
+                    <div class="chart-stat-value">{{ bank_expense_data["discord_logged_total_display"] }}</div>
+                </div>
+                <div class="chart-stat">
+                    <div class="chart-stat-label">Inventory/grading</div>
+                    <div class="chart-stat-value">{{ bank_expense_data["inventory_total_display"] }}</div>
+                </div>
+                <div class="chart-stat">
+                    <div class="chart-stat-label">Partner paybacks</div>
+                    <div class="chart-stat-value">{{ bank_expense_data["partner_paybacks_total_display"] }}</div>
+                </div>
+                <div class="chart-stat">
+                    <div class="chart-stat-label">Uncategorized</div>
+                    <div class="chart-stat-value">{{ bank_expense_data["uncategorized_total_display"] }}</div>
+                </div>
+            </div>
+        </section>
+
+        <section class="chart-grid">
+            <article class="panel chart-panel-wide">
+                <div class="section-head">
+                    <div>
+                        <p class="section-kicker">Bank trend</p>
+                        <h2 class="section-title">Daily Bank Outflows</h2>
+                        <p class="section-copy">Daily statement spend split into bank-only categories, with Discord-logged rows separated as an excluded comparison.</p>
+                    </div>
+                </div>
+                <div class="chart-wrap"><canvas id="finance-bank-daily-chart"></canvas></div>
+                <div class="chart-empty" id="finance-bank-daily-empty">No bank expenses in this range.</div>
+            </article>
+
+            <div class="chart-stack">
+                <article class="panel">
+                    <div class="section-head">
+                        <div>
+                            <p class="section-kicker">Bank mix</p>
+                            <h2 class="section-title">Bank-Only Categories</h2>
+                        </div>
+                    </div>
+                    <div class="chart-wrap compact"><canvas id="finance-bank-category-chart"></canvas></div>
+                    <div class="chart-empty" id="finance-bank-category-empty">No bank expense categories in this range.</div>
+                </article>
+
+                <article class="panel">
+                    <div class="section-head">
+                        <div>
+                            <p class="section-kicker">Accounts</p>
+                            <h2 class="section-title">Checking vs Credit Card</h2>
+                        </div>
+                    </div>
+                    <div class="chart-wrap compact"><canvas id="finance-bank-account-chart"></canvas></div>
+                    <div class="chart-empty" id="finance-bank-account-empty">No account outflows in this range.</div>
+                </article>
+            </div>
+        </section>
+
+        <section class="data-grid">
+            <article class="panel">
+                <div class="section-head">
+                    <div>
+                        <p class="section-kicker">Bank categories</p>
+                        <h2 class="section-title">Bank-Only Category Totals</h2>
+                        <p class="section-copy">Only Chase rows not already matched to a Discord transaction are included in these totals.</p>
+                    </div>
+                </div>
+                <div class="bar-list">
+                    {% for row in bank_expense_data["category_rows"][:12] %}
+                    <div class="bar-row">
+                        <div class="bar-label">{{ row["label"] }}</div>
+                        <div class="bar-track"><div class="bar-fill spend" style="width: {{ row['share_pct'] }}%;"></div></div>
+                        <div class="bar-share">{{ row["share_display"] }}</div>
+                        <div class="bar-value">{{ row["bank_only_total_display"] }}</div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </article>
+
+            <article class="panel">
+                <div class="section-head">
+                    <div>
+                        <p class="section-kicker">Bank accounts</p>
+                        <h2 class="section-title">Account Expense Split</h2>
+                        <p class="section-copy">Compare Chase checking and credit-card outflows without leaving finance.</p>
+                    </div>
+                </div>
+                <div class="table-shell">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Account</th>
+                                <th>Rows</th>
+                                <th>Statement outflow</th>
+                                <th>Already in Discord</th>
+                                <th>Bank-only</th>
+                                <th>Operating</th>
+                                <th>Transfers/paybacks</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for row in bank_expense_data["account_rows"] %}
+                            <tr>
+                                <td class="statement-label">{{ row["label"] }}</td>
+                                <td>{{ row["count"] }}</td>
+                                <td>{{ row["total_display"] }}</td>
+                                <td>{{ row["discord_logged_total_display"] }}</td>
+                                <td>{{ row["bank_only_total_display"] }}</td>
+                                <td>{{ row["operating_total_display"] }}</td>
+                                <td>{{ row["non_operating_total_display"] }}</td>
+                            </tr>
+                            {% else %}
+                            <tr><td colspan="7" class="empty">No bank expenses matched this range.</td></tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </article>
+        </section>
+
+        <section class="panel">
+            <div class="section-head">
+                <div>
+                    <p class="section-kicker">Cadence</p>
+                    <h2 class="section-title">Six-Month Revenue And Profit</h2>
+                    <p class="section-copy">Monthly product revenue, operating cash profit, and operating margin.</p>
+                </div>
+            </div>
+            <div class="chart-wrap monthly"><canvas id="finance-monthly-chart"></canvas></div>
+        </section>
+
         <section class="content-grid">
             <article class="panel">
                 <div class="section-head">
                     <div>
                         <p class="section-kicker">Statement</p>
-                        <h2 class="section-title">Profit And Loss</h2>
+                        <h2 class="section-title">Cash Operating Statement</h2>
                         <p class="section-copy">Current range against the immediately preceding period of the same length.</p>
                     </div>
                     <span class="tag">{{ range_data["label"] }}</span>
@@ -586,7 +857,7 @@
                         </tbody>
                     </table>
                 </div>
-                <p class="caption">Discord revenue on this page reflects normalized cash-in. External platform revenue is shown net of tax where tax is available. This is an operator-grade cash view, not a full accrual statement.</p>
+                <p class="caption">Paid platform orders use product subtotal or tax-excluded subtotal for revenue. Known tax is tracked separately, and missing tax affects tax completeness instead of removing the order from revenue.</p>
             </article>
 
             <div class="stack">
@@ -736,6 +1007,383 @@
             </article>
         </section>
     </div>
+    <script>
+    (function () {
+        var chartData = {{ finance_chart_data|tojson }};
+        if (!window.Chart || !chartData) {
+            return;
+        }
+
+        var gridColor = "rgba(148, 163, 184, 0.18)";
+        var labelColor = "#b8c0ca";
+        var textColor = "#f8fafc";
+        var palette = {
+            revenue: "#2dd4bf",
+            inventory: "#f59e0b",
+            operating: "#94a3b8",
+            profit: "#22c55e",
+            cumulative: "#60a5fa",
+            source: ["#2dd4bf", "#60a5fa", "#f472b6"],
+            spend: ["#f59e0b", "#fb7185", "#a78bfa", "#94a3b8"],
+            bank: {
+                operating: "#60a5fa",
+                inventory: "#f59e0b",
+                partner: "#f472b6",
+                nonOperating: "#94a3b8",
+                uncategorized: "#ef4444",
+                categories: ["#f59e0b", "#60a5fa", "#f472b6", "#22c55e", "#a78bfa", "#fb7185", "#2dd4bf", "#eab308", "#94a3b8", "#ef4444", "#38bdf8", "#c084fc"],
+                accounts: ["#60a5fa", "#f59e0b", "#22c55e", "#f472b6"]
+            }
+        };
+
+        Chart.defaults.color = labelColor;
+        Chart.defaults.font.family = "Inter, -apple-system, BlinkMacSystemFont, sans-serif";
+
+        function money(value) {
+            var number = Number(value || 0);
+            var sign = number < 0 ? "-" : "";
+            var abs = Math.abs(number);
+            if (abs >= 1000) {
+                return sign + "$" + Math.round(abs).toLocaleString();
+            }
+            return sign + "$" + abs.toLocaleString(undefined, { maximumFractionDigits: 2 });
+        }
+
+        function percent(value) {
+            if (value === null || value === undefined) {
+                return "--";
+            }
+            return Number(value).toFixed(1) + "%";
+        }
+
+        function hasValues(values) {
+            return (values || []).some(function (value) {
+                return Math.abs(Number(value || 0)) >= 0.005;
+            });
+        }
+
+        function sharedOptions(extra) {
+            return Object.assign({
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: { mode: "index", intersect: false },
+                plugins: {
+                    legend: {
+                        labels: { color: textColor, boxWidth: 10, boxHeight: 10, usePointStyle: true }
+                    },
+                    tooltip: {
+                        callbacks: {
+                            label: function (ctx) {
+                                var label = ctx.dataset.label ? ctx.dataset.label + ": " : "";
+                                return label + money(ctx.parsed.y !== undefined ? ctx.parsed.y : ctx.parsed);
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    x: { grid: { color: "transparent" }, ticks: { color: labelColor, maxRotation: 0, autoSkip: true } },
+                    y: { grid: { color: gridColor }, ticks: { color: labelColor, callback: money } }
+                }
+            }, extra || {});
+        }
+
+        var dailyCanvas = document.getElementById("finance-daily-chart");
+        if (dailyCanvas && chartData.daily) {
+            new Chart(dailyCanvas, {
+                data: {
+                    labels: chartData.daily.labels,
+                    datasets: [
+                        {
+                            type: "bar",
+                            label: "Revenue",
+                            data: chartData.daily.revenue,
+                            backgroundColor: "rgba(45, 212, 191, 0.68)",
+                            borderRadius: 6,
+                            stack: "cash"
+                        },
+                        {
+                            type: "bar",
+                            label: "Inventory cash out",
+                            data: chartData.daily.inventorySpend.map(function (value) { return -Number(value || 0); }),
+                            backgroundColor: "rgba(245, 158, 11, 0.72)",
+                            borderRadius: 6,
+                            stack: "cash"
+                        },
+                        {
+                            type: "bar",
+                            label: "Operating spend",
+                            data: chartData.daily.operatingExpenses.map(function (value) { return -Number(value || 0); }),
+                            backgroundColor: "rgba(148, 163, 184, 0.56)",
+                            borderRadius: 6,
+                            stack: "cash"
+                        },
+                        {
+                            type: "line",
+                            label: "Operating cash profit",
+                            data: chartData.daily.operatingProfit,
+                            borderColor: palette.profit,
+                            backgroundColor: "rgba(34, 197, 94, 0.14)",
+                            tension: 0.32,
+                            pointRadius: 2,
+                            borderWidth: 2,
+                            fill: false,
+                            yAxisID: "y"
+                        },
+                        {
+                            type: "line",
+                            label: "Cumulative profit",
+                            data: chartData.daily.cumulativeProfit,
+                            borderColor: palette.cumulative,
+                            backgroundColor: "rgba(96, 165, 250, 0.14)",
+                            tension: 0.32,
+                            pointRadius: 0,
+                            borderDash: [5, 5],
+                            borderWidth: 2,
+                            fill: false,
+                            yAxisID: "y"
+                        }
+                    ]
+                },
+                options: sharedOptions({
+                    scales: {
+                        x: { stacked: false, grid: { color: "transparent" }, ticks: { color: labelColor, maxRotation: 0, autoSkip: true } },
+                        y: { stacked: false, grid: { color: gridColor }, ticks: { color: labelColor, callback: money } }
+                    }
+                })
+            });
+        }
+
+        function renderDoughnut(canvasId, emptyId, labels, values, colors) {
+            var canvas = document.getElementById(canvasId);
+            var empty = document.getElementById(emptyId);
+            if (!canvas) {
+                return;
+            }
+            if (!hasValues(values)) {
+                canvas.parentElement.style.display = "none";
+                if (empty) {
+                    empty.style.display = "flex";
+                }
+                return;
+            }
+            new Chart(canvas, {
+                type: "doughnut",
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        data: values,
+                        backgroundColor: colors,
+                        borderColor: "#111318",
+                        borderWidth: 2,
+                        hoverOffset: 6
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    cutout: "64%",
+                    plugins: {
+                        legend: {
+                            position: "bottom",
+                            labels: { color: textColor, boxWidth: 10, boxHeight: 10, usePointStyle: true }
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function (ctx) {
+                                    var total = ctx.dataset.data.reduce(function (sum, value) {
+                                        return sum + Number(value || 0);
+                                    }, 0);
+                                    var value = Number(ctx.parsed || 0);
+                                    var share = total ? " (" + percent((value / total) * 100) + ")" : "";
+                                    return ctx.label + ": " + money(value) + share;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        renderDoughnut(
+            "finance-source-chart",
+            "finance-source-empty",
+            chartData.sourceMix.labels,
+            chartData.sourceMix.values,
+            palette.source
+        );
+        renderDoughnut(
+            "finance-spend-chart",
+            "finance-spend-empty",
+            chartData.spendMix.labels,
+            chartData.spendMix.values,
+            palette.spend
+        );
+
+        if (chartData.bank) {
+            var bankCategoryColors = (chartData.bank.categoryMix.groups || []).map(function (group, index) {
+                if (group === "inventory") { return palette.bank.inventory; }
+                if (group === "partner_paybacks") { return palette.bank.partner; }
+                if (group === "non_operating") { return palette.bank.nonOperating; }
+                if (group === "uncategorized") { return palette.bank.uncategorized; }
+                return palette.bank.categories[index % palette.bank.categories.length];
+            });
+            renderDoughnut(
+                "finance-bank-category-chart",
+                "finance-bank-category-empty",
+                chartData.bank.categoryMix.labels,
+                chartData.bank.categoryMix.values,
+                bankCategoryColors
+            );
+            renderDoughnut(
+                "finance-bank-account-chart",
+                "finance-bank-account-empty",
+                chartData.bank.accountSplit.labels,
+                chartData.bank.accountSplit.values,
+                palette.bank.accounts
+            );
+
+            var bankDailyCanvas = document.getElementById("finance-bank-daily-chart");
+            var bankDailyEmpty = document.getElementById("finance-bank-daily-empty");
+            if (bankDailyCanvas && chartData.bank.daily) {
+                var bankDailyValues = []
+                    .concat(chartData.bank.daily.operating || [])
+                    .concat(chartData.bank.daily.inventory || [])
+                    .concat(chartData.bank.daily.partnerPaybacks || [])
+                    .concat(chartData.bank.daily.nonOperating || [])
+                    .concat(chartData.bank.daily.uncategorized || [])
+                    .concat(chartData.bank.daily.alreadyLogged || []);
+                if (!hasValues(bankDailyValues)) {
+                    bankDailyCanvas.parentElement.style.display = "none";
+                    if (bankDailyEmpty) {
+                        bankDailyEmpty.style.display = "flex";
+                    }
+                } else {
+                    new Chart(bankDailyCanvas, {
+                        type: "bar",
+                        data: {
+                            labels: chartData.bank.daily.labels,
+                            datasets: [
+                                {
+                                    label: "Inventory/grading",
+                                    data: chartData.bank.daily.inventory,
+                                    backgroundColor: "rgba(245, 158, 11, 0.72)",
+                                    borderRadius: 6,
+                                    stack: "bank"
+                                },
+                                {
+                                    label: "Operating",
+                                    data: chartData.bank.daily.operating,
+                                    backgroundColor: "rgba(96, 165, 250, 0.66)",
+                                    borderRadius: 6,
+                                    stack: "bank"
+                                },
+                                {
+                                    label: "Partner paybacks",
+                                    data: chartData.bank.daily.partnerPaybacks,
+                                    backgroundColor: "rgba(244, 114, 182, 0.68)",
+                                    borderRadius: 6,
+                                    stack: "bank"
+                                },
+                                {
+                                    label: "Transfers/loans",
+                                    data: chartData.bank.daily.nonOperating,
+                                    backgroundColor: "rgba(148, 163, 184, 0.52)",
+                                    borderRadius: 6,
+                                    stack: "bank"
+                                },
+                                {
+                                    label: "Uncategorized",
+                                    data: chartData.bank.daily.uncategorized,
+                                    backgroundColor: "rgba(239, 68, 68, 0.62)",
+                                    borderRadius: 6,
+                                    stack: "bank"
+                                },
+                                {
+                                    label: "Already logged in Discord",
+                                    data: chartData.bank.daily.alreadyLogged,
+                                    backgroundColor: "rgba(148, 163, 184, 0.34)",
+                                    borderRadius: 6,
+                                    stack: "logged"
+                                }
+                            ]
+                        },
+                        options: sharedOptions({
+                            scales: {
+                                x: { stacked: true, grid: { color: "transparent" }, ticks: { color: labelColor, maxRotation: 0, autoSkip: true } },
+                                y: { stacked: true, grid: { color: gridColor }, ticks: { color: labelColor, callback: money } }
+                            }
+                        })
+                    });
+                }
+            }
+        }
+
+        var monthlyCanvas = document.getElementById("finance-monthly-chart");
+        if (monthlyCanvas && chartData.monthly) {
+            new Chart(monthlyCanvas, {
+                data: {
+                    labels: chartData.monthly.labels,
+                    datasets: [
+                        {
+                            type: "bar",
+                            label: "Revenue",
+                            data: chartData.monthly.revenue,
+                            backgroundColor: "rgba(45, 212, 191, 0.68)",
+                            borderRadius: 6,
+                            yAxisID: "y"
+                        },
+                        {
+                            type: "bar",
+                            label: "Operating cash profit",
+                            data: chartData.monthly.operatingProfit,
+                            backgroundColor: "rgba(34, 197, 94, 0.62)",
+                            borderRadius: 6,
+                            yAxisID: "y"
+                        },
+                        {
+                            type: "line",
+                            label: "Operating margin",
+                            data: chartData.monthly.operatingMargin,
+                            borderColor: "#f472b6",
+                            backgroundColor: "rgba(244, 114, 182, 0.16)",
+                            tension: 0.32,
+                            pointRadius: 3,
+                            borderWidth: 2,
+                            yAxisID: "margin"
+                        }
+                    ]
+                },
+                options: sharedOptions({
+                    plugins: {
+                        legend: {
+                            labels: { color: textColor, boxWidth: 10, boxHeight: 10, usePointStyle: true }
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function (ctx) {
+                                    var label = ctx.dataset.label ? ctx.dataset.label + ": " : "";
+                                    if (ctx.dataset.yAxisID === "margin") {
+                                        return label + percent(ctx.parsed.y);
+                                    }
+                                    return label + money(ctx.parsed.y);
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: { grid: { color: "transparent" }, ticks: { color: labelColor, maxRotation: 0, autoSkip: false } },
+                        y: { position: "left", grid: { color: gridColor }, ticks: { color: labelColor, callback: money } },
+                        margin: {
+                            position: "right",
+                            grid: { drawOnChartArea: false },
+                            ticks: { color: labelColor, callback: function (value) { return value + "%"; } }
+                        }
+                    }
+                })
+            });
+        }
+    })();
+    </script>
     {% include '_mobile_bottom_nav.html' %}
 {% include "_csrf_bootstrap.html" %}
 </body>

@@ -403,6 +403,70 @@ def _tiktok_day_key(value: Optional[datetime]) -> str:
     return parsed.astimezone(REPORTING_TZ).date().isoformat()
 
 
+def external_order_net_revenue(row: ShopifyOrder | TikTokOrder) -> float:
+    subtotal_ex_tax = getattr(row, "subtotal_ex_tax", None)
+    if subtotal_ex_tax is not None:
+        return round(float(subtotal_ex_tax or 0.0), 2)
+
+    subtotal_price = getattr(row, "subtotal_price", None)
+    if subtotal_price is not None and abs(float(subtotal_price or 0.0)) >= 0.005:
+        return round(float(subtotal_price or 0.0), 2)
+
+    gross_value = float(getattr(row, "total_price", 0.0) or 0.0)
+    tax_value = getattr(row, "total_tax", None)
+    if tax_value is not None:
+        return round(gross_value - float(tax_value or 0.0), 2)
+    return round(gross_value, 2)
+
+
+def build_shopify_daily_totals(rows: list[ShopifyOrder]) -> list[dict[str, object]]:
+    daily_totals: defaultdict[str, dict[str, object]] = defaultdict(_tiktok_daily_totals_bucket)
+
+    for row in rows:
+        day_key = _tiktok_day_key(row.created_at)
+        if not day_key:
+            continue
+
+        bucket = daily_totals[day_key]
+        bucket["orders"] += 1
+
+        status = (row.financial_status or "").strip().lower()
+        if status == "paid":
+            bucket["paid_orders"] += 1
+        elif status == "pending":
+            bucket["pending_orders"] += 1
+        elif status == "refunded":
+            bucket["refunded_orders"] += 1
+        else:
+            bucket["other_orders"] += 1
+
+        if status != "paid":
+            continue
+
+        bucket["gross"] += float(row.total_price or 0.0)
+        bucket["net"] += external_order_net_revenue(row)
+        if row.total_tax is None:
+            bucket["tax_unknown_orders"] += 1
+        else:
+            bucket["tax"] += float(row.total_tax or 0.0)
+
+    return [
+        {
+            "date": date_key,
+            "orders": values["orders"],
+            "paid_orders": values["paid_orders"],
+            "pending_orders": values["pending_orders"],
+            "refunded_orders": values["refunded_orders"],
+            "other_orders": values["other_orders"],
+            "gross": round(values["gross"], 2),
+            "tax": round(values["tax"], 2),
+            "net": round(values["net"], 2),
+            "tax_unknown_orders": values["tax_unknown_orders"],
+        }
+        for date_key, values in sorted(daily_totals.items())
+    ]
+
+
 def build_tiktok_daily_totals(rows: list[TikTokOrder]) -> list[dict[str, object]]:
     daily_totals: defaultdict[str, dict[str, object]] = defaultdict(_tiktok_daily_totals_bucket)
 
@@ -429,15 +493,12 @@ def build_tiktok_daily_totals(rows: list[TikTokOrder]) -> list[dict[str, object]
 
         gross_value = float(row.total_price or 0.0)
         bucket["gross"] += gross_value
+        bucket["net"] += external_order_net_revenue(row)
 
         if row.total_tax is None:
             bucket["tax_unknown_orders"] += 1
-            continue
-
-        tax_value = float(row.total_tax or 0.0)
-        net_value = float(row.subtotal_ex_tax) if row.subtotal_ex_tax is not None else gross_value - tax_value
-        bucket["tax"] += tax_value
-        bucket["net"] += net_value
+        else:
+            bucket["tax"] += float(row.total_tax or 0.0)
 
     return [
         {
@@ -483,18 +544,17 @@ def build_shopify_reporting_summary(rows: list[ShopifyOrder]) -> dict:
         paid_order_count += 1
         gross_value = float(row.total_price or 0.0)
         paid_gross += gross_value
+        paid_net += external_order_net_revenue(row)
 
         if row.total_tax is None:
             tax_unknown_count += 1
             continue
 
         tax_value = float(row.total_tax or 0.0)
-        net_value = float(row.subtotal_ex_tax) if row.subtotal_ex_tax is not None else gross_value - tax_value
         paid_tax += tax_value
-        paid_net += net_value
         paid_known_tax_orders += 1
 
-    avg_paid_net = round(paid_net / paid_known_tax_orders, 2) if paid_known_tax_orders else 0.0
+    avg_paid_net = round(paid_net / paid_order_count, 2) if paid_order_count else 0.0
 
     return {
         "orders": len(rows),
@@ -508,11 +568,12 @@ def build_shopify_reporting_summary(rows: list[ShopifyOrder]) -> dict:
         "avg_order_value_net": avg_paid_net,
         "has_missing_tax_data": tax_unknown_count > 0,
         "warning": (
-            f"{tax_unknown_count} orders missing tax data - totals may be incomplete"
+            f"{tax_unknown_count} orders missing tax data - tax collected is incomplete"
             if tax_unknown_count
             else ""
         ),
         "line_item_summary": line_item_summary,
+        "daily_totals": build_shopify_daily_totals(rows),
     }
 
 
@@ -552,18 +613,17 @@ def build_tiktok_reporting_summary(rows: list[TikTokOrder]) -> dict:
         paid_order_count += 1
         gross_value = float(row.total_price or 0.0)
         paid_gross += gross_value
+        paid_net += external_order_net_revenue(row)
 
         if row.total_tax is None:
             tax_unknown_count += 1
             continue
 
         tax_value = float(row.total_tax or 0.0)
-        net_value = float(row.subtotal_ex_tax) if row.subtotal_ex_tax is not None else gross_value - tax_value
         paid_tax += tax_value
-        paid_net += net_value
         paid_known_tax_orders += 1
 
-    avg_paid_net = round(paid_net / paid_known_tax_orders, 2) if paid_known_tax_orders else 0.0
+    avg_paid_net = round(paid_net / paid_order_count, 2) if paid_order_count else 0.0
 
     return {
         "orders": len(rows),
@@ -577,7 +637,7 @@ def build_tiktok_reporting_summary(rows: list[TikTokOrder]) -> dict:
         "avg_order_value_net": avg_paid_net,
         "has_missing_tax_data": tax_unknown_count > 0,
         "warning": (
-            f"{tax_unknown_count} orders missing tax data - totals may be incomplete"
+            f"{tax_unknown_count} orders missing tax data - tax collected is incomplete"
             if tax_unknown_count
             else ""
         ),
@@ -728,6 +788,7 @@ def build_financial_summary(rows: list[DiscordMessage]) -> dict:
         money_in = normalize_money_value(row.money_in)
         money_out = normalize_money_value(row.money_out)
         entry_kind = row.entry_kind or "unknown"
+        expense_category = (row.expense_category or "").strip().lower()
         day_key = row.created_at.date().isoformat()
         net_value = signed_money_delta(money_in, money_out)
         amount_value = row.amount if row.amount is not None else money_in or money_out
@@ -744,15 +805,23 @@ def build_financial_summary(rows: list[DiscordMessage]) -> dict:
             timeline[day_key]["sales"] += money_in
         elif entry_kind == "buy":
             totals["buys"] += money_out
+            totals["inventory_cash_out"] += money_out
             timeline[day_key]["buys"] += money_out
         elif entry_kind == "expense":
             totals["expenses"] += money_out
+            if expense_category == "inventory":
+                totals["inventory_expenses"] += money_out
+            else:
+                totals["operating_expenses"] += money_out
             timeline[day_key]["expenses"] += money_out
         elif entry_kind == "trade":
             totals["trade_cash_in"] += money_in
             totals["trade_cash_out"] += money_out
+            totals["inventory_cash_out"] += money_out
             timeline[day_key]["trade_in"] += money_in
             timeline[day_key]["trade_out"] += money_out
+        elif money_out:
+            totals["operating_expenses"] += money_out
 
         if row.expense_category:
             expense_categories[row.expense_category] += money_out
@@ -763,6 +832,7 @@ def build_financial_summary(rows: list[DiscordMessage]) -> dict:
             payment_breakdown[row.payment_method] += normalize_money_value(amount_value)
 
     totals["gross_margin"] = totals["sales"] - totals["buys"]
+    totals["inventory_spend"] = totals["inventory_cash_out"] + totals["inventory_expenses"]
 
     return {
         "totals": {key: round(value, 2) for key, value in totals.items()},

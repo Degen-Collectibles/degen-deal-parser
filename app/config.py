@@ -41,6 +41,18 @@ class Settings(BaseSettings):
     log_to_file: bool = Field(default=True, alias="LOG_TO_FILE")
     log_dir: str = Field(default="logs", alias="LOG_DIR")
 
+    # Live bank feeds. Plaid Link creates a temporary public token in the
+    # browser; the server exchanges it for an access token and keeps that token
+    # encrypted before syncing transaction deltas into bank_transactions.
+    plaid_enabled: bool = Field(default=False, alias="PLAID_ENABLED")
+    plaid_client_id: str = Field(default="", alias="PLAID_CLIENT_ID")
+    plaid_secret: str = Field(default="", alias="PLAID_SECRET")
+    plaid_env: str = Field(default="sandbox", alias="PLAID_ENV")
+    plaid_products: str = Field(default="transactions", alias="PLAID_PRODUCTS")
+    plaid_country_codes: str = Field(default="US", alias="PLAID_COUNTRY_CODES")
+    plaid_webhook_url: str = Field(default="", alias="PLAID_WEBHOOK_URL")
+    bank_feed_encryption_key: str = Field(default="", alias="BANK_FEED_ENCRYPTION_KEY")
+
     # Durable runtime data root. Defaults to repo-relative `data/` for local
     # dev; Green/Linux production should set DATA_ROOT=/opt/degen/data so
     # uploaded attachments, hit images, and v2 training captures persist

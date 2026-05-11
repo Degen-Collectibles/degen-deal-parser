@@ -990,7 +990,7 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(summary["tax_unknown_orders"], 1)
         self.assertEqual(summary["gross_revenue"], 52.0)
         self.assertEqual(summary["total_tax"], 3.5)
-        self.assertEqual(summary["net_revenue"], 38.5)
+        self.assertEqual(summary["net_revenue"], 48.5)
         self.assertEqual(len(summary["daily_totals"]), 1)
         self.assertEqual(summary["daily_totals"][0]["orders"], 4)
         self.assertEqual(summary["daily_totals"][0]["paid_orders"], 2)
@@ -998,7 +998,7 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(summary["daily_totals"][0]["refunded_orders"], 1)
         self.assertEqual(summary["daily_totals"][0]["gross"], 52.0)
         self.assertEqual(summary["daily_totals"][0]["tax"], 3.5)
-        self.assertEqual(summary["daily_totals"][0]["net"], 38.5)
+        self.assertEqual(summary["daily_totals"][0]["net"], 48.5)
         self.assertEqual(summary["daily_totals"][0]["tax_unknown_orders"], 1)
 
     def test_tiktok_reporting_summary_treats_completed_and_shipment_states_as_paid_like(self) -> None:

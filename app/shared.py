@@ -69,6 +69,8 @@ from .models import (
     AttachmentAsset,
     BackfillRequest,
     BIG_HIT_THRESHOLD,
+    BankStatementImport,
+    BankTransaction,
     BookkeepingImport,
     DiscordMessage,
     expand_parse_status_filter_values,
@@ -107,12 +109,14 @@ from .reparse import reparse_message_row, reparse_message_rows
 from .reporting import (
     build_financial_summary,
     build_reporting_periods,
+    build_shopify_daily_totals,
     build_shopify_reporting_summary,
     build_tiktok_buyer_insights,
     build_tiktok_orders_page_data as build_tiktok_orders_page_reporting_data,
     build_tiktok_product_performance,
     build_tiktok_reporting_summary,
     classify_tiktok_reporting_status,
+    external_order_net_revenue,
     get_financial_rows,
     get_shopify_reporting_rows,
     get_tiktok_reporting_rows,
@@ -298,6 +302,7 @@ def build_finance_url(
     start: str = "",
     end: str = "",
     window: str = FINANCE_WINDOW_MTD,
+    bank_account: str = "",
 ) -> str:
     params: dict[str, str] = {}
     if start:
@@ -306,6 +311,8 @@ def build_finance_url(
         params["end"] = end
     if not params:
         params["window"] = normalize_finance_window(window)
+    if bank_account and bank_account != "all":
+        params["bank_account"] = bank_account
     if not params:
         return "/finance"
     return f"/finance?{urlencode(params)}"
@@ -1270,7 +1277,6 @@ def compose_finance_statement(
     day_count: int,
 ) -> dict[str, object]:
     discord_totals = discord_summary.get("totals", {})
-    expense_categories = discord_summary.get("expense_categories", {})
 
     discord_money_in = round(float(discord_totals.get("money_in", 0.0) or 0.0), 2)
     discord_money_out = round(float(discord_totals.get("money_out", 0.0) or 0.0), 2)
@@ -1278,10 +1284,20 @@ def compose_finance_statement(
     discord_buys = round(float(discord_totals.get("buys", 0.0) or 0.0), 2)
     discord_trade_in = round(float(discord_totals.get("trade_cash_in", 0.0) or 0.0), 2)
     discord_trade_out = round(float(discord_totals.get("trade_cash_out", 0.0) or 0.0), 2)
-    inventory_expense = round(float(expense_categories.get("inventory", 0.0) or 0.0), 2)
+    inventory_expense = round(float(discord_totals.get("inventory_expenses", 0.0) or 0.0), 2)
 
-    inventory_spend = round(discord_buys + discord_trade_out + inventory_expense, 2)
-    operating_expenses = round(max(discord_money_out - inventory_spend, 0.0), 2)
+    inventory_spend = round(
+        float(discord_totals.get("inventory_spend", 0.0) or 0.0),
+        2,
+    )
+    if not inventory_spend:
+        inventory_spend = round(discord_buys + discord_trade_out + inventory_expense, 2)
+    operating_expenses = round(
+        float(discord_totals.get("operating_expenses", 0.0) or 0.0),
+        2,
+    )
+    if not operating_expenses:
+        operating_expenses = round(max(discord_money_out - inventory_spend, 0.0), 2)
 
     shopify_net_revenue = round(float(shopify_summary.get("net_revenue", 0.0) or 0.0), 2)
     shopify_tax = round(float(shopify_summary.get("total_tax", 0.0) or 0.0), 2)
@@ -1354,6 +1370,154 @@ def compose_finance_statement(
     }
 
 
+def _finance_local_day_key(value: Optional[datetime]) -> str:
+    if value is None:
+        return ""
+    parsed = value
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(PACIFIC_TZ).date().isoformat()
+
+
+def _finance_day_label(day_key: str) -> str:
+    parsed = datetime.fromisoformat(day_key)
+    return f"{parsed.strftime('%b')} {parsed.day}"
+
+
+def _finance_daily_bucket(day_key: str) -> dict[str, object]:
+    return {
+        "date": day_key,
+        "label": _finance_day_label(day_key),
+        "discord_revenue": 0.0,
+        "shopify_revenue": 0.0,
+        "tiktok_revenue": 0.0,
+        "inventory_spend": 0.0,
+        "operating_expenses": 0.0,
+        "transaction_count": 0,
+        "platform_orders": 0,
+    }
+
+
+def build_finance_daily_rows(
+    *,
+    transactions,
+    shopify_rows,
+    tiktok_rows,
+    start: datetime,
+    end: datetime,
+) -> list[dict[str, object]]:
+    start_day = start.astimezone(PACIFIC_TZ).date()
+    end_day = end.astimezone(PACIFIC_TZ).date()
+    daily: dict[str, dict[str, object]] = {}
+    current_day = start_day
+    while current_day <= end_day:
+        day_key = current_day.isoformat()
+        daily[day_key] = _finance_daily_bucket(day_key)
+        current_day += timedelta(days=1)
+
+    for row in transactions:
+        day_key = _finance_local_day_key(row.occurred_at)
+        if day_key not in daily:
+            continue
+        bucket = daily[day_key]
+        money_in = normalize_money_value(row.money_in)
+        money_out = normalize_money_value(row.money_out)
+        entry_kind = (row.entry_kind or "unknown").strip().lower()
+        expense_category = (row.expense_category or "").strip().lower()
+        bucket["discord_revenue"] = float(bucket["discord_revenue"]) + money_in
+        bucket["transaction_count"] = int(bucket["transaction_count"]) + 1
+        if entry_kind in {"buy", "trade"} or (entry_kind == "expense" and expense_category == "inventory"):
+            bucket["inventory_spend"] = float(bucket["inventory_spend"]) + money_out
+        elif money_out:
+            bucket["operating_expenses"] = float(bucket["operating_expenses"]) + money_out
+
+    for row in shopify_rows:
+        if (row.financial_status or "").strip().lower() != "paid":
+            continue
+        day_key = _finance_local_day_key(row.created_at)
+        if day_key not in daily:
+            continue
+        bucket = daily[day_key]
+        bucket["shopify_revenue"] = float(bucket["shopify_revenue"]) + external_order_net_revenue(row)
+        bucket["platform_orders"] = int(bucket["platform_orders"]) + 1
+
+    for row in tiktok_rows:
+        if classify_tiktok_reporting_status(row) != "paid":
+            continue
+        day_key = _finance_local_day_key(row.created_at)
+        if day_key not in daily:
+            continue
+        bucket = daily[day_key]
+        bucket["tiktok_revenue"] = float(bucket["tiktok_revenue"]) + external_order_net_revenue(row)
+        bucket["platform_orders"] = int(bucket["platform_orders"]) + 1
+
+    cumulative_profit = 0.0
+    rows: list[dict[str, object]] = []
+    for day_key in sorted(daily):
+        bucket = daily[day_key]
+        revenue = round(
+            float(bucket["discord_revenue"])
+            + float(bucket["shopify_revenue"])
+            + float(bucket["tiktok_revenue"]),
+            2,
+        )
+        inventory_spend = round(float(bucket["inventory_spend"]), 2)
+        operating_expenses = round(float(bucket["operating_expenses"]), 2)
+        gross_profit = round(revenue - inventory_spend, 2)
+        operating_profit = round(gross_profit - operating_expenses, 2)
+        cumulative_profit = round(cumulative_profit + operating_profit, 2)
+        rows.append(
+            {
+                **bucket,
+                "discord_revenue": round(float(bucket["discord_revenue"]), 2),
+                "shopify_revenue": round(float(bucket["shopify_revenue"]), 2),
+                "tiktok_revenue": round(float(bucket["tiktok_revenue"]), 2),
+                "revenue": revenue,
+                "inventory_spend": inventory_spend,
+                "operating_expenses": operating_expenses,
+                "gross_profit": gross_profit,
+                "operating_profit": operating_profit,
+                "cumulative_profit": cumulative_profit,
+                "activity_count": int(bucket["transaction_count"]) + int(bucket["platform_orders"]),
+            }
+        )
+    return rows
+
+
+def build_finance_chart_data(
+    *,
+    daily_rows: list[dict[str, object]],
+    source_mix_rows: list[dict[str, object]],
+    spend_mix_rows: list[dict[str, object]],
+    monthly_rows: list[dict[str, object]],
+) -> dict[str, object]:
+    return {
+        "daily": {
+            "labels": [row["label"] for row in daily_rows],
+            "revenue": [row["revenue"] for row in daily_rows],
+            "inventorySpend": [row["inventory_spend"] for row in daily_rows],
+            "operatingExpenses": [row["operating_expenses"] for row in daily_rows],
+            "operatingProfit": [row["operating_profit"] for row in daily_rows],
+            "cumulativeProfit": [row["cumulative_profit"] for row in daily_rows],
+            "activityCount": [row["activity_count"] for row in daily_rows],
+        },
+        "sourceMix": {
+            "labels": [row["label"] for row in source_mix_rows],
+            "values": [row["value"] for row in source_mix_rows],
+        },
+        "spendMix": {
+            "labels": [row["label"] for row in spend_mix_rows],
+            "values": [row["value"] for row in spend_mix_rows],
+        },
+        "monthly": {
+            "labels": [row["label"] for row in monthly_rows],
+            "revenue": [row["revenue"] for row in monthly_rows],
+            "operatingProfit": [row["operating_profit"] for row in monthly_rows],
+            "operatingMargin": [row["operating_margin_pct"] for row in monthly_rows],
+        },
+    }
+
+
 def build_finance_range_snapshot(
     session: Session,
     *,
@@ -1373,12 +1537,20 @@ def build_finance_range_snapshot(
         tiktok_summary=tiktok_summary,
         day_count=day_count,
     )
+    daily_rows = build_finance_daily_rows(
+        transactions=transactions,
+        shopify_rows=shopify_rows,
+        tiktok_rows=tiktok_rows,
+        start=start,
+        end=end,
+    )
     return {
         "transactions": transactions,
         "discord_summary": discord_summary,
         "shopify_summary": shopify_summary,
         "tiktok_summary": tiktok_summary,
         "statement": statement,
+        "daily_rows": daily_rows,
     }
 
 
@@ -1387,14 +1559,14 @@ def build_finance_statement_rows(
     prior_statement: dict[str, object],
 ) -> list[dict[str, object]]:
     row_specs = [
-        ("Discord cash-in revenue", "discord_revenue", "money"),
-        ("Shopify net revenue", "shopify_net_revenue", "money"),
-        ("TikTok Shop net revenue", "tiktok_net_revenue", "money"),
+        ("Discord cash-in sales", "discord_revenue", "money"),
+        ("Shopify product revenue", "shopify_net_revenue", "money"),
+        ("TikTok Shop product revenue", "tiktok_net_revenue", "money"),
         ("Total revenue", "revenue", "money"),
-        ("Inventory cash deployed", "inventory_spend", "money"),
-        ("Gross profit", "gross_profit", "money"),
+        ("Inventory cash out", "inventory_spend", "money"),
+        ("Gross cash profit", "gross_profit", "money"),
         ("Operating expenses", "operating_expenses", "money"),
-        ("Operating profit", "operating_profit", "money"),
+        ("Operating cash profit", "operating_profit", "money"),
         ("Operating margin", "operating_margin_pct", "percent"),
     ]
 
@@ -1423,12 +1595,12 @@ def build_finance_kpi_rows(
     prior_statement: dict[str, object],
 ) -> list[dict[str, object]]:
     kpi_specs = [
-        ("Net Revenue", "revenue", "money", "up", "Discord cash in + platform net sales"),
-        ("Gross Profit", "gross_profit", "money", "up", "Revenue less inventory cash deployment"),
-        ("Operating Profit", "operating_profit", "money", "up", "Gross profit after operating spend"),
-        ("Operating Margin", "operating_margin_pct", "percent", "up", "Operating profit divided by revenue"),
-        ("Inventory Spend", "inventory_spend", "money", "down", "Buys, trade cash out, and inventory-tagged expenses"),
-        ("Tax Collected", "external_tax", "money", "neutral", "Shopify and TikTok tax tracked separately from net revenue"),
+        ("Product Revenue", "revenue", "money", "up", "Discord cash in + paid platform product sales"),
+        ("Gross Cash Profit", "gross_profit", "money", "up", "Revenue less inventory cash out"),
+        ("Operating Cash Profit", "operating_profit", "money", "up", "Gross cash profit after operating expenses"),
+        ("Operating Margin", "operating_margin_pct", "percent", "up", "Operating cash profit divided by product revenue"),
+        ("Inventory Cash Out", "inventory_spend", "money", "down", "Buys, trade cash out, and inventory expense rows"),
+        ("Tax Collected", "external_tax", "money", "neutral", "Known Shopify and TikTok tax tracked outside revenue"),
     ]
 
     rows: list[dict[str, object]] = []
@@ -1699,6 +1871,16 @@ def build_finance_monthly_rows(session: Session, *, months: int = 6) -> list[dic
         rows.append(
             {
                 "label": month_start_local.strftime("%b %Y"),
+                "revenue": round(float(statement["revenue"] or 0.0), 2),
+                "operating_profit": round(float(statement["operating_profit"] or 0.0), 2),
+                "operating_margin_pct": (
+                    float(statement["operating_margin_pct"])
+                    if statement.get("operating_margin_pct") is not None
+                    else None
+                ),
+                "discord_revenue": round(float(statement["discord_revenue"] or 0.0), 2),
+                "shopify_net_revenue": round(float(statement["shopify_net_revenue"] or 0.0), 2),
+                "tiktok_net_revenue": round(float(statement["tiktok_net_revenue"] or 0.0), 2),
                 "revenue_display": statement["revenue_display"],
                 "operating_profit_display": statement["operating_profit_display"],
                 "margin_display": statement["operating_margin_display"],

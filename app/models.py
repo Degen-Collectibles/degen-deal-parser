@@ -339,6 +339,106 @@ class BookkeepingEntry(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow, index=True)
 
 
+class BankStatementImport(SQLModel, table=True):
+    __tablename__ = "bank_statement_imports"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    label: str = Field(index=True)
+    account_label: str = Field(index=True)
+    account_type: str = Field(default="checking", index=True)
+    source_kind: str = Field(default="upload", index=True)
+    source_name: Optional[str] = Field(default=None, index=True)
+    file_hash: Optional[str] = Field(default=None, index=True)
+    provider: Optional[str] = Field(default=None, index=True)
+    provider_item_id: Optional[str] = Field(default=None, index=True)
+    provider_account_id: Optional[str] = Field(default=None, index=True)
+    sync_cursor: Optional[str] = None
+    last_sync_at: Optional[datetime] = Field(default=None, index=True)
+    last_sync_error: Optional[str] = None
+    row_count: int = Field(default=0)
+    range_start: Optional[datetime] = Field(default=None, index=True)
+    range_end: Optional[datetime] = Field(default=None, index=True)
+    total_credits: float = 0.0
+    total_debits: float = 0.0
+    net_amount: float = 0.0
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+
+
+class BankTransaction(SQLModel, table=True):
+    __tablename__ = "bank_transactions"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    import_id: int = Field(index=True, foreign_key="bank_statement_imports.id")
+    row_index: int = Field(index=True)
+    account_label: str = Field(index=True)
+    account_type: str = Field(default="checking", index=True)
+    posted_at: Optional[datetime] = Field(default=None, index=True)
+    transaction_at: Optional[datetime] = Field(default=None, index=True)
+    description: str = ""
+    description_stem: str = Field(default="", index=True)
+    details: Optional[str] = Field(default=None, index=True)
+    raw_type: Optional[str] = Field(default=None, index=True)
+    amount: float = Field(default=0.0, index=True)
+    balance: Optional[float] = None
+    check_or_slip: Optional[str] = None
+    classification: str = Field(default="needs_review", index=True)
+    confidence: str = Field(default="low", index=True)
+    expense_category: str = Field(default="uncategorized", index=True)
+    expense_subcategory: Optional[str] = Field(default=None, index=True)
+    category_confidence: str = Field(default="low", index=True)
+    category_reason: str = ""
+    match_reason: str = ""
+    matched_transaction_id: Optional[int] = Field(default=None, index=True, foreign_key="transaction.id")
+    matched_source_message_id: Optional[int] = Field(default=None, index=True)
+    matched_platform: Optional[str] = Field(default=None, index=True)
+    review_status: str = Field(default="open", index=True)
+    review_note: Optional[str] = None
+    provider_transaction_id: Optional[str] = Field(default=None, index=True)
+    pending: bool = Field(default=False, index=True)
+    pending_transaction_id: Optional[str] = Field(default=None, index=True)
+    is_removed: bool = Field(default=False, index=True)
+    raw_row_json: str = "{}"
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+    updated_at: datetime = Field(default_factory=utcnow, index=True)
+
+
+class BankFeedConnection(SQLModel, table=True):
+    __tablename__ = "bank_feed_connections"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    provider: str = Field(default="plaid", index=True)
+    provider_item_id: str = Field(index=True, unique=True)
+    access_token_enc: Optional[bytes] = Field(default=None, sa_column=Column(LargeBinary, nullable=True))
+    institution_id: Optional[str] = Field(default=None, index=True)
+    institution_name: Optional[str] = Field(default=None, index=True)
+    status: str = Field(default="active", index=True)
+    cursor: Optional[str] = None
+    last_sync_at: Optional[datetime] = Field(default=None, index=True)
+    last_sync_error: Optional[str] = None
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+    updated_at: datetime = Field(default_factory=utcnow, index=True)
+
+
+class BankFeedAccount(SQLModel, table=True):
+    __tablename__ = "bank_feed_accounts"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    connection_id: int = Field(index=True, foreign_key="bank_feed_connections.id")
+    bank_import_id: Optional[int] = Field(default=None, index=True, foreign_key="bank_statement_imports.id")
+    provider_account_id: str = Field(index=True, unique=True)
+    account_label: str = Field(index=True)
+    account_type: str = Field(default="checking", index=True)
+    account_subtype: Optional[str] = Field(default=None, index=True)
+    official_name: Optional[str] = None
+    mask: Optional[str] = Field(default=None, index=True)
+    current_balance: Optional[float] = None
+    available_balance: Optional[float] = None
+    iso_currency_code: Optional[str] = Field(default=None, index=True)
+    is_active: bool = Field(default=True, index=True)
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+    updated_at: datetime = Field(default_factory=utcnow, index=True)
+
+
 class ShopifyOrder(SQLModel, table=True):
     __tablename__ = "shopify_orders"
 

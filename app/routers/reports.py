@@ -6,7 +6,6 @@ Extracted from app/main.py -- all routes under /reports/, /messages/export.csv,
 """
 from __future__ import annotations
 
-from datetime import timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -14,9 +13,82 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlmodel import Session
 
 from ..shared import *  # noqa: F401,F403 -- shared helpers, constants, state
+from ..bank_reconciliation import (
+    BANK_ACCOUNT_FILTER_LABELS,
+    build_finance_bank_expense_data,
+    normalize_bank_account_filter,
+)
 from ..db import get_session
 
 router = APIRouter()
+
+
+def _decorate_bank_expense_data(data: dict[str, object]) -> dict[str, object]:
+    decorated = dict(data)
+    for key in (
+        "gross_outflow_total",
+        "bank_only_total",
+        "discord_logged_total",
+        "operating_total",
+        "non_operating_total",
+        "inventory_total",
+        "partner_paybacks_total",
+        "uncategorized_total",
+    ):
+        decorated[f"{key}_display"] = format_dashboard_money(float(data.get(key, 0.0) or 0.0))
+
+    category_rows = []
+    for row in data.get("category_rows", []) or []:
+        item = dict(row)
+        item["total_display"] = format_dashboard_money(float(item.get("total", 0.0) or 0.0))
+        item["bank_only_total_display"] = format_dashboard_money(float(item.get("bank_only_total", 0.0) or 0.0))
+        item["discord_logged_total_display"] = format_dashboard_money(float(item.get("discord_logged_total", 0.0) or 0.0))
+        item["operating_total_display"] = format_dashboard_money(float(item.get("operating_total", 0.0) or 0.0))
+        item["non_operating_total_display"] = format_dashboard_money(float(item.get("non_operating_total", 0.0) or 0.0))
+        item["share_display"] = format_percent_value(float(item.get("share_pct", 0.0) or 0.0))
+        category_rows.append(item)
+    decorated["category_rows"] = category_rows
+
+    account_rows = []
+    for row in data.get("account_rows", []) or []:
+        item = dict(row)
+        item["total_display"] = format_dashboard_money(float(item.get("total", 0.0) or 0.0))
+        item["bank_only_total_display"] = format_dashboard_money(float(item.get("bank_only_total", 0.0) or 0.0))
+        item["discord_logged_total_display"] = format_dashboard_money(float(item.get("discord_logged_total", 0.0) or 0.0))
+        item["operating_total_display"] = format_dashboard_money(float(item.get("operating_total", 0.0) or 0.0))
+        item["non_operating_total_display"] = format_dashboard_money(float(item.get("non_operating_total", 0.0) or 0.0))
+        item["share_display"] = format_percent_value(float(item.get("share_pct", 0.0) or 0.0))
+        account_rows.append(item)
+    decorated["account_rows"] = account_rows
+    return decorated
+
+
+def _build_bank_expense_chart_data(data: dict[str, object]) -> dict[str, object]:
+    category_rows = list(data.get("category_rows", []) or [])[:12]
+    account_rows = list(data.get("account_rows", []) or [])
+    daily_rows = list(data.get("daily_rows", []) or [])
+    return {
+        "categoryMix": {
+            "labels": [row["label"] for row in category_rows],
+            "values": [row["bank_only_total"] for row in category_rows],
+            "groups": [row.get("group", "operating") for row in category_rows],
+        },
+        "accountSplit": {
+            "labels": [row["label"] for row in account_rows],
+            "values": [row["bank_only_total"] for row in account_rows],
+        },
+        "daily": {
+            "labels": [row["label"] for row in daily_rows],
+            "operating": [row["operating"] for row in daily_rows],
+            "inventory": [row["inventory"] for row in daily_rows],
+            "partnerPaybacks": [row["partner_paybacks"] for row in daily_rows],
+            "nonOperating": [row["non_operating"] for row in daily_rows],
+            "uncategorized": [row["uncategorized"] for row in daily_rows],
+            "alreadyLogged": [row["already_logged"] for row in daily_rows],
+            "bankOnlyTotal": [row["bank_only_total"] for row in daily_rows],
+            "total": [row["total"] for row in daily_rows],
+        },
+    }
 
 
 @router.get("/reports/summary")
@@ -193,47 +265,7 @@ def reports_page(
         shopify_summary = build_shopify_reporting_summary(shopify_rows)
         tiktok_rows = get_tiktok_reporting_rows(session, start=start_dt, end=end_dt)
         tiktok_summary = build_tiktok_reporting_summary(tiktok_rows)
-        shopify_timeline_map: dict[str, dict[str, float | int]] = {}
-        for row in shopify_rows:
-            status = (row.financial_status or "").strip().lower()
-            if status != "paid":
-                continue
-            created_at = row.created_at
-            if created_at.tzinfo is None:
-                created_at = created_at.replace(tzinfo=timezone.utc)
-            day_key = created_at.astimezone(PACIFIC_TZ).date().isoformat()
-            bucket = shopify_timeline_map.setdefault(
-                day_key,
-                {
-                    "date": day_key,
-                    "orders": 0,
-                    "gross": 0.0,
-                    "tax": 0.0,
-                    "net": 0.0,
-                    "tax_unknown_orders": 0,
-                },
-            )
-            bucket["orders"] = int(bucket["orders"]) + 1
-            gross_value = float(row.total_price or 0.0)
-            bucket["gross"] = float(bucket["gross"]) + gross_value
-            if row.total_tax is None:
-                bucket["tax_unknown_orders"] = int(bucket["tax_unknown_orders"]) + 1
-                continue
-            tax_value = float(row.total_tax or 0.0)
-            net_value = float(row.subtotal_ex_tax) if row.subtotal_ex_tax is not None else gross_value - tax_value
-            bucket["tax"] = float(bucket["tax"]) + tax_value
-            bucket["net"] = float(bucket["net"]) + net_value
-        shopify_daily_totals = [
-            {
-                "date": day_key,
-                "orders": int(values["orders"]),
-                "gross": round(float(values["gross"]), 2),
-                "tax": round(float(values["tax"]), 2),
-                "net": round(float(values["net"]), 2),
-                "tax_unknown_orders": int(values["tax_unknown_orders"]),
-            }
-            for day_key, values in sorted(shopify_timeline_map.items())
-        ]
+        shopify_daily_totals = build_shopify_daily_totals(shopify_rows)
         tiktok_daily_totals = list(tiktok_summary.get("daily_totals", []))
         period_rows = build_report_period_comparison_rows(
             session,
@@ -330,12 +362,14 @@ def finance_page(
     start: Optional[str] = Query(default=None),
     end: Optional[str] = Query(default=None),
     window: Optional[str] = Query(default=FINANCE_WINDOW_MTD),
+    bank_account: Optional[str] = Query(default="all"),
     session: Session = Depends(get_session),
 ):
     if denial := require_role_response(request, "viewer"):
         return denial
 
     range_data = resolve_finance_range(start=start, end=end, window=window)
+    selected_bank_account = normalize_bank_account_filter(bank_account if isinstance(bank_account, str) else "all")
     finance_cache_key = f"finance:{start or ''}:{end or ''}:{window or ''}"
     cached_finance = cache_get(finance_cache_key)
     if cached_finance is None:
@@ -361,6 +395,22 @@ def finance_page(
     source_mix_rows = build_finance_source_mix_rows(current_statement)
     spend_mix_rows = build_finance_spend_mix_rows(current_statement)
     top_channels = build_finance_channel_rows(current_snapshot["transactions"])
+    monthly_rows = build_finance_monthly_rows(session)
+    bank_expense_data = _decorate_bank_expense_data(
+        build_finance_bank_expense_data(
+            session,
+            start=range_data["start_dt"],
+            end=range_data["end_dt"],
+            account_filter=selected_bank_account,
+        )
+    )
+    finance_chart_data = build_finance_chart_data(
+        daily_rows=current_snapshot["daily_rows"],
+        source_mix_rows=source_mix_rows,
+        spend_mix_rows=spend_mix_rows,
+        monthly_rows=monthly_rows,
+    )
+    finance_chart_data["bank"] = _build_bank_expense_chart_data(bank_expense_data)
     analyst_notes = build_finance_notes(
         current_statement=current_statement,
         prior_statement=prior_statement,
@@ -372,7 +422,7 @@ def finance_page(
     quick_windows = [
         {
             "label": FINANCE_WINDOW_LABELS[window_key],
-            "url": build_finance_url(window=window_key),
+            "url": build_finance_url(window=window_key, bank_account=selected_bank_account),
             "active": range_data["selected_window"] == window_key,
         }
         for window_key in (
@@ -381,6 +431,20 @@ def finance_page(
             FINANCE_WINDOW_90D,
             FINANCE_WINDOW_YTD,
         )
+    ]
+    bank_account_views = [
+        {
+            "key": account_key,
+            "label": account_label,
+            "url": build_finance_url(
+                start=str(range_data["selected_start"] or ""),
+                end=str(range_data["selected_end"] or ""),
+                window=str(range_data["selected_window"]),
+                bank_account=account_key,
+            ),
+            "active": selected_bank_account == account_key,
+        }
+        for account_key, account_label in BANK_ACCOUNT_FILTER_LABELS.items()
     ]
 
     return templates.TemplateResponse(
@@ -393,8 +457,10 @@ def finance_page(
             "selected_start": range_data["selected_start"],
             "selected_end": range_data["selected_end"],
             "selected_window": range_data["selected_window"],
+            "selected_bank_account": selected_bank_account,
             "range_data": range_data,
             "quick_windows": quick_windows,
+            "bank_account_views": bank_account_views,
             "current_statement": current_statement,
             "prior_statement": prior_statement,
             "kpi_rows": build_finance_kpi_rows(current_statement, prior_statement),
@@ -407,7 +473,9 @@ def finance_page(
                 current_statement=current_statement,
                 range_data=range_data,
             ),
-            "monthly_rows": build_finance_monthly_rows(session),
+            "monthly_rows": monthly_rows,
+            "bank_expense_data": bank_expense_data,
+            "finance_chart_data": finance_chart_data,
             "finance_url": build_finance_url,
         },
     )

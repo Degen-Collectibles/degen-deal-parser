@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <link rel="manifest" href="/static/manifest.webmanifest">
+    <meta name="theme-color" content="#08090a">
+    <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon-180.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/icon-192.png">
+    <link rel="icon" type="image/png" sizes="512x512" href="/static/icons/icon-512.png">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+    <title>{{ title }}</title>
+    <style>
+        :root {
+            --panel: var(--lx-s1);
+            --panel-strong: var(--lx-s2);
+            --line: var(--lx-br);
+            --text: var(--lx-text);
+            --muted: var(--lx-muted);
+            --good: #22c55e;
+            --warn: #f59e0b;
+            --bad: #ef4444;
+            --info: #60a5fa;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            font-family: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+            color: var(--text);
+            background: var(--lx-bg);
+        }
+        a { color: inherit; text-decoration: none; }
+        .page { max-width: 1520px; margin: 0 auto; padding: 28px 28px 64px; }
+        .hero, .panel, .metric {
+            border: 1px solid var(--line);
+            background: var(--panel);
+            border-radius: 16px;
+            box-shadow: 0 1px 3px rgba(0,0,0,.35);
+        }
+        .hero { padding: 24px; margin-bottom: 16px; }
+        .eyebrow, .pill, .tab {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            border-radius: 999px;
+            font-size: 11px;
+            font-weight: 800;
+            letter-spacing: .08em;
+            text-transform: uppercase;
+        }
+        .eyebrow { color: var(--lx-red); background: var(--panel-strong); border: 1px solid var(--line); padding: 7px 10px; }
+        h1 { margin: 12px 0 8px; font-size: clamp(32px, 4vw, 48px); line-height: 1; color: #fff; letter-spacing: 0; }
+        h2 { margin: 0; color: #fff; font-size: 20px; letter-spacing: 0; }
+        p { margin: 0; color: var(--muted); line-height: 1.55; max-width: 920px; }
+        .hero-actions, .filters, .button-row, .tabs {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        .hero-actions { margin-top: 16px; }
+        .layout { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 18px; align-items: start; }
+        .panel { padding: 18px; margin-bottom: 16px; }
+        .side { position: sticky; top: 16px; }
+        .section-head {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            align-items: flex-start;
+            margin-bottom: 14px;
+        }
+        .small { color: var(--muted); font-size: 13px; line-height: 1.45; }
+        .metric-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
+        .metric { padding: 14px; min-height: 94px; }
+        .metric-label { color: var(--muted); font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
+        .metric-value { margin-top: 8px; font-size: 26px; color: #fff; font-weight: 800; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+        label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
+        input, select, textarea {
+            min-height: 42px;
+            width: 100%;
+            border-radius: 12px;
+            border: 1px solid var(--line);
+            background: var(--panel-strong);
+            color: var(--text);
+            padding: 10px 12px;
+            font: inherit;
+        }
+        textarea { min-height: 72px; resize: vertical; }
+        .button, button {
+            appearance: none;
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            min-height: 40px;
+            padding: 10px 13px;
+            background: var(--panel-strong);
+            color: var(--text);
+            font: inherit;
+            font-weight: 800;
+            cursor: pointer;
+        }
+        .primary { background: var(--lx-red); border-color: var(--lx-red); color: #fff; }
+        .danger { border-color: rgba(239,68,68,.5); color: #fecaca; }
+        .tab { padding: 8px 11px; border: 1px solid var(--line); background: var(--panel-strong); color: var(--muted); }
+        .tab.active { background: var(--lx-red); border-color: var(--lx-red); color: #fff; }
+        .flash { padding: 12px 14px; border-radius: 14px; margin-bottom: 14px; font-weight: 700; }
+        .flash.success { color: #bbf7d0; background: rgba(34,197,94,.14); border: 1px solid rgba(34,197,94,.3); }
+        .flash.error { color: #fecaca; background: rgba(239,68,68,.14); border: 1px solid rgba(239,68,68,.3); }
+        .table-shell { overflow: auto; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); max-height: 72vh; }
+        table { width: 100%; min-width: 1420px; border-collapse: collapse; }
+        th, td { padding: 11px 12px; border-bottom: 1px solid var(--line); vertical-align: top; text-align: left; font-size: 13px; }
+        th { position: sticky; top: 0; z-index: 1; color: var(--muted); background: var(--panel-strong); text-transform: uppercase; letter-spacing: .08em; font-size: 11px; }
+        tr.needs-attention td:first-child { border-left: 4px solid var(--warn); }
+        .amount { font-weight: 800; font-variant-numeric: tabular-nums; color: #fff; white-space: nowrap; }
+        .amount.positive { color: #bbf7d0; }
+        .amount.negative { color: #fecaca; }
+        .pill { padding: 5px 8px; border: 1px solid var(--line); background: var(--panel-strong); color: var(--muted); white-space: nowrap; }
+        .pill.high, .pill.reviewed { color: #bbf7d0; background: rgba(34,197,94,.12); border-color: rgba(34,197,94,.25); }
+        .pill.medium, .pill.open { color: #fde68a; background: rgba(245,158,11,.12); border-color: rgba(245,158,11,.28); }
+        .pill.low, .pill.ignored { color: #cbd5e1; background: rgba(148,163,184,.12); }
+        .import-card { border: 1px solid var(--line); background: var(--panel); border-radius: 14px; padding: 12px; margin-top: 10px; }
+        .import-card.active { border-color: rgba(239,68,68,.6); }
+        .row-actions { display: grid; gap: 8px; min-width: 210px; }
+        .inline-form { display: grid; gap: 7px; }
+        .muted-desc { color: var(--muted); max-width: 420px; line-height: 1.45; }
+        .match-box { display: grid; gap: 6px; min-width: 170px; }
+        .empty { padding: 28px; text-align: center; color: var(--muted); }
+        .guide-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-top: 14px; }
+        .guide-step { display: grid; gap: 7px; padding-top: 12px; border-top: 1px solid var(--line); }
+        .guide-step strong { color: #fff; }
+        .guide-step p { font-size: 13px; }
+        .step-num {
+            display: inline-grid;
+            place-items: center;
+            width: 26px;
+            height: 26px;
+            border-radius: 999px;
+            background: var(--lx-red);
+            color: #fff;
+            font-size: 12px;
+            font-weight: 900;
+        }
+        .queue-note {
+            padding: 12px 14px;
+            margin-bottom: 12px;
+            border-radius: 14px;
+            color: #fde68a;
+            background: rgba(245,158,11,.12);
+            border: 1px solid rgba(245,158,11,.25);
+            line-height: 1.45;
+        }
+        .row-index { color: #fff; font-weight: 800; font-variant-numeric: tabular-nums; white-space: nowrap; }
+        .feed-card { border: 1px solid var(--line); border-radius: 14px; padding: 12px; margin-top: 10px; background: var(--panel); }
+        .feed-card strong { color: #fff; }
+        .feed-account { display: grid; gap: 4px; padding-top: 10px; margin-top: 10px; border-top: 1px solid var(--line); }
+        .feed-status { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+        .status-dot { width: 8px; height: 8px; border-radius: 999px; background: var(--warn); flex: 0 0 auto; }
+        .status-dot.ready { background: var(--good); }
+        .missing-list { display: grid; gap: 6px; margin-top: 10px; }
+        .missing-list code { padding: 5px 7px; border-radius: 8px; background: var(--panel-strong); color: #fff; overflow-wrap: anywhere; }
+        @media (max-width: 1180px) {
+            .layout { grid-template-columns: 1fr; }
+            .side { position: static; }
+            .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .guide-list { grid-template-columns: 1fr; }
+        }
+        @media (max-width: 700px) {
+            .page { padding: 16px 14px 36px; }
+            .metric-grid { grid-template-columns: 1fr; }
+            .filters { display: grid; grid-template-columns: 1fr; }
+        }
+    </style>
+    <link rel="stylesheet" href="/static/linear.css?v=1776749171">
+    <link rel="stylesheet" href="/static/safe-area.css?v=1776747800">
+</head>
+<body>
+    <div class="page">
+        {% include "_linear_sidebar.html" %}
+
+        <section class="hero">
+            <div class="eyebrow">Bank Reconciliation</div>
+            <h1>Bank Activity Review</h1>
+            <p>Upload Chase bank and card CSV exports, auto-categorize expenses, preserve payout/match evidence, and export a clean accountant-friendly ledger.</p>
+            <div class="hero-actions">
+                <a class="button" href="/finance">Finance</a>
+                <a class="button" href="/bookkeeping">Sheet reconciliation</a>
+                {% if selected_import %}
+                <a class="button primary" href="/bookkeeping/bank/{{ selected_import.id }}/export.csv?classification={{ selected_classification|urlencode }}&expense_category={{ selected_expense_category|urlencode }}&review_status={{ selected_review_status|urlencode }}&attention={{ 'true' if selected_attention else 'false' }}&expenses_only={{ 'true' if selected_expenses_only else 'false' }}&search={{ selected_search|urlencode }}">Export current view</a>
+                {% endif %}
+            </div>
+        </section>
+
+        {% if success %}<div class="flash success">{{ success }}</div>{% endif %}
+        {% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+
+        <div class="layout">
+            <main>
+                {% if selected_import and summary %}
+                <section class="metric-grid">
+                    <div class="metric"><div class="metric-label">Expense Total</div><div class="metric-value">{{ summary["expense_total"]|money }}</div></div>
+                    <div class="metric"><div class="metric-label">Categories</div><div class="metric-value">{{ summary["expense_categories"] }}</div></div>
+                    <div class="metric"><div class="metric-label">Uncategorized</div><div class="metric-value">{{ summary["uncategorized_expenses"] }}</div></div>
+                    <div class="metric"><div class="metric-label">Transfers/Loans</div><div class="metric-value">{{ summary["non_operating_debits"]|money }}</div></div>
+                    <div class="metric"><div class="metric-label">Payouts</div><div class="metric-value">{{ summary["payouts"] }}</div></div>
+                </section>
+
+                <section class="panel">
+                    <div class="section-head">
+                        <div>
+                            <h2>Auto-Categorized</h2>
+                            <div class="small">The app assigns accounting categories from matched app transactions, Chase merchant categories, and business-specific bank-description rules.</div>
+                        </div>
+                    </div>
+                    <div class="guide-list">
+                        <div class="guide-step">
+                            <span class="step-num">1</span>
+                            <strong>Inventory first</strong>
+                            <p>Zelle, Venmo, PayPal, eBay, card-show seller payments, wires, and cash withdrawals are treated as inventory-related unless a stronger rule wins.</p>
+                        </div>
+                        <div class="guide-step">
+                            <span class="step-num">2</span>
+                            <strong>Operating expenses split out</strong>
+                            <p>PSA, shipping, payroll, taxes, software, travel, lodging, fuel, meals, rent, and supplies get their own buckets for export.</p>
+                        </div>
+                        <div class="guide-step">
+                            <span class="step-num">3</span>
+                            <strong>Unclear stays explicit</strong>
+                            <p>Paper checks and bank lines without enough payee detail stay Uncategorized instead of being silently guessed.</p>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="panel">
+                    <div class="section-head">
+                        <div>
+                            <h2>{{ selected_import.account_label }}</h2>
+                            <div class="small">
+                                {{ selected_import.source_name or "Imported CSV" }} · {{ selected_import.account_type|replace("_", " ")|title }}
+                                {% if selected_import.range_start and selected_import.range_end %}
+                                · {{ selected_import.range_start.date() }} to {{ selected_import.range_end.date() }}
+                                {% endif %}
+                            </div>
+                        </div>
+                        <form method="post" action="/bookkeeping/bank/{{ selected_import.id }}/rerun-form">
+                            <button type="submit">Re-categorize</button>
+                        </form>
+                    </div>
+                    <form method="get" action="/bookkeeping/bank" class="filters">
+                        <input type="hidden" name="import_id" value="{{ selected_import.id }}">
+                        <label>Expense category
+                            <select name="expense_category">
+                                <option value="">All expense categories</option>
+                                {% for option in expense_category_options %}
+                                <option value="{{ option.value }}" {% if selected_expense_category == option.value %}selected{% endif %}>{{ option.label }} ({{ option.count }})</option>
+                                {% endfor %}
+                            </select>
+                        </label>
+                        <label>Bank match bucket
+                            <select name="classification">
+                                <option value="">All bank buckets</option>
+                                {% for option in classification_options %}
+                                <option value="{{ option.value }}" {% if selected_classification == option.value %}selected{% endif %}>{{ option.label }} ({{ option.count }})</option>
+                                {% endfor %}
+                            </select>
+                        </label>
+                        <label>Status
+                            <select name="review_status">
+                                <option value="">All statuses</option>
+                                <option value="open" {% if selected_review_status == "open" %}selected{% endif %}>Open</option>
+                                <option value="reviewed" {% if selected_review_status == "reviewed" %}selected{% endif %}>Reviewed</option>
+                                <option value="ignored" {% if selected_review_status == "ignored" %}selected{% endif %}>Ignored</option>
+                            </select>
+                        </label>
+                        <label>Search
+                            <input type="search" name="search" value="{{ selected_search }}" placeholder="Description or type">
+                        </label>
+                        <label>Limit
+                            <select name="limit">
+                                {% for item in [100,250,500,1000] %}
+                                <option value="{{ item }}" {% if limit == item %}selected{% endif %}>{{ item }}</option>
+                                {% endfor %}
+                            </select>
+                        </label>
+                        <label style="display:flex; flex-direction:row; align-items:center; min-height:42px; margin-top:20px;">
+                            <input type="checkbox" name="attention" value="true" {% if selected_attention %}checked{% endif %} style="width:auto; min-height:auto;">
+                            Needs context only
+                        </label>
+                        <label>View
+                            <select name="expenses_only">
+                                <option value="true" {% if selected_expenses_only %}selected{% endif %}>Expenses only</option>
+                                <option value="false" {% if not selected_expenses_only %}selected{% endif %}>All bank rows</option>
+                            </select>
+                        </label>
+                        <button type="submit" class="primary">Apply</button>
+                        <a class="button" href="/bookkeeping/bank?import_id={{ selected_import.id }}">Clear</a>
+                    </form>
+                    <div class="tabs" style="margin-top:12px;">
+                        <a class="tab{% if selected_expenses_only and not selected_expense_category and not selected_attention %} active{% endif %}" href="/bookkeeping/bank?import_id={{ selected_import.id }}">Categorized expenses</a>
+                        <a class="tab{% if selected_attention %} active{% endif %}" href="/bookkeeping/bank?import_id={{ selected_import.id }}&attention=true">Needs context</a>
+                        <a class="tab{% if not selected_expenses_only and not selected_attention %} active{% endif %}" href="/bookkeeping/bank?import_id={{ selected_import.id }}&expenses_only=false">All bank rows</a>
+                        <a class="tab{% if not selected_attention and selected_review_status == 'open' %} active{% endif %}" href="/bookkeeping/bank?import_id={{ selected_import.id }}&review_status=open">Open rows</a>
+                        <a class="tab{% if selected_classification == 'shopify_payout' %} active{% endif %}" href="/bookkeeping/bank?import_id={{ selected_import.id }}&classification=shopify_payout">Shopify payouts</a>
+                        <a class="tab{% if selected_classification == 'tiktok_payout' %} active{% endif %}" href="/bookkeeping/bank?import_id={{ selected_import.id }}&classification=tiktok_payout">TikTok payouts</a>
+                    </div>
+                </section>
+
+                <section class="panel">
+                    <div class="section-head">
+                        <div>
+                            <h2>Categorized Activity</h2>
+                            <div class="small">Showing {{ row_views|length }} of {{ filtered_count }} matching rows in statement order{% if hidden_count %}; {{ hidden_count }} hidden by limit{% endif %}.</div>
+                        </div>
+                    </div>
+                    {% if selected_attention %}
+                    <div class="queue-note"><strong>Needs context:</strong> These are the rows where the bank description is not enough for a confident accounting answer. Everything else is categorized for export.</div>
+                    {% endif %}
+                    <div class="table-shell">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Line</th>
+                                    <th>Status</th>
+                                    <th>Date</th>
+                                    <th>Amount</th>
+                                    <th>Expense Category</th>
+                                    <th>Bucket</th>
+                                    <th>Description</th>
+                                    <th>Match</th>
+                                    <th>Override</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for item in row_views %}
+                                {% set row = item.row %}
+                                <tr class="{% if item.needs_attention %}needs-attention{% endif %}">
+                                    <td><span class="row-index">#{{ row.row_index }}</span></td>
+                                    <td>
+                                        <span class="pill {{ row.review_status }}">{{ row.review_status }}</span><br>
+                                        <span class="pill {{ row.confidence }}" style="margin-top:6px;">{{ row.confidence }}</span>
+                                    </td>
+                                    <td>{{ row.posted_at.date() if row.posted_at else "" }}</td>
+                                    <td class="amount {{ 'positive' if row.amount > 0 else 'negative' }}">{{ row.amount|money }}</td>
+                                    <td>
+                                        <strong>{{ item.expense_category_label }}</strong>
+                                        <div class="small">{{ row.expense_subcategory or row.category_reason or "" }}</div>
+                                        <span class="pill {{ row.category_confidence }}" style="margin-top:6px;">{{ row.category_confidence }}</span>
+                                    </td>
+                                    <td>
+                                        <strong>{{ item.classification_label }}</strong>
+                                        <div class="small">{{ row.raw_type or row.details or "" }}</div>
+                                    </td>
+                                    <td>
+                                        <div class="muted-desc">{{ row.description_stem or row.description }}</div>
+                                        {% if row.review_note %}<div class="small" style="margin-top:6px;">Note: {{ row.review_note }}</div>{% endif %}
+                                    </td>
+                                    <td>
+                                        <div class="match-box">
+                                            {% if item.matched_transaction %}
+                                            <strong>{{ item.matched_transaction.entry_kind or "transaction" }}</strong>
+                                            <span class="small">{{ item.matched_transaction.channel_name or item.matched_transaction.channel_id or "" }}</span>
+                                            {% if item.action_links and item.action_links["open_row"] %}
+                                            <a class="button" href="{{ item.action_links['open_row'] }}">Open row</a>
+                                            {% endif %}
+                                            {% else %}
+                                            <span class="small">{{ row.match_reason }}</span>
+                                            {% endif %}
+                                            {% if row.matched_platform and not item.matched_transaction %}
+                                            <span class="pill high">{{ row.matched_platform }}</span>
+                                            {% endif %}
+                                        </div>
+                                    </td>
+                                    <td>
+                                        <div class="row-actions">
+                                            <form method="post" action="/bookkeeping/bank/rows/{{ row.id }}/status-form" class="inline-form">
+                                                <input type="hidden" name="import_id" value="{{ selected_import.id }}">
+                                                <input type="hidden" name="selected_classification" value="{{ selected_classification }}">
+                                                <input type="hidden" name="selected_expense_category" value="{{ selected_expense_category }}">
+                                                <input type="hidden" name="selected_review_status" value="{{ selected_review_status }}">
+                                                <input type="hidden" name="selected_attention" value="{{ 'true' if selected_attention else 'false' }}">
+                                                <input type="hidden" name="selected_expenses_only" value="{{ 'true' if selected_expenses_only else 'false' }}">
+                                                <input type="hidden" name="selected_search" value="{{ selected_search }}">
+                                                <input type="hidden" name="selected_limit" value="{{ limit }}">
+                                                <label>Expense category
+                                                    <select name="expense_category">
+                                                        {% for choice in expense_category_choices %}
+                                                        <option value="{{ choice.value }}" {% if row.expense_category == choice.value %}selected{% endif %}>{{ choice.label }}</option>
+                                                        {% endfor %}
+                                                    </select>
+                                                </label>
+                                                <label>Bank bucket
+                                                    <select name="classification">
+                                                        {% for choice in classification_choices %}
+                                                        <option value="{{ choice.value }}" {% if row.classification == choice.value %}selected{% endif %}>{{ choice.label }}</option>
+                                                        {% endfor %}
+                                                    </select>
+                                                </label>
+                                                <textarea name="note" placeholder="Optional note">{{ row.review_note or "" }}</textarea>
+                                                <div class="button-row">
+                                                    <button type="submit" name="review_status" value="reviewed" class="primary">Save</button>
+                                                    <button type="submit" name="review_status" value="ignored">Ignore</button>
+                                                    {% if row.review_status != "open" %}<button type="submit" name="review_status" value="open">Reopen</button>{% endif %}
+                                                </div>
+                                            </form>
+                                        </div>
+                                    </td>
+                                </tr>
+                                {% else %}
+                                <tr><td colspan="9"><div class="empty">No rows match the current filters.</div></td></tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+                {% else %}
+                <section class="panel">
+                    <h2>No Bank Imports Yet</h2>
+                    <p style="margin-top:8px;">Upload the Chase checking and credit-card CSV files to start the reconciliation queue.</p>
+                </section>
+                {% endif %}
+            </main>
+
+            <aside class="side">
+                <section class="panel">
+                    <div class="section-head">
+                        <div>
+                            <h2>Live Bank Feed</h2>
+                            <div class="small">Connect checking and credit cards through Plaid, then sync into the same categorized ledger as CSV imports.</div>
+                        </div>
+                    </div>
+                    <div class="feed-status">
+                        <span class="status-dot{% if plaid_status.ready %} ready{% endif %}"></span>
+                        <span>{{ "Ready" if plaid_status.ready else "Needs Plaid setup" }} - {{ plaid_status.env|title }}</span>
+                    </div>
+                    {% if not plaid_status.ready %}
+                    <div class="missing-list">
+                        {% for item in plaid_status.missing %}
+                        <code>{{ item }}</code>
+                        {% endfor %}
+                    </div>
+                    <div class="small" style="margin-top:10px;">Webhook target: {{ plaid_status.webhook_url or "Set PUBLIC_BASE_URL or PLAID_WEBHOOK_URL" }}</div>
+                    {% else %}
+                    <div class="button-row" style="margin-top:12px;">
+                        <button type="button" class="primary" id="plaid-connect-button">Connect bank</button>
+                        <form method="post" action="/bookkeeping/bank/plaid/sync-form">
+                            <button type="submit">Sync now</button>
+                        </form>
+                    </div>
+                    {% if not plaid_status.encryption_key_configured %}
+                    <div class="small" style="margin-top:10px;">Using fallback encryption. Set BANK_FEED_ENCRYPTION_KEY before production.</div>
+                    {% endif %}
+                    {% endif %}
+
+                    {% for item in bank_feed_connections %}
+                    {% set conn = item.connection %}
+                    <div class="feed-card">
+                        <strong>{{ conn.institution_name or "Plaid institution" }}</strong>
+                        <div class="small">{{ conn.status|title }}{% if conn.last_sync_at %} - synced {{ conn.last_sync_at.strftime("%Y-%m-%d %H:%M") }} UTC{% endif %}</div>
+                        {% if conn.last_sync_error %}<div class="small" style="color:#fecaca;">{{ conn.last_sync_error }}</div>{% endif %}
+                        <form method="post" action="/bookkeeping/bank/plaid/sync-form" style="margin-top:10px;">
+                            <input type="hidden" name="connection_id" value="{{ conn.id }}">
+                            <button type="submit">Sync this bank</button>
+                        </form>
+                        {% for account in item.accounts %}
+                        <div class="feed-account">
+                            <span>{{ account.account_label }}</span>
+                            <span class="small">{{ account.account_type|replace("_", " ")|title }}{% if account.mask %} ending {{ account.mask }}{% endif %}</span>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <div class="small" style="margin-top:12px;">No live bank connections yet.</div>
+                    {% endfor %}
+                </section>
+
+                <section class="panel">
+                    <div class="section-head">
+                        <div>
+                            <h2>Import CSV</h2>
+                            <div class="small">Use Chase activity exports for checking or credit cards. Re-uploading the same file re-runs matching instead of duplicating it.</div>
+                        </div>
+                    </div>
+                    <form method="post" action="/bookkeeping/bank/import-form" enctype="multipart/form-data" class="inline-form">
+                        <label>Account label
+                            <input type="text" name="account_label" placeholder="Chase Checking 3833" required>
+                        </label>
+                        <label>Account type
+                            <select name="account_type">
+                                <option value="checking">Checking</option>
+                                <option value="credit_card">Credit card</option>
+                                <option value="savings">Savings</option>
+                            </select>
+                        </label>
+                        <label>Chase CSV
+                            <input type="file" name="upload_file" accept=".csv" required>
+                        </label>
+                        <button type="submit" class="primary">Import and classify</button>
+                    </form>
+                </section>
+
+                <section class="panel">
+                    <div class="section-head">
+                        <div>
+                            <h2>Imports</h2>
+                            <div class="small">Open an import to continue reviewing it.</div>
+                        </div>
+                    </div>
+                    {% for item in imports %}
+                    <div class="import-card{% if selected_import and selected_import.id == item.id %} active{% endif %}">
+                        <strong>{{ item.account_label }}</strong>
+                        <div class="small">{{ item.source_name or "" }}</div>
+                        <div class="small">{{ item.row_count }} rows · {{ item.net_amount|money }} net</div>
+                        {% if item.range_start and item.range_end %}<div class="small">{{ item.range_start.date() }} to {{ item.range_end.date() }}</div>{% endif %}
+                        <div class="button-row" style="margin-top:10px;">
+                            <a class="button" href="/bookkeeping/bank?import_id={{ item.id }}">Open</a>
+                            {% if current_user and current_user.role == "admin" %}
+                            <form method="post" action="/bookkeeping/bank/{{ item.id }}/delete-form" onsubmit="return confirm('Delete this bank import?');">
+                                <button type="submit" class="danger">Delete</button>
+                            </form>
+                            {% endif %}
+                        </div>
+                    </div>
+                    {% else %}
+                    <div class="small">No bank imports yet.</div>
+                    {% endfor %}
+                </section>
+
+                {% if selected_import and expense_category_options %}
+                <section class="panel">
+                    <h2>Expense Categories</h2>
+                    <div style="display:grid; gap:8px; margin-top:12px;">
+                        {% for option in expense_category_options %}
+                        <a class="tab{% if selected_expense_category == option.value %} active{% endif %}" href="/bookkeeping/bank?import_id={{ selected_import.id }}&expense_category={{ option.value }}&limit={{ limit }}">{{ option.label }} - {{ option.total|money }} ({{ option.count }})</a>
+                        {% endfor %}
+                    </div>
+                </section>
+                {% endif %}
+            </aside>
+        </div>
+    </div>
+    {% include '_mobile_bottom_nav.html' %}
+{% include "_csrf_bootstrap.html" %}
+{% if plaid_status.ready %}
+<script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
+<script>
+(function () {
+    var button = document.getElementById("plaid-connect-button");
+    if (!button) return;
+    function showError(message) {
+        button.textContent = message || "Plaid error";
+        button.disabled = false;
+        setTimeout(function () { button.textContent = "Connect bank"; }, 3500);
+    }
+    button.addEventListener("click", function () {
+        button.disabled = true;
+        button.textContent = "Opening...";
+        fetch("/bookkeeping/bank/plaid/link-token", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: {"Content-Type": "application/json"}
+        }).then(function (response) {
+            return response.json().then(function (body) {
+                if (!response.ok || body.error) throw new Error(body.error || "Could not create Plaid Link token");
+                return body.link_token;
+            });
+        }).then(function (linkToken) {
+            var handler = Plaid.create({
+                token: linkToken,
+                onSuccess: function (publicToken, metadata) {
+                    button.textContent = "Syncing...";
+                    fetch("/bookkeeping/bank/plaid/exchange", {
+                        method: "POST",
+                        credentials: "same-origin",
+                        headers: {"Content-Type": "application/json"},
+                        body: JSON.stringify({public_token: publicToken, metadata: metadata || {}})
+                    }).then(function (response) {
+                        return response.json().then(function (body) {
+                            if (!response.ok || body.error) throw new Error(body.error || "Could not exchange Plaid token");
+                            return body;
+                        });
+                    }).then(function () {
+                        window.location.assign("/bookkeeping/bank?success=" + encodeURIComponent("Connected bank feed and started the first sync"));
+                    }).catch(function (error) {
+                        showError(error.message);
+                    });
+                },
+                onExit: function (error) {
+                    if (error) showError(error.display_message || error.error_message || "Plaid exited");
+                    else {
+                        button.disabled = false;
+                        button.textContent = "Connect bank";
+                    }
+                }
+            });
+            handler.open();
+        }).catch(function (error) {
+            showError(error.message);
+        });
+    });
+})();
+</script>
+{% endif %}
+</body>
+</html>
