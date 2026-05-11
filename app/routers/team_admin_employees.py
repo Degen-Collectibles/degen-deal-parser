@@ -46,7 +46,7 @@ from ..models import (
     User,
     utcnow,
 )
-from ..pii import decrypt_pii, encrypt_pii
+from ..pii import decrypt_pii, email_lookup_hash, encrypt_pii
 from ..rate_limit import rate_limited_or_429
 from ..shared import templates
 from ..sms import mask_sms_phone, normalize_sms_phone, send_sms, sms_phone_fingerprint
@@ -84,10 +84,29 @@ COMPENSATION_HISTORY_FIELDS = {
     "monthly_salary_pay_day",
     "payment_method",
 }
+COMPENSATION_VIEW_PERMISSION = "admin.labor_financials.view"
+COMPENSATION_EDIT_PERMISSION = "admin.labor_financials.edit"
+ROLE_MANAGEMENT_PERMISSION = "admin.permissions.edit"
 
 
 class CompensationDecryptError(ValueError):
     """Raised when encrypted compensation cannot be decrypted or parsed."""
+
+
+def _can_view_compensation(session: Session, user: User) -> bool:
+    return has_permission(session, user, COMPENSATION_VIEW_PERMISSION)
+
+
+def _can_edit_compensation(session: Session, user: User) -> bool:
+    return _can_view_compensation(session, user) and has_permission(
+        session,
+        user,
+        COMPENSATION_EDIT_PERMISSION,
+    )
+
+
+def _can_manage_employee_roles(session: Session, user: User) -> bool:
+    return has_permission(session, user, ROLE_MANAGEMENT_PERMISSION)
 
 
 def _normalize_compensation_type(value: str) -> str:
@@ -593,10 +612,12 @@ def _detail_context(
     can_edit_schedule_roster = has_permission(
         session, current, "admin.employee_roster.edit"
     )
-    can_view_labor_financials = has_permission(
-        session,
-        current,
-        "admin.labor_financials.view",
+    can_view_labor_financials = _can_view_compensation(session, current)
+    can_edit_compensation = _can_edit_compensation(session, current)
+    can_manage_roles = (
+        can_edit_profile
+        and current.id != employee.id
+        and _can_manage_employee_roles(session, current)
     )
     hourly_rate_cents = (
         _decrypt_hourly_rate_cents(profile) if can_view_labor_financials else None
@@ -646,8 +667,9 @@ def _detail_context(
         ),
         "can_edit_profile": can_edit_profile,
         "can_edit_schedule_roster": can_edit_schedule_roster,
+        "can_manage_roles": can_manage_roles,
         "can_view_labor_financials": can_view_labor_financials,
-        "can_manage_compensation": can_edit_profile and can_view_labor_financials,
+        "can_manage_compensation": can_edit_profile and can_edit_compensation,
         "can_issue_invite": can_issue_invite,
         "can_text_invite": can_issue_invite and can_reveal_pii,
     }
@@ -727,11 +749,7 @@ def admin_employees_list(
     can_edit_schedule_roster = has_permission(
         session, user, "admin.employee_roster.edit"
     )
-    can_view_labor_financials = has_permission(
-        session,
-        user,
-        "admin.labor_financials.view",
-    )
+    can_view_labor_financials = _can_view_compensation(session, user)
     return templates.TemplateResponse(
         request,
         "team/admin/employees_list.html",
@@ -816,10 +834,10 @@ def admin_employee_new_page(
     error: Optional[str] = Query(default=None),
     session: Session = Depends(get_session),
 ):
-    denial, current = _permission_gate(
+    denial, current = _admin_gate(
         request,
         session,
-        "admin.labor_financials.view",
+        "admin.employees.edit",
     )
     if denial:
         return denial
@@ -1364,10 +1382,11 @@ def admin_employee_pay_rates_page(
     show_inactive: Optional[str] = Query(default=None),
     session: Session = Depends(get_session),
 ):
-    denial, current = _permission_gate(request, session, "admin.employees.edit")
+    denial, current = _permission_gate(request, session, COMPENSATION_VIEW_PERMISSION)
     if denial:
         return denial
     include_inactive = show_inactive in ("1", "true", "yes", "on")
+    can_edit_compensation = _can_edit_compensation(session, current)
     rows = _pay_rate_rows(session, include_inactive=include_inactive)
     return templates.TemplateResponse(
         request,
@@ -1383,6 +1402,7 @@ def admin_employee_pay_rates_page(
             "payment_method_labels": PAYMENT_METHOD_LABELS,
             "today_iso": clockify_today().isoformat(),
             "show_inactive": include_inactive,
+            "can_edit_compensation": can_edit_compensation,
             "flash": flash,
             "error": error,
             "csrf_token": issue_token(request),
@@ -1399,10 +1419,10 @@ async def admin_employee_pay_rates_post(
     show_inactive: str = Form(default=""),
     session: Session = Depends(get_session),
 ):
-    denial, current = _permission_gate(request, session, "admin.employee_roster.edit")
+    denial, current = _permission_gate(request, session, COMPENSATION_EDIT_PERMISSION)
     if denial:
         return denial
-    if not has_permission(session, current, "admin.labor_financials.view"):
+    if not _can_view_compensation(session, current):
         return HTMLResponse(
             "You do not have permission to view compensation.",
             status_code=403,
@@ -1557,7 +1577,7 @@ async def admin_employee_pay_rates_post(
             AuditLog(
                 actor_user_id=current.id,
                 action="admin.pay_rates.bulk_update",
-                resource_key="admin.employee_roster.edit",
+                resource_key=COMPENSATION_EDIT_PERMISSION,
                 details_json=json.dumps(
                     {
                         "updated_count": len(changed_user_ids),
@@ -1792,6 +1812,7 @@ async def admin_employee_profile_update(
         current,
         "admin.employee_roster.edit",
     )
+    can_manage_roles = _can_manage_employee_roles(session, current)
     if not can_edit_profile:
         return _admin_denied_response(request, session, current)
     employee = session.get(User, user_id)
@@ -1805,10 +1826,9 @@ async def admin_employee_profile_update(
 
     changed: list[str] = []
     now = utcnow()
-    can_manage_compensation = can_edit_profile and has_permission(
+    can_manage_compensation = can_edit_profile and _can_edit_compensation(
         session,
         current,
-        "admin.labor_financials.view",
     )
     before_compensation_signature = (
         _compensation_signature_from_profile(profile)
@@ -1823,6 +1843,18 @@ async def admin_employee_profile_update(
     if can_edit_profile:
         new_role = (role or "").strip().lower()
         if new_role in ROLES and new_role != employee.role:
+            if current.id == user_id:
+                return HTMLResponse(
+                    "You cannot change your own role.",
+                    status_code=400,
+                )
+            if not can_manage_roles:
+                return _admin_denied_response(
+                    request,
+                    session,
+                    current,
+                    message="You do not have permission to change employee roles.",
+                )
             employee.role = new_role
             employee.updated_at = now
             session.add(employee)
@@ -2333,7 +2365,6 @@ def _employee_purge_snapshot(
     profile_snapshot: Optional[dict] = None
     if profile is not None:
         profile_snapshot = {
-            "email_lookup_hash": profile.email_lookup_hash,
             "hire_date": _iso_date(profile.hire_date),
             "termination_date": _iso_date(profile.termination_date),
             "compensation_type": profile.compensation_type,
@@ -2352,15 +2383,11 @@ def _employee_purge_snapshot(
         "version": 1,
         "user": {
             "username": employee.username,
-            "password_hash": employee.password_hash,
-            "password_salt": employee.password_salt,
             "display_name": employee.display_name,
             "role": employee.role,
             "is_active": employee.is_active,
             "is_schedulable": employee.is_schedulable,
             "staff_kind": employee.staff_kind,
-            "password_changed_at": _iso_datetime(employee.password_changed_at),
-            "session_invalidated_at": _iso_datetime(employee.session_invalidated_at),
             "created_at": _iso_datetime(employee.created_at),
             "updated_at": _iso_datetime(employee.updated_at),
         },
@@ -2429,16 +2456,11 @@ def restore_employee_purge_tombstone(
 
     user_snapshot = payload.get("user") or {}
     employee.username = str(user_snapshot.get("username") or employee.username)
-    employee.password_hash = str(user_snapshot.get("password_hash") or "")
-    employee.password_salt = str(user_snapshot.get("password_salt") or "")
     employee.display_name = str(user_snapshot.get("display_name") or "")
     employee.role = str(user_snapshot.get("role") or "employee")
     employee.is_active = bool(user_snapshot.get("is_active", False))
     employee.is_schedulable = bool(user_snapshot.get("is_schedulable", False))
     employee.staff_kind = str(user_snapshot.get("staff_kind") or "storefront")
-    employee.password_changed_at = _parse_iso_datetime(
-        user_snapshot.get("password_changed_at")
-    )
     employee.session_invalidated_at = now
     employee.created_at = (
         _parse_iso_datetime(user_snapshot.get("created_at")) or employee.created_at
@@ -2451,7 +2473,6 @@ def restore_employee_purge_tombstone(
         profile = session.get(EmployeeProfile, user_id) or EmployeeProfile(
             user_id=user_id
         )
-        profile.email_lookup_hash = profile_snapshot.get("email_lookup_hash")
         profile.hire_date = _parse_iso_date(profile_snapshot.get("hire_date"))
         profile.termination_date = _parse_iso_date(
             profile_snapshot.get("termination_date")
@@ -2472,9 +2493,19 @@ def restore_employee_purge_tombstone(
             _parse_iso_datetime(profile_snapshot.get("created_at"))
             or profile.created_at
         )
-        profile.updated_at = now
         for field_name in _PURGE_PROFILE_BLOB_FIELDS:
             setattr(profile, field_name, _decode_blob(profile_snapshot.get(field_name)))
+        profile.email_lookup_hash = None
+        if profile.email_ciphertext:
+            try:
+                restored_email = (decrypt_pii(profile.email_ciphertext) or "").strip()
+            except ValueError:
+                restored_email = ""
+            if restored_email:
+                profile.email_lookup_hash = email_lookup_hash(restored_email)
+        if profile.email_lookup_hash is None:
+            profile.email_lookup_hash = profile_snapshot.get("email_lookup_hash")
+        profile.updated_at = now
         session.add(profile)
 
     tombstone.restored_at = now

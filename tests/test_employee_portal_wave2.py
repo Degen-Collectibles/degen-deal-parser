@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import importlib
+import asyncio
 import json
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from cryptography.fernet import Fernet
@@ -251,6 +253,55 @@ class RouteGatingTests(unittest.TestCase):
             follow_redirects=False,
         )
         self.assertEqual(r.status_code, 403)
+
+    def test_permissions_set_rejects_unknown_role_with_400(self):
+        from app import config as cfg
+        from app.models import User
+        from app.routers.team_admin import team_admin_permissions_set
+
+        prev = os.environ.get("EMPLOYEE_PORTAL_ENABLED")
+        os.environ["EMPLOYEE_PORTAL_ENABLED"] = "true"
+        cfg.get_settings.cache_clear()
+        try:
+            with Session(self.engine) as session:
+                admin = User(
+                    id=99,
+                    username="admin-role-check",
+                    password_hash="x",
+                    password_salt="x",
+                    display_name="Admin",
+                    role="admin",
+                    is_active=True,
+                )
+                session.add(admin)
+                session.commit()
+                request = SimpleNamespace(
+                    state=SimpleNamespace(current_user=admin),
+                    scope={"session": {}},
+                    session={},
+                    headers={},
+                    client=SimpleNamespace(host="testclient"),
+                    url=SimpleNamespace(path="/team/admin/permissions/set", query=""),
+                )
+
+                response = asyncio.run(
+                    team_admin_permissions_set(
+                        request,
+                        role="bogus",
+                        resource_key="page.dashboard",
+                        is_allowed="1",
+                        session=session,
+                    )
+                )
+        finally:
+            if prev is None:
+                os.environ.pop("EMPLOYEE_PORTAL_ENABLED", None)
+            else:
+                os.environ["EMPLOYEE_PORTAL_ENABLED"] = prev
+            cfg.get_settings.cache_clear()
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Unknown role", response.body.decode("utf-8"))
 
 
 if __name__ == "__main__":

@@ -603,6 +603,8 @@ async def team_admin_permissions_set(
     denial, user = _admin_gate(request, session, "admin.permissions.edit")
     if denial:
         return denial
+    if role not in perms.ROLES:
+        return HTMLResponse("Unknown role", status_code=400)
     if resource_key not in perms.RESOURCE_KEYS:
         return HTMLResponse("Unknown resource_key", status_code=400)
     perms.set_permission(

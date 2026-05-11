@@ -1522,12 +1522,19 @@ def _clockify_seconds_by_day(
     cursor = clipped_start.date()
     while cursor < end_local.date():
         day_start = datetime.combine(cursor, datetime.min.time(), tzinfo=tzinfo)
-        day_end = day_start + timedelta(days=1)
+        day_end = datetime.combine(
+            cursor + timedelta(days=1),
+            datetime.min.time(),
+            tzinfo=tzinfo,
+        )
         overlap_start = max(clipped_start, day_start)
         overlap_end = min(clipped_end, day_end)
         if overlap_end > overlap_start:
             out[cursor] = out.get(cursor, 0) + int(
-                (overlap_end - overlap_start).total_seconds()
+                (
+                    overlap_end.astimezone(timezone.utc)
+                    - overlap_start.astimezone(timezone.utc)
+                ).total_seconds()
             )
         if day_end >= clipped_end:
             break
@@ -3520,7 +3527,7 @@ def admin_exceptions_page(
                 session, user, "admin.payroll.view"
             ),
             "can_edit_compensation": has_permission(
-                session, user, "admin.employees.edit"
+                session, user, "admin.labor_financials.edit"
             ) and has_permission(session, user, "admin.labor_financials.view"),
         },
     )

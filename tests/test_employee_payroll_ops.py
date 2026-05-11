@@ -294,6 +294,30 @@ class PayrollOpsTests(unittest.TestCase):
         self.assertNotIn(inactive.id, active_scope)
         self.assertIn(inactive.id, inactive_scope)
 
+    def test_clockify_seconds_by_day_counts_dst_spring_forward_real_seconds(self):
+        from app.models import ClockifyTimeEntry
+        from app.routers.team_admin_clockify import _clockify_seconds_by_day
+
+        start_local = datetime(2026, 3, 8, 0, 0, tzinfo=LA)
+        end_local = datetime(2026, 3, 8, 4, 0, tzinfo=LA)
+        entry = ClockifyTimeEntry(
+            clockify_entry_id="dst-spring-forward",
+            clockify_user_id="ck-dst",
+            workspace_id="workspace",
+            start_at=start_local.astimezone(timezone.utc),
+            end_at=end_local.astimezone(timezone.utc),
+            duration_seconds=3 * 3600,
+        )
+
+        seconds_by_day = _clockify_seconds_by_day(
+            entry,
+            start_local=start_local,
+            end_local=datetime(2026, 3, 9, 0, 0, tzinfo=LA),
+            now_utc=datetime(2026, 3, 8, 12, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(seconds_by_day[date(2026, 3, 8)], 3 * 3600)
+
     def test_compensation_decrypt_failure_raises(self):
         from app.routers.team_admin_employees import (
             CompensationDecryptError,

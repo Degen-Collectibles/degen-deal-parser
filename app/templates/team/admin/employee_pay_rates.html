@@ -1,5 +1,6 @@
 {% extends "team/admin/base.html" %}
 {% set active = 'pay-rates' %}
+{% set can_edit_compensation = can_edit_compensation|default(false) %}
 {% block content %}
 {% if flash %}<div class="ta-flash success">{{ flash }}</div>{% endif %}
 {% if error %}<div class="ta-flash warn">{{ error }}</div>{% endif %}
@@ -32,7 +33,7 @@
     <input type="hidden" name="show_inactive" value="{{ '1' if show_inactive else '' }}"/>
     <div class="ta-card">
         <label style="font-size:12px; color:var(--lx-muted); display:block; margin-bottom:6px;">Effective date for saved compensation changes</label>
-        <input type="date" name="effective_date" value="{{ today_iso }}" style="padding:7px 10px; border-radius:8px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/>
+        <input type="date" name="effective_date" value="{{ today_iso }}" {% if not can_edit_compensation %}disabled{% endif %} style="padding:7px 10px; border-radius:8px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/>
         <div style="font-size:12px; color:var(--lx-muted); margin-top:8px;">
             Raises and pay type changes apply from this date forward. Older payroll windows use the prior saved rate when history exists.
         </div>
@@ -80,6 +81,7 @@
                         <td style="padding:12px 14px; border-bottom:1px solid var(--lx-br);">
                             <select name="comp_{{ employee.id }}"
                                     data-comp-select
+                                    {% if not can_edit_compensation %}disabled aria-disabled="true"{% endif %}
                                     style="width:150px; padding:6px 8px; border-radius:8px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);">
                                 {% for comp in compensation_types %}
                                     <option value="{{ comp }}" {% if row.compensation_type == comp %}selected{% endif %}>{{ compensation_type_labels[comp] }}</option>
@@ -95,7 +97,7 @@
                                        data-hourly-input
                                        inputmode="decimal"
                                        placeholder="25.00"
-                                       {% if not row.can_edit_hourly %}disabled aria-disabled="true"{% endif %}
+                                       {% if not can_edit_compensation or not row.can_edit_hourly %}disabled aria-disabled="true"{% endif %}
                                        style="width:110px; padding:6px 8px; border-radius:8px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/>
                             </div>
                             <div data-hourly-help style="font-size:11px; color:var(--lx-muted); margin-top:4px; {% if row.can_edit_hourly %}display:none;{% endif %}">Only for hourly</div>
@@ -109,7 +111,7 @@
                                        data-salary-input
                                        inputmode="decimal"
                                        placeholder="4500.00"
-                                       {% if not row.can_edit_salary %}disabled aria-disabled="true"{% endif %}
+                                       {% if not can_edit_compensation or not row.can_edit_salary %}disabled aria-disabled="true"{% endif %}
                                        style="width:120px; padding:6px 8px; border-radius:8px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/>
                             </div>
                             <div data-salary-help style="font-size:11px; color:var(--lx-muted); margin-top:4px; {% if row.can_edit_salary %}display:none;{% endif %}">Only for salary</div>
@@ -123,14 +125,14 @@
                                    max="31"
                                    inputmode="numeric"
                                    placeholder="15"
-                                   {% if not row.can_edit_salary %}disabled aria-disabled="true"{% endif %}
+                                   {% if not can_edit_compensation or not row.can_edit_salary %}disabled aria-disabled="true"{% endif %}
                                    style="width:76px; padding:6px 8px; border-radius:8px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/>
                             <div style="font-size:11px; color:var(--lx-muted); margin-top:4px;">{{ row.monthly_pay_date_label }}</div>
                         </td>
                         <td style="padding:12px 14px; border-bottom:1px solid var(--lx-br);">
                             <select name="payment_{{ employee.id }}"
                                     data-payment-input
-                                    {% if not row.is_paid %}disabled aria-disabled="true"{% endif %}
+                                    {% if not can_edit_compensation or not row.is_paid %}disabled aria-disabled="true"{% endif %}
                                     style="width:130px; padding:6px 8px; border-radius:8px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);">
                                 {% for method in payment_methods %}
                                     <option value="{{ method }}" {% if row.payment_method == method %}selected{% endif %}>{{ payment_method_labels[method] }}</option>
@@ -146,13 +148,18 @@
             </table>
         </div>
     </div>
+    {% if can_edit_compensation %}
     <button class="ta-btn" type="submit" style="background:#3b82f6; color:white; border-color:#3b82f6; font-weight:600;">
         Save compensation
     </button>
+    {% else %}
+    <div class="ta-card" style="font-size:13px; color:var(--lx-muted);">View-only — you do not have permission to edit compensation.</div>
+    {% endif %}
 </form>
 
 <script>
 (function () {
+    const canEditCompensation = {{ can_edit_compensation|tojson }};
     function setDisabled(input, disabled) {
         if (!input) return;
         input.disabled = disabled;
@@ -167,10 +174,10 @@
         const isSalary = type === "monthly_salary";
         const isPaid = type !== "unpaid";
 
-        setDisabled(row.querySelector("[data-hourly-input]"), !isHourly);
-        setDisabled(row.querySelector("[data-salary-input]"), !isSalary);
-        setDisabled(row.querySelector("[data-payday-input]"), !isSalary);
-        setDisabled(row.querySelector("[data-payment-input]"), !isPaid);
+        setDisabled(row.querySelector("[data-hourly-input]"), !canEditCompensation || !isHourly);
+        setDisabled(row.querySelector("[data-salary-input]"), !canEditCompensation || !isSalary);
+        setDisabled(row.querySelector("[data-payday-input]"), !canEditCompensation || !isSalary);
+        setDisabled(row.querySelector("[data-payment-input]"), !canEditCompensation || !isPaid);
 
         const hourlyHelp = row.querySelector("[data-hourly-help]");
         const salaryHelp = row.querySelector("[data-salary-help]");

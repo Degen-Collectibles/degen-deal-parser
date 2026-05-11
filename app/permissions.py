@@ -77,6 +77,7 @@ RESOURCE_KEYS: List[str] = [
     "admin.schedule.edit",
     # Payroll exports expose compensation totals.
     "admin.labor_financials.view",
+    "admin.labor_financials.edit",
     "admin.payroll.view",
     "admin.payroll.lock",
     # Explicit escape hatch for legacy ops pages that still use role gates.
@@ -140,6 +141,7 @@ _LABEL_OVERRIDES: Dict[str, str] = {
     "admin.schedule.view": "Admin · View schedule grid",
     "admin.schedule.edit": "Admin · Edit schedule grid",
     "admin.labor_financials.view": "Admin · View compensation and labor costs",
+    "admin.labor_financials.edit": "Admin · Edit compensation",
     "admin.payroll.view": "Admin · View payroll export",
     "admin.payroll.lock": "Admin · Lock payroll export window",
     "legacy.ops.view": "Legacy ops pages",

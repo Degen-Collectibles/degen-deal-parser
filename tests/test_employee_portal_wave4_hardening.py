@@ -142,6 +142,22 @@ class _Harness:
         self.session.commit()
         return u
 
+    def _set_role_permission(self, role: str, resource_key: str, allowed: bool = True):
+        from app.models import RolePermission, utcnow
+
+        row = self.session.exec(
+            select(RolePermission).where(
+                RolePermission.role == role,
+                RolePermission.resource_key == resource_key,
+            )
+        ).first()
+        if row is None:
+            row = RolePermission(role=role, resource_key=resource_key)
+        row.is_allowed = allowed
+        row.updated_at = utcnow()
+        self.session.add(row)
+        self.session.commit()
+
 
 # ---------------------------------------------------------------------------
 # CSRF-missing rejections on destructive admin routes
@@ -257,6 +273,144 @@ class ProfileUpdateGateTests(unittest.TestCase, _Harness):
         self.session.expire_all()
         self.assertEqual(self.session.get(User, emp.id).display_name, "Saved Name")
 
+    def test_role_change_requires_role_management_permission(self):
+        from app.models import User
+
+        self._login(role="manager", user_id=22, username="mgr_role")
+        self._set_role_permission("manager", "admin.employees.edit", True)
+        emp = self._seed_employee(user_id=1203, username="emp1203")
+        csrf = self._csrf()
+
+        r = self.client.post(
+            f"/team/admin/employees/{emp.id}/profile-update",
+            data={"csrf_token": csrf, "role": "manager"},
+            follow_redirects=False,
+        )
+
+        self.assertEqual(r.status_code, 403)
+        self.session.expire_all()
+        self.assertEqual(self.session.get(User, emp.id).role, "employee")
+
+    def test_self_role_change_rejected_even_with_role_management_permission(self):
+        from app.models import User
+
+        manager = self._login(role="manager", user_id=23, username="mgr_self_role")
+        self._set_role_permission("manager", "admin.employees.edit", True)
+        self._set_role_permission("manager", "admin.permissions.edit", True)
+        csrf = self._csrf()
+
+        r = self.client.post(
+            f"/team/admin/employees/{manager.id}/profile-update",
+            data={"csrf_token": csrf, "role": "admin"},
+            follow_redirects=False,
+        )
+
+        self.assertEqual(r.status_code, 400)
+        self.session.expire_all()
+        self.assertEqual(self.session.get(User, manager.id).role, "manager")
+
+    def test_admin_with_role_management_can_change_target_role(self):
+        from app.models import User
+
+        self._login(role="admin", user_id=24, username="adm_role")
+        emp = self._seed_employee(user_id=1204, username="emp1204")
+        csrf = self._csrf()
+
+        r = self.client.post(
+            f"/team/admin/employees/{emp.id}/profile-update",
+            data={"csrf_token": csrf, "role": "manager"},
+            follow_redirects=False,
+        )
+
+        self.assertEqual(r.status_code, 303)
+        self.session.expire_all()
+        self.assertEqual(self.session.get(User, emp.id).role, "manager")
+
+
+class CompensationPermissionGateTests(unittest.TestCase, _Harness):
+    def setUp(self): self._setup()
+    def tearDown(self): self._teardown()
+
+    def test_pay_rates_get_uses_compensation_view_and_post_requires_edit(self):
+        from app.models import EmployeeProfile
+        from app.pii import encrypt_pii
+
+        self._login(role="manager", user_id=25, username="mgr_comp_view")
+        self._set_role_permission("manager", "admin.labor_financials.view", True)
+        emp = self._seed_employee(user_id=1205, username="emp1205")
+        profile = self.session.get(EmployeeProfile, emp.id)
+        profile.hourly_rate_cents_enc = encrypt_pii("2300")
+        self.session.add(profile)
+        self.session.commit()
+
+        page = self.client.get("/team/admin/employees/pay-rates")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn('value="23.00"', page.text)
+        self.assertIn("View-only", page.text)
+        self.assertNotIn("Save compensation", page.text)
+
+        csrf = self._csrf()
+        r = self.client.post(
+            "/team/admin/employees/pay-rates",
+            data={"csrf_token": csrf, f"rate_{emp.id}": "24.00"},
+            follow_redirects=False,
+        )
+        self.assertEqual(r.status_code, 403)
+
+    def test_pay_rates_post_allows_explicit_compensation_edit_permission(self):
+        from app.models import EmployeeProfile
+        from app.pii import decrypt_pii, encrypt_pii
+
+        self._login(role="manager", user_id=26, username="mgr_comp_edit")
+        self._set_role_permission("manager", "admin.labor_financials.view", True)
+        self._set_role_permission("manager", "admin.labor_financials.edit", True)
+        emp = self._seed_employee(user_id=1206, username="emp1206")
+        profile = self.session.get(EmployeeProfile, emp.id)
+        profile.hourly_rate_cents_enc = encrypt_pii("2300")
+        self.session.add(profile)
+        self.session.commit()
+
+        csrf = self._csrf()
+        r = self.client.post(
+            "/team/admin/employees/pay-rates",
+            data={"csrf_token": csrf, f"rate_{emp.id}": "24.00"},
+            follow_redirects=False,
+        )
+
+        self.assertEqual(r.status_code, 303)
+        self.session.expire_all()
+        refreshed = self.session.get(EmployeeProfile, emp.id)
+        self.assertEqual(decrypt_pii(refreshed.hourly_rate_cents_enc), "2400")
+
+    def test_profile_update_compensation_ignores_labor_view_without_edit(self):
+        from app.models import EmployeeProfile
+        from app.pii import decrypt_pii, encrypt_pii
+
+        self._login(role="manager", user_id=27, username="mgr_profile_comp")
+        self._set_role_permission("manager", "admin.employees.edit", True)
+        self._set_role_permission("manager", "admin.labor_financials.view", True)
+        emp = self._seed_employee(user_id=1207, username="emp1207")
+        profile = self.session.get(EmployeeProfile, emp.id)
+        profile.hourly_rate_cents_enc = encrypt_pii("2300")
+        self.session.add(profile)
+        self.session.commit()
+
+        csrf = self._csrf()
+        r = self.client.post(
+            f"/team/admin/employees/{emp.id}/profile-update",
+            data={
+                "csrf_token": csrf,
+                "display_name": "Allowed Name",
+                "hourly_rate_dollars": "24.00",
+            },
+            follow_redirects=False,
+        )
+
+        self.assertEqual(r.status_code, 303)
+        self.session.expire_all()
+        refreshed = self.session.get(EmployeeProfile, emp.id)
+        self.assertEqual(decrypt_pii(refreshed.hourly_rate_cents_enc), "2300")
+
 
 # ---------------------------------------------------------------------------
 # Fernet decrypt failure on reveal → pii.reveal_failed audit + no 500
@@ -297,6 +451,30 @@ class RevealDecryptFailureTests(unittest.TestCase, _Harness):
         self.assertEqual(len(reveal_rows), 1)  # Phase 1 committed
         self.assertEqual(len(failed_rows), 1)  # Phase 2 failure audited
         self.assertIn("invalid_token", failed_rows[0].details_json)
+
+
+class ProfileGetDecryptFailureTests(unittest.TestCase, _Harness):
+    def setUp(self): self._setup()
+    def tearDown(self): self._teardown()
+
+    def test_profile_get_treats_stale_pii_ciphertext_as_blank(self):
+        from app.models import EmployeeProfile
+
+        employee = self._login(role="employee", user_id=31, username="emp_profile_bad")
+        other = Fernet(Fernet.generate_key())
+        profile = EmployeeProfile(
+            user_id=employee.id,
+            phone_enc=other.encrypt(b"stale phone"),
+            email_ciphertext=other.encrypt(b"stale@example.com"),
+            legal_name_enc=other.encrypt(b"Stale Name"),
+        )
+        self.session.add(profile)
+        self.session.commit()
+
+        r = self.client.get("/team/profile", follow_redirects=False)
+
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("My Profile", r.text)
 
 
 # ---------------------------------------------------------------------------

@@ -1766,11 +1766,11 @@ def team_profile(
         return denial
     profile = _profile_for(session, user.id)
     # Self-view of own PII is not audited per spec.
-    phone = decrypt_pii(profile.phone_enc) or ""
-    email = decrypt_pii(profile.email_ciphertext) or ""
-    legal_name = decrypt_pii(profile.legal_name_enc) or ""
-    emergency_contact_name = decrypt_pii(profile.emergency_contact_name_enc) or ""
-    emergency_contact_phone = decrypt_pii(profile.emergency_contact_phone_enc) or ""
+    phone = _decrypt_optional(profile.phone_enc)
+    email = _decrypt_optional(profile.email_ciphertext)
+    legal_name = _decrypt_optional(profile.legal_name_enc)
+    emergency_contact_name = _decrypt_optional(profile.emergency_contact_name_enc)
+    emergency_contact_phone = _decrypt_optional(profile.emergency_contact_phone_enc)
     address = _decode_address(profile.address_enc)
     profile_completion = _profile_completion_for(session, user, profile=profile)
     return templates.TemplateResponse(

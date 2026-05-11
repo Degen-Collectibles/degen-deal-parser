@@ -1139,6 +1139,7 @@ DEFAULT_ROLE_PERMISSIONS: tuple[tuple[str, str, bool], ...] = tuple(
         # Payroll exports expose compensation totals, so they stay admin-only
         # unless the permissions matrix explicitly grants them.
         ("admin.labor_financials.view", (False, False, False, False, True)),
+        ("admin.labor_financials.edit", (False, False, False, False, True)),
         ("admin.payroll.view", (False, False, False, False, True)),
         ("admin.payroll.lock", (False, False, False, False, True)),
         ("legacy.ops.view", (False, False, False, True, True)),

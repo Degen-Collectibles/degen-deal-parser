@@ -1,6 +1,8 @@
 {% extends "team/admin/base.html" %}
 {% set active = 'employees' %}
 {% set can_edit_schedule_roster = can_edit_schedule_roster if can_edit_schedule_roster is defined else can_edit_profile|default(false) %}
+{% set can_manage_roles = can_manage_roles|default(false) %}
+{% set can_manage_compensation = can_manage_compensation|default(false) %}
 {% block content %}
 {% if flash %}<div class="ta-flash success">{{ flash }}</div>{% endif %}
 
@@ -109,7 +111,7 @@
             <tr>
                 <td style="padding:6px 0; color:var(--lx-muted);">Role</td>
                 <td>
-                    <select name="role" {% if not can_edit_profile %}disabled{% endif %} style="padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);">
+                    <select name="role" {% if not can_manage_roles %}disabled{% endif %} style="padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);">
                         {% for r in roles %}<option value="{{ r }}" {% if r == employee.role %}selected{% endif %}>{{ r }}</option>{% endfor %}
                     </select>
                     <span style="font-size:11px; color:var(--lx-muted); margin-left:8px;">permission level (admin / manager / employee / viewer / reviewer)</span>
@@ -154,7 +156,7 @@
             <tr>
                 <td style="padding:6px 0; color:var(--lx-muted);">Compensation</td>
                 <td>
-                    <select name="compensation_type" style="padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);">
+                    <select name="compensation_type" {% if not can_manage_compensation %}disabled{% endif %} style="padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);">
                         {% for comp in compensation_types %}
                             <option value="{{ comp }}" {% if current_compensation_type == comp %}selected{% endif %}>{{ compensation_type_labels[comp] }}</option>
                         {% endfor %}
@@ -165,7 +167,7 @@
             <tr>
                 <td style="padding:6px 0; color:var(--lx-muted);">Pay effective date</td>
                 <td>
-                    <input type="date" name="compensation_effective_date" value="{{ today_iso }}" style="padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/>
+                    <input type="date" name="compensation_effective_date" value="{{ today_iso }}" {% if not can_manage_compensation %}disabled{% endif %} style="padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/>
                     <span style="font-size:11px; color:var(--lx-muted); margin-left:8px;">used only when compensation fields change</span>
                 </td>
             </tr>
@@ -173,7 +175,7 @@
                 <td style="padding:6px 0; color:var(--lx-muted);">Hourly rate</td>
                 <td>
                     <span style="color:var(--lx-muted); margin-right:4px;">$</span>
-                    <input type="text" name="hourly_rate_dollars" value="{{ hourly_rate_value }}" inputmode="decimal" placeholder="25.00" style="width:200px; padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/>
+                    <input type="text" name="hourly_rate_dollars" value="{{ hourly_rate_value }}" inputmode="decimal" placeholder="25.00" {% if not can_manage_compensation %}disabled{% endif %} style="width:200px; padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/>
                     {% if hourly_rate_display %}
                     <span style="font-size:11px; color:var(--lx-muted); margin-left:8px;">current ${{ hourly_rate_display }}/hr</span>
                     {% endif %}
@@ -183,14 +185,14 @@
                 <td style="padding:6px 0; color:var(--lx-muted);">Monthly salary</td>
                 <td>
                     <span style="color:var(--lx-muted); margin-right:4px;">$</span>
-                    <input type="text" name="monthly_salary_dollars" value="{{ monthly_salary_value }}" inputmode="decimal" placeholder="4500.00" style="width:200px; padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/>
+                    <input type="text" name="monthly_salary_dollars" value="{{ monthly_salary_value }}" inputmode="decimal" placeholder="4500.00" {% if not can_manage_compensation %}disabled{% endif %} style="width:200px; padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/>
                     <span style="font-size:11px; color:var(--lx-muted); margin-left:8px;">per month</span>
                 </td>
             </tr>
             <tr>
                 <td style="padding:6px 0; color:var(--lx-muted);">Monthly pay date</td>
                 <td>
-                    <input type="number" name="monthly_salary_pay_day" value="{{ monthly_salary_pay_day_value }}" min="1" max="31" inputmode="numeric" placeholder="15" style="width:90px; padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/>
+                    <input type="number" name="monthly_salary_pay_day" value="{{ monthly_salary_pay_day_value }}" min="1" max="31" inputmode="numeric" placeholder="15" {% if not can_manage_compensation %}disabled{% endif %} style="width:90px; padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/>
                     <span style="font-size:11px; color:var(--lx-muted); margin-left:8px;">day of month; next {{ monthly_salary_pay_date_label }}</span>
                 </td>
             </tr>
@@ -198,7 +200,7 @@
                 <td style="padding:6px 0; color:var(--lx-muted);">Payment method</td>
                 <td>
                     {% set current_payment_method = profile.payment_method or 'cash' %}
-                    <select name="payment_method" style="padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);">
+                    <select name="payment_method" {% if not can_manage_compensation %}disabled{% endif %} style="padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);">
                         {% for method in payment_methods %}
                             <option value="{{ method }}" {% if current_payment_method == method %}selected{% endif %}>{{ payment_method_labels[method] }}</option>
                         {% endfor %}

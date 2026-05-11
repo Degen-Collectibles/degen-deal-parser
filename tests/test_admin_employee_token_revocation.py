@@ -320,6 +320,14 @@ class EmployeeTokenRevocationTests(unittest.TestCase):
 
         tombstone = self.session.exec(select(EmployeePurgeTombstone)).one()
         self.assertGreater(tombstone.restore_until, tombstone.created_at)
+        snapshot = json.loads(tombstone.snapshot_json)
+        self.assertNotIn("password_hash", snapshot["user"])
+        self.assertNotIn("password_salt", snapshot["user"])
+        self.assertNotIn("password_changed_at", snapshot["user"])
+        self.assertNotIn("session_invalidated_at", snapshot["user"])
+        self.assertNotIn("email_lookup_hash", snapshot["profile"])
+        self.assertNotIn("restore@example.com", tombstone.snapshot_json)
+        self.assertNotIn("555-123-4567", tombstone.snapshot_json)
         purged_profile = self.session.get(EmployeeProfile, self.employee.id)
         self.assertIsNone(purged_profile.phone_enc)
         self.assertIsNone(purged_profile.email_ciphertext)
@@ -338,6 +346,8 @@ class EmployeeTokenRevocationTests(unittest.TestCase):
         self.assertEqual(restored_user.display_name, "Restore Target")
         self.assertTrue(restored_user.is_active)
         self.assertIsNotNone(restored_user.session_invalidated_at)
+        self.assertEqual(restored_user.password_hash, "__purged_password_hash__")
+        self.assertEqual(restored_user.password_salt, "__purged_password_salt__")
         self.assertEqual(decrypt_pii(restored_profile.phone_enc), "555-123-4567")
         self.assertEqual(
             restored_profile.email_lookup_hash,
