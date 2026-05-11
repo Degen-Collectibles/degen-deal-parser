@@ -314,6 +314,7 @@ def categorize_bank_payload(payload: dict[str, Any], matched_transaction: Option
     description = str(payload.get("description") or "")
     raw_type = str(payload.get("raw_type") or "")
     details = str(payload.get("details") or "")
+    check_or_slip = str(payload.get("check_or_slip") or "").strip()
     raw_row_json = str(payload.get("raw_row_json") or "")
     chase_category = _raw_row_value(raw_row_json, "Category")
     text = " ".join([description, raw_type, details, chase_category]).lower()
@@ -344,6 +345,8 @@ def categorize_bank_payload(payload: dict[str, Any], matched_transaction: Option
         return _category_result("taxes_licenses", "Sales/payroll/state tax", "high", "Tax authority or tax-payment descriptor.")
     if "payroll service" in text or "payroll" in text:
         return _category_result("payroll", "Payroll service", "high", "Payroll processor descriptor.")
+    if check_or_slip or re.search(r"\bcheck\b", text):
+        return _category_result("payroll", "Payroll check", "high", "All paper/check payments are treated as payroll.")
     if _contains_any(text, ("www.psacard.com", "psa card", "psacard")):
         return _category_result("grading_fees", "PSA grading", "high", "PSA grading charge.")
     if _contains_any(text, ("stamps.com", "shippingeasy", "shipping easy", "fedex", "dhl", "usps", "ups store", "postal")):
@@ -391,8 +394,6 @@ def categorize_bank_payload(payload: dict[str, Any], matched_transaction: Option
         return _category_result("inventory_purchases", "Wire seller payment", "medium", "Outgoing wire to a named seller/vendor.")
     if "withdrawal" in text:
         return _category_result("cash_inventory_purchases", "Cash withdrawal", "low", "Cash withdrawal; likely inventory cash, but the bank line has no payee.")
-    if "check" in text:
-        return _category_result("uncategorized", "Paper check", "low", "Paper check descriptor does not include enough payee detail.")
     if _contains_any(text, ("fee", "interest", "finance charge")):
         return _category_result("bank_fees", "Bank/finance fee", "medium", "Bank fee or finance-charge descriptor.")
     if chase_category.lower() == "merchandise & inventory":

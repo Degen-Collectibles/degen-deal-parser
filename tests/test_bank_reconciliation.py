@@ -75,6 +75,19 @@ def test_partner_payback_rule_overrides_matched_inventory_transaction():
     assert result["expense_category"] == "partner_paybacks"
 
 
+def test_check_outflows_are_payroll():
+    result = categorize_bank_payload(
+        {
+            "amount": -1250.00,
+            "description": "CHECK PAID",
+            "check_or_slip": "1042",
+        }
+    )
+
+    assert result["expense_category"] == "payroll"
+    assert result["category_confidence"] == "high"
+
+
 def test_summary_excludes_transfers_from_expense_total():
     summary = summarize_bank_transactions(
         [
