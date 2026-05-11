@@ -383,6 +383,13 @@ def _current_user_label(request: Request) -> Optional[str]:
     )
 
 
+def _safe_inventory_return_url(value: str | None, fallback: str) -> str:
+    target = (value or "").strip()
+    if target.startswith("/inventory") and not target.startswith("//") and "://" not in target:
+        return target
+    return fallback
+
+
 def _normalize_lookup(value: str | None) -> str:
     return " ".join((value or "").strip().lower().split())
 
@@ -2021,6 +2028,10 @@ async def inventory_list(
         ).one(),
     }
 
+    list_return_url = request.url.path
+    if request.url.query:
+        list_return_url = f"{list_return_url}?{request.url.query}"
+
     return _templates.TemplateResponse(
         request,
         "inventory.html",
@@ -2039,6 +2050,7 @@ async def inventory_list(
             "archived_filter": archived,
             "resticker_filter": resticker,
             "can_manage_inventory": can_manage_inventory,
+            "list_return_url": list_return_url,
             "games": GAMES,
             "statuses": sorted(ALL_INVENTORY_STATUSES),
             "inventory_summary": inventory_summary,
@@ -2780,11 +2792,13 @@ async def inventory_item_adjust_stock(
     request: Request,
     item_id: int,
     session: Session = Depends(get_session),
-    quantity_delta: int = Form(...),
+    quantity_delta: Optional[int] = Form(default=None),
+    target_quantity: Optional[int] = Form(default=None),
     reason: str = Form(default="adjustment"),
     location: str = Form(default=""),
     source: str = Form(default="Manual Adjustment"),
     notes: str = Form(default=""),
+    return_to: str = Form(default=""),
 ):
     if denial := _require_inventory_manage(request, session):
         return denial
@@ -2794,20 +2808,35 @@ async def inventory_item_adjust_stock(
         return HTMLResponse("Item not found.", status_code=404)
     if item.archived_at is not None:
         return HTMLResponse("Restore this item before adjusting stock.", status_code=400)
-    if quantity_delta == 0:
-        return HTMLResponse("Adjustment quantity cannot be zero.", status_code=400)
 
     before_qty = max(0, item.quantity or 0)
-    after_qty = before_qty + quantity_delta
+    if target_quantity is not None:
+        if target_quantity < 0:
+            return HTMLResponse("Quantity cannot be negative.", status_code=400)
+        after_qty = target_quantity
+        quantity_delta_value = after_qty - before_qty
+        if not (reason or "").strip():
+            reason = "stock_count"
+    else:
+        if quantity_delta is None:
+            return HTMLResponse("Adjustment quantity is required.", status_code=400)
+        if quantity_delta == 0:
+            return HTMLResponse("Adjustment quantity cannot be zero.", status_code=400)
+        quantity_delta_value = quantity_delta
+        after_qty = before_qty + quantity_delta_value
     if after_qty < 0:
         return HTMLResponse("Adjustment would make quantity negative.", status_code=400)
 
     reason_clean = (reason or "adjustment").strip() or "adjustment"
+    redirect_to = _safe_inventory_return_url(return_to, f"/inventory/{item_id}")
+    if quantity_delta_value == 0:
+        return RedirectResponse(redirect_to, status_code=303)
+
     location_clean = location.strip() or item.location
     item.quantity = after_qty
     if location.strip():
         item.location = location.strip()
-    if quantity_delta > 0 and item.status == INVENTORY_SOLD:
+    if quantity_delta_value > 0 and item.status == INVENTORY_SOLD:
         item.status = INVENTORY_IN_STOCK
         item.sold_at = None
         item.sold_price = None
@@ -2820,7 +2849,7 @@ async def inventory_item_adjust_stock(
         InventoryStockMovement(
             item_id=item.id,
             reason=reason_clean,
-            quantity_delta=quantity_delta,
+            quantity_delta=quantity_delta_value,
             quantity_before=before_qty,
             quantity_after=after_qty,
             location=location_clean,
@@ -2831,7 +2860,9 @@ async def inventory_item_adjust_stock(
         )
     )
     session.commit()
-    return RedirectResponse(f"/inventory/{item_id}", status_code=303)
+    if redirect_to == "/inventory" or redirect_to.startswith("/inventory?"):
+        redirect_to = f"{redirect_to}{'&' if '?' in redirect_to else '?'}updated=1"
+    return RedirectResponse(redirect_to, status_code=303)
 
 
 @router.post("/inventory/{item_id}/delete")

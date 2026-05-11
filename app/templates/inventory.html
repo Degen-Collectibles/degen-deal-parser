@@ -79,7 +79,7 @@
         .scan-input:focus { outline:none; box-shadow:0 0 0 3px rgba(213,83,56,.2); }
         .scan-label { font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; color: var(--lx-muted); }
         .table-shell { overflow:auto; border:1px solid var(--lx-br); border-radius:20px; background: var(--lx-s1); max-height:72vh; margin-bottom:16px; }
-        table { width:100%; border-collapse:separate; border-spacing:0; min-width:900px; }
+        table { width:100%; border-collapse:separate; border-spacing:0; min-width:1080px; }
         th, td { padding:10px 14px; border-bottom:1px solid var(--lx-br); text-align:left; vertical-align:middle; font-size:13px; }
         thead th { position:sticky; top:0; z-index:2; background: var(--lx-s2); color: var(--lx-muted); font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; white-space:nowrap; }
         tbody tr:hover { background: rgba(255,255,255,.04); }
@@ -104,6 +104,15 @@
         .count-badge { font-size:12px; font-weight:700; color: var(--lx-muted); }
         .table-actions { display:flex;gap:8px;flex-wrap:wrap; }
         .row-actions { display:flex;gap:6px;flex-wrap:wrap;align-items:center; }
+        .qty-cell { min-width:154px; }
+        .qty-badge { display:inline-flex;min-width:38px;justify-content:center;padding:5px 9px;border-radius:12px;border:1px solid var(--line);background:var(--lx-s2);color:#fff;font-weight:900;font-variant-numeric:tabular-nums; }
+        .qty-tools { display:grid;gap:7px;align-items:center; }
+        .qty-tools form { margin:0; }
+        .qty-stepper { display:inline-grid;grid-template-columns:30px minmax(36px,auto) 30px;gap:5px;align-items:center;width:max-content; }
+        .qty-stepper button { width:30px;height:30px;padding:0;border-radius:10px;display:grid;place-items:center;font-size:16px;line-height:1; }
+        .qty-set-form { display:flex;gap:5px;align-items:center; }
+        .qty-set-input { width:64px;min-width:64px;padding:7px 8px;text-align:center;font-weight:900;font-variant-numeric:tabular-nums; }
+        .qty-set-form button { width:auto;padding:7px 9px;border-radius:10px;font-size:11px; }
         .bulk-actions { display:grid;grid-template-columns:minmax(150px,220px) minmax(140px,1fr) minmax(160px,1.2fr) auto;gap:8px;align-items:end;margin:0 0 12px; }
         .bulk-check { width:auto; }
         .success-banner { margin-top:14px;padding:11px 14px;border:1px solid rgba(34,197,94,.32);border-radius:14px;background:rgba(34,197,94,.12);color:#86efac;font-size:13px;font-weight:800; }
@@ -289,6 +298,7 @@
                 </label>
                 <label>&nbsp;<button type="submit" class="secondary-button">Apply</button></label>
             </div>
+        </form>
         {% endif %}
 
         <div class="table-shell">
@@ -302,6 +312,7 @@
                         <th>Type</th>
                         <th>Set</th>
                         <th>Grade / Cond</th>
+                        <th>Qty</th>
                         {% if can_manage_inventory %}<th>Cost</th>{% endif %}
                         <th>Price</th>
                         <th>Status</th>
@@ -332,6 +343,38 @@
                             {% if item.variant %}{{ item.variant }} - {% endif %}{{ item.condition }}
                         {% else %}—{% endif %}
                     </td>
+                    <td class="qty-cell">
+                        {% if can_manage_inventory and item.archived_at is none %}
+                        <div class="qty-tools">
+                            <div class="qty-stepper" aria-label="Quantity for {{ item.card_name }}">
+                                <form method="post" action="/inventory/{{ item.id }}/adjust-stock">
+                                    <input type="hidden" name="quantity_delta" value="-1">
+                                    <input type="hidden" name="reason" value="quick_adjust">
+                                    <input type="hidden" name="source" value="Inventory List">
+                                    <input type="hidden" name="return_to" value="{{ list_return_url }}">
+                                    <button type="submit" class="btn-sm" {% if item.quantity <= 0 %}disabled{% endif %} title="Remove one">-</button>
+                                </form>
+                                <span class="qty-badge">{{ item.quantity }}</span>
+                                <form method="post" action="/inventory/{{ item.id }}/adjust-stock">
+                                    <input type="hidden" name="quantity_delta" value="1">
+                                    <input type="hidden" name="reason" value="quick_adjust">
+                                    <input type="hidden" name="source" value="Inventory List">
+                                    <input type="hidden" name="return_to" value="{{ list_return_url }}">
+                                    <button type="submit" class="btn-sm" title="Add one">+</button>
+                                </form>
+                            </div>
+                            <form class="qty-set-form" method="post" action="/inventory/{{ item.id }}/adjust-stock">
+                                <input class="qty-set-input" type="number" name="target_quantity" min="0" step="1" value="{{ item.quantity }}" aria-label="Set quantity for {{ item.card_name }}">
+                                <input type="hidden" name="reason" value="stock_count">
+                                <input type="hidden" name="source" value="Inventory List">
+                                <input type="hidden" name="return_to" value="{{ list_return_url }}">
+                                <button type="submit" class="btn-sm">Set</button>
+                            </form>
+                        </div>
+                        {% else %}
+                        <span class="qty-badge">{{ item.quantity }}</span>
+                        {% endif %}
+                    </td>
                     {% if can_manage_inventory %}<td class="price-cell">{{ item.cost_basis | money }}</td>{% endif %}
                     <td class="price-cell">
                         {% set ep = effective_price(item) %}
@@ -354,12 +397,11 @@
                     </td>
                 </tr>
                 {% else %}
-                <tr><td colspan="{{ 11 if can_manage_inventory else 9 }}"><div class="empty-state"><strong>No items found.</strong><span>Try a different filter or add stock.</span><a href="/inventory/add-stock" class="button primary-button" style="width:auto;">Add Stock</a></div></td></tr>
+                <tr><td colspan="{{ 12 if can_manage_inventory else 10 }}"><div class="empty-state"><strong>No items found.</strong><span>Try a different filter or add stock.</span><a href="/inventory/add-stock" class="button primary-button" style="width:auto;">Add Stock</a></div></td></tr>
                 {% endfor %}
                 </tbody>
             </table>
         </div>
-        {% if can_manage_inventory %}</form>{% endif %}
 
         {% if total_pages > 1 %}
         <div class="pagination">

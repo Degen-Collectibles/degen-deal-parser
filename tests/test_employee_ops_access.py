@@ -221,6 +221,7 @@ class EmployeeOpsAccessTests(unittest.TestCase):
                 game="Pokemon",
                 card_name="Employee Visible ETB",
                 set_name="Test Set",
+                quantity=6,
                 cost_basis=12.34,
                 auto_price=49.99,
             )
@@ -229,7 +230,10 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         r = self.client.get("/inventory", follow_redirects=False)
         self.assertEqual(r.status_code, 200)
         self.assertIn("Employee Visible ETB", r.text)
+        self.assertIn("<th>Qty</th>", r.text)
+        self.assertIn('class="qty-badge">6</span>', r.text)
         self.assertIn("$49.99", r.text)
+        self.assertNotIn("/adjust-stock", r.text)
         self.assertNotIn("<th>Cost</th>", r.text)
         self.assertNotIn("$12.34", r.text)
 
@@ -411,6 +415,56 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         self.assertEqual(movement.quantity_before, 5)
         self.assertEqual(movement.quantity_after, 3)
         self.assertEqual(movement.created_by, "mgr25")
+
+    def test_manager_can_set_quantity_from_inventory_list(self):
+        self._login_as("manager", user_id=227, username="mgr27")
+        from app.models import InventoryItem, InventoryStockMovement
+
+        item = InventoryItem(
+            barcode="DGN-LISTQTY1",
+            item_type="sealed",
+            game="Pokemon",
+            card_name="List Quantity ETB",
+            set_name="Test Set",
+            quantity=5,
+            auto_price=49.99,
+        )
+        self.session.add(item)
+        self.session.commit()
+        self.session.refresh(item)
+        item_id = item.id
+
+        page = self.client.get("/inventory?q=List+Quantity", follow_redirects=False)
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("<th>Qty</th>", page.text)
+        self.assertIn(f'action="/inventory/{item_id}/adjust-stock"', page.text)
+        self.assertIn('name="target_quantity"', page.text)
+        csrf = self._csrf_from_html(page.text)
+
+        response = self.client.post(
+            f"/inventory/{item_id}/adjust-stock",
+            headers={"X-CSRF-Token": csrf},
+            data={
+                "target_quantity": "8",
+                "reason": "stock_count",
+                "source": "Inventory List",
+                "return_to": "/inventory?q=List+Quantity",
+            },
+            follow_redirects=False,
+        )
+
+        self.assertEqual(response.status_code, 303)
+        self.assertIn("/inventory?q=List+Quantity&updated=1", response.headers["location"])
+        self.session.expire_all()
+        adjusted = self.session.get(InventoryItem, item_id)
+        self.assertEqual(adjusted.quantity, 8)
+        movement = self.session.exec(
+            select(InventoryStockMovement).where(InventoryStockMovement.item_id == item_id)
+        ).one()
+        self.assertEqual(movement.reason, "stock_count")
+        self.assertEqual(movement.quantity_delta, 3)
+        self.assertEqual(movement.quantity_before, 5)
+        self.assertEqual(movement.quantity_after, 8)
 
     def test_manager_can_bulk_update_inventory_location(self):
         self._login_as("manager", user_id=226, username="mgr26")
