@@ -65,12 +65,18 @@ from .inventory_barcode import (
     render_barcode_svg,
 )
 from .inventory_pricing import (
+    SLAB_PRICE_SOURCE_OPTIONS,
+    alt_cli_status,
     build_card_ladder_cli_query,
     card_ladder_cli_status,
     clear_slab_resticker_alert,
     effective_price,
     fetch_price_for_item,
+    fetch_slab_price,
     import_card_ladder_cli_records_for_item,
+    normalize_slab_price_source,
+    point130_cli_status,
+    sync_alt_cli_for_item,
     sync_card_ladder_cli_for_item,
 )
 from .inventory_price_updates import record_inventory_price_result
@@ -3114,6 +3120,10 @@ async def inventory_scan_slabs_page(
             "games": GAMES,
             "initial_query": q,
             "initial_error": error,
+            "slab_price_sources": [
+                {"value": source, "label": _slab_price_source_label(source)}
+                for source in SLAB_PRICE_SOURCE_OPTIONS
+            ],
         },
     )
 
@@ -3295,6 +3305,7 @@ async def inventory_scan_slab_comps(request: Request, session: Session = Depends
     card_name = (body.get("card_name") or "").strip()
     if not card_name:
         return JSONResponse({"error": "card_name is required"}, status_code=400)
+    price_source = _slab_price_source_from_body(body)
 
     preview_item = InventoryItem(
         barcode="PREVIEW",
@@ -3310,19 +3321,20 @@ async def inventory_scan_slab_comps(request: Request, session: Session = Depends
 
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
-            result = await fetch_price_for_item(
+            result = await fetch_slab_price(
                 preview_item,
                 client,
-                api_key=settings.scrydex_api_key,
-                base_url=settings.scrydex_base_url,
+                source_filter=price_source,
             )
     except Exception as exc:
         logger.warning("[inventory/scan] slab comps failed for %s: %s", card_name, exc)
         result = None
 
     response = _slab_comps_lookup_payload(preview_item, result)
+    response["selected_price_source"] = price_source
+    response["selected_price_source_label"] = _slab_price_source_label(price_source)
     if result is None:
-        response["lookup_warning"] = "No Card Ladder comps came back for those slab details."
+        response["lookup_warning"] = f"No {_slab_price_source_label(price_source)} comps came back for those slab details."
     return JSONResponse(response)
 
 
@@ -3383,6 +3395,7 @@ async def inventory_scan_slab_grade_comps(request: Request, session: Session = D
     set_name = (body.get("set_name") or "").strip()
     card_number = (body.get("card_number") or "").strip()
     cert_number = (body.get("cert_number") or "").strip()
+    price_source = _slab_price_source_from_body(body)
 
     preview_items = [
         InventoryItem(
@@ -3404,11 +3417,10 @@ async def inventory_scan_slab_grade_comps(request: Request, session: Session = D
         async with httpx.AsyncClient(timeout=25.0) as client:
             results = await asyncio.gather(
                 *[
-                    fetch_price_for_item(
+                    fetch_slab_price(
                         item,
                         client,
-                        api_key=settings.scrydex_api_key,
-                        base_url=settings.scrydex_base_url,
+                        source_filter=price_source,
                     )
                     for item in preview_items
                 ],
@@ -3430,8 +3442,10 @@ async def inventory_scan_slab_grade_comps(request: Request, session: Session = D
             )
             result = None
         payload = _slab_comps_lookup_payload(item, result)
+        payload["selected_price_source"] = price_source
+        payload["selected_price_source_label"] = _slab_price_source_label(price_source)
         if result is None:
-            payload["lookup_warning"] = "No Card Ladder comps came back for this grade."
+            payload["lookup_warning"] = f"No {_slab_price_source_label(price_source)} comps came back for this grade."
         grade_comps.append(payload)
 
     response: dict[str, Any] = {
@@ -3445,10 +3459,14 @@ async def inventory_scan_slab_grade_comps(request: Request, session: Session = D
         "grading_company": grading_company,
         "cert_number": cert_number,
         "grade_comps": grade_comps,
+        "selected_price_source": price_source,
+        "selected_price_source_label": _slab_price_source_label(price_source),
+        "alt_cli": alt_cli_status(),
         "card_ladder_cli": card_ladder_cli_status(),
+        "point130_cli": point130_cli_status(),
     }
     if not any(row.get("last_solds") or row.get("suggested_price") for row in grade_comps):
-        response["lookup_warning"] = "No Card Ladder comps came back for those slab details."
+        response["lookup_warning"] = f"No {_slab_price_source_label(price_source)} comps came back for those slab details."
     return JSONResponse(response)
 
 
@@ -3498,6 +3516,49 @@ async def inventory_scan_slab_cardladder_refresh(request: Request, session: Sess
 
     payload = _slab_comps_lookup_payload(preview_item, result)
     payload["card_ladder_cli"] = card_ladder_cli_status()
+    return JSONResponse(payload)
+
+
+@router.post("/inventory/scan/slab-alt-refresh")
+async def inventory_scan_slab_alt_refresh(request: Request, session: Session = Depends(get_session)):
+    """Refresh one selected slab grade through ALT sold-listing search."""
+    if denial := _require_employee_permission(request, "ops.degen_eye.view", session):
+        return denial
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+    card_name = (body.get("card_name") or "").strip()
+    if not card_name:
+        return JSONResponse({"error": "card_name is required"}, status_code=400)
+
+    preview_item = InventoryItem(
+        barcode="PREVIEW",
+        item_type=ITEM_TYPE_SLAB,
+        game=_normalize_add_stock_game(body.get("game") or "Pokemon"),
+        card_name=card_name,
+        set_name=(body.get("set_name") or "").strip() or None,
+        card_number=(body.get("card_number") or "").strip() or None,
+        grading_company=(body.get("grading_company") or "PSA").strip().upper() or "PSA",
+        grade=(body.get("grade") or "").strip() or None,
+        cert_number=(body.get("cert_number") or "").strip() or None,
+    )
+
+    try:
+        result = await sync_alt_cli_for_item(preview_item, limit=20)
+    except Exception as exc:
+        return JSONResponse(
+            {
+                "error": str(exc),
+                "alt_cli": alt_cli_status(),
+            },
+            status_code=502,
+        )
+
+    payload = _slab_comps_lookup_payload(preview_item, result)
+    payload["alt_cli"] = alt_cli_status()
     return JSONResponse(payload)
 
 
@@ -3574,6 +3635,28 @@ def _slab_comps_lookup_payload(
     }
 
 
+def _slab_price_source_from_body(body: dict[str, Any]) -> str:
+    return normalize_slab_price_source(
+        body.get("price_source")
+        or body.get("source")
+        or body.get("comp_source")
+        or body.get("pricing_source")
+    )
+
+
+def _slab_price_source_label(source: str) -> str:
+    source = normalize_slab_price_source(source)
+    labels = {
+        "all": "All Sources",
+        "alt": "ALT",
+        "pricecharting": "PriceCharting",
+        "myslabs": "MySlabs",
+        "card_ladder": "Card Ladder",
+        "130point": "130point",
+    }
+    return labels.get(source, source.replace("_", " ").title())
+
+
 def _lookup_sales_from_price_raw(raw: dict[str, Any], *, source: str = "") -> list[dict[str, Any]]:
     sales = raw.get("sales")
     if not isinstance(sales, list):
@@ -3587,6 +3670,8 @@ def _lookup_sales_from_price_raw(raw: dict[str, Any], *, source: str = "") -> li
                 "date": str(sale.get("sold_date") or sale.get("date") or ""),
                 "price": _parse_float(str(sale.get("price") or "")),
                 "source": source or "card_ladder",
+                "sources": sale.get("sources") if isinstance(sale.get("sources"), list) else [source or "card_ladder"],
+                "source_details": sale.get("source_details") if isinstance(sale.get("source_details"), list) else [],
                 "title": str(sale.get("title") or ""),
                 "platform": str(sale.get("platform") or ""),
                 "url": str(sale.get("url") or ""),

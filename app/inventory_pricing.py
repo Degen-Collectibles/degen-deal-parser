@@ -27,9 +27,10 @@ import asyncio
 import csv
 import io
 import sys
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import urlencode
+from urllib.parse import urljoin, urlencode
 
 import httpx
 
@@ -44,11 +45,13 @@ logger = logging.getLogger(__name__)
 POINT130_SEARCH_URL = "https://www.130point.com/sales/search"
 
 # ---------------------------------------------------------------------------
-# Alt.gg API (graded cards marketplace)
-# Example: https://alt.gg/api/search?q=Charizard+PSA+10
+# ALT sold-listing search (graded cards marketplace)
+# scripts/alt_cli.py fetches ALT's current web-app search config, then queries
+# the sold-listing Typesense collection.
 # ---------------------------------------------------------------------------
-ALT_SEARCH_URL = "https://alt.gg/api/search"
+ALT_BROWSE_URL = "https://alt.xyz/browse"
 PRICECHARTING_GAME_URL = "https://www.pricecharting.com/game"
+MYSLABS_ARCHIVE_SEARCH_URL = "https://myslabs.com/search/archive/"
 
 # ---------------------------------------------------------------------------
 # Card Ladder (price history for graded cards)
@@ -68,6 +71,25 @@ CARD_LADDER_NOISE_EXCLUSIONS = (
     "Custom",
     "Checklist",
 )
+STALE_SLAB_COMP_DAYS = 30
+SLAB_PRICE_SOURCE_OPTIONS = ("all", "alt", "pricecharting", "myslabs", "card_ladder", "130point")
+SLAB_PRICE_SOURCE_ALIASES = {
+    "": "all",
+    "all_sources": "all",
+    "all sources": "all",
+    "slab_comps": "all",
+    "slab comps": "all",
+    "price_charting": "pricecharting",
+    "price charting": "pricecharting",
+    "pc": "pricecharting",
+    "cardladder": "card_ladder",
+    "card ladder": "card_ladder",
+    "cl": "card_ladder",
+    "point130": "130point",
+    "130 point": "130point",
+    "my_slabs": "myslabs",
+    "my slabs": "myslabs",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +397,276 @@ def _card_ladder_sales_from_cli_records(records: list[Any]) -> list[dict[str, An
     return sales
 
 
+def build_alt_cli_query(item: InventoryItem) -> str:
+    try:
+        from scripts import alt_cli
+    except Exception:
+        return _slab_query(item)
+    return alt_cli.build_slab_query(
+        _card_ladder_cli_base_query(item),
+        grader=(item.grading_company or "").strip().upper(),
+        grade=str(item.grade or "").strip(),
+        cert=str(item.cert_number or "").strip(),
+    )
+
+
+def alt_cli_status() -> dict[str, Any]:
+    try:
+        from scripts import alt_cli
+    except Exception as exc:
+        return {"available": False, "error": str(exc)}
+    cache_db = alt_cli.default_cache_path()
+    return {
+        "available": True,
+        "cache_db": str(cache_db),
+        "cache_exists": cache_db.exists(),
+    }
+
+
+def _alt_card_number_filter(item: InventoryItem) -> str:
+    raw = str(item.card_number or "").strip()
+    if not raw:
+        return ""
+    return raw.split("/", 1)[0].strip()
+
+
+def _fetch_alt_cli_cache(
+    item: InventoryItem,
+    *,
+    query: str = "",
+    cache_path: str | Path | None = None,
+    limit: int = 20,
+) -> Optional[dict[str, Any]]:
+    try:
+        from scripts import alt_cli
+    except Exception as exc:
+        logger.debug("[pricing] alt_cli unavailable: %s", exc)
+        return None
+
+    cache_db = Path(cache_path) if cache_path else alt_cli.default_cache_path()
+    if not cache_db.exists():
+        return None
+    resolved_query = query or build_alt_cli_query(item)
+    try:
+        records = alt_cli.load_cached_records(
+            cache_db,
+            query=resolved_query,
+            limit=limit,
+        )
+        if not records:
+            records = alt_cli.load_cached_records(
+                cache_db,
+                text=_card_ladder_cli_base_query(item),
+                grader=(item.grading_company or "").strip().upper(),
+                grade=str(item.grade or "").strip(),
+                limit=limit,
+            )
+    except Exception as exc:
+        logger.debug("[pricing] alt_cli cache read failed for %s: %s", resolved_query, exc)
+        return None
+    return _alt_result_from_records(
+        resolved_query,
+        records,
+        source_detail="alt_cli_cache",
+        cache_db=str(cache_db),
+    )
+
+
+async def sync_alt_cli_for_item(
+    item: InventoryItem,
+    *,
+    limit: int = 20,
+) -> dict[str, Any]:
+    try:
+        from scripts import alt_cli
+    except Exception as exc:
+        raise RuntimeError(f"ALT CLI is unavailable: {exc}") from exc
+
+    query = build_alt_cli_query(item)
+    if not query:
+        raise RuntimeError("Card name or slab details are required before refreshing ALT.")
+    records = await asyncio.to_thread(
+        alt_cli.fetch_records,
+        query,
+        grader=(item.grading_company or "").strip().upper(),
+        grade=str(item.grade or "").strip(),
+        card_number=_alt_card_number_filter(item),
+        limit=limit,
+    )
+    if not records:
+        raise RuntimeError("ALT returned no sold comps for this slab query.")
+    await asyncio.to_thread(alt_cli.cache_records, alt_cli.default_cache_path(), query, records)
+    result = _alt_result_from_records(query, records, source_detail="alt_typesense_live")
+    if not result:
+        raise RuntimeError("ALT returned sold rows, but none had usable prices.")
+    return result
+
+
+def _alt_result_from_records(
+    query: str,
+    records: list[Any],
+    *,
+    source_detail: str,
+    cache_db: str = "",
+) -> Optional[dict[str, Any]]:
+    return _result_from_comp_records(
+        query,
+        records,
+        source="alt",
+        source_detail=source_detail,
+        sales_history_url=alt_sales_history_url(query),
+        cache_db=cache_db,
+    )
+
+
+def _sales_from_comp_records(records: list[Any]) -> list[dict[str, Any]]:
+    sales: list[dict[str, Any]] = []
+    seen: set[tuple[str, float, str]] = set()
+    for record in records:
+        price = _safe_float(getattr(record, "price", None))
+        if price is None:
+            continue
+        sale = {
+            "title": str(getattr(record, "title", "") or "").strip(),
+            "price": round(price, 2),
+            "sold_date": _normalize_sale_date(getattr(record, "sold_date", "")),
+            "platform": str(getattr(record, "platform", "") or "").strip(),
+            "sale_type": str(getattr(record, "sale_type", "") or "").strip(),
+            "url": str(getattr(record, "url", "") or "").strip(),
+            "image_url": str(getattr(record, "image_url", "") or "").strip(),
+        }
+        key = (sale["sold_date"], sale["price"], sale["title"])
+        if key in seen:
+            continue
+        seen.add(key)
+        sales.append(sale)
+        if len(sales) >= 50:
+            break
+    return sales
+
+
+def alt_sales_history_url(query: str) -> str:
+    params = urlencode({"query": query, "tab": "sold"})
+    return f"{ALT_BROWSE_URL}?{params}"
+
+
+def build_130point_cli_query(item: InventoryItem) -> str:
+    try:
+        from scripts import point130_cli
+    except Exception:
+        return _slab_query(item)
+    return point130_cli.build_slab_query(
+        _card_ladder_cli_base_query(item),
+        grader=(item.grading_company or "").strip().upper(),
+        grade=str(item.grade or "").strip(),
+        cert=str(item.cert_number or "").strip(),
+    )
+
+
+def point130_cli_status() -> dict[str, Any]:
+    try:
+        from scripts import point130_cli
+    except Exception as exc:
+        return {"available": False, "error": str(exc)}
+    cache_db = point130_cli.default_cache_path()
+    return {
+        "available": True,
+        "cache_db": str(cache_db),
+        "cache_exists": cache_db.exists(),
+    }
+
+
+def _fetch_130point_cli_cache(
+    item: InventoryItem,
+    *,
+    query: str = "",
+    cache_path: str | Path | None = None,
+    limit: int = 20,
+) -> Optional[dict[str, Any]]:
+    try:
+        from scripts import point130_cli
+    except Exception as exc:
+        logger.debug("[pricing] point130_cli unavailable: %s", exc)
+        return None
+
+    cache_db = Path(cache_path) if cache_path else point130_cli.default_cache_path()
+    if not cache_db.exists():
+        return None
+    resolved_query = query or build_130point_cli_query(item)
+    try:
+        records = point130_cli.load_cached_records(
+            cache_db,
+            query=resolved_query,
+            limit=limit,
+        )
+        if not records:
+            records = point130_cli.load_cached_records(
+                cache_db,
+                text=_card_ladder_cli_base_query(item),
+                grader=(item.grading_company or "").strip().upper(),
+                grade=str(item.grade or "").strip(),
+                limit=limit,
+            )
+    except Exception as exc:
+        logger.debug("[pricing] point130_cli cache read failed for %s: %s", resolved_query, exc)
+        return None
+    return _result_from_comp_records(
+        resolved_query,
+        records,
+        source="130point",
+        source_detail="130point_cli_cache",
+        sales_history_url=point130_sales_history_url(resolved_query),
+        cache_db=str(cache_db),
+    )
+
+
+def point130_sales_history_url(query: str) -> str:
+    try:
+        from scripts import point130_cli
+        return point130_cli.sales_search_url(query)
+    except Exception:
+        params = urlencode({"q": query})
+        return f"{POINT130_SEARCH_URL}?{params}"
+
+
+def _result_from_comp_records(
+    query: str,
+    records: list[Any],
+    *,
+    source: str,
+    source_detail: str,
+    sales_history_url: str,
+    cache_db: str = "",
+) -> Optional[dict[str, Any]]:
+    sales = _sales_from_comp_records(records)
+    if not sales:
+        return None
+    prices = [float(sale["price"]) for sale in sales if _safe_float(sale.get("price")) is not None]
+    suggested = _suggest_price_from_sales(sales)
+    if suggested is None:
+        return None
+    for sale in sales:
+        sale.setdefault("source", source)
+        sale.setdefault("sources", [source])
+        sale.setdefault("source_details", [source_detail])
+    raw: dict[str, Any] = {
+        "query": query,
+        "sales_history_url": sales_history_url,
+        "source_detail": source_detail,
+        "sample_count": len(prices),
+        "sales": sales[:20],
+    }
+    if cache_db:
+        raw["cache_db"] = cache_db
+    return {
+        "source": source,
+        "market_price": suggested,
+        "low_price": round(min(prices), 2) if prices else None,
+        "high_price": round(max(prices), 2) if prices else None,
+        "raw": raw,
+    }
+
+
 async def sync_card_ladder_cli_for_item(
     item: InventoryItem,
     *,
@@ -560,35 +852,62 @@ def _sliding_text_chunks(lines: list[str]) -> list[str]:
 async def fetch_slab_price(
     item: InventoryItem,
     client: httpx.AsyncClient,
+    *,
+    source_filter: str = "all",
 ) -> Optional[dict[str, Any]]:
     """
-    Try slab pricing sources in order: Card Ladder -> 130point -> Alt.
-    Returns the first successful result, or None if all fail.
+    Collect slab comps from every available source and dedupe overlapping solds.
     """
-    cli_query = build_card_ladder_cli_query(item)
-    result = _fetch_card_ladder_cli_cache(item, query=cli_query)
-    if result:
-        return result
+    selected_source = normalize_slab_price_source(source_filter)
+    results: list[dict[str, Any]] = []
 
-    card_ladder_query = build_card_ladder_slab_query(item)
-    result = await _fetch_card_ladder_price(item, client, card_ladder_query)
-    if result:
-        return result
+    if _wants_slab_source(selected_source, "card_ladder"):
+        cli_query = build_card_ladder_cli_query(item)
+        result = _fetch_card_ladder_cli_cache(item, query=cli_query)
+        if result:
+            results.append(result)
+
+        if not result or selected_source == "all":
+            card_ladder_query = build_card_ladder_slab_query(item)
+            result = await _fetch_card_ladder_price(item, client, card_ladder_query)
+            if result:
+                results.append(result)
 
     query = _slab_query(item)
-    result = await _fetch_130point_price(item, client, query)
-    if result:
-        return result
+    if _wants_slab_source(selected_source, "alt"):
+        result = await _fetch_alt_price(item, client, query)
+        if result:
+            results.append(result)
 
-    result = await _fetch_alt_price(item, client, query)
-    if result:
-        return result
+    if _wants_slab_source(selected_source, "130point"):
+        result = await _fetch_130point_price(item, client, query)
+        if result:
+            results.append(result)
 
-    result = await _fetch_pricecharting_price(item, client, query)
-    if result:
-        return result
+    if _wants_slab_source(selected_source, "myslabs"):
+        result = await _fetch_myslabs_price(item, client, query)
+        if result:
+            results.append(result)
 
-    return None
+    if _wants_slab_source(selected_source, "pricecharting"):
+        result = await _fetch_pricecharting_price(item, client, query)
+        if result:
+            results.append(result)
+
+    if selected_source != "all":
+        return results[0] if results else None
+
+    return combine_slab_price_results(item, results)
+
+
+def normalize_slab_price_source(source: Any) -> str:
+    cleaned = str(source or "").strip().lower().replace("-", "_")
+    normalized = SLAB_PRICE_SOURCE_ALIASES.get(cleaned, cleaned)
+    return normalized if normalized in SLAB_PRICE_SOURCE_OPTIONS else "all"
+
+
+def _wants_slab_source(selected_source: str, source: str) -> bool:
+    return selected_source == "all" or selected_source == source
 
 
 async def _fetch_130point_price(
@@ -602,31 +921,26 @@ async def _fetch_130point_price(
     The endpoint returns a JSON array of recent sales. We compute median price
     from the top results. Update URL/params if the site structure changes.
     """
+    point_query = build_130point_cli_query(item)
+    cached = _fetch_130point_cli_cache(item, query=point_query)
+    if cached:
+        return cached
+
     try:
-        params = {"q": query, "output": "json"}
-        resp = await client.get(POINT130_SEARCH_URL, params=params, timeout=15.0,
-                                headers={"User-Agent": "DegenCollectibles/1.0"})
-        if resp.status_code != 200:
-            return None
-        data = resp.json()
-        # Expected: list of sale records with "price" or "sale_price" field
-        sales = data if isinstance(data, list) else (data.get("results") or data.get("sales") or [])
-        prices = [_safe_float(s.get("price") or s.get("sale_price")) for s in sales[:20]]
-        prices = [p for p in prices if p is not None and p > 0]
-        if not prices:
-            return None
-        prices_sorted = sorted(prices)
-        mid = len(prices_sorted) // 2
-        median = prices_sorted[mid]
-        return {
-            "source": "130point",
-            "market_price": round(median, 2),
-            "low_price": round(min(prices_sorted), 2),
-            "high_price": round(max(prices_sorted), 2),
-            "raw": {"query": query, "sample_count": len(prices_sorted)},
-        }
+        from scripts import point130_cli
+
+        records = await asyncio.to_thread(point130_cli.fetch_records, point_query, limit=20)
+        if records:
+            await asyncio.to_thread(point130_cli.cache_records, point130_cli.default_cache_path(), point_query, records)
+        return _result_from_comp_records(
+            point_query,
+            records,
+            source="130point",
+            source_detail="130point_live",
+            sales_history_url=point130_sales_history_url(point_query),
+        )
     except Exception as exc:
-        logger.debug("[pricing] 130point failed for %s: %s", query, exc)
+        logger.debug("[pricing] 130point failed for %s: %s", point_query or query, exc)
         return None
 
 
@@ -635,32 +949,125 @@ async def _fetch_alt_price(
     client: httpx.AsyncClient,
     query: str,
 ) -> Optional[dict[str, Any]]:
-    """Alt.gg graded card marketplace pricing."""
+    """ALT sold-listing search using the same web-app Typesense service."""
+    alt_query = build_alt_cli_query(item)
+    cached = _fetch_alt_cli_cache(item, query=alt_query)
+    if cached:
+        return cached
+
     try:
-        params = {"q": query}
-        resp = await client.get(ALT_SEARCH_URL, params=params, timeout=15.0,
-                                headers={"User-Agent": "DegenCollectibles/1.0"})
+        return await sync_alt_cli_for_item(item, limit=20)
+    except Exception as exc:
+        logger.debug("[pricing] alt failed for %s: %s", alt_query or query, exc)
+        return None
+
+
+async def _fetch_myslabs_price(
+    item: InventoryItem,
+    client: httpx.AsyncClient,
+    query: str,
+) -> Optional[dict[str, Any]]:
+    """MySlabs public sold archive for slabbed card sales."""
+    myslabs_query = build_myslabs_query(item)
+    try:
+        resp = await client.get(
+            MYSLABS_ARCHIVE_SEARCH_URL,
+            params={"publish_type": "0", "q": myslabs_query, "o": "created_desc"},
+            timeout=20.0,
+            follow_redirects=True,
+            headers={
+                "Accept": "text/html,application/xhtml+xml",
+                "User-Agent": "Mozilla/5.0 (compatible; DegenCollectibles/1.0)",
+            },
+        )
         if resp.status_code != 200:
             return None
-        data = resp.json()
-        listings = data if isinstance(data, list) else (data.get("results") or data.get("listings") or [])
-        prices = [_safe_float(s.get("price") or s.get("list_price")) for s in listings[:20]]
-        prices = [p for p in prices if p is not None and p > 0]
-        if not prices:
+        sales = _myslabs_sales_from_html(resp.text, limit=20)
+        if not sales:
             return None
-        prices_sorted = sorted(prices)
-        mid = len(prices_sorted) // 2
-        median = prices_sorted[mid]
+        prices = [float(sale["price"]) for sale in sales if _safe_float(sale.get("price")) is not None]
+        suggested = _suggest_price_from_sales(sales)
+        if suggested is None:
+            return None
         return {
-            "source": "alt",
-            "market_price": round(median, 2),
-            "low_price": round(min(prices_sorted), 2),
-            "high_price": round(max(prices_sorted), 2),
-            "raw": {"query": query, "sample_count": len(prices_sorted)},
+            "source": "myslabs",
+            "market_price": suggested,
+            "low_price": round(min(prices), 2) if prices else None,
+            "high_price": round(max(prices), 2) if prices else None,
+            "raw": {
+                "query": myslabs_query,
+                "sales_history_url": str(resp.url),
+                "source_detail": "myslabs_archive",
+                "sample_count": len(prices),
+                "sales": sales[:20],
+            },
         }
     except Exception as exc:
-        logger.debug("[pricing] alt failed for %s: %s", query, exc)
+        logger.debug("[pricing] myslabs failed for %s: %s", myslabs_query or query, exc)
         return None
+
+
+def build_myslabs_query(item: InventoryItem) -> str:
+    card_number = str(item.card_number or "").strip()
+    if "/" in card_number:
+        card_number = card_number.split("/", 1)[0].strip()
+    parts = [
+        item.card_name or "",
+        item.set_name or "",
+        card_number,
+        item.grading_company or "",
+        item.grade or "",
+    ]
+    return " ".join(str(part).strip() for part in parts if str(part or "").strip())
+
+
+def _myslabs_sales_from_html(text: str, *, limit: int = 20) -> list[dict[str, Any]]:
+    sales: list[dict[str, Any]] = []
+    for block in re.split(r'(?=<div class="slab_item\b)', text or "")[1:]:
+        end = block.find('<script type="application/ld+json"')
+        if end != -1:
+            block = block[:end]
+        title_m = re.search(r'<div class="slab-title">\s*(.*?)\s*</div>', block, flags=re.IGNORECASE | re.DOTALL)
+        price_m = re.search(r'<div class="item-price">\s*\$([^<]+)', block, flags=re.IGNORECASE | re.DOTALL)
+        date_m = re.search(r'<small class="[^"]*">\s*([^<]+?)\s*</small>', block, flags=re.IGNORECASE | re.DOTALL)
+        href_m = re.search(r'<a href="([^"]+)"', block, flags=re.IGNORECASE)
+        image_m = re.search(r'(?:data-src|src)="([^"]+)"', block, flags=re.IGNORECASE)
+        if not title_m or not price_m or not date_m:
+            continue
+        price = _safe_float(price_m.group(1))
+        if price is None:
+            continue
+        title = html_lib.unescape(re.sub(r"<[^>]+>", " ", title_m.group(1)))
+        title = re.sub(r"\s+", " ", title).strip()
+        sold_date = _myslabs_sale_date(date_m.group(1))
+        url = urljoin("https://myslabs.com", html_lib.unescape(href_m.group(1)).strip()) if href_m else ""
+        image_url = html_lib.unescape(image_m.group(1)).strip() if image_m else ""
+        sales.append(
+            {
+                "title": title,
+                "price": round(price, 2),
+                "sold_date": sold_date,
+                "platform": "MySlabs",
+                "sale_type": "",
+                "url": url,
+                "image_url": image_url,
+                "sources": ["myslabs"],
+                "source_details": ["myslabs_archive"],
+            }
+        )
+        if len(sales) >= limit:
+            break
+    return sales
+
+
+def _myslabs_sale_date(value: Any) -> str:
+    raw = html_lib.unescape(str(value or "")).strip()
+    for fmt in ("%b %d, %Y", "%B %d, %Y"):
+        try:
+            return datetime.strptime(raw, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return _normalize_sale_date(raw)
 
 
 async def _fetch_pricecharting_price(
@@ -699,6 +1106,7 @@ async def _fetch_pricecharting_price(
             "raw": {
                 "query": query,
                 "product_url": str(resp.url),
+                "source_detail": "pricecharting",
                 "sample_count": len(prices),
                 "sales": sales[:20],
             },
@@ -1014,9 +1422,37 @@ def _normalize_sale_date(value: Any) -> str:
     return raw
 
 
+def _sale_date(value: Any) -> Optional[date]:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    raw = str(value or "").strip()
+    iso_match = re.match(r"^(\d{4}-\d{2}-\d{2})", raw)
+    if iso_match:
+        try:
+            return date.fromisoformat(iso_match.group(1))
+        except ValueError:
+            return None
+    for fmt in ("%m/%d/%Y", "%m/%d/%y"):
+        try:
+            return datetime.strptime(raw, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
 def _suggest_price_from_sales(sales: list[dict[str, Any]]) -> Optional[float]:
     if not sales:
         return None
+    for sale in sales:
+        latest_price = _safe_float(sale.get("price"))
+        if latest_price is None:
+            continue
+        latest_date = _sale_date(sale.get("sold_date") or sale.get("date"))
+        if latest_date and (utcnow().date() - latest_date).days > STALE_SLAB_COMP_DAYS:
+            return round(latest_price, 2)
+        break
     weighted: list[float] = []
     for index, sale in enumerate(sales[:5]):
         price = _safe_float(sale.get("price"))
@@ -1030,6 +1466,172 @@ def _suggest_price_from_sales(sales: list[dict[str, Any]]) -> Optional[float]:
     if len(weighted) % 2 == 0:
         return round((weighted[mid - 1] + weighted[mid]) / 2, 2)
     return round(weighted[mid], 2)
+
+
+def combine_slab_price_results(
+    item: InventoryItem,
+    results: list[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+    usable = [result for result in results if isinstance(result, dict)]
+    if not usable:
+        return None
+
+    all_sales: list[dict[str, Any]] = []
+    source_results: list[dict[str, Any]] = []
+    source_urls: dict[str, str] = {}
+    for result in usable:
+        source = str(result.get("source") or "unknown")
+        raw = result.get("raw") if isinstance(result.get("raw"), dict) else {}
+        source_detail = str(raw.get("source_detail") or source)
+        source_results.append(
+            {
+                "source": source,
+                "source_detail": source_detail,
+                "market_price": result.get("market_price"),
+                "sample_count": raw.get("sample_count"),
+                "query": raw.get("query"),
+            }
+        )
+        url = str(raw.get("sales_history_url") or raw.get("product_url") or "")
+        if url:
+            source_urls[source] = url
+        for sale in _sales_from_price_result(result):
+            sale_sources = _clean_sources(sale.get("sources")) or [source]
+            if source not in sale_sources:
+                sale_sources.append(source)
+            details = _clean_sources(sale.get("source_details")) or [source_detail]
+            if source_detail not in details:
+                details.append(source_detail)
+            sale["sources"] = sale_sources
+            sale["source_details"] = details
+            sale["source"] = "+".join(sale_sources)
+            all_sales.append(sale)
+
+    merged_sales = _dedupe_slab_sales(all_sales)
+    if not merged_sales:
+        return None
+    prices = [float(sale["price"]) for sale in merged_sales if _safe_float(sale.get("price")) is not None]
+    suggested = _suggest_price_from_sales(merged_sales)
+    if suggested is None:
+        return None
+    sources = sorted({source for sale in merged_sales for source in _clean_sources(sale.get("sources"))})
+    return {
+        "source": "slab_comps",
+        "market_price": suggested,
+        "low_price": round(min(prices), 2) if prices else None,
+        "high_price": round(max(prices), 2) if prices else None,
+        "raw": {
+            "query": build_alt_cli_query(item),
+            "source_detail": "multi_source_comps",
+            "sources": sources,
+            "source_urls": source_urls,
+            "source_results": source_results,
+            "sales_history_url": next(iter(source_urls.values()), ""),
+            "sample_count": len(prices),
+            "sales": merged_sales[:30],
+        },
+    }
+
+
+def _sales_from_price_result(result: dict[str, Any]) -> list[dict[str, Any]]:
+    source = str(result.get("source") or "")
+    raw = result.get("raw") if isinstance(result.get("raw"), dict) else {}
+    sales = raw.get("sales")
+    if not isinstance(sales, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for sale in sales:
+        if not isinstance(sale, dict):
+            continue
+        price = _safe_float(sale.get("price"))
+        if price is None:
+            continue
+        copied = dict(sale)
+        copied["price"] = round(price, 2)
+        copied["sold_date"] = _normalize_sale_date(copied.get("sold_date") or copied.get("date"))
+        copied.setdefault("source", source)
+        copied.setdefault("sources", [source] if source else [])
+        out.append(copied)
+    return out
+
+
+def _clean_sources(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(source).strip() for source in value if str(source or "").strip()]
+    if isinstance(value, str) and value.strip():
+        return [part.strip() for part in value.split("+") if part.strip()]
+    return []
+
+
+def _dedupe_slab_sales(sales: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[tuple[str, ...], dict[str, Any]] = {}
+    order: list[tuple[str, ...]] = []
+    for sale in sales:
+        key = _slab_sale_dedupe_key(sale)
+        if key not in merged:
+            merged[key] = dict(sale)
+            merged[key]["sources"] = _clean_sources(sale.get("sources"))
+            merged[key]["source_details"] = _clean_sources(sale.get("source_details"))
+            order.append(key)
+            continue
+        current = merged[key]
+        current["sources"] = sorted(set(_clean_sources(current.get("sources")) + _clean_sources(sale.get("sources"))))
+        current["source_details"] = sorted(
+            set(_clean_sources(current.get("source_details")) + _clean_sources(sale.get("source_details")))
+        )
+        current["source"] = "+".join(current["sources"])
+        if not current.get("url") and sale.get("url"):
+            current["url"] = sale.get("url")
+        if not current.get("image_url") and sale.get("image_url"):
+            current["image_url"] = sale.get("image_url")
+        if len(str(sale.get("title") or "")) > len(str(current.get("title") or "")):
+            current["title"] = sale.get("title")
+    rows = [merged[key] for key in order]
+    rows.sort(key=_slab_sale_sort_key, reverse=True)
+    for row in rows:
+        row["sources"] = sorted(set(_clean_sources(row.get("sources"))))
+        row["source_details"] = sorted(set(_clean_sources(row.get("source_details"))))
+        row["source"] = "+".join(row["sources"])
+    return rows
+
+
+def _slab_sale_dedupe_key(sale: dict[str, Any]) -> tuple[str, ...]:
+    url_key = _normalized_listing_url(sale.get("url"))
+    if url_key:
+        return ("url", url_key)
+    date = str(sale.get("sold_date") or sale.get("date") or "").strip().lower()
+    price = _safe_float(sale.get("price"))
+    price_key = f"{price:.2f}" if price is not None else ""
+    title_key = _normalized_sale_title(sale.get("title"))
+    platform = str(sale.get("platform") or "").strip().lower()
+    return ("listing", date, price_key, platform, title_key)
+
+
+def _normalized_listing_url(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    ebay = re.search(r"(?:itm/|item=)(\d{9,15})", raw, flags=re.IGNORECASE)
+    if ebay:
+        return f"ebay:{ebay.group(1)}"
+    cleaned = re.sub(r"[?#].*$", "", raw.lower())
+    cleaned = cleaned.replace("https://", "").replace("http://", "").replace("www.", "")
+    return cleaned.rstrip("/")
+
+
+def _normalized_sale_title(value: Any) -> str:
+    text = html_lib.unescape(str(value or "").lower())
+    text = text.replace("opens in a new window or tab", " ")
+    text = re.sub(r"\bnew listing\b", " ", text)
+    tokens = re.findall(r"[a-z0-9]+", text)
+    return " ".join(tokens[:14])
+
+
+def _slab_sale_sort_key(sale: dict[str, Any]) -> tuple[str, float]:
+    date = str(sale.get("sold_date") or sale.get("date") or "")
+    iso = re.match(r"^(\d{4}-\d{2}-\d{2})", date)
+    date_key = iso.group(1) if iso else date
+    return (date_key, float(_safe_float(sale.get("price")) or 0.0))
 
 
 # ---------------------------------------------------------------------------

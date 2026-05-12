@@ -1035,7 +1035,16 @@ GAMES: list[str] = [
     "Other",
 ]
 CONDITIONS: list[str] = ["NM", "LP", "MP", "HP", "DMG"]
-PRICE_SOURCES: list[str] = ["scrydex", "130point", "alt", "card_ladder", "manual"]
+PRICE_SOURCES: list[str] = [
+    "scrydex",
+    "130point",
+    "alt",
+    "card_ladder",
+    "myslabs",
+    "pricecharting",
+    "slab_comps",
+    "manual",
+]
 
 
 class InventoryItem(SQLModel, table=True):

@@ -38,7 +38,7 @@ def record_inventory_price_result(
     item.updated_at = utcnow()
 
     alert_event = "none"
-    if settings.inventory_slab_resticker_alert_enabled and source == "card_ladder":
+    if settings.inventory_slab_resticker_alert_enabled and source in {"card_ladder", "slab_comps"}:
         alert_event = apply_slab_resticker_alert(
             item,
             suggested_price=market_price,
@@ -83,9 +83,9 @@ def notify_slab_resticker_alert(
     try:
         target = item.resticker_alert_price
         reference = item.resticker_reference_price
-        body = item.resticker_alert_reason or "Card Ladder moved above the current sticker price."
+        body = item.resticker_alert_reason or "Slab comps moved above the current sticker price."
         if target is not None and reference is not None:
-            body = f"Sticker ${reference:,.2f} -> Card Ladder ${target:,.2f}. Update the slab label."
+            body = f"Sticker ${reference:,.2f} -> slab comps ${target:,.2f}. Update the slab label."
         notify_active_employees(
             session,
             actor_user_id=actor_user_id,
