@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import time
 from copy import deepcopy
@@ -31,13 +32,16 @@ from .team import _nav_context
 from .team_admin import _admin_denied_response, _permission_gate, _set_team_admin_state
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 BUYLIST_CONFIG_KEY = "staff_buylist_config"
-BUYLIST_SEARCH_RESULT_LIMIT = 6
+BUYLIST_SEARCH_RESULT_LIMIT = 12
 BUYLIST_SEARCH_CACHE_TTL_SECONDS = 300
 BUYLIST_SEARCH_CACHE_MAX = 128
 BUYLIST_SEARCH_MIN_CHARS = 2
+BUYLIST_SEARCH_MAX_CHARS = 500
+BUYLIST_ALL_GAMES_VALUE = "__all__"
 BUYLIST_PRODUCT_TYPE_CARD = "card"
 BUYLIST_PRODUCT_TYPE_SEALED = "sealed"
 BUYLIST_PRODUCT_TYPES = {BUYLIST_PRODUCT_TYPE_CARD, BUYLIST_PRODUCT_TYPE_SEALED}
@@ -45,8 +49,10 @@ CONDITION_PRICING_PERCENTAGE = "percentage_modifiers"
 CONDITION_PRICING_TCGPLAYER = "tcgplayer_market"
 CONDITION_PRICING_MODES = {CONDITION_PRICING_PERCENTAGE, CONDITION_PRICING_TCGPLAYER}
 BUYLIST_SUBMISSION_STATUSES = ("submitted", "approved", "paid", "rejected")
+NO_MARKET_PRICE_NOTE = "No market price found. Manager review required."
 
 _BUYLIST_SEARCH_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+BUYLIST_SEARCH_CACHE_VERSION = "buylist-search-v4"
 
 BUYLIST_GAMES: tuple[dict[str, str], ...] = (
     {"game": "Pokemon", "label": "Pokemon", "category_id": "3"},
@@ -65,7 +71,7 @@ DEFAULT_BUYLIST_CONFIG: dict[str, Any] = {
     "enabled_games": ["Pokemon", "Pokemon JP", "Magic", "Yu-Gi-Oh", "One Piece", "Lorcana", "Riftbound"],
     "default_game": "Pokemon",
     "default_payment": "cash",
-    "condition_pricing_mode": CONDITION_PRICING_PERCENTAGE,
+    "condition_pricing_mode": CONDITION_PRICING_TCGPLAYER,
     "cash_ranges": [
         {"min": 0.0, "max": 0.49, "type": "fixed", "value": 0.01},
         {"min": 0.5, "max": 0.99, "type": "fixed", "value": 0.10},
@@ -167,6 +173,10 @@ def get_buylist_config(session: Session) -> dict[str, Any]:
     config["enabled_games"] = [
         game for game in config.get("enabled_games", []) if game.lower() in _GAME_BY_NAME
     ] or list(DEFAULT_BUYLIST_CONFIG["enabled_games"])
+    if str(config.get("default_game") or "").lower() not in _GAME_BY_NAME:
+        config["default_game"] = "Pokemon"
+    if config["default_game"] not in config["enabled_games"]:
+        config["default_game"] = config["enabled_games"][0]
     if config.get("condition_pricing_mode") not in CONDITION_PRICING_MODES:
         config["condition_pricing_mode"] = DEFAULT_BUYLIST_CONFIG["condition_pricing_mode"]
     return config
@@ -196,7 +206,10 @@ def _buylist_search_cache_key(
 ) -> str:
     normalized = re.sub(r"\s+", " ", query.strip().lower())
     product_type = _normalize_product_type(product_type)
-    return f"{product_type}:{category_id}:{normalized}:{_buylist_config_fingerprint(config)}"
+    return (
+        f"{BUYLIST_SEARCH_CACHE_VERSION}:{product_type}:{category_id}:"
+        f"{normalized}:{_buylist_config_fingerprint(config)}"
+    )
 
 
 def _buylist_search_cache_get(key: str) -> Optional[dict[str, Any]]:
@@ -229,6 +242,30 @@ def _enabled_game_options(config: dict[str, Any]) -> list[dict[str, str]]:
     return [row for row in BUYLIST_GAMES if row["game"].lower() in enabled]
 
 
+def _default_buylist_game(config: dict[str, Any]) -> str:
+    enabled = _enabled_game_options(config)
+    configured = str(config.get("default_game") or "Pokemon").strip()
+    if _is_all_games(configured):
+        configured = "Pokemon"
+    row = _GAME_BY_NAME.get(configured.lower())
+    if row and any(row["game"] == option["game"] for option in enabled):
+        return row["game"]
+    pokemon = _GAME_BY_NAME["pokemon"]
+    if any(pokemon["game"] == option["game"] for option in enabled):
+        return pokemon["game"]
+    return (enabled[0] if enabled else pokemon)["game"]
+
+
+def _is_all_games(value: str | None) -> bool:
+    normalized = (value or "").strip().lower()
+    return normalized in {
+        BUYLIST_ALL_GAMES_VALUE,
+        "all",
+        "all games",
+        "all-games",
+    }
+
+
 def _normalize_product_type(value: str | None) -> str:
     normalized = (value or BUYLIST_PRODUCT_TYPE_CARD).strip().lower()
     return normalized if normalized in BUYLIST_PRODUCT_TYPES else BUYLIST_PRODUCT_TYPE_CARD
@@ -236,8 +273,10 @@ def _normalize_product_type(value: str | None) -> str:
 
 def _category_for_game(game: str | None, config: dict[str, Any]) -> str:
     enabled = _enabled_game_options(config)
-    default_game = str(config.get("default_game") or enabled[0]["game"] if enabled else "Pokemon")
+    default_game = _default_buylist_game(config)
     selected = (game or default_game or "Pokemon").strip().lower()
+    if _is_all_games(selected):
+        selected = default_game.lower()
     row = _GAME_BY_NAME.get(selected)
     if row and any(row["game"] == option["game"] for option in enabled):
         return row["category_id"]
@@ -390,12 +429,7 @@ def _condition_market_prices_for_variant(
     variants: list[dict[str, Any]],
     selected_variant: str,
 ) -> dict[str, float]:
-    selected = (selected_variant or "").strip()
-    variant = None
-    if selected:
-        variant = next((row for row in variants if isinstance(row, dict) and _variant_matches(row, selected)), None)
-    if variant is None:
-        variant = next((row for row in variants if isinstance(row, dict)), None)
+    variant = _select_variant([row for row in variants if isinstance(row, dict)], selected_variant)
     if not variant:
         return {}
     conditions = variant.get("conditions") or {}
@@ -411,12 +445,7 @@ def _condition_price_metrics_for_variant(
     variants: list[dict[str, Any]],
     selected_variant: str,
 ) -> dict[str, dict[str, Any]]:
-    selected = (selected_variant or "").strip()
-    variant = None
-    if selected:
-        variant = next((row for row in variants if isinstance(row, dict) and _variant_matches(row, selected)), None)
-    if variant is None:
-        variant = next((row for row in variants if isinstance(row, dict)), None)
+    variant = _select_variant([row for row in variants if isinstance(row, dict)], selected_variant)
     if not variant:
         return {}
     conditions = variant.get("conditions") or {}
@@ -453,8 +482,8 @@ def _condition_market_price_from_item(
 
 
 def _condition_pricing_mode(config: dict[str, Any]) -> str:
-    mode = str(config.get("condition_pricing_mode") or CONDITION_PRICING_PERCENTAGE).strip().lower()
-    return mode if mode in CONDITION_PRICING_MODES else CONDITION_PRICING_PERCENTAGE
+    mode = str(config.get("condition_pricing_mode") or CONDITION_PRICING_TCGPLAYER).strip().lower()
+    return mode if mode in CONDITION_PRICING_MODES else CONDITION_PRICING_TCGPLAYER
 
 
 def _pattern_matches(pattern: str, product: dict[str, Any]) -> bool:
@@ -527,6 +556,9 @@ def calculate_buylist_offer(
     language_mod = 100.0 if is_sealed else _modifier_percent(config, "language_modifiers", language)
     printing_mod = 100.0 if is_sealed else _modifier_percent(config, "printing_modifiers", printing)
     list_multiplier, list_notes, blocked = _list_adjustment(config, product)
+    missing_market_price = effective_market_price <= 0
+    if missing_market_price:
+        blocked = True
     total_multiplier = (condition_mod / 100.0) * (language_mod / 100.0) * (printing_mod / 100.0) * list_multiplier
 
     cash = 0.0 if blocked else base_cash * total_multiplier
@@ -549,6 +581,8 @@ def calculate_buylist_offer(
         f"{printing} {printing_mod:g}%",
         *list_notes,
     ]
+    if missing_market_price:
+        notes.append(NO_MARKET_PRICE_NOTE)
     if blocked:
         notes.append("Not buying")
 
@@ -567,19 +601,32 @@ def calculate_buylist_offer(
     }
 
 
-def _variant_price(candidate: dict[str, Any], selected_variant: str | None = None) -> tuple[float, str]:
-    variants = candidate.get("available_variants") or []
-    selected = (selected_variant or candidate.get("variant") or "").strip()
+def _select_variant(
+    variants: list[dict[str, Any]],
+    selected_variant: str | None = None,
+) -> dict[str, Any] | None:
+    selected = (selected_variant or "").strip()
     if selected:
         for variant in variants:
             if str(variant.get("name") or "").strip().lower() == selected.lower():
-                price = variant.get("price")
-                if price is not None:
-                    return _float(price), str(variant.get("name") or selected)
+                return variant
     for variant in variants:
+        if str(variant.get("name") or "").strip().lower() == "normal":
+            return variant
+    for variant in variants:
+        if variant.get("price") is not None:
+            return variant
+    return variants[0] if variants else None
+
+
+def _variant_price(candidate: dict[str, Any], selected_variant: str | None = None) -> tuple[float, str]:
+    variants = [row for row in (candidate.get("available_variants") or []) if isinstance(row, dict)]
+    selected = (selected_variant or candidate.get("variant") or "").strip()
+    variant = _select_variant(variants, selected)
+    if variant:
         price = variant.get("price")
         if price is not None:
-            return _float(price), str(variant.get("name") or "Market")
+            return _float(price), str(variant.get("name") or selected or "Market")
     return _float(candidate.get("market_price")), selected or "Normal"
 
 
@@ -667,6 +714,38 @@ async def _search_buylist_sealed_products(
     from ..inventory import _cached_add_stock_sealed_search
 
     return await _cached_add_stock_sealed_search(query, game=game, limit=limit)
+
+
+def _dedupe_key(payload: dict[str, Any]) -> str:
+    display_name = str(payload.get("name") or "").strip().lower()
+    display_set = str(payload.get("set_name") or "").strip().lower()
+    display_number = str(payload.get("number") or "").strip().lower()
+    display_number_core = display_number.split("/", 1)[0].lstrip("0") or display_number
+    display_game = str(payload.get("game") or "").strip().lower()
+    if display_name and display_set and display_number_core:
+        return f"display:{display_game}:{display_name}:{display_set}:{display_number_core}"
+    for key in ("tcgplayer_product_id", "product_id", "id", "external_id"):
+        value = str(payload.get(key) or "").strip().lower()
+        if value:
+            return f"{key}:{value}"
+    return "|".join(
+        str(payload.get(key) or "").strip().lower()
+        for key in ("game", "name", "set_name", "number", "upc")
+    )
+
+
+def _dedupe_payloads(payloads: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    for payload in payloads:
+        key = _dedupe_key(payload)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(payload)
+        if len(deduped) >= limit:
+            break
+    return deduped
 
 
 def _sealed_product_payload(
@@ -786,10 +865,11 @@ def _rules_to_text(rules: list[dict[str, Any]]) -> str:
     )
 
 
-def _json_loads(value: str, fallback: Any) -> Any:
+def _json_loads(value: str, fallback: Any, *, label: str = "buylist_json") -> Any:
     try:
         parsed = json.loads(value or "")
     except (TypeError, json.JSONDecodeError):
+        logger.warning("Invalid %s; using fallback.", label, exc_info=True)
         return deepcopy(fallback)
     return parsed if parsed is not None else deepcopy(fallback)
 
@@ -824,10 +904,26 @@ def _submission_to_view(row: BuylistSubmission, submitter: Optional[User]) -> di
     return {
         "row": row,
         "submitter": submitter,
-        "totals": _json_loads(row.totals_json, {}),
-        "lines": _json_loads(row.lines_json, []),
-        "inventory_result": _json_loads(row.inventory_result_json, {}),
+        "totals": _json_loads(row.totals_json, {}, label=f"buylist_submission.{row.id}.totals_json"),
+        "lines": _json_loads(row.lines_json, [], label=f"buylist_submission.{row.id}.lines_json"),
+        "inventory_result": _json_loads(
+            row.inventory_result_json,
+            {},
+            label=f"buylist_submission.{row.id}.inventory_result_json",
+        ),
     }
+
+
+def _buylist_submission_status_counts(session: Session) -> tuple[dict[str, int], int]:
+    counts = {status_key: 0 for status_key in BUYLIST_SUBMISSION_STATUSES}
+    unknown_count = 0
+    for raw_status in session.exec(select(BuylistSubmission.status)).all():
+        status_key = str(raw_status or "").strip()
+        if status_key in counts:
+            counts[status_key] += 1
+        else:
+            unknown_count += 1
+    return counts, unknown_count
 
 
 def _receive_submission_inventory(
@@ -842,7 +938,11 @@ def _receive_submission_inventory(
     payment_view = (submission.payment_view or "cash").strip().lower()
     if payment_view not in {"cash", "trade"}:
         payment_view = "cash"
-    lines = _json_loads(submission.lines_json, [])
+    lines = _json_loads(
+        submission.lines_json,
+        [],
+        label=f"buylist_submission.{submission.id}.lines_json",
+    )
     if not isinstance(lines, list) or not lines:
         raise ValueError("Submission has no line items.")
 
@@ -900,6 +1000,10 @@ def _receive_submission_inventory(
                 actor_label=actor_label,
             )
             language = str(line.get("language") or "").strip()
+            if not language:
+                language = "Japanese" if str(line.get("game") or "").strip() == "Pokemon JP" else "English"
+            if language not in LANGUAGE_OPTIONS:
+                language = "Other"
             if language and item.language != language:
                 item.language = language
                 session.add(item)
@@ -927,6 +1031,7 @@ def staff_buylist_page(request: Request, session: Session = Depends(get_session)
     if denial:
         return denial
     config = get_buylist_config(session)
+    can_manage_buylist_pricing = bool(user and has_permission(session, user, "admin.supply.view"))
     return templates.TemplateResponse(
         request,
         "team/buylist.html",
@@ -937,9 +1042,11 @@ def staff_buylist_page(request: Request, session: Session = Depends(get_session)
             "current_user": user,
             "config": config,
             "game_options": _enabled_game_options(config),
+            "search_default_game": _default_buylist_game(config),
             "condition_options": CONDITION_OPTIONS,
             "language_options": LANGUAGE_OPTIONS,
             "csrf_token": issue_token(request),
+            "can_manage_buylist_pricing": can_manage_buylist_pricing,
             **_nav_context(session, user),
         },
     )
@@ -968,7 +1075,17 @@ async def staff_buylist_search(
                 "message": f"Type at least {BUYLIST_SEARCH_MIN_CHARS} characters.",
             }
         )
-    category_id = _category_for_game(game, config)
+    if len(query) > BUYLIST_SEARCH_MAX_CHARS:
+        return JSONResponse(
+            {
+                "ok": False,
+                "cards": [],
+                "error": f"Search is too long. Keep it under {BUYLIST_SEARCH_MAX_CHARS} characters.",
+            },
+            status_code=400,
+        )
+    selected_game = _default_buylist_game(config) if _is_all_games(game) else (game or _default_buylist_game(config))
+    category_id = _category_for_game(selected_game, config)
     product_type = _normalize_product_type(product_type)
     cache_key = _buylist_search_cache_key(
         query,
@@ -992,6 +1109,8 @@ async def staff_buylist_search(
             for product in raw_products
             if isinstance(product, dict)
         ]
+        if cards:
+            warning = ""
         payload = {
             "ok": True,
             "status": "MATCHED" if cards else "NO_MATCH",
@@ -1012,22 +1131,29 @@ async def staff_buylist_search(
         use_ai_parse=False,
         max_results=BUYLIST_SEARCH_RESULT_LIMIT,
         include_pokemontcg_supplement=False,
+        allow_cross_category_pricing=False,
+        allow_pokemontcg_price_fallback=False,
     )
-    raw_cards = result.get("candidates") or []
+    raw_cards = result.get("candidates") or [] if isinstance(result, dict) else []
     cards = [
         _candidate_payload(card, config, category_id=category_id)
         for card in raw_cards
         if isinstance(card, dict)
     ]
+    cards = _dedupe_payloads(cards, limit=BUYLIST_SEARCH_RESULT_LIMIT)
+    warning = result.get("error") if isinstance(result, dict) else None
+    processing_time_ms = result.get("processing_time_ms") if isinstance(result, dict) else None
+    status = result.get("status") if isinstance(result, dict) else None
+    game_name = _game_for_category(category_id)
     payload = {
         "ok": True,
-        "status": result.get("status"),
+        "status": status,
         "product_type": product_type,
-        "game": _game_for_category(category_id),
+        "game": game_name,
         "category_id": category_id,
         "cards": cards,
-        "error": result.get("error"),
-        "processing_time_ms": result.get("processing_time_ms"),
+        "error": warning,
+        "processing_time_ms": processing_time_ms,
         "cached": False,
     }
     _buylist_search_cache_set(cache_key, payload)
@@ -1181,6 +1307,17 @@ async def staff_buylist_save(request: Request, session: Session = Depends(get_se
     quote_payload = json.loads(quote_response.body.decode("utf-8"))
     if not quote_payload.get("ok"):
         return quote_response
+    blocked_lines = [
+        line for line in quote_payload.get("lines") or [] if isinstance(line, dict) and line.get("blocked")
+    ]
+    if blocked_lines:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "Remove manager-review items before saving this quote.",
+            },
+            status_code=400,
+        )
 
     details = {
         "customer_name": str(body.get("customer_name") or "").strip()[:200],
@@ -1253,9 +1390,7 @@ def admin_buylist_submissions_page(
             row.id: row
             for row in session.exec(select(User).where(User.id.in_(submitter_ids))).all()
         }
-    counts = {status_key: 0 for status_key in BUYLIST_SUBMISSION_STATUSES}
-    for status_key in session.exec(select(BuylistSubmission.status)).all():
-        counts[status_key] = counts.get(status_key, 0) + 1
+    counts, unknown_status_count = _buylist_submission_status_counts(session)
 
     return templates.TemplateResponse(
         request,
@@ -1272,6 +1407,7 @@ def admin_buylist_submissions_page(
             "filter_status": filter_status,
             "statuses": BUYLIST_SUBMISSION_STATUSES,
             "counts": counts,
+            "unknown_status_count": unknown_status_count,
             "flash": flash,
             "csrf_token": issue_token(request),
         },
@@ -1453,7 +1589,7 @@ async def staff_buylist_admin_save(
     enabled_games: list[str] = Form(default=[]),
     default_game: str = Form(default="Pokemon"),
     default_payment: str = Form(default="cash"),
-    condition_pricing_mode: str = Form(default=CONDITION_PRICING_PERCENTAGE),
+    condition_pricing_mode: str = Form(default=CONDITION_PRICING_TCGPLAYER),
     checkout_note: str = Form(default=""),
     hotlist_rules: str = Form(default=""),
     darklist_rules: str = Form(default=""),
@@ -1471,9 +1607,9 @@ async def staff_buylist_admin_save(
     default_payment = (default_payment or "cash").strip().lower()
     if default_payment not in {"cash", "trade"}:
         default_payment = "cash"
-    condition_pricing_mode = (condition_pricing_mode or CONDITION_PRICING_PERCENTAGE).strip().lower()
+    condition_pricing_mode = (condition_pricing_mode or CONDITION_PRICING_TCGPLAYER).strip().lower()
     if condition_pricing_mode not in CONDITION_PRICING_MODES:
-        condition_pricing_mode = CONDITION_PRICING_PERCENTAGE
+        condition_pricing_mode = CONDITION_PRICING_TCGPLAYER
 
     config = get_buylist_config(session)
     config.update(
