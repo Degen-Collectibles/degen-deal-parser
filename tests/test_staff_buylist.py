@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from app.routers import team_buylist
+from app.routers import team_admin, team_buylist
 from app.routers.team_buylist import DEFAULT_BUYLIST_CONFIG, calculate_buylist_offer
 from app.models import BuylistSubmission, InventoryItem, User
 
@@ -142,6 +142,39 @@ def test_staff_buylist_card_payload_includes_tcgplayer_listing_metrics():
     assert payload["market_price"] == 339.46
 
 
+def test_staff_buylist_payload_prefers_normal_when_tcgtracking_returns_foil_first():
+    config = deepcopy(DEFAULT_BUYLIST_CONFIG)
+    candidate = {
+        "id": "magic-630917",
+        "name": "Summon Bahamut",
+        "set_name": "FINAL FANTASY",
+        "number": "1",
+        "available_variants": [
+            {
+                "name": "Foil",
+                "price": 22.89,
+                "conditions": {"NM": {"mkt": 22.81, "low": 19.67, "cnt": 25}},
+            },
+            {
+                "name": "Normal",
+                "price": 19.62,
+                "conditions": {
+                    "NM": {"mkt": 19.12, "low": 13.99, "cnt": 25},
+                    "LP": {"mkt": 17.96, "low": 16.54, "cnt": 25},
+                },
+            },
+        ],
+    }
+
+    payload = team_buylist._candidate_payload(candidate, config, category_id="1")
+
+    assert payload["variant"] == "Normal"
+    assert payload["base_market_price"] == 19.62
+    assert payload["market_price"] == 19.12
+    assert payload["condition_market_prices"]["LP"] == 17.96
+    assert "NM TCGPlayer market" in payload["pricing_notes"]
+
+
 def test_staff_buylist_tcgplayer_mode_falls_back_to_modifier_table():
     config = deepcopy(DEFAULT_BUYLIST_CONFIG)
     config["condition_pricing_mode"] = team_buylist.CONDITION_PRICING_TCGPLAYER
@@ -160,6 +193,33 @@ def test_staff_buylist_tcgplayer_mode_falls_back_to_modifier_table():
     assert offer["trade_offer"] == 63.75
     assert offer["condition_price_source"] == "modifier_fallback"
     assert "LP modifier fallback 85%" in offer["notes"]
+
+
+def test_staff_buylist_blocks_missing_market_price():
+    config = deepcopy(DEFAULT_BUYLIST_CONFIG)
+
+    offer = calculate_buylist_offer(
+        config,
+        market_price=0.0,
+        condition="NM",
+        language="English",
+        printing="Normal",
+        product={"name": "Unpriced Card"},
+    )
+
+    assert offer["blocked"] is True
+    assert offer["cash_offer"] == 0.0
+    assert offer["trade_offer"] == 0.0
+    assert team_buylist.NO_MARKET_PRICE_NOTE in offer["notes"]
+    assert "Not buying" in offer["notes"]
+
+
+def test_staff_buylist_json_loads_logs_corrupt_payload(caplog):
+    with caplog.at_level("WARNING", logger="app.routers.team_buylist"):
+        parsed = team_buylist._json_loads("{bad-json", [], label="buylist_submission.99.lines_json")
+
+    assert parsed == []
+    assert "Invalid buylist_submission.99.lines_json" in caplog.text
 
 
 def test_tcgplayer_sales_payload_normalizes_snapshot_and_latest_solds():
@@ -325,6 +385,90 @@ def test_staff_buylist_search_uses_fast_options_and_cache(monkeypatch):
     assert calls[0][0] == "test card"
     assert calls[0][1]["max_results"] == team_buylist.BUYLIST_SEARCH_RESULT_LIMIT
     assert calls[0][1]["include_pokemontcg_supplement"] is False
+    assert calls[0][1]["allow_cross_category_pricing"] is False
+    assert calls[0][1]["allow_pokemontcg_price_fallback"] is False
+
+
+def test_staff_buylist_search_rejects_overlong_query(monkeypatch):
+    async def fake_text_search_cards(query, **kwargs):  # pragma: no cover - should not be called
+        raise AssertionError("search should not run for overlong queries")
+
+    monkeypatch.setattr(team_buylist, "_require_team_user", lambda request, session: (None, SimpleNamespace(id=1)))
+    monkeypatch.setattr(team_buylist, "get_buylist_config", lambda session: deepcopy(DEFAULT_BUYLIST_CONFIG))
+    monkeypatch.setattr(team_buylist, "text_search_cards", fake_text_search_cards)
+
+    response = asyncio.run(
+        team_buylist.staff_buylist_search(
+            SimpleNamespace(),
+            q="x" * (team_buylist.BUYLIST_SEARCH_MAX_CHARS + 1),
+            game="Pokemon",
+            product_type="card",
+            session=None,
+        )
+    )
+    body = json.loads(response.body.decode("utf-8"))
+
+    assert response.status_code == 400
+    assert body["ok"] is False
+    assert "Search is too long" in body["error"]
+
+
+def test_staff_buylist_search_all_games_value_uses_configured_default(monkeypatch):
+    calls = []
+
+    async def fake_text_search_cards(query, **kwargs):
+        calls.append((query, kwargs))
+        category_id = kwargs["category_id"]
+        candidates = []
+        if category_id == "3":
+            candidates = [
+                {
+                    "id": "pokemon-pikachu",
+                    "product_id": "pokemon-pikachu",
+                    "name": "Pikachu",
+                    "set_name": "151",
+                    "number": "025/165",
+                    "available_variants": [{"name": "Normal", "price": 2.0}],
+                }
+            ]
+        return {
+            "status": "MATCHED" if candidates else "NO_MATCH",
+            "processing_time_ms": 50,
+            "candidates": candidates,
+        }
+
+    monkeypatch.setattr(team_buylist, "_require_team_user", lambda request, session: (None, SimpleNamespace(id=1)))
+    monkeypatch.setattr(team_buylist, "get_buylist_config", lambda session: deepcopy(DEFAULT_BUYLIST_CONFIG))
+    monkeypatch.setattr(team_buylist, "text_search_cards", fake_text_search_cards)
+    team_buylist._BUYLIST_SEARCH_CACHE.clear()
+
+    response = asyncio.run(
+        team_buylist.staff_buylist_search(
+            SimpleNamespace(),
+            q="pikachu",
+            game=team_buylist.BUYLIST_ALL_GAMES_VALUE,
+            product_type="card",
+            session=None,
+        )
+    )
+    body = json.loads(response.body.decode("utf-8"))
+
+    assert body["game"] == "Pokemon"
+    assert body["category_id"] == "3"
+    assert body["cards"][0]["game"] == "Pokemon"
+    assert body["cards"][0]["name"] == "Pikachu"
+    assert [call[1]["category_id"] for call in calls] == ["3"]
+
+def test_staff_buylist_dedupes_same_card_with_short_and_full_numbers():
+    payloads = [
+        {"game": "Pokemon", "name": "Pikachu", "set_name": "151", "number": "025/165", "id": "tcgdex"},
+        {"game": "Pokemon", "name": "Pikachu", "set_name": "151", "number": "25", "id": "pokemontcg"},
+        {"game": "Pokemon", "name": "Pikachu", "set_name": "151", "number": "173", "id": "sir"},
+    ]
+
+    deduped = team_buylist._dedupe_payloads(payloads, limit=12)
+
+    assert [row["id"] for row in deduped] == ["tcgdex", "sir"]
 
 
 def test_staff_buylist_search_can_return_sealed_products(monkeypatch):
@@ -368,12 +512,13 @@ def test_staff_buylist_search_can_return_sealed_products(monkeypatch):
     assert calls == [("test booster box", {"game": "Pokemon", "limit": team_buylist.BUYLIST_SEARCH_RESULT_LIMIT})]
 
 
-def test_staff_buylist_save_creates_submission():
+def test_staff_buylist_save_creates_submission(monkeypatch):
     engine, session = _memory_session()
     try:
         user = _user(10, role="employee")
         session.add(user)
         session.commit()
+        monkeypatch.setattr(team_buylist, "_require_team_user", lambda request, sess: (None, user))
         request = FakeJsonRequest(
             {
                 "customer_name": "Ash",
@@ -410,6 +555,106 @@ def test_staff_buylist_save_creates_submission():
         assert row.customer_name == "Ash"
         assert json.loads(row.totals_json)["cash"] == 10.0
         assert lines[0]["unit_cash"] == 5.0
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_staff_buylist_save_rejects_manager_review_lines(monkeypatch):
+    engine, session = _memory_session()
+    try:
+        user = _user(11, role="employee")
+        session.add(user)
+        session.commit()
+        monkeypatch.setattr(team_buylist, "_require_team_user", lambda request, sess: (None, user))
+        request = FakeJsonRequest(
+            {
+                "customer_name": "Brock",
+                "payment_view": "cash",
+                "items": [
+                    {
+                        "id": "card-zero",
+                        "item_type": "card",
+                        "game": "Magic",
+                        "name": "Unpriced Card",
+                        "set_name": "Test Set",
+                        "number": "1",
+                        "variant": "Normal",
+                        "condition": "NM",
+                        "language": "English",
+                        "market_price": 0.0,
+                        "base_market_price": 0.0,
+                        "quantity": 1,
+                    }
+                ],
+            },
+            user,
+        )
+
+        response = asyncio.run(team_buylist.staff_buylist_save(request, session=session))
+        body = json.loads(response.body.decode("utf-8"))
+
+        assert response.status_code == 400
+        assert body["ok"] is False
+        assert "manager-review" in body["error"]
+        assert session.exec(select(BuylistSubmission)).all() == []
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_staff_buylist_status_counts_surface_unknown_statuses():
+    engine, session = _memory_session()
+    try:
+        session.add(
+            BuylistSubmission(
+                submitted_by_user_id=1,
+                customer_name="Known",
+                status="submitted",
+                totals_json="{}",
+                lines_json="[]",
+            )
+        )
+        session.add(
+            BuylistSubmission(
+                submitted_by_user_id=1,
+                customer_name="Odd",
+                status="stuck",
+                totals_json="{}",
+                lines_json="[]",
+            )
+        )
+        session.commit()
+
+        counts, unknown_count = team_buylist._buylist_submission_status_counts(session)
+
+        assert counts["submitted"] == 1
+        assert "stuck" not in counts
+        assert unknown_count == 1
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_staff_buylist_admin_denies_employee_role(monkeypatch):
+    engine, session = _memory_session()
+    try:
+        employee = _user(12, role="employee")
+        session.add(employee)
+        session.commit()
+        request = SimpleNamespace(
+            state=SimpleNamespace(current_user=employee),
+            client=SimpleNamespace(host="127.0.0.1"),
+        )
+        monkeypatch.setattr(
+            team_admin,
+            "get_settings",
+            lambda: SimpleNamespace(employee_portal_enabled=True),
+        )
+
+        response = team_buylist.admin_buylist_submissions_page(request, session=session)
+
+        assert response.status_code == 403
     finally:
         session.close()
         engine.dispose()
@@ -474,6 +719,124 @@ def test_staff_buylist_approval_receives_inventory(monkeypatch):
         assert item.cost_basis == 5.0
         assert item.location == "Case A"
         assert result["items"][0]["inventory_item_id"] == item.id
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_staff_buylist_approval_defaults_missing_jp_language(monkeypatch):
+    engine, session = _memory_session()
+    try:
+        actor = _user(30, role="admin")
+        submitter = _user(31, role="employee")
+        session.add(actor)
+        session.add(submitter)
+        session.add(
+            BuylistSubmission(
+                submitted_by_user_id=submitter.id,
+                customer_name="Erika",
+                payment_view="cash",
+                status="submitted",
+                totals_json=json.dumps({"cash": 5.0, "trade": 6.0, "quantity": 1, "items": 1}),
+                lines_json=json.dumps(
+                    [
+                        {
+                            "id": "jp-card-1",
+                            "item_type": "card",
+                            "game": "Pokemon JP",
+                            "name": "Gengar VMAX",
+                            "set_name": "Gengar VMAX High-Class Deck",
+                            "number": "002/019",
+                            "variant": "Holofoil",
+                            "condition": "NM",
+                            "market_price": 10.0,
+                            "base_market_price": 10.0,
+                            "unit_cash": 5.0,
+                            "unit_trade": 6.0,
+                            "quantity": 1,
+                        }
+                    ],
+                    sort_keys=True,
+                ),
+            )
+        )
+        session.commit()
+        submission = session.exec(select(BuylistSubmission)).one()
+        monkeypatch.setattr(team_buylist, "_permission_gate", lambda request, sess, key: (None, actor))
+
+        asyncio.run(
+            team_buylist.admin_buylist_submission_approve(
+                FakeJsonRequest({}, actor),
+                submission_id=submission.id,
+                location="Case JP",
+                session=session,
+            )
+        )
+        item = session.exec(select(InventoryItem).where(InventoryItem.card_name == "Gengar VMAX")).one()
+
+        assert item.language == "Japanese"
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_staff_buylist_reject_and_mark_paid_flows(monkeypatch):
+    engine, session = _memory_session()
+    try:
+        actor = _user(40, role="admin")
+        submitter = _user(41, role="employee")
+        session.add(actor)
+        session.add(submitter)
+        session.add(
+            BuylistSubmission(
+                submitted_by_user_id=submitter.id,
+                customer_name="Reject Me",
+                payment_view="cash",
+                status="submitted",
+                totals_json="{}",
+                lines_json="[]",
+            )
+        )
+        session.add(
+            BuylistSubmission(
+                submitted_by_user_id=submitter.id,
+                customer_name="Pay Me",
+                payment_view="cash",
+                status="approved",
+                totals_json="{}",
+                lines_json="[]",
+            )
+        )
+        session.commit()
+        rows = session.exec(select(BuylistSubmission).order_by(BuylistSubmission.id)).all()
+        reject_row, pay_row = rows
+        monkeypatch.setattr(team_buylist, "_permission_gate", lambda request, sess, key: (None, actor))
+
+        reject_response = asyncio.run(
+            team_buylist.admin_buylist_submission_reject(
+                FakeJsonRequest({}, actor),
+                submission_id=reject_row.id,
+                decision_notes="Customer passed",
+                session=session,
+            )
+        )
+        paid_response = asyncio.run(
+            team_buylist.admin_buylist_submission_mark_paid(
+                FakeJsonRequest({}, actor),
+                submission_id=pay_row.id,
+                session=session,
+            )
+        )
+        session.refresh(reject_row)
+        session.refresh(pay_row)
+
+        assert reject_response.status_code == 303
+        assert paid_response.status_code == 303
+        assert reject_row.status == "rejected"
+        assert reject_row.rejected_by_user_id == actor.id
+        assert reject_row.decision_notes == "Customer passed"
+        assert pay_row.status == "paid"
+        assert pay_row.paid_by_user_id == actor.id
     finally:
         session.close()
         engine.dispose()
