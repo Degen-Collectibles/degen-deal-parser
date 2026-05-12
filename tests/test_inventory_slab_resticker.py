@@ -1,9 +1,12 @@
+from datetime import datetime, timezone
 import shutil
+import asyncio
 import uuid
 from pathlib import Path
 
 from sqlmodel import Session, SQLModel, create_engine, select
 
+from app import inventory_pricing
 from app.inventory import (
     _receive_slab_stock,
     _slab_comps_lookup_payload,
@@ -12,17 +15,24 @@ from app.inventory import (
 )
 from app.inventory_price_updates import record_inventory_price_result
 from app.inventory_pricing import (
+    _alt_result_from_records,
     _card_ladder_result_from_payload,
     _fetch_card_ladder_cli_cache,
+    _myslabs_sales_from_html,
     _pricecharting_product_url,
     _pricecharting_sales_from_html,
     apply_slab_resticker_alert,
     build_card_ladder_cli_query,
     build_card_ladder_slab_query,
+    build_myslabs_query,
     clear_slab_resticker_alert,
+    combine_slab_price_results,
+    fetch_slab_price,
     import_card_ladder_cli_records_for_item,
+    normalize_slab_price_source,
 )
 from app.models import InventoryItem, ITEM_TYPE_SLAB, PriceHistory
+from scripts import alt_cli
 from scripts import cardladder_cli
 
 
@@ -189,6 +199,261 @@ def test_card_ladder_manual_import_writes_cli_cache(tmp_path):
     assert result["raw"]["source_detail"] == "card_ladder_manual_import"
     assert result["raw"]["imported_count"] == 1
     assert cache_db.exists()
+
+
+def test_alt_records_drive_price_result():
+    result = _alt_result_from_records(
+        "Umbreon VMAX Evolving Skies 215/203 PSA 10",
+        [
+            alt_cli.AltCompRecord(
+                title="Umbreon VMAX 215/203 PSA 10",
+                price=4550.0,
+                sold_date="2026-05-09",
+                platform="eBay",
+            ),
+            alt_cli.AltCompRecord(
+                title="Umbreon VMAX 215/203 PSA 10",
+                price=4500.0,
+                sold_date="2026-05-07",
+                platform="eBay",
+            ),
+        ],
+        source_detail="alt_typesense_live",
+    )
+
+    assert result is not None
+    assert result["source"] == "alt"
+    assert result["market_price"] == 4550.0
+    assert result["raw"]["source_detail"] == "alt_typesense_live"
+    assert result["raw"]["sample_count"] == 2
+    assert result["raw"]["sales"][0]["platform"] == "eBay"
+
+
+def test_multi_source_comps_dedupe_same_listing_and_tag_sources():
+    item = InventoryItem(
+        barcode="PREVIEW",
+        item_type=ITEM_TYPE_SLAB,
+        game="Pokemon",
+        card_name="Umbreon VMAX",
+        set_name="Evolving Skies",
+        card_number="215/203",
+        grading_company="PSA",
+        grade="10",
+    )
+
+    result = combine_slab_price_results(
+        item,
+        [
+            {
+                "source": "alt",
+                "market_price": 4550.0,
+                "raw": {
+                    "source_detail": "alt_typesense_live",
+                    "sales": [
+                        {
+                            "sold_date": "2026-05-09",
+                            "price": 4550.0,
+                            "title": "Umbreon VMAX PSA 10",
+                            "platform": "eBay",
+                            "url": "https://www.ebay.com/itm/287293825532",
+                        }
+                    ],
+                },
+            },
+            {
+                "source": "130point",
+                "market_price": 4550.0,
+                "raw": {
+                    "source_detail": "130point_cli_cache",
+                    "sales": [
+                        {
+                            "sold_date": "2026-05-09",
+                            "price": 4550.0,
+                            "title": "Umbreon VMAX 215/203 Evolving Skies PSA 10",
+                            "platform": "eBay",
+                            "url": "https://www.ebay.com/itm/287293825532?hash=test",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+
+    assert result is not None
+    assert result["source"] == "slab_comps"
+    assert result["market_price"] == 4550.0
+    assert result["raw"]["sample_count"] == 1
+    assert result["raw"]["sources"] == ["130point", "alt"]
+    sale = result["raw"]["sales"][0]
+    assert sale["sources"] == ["130point", "alt"]
+    assert sale["source"] == "130point+alt"
+
+
+def test_stale_slab_comps_use_latest_sale_instead_of_weighted_median(monkeypatch):
+    monkeypatch.setattr(
+        inventory_pricing,
+        "utcnow",
+        lambda: datetime(2026, 5, 11, tzinfo=timezone.utc),
+    )
+    item = InventoryItem(
+        barcode="PREVIEW",
+        item_type=ITEM_TYPE_SLAB,
+        game="Pokemon",
+        card_name="Umbreon VMAX",
+        set_name="Evolving Skies",
+        card_number="215/203",
+        grading_company="PSA",
+        grade="10",
+    )
+
+    result = combine_slab_price_results(
+        item,
+        [
+            {
+                "source": "alt",
+                "market_price": 500.0,
+                "raw": {
+                    "source_detail": "alt_typesense_live",
+                    "sales": [
+                        {
+                            "sold_date": "2026-03-25",
+                            "price": 100.0,
+                            "title": "Umbreon VMAX PSA 10 latest stale sale",
+                            "platform": "eBay",
+                            "url": "https://www.ebay.com/itm/100000000001",
+                        },
+                        {
+                            "sold_date": "2026-03-10",
+                            "price": 500.0,
+                            "title": "Umbreon VMAX PSA 10 older sale",
+                            "platform": "eBay",
+                            "url": "https://www.ebay.com/itm/100000000002",
+                        },
+                        {
+                            "sold_date": "2026-03-01",
+                            "price": 600.0,
+                            "title": "Umbreon VMAX PSA 10 oldest sale",
+                            "platform": "eBay",
+                            "url": "https://www.ebay.com/itm/100000000003",
+                        },
+                    ],
+                },
+            }
+        ],
+    )
+
+    assert result is not None
+    assert result["market_price"] == 100.0
+
+
+def test_myslabs_archive_parser_normalizes_sold_rows():
+    html = """
+    <div class="slab_item">
+        <a href="/slab/view/1452981/"><img class="lazy"
+            data-src="https://cdn.myslabs.com/card.png?width=360&amp;height=610"
+            alt="2021 Pokemon Evolving Skies Umbreon VMAX 215 PSA 10" /></a>
+        <a href="/slab/view/1452981/" class="text-decoration-none">
+            <div class="slab-title">
+                2021 Pokemon Evolving Skies Umbreon VMAX 215 PSA 10
+            </div>
+        </a>
+        <div class="slab-details">
+            <div class="item-price">
+                $2,222<i></i>
+            </div>
+            <small class="">
+                Jan 6, 2025
+            </small>
+        </div>
+    </div>
+    <script type="application/ld+json">{}</script>
+    """
+
+    sales = _myslabs_sales_from_html(html)
+
+    assert sales == [
+        {
+            "title": "2021 Pokemon Evolving Skies Umbreon VMAX 215 PSA 10",
+            "price": 2222.0,
+            "sold_date": "2025-01-06",
+            "platform": "MySlabs",
+            "sale_type": "",
+            "url": "https://myslabs.com/slab/view/1452981/",
+            "image_url": "https://cdn.myslabs.com/card.png?width=360&height=610",
+            "sources": ["myslabs"],
+            "source_details": ["myslabs_archive"],
+        }
+    ]
+
+
+def test_build_myslabs_query_includes_slab_details():
+    item = InventoryItem(
+        barcode="PREVIEW",
+        item_type=ITEM_TYPE_SLAB,
+        game="Pokemon",
+        card_name="Umbreon VMAX",
+        set_name="Evolving Skies",
+        card_number="215/203",
+        grading_company="PSA",
+        grade="10",
+    )
+
+    assert build_myslabs_query(item) == "Umbreon VMAX Evolving Skies 215 PSA 10"
+
+
+def test_normalize_slab_price_source_aliases():
+    assert normalize_slab_price_source("price charting") == "pricecharting"
+    assert normalize_slab_price_source("cardladder") == "card_ladder"
+    assert normalize_slab_price_source("ALT") == "alt"
+    assert normalize_slab_price_source("unknown") == "all"
+
+
+def test_fetch_slab_price_can_limit_to_pricecharting(monkeypatch):
+    item = InventoryItem(
+        barcode="PREVIEW",
+        item_type=ITEM_TYPE_SLAB,
+        game="Pokemon",
+        card_name="Umbreon VMAX",
+        set_name="Evolving Skies",
+        card_number="215/203",
+        grading_company="PSA",
+        grade="10",
+    )
+    calls: list[str] = []
+
+    monkeypatch.setattr(inventory_pricing, "_fetch_card_ladder_cli_cache", lambda *args, **kwargs: None)
+
+    async def fake_source(name, result=None):
+        async def _inner(*args, **kwargs):
+            calls.append(name)
+            return result
+
+        return _inner
+
+    async def fake_pricecharting(*args, **kwargs):
+        calls.append("pricecharting")
+        return {
+            "source": "pricecharting",
+            "market_price": 123.0,
+            "raw": {
+                "source_detail": "pricecharting",
+                "sample_count": 1,
+                "sales": [{"sold_date": "2026-05-01", "price": 123.0, "title": "Umbreon VMAX PSA 10"}],
+            },
+        }
+
+    monkeypatch.setattr(inventory_pricing, "_fetch_card_ladder_price", asyncio.run(fake_source("card_ladder")))
+    monkeypatch.setattr(inventory_pricing, "_fetch_alt_price", asyncio.run(fake_source("alt")))
+    monkeypatch.setattr(inventory_pricing, "_fetch_130point_price", asyncio.run(fake_source("130point")))
+    monkeypatch.setattr(inventory_pricing, "_fetch_myslabs_price", asyncio.run(fake_source("myslabs")))
+    monkeypatch.setattr(inventory_pricing, "_fetch_pricecharting_price", fake_pricecharting)
+
+    result = asyncio.run(fetch_slab_price(item, object(), source_filter="pricecharting"))
+
+    assert result is not None
+    assert result["source"] == "pricecharting"
+    assert result["market_price"] == 123.0
+    assert calls == ["pricecharting"]
 
 
 def test_slab_grade_options_prioritizes_cert_grade():

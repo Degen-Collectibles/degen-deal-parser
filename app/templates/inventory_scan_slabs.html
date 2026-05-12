@@ -54,7 +54,7 @@
         input, select, textarea { width:100%; padding:11px 12px; border-radius:12px; border:1px solid var(--line); background:var(--lx-s1); color:var(--text); font:inherit; }
         textarea { min-height:42px; resize:vertical; }
         input:focus, select:focus, textarea:focus { outline:none; border-color:rgba(96,165,250,.8); box-shadow:0 0 0 3px rgba(96,165,250,.14); }
-        .search-form { display:grid; grid-template-columns:minmax(140px,190px) minmax(130px,170px) minmax(260px,1fr) auto auto; gap:10px; align-items:end; margin-top:16px; }
+        .search-form { display:grid; grid-template-columns:minmax(140px,170px) minmax(130px,160px) minmax(150px,210px) minmax(240px,1fr) auto auto; gap:10px; align-items:end; margin-top:16px; }
         .status { display:none; padding:12px 14px; border-radius:14px; margin-top:14px; font-size:13px; font-weight:800; }
         .status.loading { display:block; border:1px solid rgba(234,179,8,.38); background:var(--yellow-bg); color:#fef3c7; }
         .status.warning { display:block; border:1px solid rgba(234,179,8,.38); background:var(--yellow-bg); color:#fef3c7; }
@@ -81,22 +81,28 @@
         .manual-grid { display:grid; grid-template-columns:1.3fr 150px 1fr 110px 110px; gap:10px; align-items:end; margin-top:14px; }
         .selected-card { display:grid; grid-template-columns:86px 1fr; gap:14px; align-items:center; margin-bottom:14px; }
         .selected-card .thumb { width:86px; }
-        .grade-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(390px,1fr)); gap:12px; }
-        .grade-card { border:1px solid var(--line); border-radius:16px; background:var(--lx-s1); padding:14px; display:grid; gap:12px; }
-        .grade-top { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
+        .grade-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,520px),1fr)); gap:12px; }
+        .grade-card { border:1px solid var(--line); border-radius:16px; background:var(--lx-s1); padding:14px; display:grid; gap:12px; min-width:0; }
+        .grade-top { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:flex-start; gap:12px; min-width:0; }
+        .grade-main { display:flex; gap:12px; align-items:flex-start; min-width:0; }
+        .grade-info { min-width:0; }
+        .grade-info h3 { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
         .import-panel { display:none; border:1px solid var(--line); border-radius:14px; background:rgba(255,255,255,.03); padding:12px; gap:10px; }
         .import-panel.active { display:grid; }
         .import-panel textarea { min-height:120px; font-size:13px; text-transform:none; letter-spacing:0; }
         .grade-badge { width:58px; height:58px; border-radius:14px; background:linear-gradient(135deg,var(--accent),var(--accent-strong)); display:flex; flex-direction:column; align-items:center; justify-content:center; color:#fff; flex-shrink:0; }
         .grade-badge strong { font-size:20px; line-height:1; }
         .grade-badge span { font-size:10px; font-weight:900; opacity:.82; }
-        .price { text-align:right; }
+        .price { text-align:right; min-width:116px; justify-self:end; }
         .price strong { display:block; color:#fff; font-size:24px; letter-spacing:0; }
         .price span { display:block; color:var(--muted); font-size:12px; font-weight:800; margin-top:2px; }
-        .sales { width:100%; border-collapse:separate; border-spacing:0; }
+        .sales { width:100%; border-collapse:separate; border-spacing:0; table-layout:fixed; }
         .sales th, .sales td { padding:8px 7px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; font-size:12px; }
         .sales th { color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.08em; font-weight:800; background:transparent; }
         .sales tr:last-child td { border-bottom:none; }
+        .sales th:nth-child(1), .sales td:nth-child(1) { width:64px; }
+        .sales th:nth-child(2), .sales td:nth-child(2) { width:92px; }
+        .sales th:nth-child(3), .sales td:nth-child(3) { width:128px; }
         .sale-title { color:var(--muted); max-width:230px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
         .receive-grid { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; align-items:end; }
         .receive-grid .wide { grid-column:1 / -1; }
@@ -112,7 +118,7 @@
             .receive-grid { grid-template-columns:1fr; }
             .selected-card { grid-template-columns:58px 1fr; }
             .selected-card .thumb { width:58px; }
-            .grade-top { align-items:stretch; }
+            .grade-top { grid-template-columns:1fr; align-items:stretch; }
             .price { text-align:left; }
         }
     </style>
@@ -148,6 +154,13 @@
                 <select id="company-select">
                     {% for co in grading_companies %}
                     <option value="{{ co }}">{{ co }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label>Comp Source
+                <select id="source-select">
+                    {% for source in slab_price_sources %}
+                    <option value="{{ source.value }}" {% if source.value == "all" %}selected{% endif %}>{{ source.label }}</option>
                     {% endfor %}
                 </select>
             </label>
@@ -402,13 +415,14 @@
                     (card.set_name ? '<span class="chip blue">' + escHtml(card.set_name) + '</span>' : "") +
                     (card.card_number ? '<span class="chip">#' + escHtml(card.card_number) + '</span>' : "") +
                     '<span class="chip">' + escHtml(document.getElementById("company-select").value) + '</span>' +
+                    '<span class="chip good">' + escHtml(selectedSourceLabel()) + '</span>' +
                 '</div>' +
             '</div>';
     }
 
     async function fetchGradeComps(card, preferredGrade) {
         var company = document.getElementById("company-select").value;
-        setBusy(true, "Fetching Card Ladder comps by grade...");
+        setBusy(true, "Fetching " + selectedSourceLabel() + " comps by grade...");
         document.getElementById("grade-panel").style.display = "";
         document.getElementById("grade-grid").innerHTML = '<div class="empty"><span class="spinner"></span> Pulling last solds...</div>';
         try {
@@ -423,7 +437,8 @@
                     image_url: card.image_url || "",
                     grading_company: company,
                     grade: preferredGrade || "",
-                    cert_number: currentCert ? currentCert.cert_number || "" : ""
+                    cert_number: currentCert ? currentCert.cert_number || "" : "",
+                    price_source: selectedPriceSource()
                 })
             });
             var data = await resp.json();
@@ -457,9 +472,9 @@
             card.className = "grade-card";
             card.innerHTML =
                 '<div class="grade-top">' +
-                    '<div style="display:flex;gap:12px;align-items:flex-start;">' +
+                    '<div class="grade-main">' +
                         '<div class="grade-badge"><strong>' + escHtml(row.grade || "-") + '</strong><span>' + escHtml(row.grading_company || "") + '</span></div>' +
-                        '<div>' +
+                        '<div class="grade-info">' +
                             '<h3>' + escHtml((currentCard && (currentCard.name || currentCard.card_name)) || row.card_name || "") + '</h3>' +
                             '<div class="meta">' +
                                 (row.price_source ? '<span class="chip good">' + escHtml(sourceName(row.price_source)) + '</span>' : "") +
@@ -481,6 +496,9 @@
                 '<div style="display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap;">' +
                     '<span class="count">' + certLabelForGrade(row.grade) + '</span>' +
                     '<div style="display:flex;gap:8px;flex-wrap:wrap;">' +
+                        '<button class="secondary" type="button" data-source-refresh>Refresh Selected Source</button>' +
+                        '<button class="secondary" type="button" data-all-refresh>Refresh All Sources</button>' +
+                        '<button class="secondary" type="button" data-alt-refresh>Refresh ALT</button>' +
                         '<button class="secondary" type="button" data-refresh>Refresh Card Ladder</button>' +
                         '<button class="secondary" type="button" data-import-toggle>Import Solds</button>' +
                         '<button class="primary" type="button" data-add>Add ' + escHtml(row.grading_company || "") + ' ' + escHtml(row.grade || "") + ' Slab</button>' +
@@ -495,6 +513,15 @@
                 '</div>';
             card.querySelector("[data-refresh]").addEventListener("click", function () {
                 refreshCardLadder(index, card.querySelector("[data-refresh]"));
+            });
+            card.querySelector("[data-source-refresh]").addEventListener("click", function () {
+                refreshSelectedSource(index, card.querySelector("[data-source-refresh]"));
+            });
+            card.querySelector("[data-all-refresh]").addEventListener("click", function () {
+                refreshAllSources(index, card.querySelector("[data-all-refresh]"));
+            });
+            card.querySelector("[data-alt-refresh]").addEventListener("click", function () {
+                refreshAlt(index, card.querySelector("[data-alt-refresh]"));
             });
             card.querySelector("[data-import-toggle]").addEventListener("click", function () {
                 toggleImportPanel(index);
@@ -518,11 +545,20 @@
             return '<tr>' +
                 '<td>' + escHtml(sale.date || sale.sold_date || "") + '</td>' +
                 '<td><strong>' + (numeric(sale.price) != null ? money(numeric(sale.price)) : "-") + '</strong></td>' +
-                '<td>' + escHtml(sale.platform || sourceName(sale.source || "")) + '</td>' +
+                '<td>' + sourceTags(sale) + '</td>' +
                 '<td class="sale-title" title="' + escAttr(sale.title || "") + '">' + escHtml(sale.title || "") + '</td>' +
             '</tr>';
         }).join("");
         return '<table class="sales"><thead><tr><th>Date</th><th>Price</th><th>Source</th><th>Title</th></tr></thead><tbody>' + rows + '</tbody></table>';
+    }
+
+    function sourceTags(sale) {
+        var sources = Array.isArray(sale.sources) && sale.sources.length ? sale.sources : [sale.source || sale.platform || ""];
+        var tags = sources.filter(Boolean).map(function (source) {
+            return '<span class="chip" style="margin:0 4px 4px 0;">' + escHtml(sourceName(source)) + '</span>';
+        }).join("");
+        if (sale.platform) tags += '<span class="chip blue" style="margin:0 4px 4px 0;">' + escHtml(sale.platform) + '</span>';
+        return tags || "-";
     }
 
     function toggleImportPanel(index, force) {
@@ -571,6 +607,76 @@
             if (button && button.isConnected) {
                 button.disabled = false;
                 button.textContent = "Refresh Card Ladder";
+            }
+        }
+    }
+
+    async function refreshAlt(index, button) {
+        return refreshExternalComps(index, button, {
+            url: "/inventory/scan/slab-alt-refresh",
+            label: "ALT",
+            source: "alt",
+            loading: "Refreshing ALT sold comps..."
+        });
+    }
+
+    async function refreshSelectedSource(index, button) {
+        var source = selectedPriceSource();
+        return refreshExternalComps(index, button, {
+            url: "/inventory/scan/slab-comps",
+            label: selectedSourceLabel(),
+            source: source,
+            loading: "Refreshing " + selectedSourceLabel() + " slab comps...",
+            resetText: "Refresh Selected Source"
+        });
+    }
+
+    async function refreshAllSources(index, button) {
+        return refreshExternalComps(index, button, {
+            url: "/inventory/scan/slab-comps",
+            label: "All Sources",
+            source: "all",
+            loading: "Refreshing all slab comp sources..."
+        });
+    }
+
+    async function refreshExternalComps(index, button, options) {
+        var row = currentGradeComps[index];
+        if (!row || !currentCard) return;
+        var certNumber = "";
+        if (currentCert && gradesMatch(currentCert.grade, row.grade)) certNumber = currentCert.cert_number || "";
+        button.disabled = true;
+        button.innerHTML = '<span class="spinner"></span> Refreshing...';
+        showStatus(options.loading || "Refreshing comps...", "loading");
+        try {
+            var resp = await fetch(options.url, {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({
+                    card_name: currentCard.name || currentCard.card_name || row.card_name,
+                    game: currentCard.game || row.game || document.getElementById("game-select").value,
+                    set_name: currentCard.set_name || row.set_name || "",
+                    card_number: currentCard.card_number || row.card_number || "",
+                    grading_company: row.grading_company || document.getElementById("company-select").value,
+                    grade: row.grade || "",
+                    cert_number: certNumber,
+                    price_source: options.source || selectedPriceSource()
+                })
+            });
+            var data = await resp.json();
+            if (!resp.ok) {
+                showStatus(escHtml(data.error || (options.label + " refresh failed.")), "error");
+                return;
+            }
+            currentGradeComps[index] = Object.assign({}, row, data);
+            renderGradeComps(currentGradeComps);
+            showStatus(options.label + " comps refreshed for " + (row.grading_company || "") + " " + (row.grade || "") + ".", "success");
+        } catch (err) {
+            showStatus("Network error: " + escHtml(err.message), "error");
+        } finally {
+            if (button && button.isConnected) {
+                button.disabled = false;
+                button.textContent = options.resetText || ("Refresh " + options.label);
             }
         }
     }
@@ -786,13 +892,33 @@
         return Number.isFinite(num) ? "$" + num.toFixed(2) : "-";
     }
 
+    function selectedPriceSource() {
+        var field = document.getElementById("source-select");
+        return field ? field.value || "all" : "all";
+    }
+
+    function selectedSourceLabel() {
+        return sourceName(selectedPriceSource());
+    }
+
     function sourceName(source) {
+        if (source === "all") return "All Sources";
+        if (source === "slab_comps") return "Slab comps";
+        if (source === "pricecharting") return "PriceCharting";
+        if (source === "myslabs") return "MySlabs";
+        if (source === "alt") return "ALT";
         return String(source || "").replace(/_/g, " ").replace(/\b\w/g, function (m) { return m.toUpperCase(); });
     }
 
     function sourceDetailName(source) {
         if (source === "card_ladder_cli_cache") return "CLI cache";
         if (source === "card_ladder_manual_import") return "Manual import";
+        if (source === "alt_typesense_live") return "ALT live";
+        if (source === "alt_cli_cache") return "ALT cache";
+        if (source === "130point_live") return "130point live";
+        if (source === "130point_cli_cache") return "130point cache";
+        if (source === "myslabs_archive") return "MySlabs archive";
+        if (source === "multi_source_comps") return "Multi-source";
         return sourceName(source);
     }
 
