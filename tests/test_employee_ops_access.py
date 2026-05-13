@@ -23,7 +23,7 @@ import importlib
 import json
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from cryptography.fernet import Fernet
 from sqlalchemy.pool import StaticPool
@@ -515,6 +515,206 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         movements = self.session.exec(select(InventoryStockMovement)).all()
         self.assertEqual(len(movements), 2)
         self.assertEqual({row.reason for row in movements}, {"bulk_location"})
+
+    def test_inventory_list_surfaces_tcgplayer_market_gap_first(self):
+        self._login_as("manager", user_id=236, username="mgr36")
+        from app.models import InventoryItem
+
+        fine = InventoryItem(
+            barcode="DGN-PRICEOK",
+            item_type="sealed",
+            game="Pokemon",
+            card_name="Fine Box",
+            quantity=1,
+            list_price=101.0,
+            auto_price=100.0,
+        )
+        review = InventoryItem(
+            barcode="DGN-PRICEBAD",
+            item_type="sealed",
+            game="Pokemon",
+            card_name="Review Box",
+            quantity=1,
+            list_price=70.0,
+            auto_price=100.0,
+        )
+        self.session.add_all([fine, review])
+        self.session.commit()
+
+        page = self.client.get("/inventory", follow_redirects=False)
+
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("TCGPlayer Market", page.text)
+        self.assertIn("Review Prices", page.text)
+        self.assertIn("price-review-row", page.text)
+        self.assertLess(page.text.index("Review Box"), page.text.index("Fine Box"))
+        self.assertIn('action="/inventory/', page.text)
+        self.assertIn("priced below TCGPlayer market", page.text)
+
+    def test_inventory_price_review_ignores_prices_above_market(self):
+        self._login_as("manager", user_id=241, username="mgr41")
+        from app.models import InventoryItem
+
+        item = InventoryItem(
+            barcode="DGN-PRICEHIGH",
+            item_type="sealed",
+            game="Pokemon",
+            card_name="High Price Box",
+            quantity=1,
+            list_price=130.0,
+            auto_price=100.0,
+        )
+        self.session.add(item)
+        self.session.commit()
+
+        page = self.client.get("/inventory", follow_redirects=False)
+
+        self.assertEqual(page.status_code, 200)
+        self.assertNotIn("priced below TCGPlayer market", page.text)
+        self.assertNotIn("Review Prices", page.text)
+
+    def test_manager_can_bulk_reprice_inventory(self):
+        self._login_as("manager", user_id=237, username="mgr37")
+        from app.models import InventoryItem
+
+        item = InventoryItem(
+            barcode="DGN-REPRICE1",
+            item_type="sealed",
+            game="Pokemon",
+            card_name="Reprice Box",
+            quantity=1,
+            list_price=50.0,
+            auto_price=82.0,
+        )
+        self.session.add(item)
+        self.session.commit()
+        self.session.refresh(item)
+
+        page = self.client.get("/inventory", follow_redirects=False)
+        csrf = self._csrf_from_html(page.text)
+        response = self.client.post(
+            "/inventory/bulk-action",
+            headers={"X-CSRF-Token": csrf},
+            data={"bulk_action": "reprice", "item_id": [str(item.id)]},
+            follow_redirects=False,
+        )
+
+        self.assertEqual(response.status_code, 303)
+        self.assertIn("/inventory?repriced=1&price_errors=0", response.headers["location"])
+        self.session.expire_all()
+        refreshed = self.session.get(InventoryItem, item.id)
+        self.assertEqual(refreshed.list_price, 82.0)
+        self.assertEqual(refreshed.auto_price, 82.0)
+
+    def test_manager_can_bulk_reprice_inventory_above_market(self):
+        self._login_as("manager", user_id=238, username="mgr38")
+        from app.models import InventoryItem
+
+        item = InventoryItem(
+            barcode="DGN-REPRICE5",
+            item_type="sealed",
+            game="Pokemon",
+            card_name="Markup Box",
+            quantity=1,
+            list_price=50.0,
+            auto_price=100.0,
+        )
+        self.session.add(item)
+        self.session.commit()
+        self.session.refresh(item)
+
+        page = self.client.get("/inventory", follow_redirects=False)
+        csrf = self._csrf_from_html(page.text)
+        response = self.client.post(
+            "/inventory/bulk-action",
+            headers={"X-CSRF-Token": csrf},
+            data={"bulk_action": "reprice_5", "item_id": [str(item.id)]},
+            follow_redirects=False,
+        )
+
+        self.assertEqual(response.status_code, 303)
+        self.session.expire_all()
+        refreshed = self.session.get(InventoryItem, item.id)
+        self.assertEqual(refreshed.list_price, 105.0)
+
+    def test_manager_can_bulk_edit_inventory_qty_cost_and_price(self):
+        self._login_as("manager", user_id=239, username="mgr39")
+        from app.models import InventoryItem, InventoryStockMovement
+
+        item = InventoryItem(
+            barcode="DGN-BULKEDIT",
+            item_type="sealed",
+            game="Pokemon",
+            card_name="Bulk Edit Box",
+            quantity=2,
+            cost_basis=10.0,
+            list_price=20.0,
+        )
+        self.session.add(item)
+        self.session.commit()
+        self.session.refresh(item)
+
+        page = self.client.get("/inventory?edit=1", follow_redirects=False)
+        self.assertIn("Edit Mode", page.text)
+        self.assertIn(f'name="bulk_qty_{item.id}"', page.text)
+        self.assertIn(f'data-target-name="bulk_price_{item.id}"', page.text)
+        self.assertIn('type="button" data-market-fill="1"', page.text)
+        self.assertIn('data-markup-percent="5"', page.text)
+        self.assertIn('data-markup-percent="10"', page.text)
+        self.assertIn("Save Selected Edits", page.text)
+        csrf = self._csrf_from_html(page.text)
+        response = self.client.post(
+            "/inventory/bulk-action",
+            headers={"X-CSRF-Token": csrf},
+            data={
+                "bulk_action": "bulk_edit",
+                "item_id": [str(item.id)],
+                f"bulk_qty_{item.id}": "7",
+                f"bulk_cost_{item.id}": "12.34",
+                f"bulk_price_{item.id}": "29.99",
+            },
+            follow_redirects=False,
+        )
+
+        self.assertEqual(response.status_code, 303)
+        self.assertIn("/inventory?updated=1", response.headers["location"])
+        self.session.expire_all()
+        refreshed = self.session.get(InventoryItem, item.id)
+        self.assertEqual(refreshed.quantity, 7)
+        self.assertEqual(refreshed.cost_basis, 12.34)
+        self.assertEqual(refreshed.list_price, 29.99)
+        movement = self.session.exec(
+            select(InventoryStockMovement).where(InventoryStockMovement.item_id == item.id)
+        ).one()
+        self.assertEqual(movement.reason, "bulk_edit_qty")
+        self.assertEqual(movement.quantity_delta, 5)
+
+    def test_add_stock_existing_item_has_market_markup_buttons(self):
+        self._login_as("manager", user_id=240, username="mgr40")
+        from app.models import InventoryItem
+
+        item = InventoryItem(
+            barcode="DGN-ADDPRICE",
+            item_type="sealed",
+            game="Pokemon",
+            card_name="Existing Market Box",
+            quantity=3,
+            list_price=90.0,
+            auto_price=100.0,
+        )
+        self.session.add(item)
+        self.session.commit()
+
+        with patch("app.inventory._cached_add_stock_sealed_search", new=AsyncMock(return_value=([], ""))):
+            page = self.client.get(
+                "/inventory/add-stock?game=Pokemon&search_type=sealed&q=Existing+Market+Box",
+                follow_redirects=False,
+            )
+
+        self.assertEqual(page.status_code, 200)
+        self.assertIn('data-market-price="100.00"', page.text)
+        self.assertIn('data-price-percent="5"', page.text)
+        self.assertIn('data-price-percent="10"', page.text)
 
     def test_archived_item_hidden_from_default_inventory_list(self):
         self._login_as("admin", user_id=227, username="adm27")

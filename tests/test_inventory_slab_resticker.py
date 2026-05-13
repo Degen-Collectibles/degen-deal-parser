@@ -18,9 +18,11 @@ from app.inventory_pricing import (
     _alt_result_from_records,
     _card_ladder_result_from_payload,
     _fetch_card_ladder_cli_cache,
+    _filter_slab_price_result_for_item,
     _myslabs_sales_from_html,
     _pricecharting_product_url,
     _pricecharting_sales_from_html,
+    _ximilar_price_result_from_payload,
     apply_slab_resticker_alert,
     build_card_ladder_cli_query,
     build_card_ladder_slab_query,
@@ -31,7 +33,7 @@ from app.inventory_pricing import (
     import_card_ladder_cli_records_for_item,
     normalize_slab_price_source,
 )
-from app.models import InventoryItem, ITEM_TYPE_SLAB, PriceHistory
+from app.models import InventoryItem, ITEM_TYPE_SEALED, ITEM_TYPE_SINGLE, ITEM_TYPE_SLAB, PriceHistory
 from scripts import alt_cli
 from scripts import cardladder_cli
 
@@ -92,6 +94,94 @@ def test_slab_resticker_alert_flags_meaningful_card_ladder_move():
     clear_slab_resticker_alert(item, reason="resolved")
     assert item.resticker_alert_active is False
     assert item.resticker_resolved_at is not None
+
+
+class _FakeTcgResponse:
+    def __init__(self, status_code, payload):
+        self.status_code = status_code
+        self._payload = payload
+        self.text = str(payload)
+
+    def json(self):
+        return self._payload
+
+
+class _FakeTcgClient:
+    async def get(self, url, params=None, headers=None):
+        if url.endswith("/3/search"):
+            return _FakeTcgResponse(200, {"sets": [{"id": 10, "name": "Test Set"}]})
+        if url.endswith("/3/sets/10/pricing"):
+            return _FakeTcgResponse(
+                200,
+                {"prices": {"123": {"tcg": {"Normal": {"market": 44.5, "low": 39.0}}}}},
+            )
+        if url.endswith("/3/sets/10"):
+            return _FakeTcgResponse(
+                200,
+                {"products": [{"id": 123, "clean_name": "Test Booster Box", "tcgplayer_url": "https://www.tcgplayer.com/product/123"}]},
+            )
+        return _FakeTcgResponse(404, {})
+
+
+def test_fetch_price_for_item_prices_sealed_from_tcgtracking():
+    item = InventoryItem(
+        barcode="DGN-SEALED",
+        item_type=ITEM_TYPE_SEALED,
+        game="Pokemon",
+        card_name="Test Booster Box",
+        set_name="Test Set",
+    )
+
+    result = asyncio.run(inventory_pricing.fetch_price_for_item(item, _FakeTcgClient()))
+
+    assert result is not None
+    assert result["source"] == "tcgtracking"
+    assert result["market_price"] == 44.5
+    assert result["low_price"] == 39.0
+    assert result["raw"]["source_detail"] == "tcgtracking_sealed_search"
+
+
+def test_fetch_price_for_item_prices_single_from_tcgtracking(monkeypatch):
+    async def fake_text_search_cards(query, **kwargs):
+        assert query == "Test Card Test Set 001"
+        assert kwargs["category_id"] == "3"
+        return {
+            "status": "MATCHED",
+            "best_match": {
+                "name": "Test Card",
+                "available_variants": [
+                    {
+                        "name": "Normal",
+                        "price": 12.0,
+                        "conditions": {
+                            "NM": {"mkt": 12.0, "low": 9.0},
+                            "LP": {"mkt": 10.0, "low": 8.0},
+                        },
+                    }
+                ],
+            },
+            "candidates": [],
+        }
+
+    monkeypatch.setattr("app.pokemon_scanner.text_search_cards", fake_text_search_cards)
+    item = InventoryItem(
+        barcode="DGN-SINGLE",
+        item_type=ITEM_TYPE_SINGLE,
+        game="Pokemon",
+        card_name="Test Card",
+        set_name="Test Set",
+        card_number="001",
+        variant="Normal",
+        condition="LP",
+    )
+
+    result = asyncio.run(inventory_pricing.fetch_price_for_item(item, object()))
+
+    assert result is not None
+    assert result["source"] == "tcgtracking"
+    assert result["market_price"] == 10.0
+    assert result["low_price"] == 8.0
+    assert result["raw"]["condition"] == "LP"
 
 
 def test_build_card_ladder_slab_query_adds_grader_noise_exclusions():
@@ -401,6 +491,174 @@ def test_build_myslabs_query_includes_slab_details():
     assert build_myslabs_query(item) == "Umbreon VMAX Evolving Skies 215 PSA 10"
 
 
+def test_ximilar_price_guide_payload_normalizes_card_slab_and_listings():
+    payload = {
+        "records": [
+            {
+                "_objects": [
+                    {
+                        "name": "Card",
+                        "_tags": {"Subcategory": [{"name": "Pokemon"}]},
+                        "_identification": {
+                            "best_match": {
+                                "name": "Umbreon VMAX",
+                                "full_name": "Umbreon VMAX Evolving Skies 215/203",
+                                "set": "Evolving Skies",
+                                "set_code": "swsh7",
+                                "card_number": "215",
+                                "out_of": "203",
+                            }
+                        },
+                    },
+                    {
+                        "name": "Slab Label",
+                        "_tags": {"Company": [{"name": "PSA"}]},
+                        "_identification": {
+                            "best_match": {
+                                "grade_value": "10.0",
+                                "certificate_number": "155393445",
+                            }
+                        },
+                    },
+                ],
+                "_pricing": {
+                    "listings": [
+                        {
+                            "name": "Umbreon VMAX Alt Art PSA 10",
+                            "price": "4550.00",
+                            "currency": "USD",
+                            "source": "ebay",
+                            "item_link": "https://www.ebay.com/itm/287293825532",
+                            "date_of_sale": "2026-05-09T10:00:00Z",
+                            "grade_company": "PSA",
+                            "grade_value": "10",
+                        },
+                        {
+                            "name": "Umbreon VMAX PSA 9",
+                            "price": "900.00",
+                            "source": "ebay",
+                            "item_link": "https://www.ebay.com/itm/111111111111",
+                            "grade_company": "PSA",
+                            "grade_value": "9",
+                        },
+                    ]
+                },
+            }
+        ]
+    }
+
+    result = _ximilar_price_result_from_payload(payload)
+
+    assert result is not None
+    assert result["source"] == "ximilar"
+    assert result["market_price"] == 4550.0
+    raw = result["raw"]
+    assert raw["source_detail"] == "ximilar_price_guide"
+    assert raw["ximilar_card"]["card_number"] == "215/203"
+    assert raw["ximilar_slab"]["grade"] == "10"
+    assert raw["ximilar_slab"]["cert_number"] == "155393445"
+    assert raw["sample_count"] == 1
+    assert raw["sales"][0]["sources"] == ["ximilar"]
+    assert raw["sales"][0]["source_details"] == ["ximilar_price_guide"]
+
+
+def test_one_piece_base_slab_filters_variant_sold_rows():
+    item = InventoryItem(
+        barcode="PREVIEW",
+        item_type=ITEM_TYPE_SLAB,
+        game="One Piece",
+        card_name="Monkey.D.Luffy (119)",
+        set_name="Awakening of the New Era",
+        card_number="OP05-119",
+        grading_company="PSA",
+        grade="10",
+    )
+    result = {
+        "source": "alt",
+        "market_price": 13500.0,
+        "raw": {
+            "source_detail": "alt_typesense_live",
+            "sample_count": 3,
+            "sales": [
+                {"title": "Monkey.D.Luffy OP05-119 Manga PSA 10", "price": 13500.0, "sold_date": "2026-05-10"},
+                {"title": "Monkey.D.Luffy OP05-119 Alternate Art PSA 10", "price": 700.0, "sold_date": "2026-05-09"},
+                {"title": "Monkey.D.Luffy OP05-119 PSA 10", "price": 60.0, "sold_date": "2026-05-08"},
+            ],
+        },
+    }
+
+    filtered = _filter_slab_price_result_for_item(item, result)
+
+    assert filtered is not None
+    assert filtered["market_price"] == 60.0
+    assert filtered["raw"]["sample_count"] == 1
+    assert filtered["raw"]["sales"][0]["title"] == "Monkey.D.Luffy OP05-119 PSA 10"
+
+
+def test_one_piece_manga_slab_keeps_manga_sold_rows():
+    item = InventoryItem(
+        barcode="PREVIEW",
+        item_type=ITEM_TYPE_SLAB,
+        game="One Piece",
+        card_name="Monkey.D.Luffy (119) (Alternate Art) (Manga)",
+        set_name="Awakening of the New Era",
+        card_number="OP05-119",
+        grading_company="PSA",
+        grade="10",
+    )
+    result = {
+        "source": "alt",
+        "market_price": 13500.0,
+        "raw": {
+            "source_detail": "alt_typesense_live",
+            "sample_count": 2,
+            "sales": [
+                {"title": "Monkey.D.Luffy OP05-119 Manga PSA 10", "price": 13500.0, "sold_date": "2026-05-10"},
+                {"title": "Monkey.D.Luffy OP05-119 PSA 10", "price": 60.0, "sold_date": "2026-05-08"},
+            ],
+        },
+    }
+
+    filtered = _filter_slab_price_result_for_item(item, result)
+
+    assert filtered is not None
+    assert filtered["market_price"] == 13500.0
+    assert filtered["raw"]["sample_count"] == 1
+    assert filtered["raw"]["sales"][0]["title"] == "Monkey.D.Luffy OP05-119 Manga PSA 10"
+
+
+def test_non_pokemon_slab_filters_number_only_false_matches():
+    item = InventoryItem(
+        barcode="PREVIEW",
+        item_type=ITEM_TYPE_SLAB,
+        game="Riftbound",
+        card_name="Jinx Rebel",
+        set_name="Riftbound Organized Play Promotional Cards",
+        card_number="202/298",
+        grading_company="PSA",
+        grade="10",
+    )
+    result = {
+        "source": "130point",
+        "market_price": 205.0,
+        "raw": {
+            "source_detail": "130point_live",
+            "sample_count": 2,
+            "sales": [
+                {"title": "BLASTOISE EX POKEMON 202/165 PSA 10", "price": 205.0, "sold_date": "2026-05-10"},
+                {"title": "Riftbound Jinx Rebel 202/298 PSA 10", "price": 24.0, "sold_date": "2026-05-09"},
+            ],
+        },
+    }
+
+    filtered = _filter_slab_price_result_for_item(item, result)
+
+    assert filtered is not None
+    assert filtered["market_price"] == 24.0
+    assert filtered["raw"]["sample_count"] == 1
+    assert filtered["raw"]["sales"][0]["title"] == "Riftbound Jinx Rebel 202/298 PSA 10"
+
+
 def test_normalize_slab_price_source_aliases():
     assert normalize_slab_price_source("price charting") == "pricecharting"
     assert normalize_slab_price_source("cardladder") == "card_ladder"
@@ -506,6 +764,16 @@ def test_slab_search_fallback_handles_common_nickname_when_card_api_times_out():
     assert card["name"] == "Umbreon VMAX"
     assert card["set_name"] == "Evolving Skies"
     assert card["card_number"] == "215/203"
+    assert card["lookup_fallback"] is True
+
+
+def test_slab_search_fallback_handles_van_gogh_pikachu_nickname():
+    card = _slab_search_fallback_suggestion("pikachu van gogh", game="Pokemon")
+
+    assert card is not None
+    assert card["name"] == "Pikachu with Grey Felt Hat"
+    assert card["set_name"] == "SVP Black Star Promos"
+    assert card["card_number"] == "085/225"
     assert card["lookup_fallback"] is True
 
 

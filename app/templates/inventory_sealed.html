@@ -48,7 +48,7 @@
         .primary { background:var(--accent); color:#fff; border:1px solid var(--accent); }
         .primary:hover { background:var(--accent-strong); border-color:var(--accent-strong); }
         .secondary { background:var(--lx-s1); color:var(--text); border:1px solid var(--line); }
-        .search-form { display:grid; grid-template-columns:minmax(150px,220px) minmax(220px,1fr) auto; gap:10px; align-items:end; margin-top:16px; }
+        .search-form { display:grid; grid-template-columns:minmax(150px,220px) minmax(150px,210px) minmax(220px,1fr) auto; gap:10px; align-items:end; margin-top:16px; }
         .batch-defaults { margin-top:12px; border:1px solid var(--line); border-radius:14px; background:rgba(255,255,255,.02); padding:11px 12px; }
         .batch-defaults summary { cursor:pointer; color:var(--muted); font-size:13px; font-weight:800; }
         .batch-default-grid { display:grid; grid-template-columns:1fr 1fr 1.4fr auto; gap:10px; align-items:end; margin-top:12px; }
@@ -83,6 +83,10 @@
         .receive-grid { display:grid; grid-template-columns:82px 1fr 1fr; gap:8px; align-items:end; }
         .receive-grid .wide { grid-column:span 3; }
         .receive-grid .half { grid-column:span 1; }
+        .price-control { display:grid; gap:6px; }
+        .price-buttons { display:flex; gap:5px; flex-wrap:wrap; }
+        .price-buttons button { width:auto; padding:6px 8px; border-radius:9px; font-size:11px; background:var(--lx-s2); color:var(--text); border:1px solid var(--line); }
+        .price-buttons button:disabled { opacity:.45; cursor:not-allowed; transform:none; }
         .actions { display:flex; justify-content:space-between; gap:10px; align-items:center; flex-wrap:wrap; }
         .qty-now { color:var(--muted); font-size:12px; font-weight:800; }
         .bulk-form { display:grid; gap:12px; }
@@ -166,6 +170,13 @@
                     {% endfor %}
                 </select>
             </label>
+            <label>Search Type
+                <select name="search_type">
+                    {% for option in search_type_options %}
+                    <option value="{{ option.value }}" {% if option.value == search_type %}selected{% endif %}>{{ option.label }}</option>
+                    {% endfor %}
+                </select>
+            </label>
             <label>Search
                 <input type="search" name="q" value="{{ q }}" placeholder="Evolving Skies Booster Box, Final Fantasy Bundle, Charizard ex 151 199..." autocomplete="off" autofocus>
             </label>
@@ -222,6 +233,7 @@
             {% set default_prices = card.default_variant.condition_prices if card.default_variant else {} %}
             <form method="post" action="/inventory/singles/receive" class="single-card" data-single-card data-variants="{{ card.variants|tojson|forceescape }}">
                 <input type="hidden" name="game" value="{{ card.game }}">
+                <input type="hidden" name="search_type" value="cards">
                 <input type="hidden" name="card_name" value="{{ card.name }}">
                 <input type="hidden" name="set_name" value="{{ card.set_name }}">
                 <input type="hidden" name="set_code" value="{{ card.set_code }}">
@@ -272,7 +284,14 @@
                         <input type="number" name="unit_cost" min="0" step="0.01" placeholder="0.00" inputmode="decimal">
                     </label>
                     <label>Sell Price
-                        <input type="number" name="list_price" min="0" step="0.01" value="{{ '%.2f'|format(card.default_price) if card.default_price is not none else '' }}" placeholder="Optional" inputmode="decimal" data-price-input>
+                        <div class="price-control" data-price-control data-market-price="{{ '%.2f'|format(card.default_price) if card.default_price is not none else '' }}">
+                            <input type="number" name="list_price" min="0" step="0.01" value="{{ '%.2f'|format(card.default_price) if card.default_price is not none else '' }}" placeholder="Optional" inputmode="decimal" data-price-input>
+                            <div class="price-buttons">
+                                <button type="button" data-price-percent="0">Market</button>
+                                <button type="button" data-price-percent="5">+5%</button>
+                                <button type="button" data-price-percent="10">+10%</button>
+                            </div>
+                        </div>
                     </label>
                     <label>Location
                         <input type="text" name="location" placeholder="Case A">
@@ -293,7 +312,7 @@
 
     {% if not has_search %}
     <div class="panel">
-        <div class="empty">Search for a {{ selected_game }} sealed product or single card above, or use Scan Singles for camera entry.</div>
+        <div class="empty">Search for a {{ selected_game }} card or sealed product above, or use Scan Singles for camera entry.</div>
     </div>
     {% endif %}
 
@@ -308,6 +327,7 @@
             <form method="post" action="/inventory/sealed/receive" class="product">
                 <input type="hidden" name="item_id" value="{{ item.id }}">
                 <input type="hidden" name="game" value="{{ item.game }}">
+                <input type="hidden" name="search_type" value="sealed">
                 <input type="hidden" name="product_name" value="{{ item.card_name }}">
                 <input type="hidden" name="set_name" value="{{ item.set_name or '' }}">
                 <input type="hidden" name="sealed_product_kind" value="{{ item.sealed_product_kind or '' }}">
@@ -332,7 +352,14 @@
                         <input type="number" name="unit_cost" min="0" step="0.01" placeholder="0.00" inputmode="decimal">
                     </label>
                     <label>Sell Price
-                        <input type="number" name="list_price" min="0" step="0.01" value="{{ '%.2f'|format(item.list_price) if item.list_price is not none else '' }}" placeholder="Optional" inputmode="decimal">
+                        <div class="price-control" data-price-control data-market-price="{{ '%.2f'|format(item.auto_price) if item.auto_price is not none else '' }}">
+                            <input type="number" name="list_price" min="0" step="0.01" value="{{ '%.2f'|format(item.list_price) if item.list_price is not none else '' }}" placeholder="Optional" inputmode="decimal" data-price-input>
+                            <div class="price-buttons">
+                                <button type="button" data-price-percent="0" {% if item.auto_price is none %}disabled{% endif %}>Market</button>
+                                <button type="button" data-price-percent="5" {% if item.auto_price is none %}disabled{% endif %}>+5%</button>
+                                <button type="button" data-price-percent="10" {% if item.auto_price is none %}disabled{% endif %}>+10%</button>
+                            </div>
+                        </div>
                     </label>
                     <label class="half">Location
                         <input type="text" name="location" value="{{ item.location or '' }}" placeholder="Shelf A">
@@ -364,11 +391,13 @@
             {% for product in suggestions %}
             <form method="post" action="/inventory/sealed/receive" class="product">
                 <input type="hidden" name="game" value="{{ product.game or selected_game }}">
+                <input type="hidden" name="search_type" value="sealed">
                 <input type="hidden" name="product_name" value="{{ product.name }}">
                 <input type="hidden" name="set_name" value="{{ product.set_name }}">
                 <input type="hidden" name="sealed_product_kind" value="{{ product.kind }}">
                 <input type="hidden" name="upc" value="{{ product.upc }}">
                 <input type="hidden" name="image_url" value="{{ product.image_url }}">
+                <input type="hidden" name="auto_price" value="{{ '%.2f'|format(product.market_price) if product.market_price else '' }}">
                 <div class="product-main">
                     <div class="thumb" data-fallback="{{ product.kind[:2].upper() }}">{% if product.image_url %}<img src="{{ product.image_url }}" alt="" onerror="this.remove()">{% endif %}</div>
                     <div style="min-width:0;">
@@ -377,7 +406,7 @@
                             <span class="chip blue">{{ product.set_name }}</span>
                             <span class="chip">{{ product.kind }}</span>
                             {% if product.source_name %}<span class="chip">{{ product.source_name }}</span>{% endif %}
-                            {% if product.market_price %}<span class="chip good">TCG market {{ product.market_price | money }}</span>{% endif %}
+                            {% if product.market_price %}<span class="chip good">{{ product.market_price_source or "TCGPlayer" }} {{ product.market_price | money }}</span>{% endif %}
                             {% if product.upc %}<span class="chip">{{ product.upc }}</span>{% endif %}
                         </div>
                     </div>
@@ -390,7 +419,14 @@
                         <input type="number" name="unit_cost" min="0" step="0.01" placeholder="0.00" inputmode="decimal">
                     </label>
                     <label>Sell Price
-                        <input type="number" name="list_price" min="0" step="0.01" value="{{ '%.2f'|format(product.market_price) if product.market_price else '' }}" placeholder="Optional" inputmode="decimal">
+                        <div class="price-control" data-price-control data-market-price="{{ '%.2f'|format(product.market_price) if product.market_price else '' }}">
+                            <input type="number" name="list_price" min="0" step="0.01" value="{{ '%.2f'|format(product.market_price) if product.market_price else '' }}" placeholder="Optional" inputmode="decimal" data-price-input>
+                            <div class="price-buttons">
+                                <button type="button" data-price-percent="0" {% if not product.market_price %}disabled{% endif %}>Market</button>
+                                <button type="button" data-price-percent="5" {% if not product.market_price %}disabled{% endif %}>+5%</button>
+                                <button type="button" data-price-percent="10" {% if not product.market_price %}disabled{% endif %}>+10%</button>
+                            </div>
+                        </div>
                     </label>
                     <label class="half">Location
                         <input type="text" name="location" placeholder="Shelf A">
@@ -412,7 +448,7 @@
     </div>
     {% endif %}
 
-    {% if has_search %}
+    {% if has_search and search_type != "cards" %}
     {% set has_matches = single_results or existing_items or suggestions %}
     <div class="panel">
         {% if has_matches %}
@@ -427,6 +463,7 @@
         {% endif %}
         <form method="post" action="/inventory/sealed/receive" class="create-grid">
             <input type="hidden" name="game" value="{{ selected_game }}">
+            <input type="hidden" name="search_type" value="sealed">
             <label>Product Name
                 <input type="text" name="product_name" value="{{ q }}" required placeholder="Product name">
             </label>
@@ -514,6 +551,17 @@
     function money(value) {
         var num = Number(value);
         return Number.isFinite(num) ? "$" + num.toFixed(2) : "-";
+    }
+    function setPriceFromMarket(control, percent) {
+        if (!control) return;
+        var input = control.querySelector("[data-price-input]");
+        if (!input) return;
+        var marketRaw = input.dataset.marketPrice || control.getAttribute("data-market-price") || "";
+        var market = Number(marketRaw);
+        if (!Number.isFinite(market) || market <= 0) return;
+        var markup = Number(percent || 0);
+        if (!Number.isFinite(markup) || markup < 0) markup = 0;
+        input.value = (market * (1 + markup / 100)).toFixed(2);
     }
     function loadDefaults() {
         try { return JSON.parse(localStorage.getItem(defaultsKey) || "{}") || {}; } catch (e) { return {}; }
@@ -623,12 +671,23 @@
             var fallback = variant ? variant.market_price : null;
             var selectedPrice = selectedRow.market != null ? selectedRow.market : fallback;
             if (priceInput) {
+                priceInput.dataset.marketPrice = selectedPrice != null ? Number(selectedPrice).toFixed(2) : "";
+                var control = priceInput.closest("[data-price-control]");
+                if (control) control.setAttribute("data-market-price", priceInput.dataset.marketPrice);
                 priceInput.value = selectedPrice != null ? Number(selectedPrice).toFixed(2) : "";
+                card.querySelectorAll("[data-price-percent]").forEach(function (button) {
+                    button.disabled = selectedPrice == null;
+                });
             }
         }
         if (variantSelect) variantSelect.addEventListener("change", renderPrices);
         if (conditionSelect) conditionSelect.addEventListener("change", renderPrices);
         renderPrices();
+    });
+    document.querySelectorAll("[data-price-percent]").forEach(function (button) {
+        button.addEventListener("click", function () {
+            setPriceFromMarket(button.closest("[data-price-control]"), button.getAttribute("data-price-percent"));
+        });
     });
     bindReceivingDefaults();
 })();

@@ -1016,6 +1016,7 @@ ITEM_TYPE_SEALED = "sealed"
 GRADING_COMPANIES: list[str] = ["PSA", "BGS", "CGC", "SGC"]
 GAMES: list[str] = [
     "Pokemon",
+    "Pokemon Japan",
     "Magic",
     "MTG",
     "Yu-Gi-Oh",
@@ -1040,6 +1041,7 @@ PRICE_SOURCES: list[str] = [
     "130point",
     "alt",
     "card_ladder",
+    "ximilar",
     "myslabs",
     "pricecharting",
     "slab_comps",
