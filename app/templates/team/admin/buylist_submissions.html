@@ -135,6 +135,11 @@
 {% if flash %}
   <div class="ta-flash" style="margin-bottom:14px;">{{ flash }}</div>
 {% endif %}
+{% if unknown_status_count %}
+  <div class="ta-flash warn" style="margin-bottom:14px;">
+    {{ unknown_status_count }} buylist submission{% if unknown_status_count != 1 %}s{% endif %} have an unknown status and need admin review.
+  </div>
+{% endif %}
 
 <div class="buylist-queue-head">
   <div>

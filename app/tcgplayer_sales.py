@@ -264,8 +264,11 @@ def normalize_tcgplayer_sales_payload(
     product_url: str | None = None,
     errors: list[str] | None = None,
 ) -> dict[str, Any]:
+    raw_history_rows = (history_payload or {}).get("result", []) if isinstance(history_payload, dict) else []
+    if not isinstance(raw_history_rows, list):
+        raw_history_rows = []
     history_rows = [
-        row for row in (history_payload or {}).get("result", [])
+        row for row in raw_history_rows
         if isinstance(row, dict)
     ]
     selected_history = _best_matching_row(
@@ -434,11 +437,11 @@ async def fetch_tcgplayer_public_sales(
             sales_payload = await _response_json(sales_response, label="Latest sales", errors=errors)
             history_payload = await _response_json(history_response, label="3-month history", errors=errors)
 
+            raw_history_rows = (history_payload or {}).get("result", []) if isinstance(history_payload, dict) else []
+            if not isinstance(raw_history_rows, list):
+                raw_history_rows = []
             selected_history = _best_matching_row(
-                [
-                    row for row in (history_payload or {}).get("result", [])
-                    if isinstance(row, dict)
-                ] if isinstance(history_payload, dict) else [],
+                [row for row in raw_history_rows if isinstance(row, dict)],
                 selected_condition=normalized_condition,
                 selected_variant=selected_variant,
                 selected_language=selected_language,

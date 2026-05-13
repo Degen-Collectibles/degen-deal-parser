@@ -273,7 +273,7 @@
       <div class="buylist-searchbar">
         <select class="pt-select" id="buylistGame" style="max-width:190px;">
           {% for game in game_options %}
-            <option value="{{ game.game }}" {% if game.game == config.default_game %}selected{% endif %}>{{ game.label }}</option>
+            <option value="{{ game.game }}" {% if game.game == search_default_game %}selected{% endif %}>{{ game.label }}</option>
           {% endfor %}
         </select>
         <select class="pt-select" id="buylistProductType" style="max-width:130px;">
@@ -335,7 +335,9 @@
       <button class="pt-btn primary" type="button" id="buylistSave">Save quote</button>
       <button class="pt-btn primary" type="button" id="buylistCopy">Copy summary</button>
       <button class="pt-btn" type="button" id="buylistPrint">Print quote</button>
+      {% if can_manage_buylist_pricing %}
       <a class="pt-btn" href="/team/admin/buylist">Pricing</a>
+      {% endif %}
     </div>
   </aside>
 </div>
@@ -392,6 +394,7 @@
   }
 
   const conditionPricingMode = config.condition_pricing_mode === 'tcgplayer_market' ? 'tcgplayer_market' : 'percentage_modifiers';
+  const noMarketPriceNote = 'No market price found. Manager review required.';
 
   function isSealedProduct(card) {
     return String(card.item_type || '').toLowerCase() === 'sealed';
@@ -559,8 +562,10 @@
       const cashBase = rangeOffer(market, config.cash_ranges);
       const tradeBase = rangeOffer(market, config.trade_ranges);
       const list = listAdjustment(card);
-      const blocked = list.blocked || Boolean(card.blocked);
+      const noMarketPrice = market <= 0;
+      const blocked = list.blocked || Boolean(card.blocked) || noMarketPrice;
       const notes = ['Sealed product TCGPlayer market', ...list.notes];
+      if (noMarketPrice) notes.push(noMarketPriceNote);
       if (blocked) notes.push('Not buying');
       return {
         market: roundMoney(market),
@@ -585,7 +590,8 @@
     const printingMod = modifierPercent('printing_modifiers', variant);
     const list = listAdjustment(card);
     const multiplier = (conditionMod / 100) * (languageMod / 100) * (printingMod / 100) * list.multiplier;
-    const blocked = list.blocked || Boolean(card.blocked);
+    const noMarketPrice = market <= 0;
+    const blocked = list.blocked || Boolean(card.blocked) || noMarketPrice;
     const conditionNote = useConditionMarket
       ? `${condition} TCGPlayer market`
       : (conditionPricingMode === 'tcgplayer_market' ? `${condition} modifier fallback ${conditionMod}%` : `${condition} ${conditionMod}%`);
@@ -595,6 +601,7 @@
       `${variant} ${printingMod}%`,
       ...list.notes
     ];
+    if (noMarketPrice) notes.push(noMarketPriceNote);
     if (blocked) notes.push('Not buying');
     return {
       market: roundMoney(market),
@@ -626,7 +633,7 @@
     document.querySelectorAll('.buylist-pay-btn').forEach(btn => {
       btn.classList.toggle('active', btn.dataset.payment === state.payment);
     });
-    renderResults();
+    document.querySelectorAll('.buylist-result').forEach(updateResultCard);
     renderCart();
   }
 
@@ -731,8 +738,11 @@
 
   function syncProductTypeUi() {
     const sealed = els.productType.value === 'sealed';
-    els.search.placeholder = sealed ? 'Search sealed product, set, UPC, or TCGPlayer URL' : 'Search card name, set, or number';
+    els.search.placeholder = sealed
+      ? 'Search sealed product, set, UPC, or TCGPlayer URL'
+      : 'Search card name, set, or number';
     els.defaultCondition.disabled = sealed;
+    els.defaultCondition.hidden = sealed;
   }
 
   async function runSearch() {
@@ -826,7 +836,7 @@
           </div>
           <div>
             <div class="buylist-card-title">${escapeHtml(card.name)}</div>
-            <div class="buylist-card-sub">${escapeHtml(card.set_name)}${card.number ? ` #${escapeHtml(card.number)}` : ''}</div>
+            <div class="buylist-card-sub">${card.game ? `<strong>${escapeHtml(card.game)}</strong> | ` : ''}${escapeHtml(card.set_name)}${card.number ? ` #${escapeHtml(card.number)}` : ''}</div>
           </div>
           <div class="buylist-price-row">
             <span>Market<strong class="js-card-market">${money(offer.market)}</strong></span>
@@ -837,7 +847,9 @@
           ${controls}
           <div class="buylist-card-actions">
             <input class="buylist-qty js-card-qty" type="number" min="1" max="999" value="1" aria-label="Quantity">
-            ${productId ? '<button class="pt-btn js-card-sales" type="button">More data</button>' : ''}
+            ${productId
+              ? '<button class="pt-btn js-card-sales" type="button">More data</button>'
+              : '<button class="pt-btn" type="button" disabled title="TCGPlayer sales history is unavailable for this result.">More data</button>'}
             <button class="pt-btn primary js-add-card" type="button" ${offer.blocked ? 'disabled' : ''}>
               ${offer.blocked ? 'Blocked' : `Add ${money(quote)}`}
             </button>
@@ -976,7 +988,7 @@
           <div class="buylist-line-head">
             <div>
               <div class="buylist-card-title">${escapeHtml(line.name)}</div>
-              <div class="buylist-card-sub">${escapeHtml(line.set_name || '')}${line.number ? ` #${escapeHtml(line.number)}` : ''}</div>
+              <div class="buylist-card-sub">${line.game ? `<strong>${escapeHtml(line.game)}</strong> | ` : ''}${escapeHtml(line.set_name || '')}${line.number ? ` #${escapeHtml(line.number)}` : ''}</div>
             </div>
             <button class="buylist-remove js-remove-line" type="button">Remove</button>
           </div>
@@ -1062,7 +1074,10 @@
     btn.addEventListener('click', () => setPayment(btn.dataset.payment));
   });
   els.search.addEventListener('input', scheduleSearch);
-  els.game.addEventListener('change', runSearch);
+  els.game.addEventListener('change', () => {
+    syncProductTypeUi();
+    runSearch();
+  });
   els.productType.addEventListener('change', () => {
     syncProductTypeUi();
     runSearch();
