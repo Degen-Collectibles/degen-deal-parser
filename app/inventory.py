@@ -14,7 +14,7 @@ import math
 import re
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import unquote, urlencode
@@ -22,6 +22,7 @@ from urllib.parse import unquote, urlencode
 import httpx
 from fastapi import APIRouter, Depends, Form, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from sqlalchemy import case
 from sqlmodel import Session, select, func
 
 # Reuse the shared Jinja2Templates instance so custom filters registered in
@@ -35,6 +36,7 @@ from .card_scanner import identify_card_from_image, lookup_card_image_and_price
 from .cert_lookup import lookup_cert
 from .pokemon_scanner import (
     TCGTRACKING_BASE,
+    TCGTRACKING_HEADERS,
     _heuristic_parse_query,
     fetch_tcg_categories,
     get_scan_history,
@@ -73,6 +75,7 @@ from .inventory_pricing import (
     effective_price,
     fetch_price_for_item,
     fetch_slab_price,
+    fetch_ximilar_slab_price_from_image,
     import_card_ladder_cli_records_for_item,
     normalize_slab_price_source,
     point130_cli_status,
@@ -107,6 +110,89 @@ logger = logging.getLogger(__name__)
 _CLIENT_LOG_RATE: dict[str, list[float]] = {}
 
 PAGE_SIZE = 50
+PRICE_MARKUP_ACTIONS = {
+    "reprice": 0.0,
+    "reprice_5": 5.0,
+    "reprice_10": 10.0,
+}
+
+
+def _inventory_price_gap_thresholds() -> tuple[float, float]:
+    min_percent = max(float(getattr(settings, "inventory_price_review_threshold_percent", 10.0) or 0.0), 0.0)
+    min_dollars = max(float(getattr(settings, "inventory_price_review_threshold_dollars", 5.0) or 0.0), 0.0)
+    return min_percent, min_dollars
+
+
+def _inventory_price_review_sql_condition():
+    min_percent, min_dollars = _inventory_price_gap_thresholds()
+    min_ratio = min_percent / 100.0
+    under_market_gap = InventoryItem.auto_price - InventoryItem.list_price
+    return (
+        (InventoryItem.list_price != None)  # noqa: E711
+        & (InventoryItem.auto_price != None)  # noqa: E711
+        & (InventoryItem.auto_price > 0)
+        & (under_market_gap >= min_dollars)
+        & ((under_market_gap / InventoryItem.auto_price) >= min_ratio)
+    )
+
+
+def _inventory_price_review_context(item: InventoryItem) -> dict[str, Any]:
+    current_price = effective_price(item)
+    market_price = item.auto_price
+    min_percent, min_dollars = _inventory_price_gap_thresholds()
+    delta = None
+    percent = None
+    needs_review = False
+    direction = ""
+    if current_price is not None and market_price is not None and market_price > 0:
+        delta = round(float(current_price) - float(market_price), 2)
+        under_market_gap = round(float(market_price) - float(current_price), 2)
+        percent = round((under_market_gap / float(market_price)) * 100.0, 1) if under_market_gap > 0 else 0.0
+        needs_review = under_market_gap >= min_dollars and percent >= min_percent
+        if needs_review:
+            direction = "below"
+
+    stale = False
+    stale_hours = max(float(getattr(settings, "inventory_price_stale_hours", 24.0) or 24.0), 1.0)
+    if item.status in {INVENTORY_IN_STOCK, INVENTORY_LISTED} and item.archived_at is None:
+        last_priced = item.last_priced_at
+        if last_priced is None:
+            stale = True
+        else:
+            if last_priced.tzinfo is None:
+                last_priced = last_priced.replace(tzinfo=timezone.utc)
+            stale = last_priced < (utcnow() - timedelta(hours=stale_hours))
+
+    return {
+        "current_price": current_price,
+        "market_price": market_price,
+        "delta": delta,
+        "delta_abs": abs(delta) if delta is not None and delta < 0 else None,
+        "percent": percent,
+        "needs_review": needs_review,
+        "direction": direction,
+        "stale": stale,
+    }
+
+
+def _inventory_url_with_params(request: Request, updates: dict[str, Any]) -> str:
+    params = dict(request.query_params)
+    for key, value in updates.items():
+        if value is None or value == "":
+            params.pop(key, None)
+        else:
+            params[key] = str(value)
+    if not params:
+        return request.url.path
+    return f"{request.url.path}?{urlencode(params)}"
+
+
+def _inventory_price_from_market(item: InventoryItem, markup_percent: float = 0.0) -> Optional[float]:
+    market_price = _safe_price(item.auto_price)
+    if market_price is None or market_price <= 0:
+        return None
+    markup = max(float(markup_percent or 0.0), 0.0)
+    return round(market_price * (1.0 + (markup / 100.0)), 2)
 
 SLAB_GRADE_OPTIONS: dict[str, tuple[str, ...]] = {
     "PSA": ("10", "9", "8", "7"),
@@ -217,24 +303,41 @@ _TCGPLAYER_PRODUCT_RE = re.compile(
 _ADD_STOCK_SEARCH_CACHE_TTL_SECONDS = 300.0
 _ADD_STOCK_SEALED_CACHE: dict[str, tuple[float, list[dict[str, Any]], str]] = {}
 _ADD_STOCK_SINGLE_CACHE: dict[str, tuple[float, list[dict[str, Any]], str]] = {}
+_TCGTRACKING_SET_LIST_CACHE_TTL_SECONDS = 60 * 60 * 6
+_TCGTRACKING_SEALED_CATALOG_CACHE_TTL_SECONDS = 60 * 60 * 6
+_TCGTRACKING_SEALED_CATALOG_CATEGORY_PRODUCT_LIMIT = 50_000
+_TCGTRACKING_SET_LIST_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_TCGTRACKING_SEALED_CATALOG_CACHE: dict[str, tuple[float, list[dict[str, Any]], str]] = {}
+_TCGTRACKING_SEALED_CATALOG_LOCKS: dict[str, asyncio.Lock] = {}
+ADD_STOCK_SEARCH_TYPE_OPTIONS: tuple[dict[str, str], ...] = (
+    {"value": "both", "label": "Cards + Sealed"},
+    {"value": "cards", "label": "Cards"},
+    {"value": "sealed", "label": "Sealed"},
+)
+_ADD_STOCK_SEARCH_TYPE_VALUES = {option["value"] for option in ADD_STOCK_SEARCH_TYPE_OPTIONS}
 
 ADD_STOCK_GAME_OPTIONS: tuple[dict[str, Any], ...] = (
     {"game": "Pokemon", "label": "Pokemon", "category_ids": ("3", "85"), "single_category_id": "3"},
+    {"game": "Pokemon Japan", "label": "Pokemon Japan", "category_ids": ("85",), "single_category_id": "85"},
     {"game": "Magic", "label": "Magic", "category_ids": ("1",), "single_category_id": "1"},
     {"game": "Yu-Gi-Oh", "label": "Yu-Gi-Oh", "category_ids": ("2",), "single_category_id": "2"},
     {"game": "One Piece", "label": "One Piece", "category_ids": ("68",), "single_category_id": "68"},
     {"game": "Lorcana", "label": "Lorcana", "category_ids": ("71",), "single_category_id": "71"},
     {"game": "Riftbound", "label": "Riftbound", "category_ids": ("89",), "single_category_id": "89"},
     {"game": "Dragon Ball", "label": "Dragon Ball", "category_ids": ("80", "27", "23"), "single_category_id": "80"},
-    {"game": "Digimon", "label": "Digimon", "category_ids": ("57",), "single_category_id": "57"},
+    {"game": "Digimon", "label": "Digimon", "category_ids": ("63",), "single_category_id": "63"},
     {"game": "Flesh and Blood", "label": "Flesh and Blood", "category_ids": ("62",), "single_category_id": "62"},
-    {"game": "Weiss Schwarz", "label": "Weiss Schwarz", "category_ids": ("19",), "single_category_id": "19"},
+    {"game": "Weiss Schwarz", "label": "Weiss Schwarz", "category_ids": ("20",), "single_category_id": "20"},
     {"game": "Cardfight Vanguard", "label": "Cardfight Vanguard", "category_ids": ("16",), "single_category_id": "16"},
-    {"game": "Union Arena", "label": "Union Arena", "category_ids": ("82",), "single_category_id": "82"},
+    {"game": "Union Arena", "label": "Union Arena", "category_ids": ("81",), "single_category_id": "81"},
     {"game": "Other", "label": "Other", "category_ids": (), "single_category_id": ""},
 )
 _ADD_STOCK_GAME_BY_NAME = {str(option["game"]).lower(): option for option in ADD_STOCK_GAME_OPTIONS}
 _ADD_STOCK_GAME_ALIASES = {
+    "pokemon jp": "Pokemon Japan",
+    "pokemon japan": "Pokemon Japan",
+    "japanese pokemon": "Pokemon Japan",
+    "jp pokemon": "Pokemon Japan",
     "mtg": "Magic",
     "magic the gathering": "Magic",
     "magic: the gathering": "Magic",
@@ -261,6 +364,7 @@ _ADD_STOCK_CATEGORY_TO_GAME = {
     for category_id in option["category_ids"]
 }
 _ADD_STOCK_GAME_SEARCH_NOISE_TOKENS: dict[str, set[str]] = {
+    "Pokemon Japan": {"pokemon", "pokémon", "japan", "japanese", "jp", "card", "cards", "tcg"},
     "Magic": {"magic", "the", "gathering", "mtg"},
     "Yu-Gi-Oh": {"yugioh", "yu", "gi", "oh"},
     "One Piece": {"one", "piece", "card", "game"},
@@ -433,6 +537,24 @@ def _normalize_add_stock_game(value: str | None) -> str:
         if raw in {_normalize_lookup(game).replace("&", "and"), _normalize_lookup(label).replace("&", "and")}:
             return game
     return "Pokemon"
+
+
+def _normalize_add_stock_search_type(value: str | None) -> str:
+    raw = _normalize_lookup(value).replace("_", "-")
+    aliases = {
+        "all": "both",
+        "any": "both",
+        "auto": "both",
+        "card": "cards",
+        "single": "cards",
+        "singles": "cards",
+        "sealed product": "sealed",
+        "sealed products": "sealed",
+        "product": "sealed",
+        "products": "sealed",
+    }
+    normalized = aliases.get(raw, raw)
+    return normalized if normalized in _ADD_STOCK_SEARCH_TYPE_VALUES else "both"
 
 
 def _add_stock_game_option(game: str | None) -> dict[str, Any]:
@@ -683,6 +805,38 @@ def _tcgtracking_market_price(product_id: str, pricing: dict[str, Any] | None) -
     return None
 
 
+def _tcgtracking_sealed_price(
+    product_id: str,
+    pricing: dict[str, Any] | None,
+) -> tuple[Optional[float], str]:
+    product_prices = (pricing or {}).get(str(product_id), {}).get("tcg", {})
+    if not isinstance(product_prices, dict):
+        return None, ""
+    preferred_order = ("Normal", "Holofoil", "Reverse Holofoil")
+    subtype_items = list(product_prices.items())
+    subtype_items.sort(
+        key=lambda item: preferred_order.index(item[0]) if item[0] in preferred_order else len(preferred_order)
+    )
+    fallback_low: Optional[float] = None
+    for _subtype_name, subtype_data in subtype_items:
+        if not isinstance(subtype_data, dict):
+            continue
+        market = subtype_data.get("market")
+        if market is not None:
+            try:
+                return round(float(market), 2), "TCGPlayer Market"
+            except (TypeError, ValueError):
+                pass
+        if fallback_low is None and subtype_data.get("low") is not None:
+            try:
+                fallback_low = round(float(subtype_data.get("low")), 2)
+            except (TypeError, ValueError):
+                fallback_low = None
+    if fallback_low is not None:
+        return fallback_low, "TCGPlayer Low"
+    return None, ""
+
+
 def _tcgtracking_sealed_product(
     *,
     product: dict[str, Any],
@@ -706,12 +860,14 @@ def _tcgtracking_sealed_product(
         return None
 
     set_name = str(set_info.get("name") or set_info.get("set_name") or "").strip()
+    set_id = str(set_info.get("id") or "").strip()
     external_id = str(product.get("id") or "").strip()
     image_url = _tcgtracking_large_image(str(product.get("image_url") or ""))
-    market_price = _tcgtracking_market_price(external_id, pricing)
+    market_price, market_price_source = _tcgtracking_sealed_price(external_id, pricing)
     return {
         "name": product_name,
         "set_name": set_name,
+        "set_id": set_id,
         "kind": kind,
         "upc": "",
         "image_url": image_url,
@@ -723,7 +879,7 @@ def _tcgtracking_sealed_product(
         "category_id": str(category_id),
         "game": game.strip() or _add_stock_game_for_category_id(category_id),
         "market_price": market_price,
-        "market_price_source": "TCGPlayer Market" if market_price is not None else "",
+        "market_price_source": market_price_source,
     }
 
 
@@ -759,6 +915,10 @@ def _sealed_product_query_score(query: str, product: dict[str, Any]) -> int:
     product_ids = _tcgplayer_product_ids_from_query(query)
     if product_ids and str(product.get("external_id") or "") in product_ids:
         score += 100
+    if query_norm and name_norm.startswith(query_norm):
+        score += 28
+    elif query_norm and f" {query_norm} " in f" {name_norm} ":
+        score += 12
     for token in tokens:
         if _match_token(token, name_norm):
             score += 6
@@ -782,6 +942,96 @@ def _sealed_product_query_score(query: str, product: dict[str, Any]) -> int:
     if name_norm == query_norm:
         score += 40
     return score
+
+
+_SEALED_PRODUCT_KIND_QUERY_TOKENS = {
+    "box",
+    "booster",
+    "bundle",
+    "case",
+    "collection",
+    "deck",
+    "display",
+    "kit",
+    "pack",
+    "packs",
+    "premium",
+    "starter",
+    "tin",
+    "trove",
+}
+
+
+def _sealed_catalog_query_variants(query: str) -> list[str]:
+    variants: list[str] = []
+    for slug_term in _tcgplayer_slug_terms_from_query(query):
+        slug_clean = _normalize_product_text(slug_term).replace("&", "and")
+        if slug_clean and slug_clean not in variants:
+            variants.append(slug_clean)
+    query_clean = _normalize_product_text(query).replace("&", "and")
+    if query_clean and query_clean not in variants:
+        variants.append(query_clean)
+    return variants
+
+
+def _sealed_catalog_specific_tokens(query_variant: str) -> list[str]:
+    return [
+        token
+        for token in _normalize_product_text(query_variant).replace("&", "and").split()
+        if len(token) >= 4
+        and not token.isdigit()
+        and token not in _SEALED_SEARCH_NOISE_TOKENS
+        and token not in _SEALED_PRODUCT_KIND_QUERY_TOKENS
+    ]
+
+
+def _sealed_catalog_product_match_score(query: str, product: dict[str, Any]) -> Optional[int]:
+    product_ids = _tcgplayer_product_ids_from_query(query)
+    external_id = str(product.get("external_id") or "").strip()
+    if product_ids and external_id in product_ids:
+        return 1000 + _sealed_product_query_score(query, product)
+
+    name_norm = _normalize_product_text(product.get("name")).replace("&", "and")
+    set_norm = _normalize_product_text(product.get("set_name")).replace("&", "and")
+    kind_norm = _normalize_product_text(product.get("kind")).replace("&", "and")
+    haystack = f"{name_norm} {set_norm} {kind_norm}"
+    best_score: Optional[int] = None
+    for query_variant in _sealed_catalog_query_variants(query):
+        tokens = [
+            token
+            for token in query_variant.split()
+            if len(token) > 1 and token not in _SEALED_SEARCH_NOISE_TOKENS
+        ]
+        specific_tokens = _sealed_catalog_specific_tokens(query_variant)
+        if not tokens or not specific_tokens:
+            continue
+        if not all(_match_token(token, haystack) for token in tokens):
+            continue
+        if not any(_match_token(token, name_norm) for token in specific_tokens):
+            continue
+        score = _sealed_product_query_score(query_variant, product) + (len(specific_tokens) * 8)
+        if best_score is None or score > best_score:
+            best_score = score
+    return best_score
+
+
+def _sealed_catalog_query_can_match_product(query: str) -> bool:
+    if _tcgplayer_product_ids_from_query(query):
+        return True
+    return any(_sealed_catalog_specific_tokens(query_variant) for query_variant in _sealed_catalog_query_variants(query))
+
+
+def _sealed_catalog_category_ids_for_query(
+    query: str,
+    *,
+    selected_game: str,
+    category_ids: tuple[str, ...],
+) -> tuple[str, ...]:
+    if selected_game == "Pokemon" and "3" in category_ids:
+        query_norm = _normalize_product_text(query)
+        if not re.search(r"\b(japan|japanese|jp|jpn)\b", query_norm):
+            return ("3",)
+    return category_ids
 
 
 def _best_sealed_product_match(
@@ -824,6 +1074,235 @@ def _sealed_catalog_suggestions(
     return suggestions
 
 
+def _tcgtracking_sealed_catalog_cache_lock(category_id: str) -> asyncio.Lock:
+    lock = _TCGTRACKING_SEALED_CATALOG_LOCKS.get(category_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _TCGTRACKING_SEALED_CATALOG_LOCKS[category_id] = lock
+    return lock
+
+
+async def _fetch_tcgtracking_set_list(
+    client: httpx.AsyncClient,
+    category_id: str,
+) -> tuple[list[dict[str, Any]], str]:
+    cached = _TCGTRACKING_SET_LIST_CACHE.get(str(category_id))
+    if cached and (time.monotonic() - cached[0]) < _TCGTRACKING_SET_LIST_CACHE_TTL_SECONDS:
+        return [dict(row) for row in cached[1]], ""
+
+    sets_url = f"{TCGTRACKING_BASE}/{category_id}/sets"
+    try:
+        resp = await client.get(sets_url)
+        if resp.status_code != 200:
+            logger.warning(
+                "[inventory] TCGTracking set list HTTP %s for %s: %s",
+                resp.status_code,
+                sets_url,
+                resp.text[:200],
+            )
+            return [], f"{category_id} set list HTTP {resp.status_code}"
+        sets = [row for row in (resp.json().get("sets") or []) if isinstance(row, dict)]
+    except Exception as exc:
+        logger.warning("[inventory] TCGTracking set list failed for category=%s: %s", category_id, exc)
+        return [], f"{category_id} set list failed"
+
+    _TCGTRACKING_SET_LIST_CACHE[str(category_id)] = (time.monotonic(), [dict(row) for row in sets])
+    return sets, ""
+
+
+async def _fetch_tcgtracking_sealed_catalog(
+    client: httpx.AsyncClient,
+    *,
+    category_id: str,
+    game: str,
+) -> tuple[list[dict[str, Any]], str]:
+    cache_key = str(category_id)
+    cached = _TCGTRACKING_SEALED_CATALOG_CACHE.get(cache_key)
+    if cached and (time.monotonic() - cached[0]) < _TCGTRACKING_SEALED_CATALOG_CACHE_TTL_SECONDS:
+        return [dict(row) for row in cached[1]], cached[2]
+
+    async with _tcgtracking_sealed_catalog_cache_lock(cache_key):
+        cached = _TCGTRACKING_SEALED_CATALOG_CACHE.get(cache_key)
+        if cached and (time.monotonic() - cached[0]) < _TCGTRACKING_SEALED_CATALOG_CACHE_TTL_SECONDS:
+            return [dict(row) for row in cached[1]], cached[2]
+
+        set_infos, set_error = await _fetch_tcgtracking_set_list(client, cache_key)
+        if not set_infos:
+            return [], set_error
+        product_total = 0
+        for set_info in set_infos:
+            try:
+                product_total += int(set_info.get("product_count") or 0)
+            except (TypeError, ValueError):
+                continue
+        if product_total > _TCGTRACKING_SEALED_CATALOG_CATEGORY_PRODUCT_LIMIT:
+            return [], f"{category_id} sealed catalog too large"
+
+        semaphore = asyncio.Semaphore(16)
+
+        async def fetch_set_products(set_info: dict[str, Any]) -> list[dict[str, Any]]:
+            set_id = str(set_info.get("id") or "").strip()
+            if not set_id:
+                return []
+            products_url = f"{TCGTRACKING_BASE}/{category_id}/sets/{set_id}"
+            try:
+                async with semaphore:
+                    resp = await client.get(products_url)
+                if resp.status_code != 200:
+                    log_fn = logger.debug if resp.status_code == 404 else logger.warning
+                    log_fn(
+                        "[inventory] TCGTracking catalog set HTTP %s for %s: %s",
+                        resp.status_code,
+                        products_url,
+                        resp.text[:200],
+                    )
+                    return []
+                raw_products = resp.json().get("products") or []
+            except Exception as exc:
+                logger.warning(
+                    "[inventory] TCGTracking catalog set failed for category=%s set=%s: %s",
+                    category_id,
+                    set_id,
+                    exc,
+                )
+                return []
+
+            sealed_products: list[dict[str, Any]] = []
+            for raw_product in raw_products:
+                if not isinstance(raw_product, dict):
+                    continue
+                sealed = _tcgtracking_sealed_product(
+                    product=raw_product,
+                    set_info=set_info,
+                    category_id=category_id,
+                    query_kind_hints=set(),
+                    pricing=None,
+                    game=game,
+                )
+                if sealed:
+                    sealed_products.append(sealed)
+            return sealed_products
+
+        chunks = await asyncio.gather(*(fetch_set_products(set_info) for set_info in set_infos))
+        catalog = [dict(product) for chunk in chunks for product in chunk]
+        _TCGTRACKING_SEALED_CATALOG_CACHE[cache_key] = (time.monotonic(), catalog, set_error)
+        return [dict(row) for row in catalog], set_error
+
+
+async def _enrich_tcgtracking_sealed_product_prices(
+    client: httpx.AsyncClient,
+    products: list[dict[str, Any]],
+) -> None:
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for product in products:
+        category_id = str(product.get("category_id") or "").strip()
+        set_id = str(product.get("set_id") or "").strip()
+        if not category_id or not set_id:
+            continue
+        grouped.setdefault((category_id, set_id), []).append(product)
+
+    async def fetch_pricing(category_id: str, set_id: str) -> tuple[tuple[str, str], dict[str, Any]]:
+        pricing_url = f"{TCGTRACKING_BASE}/{category_id}/sets/{set_id}/pricing"
+        try:
+            resp = await client.get(pricing_url)
+            if resp.status_code == 200:
+                return (category_id, set_id), (resp.json().get("prices") or {})
+            logger.warning(
+                "[inventory] TCGTracking catalog pricing HTTP %s for %s: %s",
+                resp.status_code,
+                pricing_url,
+                resp.text[:200],
+            )
+        except Exception as exc:
+            logger.warning(
+                "[inventory] TCGTracking catalog pricing failed for category=%s set=%s: %s",
+                category_id,
+                set_id,
+                exc,
+            )
+        return (category_id, set_id), {}
+
+    pricing_by_set = dict(await asyncio.gather(*(fetch_pricing(category_id, set_id) for category_id, set_id in grouped)))
+    for set_key, set_products in grouped.items():
+        pricing = pricing_by_set.get(set_key) or {}
+        for product in set_products:
+            price, source = _tcgtracking_sealed_price(str(product.get("external_id") or ""), pricing)
+            if price is not None:
+                product["market_price"] = price
+                product["market_price_source"] = source
+
+
+def _merge_sealed_products(
+    primary: list[dict[str, Any]],
+    secondary: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for product in [*primary, *secondary]:
+        external_id = str(product.get("external_id") or "").strip()
+        key = f"id:{external_id}" if external_id else _sealed_catalog_key(product)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(product)
+        if len(merged) >= limit:
+            break
+    return merged
+
+
+async def _search_tcgtracking_sealed_catalog_products(
+    client: httpx.AsyncClient,
+    query: str,
+    *,
+    category_ids: tuple[str, ...],
+    selected_game: str,
+    limit: int,
+) -> tuple[list[dict[str, Any]], str]:
+    if not _sealed_catalog_query_can_match_product(query):
+        return [], ""
+
+    matches: list[dict[str, Any]] = []
+    errors: list[str] = []
+    catalog_category_ids = _sealed_catalog_category_ids_for_query(
+        query,
+        selected_game=selected_game,
+        category_ids=category_ids,
+    )
+    for category_id in catalog_category_ids:
+        catalog, error = await _fetch_tcgtracking_sealed_catalog(
+            client,
+            category_id=str(category_id),
+            game=_add_stock_game_for_category_id(category_id) or selected_game,
+        )
+        if error:
+            errors.append(error)
+        for product in catalog:
+            score = _sealed_catalog_product_match_score(query, product)
+            if score is None:
+                continue
+            product_copy = dict(product)
+            product_copy["_catalog_score"] = score
+            matches.append(product_copy)
+
+    if not matches:
+        return [], "; ".join(errors)
+
+    matches.sort(
+        key=lambda product: (
+            int(product.get("_catalog_score") or 0),
+            _sealed_product_query_score(query, product),
+        ),
+        reverse=True,
+    )
+    top_matches = matches[:limit]
+    await _enrich_tcgtracking_sealed_product_prices(client, top_matches)
+    for product in top_matches:
+        product.pop("_catalog_score", None)
+    return top_matches, "; ".join(errors)
+
+
 async def _search_sealed_products(
     query: str,
     *,
@@ -846,7 +1325,7 @@ async def _search_sealed_products(
     found_sets = False
     errors: list[str] = []
     timeout = httpx.Timeout(12.0, connect=5.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(timeout=timeout, headers=TCGTRACKING_HEADERS) as client:
         for category_id in category_ids:
             for search_query in search_queries:
                 search_url = f"{TCGTRACKING_BASE}/{category_id}/search"
@@ -924,6 +1403,29 @@ async def _search_sealed_products(
                             continue
                         products.append(sealed)
 
+        if len(products) < limit:
+            catalog_products, catalog_error = await _search_tcgtracking_sealed_catalog_products(
+                client,
+                query,
+                category_ids=category_ids,
+                selected_game=selected_game,
+                limit=limit,
+            )
+            if catalog_error:
+                errors.append(catalog_error)
+            if catalog_products:
+                products = _merge_sealed_products(products, catalog_products, limit=max(limit * 2, limit))
+
+    requested_product_ids = _tcgplayer_product_ids_from_query(query)
+    if requested_product_ids:
+        exact_products = [
+            product
+            for product in products
+            if str(product.get("external_id") or "").strip() in requested_product_ids
+        ]
+        if exact_products:
+            products = exact_products
+
     if products:
         products.sort(key=lambda product: _sealed_product_query_score(query, product), reverse=True)
     warning = ""
@@ -980,6 +1482,14 @@ async def _build_bulk_sealed_preview(bulk_text: str, *, game: str = "Pokemon") -
         row["product"] = _best_sealed_product_match(str(row["query"]), products)
         if not row["product"]:
             row["error"] = "No API match. Search this one manually below."
+        else:
+            row["auto_price"] = row["product"].get("market_price")
+            row["list_price"] = row["product"].get("market_price")
+            row["product_name"] = row["product"].get("name")
+            row["set_name"] = row["product"].get("set_name")
+            row["sealed_product_kind"] = row["product"].get("kind")
+            row["upc"] = row["product"].get("upc")
+            row["image_url"] = row["product"].get("image_url")
     return rows
 
 
@@ -1225,6 +1735,7 @@ async def _inventory_sealed_template_context(
     game: str = "Pokemon",
     q: str = "",
     single_q: str = "",
+    search_type: str = "both",
     received: int = 0,
     single_received: int = 0,
     error: str = "",
@@ -1238,14 +1749,16 @@ async def _inventory_sealed_template_context(
     bulk_units: int = 0,
 ) -> dict[str, Any]:
     selected_game = _normalize_add_stock_game(game)
+    selected_search_type = _normalize_add_stock_search_type(search_type if isinstance(search_type, str) else "sealed")
     search_text = (single_q or q or "").strip()
     game_values = _add_stock_existing_game_values(selected_game)
-    query = select(InventoryItem).where(
-        InventoryItem.item_type == ITEM_TYPE_SEALED,
-        InventoryItem.game.in_(game_values),
-        InventoryItem.archived_at == None,  # noqa: E711
-    )
-    if search_text:
+    existing_items: list[InventoryItem] = []
+    if search_text and selected_search_type != "cards":
+        query = select(InventoryItem).where(
+            InventoryItem.item_type == ITEM_TYPE_SEALED,
+            InventoryItem.game.in_(game_values),
+            InventoryItem.archived_at == None,  # noqa: E711
+        )
         like = f"%{search_text}%"
         query = query.where(
             InventoryItem.card_name.ilike(like)
@@ -1257,8 +1770,6 @@ async def _inventory_sealed_template_context(
         existing_items = session.exec(
             query.order_by(InventoryItem.updated_at.desc(), InventoryItem.created_at.desc()).limit(12)
         ).all()
-    else:
-        existing_items = []
 
     api_products: list[dict[str, Any]] = []
     catalog_error = ""
@@ -1266,23 +1777,42 @@ async def _inventory_sealed_template_context(
     single_lookup_error = ""
 
     if search_text:
-        looks_sealed = _add_stock_query_looks_sealed(search_text)
-        if looks_sealed:
+        if selected_search_type == "sealed":
             api_products, catalog_error = await _cached_add_stock_sealed_search(
                 search_text,
                 game=selected_game,
                 limit=24,
             )
-        else:
-            (api_products, catalog_error), (single_results, single_lookup_error_candidate) = await asyncio.gather(
-                _cached_add_stock_sealed_search(search_text, game=selected_game, limit=24),
-                _cached_add_stock_single_search(search_text, game=selected_game),
+        elif selected_search_type == "cards":
+            single_results, single_lookup_error_candidate = await _cached_add_stock_single_search(
+                search_text,
+                game=selected_game,
             )
-            if single_results:
-                api_products = []
-                catalog_error = ""
-            if single_lookup_error_candidate and not single_results and not existing_items and not api_products:
+            if single_lookup_error_candidate and not single_results:
                 single_lookup_error = single_lookup_error_candidate
+        else:
+            looks_sealed = _add_stock_query_looks_sealed(search_text)
+            if looks_sealed:
+                api_products, catalog_error = await _cached_add_stock_sealed_search(
+                    search_text,
+                    game=selected_game,
+                    limit=24,
+                )
+            else:
+                (api_products, catalog_error), (single_results, single_lookup_error_candidate) = await asyncio.gather(
+                    _cached_add_stock_sealed_search(search_text, game=selected_game, limit=24),
+                    _cached_add_stock_single_search(search_text, game=selected_game),
+                )
+                if single_results:
+                    api_products = [
+                        product
+                        for product in api_products
+                        if _sealed_catalog_product_match_score(search_text, product) is not None
+                    ]
+                    if not api_products:
+                        catalog_error = ""
+                if single_lookup_error_candidate and not single_results and not existing_items and not api_products:
+                    single_lookup_error = single_lookup_error_candidate
 
     suggestions = _sealed_catalog_suggestions(api_products, existing_items, limit=12)
     received_item = session.get(InventoryItem, received) if received else None
@@ -1315,6 +1845,8 @@ async def _inventory_sealed_template_context(
         "can_manage_inventory": _can_inventory_manage(request, session),
         "selected_game": selected_game,
         "game_options": ADD_STOCK_GAME_OPTIONS,
+        "search_type": selected_search_type,
+        "search_type_options": ADD_STOCK_SEARCH_TYPE_OPTIONS,
         "scan_url": "/degen_eye/v2" if selected_game == "Pokemon" else "/degen_eye",
         "q": search_text,
         "single_q": search_text,
@@ -1392,9 +1924,12 @@ def _receive_sealed_stock(
     quantity: int,
     unit_cost: Optional[float] = None,
     list_price: Optional[float] = None,
+    auto_price: Optional[float] = None,
+    low_price: Optional[float] = None,
     location: str = "",
     source: str = "",
     notes: str = "",
+    price_payload: Optional[dict[str, Any]] = None,
     actor_label: Optional[str] = None,
 ) -> tuple[InventoryItem, InventoryStockMovement, bool]:
     if quantity < 1:
@@ -1432,6 +1967,8 @@ def _receive_sealed_stock(
             quantity=0,
             cost_basis=unit_cost,
             list_price=list_price,
+            auto_price=auto_price,
+            last_priced_at=utcnow() if auto_price is not None else None,
             image_url=image_url.strip() or None,
             status=INVENTORY_IN_STOCK,
             created_at=utcnow(),
@@ -1450,6 +1987,9 @@ def _receive_sealed_stock(
             item.image_url = image_url.strip()
         if set_name.strip() and not item.set_name:
             item.set_name = set_name.strip()
+        if auto_price is not None:
+            item.auto_price = auto_price
+            item.last_priced_at = utcnow()
         if list_price is not None:
             item.list_price = list_price
         if item.archived_at is not None:
@@ -1488,6 +2028,17 @@ def _receive_sealed_stock(
         created_at=utcnow(),
     )
     session.add(movement)
+    if auto_price is not None or low_price is not None:
+        session.add(
+            PriceHistory(
+                item_id=item.id,
+                source="tcgtracking",
+                market_price=auto_price,
+                low_price=low_price,
+                high_price=None,
+                raw_response_json=json.dumps(price_payload or {}, sort_keys=True),
+            )
+        )
     session.commit()
     session.refresh(item)
     session.refresh(movement)
@@ -1964,14 +2515,19 @@ async def inventory_list(
     q: str = Query(default=""),
     deleted: str = Query(default=""),
     updated: int = Query(default=0),
+    repriced: int = Query(default=0),
+    price_errors: int = Query(default=0),
     archived: str = Query(default=""),
     resticker: str = Query(default=""),
+    price_review: str = Query(default=""),
+    edit: str = Query(default=""),
     page: int = Query(default=1, ge=1),
 ):
     if denial := _require_employee_permission(request, "ops.inventory.view", session):
         return denial
 
     query = select(InventoryItem)
+    price_review_condition = _inventory_price_review_sql_condition()
     if archived == "1":
         query = query.where(InventoryItem.archived_at != None)  # noqa: E711
     elif archived != "all":
@@ -1984,6 +2540,8 @@ async def inventory_list(
         query = query.where(InventoryItem.item_type == item_type)
     if resticker == "1":
         query = query.where(InventoryItem.resticker_alert_active == True)  # noqa: E712
+    if price_review == "1":
+        query = query.where(price_review_condition)
     if q:
         like = f"%{q}%"
         query = query.where(
@@ -2003,12 +2561,28 @@ async def inventory_list(
     page = min(page, total_pages)
     offset = (page - 1) * PAGE_SIZE
 
+    price_gap_expr = InventoryItem.auto_price - InventoryItem.list_price
     items = session.exec(
-        query.order_by(InventoryItem.created_at.desc()).offset(offset).limit(PAGE_SIZE)
+        query.order_by(
+            case((price_review_condition, 0), else_=1),
+            price_gap_expr.desc(),
+            InventoryItem.created_at.desc(),
+        ).offset(offset).limit(PAGE_SIZE)
     ).all()
 
     can_manage_inventory = _can_inventory_manage(request, session)
+    edit_mode = can_manage_inventory and edit == "1"
     active_items = InventoryItem.archived_at == None  # noqa: E711
+    stale_cutoff = utcnow() - timedelta(
+        hours=max(float(getattr(settings, "inventory_price_stale_hours", 24.0) or 24.0), 1.0)
+    )
+    stale_price_condition = (
+        (InventoryItem.status.in_([INVENTORY_IN_STOCK, INVENTORY_LISTED]))
+        & (
+            (InventoryItem.last_priced_at == None)  # noqa: E711
+            | (InventoryItem.last_priced_at < stale_cutoff)
+        )
+    )
     inventory_summary = {
         "all": session.exec(select(func.count()).where(active_items)).one(),
         "archived": session.exec(
@@ -2025,6 +2599,12 @@ async def inventory_list(
         ).one(),
         "resticker_alerts": session.exec(
             select(func.count()).where(InventoryItem.resticker_alert_active == True, active_items)  # noqa: E712
+        ).one(),
+        "price_reviews": session.exec(
+            select(func.count()).where(active_items, price_review_condition)
+        ).one(),
+        "price_stale": session.exec(
+            select(func.count()).where(active_items, stale_price_condition)
         ).one(),
         "in_stock": session.exec(
             select(func.count()).where(InventoryItem.status == INVENTORY_IN_STOCK, active_items)
@@ -2053,14 +2633,21 @@ async def inventory_list(
             "q": q,
             "deleted": deleted,
             "updated": updated,
+            "repriced": repriced,
+            "price_errors": price_errors,
             "archived_filter": archived,
             "resticker_filter": resticker,
+            "price_review_filter": price_review,
+            "edit_mode": edit_mode,
+            "edit_mode_url": _inventory_url_with_params(request, {"edit": "1"}),
+            "view_mode_url": _inventory_url_with_params(request, {"edit": ""}),
             "can_manage_inventory": can_manage_inventory,
             "list_return_url": list_return_url,
             "games": GAMES,
             "statuses": sorted(ALL_INVENTORY_STATUSES),
             "inventory_summary": inventory_summary,
             "effective_price": effective_price,
+            "price_review": _inventory_price_review_context,
         },
     )
 
@@ -2106,6 +2693,7 @@ async def inventory_sealed_page(
     game: str = Query(default="Pokemon"),
     q: str = Query(default=""),
     single_q: str = Query(default=""),
+    search_type: str = Query(default="both"),
     received: int = Query(default=0),
     single_received: int = Query(default=0),
     error: str = Query(default=""),
@@ -2125,6 +2713,7 @@ async def inventory_sealed_page(
             game=game,
             q=q,
             single_q=single_q,
+            search_type=search_type,
             received=received,
             single_received=single_received,
             error=error,
@@ -2194,6 +2783,7 @@ async def inventory_sealed_bulk_receive(
             list_price_raw = form.get(f"bulk_list_price_{row_index}")
             if list_price_raw is None:
                 list_price_raw = row.get("list_price") or ""
+            auto_price = _parse_float(str(row.get("auto_price") or ""))
             item, _movement, _created = _receive_sealed_stock(
                 session,
                 game=selected_game,
@@ -2204,6 +2794,12 @@ async def inventory_sealed_bulk_receive(
                 image_url=str(row.get("image_url") or ""),
                 quantity=quantity,
                 list_price=_parse_float(str(list_price_raw)),
+                auto_price=auto_price,
+                price_payload={
+                    "source": "bulk_add_stock",
+                    "market_price": auto_price,
+                    "row": row,
+                },
                 location=location,
                 source=source,
                 notes=notes,
@@ -2228,11 +2824,13 @@ async def inventory_sealed_receive(
     product_name: str = Form(default=""),
     set_name: str = Form(default=""),
     sealed_product_kind: str = Form(default=""),
+    search_type: str = Form(default="sealed"),
     upc: str = Form(default=""),
     image_url: str = Form(default=""),
     quantity: str = Form(default="1"),
     unit_cost: str = Form(default=""),
     list_price: str = Form(default=""),
+    auto_price: str = Form(default=""),
     location: str = Form(default=""),
     source: str = Form(default=""),
     notes: str = Form(default=""),
@@ -2241,16 +2839,18 @@ async def inventory_sealed_receive(
         return denial
 
     selected_game = _normalize_add_stock_game(game)
+    selected_search_type = _normalize_add_stock_search_type(search_type if isinstance(search_type, str) else "sealed")
     quantity_clean = str(quantity or "").strip()
     quantity_value = int(quantity_clean) if quantity_clean.isdigit() else 0
     item_id_int = int(item_id) if item_id.strip().isdigit() else None
     unit_cost_value = _parse_float(unit_cost)
     list_price_value = _parse_float(list_price)
+    auto_price_value = _parse_float(auto_price)
     if unit_cost_value is not None and unit_cost_value < 0:
-        params = urlencode({"game": selected_game, "q": product_name or "", "error": "Unit cost cannot be negative."})
+        params = urlencode({"game": selected_game, "search_type": selected_search_type, "q": product_name or "", "error": "Unit cost cannot be negative."})
         return RedirectResponse(f"/inventory/add-stock?{params}", status_code=303)
     if list_price_value is not None and list_price_value < 0:
-        params = urlencode({"game": selected_game, "q": product_name or "", "error": "Sell price cannot be negative."})
+        params = urlencode({"game": selected_game, "search_type": selected_search_type, "q": product_name or "", "error": "Sell price cannot be negative."})
         return RedirectResponse(f"/inventory/add-stock?{params}", status_code=303)
     try:
         item, _movement, _created = _receive_sealed_stock(
@@ -2265,16 +2865,25 @@ async def inventory_sealed_receive(
             quantity=quantity_value,
             unit_cost=unit_cost_value,
             list_price=list_price_value,
+            auto_price=auto_price_value,
+            price_payload={
+                "source": "add_stock_search",
+                "market_price": auto_price_value,
+                "product_name": product_name,
+                "set_name": set_name,
+                "sealed_product_kind": sealed_product_kind,
+                "upc": upc,
+            },
             location=location,
             source=source,
             notes=notes,
             actor_label=_current_user_label(request),
         )
     except ValueError as exc:
-        params = urlencode({"game": selected_game, "q": product_name or "", "error": str(exc)})
+        params = urlencode({"game": selected_game, "search_type": selected_search_type, "q": product_name or "", "error": str(exc)})
         return RedirectResponse(f"/inventory/add-stock?{params}", status_code=303)
 
-    params = urlencode({"game": selected_game, "received": item.id, "q": item.card_name})
+    params = urlencode({"game": selected_game, "search_type": selected_search_type, "received": item.id, "q": item.card_name})
     return RedirectResponse(f"/inventory/add-stock?{params}", status_code=303)
 
 
@@ -2288,6 +2897,7 @@ async def inventory_singles_receive(
     set_code: str = Form(default=""),
     card_number: str = Form(default=""),
     variant: str = Form(default=""),
+    search_type: str = Form(default="cards"),
     variants_json: str = Form(default="[]"),
     condition: str = Form(default="NM"),
     image_url: str = Form(default=""),
@@ -2302,15 +2912,16 @@ async def inventory_singles_receive(
         return denial
 
     selected_game = _normalize_add_stock_game(game)
+    selected_search_type = _normalize_add_stock_search_type(search_type if isinstance(search_type, str) else "cards")
     quantity_clean = str(quantity or "").strip()
     quantity_value = int(quantity_clean) if quantity_clean.isdigit() else 0
     unit_cost_value = _parse_float(unit_cost)
     list_price_value = _parse_float(list_price)
     if unit_cost_value is not None and unit_cost_value < 0:
-        params = urlencode({"game": selected_game, "q": card_name or "", "single_error": "Unit cost cannot be negative."})
+        params = urlencode({"game": selected_game, "search_type": selected_search_type, "q": card_name or "", "single_error": "Unit cost cannot be negative."})
         return RedirectResponse(f"/inventory/add-stock?{params}", status_code=303)
     if list_price_value is not None and list_price_value < 0:
-        params = urlencode({"game": selected_game, "q": card_name or "", "single_error": "Sell price cannot be negative."})
+        params = urlencode({"game": selected_game, "search_type": selected_search_type, "q": card_name or "", "single_error": "Sell price cannot be negative."})
         return RedirectResponse(f"/inventory/add-stock?{params}", status_code=303)
 
     try:
@@ -2353,10 +2964,10 @@ async def inventory_singles_receive(
             actor_label=_current_user_label(request),
         )
     except ValueError as exc:
-        params = urlencode({"game": selected_game, "q": card_name or "", "single_error": str(exc)})
+        params = urlencode({"game": selected_game, "search_type": selected_search_type, "q": card_name or "", "single_error": str(exc)})
         return RedirectResponse(f"/inventory/add-stock?{params}", status_code=303)
 
-    params = urlencode({"game": selected_game, "single_received": item.id, "q": item.card_name})
+    params = urlencode({"game": selected_game, "search_type": selected_search_type, "single_received": item.id, "q": item.card_name})
     return RedirectResponse(f"/inventory/add-stock?{params}", status_code=303)
 
 
@@ -2579,6 +3190,114 @@ async def inventory_new_submit(
     return RedirectResponse(f"/inventory/{item.id}", status_code=303)
 
 
+async def _reprice_inventory_items(
+    session: Session,
+    items: list[InventoryItem],
+    *,
+    request: Optional[Request] = None,
+    markup_percent: float = 0.0,
+) -> tuple[int, int]:
+    repriced_count = 0
+    error_count = 0
+    for item in items:
+        if item.archived_at is not None:
+            continue
+        target_price = _inventory_price_from_market(item, markup_percent=markup_percent)
+        if target_price is None:
+            error_count += 1
+            continue
+        item.list_price = target_price
+        item.updated_at = utcnow()
+        if (
+            item.resticker_alert_active
+            and item.resticker_alert_price is not None
+            and target_price >= item.resticker_alert_price
+        ):
+            clear_slab_resticker_alert(
+                item,
+                reason="Store price matched current market price.",
+            )
+        session.add(item)
+        repriced_count += 1
+    session.commit()
+    return repriced_count, error_count
+
+
+def _bulk_edit_inventory_items(
+    session: Session,
+    items: list[InventoryItem],
+    form: Any,
+    *,
+    actor: Optional[str],
+) -> tuple[int, Optional[str]]:
+    now = utcnow()
+    updated_count = 0
+    for item in items:
+        if item.archived_at is not None:
+            continue
+
+        changed = False
+        before_qty = max(0, item.quantity or 0)
+        qty_raw = str(form.get(f"bulk_qty_{item.id}") or "").strip()
+        if qty_raw:
+            try:
+                after_qty = int(qty_raw)
+            except ValueError:
+                return updated_count, f"Quantity must be a whole number for {item.card_name}."
+            if after_qty < 0:
+                return updated_count, f"Quantity cannot be negative for {item.card_name}."
+            if after_qty != before_qty:
+                item.quantity = after_qty
+                changed = True
+                session.add(
+                    InventoryStockMovement(
+                        item_id=item.id,
+                        reason="bulk_edit_qty",
+                        quantity_delta=after_qty - before_qty,
+                        quantity_before=before_qty,
+                        quantity_after=after_qty,
+                        location=item.location,
+                        source="Inventory Bulk Edit",
+                        notes="Quantity changed from inventory edit mode.",
+                        created_by=actor,
+                        created_at=now,
+                    )
+                )
+
+        cost_raw = str(form.get(f"bulk_cost_{item.id}") or "").strip()
+        next_cost = _parse_float(cost_raw)
+        if cost_raw and next_cost is None:
+            return updated_count, f"Cost must be a valid number for {item.card_name}."
+        if next_cost != item.cost_basis:
+            item.cost_basis = next_cost
+            changed = True
+
+        price_raw = str(form.get(f"bulk_price_{item.id}") or "").strip()
+        next_price = _parse_float(price_raw)
+        if price_raw and next_price is None:
+            return updated_count, f"Price must be a valid number for {item.card_name}."
+        if next_price != item.list_price:
+            item.list_price = next_price
+            changed = True
+
+        if changed:
+            if item.resticker_alert_active and (
+                item.item_type != ITEM_TYPE_SLAB
+                or (
+                    item.list_price is not None
+                    and item.resticker_alert_price is not None
+                    and item.list_price >= item.resticker_alert_price
+                )
+            ):
+                clear_slab_resticker_alert(item, reason="Sticker price updated from inventory bulk edit.")
+            item.updated_at = now
+            session.add(item)
+            updated_count += 1
+
+    session.commit()
+    return updated_count, None
+
+
 @router.post("/inventory/bulk-action")
 async def inventory_bulk_action(
     request: Request,
@@ -2597,6 +3316,26 @@ async def inventory_bulk_action(
     if action == "print_labels":
         params = urlencode({"ids": ",".join(str(item.id) for item in items if item.archived_at is None)})
         return RedirectResponse(f"/inventory/labels?{params}", status_code=303)
+    if action in PRICE_MARKUP_ACTIONS:
+        repriced_count, error_count = await _reprice_inventory_items(
+            session,
+            items,
+            request=request,
+            markup_percent=PRICE_MARKUP_ACTIONS[action],
+        )
+        params = urlencode({"repriced": repriced_count, "price_errors": error_count})
+        return RedirectResponse(f"/inventory?{params}", status_code=303)
+    if action == "bulk_edit":
+        updated_count, error = _bulk_edit_inventory_items(
+            session,
+            items,
+            form,
+            actor=_current_user_label(request),
+        )
+        if error:
+            return HTMLResponse(error, status_code=400)
+        params = urlencode({"updated": updated_count})
+        return RedirectResponse(f"/inventory?{params}", status_code=303)
 
     now = utcnow()
     actor = _current_user_label(request)
@@ -2931,6 +3670,8 @@ async def inventory_reprice(
     request: Request,
     item_id: int,
     session: Session = Depends(get_session),
+    return_to: str = Form(default=""),
+    markup_percent: str = Form(default="0"),
 ):
     if denial := _require_inventory_manage(request, session):
         return denial
@@ -2939,36 +3680,23 @@ async def inventory_reprice(
     if not item:
         return HTMLResponse("Item not found.", status_code=404)
 
-    try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            result = await fetch_price_for_item(
-                item,
-                client,
-                api_key=settings.scrydex_api_key,
-                base_url=settings.scrydex_base_url,
-            )
-        if result:
-            actor = _current_user(request)
-            _history, alert_event = record_inventory_price_result(
-                session,
-                item,
-                result,
-                request=request,
-                actor_user_id=getattr(actor, "id", None),
-            )
-            session.commit()
-            logger.info(
-                "[inventory] repriced item %s: $%.2f alert=%s",
-                item_id,
-                result.get("market_price") or 0,
-                alert_event,
-            )
-        else:
-            logger.info("[inventory] reprice returned no result for item %s", item_id)
-    except Exception as exc:
-        logger.error("[inventory] reprice error for item %s: %s", item_id, exc)
+    markup_value = _parse_float(markup_percent) or 0.0
+    repriced_count, error_count = await _reprice_inventory_items(
+        session,
+        [item],
+        request=request,
+        markup_percent=markup_value,
+    )
+    if repriced_count:
+        logger.info("[inventory] repriced item %s", item_id)
+    if error_count:
+        logger.info("[inventory] reprice skipped item %s because market price is missing", item_id)
 
-    return RedirectResponse(f"/inventory/{item_id}", status_code=303)
+    redirect_to = _safe_inventory_return_url(return_to, f"/inventory/{item_id}")
+    if redirect_to == "/inventory" or redirect_to.startswith("/inventory?"):
+        params = urlencode({"repriced": repriced_count, "price_errors": error_count})
+        redirect_to = f"{redirect_to}{'&' if '?' in redirect_to else '?'}{params}"
+    return RedirectResponse(redirect_to, status_code=303)
 
 
 @router.post("/inventory/{item_id}/resticker/apply")
@@ -3289,6 +4017,104 @@ async def inventory_scan_pokemon_text_search(request: Request, session: Session 
     category_id = (body.get("category_id") or "3").strip()
     result = await text_search_cards(query, category_id=category_id)
     return JSONResponse(result)
+
+
+@router.post("/inventory/scan/slab-ximilar")
+async def inventory_scan_slab_ximilar(request: Request, session: Session = Depends(get_session)):
+    """Identify a slab photo and fetch Ximilar price-guide listings."""
+    if denial := _require_employee_permission(request, "ops.degen_eye.view", session):
+        return denial
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+    image_b64 = (body.get("image") or "").strip()
+    if not image_b64:
+        return JSONResponse({"error": "Missing slab photo."}, status_code=400)
+    if not settings.ximilar_api_token:
+        return JSONResponse({"error": "XIMILAR_API_TOKEN is not configured."}, status_code=503)
+
+    game = _normalize_add_stock_game(body.get("game") or "Pokemon")
+    category_id = _ximilar_category_for_game(game)
+    try:
+        async with httpx.AsyncClient(timeout=45.0) as client:
+            result = await fetch_ximilar_slab_price_from_image(
+                image_b64,
+                client,
+                api_token=settings.ximilar_api_token,
+                category_id=category_id,
+            )
+    except Exception as exc:
+        logger.warning("[inventory/scan] Ximilar slab scan failed: %s", exc)
+        result = None
+
+    if result is None:
+        return JSONResponse(
+            {"error": "Ximilar did not return a card or price-guide result for that slab photo."},
+            status_code=502,
+        )
+
+    raw = result.get("raw") if isinstance(result, dict) else {}
+    raw = raw if isinstance(raw, dict) else {}
+    card_info = raw.get("ximilar_card") if isinstance(raw.get("ximilar_card"), dict) else {}
+    slab_info = raw.get("ximilar_slab") if isinstance(raw.get("ximilar_slab"), dict) else {}
+    card_name = (
+        str(card_info.get("card_name") or "").strip()
+        or str(slab_info.get("card_name") or "").strip()
+        or "Ximilar slab scan"
+    )
+    grading_company = (
+        str(slab_info.get("grading_company") or "").strip()
+        or (body.get("grading_company") or "PSA").strip().upper()
+        or "PSA"
+    )
+    preview_item = InventoryItem(
+        barcode="PREVIEW",
+        item_type=ITEM_TYPE_SLAB,
+        game=str(card_info.get("game") or game or "Pokemon"),
+        card_name=card_name,
+        set_name=str(card_info.get("set_name") or slab_info.get("set_name") or "").strip() or None,
+        card_number=str(card_info.get("card_number") or slab_info.get("card_number") or "").strip() or None,
+        grading_company=grading_company,
+        grade=str(slab_info.get("grade") or "").strip() or None,
+        cert_number=str(slab_info.get("cert_number") or "").strip() or None,
+    )
+    payload = _slab_comps_lookup_payload(preview_item, result)
+    card = {
+        "name": preview_item.card_name,
+        "card_name": preview_item.card_name,
+        "game": preview_item.game,
+        "set_name": preview_item.set_name or "",
+        "card_number": preview_item.card_number or "",
+        "image_url": "",
+        "lookup_source_label": "Ximilar",
+    }
+    response: dict[str, Any] = {
+        "card": card,
+        "cards": [card],
+        "cert": {
+            "cert_number": preview_item.cert_number or "",
+            "grading_company": preview_item.grading_company or "",
+            "grade": preview_item.grade or "",
+        },
+        "cert_number": preview_item.cert_number or "",
+        "grading_company": preview_item.grading_company or "",
+        "grade_comps": [payload],
+        "selected_price_source": "ximilar",
+        "selected_price_source_label": "Ximilar",
+        "ximilar": {
+            "card": card_info,
+            "slab": slab_info,
+        },
+    }
+    if not payload.get("last_solds"):
+        response["lookup_warning"] = (
+            "Ximilar identified the slab, but the price guide did not return marketplace listings. "
+            "The account may need price-guide access enabled, or this card may not have current listing data."
+        )
+    return JSONResponse(response)
 
 
 @router.post("/inventory/scan/slab-comps")
@@ -3655,6 +4481,23 @@ def _slab_price_source_label(source: str) -> str:
         "130point": "130point",
     }
     return labels.get(source, source.replace("_", " ").title())
+
+
+def _ximilar_category_for_game(game: str) -> str:
+    clean = (game or "").strip().lower()
+    if clean in {"pokemon japan", "pokemon jp", "japanese pokemon", "jp pokemon"}:
+        return "3"
+    if clean in {"magic", "mtg", "magic: the gathering"}:
+        return "1"
+    if clean in {"yu-gi-oh", "yugioh", "yu gi oh"}:
+        return "2"
+    if clean in {"one piece", "onepiece"}:
+        return "68"
+    if clean == "lorcana":
+        return "71"
+    if clean == "riftbound":
+        return "89"
+    return "3"
 
 
 def _lookup_sales_from_price_raw(raw: dict[str, Any], *, source: str = "") -> list[dict[str, Any]]:

@@ -79,10 +79,12 @@
         .scan-input:focus { outline:none; box-shadow:0 0 0 3px rgba(213,83,56,.2); }
         .scan-label { font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; color: var(--lx-muted); }
         .table-shell { overflow:auto; border:1px solid var(--lx-br); border-radius:20px; background: var(--lx-s1); max-height:72vh; margin-bottom:16px; }
-        table { width:100%; border-collapse:separate; border-spacing:0; min-width:1080px; }
+        table { width:100%; border-collapse:separate; border-spacing:0; min-width:1340px; }
         th, td { padding:10px 14px; border-bottom:1px solid var(--lx-br); text-align:left; vertical-align:middle; font-size:13px; }
         thead th { position:sticky; top:0; z-index:2; background: var(--lx-s2); color: var(--lx-muted); font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; white-space:nowrap; }
         tbody tr:hover { background: rgba(255,255,255,.04); }
+        tbody tr.price-review-row { background:rgba(234,179,8,.08); }
+        tbody tr.price-review-row:hover { background:rgba(234,179,8,.12); }
         tbody tr:last-child td { border-bottom:none; }
         .badge { display:inline-flex; align-items:center; padding:4px 8px; border-radius:999px; font-size:11px; font-weight:700; white-space:nowrap; }
         .badge-in-stock { background:#edf9f2; color:#166647; }
@@ -94,8 +96,18 @@
         .badge-sealed { background:var(--blue-bg); color:var(--blue); border:1px solid rgba(96,165,250,.25); }
         .badge-resticker { background:var(--yellow-bg); color:#fef3c7; border:1px solid rgba(234,179,8,.35); }
         .btn-sm { padding:5px 10px; border-radius:10px; font-size:12px; font-weight:700; border:1px solid var(--line); background: var(--lx-s1); color:var(--text); cursor:pointer; text-decoration:none; display:inline-block; }
-        .price-cell { font-variant-numeric:tabular-nums; font-weight:700; color:#166647; }
+        .price-cell { font-variant-numeric:tabular-nums; font-weight:700; color:#86efac; }
         .price-none { color: var(--lx-muted); }
+        .price-stack { display:grid;gap:4px;min-width:118px; }
+        .price-main { color:#fff;font-weight:900;font-variant-numeric:tabular-nums; }
+        .price-sub { color:var(--lx-muted);font-size:11px;font-weight:700; }
+        .market-cell { min-width:160px; }
+        .market-price { color:#93c5fd;font-weight:900;font-variant-numeric:tabular-nums; }
+        .price-gap-badge { display:inline-flex;width:max-content;padding:4px 8px;border-radius:999px;background:var(--yellow-bg);border:1px solid rgba(234,179,8,.35);color:#fef3c7;font-size:11px;font-weight:900; }
+        .reprice-inline { margin-top:6px; }
+        .reprice-inline button { padding:5px 9px;border-radius:10px;font-size:11px;width:auto; }
+        .price-adjust-actions { display:flex;gap:5px;flex-wrap:wrap;margin-top:6px; }
+        .price-adjust-actions button { min-width:54px; }
         .pagination { display:flex; gap:8px; align-items:center; justify-content:center; flex-wrap:wrap; }
         .page-btn { padding:7px 13px; border-radius:12px; border:1px solid var(--line); background: var(--lx-s1); color:var(--text); font:inherit; font-size:13px; font-weight:600; cursor:pointer; text-decoration:none; }
         .page-btn.active { background:var(--accent); color:#fff; border-color:var(--accent); }
@@ -115,6 +127,11 @@
         .qty-set-form button { width:auto;padding:7px 9px;border-radius:10px;font-size:11px; }
         .bulk-actions { display:grid;grid-template-columns:minmax(150px,220px) minmax(140px,1fr) minmax(160px,1.2fr) auto;gap:8px;align-items:end;margin:0 0 12px; }
         .bulk-check { width:auto; }
+        .bulk-edit-panel { display:flex;justify-content:space-between;gap:12px;align-items:center;margin:0 0 12px;padding:12px 14px;border:1px solid rgba(96,165,250,.28);border-radius:14px;background:rgba(96,165,250,.1); }
+        .bulk-edit-panel strong { display:block;color:#fff;font-size:13px; }
+        .bulk-edit-panel span { display:block;color:var(--lx-muted);font-size:12px;font-weight:700;margin-top:2px; }
+        .edit-inline-input { width:92px;min-width:92px;padding:7px 8px;border-radius:10px;font-size:12px;font-weight:800;font-variant-numeric:tabular-nums; }
+        .edit-inline-input.qty { width:66px;min-width:66px;text-align:center; }
         .success-banner { margin-top:14px;padding:11px 14px;border:1px solid rgba(34,197,94,.32);border-radius:14px;background:rgba(34,197,94,.12);color:#86efac;font-size:13px;font-weight:800; }
         .warning-banner { margin-top:14px;padding:12px 14px;border:1px solid rgba(234,179,8,.38);border-radius:14px;background:var(--yellow-bg);color:#fef3c7;font-size:13px;font-weight:800;display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap; }
         .empty-state { display:flex; flex-direction:column; align-items:center; gap:10px; text-align:center; color:var(--lx-muted); padding:34px 16px; }
@@ -123,7 +140,7 @@
         @keyframes card-in { from{opacity:0;transform:translateY(16px) scale(.985)} to{opacity:1;transform:none} }
         .card { animation:card-in .45s cubic-bezier(.22,1,.36,1) both; }
         @media(max-width:1100px) { .action-grid{grid-template-columns:repeat(2,1fr);} .metric-strip{grid-template-columns:repeat(3,1fr);} }
-        @media(max-width:900px) { .filters{grid-template-columns:1fr 1fr;} .bulk-actions{grid-template-columns:1fr 1fr;} .page{padding:16px 14px 28px;} .scan-row{grid-template-columns:1fr;} .hero-actions{justify-content:flex-start;} }
+        @media(max-width:900px) { .filters{grid-template-columns:1fr 1fr;} .bulk-actions{grid-template-columns:1fr 1fr;} .bulk-edit-panel{align-items:stretch;flex-direction:column;} .page{padding:16px 14px 28px;} .scan-row{grid-template-columns:1fr;} .hero-actions{justify-content:flex-start;} }
         @media(max-width:560px) { .action-grid,.metric-strip,.filters,.bulk-actions{grid-template-columns:1fr;} .button,button{width:100%;text-align:center;} }
     </style>
     <link rel="stylesheet" href="/static/linear.css?v=1776749171">
@@ -205,6 +222,24 @@
         {% if updated %}
         <div class="success-banner">Updated {{ updated }} inventory item{% if updated != 1 %}s{% endif %}.</div>
         {% endif %}
+        {% if repriced %}
+        <div class="success-banner">Matched our price to TCGPlayer market for {{ repriced }} inventory item{% if repriced != 1 %}s{% endif %}.</div>
+        {% endif %}
+        {% if price_errors %}
+        <div class="warning-banner">
+            <span>{{ price_errors }} item{% if price_errors != 1 %}s{% endif %} could not be repriced because it has no TCGPlayer market price yet.</span>
+        </div>
+        {% endif %}
+        {% if inventory_summary.price_reviews %}
+        <div class="warning-banner">
+            <span>{{ inventory_summary.price_reviews }} item{% if inventory_summary.price_reviews != 1 %}s{% endif %} are priced below TCGPlayer market.</span>
+            <a href="/inventory?price_review=1" class="btn-sm">Review Prices</a>
+        </div>
+        {% elif inventory_summary.price_stale %}
+        <div class="warning-banner">
+            <span>{{ inventory_summary.price_stale }} item{% if inventory_summary.price_stale != 1 %}s{% endif %} need a fresh market check. The daily pricing refresh will keep working through stale items.</span>
+        </div>
+        {% endif %}
         {% if inventory_summary.resticker_alerts %}
         <div class="warning-banner">
             <span>{{ inventory_summary.resticker_alerts }} slab{% if inventory_summary.resticker_alerts != 1 %}s{% endif %} need resticker review after Card Ladder moved up.</span>
@@ -229,6 +264,8 @@
         <form method="get" action="/inventory" class="filters">
             {% if archived_filter %}<input type="hidden" name="archived" value="{{ archived_filter }}">{% endif %}
             {% if resticker_filter %}<input type="hidden" name="resticker" value="{{ resticker_filter }}">{% endif %}
+            {% if price_review_filter %}<input type="hidden" name="price_review" value="{{ price_review_filter }}">{% endif %}
+            {% if edit_mode %}<input type="hidden" name="edit" value="1">{% endif %}
             <label>Search
                 <input type="text" name="q" value="{{ q }}" placeholder="Card, sealed product, barcode, UPC, cert #...">
             </label>
@@ -269,6 +306,11 @@
                 <a href="/inventory/scan/slabs" class="btn-sm">Add Slabs</a>
                 <a href="/inventory/labels{% if status_filter %}?status={{ status_filter }}{% endif %}" class="btn-sm">Print Labels</a>
                 {% if can_manage_inventory %}
+                    {% if edit_mode %}
+                    <a href="{{ view_mode_url }}" class="btn-sm">Done Editing</a>
+                    {% else %}
+                    <a href="{{ edit_mode_url }}" class="btn-sm">Bulk Edit</a>
+                    {% endif %}
                     {% if archived_filter == "1" %}
                     <a href="/inventory" class="btn-sm">Active Items</a>
                     {% else %}
@@ -280,11 +322,24 @@
 
         {% if can_manage_inventory %}
         <form id="bulk-form" method="post" action="/inventory/bulk-action">
+            {% if edit_mode %}
+            <input type="hidden" name="bulk_action" value="bulk_edit">
+            <div class="bulk-edit-panel">
+                <div>
+                    <strong>Edit Mode</strong>
+                    <span>Select rows, change qty/cost/price, then save selected edits.</span>
+                </div>
+                <button type="submit" class="secondary-button" style="width:auto;">Save Selected Edits</button>
+            </div>
+            {% else %}
             <div class="bulk-actions">
                 <label>Bulk Action
                     <select name="bulk_action" required>
                         <option value="">Choose action</option>
                         <option value="print_labels">Print Labels</option>
+                        <option value="reprice">Set Our Price to TCGPlayer</option>
+                        <option value="reprice_5">Set Our Price to TCGPlayer +5%</option>
+                        <option value="reprice_10">Set Our Price to TCGPlayer +10%</option>
                         <option value="set_location">Set Location</option>
                         <option value="mark_held">Mark Held</option>
                         <option value="archive">Archive</option>
@@ -298,6 +353,7 @@
                 </label>
                 <label>&nbsp;<button type="submit" class="secondary-button">Apply</button></label>
             </div>
+            {% endif %}
         </form>
         {% endif %}
 
@@ -315,13 +371,15 @@
                         <th>Qty</th>
                         {% if can_manage_inventory %}<th>Cost</th>{% endif %}
                         <th>Price</th>
+                        <th>TCGPlayer Market</th>
                         <th>Status</th>
                         <th>Actions</th>
                     </tr>
                 </thead>
                 <tbody>
                 {% for item in items %}
-                <tr>
+                {% set review = price_review(item) %}
+                <tr class="{% if review.needs_review %}price-review-row{% endif %}">
                     {% if can_manage_inventory %}<td><input class="bulk-check" type="checkbox" name="item_id" value="{{ item.id }}" form="bulk-form" aria-label="Select {{ item.card_name }}"></td>{% endif %}
                     <td style="font-family:monospace;font-size:12px;">{{ item.barcode }}</td>
                     <td style="font-weight:700;">{{ item.card_name }}</td>
@@ -344,7 +402,9 @@
                         {% else %}—{% endif %}
                     </td>
                     <td class="qty-cell">
-                        {% if can_manage_inventory and item.archived_at is none %}
+                        {% if edit_mode and item.archived_at is none %}
+                        <input class="edit-inline-input qty" type="number" name="bulk_qty_{{ item.id }}" min="0" step="1" value="{{ item.quantity }}" form="bulk-form" aria-label="Edit quantity for {{ item.card_name }}">
+                        {% elif can_manage_inventory and item.archived_at is none %}
                         <div class="qty-tools">
                             <div class="qty-stepper" aria-label="Quantity for {{ item.card_name }}">
                                 <form method="post" action="/inventory/{{ item.id }}/adjust-stock">
@@ -375,14 +435,46 @@
                         <span class="qty-badge">{{ item.quantity }}</span>
                         {% endif %}
                     </td>
-                    {% if can_manage_inventory %}<td class="price-cell">{{ item.cost_basis | money }}</td>{% endif %}
+                    {% if can_manage_inventory %}
+                    <td class="price-cell">
+                        {% if edit_mode and item.archived_at is none %}
+                        <input class="edit-inline-input" type="number" name="bulk_cost_{{ item.id }}" min="0" step="0.01" value="{{ '%.2f'|format(item.cost_basis) if item.cost_basis is not none else '' }}" placeholder="Cost" form="bulk-form" aria-label="Edit cost for {{ item.card_name }}">
+                        {% else %}
+                        {{ item.cost_basis | money }}
+                        {% endif %}
+                    </td>
+                    {% endif %}
                     <td class="price-cell">
                         {% set ep = effective_price(item) %}
                         {% if item.resticker_alert_active %}
                         <div style="margin-bottom:5px;"><span class="badge badge-resticker">Resticker{% if item.resticker_alert_price is not none %} {{ item.resticker_alert_price | money }}{% endif %}</span></div>
                         {% endif %}
+                        {% if edit_mode and item.archived_at is none %}
+                        <input class="edit-inline-input" type="number" name="bulk_price_{{ item.id }}" min="0" step="0.01" value="{{ '%.2f'|format(item.list_price) if item.list_price is not none else '' }}" placeholder="{% if review.market_price is not none %}{{ '%.2f'|format(review.market_price) }}{% else %}Price{% endif %}" form="bulk-form" aria-label="Edit price for {{ item.card_name }}">
+                        {% else %}
                         {% if ep is not none %}{{ ep | money }}{% if item.list_price is not none %}<span style="font-size:10px;color: var(--lx-muted);margin-left:3px;">manual</span>{% endif %}
                         {% else %}<span class="price-none">—</span>{% endif %}
+                        {% endif %}
+                    </td>
+                    <td class="market-cell">
+                        <div class="price-stack">
+                            {% if review.market_price is not none %}
+                            <span class="market-price">{{ review.market_price | money }}</span>
+                            <span class="price-sub">TCGPlayer market{% if review.stale %} - stale{% endif %}</span>
+                            {% else %}
+                            <span class="price-none">No market yet</span>
+                            {% endif %}
+                            {% if review.needs_review %}
+                            <span class="price-gap-badge">{{ review.delta_abs | money }} {{ review.direction }} market ({{ review.percent }}%)</span>
+                            {% endif %}
+                            {% if edit_mode and item.archived_at is none %}
+                            <div class="price-adjust-actions">
+                                <button type="button" data-market-fill="1" data-row-id="{{ item.id }}" data-target-name="bulk_price_{{ item.id }}" data-market-price="{{ '%.2f'|format(review.market_price) if review.market_price is not none else '' }}" data-markup-percent="0" class="btn-sm" {% if review.market_price is none %}disabled title="Market price has not loaded yet"{% endif %}>Market</button>
+                                <button type="button" data-market-fill="1" data-row-id="{{ item.id }}" data-target-name="bulk_price_{{ item.id }}" data-market-price="{{ '%.2f'|format(review.market_price) if review.market_price is not none else '' }}" data-markup-percent="5" class="btn-sm" {% if review.market_price is none %}disabled title="Market price has not loaded yet"{% endif %}>+5%</button>
+                                <button type="button" data-market-fill="1" data-row-id="{{ item.id }}" data-target-name="bulk_price_{{ item.id }}" data-market-price="{{ '%.2f'|format(review.market_price) if review.market_price is not none else '' }}" data-markup-percent="10" class="btn-sm" {% if review.market_price is none %}disabled title="Market price has not loaded yet"{% endif %}>+10%</button>
+                            </div>
+                            {% endif %}
+                        </div>
                     </td>
                     <td>
                         <span class="badge badge-{{ item.status }}">{{ item.status.replace("_"," ").title() }}</span>
@@ -397,7 +489,7 @@
                     </td>
                 </tr>
                 {% else %}
-                <tr><td colspan="{{ 12 if can_manage_inventory else 10 }}"><div class="empty-state"><strong>No items found.</strong><span>Try a different filter or add stock.</span><a href="/inventory/add-stock" class="button primary-button" style="width:auto;">Add Stock</a></div></td></tr>
+                <tr><td colspan="{{ 13 if can_manage_inventory else 11 }}"><div class="empty-state"><strong>No items found.</strong><span>Try a different filter or add stock.</span><a href="/inventory/add-stock" class="button primary-button" style="width:auto;">Add Stock</a></div></td></tr>
                 {% endfor %}
                 </tbody>
             </table>
@@ -405,9 +497,9 @@
 
         {% if total_pages > 1 %}
         <div class="pagination">
-            {% if page > 1 %}<a class="page-btn" href="?page={{ page - 1 }}&q={{ q }}&status={{ status_filter }}&game={{ game_filter }}&item_type={{ type_filter }}">‹ Prev</a>{% endif %}
+            {% if page > 1 %}<a class="page-btn" href="?page={{ page - 1 }}&q={{ q }}&status={{ status_filter }}&game={{ game_filter }}&item_type={{ type_filter }}{% if edit_mode %}&edit=1{% endif %}">‹ Prev</a>{% endif %}
             <span style="font-size:13px;color: var(--lx-muted);">Page {{ page }} of {{ total_pages }}</span>
-            {% if page < total_pages %}<a class="page-btn" href="?page={{ page + 1 }}&q={{ q }}&status={{ status_filter }}&game={{ game_filter }}&item_type={{ type_filter }}">Next ›</a>{% endif %}
+            {% if page < total_pages %}<a class="page-btn" href="?page={{ page + 1 }}&q={{ q }}&status={{ status_filter }}&game={{ game_filter }}&item_type={{ type_filter }}{% if edit_mode %}&edit=1{% endif %}">Next ›</a>{% endif %}
         </div>
         {% endif %}
     </div>
@@ -459,6 +551,24 @@
             });
         });
     }
+
+    document.querySelectorAll('[data-market-fill="1"]').forEach(function (button) {
+        button.addEventListener('click', function () {
+            var market = Number(button.getAttribute('data-market-price') || '');
+            if (!Number.isFinite(market) || market <= 0) return;
+            var markup = Number(button.getAttribute('data-markup-percent') || '0');
+            if (!Number.isFinite(markup) || markup < 0) markup = 0;
+            var targetName = button.getAttribute('data-target-name');
+            var target = targetName ? document.getElementsByName(targetName)[0] : null;
+            if (!target) return;
+            target.value = (market * (1 + markup / 100)).toFixed(2);
+            target.dispatchEvent(new Event('input', { bubbles: true }));
+            target.dispatchEvent(new Event('change', { bubbles: true }));
+            var rowId = button.getAttribute('data-row-id');
+            var rowCheck = rowId ? document.querySelector('input[name="item_id"][value="' + rowId + '"][form="bulk-form"]') : null;
+            if (rowCheck) rowCheck.checked = true;
+        });
+    });
 })();
 </script>
     {% include '_mobile_bottom_nav.html' %}

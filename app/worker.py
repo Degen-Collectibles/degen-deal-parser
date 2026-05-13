@@ -9,6 +9,7 @@ from collections.abc import Iterable
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, or_
 from sqlalchemy.exc import OperationalError
@@ -1814,8 +1815,8 @@ def should_stitch_rows(base_row: DiscordMessage, candidate_rows: list[DiscordMes
 
 async def _refresh_inventory_prices_once() -> None:
     """
-    Fetch updated prices for inventory items that are stale (in_stock or listed,
-    and last_priced_at is NULL or older than INVENTORY_PRICE_STALE_HOURS).
+    Fetch updated market prices for inventory items that are stale (in_stock or
+    listed, and last_priced_at is NULL or older than the daily refresh window).
     Rate-limited to 1 request per second to avoid hammering pricing APIs.
     """
     from datetime import timedelta
@@ -1824,7 +1825,8 @@ async def _refresh_inventory_prices_once() -> None:
     from .inventory_pricing import fetch_price_for_item
     from .inventory_price_updates import record_inventory_price_result
 
-    stale_cutoff = utcnow() - timedelta(hours=settings.inventory_price_stale_hours)
+    stale_hours = max(min(settings.inventory_price_stale_hours, 23.0), 1.0)
+    stale_cutoff = utcnow() - timedelta(hours=stale_hours)
 
     with managed_session() as session:
         items = session.exec(
@@ -1837,7 +1839,6 @@ async def _refresh_inventory_prices_once() -> None:
                 )
             )
             .order_by(InventoryItem.last_priced_at.asc().nullsfirst())
-            .limit(50)
         ).all()
         item_ids = [i.id for i in items]
 
@@ -1899,12 +1900,25 @@ async def _refresh_inventory_prices_once() -> None:
     )
 
 
+def _seconds_until_next_inventory_price_refresh(now: datetime | None = None) -> float:
+    """Return seconds until the next daily inventory market-price refresh."""
+    pacific = ZoneInfo("America/Los_Angeles")
+    now_pt = (now or utcnow()).astimezone(pacific)
+    refresh_hour = min(max(int(settings.inventory_price_refresh_hour_pacific or 8), 0), 23)
+    next_run = now_pt.replace(hour=refresh_hour, minute=0, second=0, microsecond=0)
+    if now_pt >= next_run:
+        next_run += timedelta(days=1)
+    return max((next_run - now_pt).total_seconds(), 60.0)
+
+
 async def periodic_inventory_price_loop(stop_event: asyncio.Event) -> None:
-    """Background loop that refreshes stale inventory prices every N hours."""
-    interval_hours = max(settings.inventory_price_refresh_interval_hours, 0.5)
+    """Background loop that refreshes stale inventory market prices once a day."""
     while not stop_event.is_set():
         try:
-            await asyncio.wait_for(stop_event.wait(), timeout=interval_hours * 3600)
+            await asyncio.wait_for(
+                stop_event.wait(),
+                timeout=_seconds_until_next_inventory_price_refresh(),
+            )
             break
         except asyncio.TimeoutError:
             pass

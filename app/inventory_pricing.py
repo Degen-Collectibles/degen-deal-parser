@@ -24,6 +24,7 @@ import logging
 import re
 import html as html_lib
 import asyncio
+import base64
 import csv
 import io
 import sys
@@ -34,7 +35,7 @@ from urllib.parse import urljoin, urlencode
 
 import httpx
 
-from .models import InventoryItem, ITEM_TYPE_SLAB, utcnow
+from .models import InventoryItem, ITEM_TYPE_SEALED, ITEM_TYPE_SINGLE, ITEM_TYPE_SLAB, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,33 @@ POINT130_SEARCH_URL = "https://www.130point.com/sales/search"
 ALT_BROWSE_URL = "https://alt.xyz/browse"
 PRICECHARTING_GAME_URL = "https://www.pricecharting.com/game"
 MYSLABS_ARCHIVE_SEARCH_URL = "https://myslabs.com/search/archive/"
+XIMILAR_TCG_IDENTIFY_URL = "https://api.ximilar.com/collectibles/v2/tcg_id"
+TCGTRACKING_BASE = "https://tcgtracking.com/tcgapi/v1"
+TCGTRACKING_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
+    ),
+    "Accept": "application/json,text/plain,*/*",
+    "Referer": "https://tcgtracking.com/",
+}
+TCGTRACKING_GAME_CATEGORY_IDS: dict[str, tuple[str, ...]] = {
+    "pokemon": ("3", "85"),
+    "pokemon jp": ("85",),
+    "magic": ("1",),
+    "mtg": ("1",),
+    "yu-gi-oh": ("2",),
+    "yugioh": ("2",),
+    "one piece": ("68",),
+    "lorcana": ("71",),
+    "riftbound": ("89",),
+    "dragon ball": ("80", "27", "23"),
+    "digimon": ("63",),
+    "flesh and blood": ("62",),
+    "weiss schwarz": ("20",),
+    "cardfight vanguard": ("16",),
+    "union arena": ("81",),
+}
 
 # ---------------------------------------------------------------------------
 # Card Ladder (price history for graded cards)
@@ -105,6 +133,326 @@ def effective_price(item: InventoryItem) -> Optional[float]:
     if item.auto_price is not None:
         return round(item.auto_price, 2)
     return None
+
+
+def _tcgtracking_category_ids_for_game(game: str | None) -> tuple[str, ...]:
+    clean = re.sub(r"\s+", " ", str(game or "").strip().lower())
+    return TCGTRACKING_GAME_CATEGORY_IDS.get(clean, ())
+
+
+def _money_float(value: Any) -> Optional[float]:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number or number <= 0:
+        return None
+    return round(number, 2)
+
+
+def _price_from_tcgtracking_variant(
+    variant: dict[str, Any],
+    *,
+    condition: str = "NM",
+) -> tuple[Optional[float], Optional[float]]:
+    condition_key = re.sub(r"[^A-Z0-9]", "", str(condition or "NM").upper()) or "NM"
+    conditions = variant.get("conditions") or {}
+    if isinstance(conditions, dict):
+        raw_condition = conditions.get(condition_key)
+        if isinstance(raw_condition, dict):
+            market = _money_float(
+                raw_condition.get("mkt")
+                or raw_condition.get("market")
+                or raw_condition.get("market_price")
+                or raw_condition.get("price")
+            )
+            low = _money_float(raw_condition.get("low") or raw_condition.get("low_price"))
+            if market is not None or low is not None:
+                return market, low
+    return _money_float(variant.get("price") or variant.get("market_price")), _money_float(
+        variant.get("low_price") or variant.get("low")
+    )
+
+
+def _choose_tcgtracking_variant(
+    variants: list[dict[str, Any]],
+    *,
+    preferred_variant: str = "",
+) -> dict[str, Any]:
+    if not variants:
+        return {}
+    preferred_key = re.sub(r"[^a-z0-9]", "", preferred_variant.lower())
+    if preferred_key:
+        for variant in variants:
+            if re.sub(r"[^a-z0-9]", "", str(variant.get("name") or "").lower()) == preferred_key:
+                return variant
+    for variant in variants:
+        if str(variant.get("name") or "").strip().lower() == "normal":
+            return variant
+    return variants[0]
+
+
+async def _fetch_tcgtracking_single_price(
+    item: InventoryItem,
+    client: httpx.AsyncClient,
+) -> Optional[dict[str, Any]]:
+    category_ids = _tcgtracking_category_ids_for_game(item.game)
+    if not category_ids:
+        return None
+    query_parts = [
+        item.card_name,
+        item.set_name or "",
+        item.card_number or "",
+    ]
+    query = " ".join(part for part in query_parts if str(part or "").strip()).strip()
+    if not query:
+        return None
+
+    try:
+        from .pokemon_scanner import text_search_cards
+    except Exception as exc:
+        logger.warning("[inventory_pricing] TCGTracking single import failed: %s", exc)
+        return None
+
+    for category_id in category_ids:
+        try:
+            result = await text_search_cards(
+                query,
+                category_id=category_id,
+                use_ai_parse=False,
+                max_results=6,
+                include_pokemontcg_supplement=False,
+                allow_cross_category_pricing=False,
+                allow_pokemontcg_price_fallback=False,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[inventory_pricing] TCGTracking single lookup failed for item %s category=%s: %s",
+                item.id,
+                category_id,
+                exc,
+            )
+            continue
+        candidates = []
+        if isinstance(result.get("best_match"), dict):
+            candidates.append(result["best_match"])
+        candidates.extend([row for row in (result.get("candidates") or []) if isinstance(row, dict)])
+        for candidate in candidates:
+            variants = [row for row in (candidate.get("available_variants") or []) if isinstance(row, dict)]
+            selected_variant = _choose_tcgtracking_variant(variants, preferred_variant=item.variant or "")
+            market, low = _price_from_tcgtracking_variant(selected_variant, condition=item.condition or "NM")
+            if market is None:
+                market = _money_float(candidate.get("market_price"))
+            if market is None and low is None:
+                continue
+            return {
+                "source": "tcgtracking",
+                "market_price": market,
+                "low_price": low,
+                "high_price": None,
+                "raw": {
+                    "source_detail": "tcgtracking_single_text_search",
+                    "query": query,
+                    "category_id": category_id,
+                    "condition": item.condition or "NM",
+                    "variant": selected_variant.get("name") or item.variant or "",
+                    "match": candidate,
+                },
+            }
+    return None
+
+
+_SEALED_SEARCH_NOISE = {
+    "the",
+    "and",
+    "card",
+    "cards",
+    "tcg",
+    "trading",
+    "game",
+    "pokemon",
+    "magic",
+    "mtg",
+    "yugioh",
+    "sealed",
+    "product",
+}
+_SEALED_KIND_TOKENS = {
+    "box",
+    "booster",
+    "bundle",
+    "case",
+    "collection",
+    "deck",
+    "display",
+    "elite",
+    "etb",
+    "pack",
+    "packs",
+    "premium",
+    "starter",
+    "tin",
+    "trainer",
+    "trove",
+    "upc",
+}
+
+
+def _sealed_norm(value: Any) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", str(value or "").lower())).strip()
+
+
+def _sealed_query_tokens(value: Any) -> list[str]:
+    return [
+        token
+        for token in _sealed_norm(value).split()
+        if len(token) >= 2 and token not in _SEALED_SEARCH_NOISE
+    ]
+
+
+def _sealed_set_queries(item: InventoryItem) -> list[str]:
+    candidates = [item.set_name or ""]
+    stripped_name = " ".join(
+        token
+        for token in _sealed_query_tokens(item.card_name)
+        if token not in _SEALED_KIND_TOKENS
+    )
+    candidates.extend([stripped_name, item.card_name or ""])
+    out: list[str] = []
+    for candidate in candidates:
+        clean = re.sub(r"\s+", " ", str(candidate or "")).strip()
+        if clean and clean.lower() not in {row.lower() for row in out}:
+            out.append(clean)
+    return out
+
+
+def _sealed_product_score(item: InventoryItem, product: dict[str, Any], set_info: dict[str, Any]) -> int:
+    product_name = str(product.get("clean_name") or product.get("name") or "")
+    product_norm = _sealed_norm(product_name)
+    set_norm = _sealed_norm(set_info.get("name"))
+    item_norm = _sealed_norm(item.card_name)
+    tokens = _sealed_query_tokens(item.card_name)
+    specific_tokens = [token for token in tokens if token not in _SEALED_KIND_TOKENS]
+    score = 0
+    if item_norm and product_norm == item_norm:
+        score += 120
+    elif item_norm and product_norm.startswith(item_norm):
+        score += 70
+    for token in tokens:
+        if token in product_norm:
+            score += 8
+        elif token in set_norm:
+            score += 3
+    if specific_tokens and all(token in product_norm or token in set_norm for token in specific_tokens):
+        score += 35
+    if item.set_name and _sealed_norm(item.set_name) == set_norm:
+        score += 20
+    return score
+
+
+def _tcgtracking_sealed_price_from_row(
+    product_id: str,
+    pricing: dict[str, Any] | None,
+) -> tuple[Optional[float], Optional[float], str]:
+    product_prices = (pricing or {}).get(str(product_id), {}).get("tcg", {})
+    if not isinstance(product_prices, dict):
+        return None, None, ""
+    fallback_low: Optional[float] = None
+    for _variant_name, variant_prices in product_prices.items():
+        if not isinstance(variant_prices, dict):
+            continue
+        market = _money_float(variant_prices.get("market"))
+        low = _money_float(variant_prices.get("low"))
+        if market is not None:
+            return market, low, "TCGPlayer Market"
+        if fallback_low is None and low is not None:
+            fallback_low = low
+    if fallback_low is not None:
+        return fallback_low, fallback_low, "TCGPlayer Low"
+    return None, None, ""
+
+
+async def _fetch_tcgtracking_sealed_price(
+    item: InventoryItem,
+    client: httpx.AsyncClient,
+) -> Optional[dict[str, Any]]:
+    category_ids = _tcgtracking_category_ids_for_game(item.game)
+    if not category_ids:
+        return None
+    best: tuple[int, dict[str, Any], dict[str, Any], str, dict[str, Any]] | None = None
+
+    for category_id in category_ids:
+        for search_query in _sealed_set_queries(item):
+            try:
+                search_resp = await client.get(
+                    f"{TCGTRACKING_BASE}/{category_id}/search",
+                    params={"q": search_query},
+                    headers=TCGTRACKING_HEADERS,
+                )
+                if search_resp.status_code != 200:
+                    continue
+                sets = [row for row in (search_resp.json().get("sets") or []) if isinstance(row, dict)]
+            except Exception as exc:
+                logger.warning(
+                    "[inventory_pricing] TCGTracking sealed set lookup failed for item %s q=%r: %s",
+                    item.id,
+                    search_query,
+                    exc,
+                )
+                continue
+            for set_info in sets[:3]:
+                set_id = str(set_info.get("id") or "").strip()
+                if not set_id:
+                    continue
+                try:
+                    products_resp, pricing_resp = await asyncio.gather(
+                        client.get(f"{TCGTRACKING_BASE}/{category_id}/sets/{set_id}", headers=TCGTRACKING_HEADERS),
+                        client.get(f"{TCGTRACKING_BASE}/{category_id}/sets/{set_id}/pricing", headers=TCGTRACKING_HEADERS),
+                    )
+                    if products_resp.status_code != 200:
+                        continue
+                    products = [
+                        row for row in (products_resp.json().get("products") or [])
+                        if isinstance(row, dict)
+                    ]
+                    pricing = pricing_resp.json().get("prices", {}) if pricing_resp.status_code == 200 else {}
+                except Exception as exc:
+                    logger.warning(
+                        "[inventory_pricing] TCGTracking sealed products failed for item %s set=%s: %s",
+                        item.id,
+                        set_id,
+                        exc,
+                    )
+                    continue
+                for product in products:
+                    score = _sealed_product_score(item, product, set_info)
+                    if score <= 0:
+                        continue
+                    product_id = str(product.get("id") or "")
+                    market, low, price_label = _tcgtracking_sealed_price_from_row(product_id, pricing)
+                    if market is None and low is None:
+                        continue
+                    row = (score, product, set_info, category_id, {"market": market, "low": low, "label": price_label})
+                    if best is None or row[0] > best[0]:
+                        best = row
+
+    if best is None:
+        return None
+    _score, product, set_info, category_id, price_row = best
+    return {
+        "source": "tcgtracking",
+        "market_price": price_row["market"],
+        "low_price": price_row["low"],
+        "high_price": None,
+        "raw": {
+            "source_detail": "tcgtracking_sealed_search",
+            "price_label": price_row["label"],
+            "category_id": category_id,
+            "set": set_info,
+            "product": product,
+            "tcgplayer_url": product.get("tcgplayer_url"),
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -272,9 +620,16 @@ def build_card_ladder_cli_query(item: InventoryItem, *, strict: bool = True) -> 
 
 
 def _card_ladder_cli_base_query(item: InventoryItem) -> str:
+    game = str(item.game or "").strip()
+    game_part = ""
+    if game and game.lower() not in {"pokemon", "pokémon", "pokemon japan"}:
+        game_part = game
+    elif game.lower() == "pokemon japan":
+        game_part = "Japanese Pokemon"
     return " ".join(
         part
         for part in (
+            game_part,
             str(item.card_name or "").strip(),
             str(item.set_name or "").strip(),
             str(item.card_number or "").strip(),
@@ -864,35 +1219,29 @@ async def fetch_slab_price(
     if _wants_slab_source(selected_source, "card_ladder"):
         cli_query = build_card_ladder_cli_query(item)
         result = _fetch_card_ladder_cli_cache(item, query=cli_query)
-        if result:
-            results.append(result)
+        _add_slab_price_result(results, item, result)
 
         if not result or selected_source == "all":
             card_ladder_query = build_card_ladder_slab_query(item)
             result = await _fetch_card_ladder_price(item, client, card_ladder_query)
-            if result:
-                results.append(result)
+            _add_slab_price_result(results, item, result)
 
     query = _slab_query(item)
     if _wants_slab_source(selected_source, "alt"):
         result = await _fetch_alt_price(item, client, query)
-        if result:
-            results.append(result)
+        _add_slab_price_result(results, item, result)
 
     if _wants_slab_source(selected_source, "130point"):
         result = await _fetch_130point_price(item, client, query)
-        if result:
-            results.append(result)
+        _add_slab_price_result(results, item, result)
 
     if _wants_slab_source(selected_source, "myslabs"):
         result = await _fetch_myslabs_price(item, client, query)
-        if result:
-            results.append(result)
+        _add_slab_price_result(results, item, result)
 
     if _wants_slab_source(selected_source, "pricecharting"):
         result = await _fetch_pricecharting_price(item, client, query)
-        if result:
-            results.append(result)
+        _add_slab_price_result(results, item, result)
 
     if selected_source != "all":
         return results[0] if results else None
@@ -908,6 +1257,346 @@ def normalize_slab_price_source(source: Any) -> str:
 
 def _wants_slab_source(selected_source: str, source: str) -> bool:
     return selected_source == "all" or selected_source == source
+
+
+def _add_slab_price_result(
+    results: list[dict[str, Any]],
+    item: InventoryItem,
+    result: Optional[dict[str, Any]],
+) -> None:
+    if not result:
+        return
+    filtered = _filter_slab_price_result_for_item(item, result)
+    if filtered:
+        results.append(filtered)
+
+
+async def fetch_ximilar_slab_price_from_image(
+    image_b64: str,
+    client: httpx.AsyncClient,
+    *,
+    api_token: str,
+    category_id: str = "3",
+) -> Optional[dict[str, Any]]:
+    """Use Ximilar's image-first collectibles price guide for a slab photo."""
+    if not api_token or not str(image_b64 or "").strip():
+        return None
+    clean_image = _prepare_ximilar_image_base64(image_b64)
+    try:
+        resp = await client.post(
+            XIMILAR_TCG_IDENTIFY_URL,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Token {api_token}",
+            },
+            json={
+                "records": [{"_base64": clean_image}],
+                "pricing": True,
+                "slab_id": True,
+                "slab_grade": True,
+            },
+            timeout=40.0,
+        )
+        if resp.status_code != 200:
+            logger.warning("[pricing] Ximilar slab price HTTP %s: %s", resp.status_code, resp.text[:500])
+            return None
+        return _ximilar_price_result_from_payload(resp.json(), category_id=category_id)
+    except Exception as exc:
+        logger.debug("[pricing] Ximilar slab price failed: %s", exc)
+        return None
+
+
+def _prepare_ximilar_image_base64(image_b64: str) -> str:
+    raw = str(image_b64 or "").strip()
+    if "," in raw:
+        raw = raw.split(",", 1)[1]
+    try:
+        data = base64.b64decode(raw)
+    except Exception:
+        return raw
+    try:
+        from PIL import Image
+
+        img = Image.open(io.BytesIO(data))
+        max_dim = max(img.size)
+        if max_dim > 960:
+            scale = 960 / max_dim
+            img = img.resize((int(img.size[0] * scale), int(img.size[1] * scale)), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=84)
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception:
+        return raw
+
+
+def _ximilar_price_result_from_payload(
+    payload: dict[str, Any],
+    *,
+    category_id: str = "3",
+) -> Optional[dict[str, Any]]:
+    card_info = _ximilar_card_info(payload, category_id=category_id)
+    slab_info = _ximilar_slab_info(payload)
+    listings = _ximilar_listing_rows(payload)
+    sales = _ximilar_sales_from_listings(
+        listings,
+        grading_company=str(slab_info.get("grading_company") or ""),
+        grade=str(slab_info.get("grade") or ""),
+    )
+    prices = [float(sale["price"]) for sale in sales if _safe_float(sale.get("price")) is not None]
+    suggested = _suggest_price_from_sales(sales) if sales else None
+    query = " ".join(
+        str(part or "").strip()
+        for part in (
+            card_info.get("card_name"),
+            card_info.get("set_name"),
+            card_info.get("card_number"),
+            slab_info.get("grading_company"),
+            slab_info.get("grade"),
+        )
+        if str(part or "").strip()
+    )
+    if not card_info and not slab_info and not sales:
+        return None
+    return {
+        "source": "ximilar",
+        "market_price": suggested,
+        "low_price": round(min(prices), 2) if prices else None,
+        "high_price": round(max(prices), 2) if prices else None,
+        "raw": {
+            "query": query,
+            "source_detail": "ximilar_price_guide",
+            "sample_count": len(prices),
+            "sales": sales[:20],
+            "ximilar_card": card_info,
+            "ximilar_slab": slab_info,
+            "ximilar_status": payload.get("status") if isinstance(payload.get("status"), dict) else {},
+        },
+    }
+
+
+def _ximilar_first_record(payload: dict[str, Any]) -> dict[str, Any]:
+    records = payload.get("records") if isinstance(payload, dict) else None
+    if isinstance(records, list) and records and isinstance(records[0], dict):
+        return records[0]
+    return {}
+
+
+def _ximilar_objects(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    record = _ximilar_first_record(payload)
+    objects = record.get("_objects")
+    if isinstance(objects, list):
+        return [obj for obj in objects if isinstance(obj, dict)]
+    return []
+
+
+def _ximilar_object(payload: dict[str, Any], name: str) -> dict[str, Any]:
+    wanted = name.strip().lower()
+    for obj in _ximilar_objects(payload):
+        if str(obj.get("name") or "").strip().lower() == wanted:
+            return obj
+    return {}
+
+
+def _ximilar_best_match(obj: dict[str, Any]) -> dict[str, Any]:
+    identification = obj.get("_identification") if isinstance(obj, dict) else None
+    if not isinstance(identification, dict):
+        return {}
+    best = identification.get("best_match")
+    return best if isinstance(best, dict) else {}
+
+
+def _ximilar_tag_name(obj: dict[str, Any], group: str) -> str:
+    tags = obj.get("_tags") if isinstance(obj, dict) else None
+    values = tags.get(group) if isinstance(tags, dict) else None
+    if isinstance(values, list) and values and isinstance(values[0], dict):
+        return str(values[0].get("name") or "").strip()
+    return ""
+
+
+def _ximilar_card_info(payload: dict[str, Any], *, category_id: str = "3") -> dict[str, Any]:
+    card_obj = _ximilar_object(payload, "Card")
+    best = _ximilar_best_match(card_obj)
+    if not best:
+        return {}
+    card_number = str(best.get("card_number") or best.get("card_no") or "").strip()
+    out_of = str(best.get("out_of") or "").strip()
+    if card_number and out_of and "/" not in card_number:
+        card_number = f"{card_number}/{out_of}"
+    subcategory = str(best.get("subcategory") or _ximilar_tag_name(card_obj, "Subcategory") or "").strip()
+    return {
+        "card_name": str(best.get("name") or "").strip(),
+        "full_name": str(best.get("full_name") or best.get("name") or "").strip(),
+        "set_name": str(best.get("set") or "").strip(),
+        "set_code": str(best.get("set_code") or "").strip(),
+        "card_number": card_number,
+        "rarity": str(best.get("rarity") or "").strip(),
+        "year": best.get("year"),
+        "game": _ximilar_game_name(subcategory, category_id),
+        "links": best.get("links") if isinstance(best.get("links"), dict) else {},
+    }
+
+
+def _ximilar_slab_info(payload: dict[str, Any]) -> dict[str, Any]:
+    slab_obj = _ximilar_object(payload, "Slab Label")
+    best = _ximilar_best_match(slab_obj)
+    if not best and not slab_obj:
+        return {}
+    company = (
+        best.get("grade_company")
+        or best.get("grading_company")
+        or best.get("grader")
+        or best.get("company")
+        or _ximilar_tag_name(slab_obj, "Company")
+        or ""
+    )
+    grade = best.get("grade_value") or best.get("grade") or _ximilar_tag_name(slab_obj, "Grade") or ""
+    return {
+        "card_name": str(best.get("name") or "").strip(),
+        "grading_company": _normalize_grading_company(company),
+        "grade": _normalize_grade_value(grade),
+        "cert_number": str(
+            best.get("certificate_number")
+            or best.get("cert_number")
+            or best.get("cert")
+            or ""
+        ).strip(),
+        "set_name": str(best.get("set") or "").strip(),
+        "card_number": str(best.get("card_no") or best.get("card_number") or "").lstrip("#").strip(),
+        "raw": best,
+    }
+
+
+def _ximilar_game_name(subcategory: str, category_id: str = "3") -> str:
+    clean = subcategory.strip().lower()
+    if "pokemon" in clean:
+        return "Pokemon"
+    if "magic" in clean:
+        return "Magic"
+    if "yu-gi" in clean or "yugioh" in clean:
+        return "Yu-Gi-Oh"
+    if "one piece" in clean:
+        return "One Piece"
+    if "lorcana" in clean:
+        return "Lorcana"
+    if "riftbound" in clean:
+        return "Riftbound"
+    return {
+        "1": "Magic",
+        "2": "Yu-Gi-Oh",
+        "3": "Pokemon",
+        "68": "One Piece",
+        "71": "Lorcana",
+        "89": "Riftbound",
+    }.get(str(category_id), "Other")
+
+
+def _ximilar_listing_rows(payload: Any) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[int] = set()
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            ident = id(value)
+            if ident in seen:
+                return
+            seen.add(ident)
+            if _looks_like_ximilar_listing(value):
+                rows.append(value)
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(payload)
+    return rows
+
+
+def _looks_like_ximilar_listing(row: dict[str, Any]) -> bool:
+    if _safe_float(row.get("price")) is None:
+        return False
+    return bool(
+        row.get("item_link")
+        or row.get("url")
+        or row.get("link")
+        or row.get("source")
+    ) and bool(
+        row.get("name")
+        or row.get("title")
+        or row.get("item_id")
+        or row.get("item_link")
+    )
+
+
+def _ximilar_sales_from_listings(
+    listings: list[dict[str, Any]],
+    *,
+    grading_company: str = "",
+    grade: str = "",
+) -> list[dict[str, Any]]:
+    sales = [_ximilar_sale_from_listing(row) for row in listings]
+    sales = [sale for sale in sales if sale]
+    target_grade = _normalize_grade_value(grade)
+    target_company = _normalize_grading_company(grading_company)
+    exact = [
+        sale for sale in sales
+        if (
+            (not target_grade or not sale.get("grade") or sale.get("grade") == target_grade)
+            and (not target_company or not sale.get("grading_company") or sale.get("grading_company") == target_company)
+        )
+    ]
+    if exact:
+        sales = exact
+    sales.sort(key=_slab_sale_sort_key, reverse=True)
+    return sales[:50]
+
+
+def _ximilar_sale_from_listing(row: dict[str, Any]) -> dict[str, Any]:
+    price = _safe_float(row.get("price"))
+    if price is None:
+        return {}
+    url = str(row.get("item_link") or row.get("url") or row.get("link") or "").strip()
+    title = str(row.get("name") or row.get("title") or row.get("item_id") or url or "Ximilar marketplace listing").strip()
+    sold_date = _normalize_sale_date(
+        row.get("date_of_sale")
+        or row.get("sold_date")
+        or row.get("date_sold")
+        or row.get("date_of_creation")
+        or row.get("created_at")
+        or ""
+    )
+    grade_value = _normalize_grade_value(row.get("grade_value") or row.get("grade") or "")
+    company = _normalize_grading_company(row.get("grade_company") or row.get("grading_company") or row.get("grader") or "")
+    return {
+        "title": title,
+        "price": round(price, 2),
+        "sold_date": sold_date,
+        "platform": str(row.get("source") or "").strip() or "Ximilar",
+        "sale_type": "Sold" if row.get("date_of_sale") else "Listing",
+        "url": url,
+        "image_url": str(row.get("image") or row.get("image_url") or "").strip(),
+        "currency": str(row.get("currency") or "").strip(),
+        "country_code": str(row.get("country_code") or "").strip(),
+        "grading_company": company,
+        "grade": grade_value,
+        "sources": ["ximilar"],
+        "source_details": ["ximilar_price_guide"],
+    }
+
+
+def _normalize_grading_company(value: Any) -> str:
+    clean = str(value or "").strip().upper()
+    if clean in {"BECKETT", "BGS/BECKETT"}:
+        return "BGS"
+    return clean
+
+
+def _normalize_grade_value(value: Any) -> str:
+    text = str(value or "").strip().upper()
+    text = re.sub(r"^(PSA|BGS|CGC|SGC|BECKETT)\s+", "", text).strip()
+    if text.endswith(".0"):
+        text = text[:-2]
+    return text
 
 
 async def _fetch_130point_price(
@@ -1555,6 +2244,151 @@ def _sales_from_price_result(result: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _filter_slab_price_result_for_item(
+    item: InventoryItem,
+    result: dict[str, Any],
+) -> Optional[dict[str, Any]]:
+    raw = result.get("raw") if isinstance(result.get("raw"), dict) else {}
+    sales = raw.get("sales")
+    if not isinstance(sales, list):
+        return result
+    filtered_sales = [
+        sale
+        for sale in sales
+        if (
+            isinstance(sale, dict)
+            and _slab_sale_matches_item_identity(item, sale)
+            and _slab_sale_matches_item_variant(item, sale)
+        )
+    ]
+    if len(filtered_sales) == len(sales):
+        return result
+    if not filtered_sales:
+        return None
+
+    prices = [float(sale["price"]) for sale in filtered_sales if _safe_float(sale.get("price")) is not None]
+    suggested = _suggest_price_from_sales(filtered_sales)
+    if suggested is None:
+        return None
+
+    filtered = dict(result)
+    filtered_raw = dict(raw)
+    filtered_raw["sales"] = filtered_sales
+    filtered_raw["sample_count"] = len(prices)
+    filtered["raw"] = filtered_raw
+    filtered["market_price"] = suggested
+    filtered["low_price"] = round(min(prices), 2) if prices else None
+    filtered["high_price"] = round(max(prices), 2) if prices else None
+    return filtered
+
+
+def _slab_sale_matches_item_identity(item: InventoryItem, sale: dict[str, Any]) -> bool:
+    title = str(sale.get("title") or "")
+    if not title.strip():
+        return True
+    expected_tokens = _slab_identity_tokens(item.card_name)
+    if not expected_tokens:
+        return True
+    title_tokens = set(_slab_identity_tokens(title, from_title=True))
+    if not title_tokens:
+        return True
+    required = min(2, len(expected_tokens))
+    return sum(1 for token in expected_tokens if token in title_tokens) >= required
+
+
+def _slab_identity_tokens(value: Any, *, from_title: bool = False) -> list[str]:
+    text = html_lib.unescape(str(value or "").lower())
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    noise = {
+        "the",
+        "and",
+        "card",
+        "cards",
+        "game",
+        "tcg",
+        "trading",
+        "foil",
+        "holo",
+        "rare",
+        "secret",
+        "alternate",
+        "alternative",
+        "parallel",
+        "manga",
+        "wanted",
+        "poster",
+        "special",
+        "art",
+        "psa",
+        "bgs",
+        "cgc",
+        "sgc",
+        "mint",
+        "gem",
+        "new",
+        "listing",
+    }
+    if not from_title:
+        noise.update({"ex", "v", "vmax", "vstar", "sr", "sec", "sp"})
+    tokens: list[str] = []
+    for token in text.split():
+        if len(token) < 3 or token.isdigit() or token in noise:
+            continue
+        if token not in tokens:
+            tokens.append(token)
+    return tokens[:5]
+
+
+def _slab_sale_matches_item_variant(item: InventoryItem, sale: dict[str, Any]) -> bool:
+    game = str(item.game or "").strip().lower()
+    if game not in {"one piece", "one piece card game"}:
+        return True
+
+    expected = _one_piece_variant_markers(
+        " ".join(str(part or "") for part in (item.card_name, item.variant))
+    )
+    found = _one_piece_variant_markers(str(sale.get("title") or ""))
+    if not expected:
+        return not found
+
+    if "manga" in expected:
+        return "manga" in found
+    if "manga" in found:
+        return False
+
+    if "sp" in expected:
+        return "sp" in found
+    if "sp" in found:
+        return False
+
+    if "wanted" in expected:
+        return "wanted" in found
+    if "wanted" in found:
+        return False
+
+    if "alt" in expected:
+        return "alt" in found
+    if "alt" in found:
+        return False
+
+    return True
+
+
+def _one_piece_variant_markers(value: str) -> set[str]:
+    text = html_lib.unescape(str(value or "").lower())
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    markers: set[str] = set()
+    if re.search(r"\bmanga\b", text):
+        markers.add("manga")
+    if re.search(r"\bsp\b|\bspecial\b", text):
+        markers.add("sp")
+    if "wanted poster" in text:
+        markers.add("wanted")
+    if re.search(r"\balternate art\b|\balternative art\b|\balt art\b|\baa\b|\bparallel\b", text):
+        markers.add("alt")
+    return markers
+
+
 def _clean_sources(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(source).strip() for source in value if str(source or "").strip()]
@@ -1648,6 +2482,12 @@ async def fetch_price_for_item(
     """Dispatch to the correct pricing source based on item_type."""
     if item.item_type == ITEM_TYPE_SLAB:
         return await fetch_slab_price(item, client)
+    if item.item_type == ITEM_TYPE_SEALED:
+        return await _fetch_tcgtracking_sealed_price(item, client)
+    if item.item_type == ITEM_TYPE_SINGLE:
+        tcgtracking_result = await _fetch_tcgtracking_single_price(item, client)
+        if tcgtracking_result is not None:
+            return tcgtracking_result
     return await fetch_single_price(item, client, api_key=api_key, base_url=base_url)
 
 

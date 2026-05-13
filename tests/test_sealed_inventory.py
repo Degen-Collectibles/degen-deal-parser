@@ -3,7 +3,7 @@ import asyncio
 import unittest
 import uuid
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from sqlmodel import Session, SQLModel, create_engine, select
 from starlette.requests import Request
@@ -16,14 +16,19 @@ from app.inventory import (
     _best_sealed_product_match,
     _build_bulk_sealed_preview,
     _cached_add_stock_single_search,
+    _inventory_sealed_template_context,
     _normalize_add_stock_game,
+    _normalize_add_stock_search_type,
     _pokemon_set_search_queries,
     _receive_sealed_stock,
     _receive_single_stock,
+    _sealed_catalog_category_ids_for_query,
+    _sealed_catalog_product_match_score,
     _sealed_set_search_queries,
     _sealed_catalog_suggestions,
     _sealed_kind_hints_from_query,
     _single_lookup_suggestions,
+    _tcgtracking_sealed_price,
     _tcgtracking_sealed_product,
     inventory_sealed_receive,
     inventory_singles_receive,
@@ -233,6 +238,62 @@ class SealedInventoryTests(unittest.TestCase):
             "https://tcgplayer-cdn.tcgplayer.com/product/242436_400w.jpg",
         )
         self.assertEqual(booster_box["market_price"], 1345.67)
+        self.assertEqual(booster_box["market_price_source"], "TCGPlayer Market")
+        self.assertEqual(booster_box["set_id"], "2848")
+
+    def test_tcgtracking_sealed_price_falls_back_to_low_when_market_missing(self) -> None:
+        price, source = _tcgtracking_sealed_price(
+            "131867",
+            {"131867": {"tcg": {"Normal": {"low": 199.99}}}},
+        )
+
+        self.assertEqual(price, 199.99)
+        self.assertEqual(source, "TCGPlayer Low")
+
+    def test_old_collection_box_matches_by_product_name_without_set_query(self) -> None:
+        product = _tcgtracking_sealed_product(
+            product={
+                "id": 131867,
+                "clean_name": "Kingdra EX Box",
+                "image_url": "https://tcgplayer-cdn.tcgplayer.com/product/131867_200w.jpg",
+                "tcgplayer_url": "https://www.tcgplayer.com/product/131867/pokemon-sm-base-set-kingdra-ex-box",
+            },
+            set_info={"id": 1863, "name": "SM Base Set"},
+            category_id="3",
+            query_kind_hints=set(),
+            pricing={"131867": {"tcg": {"Normal": {"low": 199.99}}}},
+        )
+        assert product is not None
+
+        self.assertEqual(product["kind"], "Collection Box")
+        self.assertIsNotNone(_sealed_catalog_product_match_score("kingdra ex", product))
+        self.assertIsNotNone(
+            _sealed_catalog_product_match_score(
+                "https://www.tcgplayer.com/product/131867/pokemon-sm-base-set-kingdra-ex-box",
+                product,
+            )
+        )
+        self.assertIsNone(_sealed_catalog_product_match_score("charizard ex 151 199", product))
+
+        newer_bundle = {
+            **product,
+            "external_id": "656950",
+            "name": "Greninja EX and Kingdra EX Special Collection Box",
+            "set_name": "Miscellaneous Cards & Products",
+        }
+        match = _best_sealed_product_match("kingdra ex", [newer_bundle, product])
+        assert match is not None
+        self.assertEqual(match["external_id"], "131867")
+
+    def test_pokemon_catalog_fallback_stays_english_unless_japanese_requested(self) -> None:
+        self.assertEqual(
+            _sealed_catalog_category_ids_for_query("kingdra ex", selected_game="Pokemon", category_ids=("3", "85")),
+            ("3",),
+        )
+        self.assertEqual(
+            _sealed_catalog_category_ids_for_query("japanese booster box", selected_game="Pokemon", category_ids=("3", "85")),
+            ("3", "85"),
+        )
 
     def test_search_queries_handle_specific_collection_box_names(self) -> None:
         queries = _pokemon_set_search_queries("Ascended Heroes Mega Meganium ex Box")
@@ -361,8 +422,121 @@ class SealedInventoryTests(unittest.TestCase):
         self.assertEqual(_normalize_add_stock_game("mtg"), "Magic")
         self.assertEqual(_normalize_add_stock_game("yugioh"), "Yu-Gi-Oh")
         self.assertEqual(_normalize_add_stock_game("opcg"), "One Piece")
+        self.assertEqual(_normalize_add_stock_game("pokemon jp"), "Pokemon Japan")
         self.assertEqual(_add_stock_single_category_id("Magic"), "1")
+        self.assertEqual(_add_stock_single_category_id("Pokemon Japan"), "85")
         self.assertEqual(_add_stock_category_ids_for_game("One Piece"), ("68",))
+        self.assertEqual(_add_stock_single_category_id("Digimon"), "63")
+        self.assertEqual(_add_stock_single_category_id("Weiss Schwarz"), "20")
+        self.assertEqual(_add_stock_single_category_id("Union Arena"), "81")
+
+    def test_add_stock_search_type_aliases(self) -> None:
+        self.assertEqual(_normalize_add_stock_search_type("card"), "cards")
+        self.assertEqual(_normalize_add_stock_search_type("single"), "cards")
+        self.assertEqual(_normalize_add_stock_search_type("products"), "sealed")
+        self.assertEqual(_normalize_add_stock_search_type("auto"), "both")
+        self.assertEqual(_normalize_add_stock_search_type("something weird"), "both")
+
+    def test_add_stock_cards_filter_skips_sealed_lookup(self) -> None:
+        sealed_search = AsyncMock(return_value=([{"name": "Should Not Run"}], ""))
+        single_search = AsyncMock(
+            return_value=(
+                [
+                    {
+                        "name": "Charizard ex",
+                        "set_name": "151",
+                        "card_number": "199/165",
+                        "variants": [],
+                        "default_variant": "",
+                        "default_condition": "NM",
+                        "default_price": 437.05,
+                    }
+                ],
+                "",
+            )
+        )
+        request = Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/inventory/add-stock",
+                "headers": [],
+                "query_string": b"",
+                "session": {},
+            }
+        )
+
+        with Session(self.engine) as session, patch(
+            "app.inventory._cached_add_stock_sealed_search",
+            sealed_search,
+        ), patch(
+            "app.inventory._cached_add_stock_single_search",
+            single_search,
+        ), patch("app.inventory.issue_token", return_value="csrf"):
+            context = asyncio.run(
+                _inventory_sealed_template_context(
+                    request,
+                    session,
+                    game="Pokemon",
+                    q="charizard ex 151 199",
+                    search_type="cards",
+                )
+            )
+
+        sealed_search.assert_not_called()
+        single_search.assert_awaited_once()
+        self.assertEqual(context["search_type"], "cards")
+        self.assertEqual(context["suggestions"], [])
+        self.assertEqual(context["single_results"][0]["name"], "Charizard ex")
+
+    def test_add_stock_sealed_filter_skips_single_lookup(self) -> None:
+        sealed_search = AsyncMock(
+            return_value=(
+                [
+                    {
+                        "name": "Kingdra EX Box",
+                        "set_name": "SM Base Set",
+                        "kind": "Collection Box",
+                        "upc": "",
+                    }
+                ],
+                "",
+            )
+        )
+        single_search = AsyncMock(return_value=([], "Should Not Run"))
+        request = Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/inventory/add-stock",
+                "headers": [],
+                "query_string": b"",
+                "session": {},
+            }
+        )
+
+        with Session(self.engine) as session, patch(
+            "app.inventory._cached_add_stock_sealed_search",
+            sealed_search,
+        ), patch(
+            "app.inventory._cached_add_stock_single_search",
+            single_search,
+        ), patch("app.inventory.issue_token", return_value="csrf"):
+            context = asyncio.run(
+                _inventory_sealed_template_context(
+                    request,
+                    session,
+                    game="Pokemon",
+                    q="kingdra ex",
+                    search_type="sealed",
+                )
+            )
+
+        sealed_search.assert_awaited_once()
+        single_search.assert_not_called()
+        self.assertEqual(context["search_type"], "sealed")
+        self.assertEqual(context["single_results"], [])
+        self.assertEqual(context["suggestions"][0]["name"], "Kingdra EX Box")
 
     def test_tcgtracking_magic_bundle_maps_to_magic_sealed_product(self) -> None:
         product = _tcgtracking_sealed_product(
@@ -559,6 +733,7 @@ class SealedInventoryTests(unittest.TestCase):
                         quantity="2",
                         unit_cost="95.50",
                         list_price="159.99",
+                        auto_price="164.50",
                         location="Wall",
                         source="Distributor",
                         notes="",
@@ -574,12 +749,16 @@ class SealedInventoryTests(unittest.TestCase):
             ).one()
             self.assertEqual(item.quantity, 2)
             self.assertEqual(item.cost_basis, 95.5)
+            self.assertEqual(item.auto_price, 164.5)
             self.assertEqual(item.image_url, "https://example.test/surging-sparks-booster-box.jpg")
             movement = session.exec(
                 select(InventoryStockMovement).where(InventoryStockMovement.item_id == item.id)
             ).one()
             self.assertEqual(movement.quantity_after, 2)
             self.assertEqual(movement.created_by, "tester")
+            history = session.exec(select(PriceHistory).where(PriceHistory.item_id == item.id)).one()
+            self.assertEqual(history.source, "tcgtracking")
+            self.assertEqual(history.market_price, 164.5)
 
     def test_single_receive_route_uses_selected_condition_price(self) -> None:
         request = Request(

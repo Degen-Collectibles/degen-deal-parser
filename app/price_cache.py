@@ -25,6 +25,7 @@ import httpx
 from .config import get_settings
 from .pokemon_scanner import (
     TCGTRACKING_BASE,
+    TCGTRACKING_HEADERS,
     ScoredCandidate,
     _cache_tcgtracking,
     _enrich_price_fast,
@@ -115,6 +116,7 @@ async def _fetch_recent_sets(
             f"{TCGTRACKING_BASE}/{cat_id}/sets/search",
             params={"q": "", "limit": str(max(top_n * 2, 50))},
             timeout=20.0,
+            headers=TCGTRACKING_HEADERS,
         )
         if resp.status_code != 200:
             logger.warning(
@@ -148,9 +150,9 @@ async def _warm_one_set(
             return True
         try:
             prod_resp, price_resp, sku_resp = await asyncio.gather(
-                client.get(f"{TCGTRACKING_BASE}/{cat_id}/sets/{set_id}", timeout=15.0),
-                client.get(f"{TCGTRACKING_BASE}/{cat_id}/sets/{set_id}/pricing", timeout=15.0),
-                client.get(f"{TCGTRACKING_BASE}/{cat_id}/sets/{set_id}/skus", timeout=15.0),
+                client.get(f"{TCGTRACKING_BASE}/{cat_id}/sets/{set_id}", timeout=15.0, headers=TCGTRACKING_HEADERS),
+                client.get(f"{TCGTRACKING_BASE}/{cat_id}/sets/{set_id}/pricing", timeout=15.0, headers=TCGTRACKING_HEADERS),
+                client.get(f"{TCGTRACKING_BASE}/{cat_id}/sets/{set_id}/skus", timeout=15.0, headers=TCGTRACKING_HEADERS),
                 return_exceptions=True,
             )
         except Exception as exc:

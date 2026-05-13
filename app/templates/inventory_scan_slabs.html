@@ -54,7 +54,7 @@
         input, select, textarea { width:100%; padding:11px 12px; border-radius:12px; border:1px solid var(--line); background:var(--lx-s1); color:var(--text); font:inherit; }
         textarea { min-height:42px; resize:vertical; }
         input:focus, select:focus, textarea:focus { outline:none; border-color:rgba(96,165,250,.8); box-shadow:0 0 0 3px rgba(96,165,250,.14); }
-        .search-form { display:grid; grid-template-columns:minmax(140px,170px) minmax(130px,160px) minmax(150px,210px) minmax(240px,1fr) auto auto; gap:10px; align-items:end; margin-top:16px; }
+        .search-form { display:grid; grid-template-columns:minmax(120px,150px) minmax(120px,150px) minmax(145px,190px) minmax(220px,1fr) auto auto auto; gap:10px; align-items:end; margin-top:16px; }
         .status { display:none; padding:12px 14px; border-radius:14px; margin-top:14px; font-size:13px; font-weight:800; }
         .status.loading { display:block; border:1px solid rgba(234,179,8,.38); background:var(--yellow-bg); color:#fef3c7; }
         .status.warning { display:block; border:1px solid rgba(234,179,8,.38); background:var(--yellow-bg); color:#fef3c7; }
@@ -110,8 +110,9 @@
         @media(max-width:1000px) {
             .page { padding:16px 14px 80px; }
             .search-form, .manual-grid, .grade-grid, .candidate-grid { grid-template-columns:1fr; }
-            .candidate { grid-template-columns:58px 1fr; }
-            .candidate button { grid-column:1 / -1; }
+            .candidate { grid-template-columns:58px minmax(0,1fr); align-items:start; }
+            .candidate > div:not(.thumb) { min-width:0; }
+            .candidate button { grid-column:1 / -1; width:100%; min-height:48px; position:relative; z-index:1; scroll-margin-bottom:120px; }
             .thumb { width:58px; border-radius:12px; }
         }
         @media(max-width:560px) {
@@ -167,6 +168,8 @@
             <label>Cert Number Or Card Name
                 <input type="search" id="lookup-input" value="{{ initial_query }}" placeholder="155393445 or Umbreon VMAX Alt Art" autocomplete="off" autofocus>
             </label>
+            <input type="file" id="ximilar-photo-input" accept="image/*" capture="environment" style="display:none;">
+            <button class="secondary" id="ximilar-scan-btn" type="button" onclick="chooseXimilarPhoto()">Scan Slab Photo</button>
             <button class="secondary" id="barcode-scan-btn" type="button" onclick="toggleBarcodeScanner()">Scan Barcode</button>
             <button class="primary" id="lookup-btn" type="submit">Search</button>
         </form>
@@ -234,10 +237,20 @@
     var currentCard = null;
     var currentCert = null;
     var currentGradeComps = [];
+    var currentXimilarImage = "";
     var zxingActive = false;
     var zxingReader = null;
     var initialError = {{ initial_error|tojson }};
     var initialQuery = {{ initial_query|tojson }};
+
+    var ximilarPhotoInput = document.getElementById("ximilar-photo-input");
+    if (ximilarPhotoInput) {
+        ximilarPhotoInput.addEventListener("change", function () {
+            var file = ximilarPhotoInput.files && ximilarPhotoInput.files[0];
+            ximilarPhotoInput.value = "";
+            if (file) scanSlabPhoto(file);
+        });
+    }
 
     window.runLookup = async function () {
         var query = document.getElementById("lookup-input").value.trim();
@@ -252,6 +265,62 @@
             await searchCardName(query);
         }
     };
+
+    window.chooseXimilarPhoto = function () {
+        var field = document.getElementById("ximilar-photo-input");
+        if (field) field.click();
+    };
+
+    async function scanSlabPhoto(file) {
+        clearResults();
+        setBusy(true, "Scanning slab photo with Ximilar price guide...");
+        try {
+            currentXimilarImage = await readFileAsDataUrl(file);
+            var resp = await fetch("/inventory/scan/slab-ximilar", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({
+                    image: currentXimilarImage,
+                    game: document.getElementById("game-select").value,
+                    grading_company: document.getElementById("company-select").value
+                })
+            });
+            var data = await resp.json();
+            if (!resp.ok) {
+                showStatus(data.error || "Ximilar slab scan failed.", "error");
+                return;
+            }
+            currentCert = data.cert || {
+                cert_number: data.cert_number || "",
+                grading_company: data.grading_company || document.getElementById("company-select").value,
+                grade: ""
+            };
+            currentCard = data.card || null;
+            currentCandidates = data.cards || (currentCard ? [currentCard] : []);
+            if (currentCert.grading_company) document.getElementById("company-select").value = currentCert.grading_company;
+            if (currentCard && currentCard.game) document.getElementById("game-select").value = currentCard.game;
+            renderCandidates(currentCandidates, "Ximilar match");
+            if (currentCard) renderSelectedCard(currentCard);
+            currentGradeComps = data.grade_comps || [];
+            document.getElementById("grade-panel").style.display = "";
+            renderGradeComps(currentGradeComps);
+            if (data.lookup_warning) showStatus(data.lookup_warning, "warning");
+            else showStatus("Ximilar slab price guide returned " + totalSoldCount(currentGradeComps) + " listings.", "success");
+        } catch (err) {
+            showStatus("Network error: " + escHtml(err.message), "error");
+        } finally {
+            setBusy(false);
+        }
+    }
+
+    function readFileAsDataUrl(file) {
+        return new Promise(function (resolve, reject) {
+            var reader = new FileReader();
+            reader.onload = function () { resolve(String(reader.result || "")); };
+            reader.onerror = function () { reject(reader.error || new Error("Could not read image.")); };
+            reader.readAsDataURL(file);
+        });
+    }
 
     function looksLikeCert(query) {
         var digits = query.replace(/\D/g, "");
@@ -415,7 +484,7 @@
                     (card.set_name ? '<span class="chip blue">' + escHtml(card.set_name) + '</span>' : "") +
                     (card.card_number ? '<span class="chip">#' + escHtml(card.card_number) + '</span>' : "") +
                     '<span class="chip">' + escHtml(document.getElementById("company-select").value) + '</span>' +
-                    '<span class="chip good">' + escHtml(selectedSourceLabel()) + '</span>' +
+                    '<span class="chip good">' + escHtml(card.lookup_source_label || selectedSourceLabel()) + '</span>' +
                 '</div>' +
             '</div>';
     }
@@ -550,6 +619,12 @@
             '</tr>';
         }).join("");
         return '<table class="sales"><thead><tr><th>Date</th><th>Price</th><th>Source</th><th>Title</th></tr></thead><tbody>' + rows + '</tbody></table>';
+    }
+
+    function totalSoldCount(rows) {
+        return (rows || []).reduce(function (total, row) {
+            return total + ((row.last_solds || []).length || 0);
+        }, 0);
     }
 
     function sourceTags(sale) {
@@ -847,6 +922,7 @@
 
     function setBusy(isBusy, message) {
         document.getElementById("lookup-btn").disabled = isBusy;
+        document.getElementById("ximilar-scan-btn").disabled = isBusy;
         if (isBusy) showStatus('<span class="spinner"></span>' + escHtml(message || "Working..."), "loading");
     }
 
@@ -907,6 +983,7 @@
         if (source === "pricecharting") return "PriceCharting";
         if (source === "myslabs") return "MySlabs";
         if (source === "alt") return "ALT";
+        if (source === "ximilar") return "Ximilar";
         return String(source || "").replace(/_/g, " ").replace(/\b\w/g, function (m) { return m.toUpperCase(); });
     }
 
@@ -918,6 +995,7 @@
         if (source === "130point_live") return "130point live";
         if (source === "130point_cli_cache") return "130point cache";
         if (source === "myslabs_archive") return "MySlabs archive";
+        if (source === "ximilar_price_guide") return "Ximilar price guide";
         if (source === "multi_source_comps") return "Multi-source";
         return sourceName(source);
     }
