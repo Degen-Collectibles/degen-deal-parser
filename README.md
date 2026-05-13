@@ -4,11 +4,12 @@ Internal platform for Degen Collectibles — Discord deal parsing + TikTok Shop 
 
 ## Quick Start
 
+### Windows
+
 **Local dev (web-only, no Discord bot):**
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\run_local_web.ps1
 ```
-Then open: `http://127.0.0.1:8000/login`
 
 **Production (web + worker + auto-restart):**
 ```powershell
@@ -19,6 +20,34 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run_hosted.ps1
 ```powershell
 .\.venv\Scripts\python.exe -m compileall app
 ```
+
+### macOS
+
+**First-time setup (install dependencies into your active conda env):**
+```bash
+pip install -r requirements.txt
+```
+
+**Local dev (web-only, no Discord bot):**
+```bash
+bash scripts/run_local_web.sh
+```
+
+**Production (web + worker — run in two separate terminals):**
+```bash
+# Terminal 1
+bash scripts/run_hosted_web.sh
+
+# Terminal 2
+bash scripts/run_hosted_worker.sh
+```
+
+**Compile check after code changes:**
+```bash
+python -m compileall app
+```
+
+Then open: `http://127.0.0.1:8000/login`
 
 ## What This App Does
 
