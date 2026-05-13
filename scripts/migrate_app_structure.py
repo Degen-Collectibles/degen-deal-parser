@@ -38,12 +38,12 @@ MOVES = {
     "bank_reconciliation":     ("discord",   "bank_reconciliation"),
     "ops_log":                 ("discord",   "ops_log"),
     "plaid_bank_feed":         ("discord",   "plaid_bank_feed"),
-    "username_scraper_client": ("discord",   "username_scraper_client"),
     # ── tiktok ────────────────────────────────────────────────────────────────
     "tiktok_ingest":           ("tiktok",    "tiktok_ingest"),
     "tiktok_auth_refresh":     ("tiktok",    "tiktok_auth_refresh"),
     "tiktok_live_chat":        ("tiktok",    "tiktok_live_chat"),
     "tiktok_alerts":           ("tiktok",    "tiktok_alerts"),
+    "username_scraper_client": ("tiktok",    "username_scraper_client"),
     # ── inventory (some renamed) ──────────────────────────────────────────────
     "inventory":               ("inventory", "routes"),
     "inventory_barcode":       ("inventory", "barcode"),
