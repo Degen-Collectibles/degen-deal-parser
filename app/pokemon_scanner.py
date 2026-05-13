@@ -1025,46 +1025,50 @@ async def _tcgtracking_product_search(
     For TCGs without a dedicated card-name API (Dragon Ball, etc.).
     Requires set_name to find the right set first.
     """
-    if not set_name:
-        return []
-
-    search_url = f"{TCGTRACKING_BASE}/{category_id}/search"
-    search_params = {"q": set_name}
-    try:
-        search_resp = await client.get(search_url, params=search_params, headers=TCGTRACKING_HEADERS)
-        if search_resp.status_code != 200:
+    set_info: dict[str, Any] | None = None
+    products: list[dict[str, Any]] = []
+    if set_name:
+        search_url = f"{TCGTRACKING_BASE}/{category_id}/search"
+        search_params = {"q": set_name}
+        try:
+            search_resp = await client.get(search_url, params=search_params, headers=TCGTRACKING_HEADERS)
+            if search_resp.status_code != 200:
+                logger.warning(
+                    "[pokemon_scanner] TCGTracking set search HTTP %s for %s (params=%r): %s",
+                    search_resp.status_code, search_url, search_params, search_resp.text[:200],
+                )
+            else:
+                sets = search_resp.json().get("sets") or []
+                if not sets:
+                    logger.info(
+                        "[pokemon_scanner] TCGTracking set search returned 0 sets for category=%s q=%r",
+                        category_id, set_name,
+                    )
+                set_info = _select_tcgtracking_set(sets, set_name)
+                if set_info:
+                    set_id = set_info["id"]
+                    prod_url = f"{TCGTRACKING_BASE}/{category_id}/sets/{set_id}"
+                    prod_resp = await client.get(prod_url, headers=TCGTRACKING_HEADERS)
+                    if prod_resp.status_code == 200:
+                        products = prod_resp.json().get("products") or []
+                    else:
+                        logger.warning(
+                            "[pokemon_scanner] TCGTracking products HTTP %s for %s: %s",
+                            prod_resp.status_code, prod_url, prod_resp.text[:200],
+                        )
+        except Exception as exc:
             logger.warning(
-                "[pokemon_scanner] TCGTracking set search HTTP %s for %s (params=%r): %s",
-                search_resp.status_code, search_url, search_params, search_resp.text[:200],
+                "[pokemon_scanner] TCGTracking product search failed for category=%s set=%r: %s",
+                category_id, set_name, exc,
             )
-            return []
-        sets = search_resp.json().get("sets") or []
-        if not sets:
-            logger.info(
-                "[pokemon_scanner] TCGTracking set search returned 0 sets for category=%s q=%r",
-                category_id, set_name,
-            )
-            return []
 
-        set_info = _select_tcgtracking_set(sets, set_name)
-        if not set_info:
-            return []
-        set_id = set_info["id"]
-        prod_url = f"{TCGTRACKING_BASE}/{category_id}/sets/{set_id}"
-        prod_resp = await client.get(prod_url, headers=TCGTRACKING_HEADERS)
-        if prod_resp.status_code != 200:
-            logger.warning(
-                "[pokemon_scanner] TCGTracking products HTTP %s for %s: %s",
-                prod_resp.status_code, prod_url, prod_resp.text[:200],
-            )
-            return []
-        products = prod_resp.json().get("products") or []
-    except Exception as exc:
-        logger.warning(
-            "[pokemon_scanner] TCGTracking product search failed for category=%s set=%r: %s",
-            category_id, set_name, exc,
+    if not products:
+        return await _tcgtracking_catalog_card_search(
+            client,
+            name=name,
+            category_id=category_id,
+            limit=limit,
         )
-        return []
 
     name_lower = (name or "").lower()
     results: list[CandidateCard] = []
@@ -1080,8 +1084,8 @@ async def _tcgtracking_product_search(
             id=str(prod.get("id", "")),
             name=prod.get("clean_name") or prod.get("name", ""),
             number=prod_num,
-            set_id=str(set_id),
-            set_name=set_info.get("name", ""),
+            set_id=str((set_info or {}).get("id") or ""),
+            set_name=(set_info or {}).get("name", ""),
             image_url=img_large,
             image_url_small=img_raw,
             source="tcgtracking",
@@ -1089,6 +1093,190 @@ async def _tcgtracking_product_search(
         ))
         if len(results) >= limit:
             break
+    return results
+
+_TCGTRACKING_CARD_SEARCH_NOISE = {
+    "a",
+    "an",
+    "and",
+    "card",
+    "cards",
+    "foil",
+    "holo",
+    "holofoil",
+    "normal",
+    "rare",
+    "the",
+}
+_TCGTRACKING_SEALED_NAME_TOKENS = (
+    "booster box",
+    "booster display",
+    "booster pack",
+    "case",
+    "collection",
+    "deck",
+    "elite trainer",
+    "starter",
+    "tin",
+)
+
+
+def _tcgtracking_card_name_tokens(value: str | None) -> list[str]:
+    return [
+        token
+        for token in re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).split()
+        if len(token) >= 2 and token not in _TCGTRACKING_CARD_SEARCH_NOISE
+    ]
+
+
+def _tcgtracking_catalog_card_score(
+    *,
+    query_name: str,
+    product: dict[str, Any],
+    set_info: dict[str, Any],
+) -> Optional[int]:
+    product_name = str(product.get("clean_name") or product.get("name") or "").strip()
+    product_norm = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", product_name.lower())).strip()
+    if not product_norm or any(token in product_norm for token in _TCGTRACKING_SEALED_NAME_TOKENS):
+        return None
+    if not str(product.get("number") or "").strip():
+        return None
+    query_norm = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", str(query_name or "").lower())).strip()
+    tokens = _tcgtracking_card_name_tokens(query_name)
+    if not query_norm or not tokens:
+        return None
+    if not all(token in product_norm for token in tokens):
+        return None
+
+    score = 20 + (len(tokens) * 8)
+    if product_norm == query_norm:
+        score += 80
+    elif product_norm.startswith(query_norm):
+        score += 45
+    elif f" {query_norm} " in f" {product_norm} ":
+        score += 30
+    if str(set_info.get("published_on") or ""):
+        score += 1
+    return score
+
+
+async def _fetch_tcgtracking_set_list_for_catalog(
+    client: httpx.AsyncClient,
+    category_id: str,
+) -> list[dict[str, Any]]:
+    cached = _tcgtracking_set_list_cache.get(str(category_id))
+    if cached and (time.monotonic() - cached[0]) < _TCGTRACKING_CATALOG_CACHE_TTL_SECONDS:
+        return [dict(row) for row in cached[1]]
+    resp = await client.get(f"{TCGTRACKING_BASE}/{category_id}/sets", headers=TCGTRACKING_HEADERS)
+    if resp.status_code != 200:
+        logger.warning(
+            "[pokemon_scanner] TCGTracking set list HTTP %s for category=%s: %s",
+            resp.status_code,
+            category_id,
+            resp.text[:200],
+        )
+        return []
+    sets = [row for row in (resp.json().get("sets") or []) if isinstance(row, dict)]
+    _tcgtracking_set_list_cache[str(category_id)] = (time.monotonic(), [dict(row) for row in sets])
+    return sets
+
+
+async def _fetch_tcgtracking_catalog_set_products(
+    client: httpx.AsyncClient,
+    category_id: str,
+    set_info: dict[str, Any],
+) -> list[dict[str, Any]]:
+    set_id = str(set_info.get("id") or "").strip()
+    if not set_id:
+        return []
+    cache_key = f"{category_id}:{set_id}"
+    cached = _tcgtracking_catalog_products_cache.get(cache_key)
+    if cached and (time.monotonic() - cached[0]) < _TCGTRACKING_CATALOG_CACHE_TTL_SECONDS:
+        return [dict(row) for row in cached[1]]
+    resp = await client.get(f"{TCGTRACKING_BASE}/{category_id}/sets/{set_id}", headers=TCGTRACKING_HEADERS)
+    if resp.status_code != 200:
+        log_fn = logger.debug if resp.status_code == 404 else logger.warning
+        log_fn(
+            "[pokemon_scanner] TCGTracking catalog products HTTP %s for category=%s set=%s: %s",
+            resp.status_code,
+            category_id,
+            set_id,
+            resp.text[:200],
+        )
+        return []
+    products = [row for row in (resp.json().get("products") or []) if isinstance(row, dict)]
+    _tcgtracking_catalog_products_cache[cache_key] = (time.monotonic(), [dict(row) for row in products])
+    return products
+
+
+async def _tcgtracking_catalog_card_search(
+    client: httpx.AsyncClient,
+    *,
+    name: Optional[str],
+    category_id: str,
+    limit: int = 10,
+) -> list[CandidateCard]:
+    if not name:
+        return []
+    try:
+        set_infos = await _fetch_tcgtracking_set_list_for_catalog(client, category_id)
+    except Exception as exc:
+        logger.warning("[pokemon_scanner] TCGTracking catalog list failed for category=%s: %s", category_id, exc)
+        return []
+    product_total = 0
+    for set_info in set_infos:
+        try:
+            product_total += int(set_info.get("product_count") or 0)
+        except (TypeError, ValueError):
+            continue
+    if product_total > _TCGTRACKING_CATALOG_PRODUCT_LIMIT:
+        logger.info(
+            "[pokemon_scanner] Skipping category=%s catalog card search, product_total=%s",
+            category_id,
+            product_total,
+        )
+        return []
+
+    semaphore = asyncio.Semaphore(14)
+
+    async def scan_set(set_info: dict[str, Any]) -> list[tuple[int, dict[str, Any], dict[str, Any]]]:
+        async with semaphore:
+            products = await _fetch_tcgtracking_catalog_set_products(client, category_id, set_info)
+        scored: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
+        for product in products:
+            score = _tcgtracking_catalog_card_score(query_name=name or "", product=product, set_info=set_info)
+            if score is not None:
+                scored.append((score, set_info, product))
+        return scored
+
+    chunks = await asyncio.gather(*(scan_set(set_info) for set_info in set_infos))
+    scored_matches = [match for chunk in chunks for match in chunk]
+    scored_matches.sort(
+        key=lambda item: (
+            item[0],
+            str(item[1].get("published_on") or ""),
+            str(item[2].get("id") or ""),
+        ),
+        reverse=True,
+    )
+
+    results: list[CandidateCard] = []
+    for _score, set_info, prod in scored_matches[:limit]:
+        img_raw = prod.get("image_url") or ""
+        img_large = img_raw.replace("_200w.jpg", "_400w.jpg") if img_raw else ""
+        results.append(
+            CandidateCard(
+                id=str(prod.get("id", "")),
+                name=prod.get("clean_name") or prod.get("name", ""),
+                number=str(prod.get("number") or ""),
+                set_id=str(set_info.get("id") or ""),
+                set_name=str(set_info.get("name") or ""),
+                image_url=img_large,
+                image_url_small=img_raw,
+                source="tcgtracking_catalog",
+                tcgplayer_url=prod.get("tcgplayer_url"),
+            )
+        )
     return results
 
 
@@ -1797,6 +1985,132 @@ _PREFERRED_CAT_ORDER = [
 _tcgtracking_cache: dict[str, dict] = {}
 _tcgtracking_cache_locks: dict[str, asyncio.Lock] = {}
 _TCGTRACKING_CACHE_MAX = 64
+_tcgtracking_set_list_cache: dict[str, tuple[float, list[dict]]] = {}
+_tcgtracking_catalog_products_cache: dict[str, tuple[float, list[dict]]] = {}
+_TCGTRACKING_CATALOG_CACHE_TTL_SECONDS = 60 * 60 * 6
+_TCGTRACKING_CATALOG_PRODUCT_LIMIT = 40_000
+
+
+_TCGTRACKING_VARIANT_CODE_LABELS = {
+    "N": "Normal",
+    "F": "Foil",
+    "CF": "Cold Foil",
+    "H": "Holofoil",
+    "RH": "Reverse Holofoil",
+    "1E": "1st Edition",
+    "1H": "1st Edition Holofoil",
+    "1N": "1st Edition Normal",
+}
+
+
+def _tcgtracking_variant_label(var_code: str, price_variant_names: list[str]) -> str:
+    label = _TCGTRACKING_VARIANT_CODE_LABELS.get(str(var_code or "").strip().upper(), str(var_code or "").strip())
+    for name in price_variant_names:
+        if str(name or "").strip().lower() == label.lower():
+            return str(name or "").strip()
+    return label or "Normal"
+
+
+def _preferred_tcgtracking_variant(variants: list[dict]) -> Optional[dict]:
+    priced = [variant for variant in variants if variant.get("price") is not None]
+    for variant in priced:
+        if str(variant.get("name") or "").strip().lower() == "normal":
+            return variant
+    return priced[0] if priced else (variants[0] if variants else None)
+
+
+def _select_tcgtracking_set(
+    sets: list[dict],
+    wanted_set_name: str | None,
+    wanted_set_code: str | None = None,
+) -> dict:
+    if not sets:
+        return {}
+    wanted_code = str(wanted_set_code or "").strip().lower()
+    if wanted_code:
+        for set_info in sets:
+            if str(set_info.get("abbreviation") or "").strip().lower() == wanted_code:
+                return set_info
+    wanted = _norm_set(wanted_set_name)
+    if wanted:
+        for set_info in sets:
+            if _norm_set(set_info.get("name")) == wanted:
+                return set_info
+        prefixed_exact: list[dict] = []
+        for set_info in sets:
+            candidate = _norm_set(set_info.get("name"))
+            if candidate.endswith(wanted):
+                prefixed_exact.append(set_info)
+        if prefixed_exact:
+            return min(prefixed_exact, key=lambda row: len(str(row.get("name") or "")))
+        for set_info in sets:
+            candidate = _norm_set(set_info.get("name"))
+            if candidate and (candidate in wanted or wanted in candidate):
+                return set_info
+    return sets[0]
+
+
+def _tcgtracking_variants_for_product(
+    prod_id: str,
+    cached: dict,
+    category_id: str,
+) -> tuple[list[dict], Optional[float]]:
+    prod_prices = (cached.get("pricing") or {}).get(str(prod_id), {}).get("tcg", {})
+
+    variants: list[dict] = []
+    for subtype_name, subtype_data in prod_prices.items():
+        mp = subtype_data.get("market")
+        lp = subtype_data.get("low")
+        if mp is not None or lp is not None:
+            variants.append({
+                "name": subtype_name,
+                "price": round(float(mp), 2) if mp is not None else None,
+                "low_price": round(float(lp), 2) if lp is not None else None,
+            })
+
+    prod_skus = (cached.get("skus") or {}).get(str(prod_id), {})
+    if prod_skus and variants:
+        price_variant_names = [str(v.get("name") or "") for v in variants]
+        cond_by_variant: dict[str, dict[str, dict]] = {}
+        preferred_languages = {"JP"} if str(cached.get("cat_id") or category_id) == "85" else {"EN"}
+        for sku_id, sku_data in prod_skus.items():
+            var_code = sku_data.get("var", "")
+            cnd = sku_data.get("cnd", "")
+            language_code = str(sku_data.get("lng") or "").strip().upper()
+            if language_code and language_code not in preferred_languages:
+                continue
+            var_name = _tcgtracking_variant_label(var_code, price_variant_names)
+            if not cnd:
+                continue
+            cond_by_variant.setdefault(var_name, {})
+            entry: dict[str, Any] = {}
+            try:
+                entry["sku_id"] = str(sku_id)
+            except Exception:
+                pass
+            if "mkt" in sku_data and sku_data["mkt"] is not None:
+                entry["mkt"] = round(float(sku_data["mkt"]), 2)
+            if "low" in sku_data and sku_data["low"] is not None:
+                entry["low"] = round(float(sku_data["low"]), 2)
+            if "hi" in sku_data and sku_data["hi"] is not None:
+                entry["hi"] = round(float(sku_data["hi"]), 2)
+            if "cnt" in sku_data and sku_data["cnt"] is not None:
+                entry["cnt"] = int(float(sku_data["cnt"]))
+            if entry:
+                existing = cond_by_variant[var_name].get(cnd)
+                if not existing or ("mkt" not in existing and "mkt" in entry):
+                    cond_by_variant[var_name][cnd] = entry
+
+        for variant in variants:
+            conds = cond_by_variant.get(variant["name"])
+            if conds:
+                variant["conditions"] = conds
+
+    preferred_variant = _preferred_tcgtracking_variant(variants)
+    market_price = None
+    if preferred_variant and preferred_variant.get("price") is not None:
+        market_price = preferred_variant["price"]
+    return variants, market_price
 
 
 _TCGTRACKING_VARIANT_CODE_LABELS = {
@@ -2007,7 +2321,7 @@ async def _enrich_price_fast(
     Falls back to PokemonTCG API for Pokemon categories only.
     """
     has_conditions = any(v.get("conditions") for v in (candidate.available_variants or []))
-    if candidate.market_price is not None and has_conditions:
+    if candidate.market_price is not None and has_conditions and str(candidate.source or "").startswith("tcgtracking"):
         return
     if not candidate.name or not candidate.set_name:
         return
@@ -2085,8 +2399,6 @@ async def _enrich_price_fast(
                     a_stripped = a.lstrip("0")
                     b_stripped = b.lstrip("0")
                     if a_stripped and a_stripped == b_stripped:
-                        return True
-                    if a_stripped.endswith(b_stripped) or b_stripped.endswith(a_stripped):
                         return True
                     a_digits = re.sub(r"[^0-9]", "", a)
                     b_digits = re.sub(r"[^0-9]", "", b)
@@ -2353,9 +2665,9 @@ _XIMILAR_TAG_TO_CATEGORY: dict[str, str] = {
     "lorcana": "71",
     "flesh and blood": "62",
     "cardfight vanguard": "16",
-    "digimon": "57",
-    "weiss schwarz": "19",
-    "union arena": "82",
+    "digimon": "63",
+    "weiss schwarz": "20",
+    "union arena": "81",
     "riftbound": "89",
     "league of legends tcg": "89",
     "league of legends trading card game": "89",
@@ -2370,15 +2682,15 @@ _CATEGORY_TO_GAME: dict[str, str] = {
     "2": "Yu-Gi-Oh",
     "3": "Pokemon",
     "16": "Cardfight Vanguard",
-    "19": "Weiss Schwarz",
+    "20": "Weiss Schwarz",
     "23": "Dragon Ball",
     "27": "Dragon Ball",
-    "57": "Digimon",
+    "63": "Digimon",
     "62": "Flesh and Blood",
     "68": "One Piece",
     "71": "Lorcana",
     "80": "Dragon Ball",
-    "82": "Union Arena",
+    "81": "Union Arena",
     "85": "Pokemon",
     "89": "Riftbound",
 }

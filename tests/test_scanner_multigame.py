@@ -190,6 +190,7 @@ def test_pokemon_jp_set_queries_fall_back_to_card_name_without_set():
 def test_tcgtracking_number_match_keeps_serial_suffix_distinct():
     assert ps._nums_match("748z", "748") is False
     assert ps._nums_match("748z", "748z") is True
+    assert ps._nums_match("42", "142") is False
 
 
 def test_score_candidates_prefers_full_token_match_over_partial_name():
@@ -207,16 +208,19 @@ def test_score_candidates_prefers_full_token_match_over_partial_name():
 def test_routing_unknown_falls_through_to_tcgtracking(monkeypatch):
     stubs = _patch_all(lambda a, v: monkeypatch.setattr(ps, a, v))
     fields = ps.ExtractedFields(card_name="Whatever", set_name="Some Set")
-    _sync(ps._lookup_candidates_by_category(fields, "57"))  # Digimon
+    _sync(ps._lookup_candidates_by_category(fields, "63"))  # Digimon
     assert len(stubs["_tcgtracking_product_search"].calls) == 1
     _args, kwargs = stubs["_tcgtracking_product_search"].calls[0]
-    assert kwargs["category_id"] == "57"
+    assert kwargs["category_id"] == "63"
 
 
 def test_category_game_map_includes_riftbound():
     assert ps._CATEGORY_TO_GAME.get("89") == "Riftbound"
     assert ps._VISION_GAME_TO_CATEGORY.get("riftbound") == "89"
     assert ps._XIMILAR_TAG_TO_CATEGORY.get("riftbound") == "89"
+    assert ps._CATEGORY_TO_GAME.get("63") == "Digimon"
+    assert ps._CATEGORY_TO_GAME.get("20") == "Weiss Schwarz"
+    assert ps._CATEGORY_TO_GAME.get("81") == "Union Arena"
 
 
 def test_vision_prompt_mentions_riftbound():

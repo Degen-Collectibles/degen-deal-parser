@@ -305,6 +305,19 @@ def test_tcgplayer_sales_payload_normalizes_snapshot_and_latest_solds():
     assert payload["last_sales"][0]["purchase_price"] == 293.29
 
 
+def test_tcgplayer_sales_payload_tolerates_null_history_result():
+    payload = normalize_tcgplayer_sales_payload(
+        "678671",
+        selected_condition="NM",
+        history_payload={"result": None},
+        sales_payload={"data": []},
+    )
+
+    assert payload["ok"] is False
+    assert payload["snapshot"] is None
+    assert payload["last_sales"] == []
+
+
 def test_tcgplayer_product_id_from_affiliate_url():
     assert (
         tcgplayer_product_id_from_url(
@@ -458,6 +471,7 @@ def test_staff_buylist_search_all_games_value_uses_configured_default(monkeypatc
     assert body["cards"][0]["game"] == "Pokemon"
     assert body["cards"][0]["name"] == "Pikachu"
     assert [call[1]["category_id"] for call in calls] == ["3"]
+
 
 def test_staff_buylist_dedupes_same_card_with_short_and_full_numbers():
     payloads = [
