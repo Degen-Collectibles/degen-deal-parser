@@ -19,7 +19,7 @@ from dataclasses import asdict
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from app import pokemon_scanner as ps  # noqa: E402
+from app.inventory import pokemon_scanner as ps  # noqa: E402
 from app.pokemon_scanner import ExtractedFields, ScoredCandidate  # noqa: E402
 
 

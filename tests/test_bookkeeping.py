@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 from sqlmodel import SQLModel, Session, create_engine
 
-from app.bookkeeping import read_tabular_rows, reconcile_bookkeeping_import
+from app.discord.bookkeeping import read_tabular_rows, reconcile_bookkeeping_import
 from app.models import (
     BookkeepingEntry,
     BookkeepingImport,

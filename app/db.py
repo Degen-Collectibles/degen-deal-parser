@@ -1381,7 +1381,7 @@ def init_db() -> None:
     ensure_sqlite_schema()
     fixup_transaction_parse_status_aliases()
     try:
-        from .backfill_requests import repair_backfill_request_state_rows
+        from .discord.backfill_requests import repair_backfill_request_state_rows
 
         with Session(engine) as session:
             repair_backfill_request_state_rows(session)
@@ -1400,8 +1400,8 @@ def init_db() -> None:
             print(f"[db] staff/schedule backfill skipped: {exc}")
 
     try:
-        from .shopify_ingest import repair_shopify_tax_fields
-        from .shopify_ingest import repair_shopify_line_item_summaries
+        from .inventory.shopify_ingest import repair_shopify_tax_fields
+        from .inventory.shopify_ingest import repair_shopify_line_item_summaries
 
         with Session(engine) as session:
             updated = repair_shopify_tax_fields(session)

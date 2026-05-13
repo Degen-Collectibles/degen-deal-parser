@@ -31,7 +31,7 @@ from ..config import get_settings
 from ..models import TikTokAuth, TikTokOrder, utcnow
 from ..reporting import build_tiktok_orders_page_data as build_tiktok_orders_page_reporting_data, parse_report_datetime
 from ..runtime_logging import structured_log_line
-from ..tiktok_ingest import (
+from ..tiktok.tiktok_ingest import (
     _build_webhook_signature_candidates,
     parse_tiktok_webhook_headers,
     parse_tiktok_webhook_payload,
@@ -39,7 +39,7 @@ from ..tiktok_ingest import (
 )
 
 from .tiktok_streamer import _account_scope_from_live_session, _compute_buyer_lifetime_totals
-from ..tiktok_alerts import alert_ghost_cancellation, alert_reverse_order
+from ..tiktok.tiktok_alerts import alert_ghost_cancellation, alert_reverse_order
 
 settings = get_settings()
 
