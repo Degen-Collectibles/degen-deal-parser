@@ -705,7 +705,7 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         self.session.add(item)
         self.session.commit()
 
-        with patch("app.inventory._cached_add_stock_sealed_search", new=AsyncMock(return_value=([], ""))):
+        with patch("app.inventory.routes._cached_add_stock_sealed_search", new=AsyncMock(return_value=([], ""))):
             page = self.client.get(
                 "/inventory/add-stock?game=Pokemon&search_type=sealed&q=Existing+Market+Box",
                 follow_redirects=False,
