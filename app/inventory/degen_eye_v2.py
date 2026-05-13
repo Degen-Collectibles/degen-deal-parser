@@ -13,7 +13,7 @@ Fallback path (pHash confidence LOW or index missing):
       -> price_cache.get_price_for_match
       -> ScanResult
 
-Returns the same ScanResult dict shape as ``app.pokemon_scanner.run_pipeline``
+Returns the same ScanResult dict shape as ``app.inventory.pokemon_scanner.run_pipeline``
 so the frontend helpers (``addToBatchFromCard``, ``_pickDisplayPrice``,
 ``_resolveConditionPrice``) work unchanged. Adds a ``debug.v2`` block with
 per-stage timing + the pHash verdict so the debug page can show what
