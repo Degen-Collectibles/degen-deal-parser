@@ -282,6 +282,7 @@ class EmployeeTokenRevocationTests(unittest.TestCase):
         details = json.loads(row.details_json)
         self.assertEqual(details["invite_tokens_revoked"], 1)
         self.assertEqual(details["reset_tokens_revoked"], 1)
+        self.assertEqual(details["purge_mode"], "recoverable")
 
     def test_admin_cannot_purge_self(self):
         from app.routers.team_admin_employees import admin_employee_purge_post
@@ -357,3 +358,39 @@ class EmployeeTokenRevocationTests(unittest.TestCase):
             select(AuditLog).where(AuditLog.action == "account.purge_restored")
         ).first()
         self.assertIsNotNone(row)
+
+    def test_expired_purge_tombstone_scrub_preserves_recoverable_window(self):
+        from app.models import EmployeePurgeTombstone, utcnow
+        from app.routers.team_admin_employees import scrub_expired_purge_tombstones
+
+        now = utcnow()
+        tombstone = EmployeePurgeTombstone(
+            user_id=self.employee.id,
+            purged_by_user_id=self.admin.id,
+            restore_until=now + timedelta(hours=1),
+            snapshot_json=json.dumps({"profile": {"phone_enc": "encrypted-pii"}}),
+            created_at=now,
+        )
+        self.session.add(tombstone)
+        self.session.commit()
+        self.session.refresh(tombstone)
+
+        self.assertEqual(scrub_expired_purge_tombstones(self.session, now=now), 0)
+        self.session.expire_all()
+        self.assertIn(
+            "encrypted-pii",
+            self.session.get(EmployeePurgeTombstone, tombstone.id).snapshot_json,
+        )
+
+        self.assertEqual(
+            scrub_expired_purge_tombstones(
+                self.session,
+                now=now + timedelta(hours=1, seconds=1),
+            ),
+            1,
+        )
+        self.session.expire_all()
+        self.assertEqual(
+            self.session.get(EmployeePurgeTombstone, tombstone.id).snapshot_json,
+            "{}",
+        )

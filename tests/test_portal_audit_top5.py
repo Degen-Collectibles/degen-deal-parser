@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import os
 import unittest
@@ -105,6 +106,119 @@ class PortalAuditTop5Tests(unittest.TestCase):
             response = team.team_dashboard(request, session=self.session)
         self.assertEqual(response.status_code, 200)
         return response.context
+
+    def test_invite_accept_rejects_authenticated_session_without_consuming_token(self):
+        from app.auth import generate_invite_token
+        from app.models import InviteToken
+        from app.routers import team
+        from sqlmodel import select
+
+        admin = self._user(40, role="admin", username="invite-admin")
+        logged_in = self._user(41, role="employee", username="logged-in")
+        raw = generate_invite_token(
+            self.session,
+            role="employee",
+            created_by_user_id=admin.id,
+        )
+        request = self._request(
+            logged_in,
+            path=f"/team/invite/accept/{raw}",
+        )
+        request.session["user_id"] = logged_in.id
+        request.scope["session"] = request.session
+
+        response = asyncio.run(
+            team.team_invite_accept_post(
+                request,
+                raw,
+                new_username="new-hire",
+                new_password="Str0ngPass!234",
+                session=self.session,
+            )
+        )
+
+        token_row = self.session.exec(select(InviteToken)).one()
+        self.assertEqual(response.status_code, 409)
+        self.assertIsNone(token_row.used_at)
+        self.assertEqual(request.session["user_id"], logged_in.id)
+
+    def test_draft_creation_rejects_privileged_role_without_role_management(self):
+        from app.models import RolePermission, User
+        from app.routers import team_admin_employees
+        from sqlmodel import select
+
+        admin = self._user(50, role="admin", username="employee-editor")
+        permission_row = self.session.exec(
+            select(RolePermission).where(
+                RolePermission.role == "admin",
+                RolePermission.resource_key == "admin.permissions.edit",
+            )
+        ).one()
+        permission_row.is_allowed = False
+        self.session.add(permission_row)
+        self.session.commit()
+
+        response = asyncio.run(
+            team_admin_employees.admin_employee_new_post(
+                self._request(admin, path="/team/admin/employees/new"),
+                display_name="Escalated Draft",
+                role="admin",
+                session=self.session,
+            )
+        )
+
+        created = self.session.exec(
+            select(User).where(User.display_name == "Escalated Draft")
+        ).first()
+        self.assertEqual(response.status_code, 403)
+        self.assertIsNone(created)
+
+    def test_draft_creation_allows_privileged_role_with_role_management(self):
+        from app.models import User
+        from app.routers import team_admin_employees
+        from sqlmodel import select
+
+        admin = self._user(60, role="admin", username="role-manager")
+
+        response = asyncio.run(
+            team_admin_employees.admin_employee_new_post(
+                self._request(admin, path="/team/admin/employees/new"),
+                display_name="Manager Draft",
+                legal_name="",
+                preferred_name="",
+                role="manager",
+                email="",
+                hire_date="",
+                session=self.session,
+            )
+        )
+
+        created = self.session.exec(
+            select(User).where(User.display_name == "Manager Draft")
+        ).one()
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(created.role, "manager")
+
+    def test_permission_catalog_includes_dedicated_buylist_edit_gate(self):
+        from app.models import RolePermission
+        from app.permissions import RESOURCE_KEYS
+        from sqlmodel import select
+
+        self.assertIn("admin.buylist.edit", RESOURCE_KEYS)
+        admin_row = self.session.exec(
+            select(RolePermission).where(
+                RolePermission.role == "admin",
+                RolePermission.resource_key == "admin.buylist.edit",
+            )
+        ).one()
+        manager_row = self.session.exec(
+            select(RolePermission).where(
+                RolePermission.role == "manager",
+                RolePermission.resource_key == "admin.buylist.edit",
+            )
+        ).one()
+        self.assertTrue(admin_row.is_allowed)
+        self.assertFalse(manager_row.is_allowed)
 
     def test_dashboard_hides_supply_queue_count_without_permission(self):
         from app.models import SupplyRequest

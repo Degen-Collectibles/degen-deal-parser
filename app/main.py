@@ -289,6 +289,23 @@ async def lifespan(app: FastAPI):
 
     background_tasks: list[asyncio.Task] = []
 
+    if settings.employee_portal_enabled:
+        from .routers.team_admin_employees import periodic_purge_tombstone_scrub_loop
+
+        purge_tombstone_scrub_task = track_background_task(
+            asyncio.create_task(
+                periodic_purge_tombstone_scrub_loop(stop_event),
+                name="employee-purge-tombstone-scrub",
+            ),
+            runtime_name=APP_HEARTBEAT_RUNTIME_NAME,
+            task_name="employee-purge-tombstone-scrub",
+            stop_event=stop_event,
+        )
+        background_tasks.append(purge_tombstone_scrub_task)
+        app.state.purge_tombstone_scrub_task = purge_tombstone_scrub_task
+    else:
+        app.state.purge_tombstone_scrub_task = None
+
     if settings.discord_ingest_enabled or settings.parser_worker_enabled:
         heartbeat_thread = threading.Thread(
             target=runtime_heartbeat_loop,

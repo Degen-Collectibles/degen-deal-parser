@@ -1126,6 +1126,7 @@ DEFAULT_ROLE_PERMISSIONS: tuple[tuple[str, str, bool], ...] = tuple(
         ("admin.invites.issue", (False, False, False, False, True)),
         ("admin.supply.view", (False, False, True, True, True)),
         ("admin.supply.approve", (False, False, True, True, True)),
+        ("admin.buylist.edit", (False, False, False, False, True)),
         ("admin.timeoff.view", (False, False, True, True, True)),
         ("admin.timeoff.approve", (False, False, True, False, True)),
         # Wave 4.5 — edit key distinct from view

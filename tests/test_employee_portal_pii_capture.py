@@ -232,9 +232,9 @@ class InvitePIICaptureTests(unittest.TestCase, _PIIHarness):
         # Onboarding complete timestamp is set.
         self.assertIsNotNone(prof.onboarding_completed_at)
 
-    def test_invite_accept_rejects_duplicate_email(self):
-        """If two invitees try to claim the same email, the second attempt
-        must be rejected rather than silently overwriting or 500-ing."""
+    def test_invite_accept_drops_duplicate_email_after_logout(self):
+        """If two invitees claim the same email, the second account still
+        onboards but the conflicting email is dropped."""
         from app.auth import generate_invite_token
         from app.models import User
 
@@ -252,10 +252,10 @@ class InvitePIICaptureTests(unittest.TestCase, _PIIHarness):
             follow_redirects=False,
         )
         self.assertEqual(r1.status_code, 303, r1.text)
+        self.client.cookies.clear()
 
         # Issue a second invite using the newly-seeded admin (already in DB).
         admin = self.session.exec(select(User).where(User.username == "adm_pii")).first()
-        from app.auth import generate_invite_token
         raw2 = generate_invite_token(
             self.session, role="employee", created_by_user_id=admin.id
         )
@@ -279,7 +279,6 @@ class InvitePIICaptureTests(unittest.TestCase, _PIIHarness):
         self.assertIn("banner=Email+not+saved", r2.headers.get("location", ""))
 
     def test_invite_accept_drops_duplicate_email_but_still_onboards(self):
-        from app.auth import generate_invite_token
         from app.models import EmployeeProfile, User
         from app.pii import decrypt_pii, email_lookup_hash, encrypt_pii
 
@@ -301,10 +300,7 @@ class InvitePIICaptureTests(unittest.TestCase, _PIIHarness):
         self.session.add(existing_profile)
         self.session.commit()
 
-        admin = self._login(role="admin", user_id=200, username="adm_pii")
-        raw = generate_invite_token(
-            self.session, role="employee", created_by_user_id=admin.id
-        )
+        raw = self._issue_invite()
         csrf = self._csrf()
         r = self.client.post(
             f"/team/invite/accept/{raw}",

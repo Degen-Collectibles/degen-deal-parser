@@ -8,7 +8,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.routers import team_admin, team_buylist
 from app.routers.team_buylist import DEFAULT_BUYLIST_CONFIG, calculate_buylist_offer
-from app.models import BuylistSubmission, InventoryItem, User
+from app.models import AppSetting, AuditLog, BuylistSubmission, InventoryItem, RolePermission, User
 
 
 class FakeJsonRequest:
@@ -569,6 +569,22 @@ def test_staff_buylist_save_creates_submission(monkeypatch):
         assert row.customer_name == "Ash"
         assert json.loads(row.totals_json)["cash"] == 10.0
         assert lines[0]["unit_cash"] == 5.0
+        audit = session.exec(
+            select(AuditLog).where(AuditLog.action == "staff_buylist.quote_saved")
+        ).one()
+        audit_details = json.loads(audit.details_json)
+        assert audit_details["buylist_submission_id"] == row.id
+        assert audit_details["line_count"] == 1
+        assert audit_details["has_customer_name"] is True
+        assert audit_details["has_customer_contact"] is True
+        assert audit_details["has_notes"] is True
+        assert "customer_name" not in audit_details
+        assert "customer_contact" not in audit_details
+        assert "notes" not in audit_details
+        assert "lines" not in audit_details
+        assert "Ash" not in audit.details_json
+        assert "ash@example.test" not in audit.details_json
+        assert "ID checked" not in audit.details_json
     finally:
         session.close()
         engine.dispose()
@@ -669,6 +685,52 @@ def test_staff_buylist_admin_denies_employee_role(monkeypatch):
         response = team_buylist.admin_buylist_submissions_page(request, session=session)
 
         assert response.status_code == 403
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_staff_buylist_admin_save_requires_dedicated_edit_permission(monkeypatch):
+    engine, session = _memory_session()
+    try:
+        manager = _user(13, role="manager")
+        session.add(manager)
+        session.add(
+            RolePermission(
+                role="manager",
+                resource_key="admin.supply.view",
+                is_allowed=True,
+            )
+        )
+        session.add(
+            RolePermission(
+                role="manager",
+                resource_key=team_buylist.BUYLIST_EDIT_PERMISSION,
+                is_allowed=False,
+            )
+        )
+        session.commit()
+        request = SimpleNamespace(
+            state=SimpleNamespace(current_user=manager),
+            client=SimpleNamespace(host="127.0.0.1"),
+        )
+        monkeypatch.setattr(
+            team_admin,
+            "get_settings",
+            lambda: SimpleNamespace(employee_portal_enabled=True),
+        )
+
+        response = asyncio.run(
+            team_buylist.staff_buylist_admin_save(
+                request,
+                enabled_games=["Pokemon"],
+                default_game="Pokemon",
+                session=session,
+            )
+        )
+
+        assert response.status_code == 403
+        assert session.get(AppSetting, team_buylist.BUYLIST_CONFIG_KEY) is None
     finally:
         session.close()
         engine.dispose()

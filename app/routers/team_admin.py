@@ -68,7 +68,7 @@ TEAM_ADMIN_NAV_SECTIONS: tuple[tuple[str, tuple[tuple[str, str, str, str], ...]]
             ("invites", "Invites", "/team/admin/invites", "admin.invites.view"),
             ("supply", "Supply queue", "/team/admin/supply", "admin.supply.view"),
             ("buylist-submissions", "Buylist queue", "/team/admin/buylist/submissions", "admin.supply.view"),
-            ("buylist", "Buylist pricing", "/team/admin/buylist", "admin.supply.view"),
+            ("buylist", "Buylist pricing", "/team/admin/buylist", "admin.buylist.edit"),
             ("time-off", "Time off", "/team/admin/timeoff", "admin.timeoff.view"),
         ),
     ),

@@ -29,7 +29,7 @@ from ..pokemon_scanner import text_search_cards
 from ..shared import templates
 from ..tcgplayer_sales import fetch_tcgplayer_public_sales, tcgplayer_product_id_from_url
 from .team import _nav_context
-from .team_admin import _admin_denied_response, _permission_gate, _set_team_admin_state
+from .team_admin import _permission_gate
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -50,6 +50,7 @@ CONDITION_PRICING_TCGPLAYER = "tcgplayer_market"
 CONDITION_PRICING_MODES = {CONDITION_PRICING_PERCENTAGE, CONDITION_PRICING_TCGPLAYER}
 BUYLIST_SUBMISSION_STATUSES = ("submitted", "approved", "paid", "rejected")
 NO_MARKET_PRICE_NOTE = "No market price found. Manager review required."
+BUYLIST_EDIT_PERMISSION = "admin.buylist.edit"
 
 _BUYLIST_SEARCH_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 BUYLIST_SEARCH_CACHE_VERSION = "buylist-search-v4"
@@ -134,19 +135,13 @@ def _require_buylist_admin(
     request: Request,
     session: Session,
 ) -> tuple[Optional[Response], Optional[User]]:
-    _portal_or_404()
-    user: Optional[User] = getattr(request.state, "current_user", None)
-    if user is None:
-        return RedirectResponse("/team/login", status_code=303), None
-    if not has_permission(session, user, "admin.supply.view"):
-        return _admin_denied_response(
-            request,
-            session,
-            user,
-            message="You do not have permission to manage buylist pricing.",
-        ), None
-    _set_team_admin_state(request, session, user)
-    return None, user
+    return _permission_gate(request, session, BUYLIST_EDIT_PERMISSION)
+
+
+def _can_manage_buylist_pricing(session: Session, user: Optional[User]) -> bool:
+    if user is None or getattr(user, "role", None) not in {"admin", "manager", "reviewer"}:
+        return False
+    return has_permission(session, user, BUYLIST_EDIT_PERMISSION)
 
 
 def _deep_merge(defaults: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -1031,7 +1026,7 @@ def staff_buylist_page(request: Request, session: Session = Depends(get_session)
     if denial:
         return denial
     config = get_buylist_config(session)
-    can_manage_buylist_pricing = bool(user and has_permission(session, user, "admin.supply.view"))
+    can_manage_buylist_pricing = _can_manage_buylist_pricing(session, user)
     return templates.TemplateResponse(
         request,
         "team/buylist.html",
@@ -1343,15 +1338,22 @@ async def staff_buylist_save(request: Request, session: Session = Depends(get_se
     session.add(submission)
     session.commit()
     session.refresh(submission)
+    audit_details = {
+        "buylist_submission_id": submission.id,
+        "submitted_by_user_id": user.id if user else None,
+        "payment_view": payment_view,
+        "totals": details["totals"],
+        "line_count": len(details["lines"]),
+        "has_customer_name": bool(details["customer_name"]),
+        "has_customer_contact": bool(details["customer_contact"]),
+        "has_notes": bool(details["notes"]),
+    }
     session.add(
         AuditLog(
             actor_user_id=user.id if user else None,
             action="staff_buylist.quote_saved",
             resource_key="team.buylist",
-            details_json=json.dumps(
-                {**details, "buylist_submission_id": submission.id},
-                sort_keys=True,
-            ),
+            details_json=json.dumps(audit_details, sort_keys=True),
             ip_address=(request.client.host if request.client else None),
         )
     )

@@ -513,6 +513,17 @@ async def team_invite_accept_post(
     session: Session = Depends(get_session),
 ):
     _portal_or_404()
+    current_user: Optional[User] = getattr(request.state, "current_user", None)
+    current_session_user_id = None
+    try:
+        current_session_user_id = request.session.get("user_id")
+    except (AssertionError, AttributeError):
+        current_session_user_id = None
+    if current_user is not None or current_session_user_id:
+        return HTMLResponse(
+            "Sign out before accepting an invite for another account.",
+            status_code=409,
+        )
     if limited := rate_limited_or_429(
         request, key_prefix="team:invite", max_requests=3, window_seconds=900.0
     ):

@@ -6,9 +6,11 @@ If the audit write fails, the decrypt does not happen (fail-closed).
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
+import logging
 from calendar import monthrange
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
@@ -31,7 +33,7 @@ from ..auth import (
 )
 from ..csrf import issue_token, require_csrf
 from ..config import get_settings
-from ..db import get_session
+from ..db import get_session, managed_session
 from ..models import (
     AuditLog,
     EmployeeCompensationHistory,
@@ -53,9 +55,14 @@ from ..sms import mask_sms_phone, normalize_sms_phone, send_sms, sms_phone_finge
 from .team_admin import _admin_denied_response, _admin_gate, _permission_gate
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 ROLES = ("employee", "viewer", "manager", "reviewer", "admin")
+PRIVILEGED_DRAFT_ROLES = frozenset({"manager", "reviewer", "admin"})
+NON_PRIVILEGED_DRAFT_ROLES = tuple(
+    role for role in ROLES if role not in PRIVILEGED_DRAFT_ROLES
+)
 COMPENSATION_TYPE_UNPAID = "unpaid"
 COMPENSATION_TYPE_HOURLY = "hourly"
 COMPENSATION_TYPE_MONTHLY = "monthly_salary"
@@ -87,6 +94,7 @@ COMPENSATION_HISTORY_FIELDS = {
 COMPENSATION_VIEW_PERMISSION = "admin.labor_financials.view"
 COMPENSATION_EDIT_PERMISSION = "admin.labor_financials.edit"
 ROLE_MANAGEMENT_PERMISSION = "admin.permissions.edit"
+PURGE_TOMBSTONE_SCRUB_INTERVAL_SECONDS = 6 * 60 * 60
 
 
 class CompensationDecryptError(ValueError):
@@ -841,6 +849,7 @@ def admin_employee_new_page(
     )
     if denial:
         return denial
+    can_manage_roles = _can_manage_employee_roles(session, current)
     return templates.TemplateResponse(
         request,
         "team/admin/employee_new.html",
@@ -848,7 +857,8 @@ def admin_employee_new_page(
             "request": request,
             "title": "Add employee",
             "current_user": current,
-            "roles": ROLES,
+            "roles": ROLES if can_manage_roles else NON_PRIVILEGED_DRAFT_ROLES,
+            "can_manage_roles": can_manage_roles,
             "error": error,
             "csrf_token": issue_token(request),
         },
@@ -875,6 +885,13 @@ async def admin_employee_new_post(
     role_clean = (role or "").strip().lower()
     if role_clean not in ROLES:
         role_clean = "employee"
+    if role_clean in PRIVILEGED_DRAFT_ROLES and not _can_manage_employee_roles(
+        session, current
+    ):
+        return HTMLResponse(
+            "You do not have permission to assign privileged employee roles.",
+            status_code=403,
+        )
     try:
         user = create_draft_employee(
             session,
@@ -2435,6 +2452,50 @@ def _ensure_purge_tombstone(
     return tombstone
 
 
+def scrub_expired_purge_tombstones(
+    session: Session, *, now: Optional[datetime] = None
+) -> int:
+    """Remove restorable PII snapshots once the undo window has expired."""
+    cutoff = now or utcnow()
+    rows = session.exec(
+        select(EmployeePurgeTombstone).where(
+            EmployeePurgeTombstone.restore_until < cutoff
+        )
+    ).all()
+    scrubbed = 0
+    for tombstone in rows:
+        if (tombstone.snapshot_json or "").strip() in {"", "{}"}:
+            continue
+        tombstone.snapshot_json = "{}"
+        session.add(tombstone)
+        scrubbed += 1
+    if scrubbed:
+        session.commit()
+    return scrubbed
+
+
+async def periodic_purge_tombstone_scrub_loop(
+    stop_event: asyncio.Event,
+    *,
+    interval_seconds: float = PURGE_TOMBSTONE_SCRUB_INTERVAL_SECONDS,
+) -> None:
+    while not stop_event.is_set():
+        try:
+            with managed_session() as session:
+                scrubbed = scrub_expired_purge_tombstones(session)
+                if scrubbed:
+                    logger.info("scrubbed %s expired employee purge tombstones", scrubbed)
+        except Exception:
+            logger.exception("employee purge tombstone scrub failed")
+        try:
+            await asyncio.wait_for(
+                stop_event.wait(),
+                timeout=max(float(interval_seconds), 1.0),
+            )
+        except asyncio.TimeoutError:
+            pass
+
+
 def restore_employee_purge_tombstone(
     session: Session,
     user_id: int,
@@ -2635,6 +2696,7 @@ async def admin_employee_purge_post(
                     "reset_tokens_revoked": reset_revoked,
                     "tombstone_id": tombstone.id,
                     "restore_until": tombstone.restore_until.isoformat(),
+                    "purge_mode": "recoverable",
                 },
                 sort_keys=True,
             ),
