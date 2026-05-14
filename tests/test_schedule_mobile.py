@@ -787,7 +787,7 @@ class ScheduleMobileSummaryRenderTests(unittest.TestCase):
         self.assertIn("scrollbar-color: #ff8a3d", html)
 
     def test_employee_schedule_template_moves_legend_above_first_grid(self):
-        source = Path("app/templates/team/schedule.html").read_text()
+        source = Path("app/templates/team/schedule.html").read_text(encoding="utf-8")
 
         self.assertLess(
             source.index('<div class="sch-legend">'),

@@ -4,6 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from app import parser as parser_module
 from app.models import ParseAttempt
 from app.parser import extract_usage_metrics, parse_deal_with_ai, parse_deal_with_ai_async
 
@@ -125,8 +126,8 @@ class AiUsageCostTests(unittest.TestCase):
                 channel_name="store-sales",
             )
 
-        self.assertEqual(parsed["_ai_provider"], "nvidia")
-        self.assertEqual(parsed["_openai_model"], "openai/openai/gpt-5.5")
+        self.assertEqual(parsed["_ai_provider"], parser_module.get_provider())
+        self.assertEqual(parsed["_openai_model"], parser_module.MODEL)
         self.assertEqual(parsed["_openai_usage"]["input_tokens"], 120)
         self.assertEqual(parsed["_openai_usage"]["output_tokens"], 30)
         self.assertGreater(parsed["_openai_usage"]["estimated_cost_usd"], 0)

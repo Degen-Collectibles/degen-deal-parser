@@ -16,8 +16,13 @@ from sqlmodel import Session, select
 
 from .models import ShopifyOrder, InventoryItem, InventoryStockMovement, INVENTORY_SOLD, utcnow
 from .runtime_logging import structured_log_line
+from .shopify_api import SHOPIFY_API_VERSION
+from .shopify_sync import (
+    SHOPIFY_SYNC_ISSUE_UNKNOWN_SKU,
+    enqueue_shopify_sync_job,
+    record_shopify_sync_issue,
+)
 
-SHOPIFY_API_VERSION = "2024-01"
 SHOPIFY_ORDERS_PATH = f"/admin/api/{SHOPIFY_API_VERSION}/orders.json"
 SHOPIFY_PROGRESS_INTERVAL = 50
 _backfill_state_lock = Lock()
@@ -534,25 +539,37 @@ def mark_inventory_sold_from_shopify_order(
         return 0
 
     order_id = str(payload.get("id") or "")
-    sold_by_sku: dict[str, dict[str, float | int]] = {}
+    order_number = str(payload.get("name") or payload.get("order_number") or "")
+    sold_by_sku: dict[str, dict[str, Any]] = {}
     for item in line_items:
         if not isinstance(item, dict):
             continue
         sku = str(item.get("sku") or "").strip()
-        if sku and sku.startswith("DGN-"):
-            try:
-                quantity = int(item.get("quantity") or 1)
-            except (TypeError, ValueError):
-                quantity = 1
-            quantity = max(1, quantity)
-            row = sold_by_sku.setdefault(sku, {"quantity": 0, "price": 0.0})
-            row["quantity"] = int(row["quantity"]) + quantity
-            row["price"] = money_to_float(item.get("price"))
+        if not sku:
+            continue
+        try:
+            quantity = int(item.get("quantity") or 1)
+        except (TypeError, ValueError):
+            quantity = 1
+        quantity = max(1, quantity)
+        row = sold_by_sku.setdefault(
+            sku,
+            {
+                "quantity": 0,
+                "price": 0.0,
+                "title": str(item.get("title") or item.get("name") or ""),
+                "variant_id": str(item.get("variant_id") or ""),
+                "payload": item,
+            },
+        )
+        row["quantity"] = int(row["quantity"]) + quantity
+        row["price"] = money_to_float(item.get("price"))
 
     if not sold_by_sku:
         return 0
 
     marked = 0
+    issues_recorded = 0
     for sku, sale in sold_by_sku.items():
         sale_price = float(sale.get("price") or 0)
         sold_quantity = max(1, int(sale.get("quantity") or 1))
@@ -560,6 +577,33 @@ def mark_inventory_sold_from_shopify_order(
             select(InventoryItem).where(InventoryItem.barcode == sku)
         ).first()
         if inv_item is None or inv_item.archived_at is not None:
+            record_shopify_sync_issue(
+                session,
+                issue_type=SHOPIFY_SYNC_ISSUE_UNKNOWN_SKU,
+                shopify_sku=sku,
+                shopify_title=str(sale.get("title") or ""),
+                shopify_order_id=order_id,
+                shopify_order_number=order_number,
+                shopify_variant_id=str(sale.get("variant_id") or "") or None,
+                quantity=sold_quantity,
+                unit_price=sale_price if sale_price > 0 else None,
+                message=(
+                    f"Shopify order {order_id or order_number or '(unknown order)'} used SKU {sku}, "
+                    "but no active Degen inventory item matched it."
+                ),
+                payload=sale.get("payload") if isinstance(sale.get("payload"), dict) else {},
+            )
+            issues_recorded += 1
+            continue
+        existing_movement = session.exec(
+            select(InventoryStockMovement).where(
+                InventoryStockMovement.item_id == inv_item.id,
+                InventoryStockMovement.reason == "sale",
+                InventoryStockMovement.source == "Shopify",
+                InventoryStockMovement.notes == f"Shopify order {order_id}".strip(),
+            )
+        ).first()
+        if existing_movement is not None:
             continue
         before_qty = max(0, inv_item.quantity or 0)
         after_qty = max(0, before_qty - sold_quantity)
@@ -585,6 +629,18 @@ def mark_inventory_sold_from_shopify_order(
                 created_at=utcnow(),
             )
         )
+        enqueue_shopify_sync_job(
+            session,
+            inv_item,
+            action="quantity",
+            source="Shopify order webhook",
+            payload={
+                "shopify_order_id": order_id,
+                "shopify_order_number": order_number,
+                "sku": sku,
+                "quantity_after": after_qty,
+            },
+        )
         marked += 1
         print(
             structured_log_line(
@@ -602,7 +658,7 @@ def mark_inventory_sold_from_shopify_order(
             )
         )
 
-    if marked:
+    if marked or issues_recorded:
         session.commit()
 
     return marked

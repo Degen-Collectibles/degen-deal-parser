@@ -749,6 +749,210 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         history = self.session.exec(select(PriceHistory).where(PriceHistory.item_id == success.id)).one()
         self.assertEqual(history.market_price, 144.0)
 
+    def test_manager_can_view_shopify_sync_queue(self):
+        self._login_as("manager", user_id=244, username="mgr44")
+        from app.models import ShopifySyncIssue
+
+        issue = ShopifySyncIssue(
+            issue_key="unknown_sku:1001:DGN-MISSING",
+            issue_type="unknown_sku",
+            status="open",
+            shopify_sku="DGN-MISSING",
+            shopify_title="Unknown Shopify Product",
+            message="Shopify order #1001 used SKU DGN-MISSING.",
+        )
+        self.session.add(issue)
+        self.session.commit()
+
+        response = self.client.get("/inventory/shopify-sync")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Shopify Sync", response.text)
+        self.assertIn("DGN-MISSING", response.text)
+        self.assertIn("Unknown Shopify Product", response.text)
+
+    def test_employee_cannot_manage_shopify_sync_queue(self):
+        self._login_as("employee", user_id=245, username="emp45")
+
+        inventory = self.client.get("/inventory")
+        self.assertNotIn("Shopify Sync", inventory.text)
+        csrf = self._csrf_from_html(inventory.text)
+
+        response = self.client.get("/inventory/shopify-sync")
+        self.assertIn(response.status_code, (302, 303, 403))
+        response = self.client.post(
+            "/inventory/shopify-sync/retry",
+            headers={"X-CSRF-Token": csrf},
+            data={"item_id": "1"},
+            follow_redirects=False,
+        )
+        self.assertIn(response.status_code, (302, 303, 403))
+
+    def test_manager_can_link_and_ignore_shopify_sync_issue(self):
+        self._login_as("manager", user_id=246, username="mgr46")
+        from app.models import InventoryItem, ShopifySyncIssue
+
+        item = InventoryItem(
+            barcode="DGN-LINK1",
+            item_type="sealed",
+            game="Pokemon",
+            card_name="Link Test Box",
+            quantity=1,
+        )
+        issue = ShopifySyncIssue(
+            issue_key="unlinked_product:111:222",
+            issue_type="unlinked_product",
+            status="open",
+            shopify_sku="DGN-LINK1",
+            shopify_title="Link Test Box",
+            shopify_product_id="111",
+            shopify_variant_id="222",
+            shopify_inventory_item_id="333",
+            shopify_location_id="444",
+            message="Needs linking.",
+        )
+        self.session.add_all([item, issue])
+        self.session.commit()
+        self.session.refresh(item)
+        self.session.refresh(issue)
+
+        page = self.client.get("/inventory/shopify-sync")
+        csrf = self._csrf_from_html(page.text)
+        response = self.client.post(
+            "/inventory/shopify-sync/link",
+            headers={"X-CSRF-Token": csrf},
+            data={
+                "item_id": str(item.id),
+                "issue_id": str(issue.id),
+                "shopify_product_id": "111",
+                "shopify_variant_id": "222",
+                "shopify_inventory_item_id": "333",
+                "shopify_location_id": "444",
+                "shopify_sku": "DGN-LINK1",
+            },
+            follow_redirects=False,
+        )
+
+        self.assertEqual(response.status_code, 303)
+        self.session.expire_all()
+        linked = self.session.get(InventoryItem, item.id)
+        linked_issue = self.session.get(ShopifySyncIssue, issue.id)
+        self.assertEqual(linked.shopify_variant_id, "222")
+        self.assertEqual(linked.shopify_inventory_item_id, "333")
+        self.assertEqual(linked.shopify_sync_status, "pending")
+        self.assertEqual(linked_issue.status, "linked")
+
+        response = self.client.post(
+            "/inventory/shopify-sync/ignore",
+            headers={"X-CSRF-Token": csrf},
+            data={"issue_id": str(issue.id), "resolution_note": "Handled manually"},
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 303)
+        self.session.expire_all()
+        ignored_issue = self.session.get(ShopifySyncIssue, issue.id)
+        self.assertEqual(ignored_issue.status, "ignored")
+
+    def test_manager_can_import_shopify_sync_issue(self):
+        self._login_as("manager", user_id=247, username="mgr47")
+        from app.models import InventoryItem, ShopifySyncIssue
+
+        issue = ShopifySyncIssue(
+            issue_key="unlinked_product:555:666",
+            issue_type="unlinked_product",
+            status="open",
+            shopify_sku="SHOPIFY-LEGACY",
+            shopify_title="Legacy Shopify Product",
+            shopify_product_id="555",
+            shopify_variant_id="666",
+            shopify_inventory_item_id="777",
+            shopify_location_id="888",
+            quantity=3,
+            unit_price=12.5,
+            message="Import this.",
+        )
+        self.session.add(issue)
+        self.session.commit()
+        self.session.refresh(issue)
+
+        page = self.client.get("/inventory/shopify-sync")
+        csrf = self._csrf_from_html(page.text)
+        response = self.client.post(
+            "/inventory/shopify-sync/import",
+            headers={"X-CSRF-Token": csrf},
+            data={"issue_id": str(issue.id)},
+            follow_redirects=False,
+        )
+
+        self.assertEqual(response.status_code, 303)
+        self.session.expire_all()
+        imported = self.session.exec(
+            select(InventoryItem).where(InventoryItem.card_name == "Legacy Shopify Product")
+        ).one()
+        resolved_issue = self.session.get(ShopifySyncIssue, issue.id)
+        self.assertEqual(imported.quantity, 3)
+        self.assertEqual(imported.list_price, 12.5)
+        self.assertEqual(imported.shopify_variant_id, "666")
+        self.assertEqual(imported.barcode, f"DGN-{imported.id:06d}")
+        self.assertEqual(resolved_issue.status, "resolved")
+
+    def test_manager_catalog_scan_links_dgn_sku_and_queues_unlinked_shopify_product(self):
+        self._login_as("manager", user_id=248, username="mgr48")
+        from app.inventory_shopify import ShopifyVariantRef
+        from app.models import InventoryItem, ShopifySyncIssue
+
+        item = InventoryItem(
+            barcode="DGN-CATALOG1",
+            item_type="sealed",
+            game="Pokemon",
+            card_name="Catalog Match Box",
+            quantity=2,
+        )
+        self.session.add(item)
+        self.session.commit()
+        self.session.refresh(item)
+
+        page = self.client.get("/inventory/shopify-sync")
+        csrf = self._csrf_from_html(page.text)
+        variants = [
+            ShopifyVariantRef(
+                sku="DGN-CATALOG1",
+                product_id="111",
+                variant_id="222",
+                inventory_item_id="333",
+                product_title="Catalog Match Box",
+            ),
+            ShopifyVariantRef(
+                sku="SHOPIFY-ONLY",
+                product_id="444",
+                variant_id="555",
+                inventory_item_id="666",
+                product_title="Shopify Only Product",
+            ),
+        ]
+        with patch("app.inventory.settings") as mocked_settings, patch(
+            "app.inventory.list_shopify_product_variants",
+            new=AsyncMock(return_value=variants),
+        ):
+            mocked_settings.shopify_store_domain = "degen-test.myshopify.com"
+            mocked_settings.shopify_access_token = "shpat_test"
+            response = self.client.post(
+                "/inventory/shopify-sync/scan",
+                headers={"X-CSRF-Token": csrf},
+                follow_redirects=False,
+            )
+
+        self.assertEqual(response.status_code, 303)
+        self.assertIn("catalog_linked=1", response.headers["location"])
+        self.assertIn("catalog_queued=1", response.headers["location"])
+        self.session.expire_all()
+        linked = self.session.get(InventoryItem, item.id)
+        self.assertEqual(linked.shopify_variant_id, "222")
+        issue = self.session.exec(select(ShopifySyncIssue)).one()
+        self.assertEqual(issue.issue_type, "unlinked_product")
+        self.assertEqual(issue.shopify_sku, "SHOPIFY-ONLY")
+        self.assertEqual(issue.shopify_product_id, "444")
+
     def test_manager_can_bulk_edit_inventory_qty_cost_and_price(self):
         self._login_as("manager", user_id=239, username="mgr39")
         from app.models import InventoryItem, InventoryStockMovement

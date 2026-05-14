@@ -12,9 +12,10 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from app.shopify_api import SHOPIFY_API_VERSION
+
 load_dotenv(ROOT_DIR / ".env")
 
-SHOPIFY_API_VERSION = "2024-01"
 DEFAULT_TOPICS = ("orders/create", "orders/updated")
 
 

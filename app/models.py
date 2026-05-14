@@ -1088,7 +1088,17 @@ class InventoryItem(SQLModel, table=True):
 
     # Shopify
     shopify_product_id: Optional[str] = Field(default=None, index=True)
-    shopify_variant_id: Optional[str] = Field(default=None)
+    shopify_variant_id: Optional[str] = Field(default=None, index=True)
+    shopify_inventory_item_id: Optional[str] = Field(default=None, index=True)
+    shopify_location_id: Optional[str] = Field(default=None, index=True)
+    shopify_sku: Optional[str] = Field(default=None, index=True)
+    shopify_product_handle: Optional[str] = Field(default=None, index=True)
+    shopify_product_status: Optional[str] = Field(default=None, index=True)
+    shopify_sync_enabled: bool = Field(default=True, index=True)
+    shopify_synced_at: Optional[datetime] = Field(default=None, index=True)
+    shopify_sync_status: str = Field(default="not_synced", index=True)
+    shopify_sync_error: Optional[str] = Field(default=None)
+    shopify_last_payload_json: str = Field(default="{}")
 
     # Status & tracking
     status: str = Field(default=INVENTORY_IN_STOCK, index=True)
@@ -1133,6 +1143,54 @@ class InventoryStockMovement(SQLModel, table=True):
     notes: Optional[str] = Field(default=None)
     created_by: Optional[str] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=utcnow, index=True)
+
+
+class ShopifySyncIssue(SQLModel, table=True):
+    __tablename__ = "shopify_sync_issues"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    issue_key: str = Field(index=True, unique=True)
+    issue_type: str = Field(index=True)
+    status: str = Field(default="open", index=True)
+    severity: str = Field(default="warning", index=True)
+
+    inventory_item_id: Optional[int] = Field(default=None, foreign_key="inventory_items.id", index=True)
+    shopify_order_id: Optional[str] = Field(default=None, index=True)
+    shopify_order_number: Optional[str] = Field(default=None, index=True)
+    shopify_product_id: Optional[str] = Field(default=None, index=True)
+    shopify_variant_id: Optional[str] = Field(default=None, index=True)
+    shopify_inventory_item_id: Optional[str] = Field(default=None, index=True)
+    shopify_location_id: Optional[str] = Field(default=None, index=True)
+    shopify_sku: Optional[str] = Field(default=None, index=True)
+    shopify_title: Optional[str] = Field(default=None, index=True)
+
+    quantity: int = Field(default=1)
+    unit_price: Optional[float] = Field(default=None)
+    message: str = Field(default="")
+    raw_payload_json: str = Field(default="{}")
+    resolution_note: Optional[str] = Field(default=None)
+    resolved_by: Optional[str] = Field(default=None, index=True)
+    resolved_at: Optional[datetime] = Field(default=None, index=True)
+
+    first_seen_at: datetime = Field(default_factory=utcnow, index=True)
+    last_seen_at: datetime = Field(default_factory=utcnow, index=True)
+    occurrence_count: int = Field(default=1)
+
+
+class ShopifySyncJob(SQLModel, table=True):
+    __tablename__ = "shopify_sync_jobs"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    item_id: int = Field(foreign_key="inventory_items.id", index=True)
+    action: str = Field(default="sync", index=True)
+    status: str = Field(default="pending", index=True)
+    source: Optional[str] = Field(default=None, index=True)
+    attempts: int = Field(default=0)
+    payload_json: str = Field(default="{}")
+    last_error: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+    updated_at: datetime = Field(default_factory=utcnow, index=True)
+    processed_at: Optional[datetime] = Field(default=None, index=True)
 
 
 # ---------------------------------------------------------------------------

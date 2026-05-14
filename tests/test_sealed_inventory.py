@@ -821,6 +821,7 @@ class SealedInventoryTests(unittest.TestCase):
 
     def test_shopify_sale_decrements_sealed_quantity_and_logs_movement(self) -> None:
         from app.shopify_ingest import mark_inventory_sold_from_shopify_order
+        from app.models import ShopifySyncJob
 
         with Session(self.engine) as session:
             item = InventoryItem(
@@ -856,6 +857,12 @@ class SealedInventoryTests(unittest.TestCase):
             self.assertEqual(movement.quantity_delta, -2)
             self.assertEqual(movement.quantity_before, 5)
             self.assertEqual(movement.quantity_after, 3)
+            sync_job = session.exec(
+                select(ShopifySyncJob).where(ShopifySyncJob.item_id == item.id)
+            ).one()
+            self.assertEqual(sync_job.action, "quantity")
+            self.assertEqual(sync_job.status, "pending")
+            self.assertEqual(sync_job.source, "Shopify order webhook")
 
             marked_again = mark_inventory_sold_from_shopify_order(
                 session,
@@ -872,6 +879,68 @@ class SealedInventoryTests(unittest.TestCase):
             session.refresh(item)
             self.assertEqual(item.quantity, 0)
             self.assertEqual(item.status, INVENTORY_SOLD)
+
+    def test_shopify_sale_webhook_retry_does_not_double_decrement(self) -> None:
+        from app.shopify_ingest import mark_inventory_sold_from_shopify_order
+        from app.models import ShopifySyncJob
+
+        with Session(self.engine) as session:
+            item = InventoryItem(
+                barcode="DGN-RETRY1",
+                item_type=ITEM_TYPE_SEALED,
+                game="Pokemon",
+                card_name="Retry Booster Box",
+                quantity=5,
+            )
+            session.add(item)
+            session.commit()
+            session.refresh(item)
+
+            payload = {
+                "id": "shop-order-retry",
+                "line_items": [
+                    {"sku": "DGN-RETRY1", "quantity": 2, "price": "99.99"},
+                ],
+            }
+            first = mark_inventory_sold_from_shopify_order(session, payload, runtime_name="unit-test")
+            second = mark_inventory_sold_from_shopify_order(session, payload, runtime_name="unit-test")
+
+            self.assertEqual(first, 1)
+            self.assertEqual(second, 0)
+            session.refresh(item)
+            self.assertEqual(item.quantity, 3)
+            movements = session.exec(
+                select(InventoryStockMovement).where(InventoryStockMovement.item_id == item.id)
+            ).all()
+            self.assertEqual(len(movements), 1)
+            sync_jobs = session.exec(
+                select(ShopifySyncJob).where(ShopifySyncJob.item_id == item.id)
+            ).all()
+            self.assertEqual(len(sync_jobs), 1)
+
+    def test_shopify_unknown_sku_creates_visible_sync_issue(self) -> None:
+        from app.shopify_ingest import mark_inventory_sold_from_shopify_order
+        from app.models import ShopifySyncIssue
+
+        with Session(self.engine) as session:
+            marked = mark_inventory_sold_from_shopify_order(
+                session,
+                {
+                    "id": "shop-order-missing",
+                    "name": "#MISSING",
+                    "line_items": [
+                        {"sku": "DGN-NOTFOUND", "quantity": 1, "title": "Unknown Shopify Product"},
+                    ],
+                },
+                runtime_name="unit-test",
+            )
+
+            self.assertEqual(marked, 0)
+            issue = session.exec(select(ShopifySyncIssue)).one()
+            self.assertEqual(issue.issue_type, "unknown_sku")
+            self.assertEqual(issue.shopify_sku, "DGN-NOTFOUND")
+            self.assertEqual(issue.status, "open")
+            self.assertIn("shop-order-missing", issue.message)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Shopify Sync - Inventory</title>
+    <link rel="stylesheet" href="/static/linear-theme.css?v=1776747800">
+    <link rel="stylesheet" href="/static/linear-sidebar.css?v=1776747800">
+    <style>
+        body { margin:0;background:var(--lx-bg);color:var(--lx-text);font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+        .page { max-width:1280px;margin:0 auto;padding:24px 24px 40px; }
+        .card { background:var(--lx-surface);border:1px solid var(--lx-border);border-radius:8px;padding:18px;margin-bottom:14px; }
+        .hero { display:flex;align-items:flex-start;justify-content:space-between;gap:16px; }
+        .eyebrow { color:var(--lx-muted);font-size:12px;text-transform:uppercase;letter-spacing:.08em;font-weight:800; }
+        h1 { margin:4px 0 6px;font-size:28px;line-height:1.1; }
+        h2 { margin:0 0 10px;font-size:18px; }
+        p { color:var(--lx-muted);margin:0; }
+        .button, button { display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--lx-border);border-radius:8px;background:var(--lx-s1);color:var(--lx-text);padding:7px 10px;font-size:12px;font-weight:800;text-decoration:none;cursor:pointer; }
+        .primary-button { background:var(--lx-accent);border-color:var(--lx-accent);color:#fff; }
+        .metric-strip { display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:14px; }
+        .metric { border:1px solid var(--lx-border);border-radius:8px;padding:12px;background:var(--lx-s1); }
+        .metric-value { font-size:22px;font-weight:900; }
+        .metric-label { color:var(--lx-muted);font-size:12px;font-weight:800; }
+        table { width:100%;border-collapse:collapse;font-size:13px; }
+        th,td { padding:9px 8px;border-bottom:1px solid var(--lx-border);text-align:left;vertical-align:top; }
+        th { color:var(--lx-muted);font-size:11px;text-transform:uppercase;letter-spacing:.04em; }
+        .muted { color:var(--lx-muted);font-size:12px; }
+        .mono { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+        .badge { display:inline-flex;border-radius:999px;padding:3px 8px;font-size:11px;font-weight:900;background:var(--lx-s2);border:1px solid var(--lx-border); }
+        .badge-error,.badge-open { color:#fecaca;background:rgba(239,68,68,.12);border-color:rgba(239,68,68,.35); }
+        .badge-synced,.badge-linked { color:#bbf7d0;background:rgba(34,197,94,.12);border-color:rgba(34,197,94,.35); }
+        .badge-pending,.badge-not_synced { color:#fde68a;background:rgba(245,158,11,.12);border-color:rgba(245,158,11,.35); }
+        .grid-2 { display:grid;grid-template-columns:1fr 1fr;gap:14px; }
+        .stack { display:flex;gap:6px;flex-wrap:wrap;align-items:center; }
+        .inline-form { display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap;margin:0; }
+        input { background:var(--lx-s1);border:1px solid var(--lx-border);border-radius:8px;color:var(--lx-text);padding:7px 9px;font-size:12px; }
+        @media(max-width:900px){ .grid-2,.metric-strip{grid-template-columns:1fr;} .hero{flex-direction:column;} .page{padding:16px 14px 28px;} table{font-size:12px;} }
+    </style>
+</head>
+<body>
+<div class="page">
+    {% include "_linear_sidebar.html" %}
+    <div class="card">
+        <div class="hero">
+            <div>
+                <div class="eyebrow">Inventory</div>
+                <h1>Shopify Sync</h1>
+                <p>Review Shopify links, sync issues, and items that need to be connected before automation controls the storefront.</p>
+            </div>
+            <div class="stack">
+                <a class="button" href="/inventory">Inventory</a>
+                <form class="inline-form" method="post" action="/inventory/shopify-sync/scan">
+                    <button type="submit">Scan Shopify Catalog</button>
+                </form>
+                <a class="button primary-button" href="/inventory/add-stock">Add Stock</a>
+            </div>
+        </div>
+        <div class="metric-strip">
+            <div class="metric"><div class="metric-value">{{ summary.linked }}</div><div class="metric-label">Linked Items</div></div>
+            <div class="metric"><div class="metric-value">{{ summary.unlinked }}</div><div class="metric-label">Unlinked Local</div></div>
+            <div class="metric"><div class="metric-value">{{ summary.issues }}</div><div class="metric-label">Open Issues</div></div>
+            <div class="metric"><div class="metric-value">{{ summary.errors }}</div><div class="metric-label">Sync Errors</div></div>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>Open Sync Issues</h2>
+        <table>
+            <thead><tr><th>Issue</th><th>Shopify</th><th>Message</th><th>Actions</th></tr></thead>
+            <tbody>
+            {% for issue in issues %}
+            <tr>
+                <td><span class="badge badge-{{ issue.status }}">{{ issue.issue_type.replace("_"," ").title() }}</span><div class="muted">Seen {{ issue.occurrence_count }}x</div></td>
+                <td><div class="mono">{{ issue.shopify_sku or "No SKU" }}</div><div>{{ issue.shopify_title or "Untitled Shopify item" }}</div></td>
+                <td>{{ issue.message }}</td>
+                <td>
+                    <form class="inline-form" method="post" action="/inventory/shopify-sync/ignore">
+                        <input type="hidden" name="issue_id" value="{{ issue.id }}">
+                        <button type="submit">Ignore</button>
+                    </form>
+                    <form class="inline-form" method="post" action="/inventory/shopify-sync/import">
+                        <input type="hidden" name="issue_id" value="{{ issue.id }}">
+                        <button type="submit">Import</button>
+                    </form>
+                </td>
+            </tr>
+            {% else %}
+            <tr><td colspan="4" class="muted">No open Shopify sync issues.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="grid-2">
+        <div class="card">
+            <h2>Linked Items</h2>
+            <table>
+                <thead><tr><th>Item</th><th>Shopify</th><th>Status</th><th>Action</th></tr></thead>
+                <tbody>
+                {% for item in linked_items %}
+                <tr>
+                    <td><a href="/inventory/{{ item.id }}">{{ item.card_name }}</a><div class="muted mono">{{ item.barcode }}</div></td>
+                    <td><div class="muted">Variant {{ item.shopify_variant_id }}</div><div class="muted">Inventory {{ item.shopify_inventory_item_id or "missing" }}</div></td>
+                    <td><span class="badge badge-{{ item.shopify_sync_status }}">{{ item.shopify_sync_status.replace("_"," ").title() }}</span>{% if item.shopify_sync_error %}<div class="muted">{{ item.shopify_sync_error }}</div>{% endif %}</td>
+                    <td>
+                        <form class="inline-form" method="post" action="/inventory/shopify-sync/retry">
+                            <input type="hidden" name="item_id" value="{{ item.id }}">
+                            <button type="submit">Retry</button>
+                        </form>
+                    </td>
+                </tr>
+                {% else %}
+                <tr><td colspan="4" class="muted">No linked inventory items yet.</td></tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <div class="card">
+            <h2>Unlinked Local Items</h2>
+            <table>
+                <thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Action</th></tr></thead>
+                <tbody>
+                {% for item in unlinked_items %}
+                <tr>
+                    <td><a href="/inventory/{{ item.id }}">{{ item.card_name }}</a><div class="muted mono">{{ item.barcode }}</div></td>
+                    <td>{{ item.quantity }}</td>
+                    <td>{{ effective_price(item) | money }}</td>
+                    <td>
+                        <form class="inline-form" method="post" action="/inventory/shopify-sync/retry">
+                            <input type="hidden" name="item_id" value="{{ item.id }}">
+                            <button type="submit">Sync</button>
+                        </form>
+                    </td>
+                </tr>
+                {% else %}
+                <tr><td colspan="4" class="muted">No unlinked active items.</td></tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% include "_csrf_bootstrap.html" %}
+</body>
+</html>

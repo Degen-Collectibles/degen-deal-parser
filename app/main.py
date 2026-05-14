@@ -148,6 +148,7 @@ from .reporting import (
 from .runtime_logging import resolve_runtime_log_path, setup_runtime_file_logging, structured_log_line
 from .runtime_monitor import get_runtime_heartbeat_status, runtime_heartbeat_loop
 from .schemas import HealthOut
+from .inventory_shopify import shopify_admin_configured
 from .shopify_ingest import (
     backfill_shopify_orders,
     mark_inventory_sold_from_shopify_order,
@@ -156,6 +157,7 @@ from .shopify_ingest import (
     upsert_shopify_order,
     validate_shopify_webhook,
 )
+from .shopify_sync_worker import periodic_shopify_sync_loop
 from .display_media import (
     extract_image_urls,
     get_cached_attachment_map,
@@ -463,6 +465,21 @@ async def lifespan(app: FastAPI):
         app.state.inv_price_task = inv_price_task
     else:
         app.state.inv_price_task = None
+
+    if settings.inventory_shopify_sync_enabled and shopify_admin_configured(settings):
+        shopify_sync_task = track_background_task(
+            asyncio.create_task(
+                periodic_shopify_sync_loop(stop_event),
+                name="shopify-inventory-sync",
+            ),
+            runtime_name=WORKER_RUNTIME_NAME,
+            task_name="shopify-inventory-sync",
+            stop_event=stop_event,
+        )
+        background_tasks.append(shopify_sync_task)
+        app.state.shopify_sync_task = shopify_sync_task
+    else:
+        app.state.shopify_sync_task = None
 
     if settings.disable_external_warmups:
         price_cache_task = None

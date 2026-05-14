@@ -83,7 +83,24 @@ from .inventory_pricing import (
     sync_card_ladder_cli_for_item,
 )
 from .inventory_price_updates import record_inventory_price_result
-from .inventory_shopify import push_item_to_shopify, update_shopify_variant_price
+from .inventory_shopify import (
+    apply_shopify_variant_ref,
+    list_shopify_product_variants,
+    resolve_shopify_access_token,
+    shopify_admin_configured,
+)
+from .shopify_sync import (
+    SHOPIFY_SYNC_ISSUE_UNLINKED_PRODUCT,
+    SHOPIFY_SYNC_ERROR,
+    SHOPIFY_SYNC_ISSUE_IGNORED,
+    SHOPIFY_SYNC_ISSUE_LINKED,
+    SHOPIFY_SYNC_ISSUE_OPEN,
+    SHOPIFY_SYNC_ISSUE_RESOLVED,
+    SHOPIFY_SYNC_LINKED,
+    enqueue_shopify_sync_job,
+    record_shopify_sync_issue,
+)
+from .shopify_sync_worker import sync_inventory_item_to_shopify
 from .models import (
     GAMES,
     CONDITIONS,
@@ -99,6 +116,8 @@ from .models import (
     InventoryItem,
     InventoryStockMovement,
     PriceHistory,
+    ShopifySyncIssue,
+    ShopifySyncJob,
     utcnow,
 )
 
@@ -3174,20 +3193,9 @@ async def inventory_new_submit(
 
     # Push to Shopify
     if push_shopify_on_save == "on" or settings.inventory_auto_shopify_push:
-        if settings.shopify_store_domain and settings.shopify_access_token:
+        if shopify_admin_configured(settings):
             try:
-                ids_resp = await push_item_to_shopify(
-                    item,
-                    store_domain=settings.shopify_store_domain,
-                    access_token=settings.shopify_access_token,
-                )
-                if ids_resp:
-                    item.shopify_product_id = ids_resp["shopify_product_id"]
-                    item.shopify_variant_id = ids_resp["shopify_variant_id"]
-                    item.status = INVENTORY_LISTED
-                    item.updated_at = utcnow()
-                    session.add(item)
-                    session.commit()
+                await _sync_inventory_item_to_shopify_now(session, item, source="Inventory New")
             except Exception as exc:
                 logger.warning("[inventory] shopify push failed on new item %s: %s", item.id, exc)
 
@@ -3222,6 +3230,7 @@ async def _reprice_inventory_items(
                 reason="Store price matched current market price.",
             )
         session.add(item)
+        enqueue_shopify_sync_job(session, item, action="reprice", source="Inventory Reprice")
         repriced_count += 1
     session.commit()
     return repriced_count, error_count
@@ -3255,6 +3264,12 @@ async def _refresh_inventory_market_prices(
                         result,
                         request=request,
                         actor_user_id=actor_user_id,
+                    )
+                    enqueue_shopify_sync_job(
+                        session,
+                        item,
+                        action="market_refresh",
+                        source="Inventory Market Refresh",
                     )
                     session.commit()
                     refreshed_count += 1
@@ -3341,10 +3356,20 @@ def _bulk_edit_inventory_items(
                 clear_slab_resticker_alert(item, reason="Sticker price updated from inventory bulk edit.")
             item.updated_at = now
             session.add(item)
+            enqueue_shopify_sync_job(session, item, action="bulk_edit", source="Inventory Bulk Edit")
             updated_count += 1
 
     session.commit()
     return updated_count, None
+
+
+async def _sync_inventory_item_to_shopify_now(
+    session: Session,
+    item: InventoryItem,
+    *,
+    source: str = "Inventory",
+) -> tuple[bool, str]:
+    return await sync_inventory_item_to_shopify(session, item, source=source)
 
 
 @router.post("/inventory/bulk-action")
@@ -3436,11 +3461,280 @@ async def inventory_bulk_action(
                 created_at=now,
             )
         )
+        enqueue_shopify_sync_job(session, item, action=action, source="Inventory Bulk Action")
         updated_count += 1
 
     session.commit()
     params = urlencode({"updated": updated_count})
     return RedirectResponse(f"/inventory?{params}", status_code=303)
+
+
+# ---------------------------------------------------------------------------
+# Shopify sync reconciliation
+# ---------------------------------------------------------------------------
+
+@router.get("/inventory/shopify-sync", response_class=HTMLResponse)
+async def inventory_shopify_sync_page(
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    if denial := _require_inventory_manage(request, session):
+        return denial
+
+    active_items = InventoryItem.archived_at == None  # noqa: E711
+    linked_items = session.exec(
+        select(InventoryItem)
+        .where(active_items, InventoryItem.shopify_variant_id != None)  # noqa: E711
+        .order_by(InventoryItem.shopify_sync_status.asc(), InventoryItem.updated_at.desc())
+        .limit(100)
+    ).all()
+    unlinked_items = session.exec(
+        select(InventoryItem)
+        .where(active_items, InventoryItem.shopify_variant_id == None)  # noqa: E711
+        .order_by(InventoryItem.updated_at.desc())
+        .limit(100)
+    ).all()
+    issues = session.exec(
+        select(ShopifySyncIssue)
+        .where(ShopifySyncIssue.status == SHOPIFY_SYNC_ISSUE_OPEN)
+        .order_by(ShopifySyncIssue.last_seen_at.desc())
+        .limit(100)
+    ).all()
+    recent_jobs = session.exec(
+        select(ShopifySyncJob)
+        .order_by(ShopifySyncJob.created_at.desc())
+        .limit(30)
+    ).all()
+    summary = {
+        "linked": len(linked_items),
+        "unlinked": len(unlinked_items),
+        "issues": len(issues),
+        "errors": session.exec(
+            select(func.count()).where(
+                active_items,
+                InventoryItem.shopify_sync_status == SHOPIFY_SYNC_ERROR,
+            )
+        ).one(),
+    }
+    return _templates.TemplateResponse(
+        request,
+        "inventory_shopify_sync.html",
+        {
+            "current_user": _current_user(request),
+            "linked_items": linked_items,
+            "unlinked_items": unlinked_items,
+            "issues": issues,
+            "recent_jobs": recent_jobs,
+            "summary": summary,
+            "effective_price": effective_price,
+        },
+    )
+
+
+@router.post("/inventory/shopify-sync/scan")
+async def inventory_shopify_sync_scan_catalog(
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    if denial := _require_inventory_manage(request, session):
+        return denial
+    access_token = resolve_shopify_access_token(settings)
+    if not settings.shopify_store_domain or not access_token:
+        return HTMLResponse("SHOPIFY_STORE_DOMAIN and a Shopify Admin token must be configured.", status_code=400)
+    try:
+        variants = await list_shopify_product_variants(
+            store_domain=settings.shopify_store_domain,
+            access_token=access_token,
+        )
+    except Exception as exc:
+        return HTMLResponse(f"Could not scan Shopify catalog: {html.escape(str(exc))}", status_code=502)
+
+    linked = 0
+    queued = 0
+    for variant in variants:
+        sku = (variant.sku or "").strip()
+        item = session.exec(select(InventoryItem).where(InventoryItem.barcode == sku)).first() if sku else None
+        if item and item.archived_at is None:
+            apply_shopify_variant_ref(item, variant)
+            item.shopify_sync_status = SHOPIFY_SYNC_LINKED
+            item.updated_at = utcnow()
+            session.add(item)
+            enqueue_shopify_sync_job(session, item, action="catalog_link", source="Shopify Catalog Scan")
+            linked += 1
+            continue
+        record_title = variant.product_title or variant.title or sku or "Shopify product"
+        record_shopify_sync_issue(
+            session,
+            issue_type=SHOPIFY_SYNC_ISSUE_UNLINKED_PRODUCT,
+            shopify_sku=sku or None,
+            shopify_title=record_title,
+            shopify_product_id=variant.product_id,
+            shopify_variant_id=variant.variant_id,
+            shopify_inventory_item_id=variant.inventory_item_id,
+            inventory_item_id=None,
+            message="Shopify catalog item is not linked to a Degen inventory item.",
+            payload={
+                "sku": sku,
+                "product_title": variant.product_title,
+                "variant_title": variant.title,
+                "product_status": variant.product_status,
+            },
+        )
+        queued += 1
+    session.commit()
+    params = urlencode({"catalog_linked": linked, "catalog_queued": queued})
+    return RedirectResponse(f"/inventory/shopify-sync?{params}", status_code=303)
+
+
+@router.post("/inventory/shopify-sync/retry")
+async def inventory_shopify_sync_retry(
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    if denial := _require_inventory_manage(request, session):
+        return denial
+    form = await request.form()
+    item_ids = [int(value) for value in form.getlist("item_id") if str(value).isdigit()]
+    issue_id = str(form.get("issue_id") or "").strip()
+    if issue_id.isdigit():
+        issue = session.get(ShopifySyncIssue, int(issue_id))
+        if issue and issue.inventory_item_id:
+            item_ids.append(issue.inventory_item_id)
+    synced = 0
+    failed = 0
+    for item_id in sorted(set(item_ids)):
+        item = session.get(InventoryItem, item_id)
+        if not item or item.archived_at is not None:
+            continue
+        ok, _message = await _sync_inventory_item_to_shopify_now(
+            session,
+            item,
+            source="Shopify Sync Retry",
+        )
+        if ok:
+            synced += 1
+        else:
+            failed += 1
+    params = urlencode({"synced": synced, "failed": failed})
+    return RedirectResponse(f"/inventory/shopify-sync?{params}", status_code=303)
+
+
+@router.post("/inventory/shopify-sync/link")
+async def inventory_shopify_sync_link(
+    request: Request,
+    session: Session = Depends(get_session),
+    item_id: int = Form(...),
+    issue_id: str = Form(default=""),
+    shopify_product_id: str = Form(default=""),
+    shopify_variant_id: str = Form(default=""),
+    shopify_inventory_item_id: str = Form(default=""),
+    shopify_location_id: str = Form(default=""),
+    shopify_sku: str = Form(default=""),
+):
+    if denial := _require_inventory_manage(request, session):
+        return denial
+    item = session.get(InventoryItem, item_id)
+    if not item:
+        return HTMLResponse("Inventory item not found.", status_code=404)
+    item.shopify_product_id = shopify_product_id.strip() or item.shopify_product_id
+    item.shopify_variant_id = shopify_variant_id.strip() or item.shopify_variant_id
+    item.shopify_inventory_item_id = shopify_inventory_item_id.strip() or item.shopify_inventory_item_id
+    item.shopify_location_id = shopify_location_id.strip() or item.shopify_location_id
+    item.shopify_sku = shopify_sku.strip() or item.shopify_sku or item.barcode
+    item.shopify_sync_status = SHOPIFY_SYNC_LINKED
+    item.updated_at = utcnow()
+    session.add(item)
+    if issue_id.isdigit():
+        issue = session.get(ShopifySyncIssue, int(issue_id))
+        if issue:
+            issue.inventory_item_id = item.id
+            issue.status = SHOPIFY_SYNC_ISSUE_LINKED
+            issue.resolved_by = _current_user_label(request)
+            issue.resolved_at = utcnow()
+            issue.resolution_note = "Linked to existing Degen inventory item."
+            session.add(issue)
+    enqueue_shopify_sync_job(session, item, action="link", source="Shopify Sync Link")
+    session.commit()
+    return RedirectResponse("/inventory/shopify-sync?linked=1", status_code=303)
+
+
+@router.post("/inventory/shopify-sync/ignore")
+async def inventory_shopify_sync_ignore(
+    request: Request,
+    session: Session = Depends(get_session),
+    issue_id: int = Form(...),
+    resolution_note: str = Form(default=""),
+):
+    if denial := _require_inventory_manage(request, session):
+        return denial
+    issue = session.get(ShopifySyncIssue, issue_id)
+    if not issue:
+        return HTMLResponse("Sync issue not found.", status_code=404)
+    issue.status = SHOPIFY_SYNC_ISSUE_IGNORED
+    issue.resolved_by = _current_user_label(request)
+    issue.resolved_at = utcnow()
+    issue.resolution_note = resolution_note.strip() or "Ignored from Shopify sync queue."
+    session.add(issue)
+    session.commit()
+    return RedirectResponse("/inventory/shopify-sync?ignored=1", status_code=303)
+
+
+@router.post("/inventory/shopify-sync/import")
+async def inventory_shopify_sync_import(
+    request: Request,
+    session: Session = Depends(get_session),
+    issue_id: int = Form(...),
+):
+    if denial := _require_inventory_manage(request, session):
+        return denial
+    issue = session.get(ShopifySyncIssue, issue_id)
+    if not issue:
+        return HTMLResponse("Sync issue not found.", status_code=404)
+    item = InventoryItem(
+        barcode=issue.shopify_sku if (issue.shopify_sku or "").startswith("DGN-") else "PENDING",
+        item_type=ITEM_TYPE_SEALED,
+        game="Other",
+        card_name=issue.shopify_title or issue.shopify_sku or "Shopify Product",
+        quantity=max(0, issue.quantity or 0),
+        list_price=issue.unit_price,
+        shopify_product_id=issue.shopify_product_id,
+        shopify_variant_id=issue.shopify_variant_id,
+        shopify_inventory_item_id=issue.shopify_inventory_item_id,
+        shopify_location_id=issue.shopify_location_id,
+        shopify_sku=issue.shopify_sku,
+        shopify_sync_status=SHOPIFY_SYNC_LINKED,
+        status=INVENTORY_LISTED,
+        created_at=utcnow(),
+        updated_at=utcnow(),
+    )
+    session.add(item)
+    session.commit()
+    session.refresh(item)
+    if item.barcode == "PENDING":
+        item.barcode = generate_barcode_value(item.id)
+    session.add(
+        InventoryStockMovement(
+            item_id=item.id,
+            reason="shopify_import",
+            quantity_delta=item.quantity,
+            quantity_before=0,
+            quantity_after=item.quantity,
+            source="Shopify Sync Import",
+            notes=f"Imported from Shopify issue {issue.id}",
+            created_by=_current_user_label(request),
+            created_at=utcnow(),
+        )
+    )
+    issue.inventory_item_id = item.id
+    issue.status = SHOPIFY_SYNC_ISSUE_RESOLVED
+    issue.resolved_by = _current_user_label(request)
+    issue.resolved_at = utcnow()
+    issue.resolution_note = "Imported into Degen inventory."
+    session.add(item)
+    session.add(issue)
+    enqueue_shopify_sync_job(session, item, action="import", source="Shopify Sync Import")
+    session.commit()
+    return RedirectResponse(f"/inventory/{item.id}", status_code=303)
 
 
 # ---------------------------------------------------------------------------
@@ -3585,6 +3879,7 @@ async def inventory_item_edit(
     item.image_url = image_url.strip() or item.image_url
     item.updated_at = utcnow()
     session.add(item)
+    enqueue_shopify_sync_job(session, item, action="edit", source="Inventory Edit")
     session.commit()
     return RedirectResponse(f"/inventory/{item_id}", status_code=303)
 
@@ -3661,6 +3956,7 @@ async def inventory_item_adjust_stock(
             created_at=utcnow(),
         )
     )
+    enqueue_shopify_sync_job(session, item, action="quantity", source=source.strip() or "Inventory Adjustment")
     session.commit()
     if redirect_to == "/inventory" or redirect_to.startswith("/inventory?"):
         redirect_to = f"{redirect_to}{'&' if '?' in redirect_to else '?'}updated=1"
@@ -3688,6 +3984,7 @@ async def inventory_item_delete(
     item.archive_reason = archive_reason or None
     item.updated_at = utcnow()
     session.add(item)
+    enqueue_shopify_sync_job(session, item, action="archive", source="Inventory Archive")
     session.commit()
     logger.info("[inventory] archived item %s (%s)", item_id, archived_name)
 
@@ -3713,6 +4010,7 @@ async def inventory_item_restore(
     item.archive_reason = None
     item.updated_at = utcnow()
     session.add(item)
+    enqueue_shopify_sync_job(session, item, action="restore", source="Inventory Restore")
     session.commit()
     logger.info("[inventory] restored archived item %s (%s)", item_id, item.card_name)
     return RedirectResponse(f"/inventory/{item_id}", status_code=303)
@@ -3847,35 +4145,12 @@ async def inventory_push_shopify(
     if not item:
         return HTMLResponse("Item not found.", status_code=404)
 
-    if not settings.shopify_store_domain or not settings.shopify_access_token:
+    if not shopify_admin_configured(settings):
         return HTMLResponse(
-            "SHOPIFY_STORE_DOMAIN and SHOPIFY_ACCESS_TOKEN must be configured.", status_code=400
+            "SHOPIFY_STORE_DOMAIN and a Shopify Admin token must be configured.", status_code=400
         )
 
-    # If already linked, update price instead of creating a duplicate
-    if item.shopify_variant_id:
-        ok = await update_shopify_variant_price(
-            item,
-            store_domain=settings.shopify_store_domain,
-            access_token=settings.shopify_access_token,
-        )
-        if ok:
-            item.updated_at = utcnow()
-            session.add(item)
-            session.commit()
-    else:
-        ids_resp = await push_item_to_shopify(
-            item,
-            store_domain=settings.shopify_store_domain,
-            access_token=settings.shopify_access_token,
-        )
-        if ids_resp:
-            item.shopify_product_id = ids_resp["shopify_product_id"]
-            item.shopify_variant_id = ids_resp["shopify_variant_id"]
-            item.status = INVENTORY_LISTED
-            item.updated_at = utcnow()
-            session.add(item)
-            session.commit()
+    await _sync_inventory_item_to_shopify_now(session, item, source="Inventory Item Detail")
 
     return RedirectResponse(f"/inventory/{item_id}", status_code=303)
 
