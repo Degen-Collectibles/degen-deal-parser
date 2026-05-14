@@ -324,6 +324,51 @@ class ClockifyAdminPerfPrivacyTests(unittest.TestCase):
         self.assertIn("2h", html)
         self.assertEqual(client.entry_calls, 0)
 
+
+    def test_live_status_ignores_stale_cached_running_entry_when_api_has_closed_entry(self):
+        from app.models import ClockifyTimeEntry
+        from app.routers import team_admin_clockify as mod
+
+        self._seed_linked_employee()
+        self.session.add(
+            ClockifyTimeEntry(
+                clockify_entry_id="stale-running",
+                clockify_user_id="clock-1",
+                user_id=20,
+                description="Cached stale work",
+                start_at=datetime(2026, 4, 24, 18, 0, tzinfo=timezone.utc),
+                end_at=None,
+                duration_seconds=0,
+                is_running=True,
+                is_deleted=False,
+                updated_at=datetime(2026, 4, 24, 18, 0, tzinfo=timezone.utc),
+            )
+        )
+        self.session.commit()
+
+        entries = [
+            {
+                "id": "stale-running",
+                "description": "Cached stale work",
+                "timeInterval": {
+                    "start": "2026-04-24T18:00:00Z",
+                    "end": "2026-04-24T22:00:00Z",
+                },
+            }
+        ]
+
+        live = mod.build_clockify_live_status(
+            self.session,
+            _FakeClockifyClient(entries=entries),
+            settings=self._settings(),
+            today=date(2026, 4, 24),
+            now=datetime(2026, 4, 24, 23, 0, tzinfo=timezone.utc),
+        )
+
+        row = live["rows"][0]
+        self.assertEqual(row["status"], "Clocked out")
+        self.assertEqual(row["today_total_label"], "4h")
+
     def test_shift_tracker_adds_hourly_labor_from_cached_entries(self):
         from app.models import ClockifyTimeEntry, EmployeeProfile
         from app.pii import encrypt_pii

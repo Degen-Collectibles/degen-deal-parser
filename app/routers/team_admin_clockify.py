@@ -77,6 +77,7 @@ CLOCKIFY_NAME_OVERRIDES = {
 }
 _CLOCKIFY_WEEK_CACHE: dict[tuple[str, date], tuple[float, ClockifyWeekSummary]] = {}
 _CLOCKIFY_WEEK_CACHE_TTL_SECONDS = 60.0
+_CLOCKIFY_CACHE_RUNNING_GRACE_SECONDS = 5 * 60
 _BREAK_KEYWORDS = ("break", "lunch", "meal", "rest")
 MISSED_BREAK_THRESHOLD_SECONDS = 5 * 3600
 MISSED_BREAK_DEDUCTION_SECONDS = 30 * 60
@@ -811,7 +812,32 @@ def _clockify_time_entry_to_raw(row: ClockifyTimeEntry) -> dict[str, Any]:
             "start": iso(row.start_at),
             "end": iso(row.end_at),
         },
+        "_cachedIsRunning": bool(row.is_running),
+        "_cachedUpdatedAt": iso(row.updated_at),
     }
+
+
+def _cached_entries_need_live_refresh(
+    entries: list[dict[str, Any]],
+    *,
+    now_utc: datetime,
+) -> bool:
+    """Return True when cached live-status rows may be stale running timers."""
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        interval = entry.get("timeInterval") if isinstance(entry.get("timeInterval"), dict) else {}
+        if interval.get("end"):
+            continue
+        if not entry.get("_cachedIsRunning"):
+            continue
+        updated_at = parse_clockify_datetime(entry.get("_cachedUpdatedAt"))
+        if updated_at is None:
+            return True
+        age_seconds = (now_utc - updated_at.astimezone(timezone.utc)).total_seconds()
+        if age_seconds > _CLOCKIFY_CACHE_RUNNING_GRACE_SECONDS:
+            return True
+    return False
 
 
 def _cached_clockify_entries_by_user(
@@ -995,6 +1021,31 @@ def build_clockify_live_status(
         }
         try:
             raw_entries = cached_entries_by_user.get(clockify_user_id)
+            if raw_entries is not None and client is not None and _cached_entries_need_live_refresh(
+                raw_entries,
+                now_utc=now_utc,
+            ):
+                raw_entries = client.get_user_time_entries(
+                    clockify_user_id,
+                    start_utc=start_local.astimezone(timezone.utc),
+                    end_utc=end_local.astimezone(timezone.utc),
+                )
+                for entry in raw_entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    entry_payload = dict(entry)
+                    entry_payload.setdefault("userId", clockify_user_id)
+                    _upsert_clockify_time_entry_from_payload(
+                        session,
+                        {
+                            "workspaceId": getattr(settings, "clockify_workspace_id", ""),
+                            "timeEntry": entry_payload,
+                        },
+                        source_event="LIVE_STATUS_REFRESH",
+                        settings=settings,
+                        received_at=now_utc,
+                    )
+                session.commit()
             if raw_entries is None:
                 if client is None:
                     raw_entries = []
