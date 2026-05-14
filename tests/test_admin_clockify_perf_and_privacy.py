@@ -132,10 +132,10 @@ class ClockifyAdminPerfPrivacyTests(unittest.TestCase):
             )
         return response.body.decode("utf-8"), fake_client
 
-    def _render_shift_tracker(self):
+    def _render_shift_tracker(self, *, entries=None):
         from app.routers import team_admin_clockify as mod
 
-        fake_client = _FakeClockifyClient()
+        fake_client = _FakeClockifyClient(entries=entries)
         with patch.object(mod, "get_settings", return_value=self._settings()), \
              patch.object(mod, "clockify_client_from_settings", return_value=fake_client):
             response = mod.admin_shift_tracker_page(
@@ -368,6 +368,48 @@ class ClockifyAdminPerfPrivacyTests(unittest.TestCase):
         row = live["rows"][0]
         self.assertEqual(row["status"], "Clocked out")
         self.assertEqual(row["today_total_label"], "4h")
+
+
+    def test_shift_tracker_page_refreshes_stale_cached_running_entry(self):
+        from app.models import ClockifyTimeEntry
+
+        self._seed_linked_employee()
+        self.session.add(
+            ClockifyTimeEntry(
+                clockify_entry_id="stale-page-running",
+                clockify_user_id="clock-1",
+                user_id=20,
+                description="Stale page work",
+                start_at=datetime(2026, 4, 24, 18, 0, tzinfo=timezone.utc),
+                end_at=None,
+                duration_seconds=0,
+                is_running=True,
+                is_deleted=False,
+                updated_at=datetime(2026, 4, 24, 18, 0, tzinfo=timezone.utc),
+            )
+        )
+        self.session.commit()
+        entries = [
+            {
+                "id": "stale-page-running",
+                "description": "Stale page work",
+                "timeInterval": {
+                    "start": "2026-04-24T18:00:00Z",
+                    "end": "2026-04-24T22:00:00Z",
+                },
+            }
+        ]
+
+        with patch("app.routers.team_admin_clockify.datetime") as fake_datetime:
+            fake_datetime.now.return_value = datetime(2026, 4, 24, 23, 0, tzinfo=timezone.utc)
+            fake_datetime.combine.side_effect = datetime.combine
+            fake_datetime.min = datetime.min
+            html, client = self._render_shift_tracker(entries=entries)
+
+        self.assertIn("Clocked out", html)
+        self.assertIn(">0</div>", html)
+        self.assertIn("4h", html)
+        self.assertEqual(client.entry_calls, 1)
 
     def test_shift_tracker_adds_hourly_labor_from_cached_entries(self):
         from app.models import ClockifyTimeEntry, EmployeeProfile

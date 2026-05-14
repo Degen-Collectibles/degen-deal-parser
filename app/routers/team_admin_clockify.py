@@ -3199,9 +3199,10 @@ def admin_shift_tracker_page(
     )
     employees = _employee_rows(session)
     counts = _employee_clockify_counts(employees)
+    client = clockify_client_from_settings(settings) if configured else None
     live = build_clockify_live_status(
         session,
-        None,
+        client,
         settings=settings,
         employee_rows=employees,
     )
