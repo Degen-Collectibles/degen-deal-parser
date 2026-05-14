@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Degen Collectibles QuickBooks Security Overview</title>
+  <style>
+    body { color: #172033; font-family: Arial, sans-serif; line-height: 1.55; margin: 0; background: #f6f8fb; }
+    main { background: #fff; margin: 32px auto; max-width: 880px; padding: 32px; border: 1px solid #d9e1ec; }
+    h1, h2 { color: #0b1220; line-height: 1.2; }
+    h1 { font-size: 30px; margin-top: 0; }
+    h2 { font-size: 20px; margin-top: 30px; }
+    p, li { font-size: 15px; }
+    .meta { color: #526173; font-size: 14px; }
+    a { color: #075cb8; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Degen Collectibles QuickBooks Security Overview</h1>
+  <p class="meta">Effective date: May 14, 2026</p>
+
+  <h2>Scope</h2>
+  <p>
+    This overview describes the security controls for the Degen Collectibles
+    operations portal and its QuickBooks integration. The integration is for
+    internal bookkeeping and reconciliation workflows only.
+  </p>
+
+  <h2>Access Control</h2>
+  <ul>
+    <li>Application access is role-based and limited to authorized staff.</li>
+    <li>Finance and bookkeeping pages require authenticated administrative access.</li>
+    <li>Access is removed when a user no longer needs it for business duties.</li>
+  </ul>
+
+  <h2>OAuth and Token Handling</h2>
+  <ul>
+    <li>QuickBooks authorization uses Intuit OAuth 2.0.</li>
+    <li>Client secrets and runtime credentials are stored outside source code.</li>
+    <li>Refresh tokens are used only to maintain authorized sync access.</li>
+    <li>Tokens are revoked or rotated if access is no longer needed or compromise is suspected.</li>
+  </ul>
+
+  <h2>Data Protection</h2>
+  <ul>
+    <li>Production access is served over HTTPS.</li>
+    <li>QuickBooks data is used only for internal accounting and reconciliation.</li>
+    <li>QuickBooks data is not sold or exposed to unauthorized third parties.</li>
+    <li>Sensitive operational data is restricted to personnel with a business need.</li>
+  </ul>
+
+  <h2>Logging and Monitoring</h2>
+  <p>
+    Sync failures, import status, reconciliation mismatches, parsing errors, and
+    operational exceptions are visible to authorized staff through application
+    pages or logs. The application avoids logging passwords, OAuth secrets, or
+    full sensitive token values.
+  </p>
+
+  <h2>Change Management</h2>
+  <p>
+    Application changes are made in the source repository, reviewed for scope,
+    tested where practical, and deployed through the approved hosting workflow.
+    Changes involving authentication, webhooks, financial calculations, token
+    handling, or reconciliation logic receive additional care before production
+    use.
+  </p>
+
+  <h2>Incident Response</h2>
+  <p>
+    If a security incident is suspected, Degen Collectibles will contain access,
+    preserve relevant logs, rotate affected credentials, revoke affected OAuth
+    connections where needed, assess affected data, document corrective action,
+    and notify affected parties, vendors, or regulators when legally required.
+  </p>
+
+  <h2>Contact</h2>
+  <p>
+    Security questions can be sent to
+    <a href="mailto:info@degencollectibles.com">info@degencollectibles.com</a>.
+  </p>
+</main>
+</body>
+</html>
