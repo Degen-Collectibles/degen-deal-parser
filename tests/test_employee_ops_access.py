@@ -637,6 +637,118 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         refreshed = self.session.get(InventoryItem, item.id)
         self.assertEqual(refreshed.list_price, 105.0)
 
+    def test_manager_can_refresh_inventory_market_price_from_list(self):
+        self._login_as("manager", user_id=242, username="mgr42")
+        from app.models import InventoryItem, PriceHistory
+
+        item = InventoryItem(
+            barcode="DGN-MARKETREFRESH",
+            item_type="sealed",
+            game="Pokemon",
+            card_name="Market Refresh Box",
+            quantity=1,
+            list_price=50.0,
+            auto_price=80.0,
+        )
+        self.session.add(item)
+        self.session.commit()
+        self.session.refresh(item)
+
+        page = self.client.get("/inventory", follow_redirects=False)
+        csrf = self._csrf_from_html(page.text)
+        self.assertIn(f'action="/inventory/{item.id}/refresh-market"', page.text)
+        self.assertIn("Refresh market", page.text)
+
+        with patch(
+            "app.inventory.fetch_price_for_item",
+            new=AsyncMock(
+                return_value={
+                    "source": "tcgtracking",
+                    "market_price": 123.45,
+                    "low_price": 111.0,
+                    "raw": {"product_id": "123"},
+                }
+            ),
+        ) as mocked_fetch:
+            response = self.client.post(
+                f"/inventory/{item.id}/refresh-market",
+                headers={"X-CSRF-Token": csrf},
+                data={"return_to": "/inventory?q=Market"},
+                follow_redirects=False,
+            )
+
+        self.assertEqual(response.status_code, 303)
+        self.assertIn("/inventory?q=Market&market_refreshed=1&market_errors=0", response.headers["location"])
+        mocked_fetch.assert_awaited_once()
+        self.session.expire_all()
+        refreshed = self.session.get(InventoryItem, item.id)
+        self.assertEqual(refreshed.list_price, 50.0)
+        self.assertEqual(refreshed.auto_price, 123.45)
+        self.assertIsNotNone(refreshed.last_priced_at)
+        history = self.session.exec(select(PriceHistory).where(PriceHistory.item_id == item.id)).one()
+        self.assertEqual(history.source, "tcgtracking")
+        self.assertEqual(history.market_price, 123.45)
+
+    def test_manager_can_bulk_refresh_inventory_market_prices(self):
+        self._login_as("manager", user_id=243, username="mgr43")
+        from app.models import InventoryItem, PriceHistory
+
+        success = InventoryItem(
+            barcode="DGN-BULKMARKET1",
+            item_type="sealed",
+            game="Pokemon",
+            card_name="Bulk Market Success",
+            quantity=1,
+            list_price=50.0,
+            auto_price=80.0,
+        )
+        missing = InventoryItem(
+            barcode="DGN-BULKMARKET2",
+            item_type="sealed",
+            game="Pokemon",
+            card_name="Bulk Market Missing",
+            quantity=1,
+            list_price=40.0,
+            auto_price=70.0,
+        )
+        self.session.add_all([success, missing])
+        self.session.commit()
+        self.session.refresh(success)
+        self.session.refresh(missing)
+
+        page = self.client.get("/inventory", follow_redirects=False)
+        csrf = self._csrf_from_html(page.text)
+        self.assertIn('<option value="refresh_market">Refresh TCGPlayer Market</option>', page.text)
+
+        async def fake_fetch(item, *_args, **_kwargs):
+            if item.card_name == "Bulk Market Success":
+                return {"source": "tcgtracking", "market_price": 144.0, "low_price": 130.0}
+            return None
+
+        with patch("app.inventory.fetch_price_for_item", side_effect=fake_fetch) as mocked_fetch:
+            response = self.client.post(
+                "/inventory/bulk-action",
+                headers={"X-CSRF-Token": csrf},
+                data={
+                    "bulk_action": "refresh_market",
+                    "item_id": [str(success.id), str(missing.id)],
+                },
+                follow_redirects=False,
+            )
+
+        self.assertEqual(response.status_code, 303)
+        self.assertIn("/inventory?market_refreshed=1&market_errors=1", response.headers["location"])
+        self.assertEqual(mocked_fetch.await_count, 2)
+        self.session.expire_all()
+        refreshed_success = self.session.get(InventoryItem, success.id)
+        refreshed_missing = self.session.get(InventoryItem, missing.id)
+        self.assertEqual(refreshed_success.list_price, 50.0)
+        self.assertEqual(refreshed_success.auto_price, 144.0)
+        self.assertEqual(refreshed_missing.list_price, 40.0)
+        self.assertEqual(refreshed_missing.auto_price, 70.0)
+        history = self.session.exec(select(PriceHistory).where(PriceHistory.item_id == success.id)).one()
+        self.assertEqual(history.market_price, 144.0)
+
     def test_manager_can_bulk_edit_inventory_qty_cost_and_price(self):
         self._login_as("manager", user_id=239, username="mgr39")
         from app.models import InventoryItem, InventoryStockMovement

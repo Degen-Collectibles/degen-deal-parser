@@ -102,7 +102,10 @@
         .price-main { color:#fff;font-weight:900;font-variant-numeric:tabular-nums; }
         .price-sub { color:var(--lx-muted);font-size:11px;font-weight:700; }
         .market-cell { min-width:160px; }
+        .market-line { display:flex;align-items:center;gap:8px;flex-wrap:wrap; }
         .market-price { color:#93c5fd;font-weight:900;font-variant-numeric:tabular-nums; }
+        .market-refresh-form { margin:0; }
+        .market-refresh-form button { padding:4px 8px;border-radius:9px;font-size:11px;width:auto; }
         .price-gap-badge { display:inline-flex;width:max-content;padding:4px 8px;border-radius:999px;background:var(--yellow-bg);border:1px solid rgba(234,179,8,.35);color:#fef3c7;font-size:11px;font-weight:900; }
         .reprice-inline { margin-top:6px; }
         .reprice-inline button { padding:5px 9px;border-radius:10px;font-size:11px;width:auto; }
@@ -225,9 +228,17 @@
         {% if repriced %}
         <div class="success-banner">Matched our price to TCGPlayer market for {{ repriced }} inventory item{% if repriced != 1 %}s{% endif %}.</div>
         {% endif %}
+        {% if market_refreshed %}
+        <div class="success-banner">Refreshed TCGPlayer market price for {{ market_refreshed }} inventory item{% if market_refreshed != 1 %}s{% endif %}.</div>
+        {% endif %}
         {% if price_errors %}
         <div class="warning-banner">
             <span>{{ price_errors }} item{% if price_errors != 1 %}s{% endif %} could not be repriced because it has no TCGPlayer market price yet.</span>
+        </div>
+        {% endif %}
+        {% if market_errors %}
+        <div class="warning-banner">
+            <span>{{ market_errors }} item{% if market_errors != 1 %}s{% endif %} could not refresh a TCGPlayer market price.</span>
         </div>
         {% endif %}
         {% if inventory_summary.price_reviews %}
@@ -337,6 +348,7 @@
                     <select name="bulk_action" required>
                         <option value="">Choose action</option>
                         <option value="print_labels">Print Labels</option>
+                        <option value="refresh_market">Refresh TCGPlayer Market</option>
                         <option value="reprice">Set Our Price to TCGPlayer</option>
                         <option value="reprice_5">Set Our Price to TCGPlayer +5%</option>
                         <option value="reprice_10">Set Our Price to TCGPlayer +10%</option>
@@ -458,11 +470,21 @@
                     </td>
                     <td class="market-cell">
                         <div class="price-stack">
+                            <div class="market-line">
+                                {% if review.market_price is not none %}
+                                <span class="market-price">{{ review.market_price | money }}</span>
+                                {% else %}
+                                <span class="price-none">No market yet</span>
+                                {% endif %}
+                                {% if can_manage_inventory and item.archived_at is none %}
+                                <form class="market-refresh-form" method="post" action="/inventory/{{ item.id }}/refresh-market">
+                                    <input type="hidden" name="return_to" value="{{ list_return_url }}">
+                                    <button type="submit" class="btn-sm" title="Refresh TCGPlayer market price now" aria-label="Refresh market price for {{ item.card_name }}">Refresh</button>
+                                </form>
+                                {% endif %}
+                            </div>
                             {% if review.market_price is not none %}
-                            <span class="market-price">{{ review.market_price | money }}</span>
                             <span class="price-sub">TCGPlayer market{% if review.stale %} - stale{% endif %}</span>
-                            {% else %}
-                            <span class="price-none">No market yet</span>
                             {% endif %}
                             {% if review.needs_review %}
                             <span class="price-gap-badge">{{ review.delta_abs | money }} {{ review.direction }} market ({{ review.percent }}%)</span>

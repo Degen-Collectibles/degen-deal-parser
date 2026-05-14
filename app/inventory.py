@@ -2517,6 +2517,8 @@ async def inventory_list(
     updated: int = Query(default=0),
     repriced: int = Query(default=0),
     price_errors: int = Query(default=0),
+    market_refreshed: int = Query(default=0),
+    market_errors: int = Query(default=0),
     archived: str = Query(default=""),
     resticker: str = Query(default=""),
     price_review: str = Query(default=""),
@@ -2635,6 +2637,8 @@ async def inventory_list(
             "updated": updated,
             "repriced": repriced,
             "price_errors": price_errors,
+            "market_refreshed": market_refreshed,
+            "market_errors": market_errors,
             "archived_filter": archived,
             "resticker_filter": resticker,
             "price_review_filter": price_review,
@@ -3223,6 +3227,51 @@ async def _reprice_inventory_items(
     return repriced_count, error_count
 
 
+async def _refresh_inventory_market_prices(
+    session: Session,
+    items: list[InventoryItem],
+    *,
+    request: Optional[Request] = None,
+) -> tuple[int, int]:
+    refreshed_count = 0
+    error_count = 0
+    actor = _current_user(request) if request is not None else None
+    actor_user_id = getattr(actor, "id", None)
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        for item in items:
+            if item.archived_at is not None:
+                continue
+            try:
+                result = await fetch_price_for_item(
+                    item,
+                    client,
+                    api_key=settings.scrydex_api_key,
+                    base_url=settings.scrydex_base_url,
+                )
+                if result and _safe_price(result.get("market_price")) is not None:
+                    record_inventory_price_result(
+                        session,
+                        item,
+                        result,
+                        request=request,
+                        actor_user_id=actor_user_id,
+                    )
+                    session.commit()
+                    refreshed_count += 1
+                    logger.info("[inventory] refreshed market price for item %s", item.id)
+                else:
+                    error_count += 1
+                    logger.info(
+                        "[inventory] market refresh skipped item %s because no market price was found",
+                        item.id,
+                    )
+            except Exception as exc:
+                session.rollback()
+                error_count += 1
+                logger.warning("[inventory] market refresh failed for item %s: %s", item.id, exc)
+    return refreshed_count, error_count
+
+
 def _bulk_edit_inventory_items(
     session: Session,
     items: list[InventoryItem],
@@ -3316,6 +3365,14 @@ async def inventory_bulk_action(
     if action == "print_labels":
         params = urlencode({"ids": ",".join(str(item.id) for item in items if item.archived_at is None)})
         return RedirectResponse(f"/inventory/labels?{params}", status_code=303)
+    if action == "refresh_market":
+        refreshed_count, error_count = await _refresh_inventory_market_prices(
+            session,
+            items,
+            request=request,
+        )
+        params = urlencode({"market_refreshed": refreshed_count, "market_errors": error_count})
+        return RedirectResponse(f"/inventory?{params}", status_code=303)
     if action in PRICE_MARKUP_ACTIONS:
         repriced_count, error_count = await _reprice_inventory_items(
             session,
@@ -3696,6 +3753,33 @@ async def inventory_reprice(
     if redirect_to == "/inventory" or redirect_to.startswith("/inventory?"):
         params = urlencode({"repriced": repriced_count, "price_errors": error_count})
         redirect_to = f"{redirect_to}{'&' if '?' in redirect_to else '?'}{params}"
+    return RedirectResponse(redirect_to, status_code=303)
+
+
+@router.post("/inventory/{item_id}/refresh-market")
+async def inventory_refresh_market_price(
+    request: Request,
+    item_id: int,
+    session: Session = Depends(get_session),
+    return_to: str = Form(default=""),
+):
+    if denial := _require_inventory_manage(request, session):
+        return denial
+
+    item = session.get(InventoryItem, item_id)
+    if not item:
+        return HTMLResponse("Item not found.", status_code=404)
+    if item.archived_at is not None:
+        return HTMLResponse("Restore this item before refreshing market price.", status_code=400)
+
+    refreshed_count, error_count = await _refresh_inventory_market_prices(
+        session,
+        [item],
+        request=request,
+    )
+    redirect_to = _safe_inventory_return_url(return_to, f"/inventory/{item_id}")
+    params = urlencode({"market_refreshed": refreshed_count, "market_errors": error_count})
+    redirect_to = f"{redirect_to}{'&' if '?' in redirect_to else '?'}{params}"
     return RedirectResponse(redirect_to, status_code=303)
 
 
