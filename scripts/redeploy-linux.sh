@@ -110,6 +110,12 @@ if [[ "$INSTALL_DEPS" != "0" ]]; then
 fi
 
 mkdir -p logs
+if id degen >/dev/null 2>&1; then
+  log "Ensuring runtime log directories are writable by degen"
+  sudo -n install -d -o degen -g degen -m 750 /var/log/degen
+  sudo -n install -d -o degen -g degen -m 775 "$APP_DIR/logs"
+  sudo -n chown -R degen:degen /var/log/degen
+fi
 stamp_path="logs/deploy.stamp"
 git_sha="$(git rev-parse HEAD)"
 git_branch="$(git rev-parse --abbrev-ref HEAD)"
