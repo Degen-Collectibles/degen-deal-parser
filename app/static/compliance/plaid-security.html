@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Degen Collectibles Plaid Security Overview</title>
+  <style>
+    body { color: #172033; font-family: Arial, sans-serif; line-height: 1.55; margin: 0; background: #f6f8fb; }
+    main { background: #fff; margin: 32px auto; max-width: 880px; padding: 32px; border: 1px solid #d9e1ec; }
+    h1, h2 { color: #0b1220; line-height: 1.2; }
+    h1 { font-size: 30px; margin-top: 0; }
+    h2 { font-size: 20px; margin-top: 30px; }
+    p, li { font-size: 15px; }
+    .meta { color: #526173; font-size: 14px; }
+    a { color: #075cb8; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Degen Collectibles Plaid Security Overview</h1>
+  <p class="meta">Effective date: May 15, 2026</p>
+
+  <h2>Scope</h2>
+  <p>
+    This overview describes security practices for the Degen Collectibles
+    operations portal and its Plaid bank-feed integration. The integration is
+    used for internal bookkeeping and reconciliation only.
+  </p>
+
+  <h2>Governance</h2>
+  <p>
+    Security and data-protection responsibilities are assigned to Degen
+    Collectibles ownership and authorized administrators. Security issues are
+    reviewed based on risk, affected data, required containment, and any legal
+    or vendor notification obligations.
+  </p>
+
+  <h2>Access Control</h2>
+  <ul>
+    <li>Application access is role-based and limited to authorized staff.</li>
+    <li>Finance and bookkeeping pages require authenticated administrative access.</li>
+    <li>Access is removed when a user no longer needs it for business duties.</li>
+    <li>Production credentials are kept out of source code and browser console logs.</li>
+  </ul>
+
+  <h2>Plaid Token Handling</h2>
+  <ul>
+    <li>Bank connections are authorized through Plaid Link.</li>
+    <li>Plaid client secrets are stored in runtime environment configuration.</li>
+    <li>Plaid access tokens are stored in encrypted form in the application database.</li>
+    <li>Connections and credentials are revoked or rotated if access is no longer needed or compromise is suspected.</li>
+  </ul>
+
+  <h2>Data Protection</h2>
+  <ul>
+    <li>Production access is served over HTTPS with TLS.</li>
+    <li>Plaid data is used only for bookkeeping, reconciliation, and internal reporting.</li>
+    <li>Plaid data is not sold or shared with unauthorized third parties.</li>
+    <li>Sensitive financial data is restricted to personnel with a business need.</li>
+  </ul>
+
+  <h2>Logging and Monitoring</h2>
+  <p>
+    Sync failures, import status, reconciliation mismatches, parsing errors, and
+    operational exceptions are visible to authorized staff through application
+    pages or logs. The application avoids logging passwords, API secrets, or
+    full sensitive token values.
+  </p>
+
+  <h2>Change and Vulnerability Management</h2>
+  <p>
+    Application changes are made in the source repository, tested where
+    practical, and deployed through the approved hosting workflow. Changes
+    involving authentication, financial data, token handling, webhooks, or
+    reconciliation logic receive additional review before production use.
+    Dependencies and hosted assets are patched based on severity and operational
+    risk.
+  </p>
+
+  <h2>Incident Response</h2>
+  <p>
+    If a security incident is suspected, Degen Collectibles will contain access,
+    preserve relevant logs, rotate affected credentials, revoke affected Plaid
+    connections where needed, assess affected data, document corrective action,
+    and notify affected parties, vendors, or regulators when legally required.
+  </p>
+
+  <h2>Contact</h2>
+  <p>
+    Security questions can be sent to
+    <a href="mailto:info@degencollectibles.com">info@degencollectibles.com</a>.
+  </p>
+</main>
+</body>
+</html>
