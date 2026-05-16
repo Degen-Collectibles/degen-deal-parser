@@ -61,7 +61,7 @@
             align-items: center;
         }
         .hero-actions { margin-top: 16px; }
-        .layout { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 18px; align-items: start; }
+        .layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 360px); gap: 18px; align-items: start; }
         .panel { padding: 18px; margin-bottom: 16px; }
         .side { position: sticky; top: 16px; }
         .section-head {
@@ -107,10 +107,18 @@
         .flash { padding: 12px 14px; border-radius: 14px; margin-bottom: 14px; font-weight: 700; }
         .flash.success { color: #bbf7d0; background: rgba(34,197,94,.14); border: 1px solid rgba(34,197,94,.3); }
         .flash.error { color: #fecaca; background: rgba(239,68,68,.14); border: 1px solid rgba(239,68,68,.3); }
-        .table-shell { overflow: auto; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); max-height: 72vh; }
-        table { width: 100%; min-width: 1420px; border-collapse: collapse; }
-        th, td { padding: 11px 12px; border-bottom: 1px solid var(--line); vertical-align: top; text-align: left; font-size: 13px; }
+        .table-shell { overflow: visible; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); }
+        table { width: 100%; min-width: 0; border-collapse: collapse; table-layout: fixed; }
+        th, td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; text-align: left; font-size: 12px; overflow-wrap: anywhere; }
         th { position: sticky; top: 0; z-index: 1; color: var(--muted); background: var(--panel-strong); text-transform: uppercase; letter-spacing: .08em; font-size: 11px; }
+        th:nth-child(1), td:nth-child(1) { width: 62px; }
+        th:nth-child(2), td:nth-child(2) { width: 92px; }
+        th:nth-child(3), td:nth-child(3) { width: 72px; }
+        th:nth-child(4), td:nth-child(4) { width: 90px; }
+        th:nth-child(5), td:nth-child(5) { width: 18%; }
+        th:nth-child(6), td:nth-child(6) { width: 18%; }
+        th:nth-child(8), td:nth-child(8) { width: 14%; }
+        th:nth-child(9), td:nth-child(9) { width: 96px; }
         tr.needs-attention td:first-child { border-left: 4px solid var(--warn); }
         .amount { font-weight: 800; font-variant-numeric: tabular-nums; color: #fff; white-space: nowrap; }
         .amount.positive { color: #bbf7d0; }
@@ -121,7 +129,23 @@
         .pill.low, .pill.ignored { color: #cbd5e1; background: rgba(148,163,184,.12); }
         .import-card { border: 1px solid var(--line); background: var(--panel); border-radius: 14px; padding: 12px; margin-top: 10px; }
         .import-card.active { border-color: rgba(239,68,68,.6); }
-        .row-actions { display: grid; gap: 8px; min-width: 210px; }
+        .row-actions { display: grid; gap: 8px; min-width: 0; }
+        .row-editor summary {
+            list-style: none;
+            width: max-content;
+            min-height: 34px;
+            padding: 8px 10px;
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            background: var(--panel-strong);
+            color: #fff;
+            font-size: 12px;
+            font-weight: 800;
+            cursor: pointer;
+        }
+        .row-editor summary::-webkit-details-marker { display: none; }
+        .row-editor[open] summary { margin-bottom: 8px; color: #fff; background: var(--lx-red); border-color: var(--lx-red); }
+        .row-editor[open] { min-width: min(320px, 42vw); }
         .inline-form { display: grid; gap: 7px; }
         .muted-desc { color: var(--muted); max-width: 420px; line-height: 1.45; }
         .match-box { display: grid; gap: 6px; min-width: 170px; }
@@ -159,11 +183,43 @@
         .status-dot.ready { background: var(--good); }
         .missing-list { display: grid; gap: 6px; margin-top: 10px; }
         .missing-list code { padding: 5px 7px; border-radius: 8px; background: var(--panel-strong); color: #fff; overflow-wrap: anywhere; }
-        @media (max-width: 1180px) {
+        @media (max-width: 1420px) {
             .layout { grid-template-columns: 1fr; }
             .side { position: static; }
+        }
+        @media (max-width: 1180px) {
             .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
             .guide-list { grid-template-columns: 1fr; }
+            .table-shell { border: 0; background: transparent; }
+            table, thead, tbody, tr, td { display: block; width: 100%; }
+            table { table-layout: auto; }
+            thead { display: none; }
+            tr {
+                margin-bottom: 12px;
+                padding: 12px;
+                border: 1px solid var(--line);
+                border-radius: 14px;
+                background: var(--panel);
+            }
+            tr.needs-attention { border-left: 4px solid var(--warn); }
+            tr.needs-attention td:first-child { border-left: 0; }
+            td {
+                display: grid;
+                grid-template-columns: 128px minmax(0, 1fr);
+                gap: 12px;
+                padding: 7px 0;
+                border-bottom: 1px solid rgba(255,255,255,.06);
+            }
+            td:last-child { border-bottom: 0; }
+            td::before {
+                content: attr(data-label);
+                color: var(--muted);
+                font-size: 10px;
+                font-weight: 900;
+                letter-spacing: .08em;
+                text-transform: uppercase;
+            }
+            .row-editor[open] { min-width: 0; }
         }
         @media (max-width: 700px) {
             .page { padding: 16px 14px 36px; }
@@ -334,27 +390,27 @@
                                 {% for item in row_views %}
                                 {% set row = item.row %}
                                 <tr class="{% if item.needs_attention %}needs-attention{% endif %}">
-                                    <td><span class="row-index">#{{ row.row_index }}</span></td>
-                                    <td>
+                                    <td data-label="Line"><span class="row-index">#{{ row.row_index }}</span></td>
+                                    <td data-label="Status">
                                         <span class="pill {{ row.review_status }}">{{ row.review_status }}</span><br>
                                         <span class="pill {{ row.confidence }}" style="margin-top:6px;">{{ row.confidence }}</span>
                                     </td>
-                                    <td>{{ row.posted_at.date() if row.posted_at else "" }}</td>
-                                    <td class="amount {{ 'positive' if row.amount > 0 else 'negative' }}">{{ row.amount|money }}</td>
-                                    <td>
+                                    <td data-label="Date">{{ row.posted_at.date() if row.posted_at else "" }}</td>
+                                    <td data-label="Amount" class="amount {{ 'positive' if row.amount > 0 else 'negative' }}">{{ row.amount|money }}</td>
+                                    <td data-label="Expense Category">
                                         <strong>{{ item.expense_category_label }}</strong>
                                         <div class="small">{{ row.expense_subcategory or row.category_reason or "" }}</div>
                                         <span class="pill {{ row.category_confidence }}" style="margin-top:6px;">{{ row.category_confidence }}</span>
                                     </td>
-                                    <td>
+                                    <td data-label="Bucket">
                                         <strong>{{ item.classification_label }}</strong>
                                         <div class="small">{{ row.raw_type or row.details or "" }}</div>
                                     </td>
-                                    <td>
+                                    <td data-label="Description">
                                         <div class="muted-desc">{{ row.description_stem or row.description }}</div>
                                         {% if row.review_note %}<div class="small" style="margin-top:6px;">Note: {{ row.review_note }}</div>{% endif %}
                                     </td>
-                                    <td>
+                                    <td data-label="Match">
                                         <div class="match-box">
                                             {% if item.matched_transaction %}
                                             <strong>{{ item.matched_transaction.entry_kind or "transaction" }}</strong>
@@ -370,38 +426,41 @@
                                             {% endif %}
                                         </div>
                                     </td>
-                                    <td>
+                                    <td data-label="Override">
                                         <div class="row-actions">
-                                            <form method="post" action="/bookkeeping/bank/rows/{{ row.id }}/status-form" class="inline-form">
-                                                <input type="hidden" name="import_id" value="{{ selected_import.id }}">
-                                                <input type="hidden" name="selected_classification" value="{{ selected_classification }}">
-                                                <input type="hidden" name="selected_expense_category" value="{{ selected_expense_category }}">
-                                                <input type="hidden" name="selected_review_status" value="{{ selected_review_status }}">
-                                                <input type="hidden" name="selected_attention" value="{{ 'true' if selected_attention else 'false' }}">
-                                                <input type="hidden" name="selected_expenses_only" value="{{ 'true' if selected_expenses_only else 'false' }}">
-                                                <input type="hidden" name="selected_search" value="{{ selected_search }}">
-                                                <input type="hidden" name="selected_limit" value="{{ limit }}">
-                                                <label>Expense category
-                                                    <select name="expense_category">
-                                                        {% for choice in expense_category_choices %}
-                                                        <option value="{{ choice.value }}" {% if row.expense_category == choice.value %}selected{% endif %}>{{ choice.label }}</option>
-                                                        {% endfor %}
-                                                    </select>
-                                                </label>
-                                                <label>Bank bucket
-                                                    <select name="classification">
-                                                        {% for choice in classification_choices %}
-                                                        <option value="{{ choice.value }}" {% if row.classification == choice.value %}selected{% endif %}>{{ choice.label }}</option>
-                                                        {% endfor %}
-                                                    </select>
-                                                </label>
-                                                <textarea name="note" placeholder="Optional note">{{ row.review_note or "" }}</textarea>
-                                                <div class="button-row">
-                                                    <button type="submit" name="review_status" value="reviewed" class="primary">Save</button>
-                                                    <button type="submit" name="review_status" value="ignored">Ignore</button>
-                                                    {% if row.review_status != "open" %}<button type="submit" name="review_status" value="open">Reopen</button>{% endif %}
-                                                </div>
-                                            </form>
+                                            <details class="row-editor">
+                                                <summary>Edit</summary>
+                                                <form method="post" action="/bookkeeping/bank/rows/{{ row.id }}/status-form" class="inline-form">
+                                                    <input type="hidden" name="import_id" value="{{ selected_import.id }}">
+                                                    <input type="hidden" name="selected_classification" value="{{ selected_classification }}">
+                                                    <input type="hidden" name="selected_expense_category" value="{{ selected_expense_category }}">
+                                                    <input type="hidden" name="selected_review_status" value="{{ selected_review_status }}">
+                                                    <input type="hidden" name="selected_attention" value="{{ 'true' if selected_attention else 'false' }}">
+                                                    <input type="hidden" name="selected_expenses_only" value="{{ 'true' if selected_expenses_only else 'false' }}">
+                                                    <input type="hidden" name="selected_search" value="{{ selected_search }}">
+                                                    <input type="hidden" name="selected_limit" value="{{ limit }}">
+                                                    <label>Expense category
+                                                        <select name="expense_category">
+                                                            {% for choice in expense_category_choices %}
+                                                            <option value="{{ choice.value }}" {% if row.expense_category == choice.value %}selected{% endif %}>{{ choice.label }}</option>
+                                                            {% endfor %}
+                                                        </select>
+                                                    </label>
+                                                    <label>Bank bucket
+                                                        <select name="classification">
+                                                            {% for choice in classification_choices %}
+                                                            <option value="{{ choice.value }}" {% if row.classification == choice.value %}selected{% endif %}>{{ choice.label }}</option>
+                                                            {% endfor %}
+                                                        </select>
+                                                    </label>
+                                                    <textarea name="note" placeholder="Optional note">{{ row.review_note or "" }}</textarea>
+                                                    <div class="button-row">
+                                                        <button type="submit" name="review_status" value="reviewed" class="primary">Save</button>
+                                                        <button type="submit" name="review_status" value="ignored">Ignore</button>
+                                                        {% if row.review_status != "open" %}<button type="submit" name="review_status" value="open">Reopen</button>{% endif %}
+                                                    </div>
+                                                </form>
+                                            </details>
                                         </div>
                                     </td>
                                 </tr>
