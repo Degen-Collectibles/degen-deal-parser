@@ -530,6 +530,9 @@ app.include_router(stream_manager_router)
 from .routers.bookkeeping import router as bookkeeping_router  # noqa: E402
 app.include_router(bookkeeping_router)
 
+from .routers.ledger import router as ledger_router  # noqa: E402
+app.include_router(ledger_router)
+
 from .routers.hits import router as hits_router  # noqa: E402
 app.include_router(hits_router)
 
