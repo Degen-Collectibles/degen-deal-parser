@@ -563,6 +563,76 @@ class AvailableDiscordChannelPersistenceTests(unittest.TestCase):
         self.assertEqual(len(available_rows), 1)
 
 
+class ShowDealsAutoWatchMessageTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = Path.cwd() / "tests" / ".tmp_channel_inventory" / str(uuid.uuid4())
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
+        db_path = self.temp_dir / "message_auto_watch.db"
+        self.engine = create_engine(
+            f"sqlite:///{db_path.as_posix()}",
+            connect_args={"check_same_thread": False},
+        )
+        SQLModel.metadata.create_all(self.engine)
+        invalidate_available_channels_cache()
+
+    def tearDown(self):
+        invalidate_available_channels_cache()
+        self.engine.dispose()
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    @contextmanager
+    def _managed_session(self):
+        with Session(self.engine) as session:
+            yield session
+
+    def test_new_show_deals_message_auto_watches_channel_before_ingest(self):
+        guild = types.SimpleNamespace(id=111, name="Degen Guild")
+        channel = types.SimpleNamespace(
+            id=5001,
+            name="2026-may-16-westgate",
+            guild=guild,
+            category=types.SimpleNamespace(name="Show Deals"),
+            category_id=10,
+            created_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+            last_message_id=9001,
+        )
+        message = _fake_message(
+            msg_id="9001",
+            content="Buy $190",
+            channel_id="5001",
+            channel_name="2026-may-16-westgate",
+            attachments=[_fake_attachment()],
+        )
+        message.channel = channel
+
+        async def noop_auto_import(_message):
+            return None
+
+        with patch("app.discord_ingest.managed_session", self._managed_session), patch(
+            "app.discord_ingest.maybe_auto_import_bookkeeping_message",
+            side_effect=noop_auto_import,
+        ), patch("app.discord_ingest.sync_attachment_assets"):
+            bot = discord_ingest_module.DealIngestBot(
+                intents=discord_ingest_module.discord.Intents.none()
+            )
+            asyncio.run(bot.on_message(message))
+
+        with Session(self.engine) as session:
+            watched = session.exec(select(WatchedChannel)).one_or_none()
+            available = session.exec(select(AvailableDiscordChannel)).one_or_none()
+            stored_message = session.exec(select(DiscordMessage)).one_or_none()
+
+        self.assertIsNotNone(watched)
+        self.assertEqual(watched.channel_id, "5001")
+        self.assertTrue(watched.is_enabled)
+        self.assertTrue(watched.backfill_enabled)
+        self.assertEqual(watched.channel_name, "Show Deals / #2026-may-16-westgate")
+        self.assertIsNotNone(available)
+        self.assertEqual(available.channel_name, "2026-may-16-westgate")
+        self.assertIsNotNone(stored_message)
+        self.assertEqual(stored_message.channel_id, "5001")
+
+
 class AvailableChannelChoiceTests(unittest.TestCase):
     def setUp(self):
         self.engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})

@@ -589,6 +589,9 @@ def insert_or_update_message(
     is_edit: bool = False,
     watched_channel_ids: Optional[set[int]] = None,
 ) -> tuple[bool, str]:
+    if watched_channel_ids is None:
+        ensure_available_discord_channel(message.channel)
+
     if not should_track_message(message, watched_channel_ids):
         return False, "ignored"
 
@@ -1255,6 +1258,12 @@ class DealIngestBot(discord.Client):
         if ok:
             print(f"[discord] deleted message {message.id}")
 
+    async def on_guild_channel_create(self, channel):
+        ensure_available_discord_channel(channel, force=True)
+
+    async def on_guild_channel_update(self, before, after):
+        ensure_available_discord_channel(after, force=True)
+
     async def backfill_channel(
         self,
         channel_id: int,
@@ -1707,6 +1716,49 @@ def _build_available_discord_channel_rows(guild_channel_pairs: list[tuple]) -> l
         )
 
     return merge_available_discord_channel_rows(channels)
+
+
+def _available_channel_cache_contains(channel_id: str) -> bool:
+    now = time.monotonic()
+    with _available_channels_cache_lock:
+        if float(_available_channels_cache["expires_at"]) <= now:
+            return False
+        return any(
+            str(channel.get("channel_id") or "") == channel_id
+            for channel in _available_channels_cache["channels"]
+        )
+
+
+def ensure_available_discord_channel(channel, *, force: bool = False) -> bool:
+    """Persist one visible Discord channel before watched-channel filtering.
+
+    New private Show Deals channels can receive messages before the worker has
+    rebuilt its full Discord inventory. Persisting the single channel here lets
+    the existing Show Deals auto-watch sync run before should_track_message()
+    checks WatchedChannel.
+    """
+    channel_id = str(getattr(channel, "id", "") or "").strip()
+    guild = getattr(channel, "guild", None)
+    if not channel_id or guild is None:
+        return False
+
+    if not force and _available_channel_cache_contains(channel_id):
+        return True
+
+    category_name = _resolve_channel_category_name(channel)
+    channel_rows = _build_available_discord_channel_rows([(guild, channel, category_name)])
+    if not channel_rows:
+        return False
+
+    channels = merge_available_discord_channel_rows(
+        channel_rows,
+        get_cached_available_discord_channels(),
+    )
+    _cache_and_persist_available_discord_channels(
+        channels,
+        remove_missing=False,
+    )
+    return True
 
 
 def _cache_and_persist_available_discord_channels(
