@@ -6,9 +6,10 @@ from sqlmodel import Session, SQLModel, create_engine
 from app.bank_reconciliation import (
     build_finance_bank_expense_data,
     categorize_bank_payload,
+    match_bank_rows_to_transactions,
     summarize_bank_transactions,
 )
-from app.models import BankStatementImport, BankTransaction
+from app.models import BankStatementImport, BankTransaction, Transaction
 
 
 class FakeBankRow:
@@ -173,3 +174,63 @@ def test_finance_bank_data_excludes_discord_matches_from_bank_only_totals():
     assert shipping["total"] == 180.0
     assert shipping["discord_logged_total"] == 100.0
     assert shipping["bank_only_total"] == 80.0
+
+
+def test_apple_cash_bank_row_does_not_match_cash_discord_buy():
+    bank_rows = [
+        {
+            "posted_at": datetime(2026, 5, 15, 12, tzinfo=timezone.utc),
+            "description": "PYMT SENT APPLE CASH SENT MONEY CUPERTINO CA 8293",
+            "amount": -280.0,
+        }
+    ]
+    cash_buy = Transaction(
+        id=1282,
+        source_message_id=2600,
+        occurred_at=datetime(2026, 5, 10, 5, tzinfo=timezone.utc),
+        parse_status="parsed",
+        entry_kind="buy",
+        payment_method="cash",
+        expense_category="inventory",
+        amount=280.0,
+        money_in=0.0,
+        money_out=280.0,
+        source_content="Bought $280",
+    )
+
+    match_bank_rows_to_transactions(bank_rows, [cash_buy])
+
+    assert bank_rows[0]["matched_transaction_id"] is None
+    assert bank_rows[0]["matched_source_message_id"] is None
+    assert bank_rows[0]["matched_platform"] is None
+    assert bank_rows[0]["classification"] == "direct_payment_out_needs_log_check"
+
+
+def test_bank_credit_does_not_match_discord_buy_outflow():
+    bank_rows = [
+        {
+            "posted_at": datetime(2026, 5, 11, 12, tzinfo=timezone.utc),
+            "description": "Zelle payment from LONG NGUYEN BACovtim2q6e",
+            "amount": 185.0,
+        }
+    ]
+    buy = Transaction(
+        id=1390,
+        source_message_id=2900,
+        occurred_at=datetime(2026, 5, 11, 1, tzinfo=timezone.utc),
+        parse_status="parsed",
+        entry_kind="buy",
+        payment_method="zelle",
+        expense_category="inventory",
+        amount=185.0,
+        money_in=0.0,
+        money_out=185.0,
+        source_content="Bought singles for 185 zelle",
+    )
+
+    match_bank_rows_to_transactions(bank_rows, [buy])
+
+    assert bank_rows[0]["matched_transaction_id"] is None
+    assert bank_rows[0]["matched_source_message_id"] is None
+    assert bank_rows[0]["matched_platform"] is None
+    assert bank_rows[0]["classification"] == "direct_customer_payment_needs_log_check"

@@ -205,7 +205,7 @@ def base_classification(description: str, amount: float) -> str:
         return "transfer_or_possible_processor_sweep" if amount > 0 else "transfer_or_card_payment"
     if any(token in lower for token in ("zelle payment from", "quickpay with zelle payment from")):
         return "direct_customer_payment_needs_log_check"
-    if any(token in lower for token in ("zelle payment to", "venmo", "cash app", "paypal inst xfer")):
+    if any(token in lower for token in ("zelle payment to", "venmo", "cash app", "paypal inst xfer", "apple cash sent")):
         return "direct_payment_out_needs_log_check"
     if amount > 0 and any(token in lower for token in ("deposit", "remote online deposit", "atm cash deposit", "cash deposit")):
         return "cash_deposit_needs_source"
@@ -256,6 +256,58 @@ def _category_result(
 
 def _contains_any(text: str, tokens: tuple[str, ...]) -> bool:
     return any(token in text for token in tokens)
+
+
+def _bank_payment_text(payload: dict[str, Any]) -> str:
+    return " ".join(
+        str(payload.get(field) or "")
+        for field in ("description", "raw_type", "details", "raw_row_json")
+    ).lower()
+
+
+def _bank_payment_rails(payload: dict[str, Any]) -> set[str]:
+    text = _bank_payment_text(payload)
+    rails: set[str] = set()
+    if _contains_any(text, ("apple cash", "apple pay", "applepay")):
+        rails.add("apple_pay")
+    if "zelle" in text:
+        rails.add("zelle")
+    if "venmo" in text:
+        rails.add("venmo")
+    if "paypal" in text:
+        rails.add("paypal")
+    if _contains_any(text, ("cash app", "cashapp", "sq *cash", "square cash")):
+        rails.add("cash_app")
+    if not rails and _contains_any(text, ("atm cash deposit", "cash deposit", "cash withdrawal")):
+        rails.add("cash")
+    return rails
+
+
+def _transaction_payment_rails(tx: Transaction) -> set[str]:
+    method = (tx.payment_method or "").strip().lower().replace(" ", "_")
+    if method in {"tap", "cc", "dc"}:
+        return {"card"}
+    if method in {"applepay", "apple_pay"}:
+        return {"apple_pay"}
+    if method in {"cashapp", "cash_app"}:
+        return {"cash_app"}
+    if method in {"cash", "zelle", "venmo", "paypal", "card"}:
+        return {method}
+    return set()
+
+
+def _payment_rails_compatible(bank_rails: set[str], transaction_rails: set[str]) -> bool:
+    if not bank_rails or not transaction_rails:
+        return True
+    return bool(bank_rails & transaction_rails)
+
+
+def _cash_flow_direction_compatible(bank_amount: float, transaction_signed_amount: float) -> bool:
+    if bank_amount > 0.01 and transaction_signed_amount < -0.01:
+        return False
+    if bank_amount < -0.01 and transaction_signed_amount > 0.01:
+        return False
+    return True
 
 
 def normalize_bank_account_filter(value: str | None) -> str:
@@ -488,6 +540,7 @@ def match_bank_rows_to_transactions(
     for bank_row in bank_rows:
         posted_date = _date_from_datetime(bank_row.get("posted_at"))
         amount = float(bank_row.get("amount") or 0.0)
+        bank_payment_rails = _bank_payment_rails(bank_row)
         candidates: list[tuple[int, int, Transaction]] = []
         for tx in transactions:
             if tx.id in used_transaction_ids:
@@ -501,10 +554,13 @@ def match_bank_rows_to_transactions(
             if day_delta > 5:
                 continue
             score = 100 - (day_delta * 10)
-            payment_method = (tx.payment_method or "").lower()
-            description = (bank_row.get("description") or "").lower()
+            transaction_payment_rails = _transaction_payment_rails(tx)
+            if not _payment_rails_compatible(bank_payment_rails, transaction_payment_rails):
+                continue
             signed = _transaction_signed_amount(tx)
-            if payment_method and payment_method in description:
+            if not _cash_flow_direction_compatible(amount, signed):
+                continue
+            if bank_payment_rails and transaction_payment_rails and bank_payment_rails & transaction_payment_rails:
                 score += 15
             if amount > 0 and signed > 0:
                 score += 15
