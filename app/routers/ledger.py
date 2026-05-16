@@ -1,0 +1,463 @@
+"""
+Unified ledger routes.
+
+Bank rows are the counted money source. Discord, Shopify, and TikTok are
+supporting context that help reviewers decide what to do with each row.
+"""
+from __future__ import annotations
+
+import csv
+import json
+from io import StringIO
+from urllib.parse import urlencode
+
+from fastapi import APIRouter, Depends, Form, Query, Request
+from fastapi.responses import JSONResponse, RedirectResponse, Response
+from sqlmodel import Session
+
+from ..csrf import CSRFProtectedRoute
+from ..db import get_session
+from ..ledger import (
+    LEDGER_STATUS_LABELS,
+    apply_ledger_rule,
+    build_ledger_page_data,
+    create_ledger_rule,
+    draft_ledger_rule_from_instruction,
+    draft_ledger_rule_with_ai,
+    ledger_filters_from_values,
+    preview_ledger_rule,
+)
+from ..models import BankTransaction, LedgerRule, utcnow
+from ..shared import *  # noqa: F401,F403 -- templates, auth helpers, user labels
+
+router = APIRouter(route_class=CSRFProtectedRoute)
+
+
+def _ledger_redirect_url(
+    *,
+    account: str = "",
+    start: str = "",
+    end: str = "",
+    status: str = "needs_action",
+    category: str = "",
+    source: str = "",
+    search: str = "",
+    sort: str = "posted_at",
+    direction: str = "desc",
+    success: str = "",
+    error: str = "",
+) -> str:
+    params: dict[str, str] = {}
+    for key, value in {
+        "account": account,
+        "start": start,
+        "end": end,
+        "status": status,
+        "category": category,
+        "source": source,
+        "search": search,
+        "sort": sort,
+        "direction": direction,
+        "success": success,
+        "error": error,
+    }.items():
+        if value:
+            params[key] = str(value)
+    return "/ledger" + (f"?{urlencode(params)}" if params else "")
+
+
+@router.get("/ledger")
+def ledger_page(
+    request: Request,
+    account: str = Query(default=""),
+    start: str = Query(default=""),
+    end: str = Query(default=""),
+    status: str = Query(default="needs_action"),
+    category: str = Query(default=""),
+    source: str = Query(default=""),
+    search: str = Query(default=""),
+    sort: str = Query(default="posted_at"),
+    direction: str = Query(default="desc"),
+    success: str = Query(default=""),
+    error: str = Query(default=""),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "reviewer"):
+        return denial
+    filters = ledger_filters_from_values(
+        account=account,
+        start=start,
+        end=end,
+        status=status,
+        category=category,
+        source=source,
+        search=search,
+        sort=sort,
+        direction=direction,
+    )
+    data = build_ledger_page_data(session, filters)
+    return templates.TemplateResponse(
+        request,
+        "ledger.html",
+        {
+            "request": request,
+            "title": "Unified Ledger",
+            "current_user": getattr(request.state, "current_user", None),
+            "success": success,
+            "error": error,
+            **data,
+        },
+    )
+
+
+@router.post("/ledger/rows/{row_id}/status-form")
+def ledger_row_status_form(
+    request: Request,
+    row_id: int,
+    review_status: str = Form(default=""),
+    classification: str = Form(default=""),
+    expense_category: str = Form(default=""),
+    note: str = Form(default=""),
+    selected_account: str = Form(default=""),
+    selected_start: str = Form(default=""),
+    selected_end: str = Form(default=""),
+    selected_status: str = Form(default="needs_action"),
+    selected_category: str = Form(default=""),
+    selected_source: str = Form(default=""),
+    selected_search: str = Form(default=""),
+    selected_sort: str = Form(default="posted_at"),
+    selected_direction: str = Form(default="desc"),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "reviewer"):
+        return denial
+    row = session.get(BankTransaction, row_id)
+    if row:
+        changed = False
+        if classification:
+            row.classification = classification
+            changed = True
+        if expense_category:
+            row.expense_category = expense_category
+            row.expense_subcategory = "Manual override"
+            row.category_confidence = "manual"
+            row.category_reason = "Manually changed from the ledger."
+            changed = True
+        if review_status in {"open", "reviewed", "ignored"}:
+            row.review_status = review_status
+            changed = True
+        row.review_note = (note or "").strip() or None
+        if changed:
+            row.updated_at = utcnow()
+            session.add(row)
+            session.commit()
+    return RedirectResponse(
+        url=_ledger_redirect_url(
+            account=selected_account,
+            start=selected_start,
+            end=selected_end,
+            status=selected_status,
+            category=selected_category,
+            source=selected_source,
+            search=selected_search,
+            sort=selected_sort,
+            direction=selected_direction,
+            success="Updated ledger row",
+        ),
+        status_code=303,
+    )
+
+
+@router.post("/ledger/rows/{row_id}/force-unmatch-form")
+def ledger_row_force_unmatch_form(
+    request: Request,
+    row_id: int,
+    mode: str = Form(default="force"),
+    note: str = Form(default=""),
+    selected_account: str = Form(default=""),
+    selected_start: str = Form(default=""),
+    selected_end: str = Form(default=""),
+    selected_status: str = Form(default="needs_action"),
+    selected_category: str = Form(default=""),
+    selected_source: str = Form(default=""),
+    selected_search: str = Form(default=""),
+    selected_sort: str = Form(default="posted_at"),
+    selected_direction: str = Form(default="desc"),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "reviewer"):
+        return denial
+    row = session.get(BankTransaction, row_id)
+    if row:
+        if mode in {"clear", "none"}:
+            row.match_override_status = None
+            row.match_override_note = None
+            row.match_override_at = None
+            row.match_override_by = None
+            success = "Cleared match override"
+        else:
+            row.match_override_status = "force_unmatched"
+            row.match_override_note = (note or "").strip() or "Forced unmatched from the ledger."
+            row.match_override_at = utcnow()
+            row.match_override_by = current_user_label(request)
+            row.matched_transaction_id = None
+            row.matched_source_message_id = None
+            row.matched_platform = None
+            row.match_reason = "Manually forced unmatched from the ledger."
+            success = "Forced row unmatched"
+        row.updated_at = utcnow()
+        session.add(row)
+        session.commit()
+    else:
+        success = ""
+    return RedirectResponse(
+        url=_ledger_redirect_url(
+            account=selected_account,
+            start=selected_start,
+            end=selected_end,
+            status=selected_status,
+            category=selected_category,
+            source=selected_source,
+            search=selected_search,
+            sort=selected_sort,
+            direction=selected_direction,
+            success=success,
+        ),
+        status_code=303,
+    )
+
+
+async def _preview_payload(request: Request) -> dict[str, str]:
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        try:
+            payload = await request.json()
+            return {str(key): value for key, value in payload.items()}
+        except Exception:
+            return {}
+    form = await request.form()
+    return {str(key): value for key, value in form.items()}
+
+
+@router.post("/ledger/rules/preview")
+async def ledger_rule_preview(
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "reviewer"):
+        return denial
+    payload = await _preview_payload(request)
+    instruction = str(payload.get("instruction") or "").strip()
+    try:
+        if payload.get("conditions_json") and payload.get("actions_json"):
+            draft = {
+                "name": str(payload.get("name") or "Ledger rule"),
+                "summary": "",
+                "conditions": json.loads(str(payload.get("conditions_json") or "{}")),
+                "actions": json.loads(str(payload.get("actions_json") or "{}")),
+                "confidence": "manual",
+                "warnings": [],
+                "source": "submitted",
+            }
+        else:
+            use_ai = str(payload.get("use_ai") or "true").lower() != "false"
+            draft = draft_ledger_rule_with_ai(instruction) if use_ai else draft_ledger_rule_from_instruction(instruction)
+        filters = ledger_filters_from_values(
+            account=str(payload.get("account") or ""),
+            start=str(payload.get("start") or ""),
+            end=str(payload.get("end") or ""),
+            status=str(payload.get("status") or "all"),
+            category=str(payload.get("category") or ""),
+            source=str(payload.get("source") or ""),
+            search=str(payload.get("search") or ""),
+            sort=str(payload.get("sort") or "posted_at"),
+            direction=str(payload.get("direction") or "desc"),
+        )
+        preview = preview_ledger_rule(
+            session,
+            conditions=draft.get("conditions") or {},
+            actions=draft.get("actions") or {},
+            filters=filters,
+        )
+        warnings = list(draft.get("warnings") or []) + list(preview.get("warnings") or [])
+        draft["warnings"] = warnings
+        return JSONResponse({"ok": True, "draft": draft, "preview": preview})
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
+
+@router.post("/ledger/rules/create-form")
+def ledger_rule_create_form(
+    request: Request,
+    name: str = Form(default="Ledger rule"),
+    description: str = Form(default=""),
+    conditions_json: str = Form(default="{}"),
+    actions_json: str = Form(default="{}"),
+    selected_account: str = Form(default=""),
+    selected_start: str = Form(default=""),
+    selected_end: str = Form(default=""),
+    selected_status: str = Form(default="needs_action"),
+    selected_category: str = Form(default=""),
+    selected_source: str = Form(default=""),
+    selected_search: str = Form(default=""),
+    selected_sort: str = Form(default="posted_at"),
+    selected_direction: str = Form(default="desc"),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "reviewer"):
+        return denial
+    try:
+        conditions = json.loads(conditions_json or "{}")
+        actions = json.loads(actions_json or "{}")
+        rule = create_ledger_rule(
+            session,
+            name=name,
+            description=description,
+            conditions=conditions if isinstance(conditions, dict) else {},
+            actions=actions if isinstance(actions, dict) else {},
+            created_by=current_user_label(request),
+        )
+        success = f"Saved ledger rule #{rule.id}"
+        error = ""
+    except Exception as exc:
+        success = ""
+        error = str(exc)
+    return RedirectResponse(
+        url=_ledger_redirect_url(
+            account=selected_account,
+            start=selected_start,
+            end=selected_end,
+            status=selected_status,
+            category=selected_category,
+            source=selected_source,
+            search=selected_search,
+            sort=selected_sort,
+            direction=selected_direction,
+            success=success,
+            error=error,
+        ),
+        status_code=303,
+    )
+
+
+@router.post("/ledger/rules/{rule_id}/apply-form")
+def ledger_rule_apply_form(
+    request: Request,
+    rule_id: int,
+    selected_account: str = Form(default=""),
+    selected_start: str = Form(default=""),
+    selected_end: str = Form(default=""),
+    selected_status: str = Form(default="all"),
+    selected_category: str = Form(default=""),
+    selected_source: str = Form(default=""),
+    selected_search: str = Form(default=""),
+    selected_sort: str = Form(default="posted_at"),
+    selected_direction: str = Form(default="desc"),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "reviewer"):
+        return denial
+    rule = session.get(LedgerRule, rule_id)
+    if not rule:
+        return RedirectResponse(url=_ledger_redirect_url(error="Ledger rule not found"), status_code=303)
+    filters = ledger_filters_from_values(
+        account=selected_account,
+        start=selected_start,
+        end=selected_end,
+        status=selected_status or "all",
+        category=selected_category,
+        source=selected_source,
+        search=selected_search,
+        sort=selected_sort,
+        direction=selected_direction,
+    )
+    result = apply_ledger_rule(session, rule, filters=filters, applied_by=current_user_label(request))
+    return RedirectResponse(
+        url=_ledger_redirect_url(
+            account=selected_account,
+            start=selected_start,
+            end=selected_end,
+            status=selected_status,
+            category=selected_category,
+            source=selected_source,
+            search=selected_search,
+            sort=selected_sort,
+            direction=selected_direction,
+            success=f"Applied {rule.name} to {result['updated_count']} row(s)",
+        ),
+        status_code=303,
+    )
+
+
+@router.get("/ledger/export.csv")
+def ledger_export_csv(
+    request: Request,
+    account: str = Query(default=""),
+    start: str = Query(default=""),
+    end: str = Query(default=""),
+    status: str = Query(default="needs_action"),
+    category: str = Query(default=""),
+    source: str = Query(default=""),
+    search: str = Query(default=""),
+    sort: str = Query(default="posted_at"),
+    direction: str = Query(default="desc"),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "reviewer"):
+        return denial
+    filters = ledger_filters_from_values(
+        account=account,
+        start=start,
+        end=end,
+        status=status,
+        category=category,
+        source=source,
+        search=search,
+        sort=sort,
+        direction=direction,
+        limit=1000,
+    )
+    data = build_ledger_page_data(session, filters)
+    output = StringIO()
+    writer = csv.writer(output)
+    writer.writerow(
+        [
+            "row_id",
+            "posted_at",
+            "account",
+            "amount",
+            "ledger_status",
+            "source",
+            "category",
+            "classification",
+            "description",
+            "matched_transaction_id",
+            "match_reason",
+            "review_status",
+            "review_note",
+        ]
+    )
+    for row in data["rows"]:
+        writer.writerow(
+            [
+                row["id"],
+                row["posted_at_display"],
+                row["account_label"],
+                row["amount"],
+                row["ledger_status"],
+                row["source"],
+                row["expense_category"],
+                row["classification"],
+                row["description"],
+                row["matched_transaction_id"],
+                row["match_reason"],
+                row["review_status"],
+                row["review_note"],
+            ]
+        )
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="ledger-export.csv"'},
+    )
+

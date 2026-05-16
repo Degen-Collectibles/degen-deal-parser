@@ -99,6 +99,7 @@ class NavigationValidationTests(unittest.TestCase):
             ('href="/review">Review<'),
             ('href="/deals">Deals<'),
             ('href="/finance">Finance<'),
+            ('href="/ledger">Ledger<'),
             ('href="/reports">Reports<'),
             ('href="/bookkeeping">Bookkeeping<'),
             ('href="/shopify/orders">Shopify Orders<'),

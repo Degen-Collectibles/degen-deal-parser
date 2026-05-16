@@ -391,6 +391,10 @@ class BankTransaction(SQLModel, table=True):
     matched_transaction_id: Optional[int] = Field(default=None, index=True, foreign_key="transaction.id")
     matched_source_message_id: Optional[int] = Field(default=None, index=True)
     matched_platform: Optional[str] = Field(default=None, index=True)
+    match_override_status: Optional[str] = Field(default=None, index=True)
+    match_override_note: Optional[str] = None
+    match_override_at: Optional[datetime] = Field(default=None, index=True)
+    match_override_by: Optional[str] = Field(default=None, index=True)
     review_status: str = Field(default="open", index=True)
     review_note: Optional[str] = None
     provider_transaction_id: Optional[str] = Field(default=None, index=True)
@@ -398,6 +402,22 @@ class BankTransaction(SQLModel, table=True):
     pending_transaction_id: Optional[str] = Field(default=None, index=True)
     is_removed: bool = Field(default=False, index=True)
     raw_row_json: str = "{}"
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+    updated_at: datetime = Field(default_factory=utcnow, index=True)
+
+
+class LedgerRule(SQLModel, table=True):
+    __tablename__ = "ledger_rules"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(index=True)
+    description: str = ""
+    conditions_json: str = Field(default="{}")
+    actions_json: str = Field(default="{}")
+    status: str = Field(default="active", index=True)
+    created_by: Optional[str] = Field(default=None, index=True)
+    applied_count: int = Field(default=0)
+    last_applied_at: Optional[datetime] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=utcnow, index=True)
     updated_at: datetime = Field(default_factory=utcnow, index=True)
 

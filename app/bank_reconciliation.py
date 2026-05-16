@@ -540,6 +540,20 @@ def match_bank_rows_to_transactions(
     for bank_row in bank_rows:
         posted_date = _date_from_datetime(bank_row.get("posted_at"))
         amount = float(bank_row.get("amount") or 0.0)
+        if str(bank_row.get("match_override_status") or "").strip().lower() == "force_unmatched":
+            classification = base_classification(str(bank_row.get("description") or ""), amount)
+            bank_row.update(
+                {
+                    "classification": classification,
+                    "confidence": classification_confidence(classification),
+                    "match_reason": "Manually forced unmatched from the ledger.",
+                    "matched_transaction_id": None,
+                    "matched_source_message_id": None,
+                    "matched_platform": None,
+                }
+            )
+            bank_row.update(categorize_bank_payload(bank_row))
+            continue
         bank_payment_rails = _bank_payment_rails(bank_row)
         candidates: list[tuple[int, int, Transaction]] = []
         for tx in transactions:
@@ -712,6 +726,14 @@ def rerun_bank_reconciliation(session: Session, import_id: int) -> BankStatement
                 "balance": row.balance,
                 "check_or_slip": row.check_or_slip,
                 "raw_row_json": row.raw_row_json,
+                "expense_category": row.expense_category,
+                "expense_subcategory": row.expense_subcategory,
+                "category_confidence": row.category_confidence,
+                "category_reason": row.category_reason,
+                "match_override_status": row.match_override_status,
+                "match_override_note": row.match_override_note,
+                "match_override_at": row.match_override_at,
+                "match_override_by": row.match_override_by,
             }
         )
     match_bank_rows_to_transactions(payloads, load_matchable_transactions(session, payloads))
@@ -722,12 +744,14 @@ def rerun_bank_reconciliation(session: Session, import_id: int) -> BankStatement
         row = by_index.get(int(payload["row_index"]))
         if not row:
             continue
+        preserve_category = str(row.category_confidence or "").lower() in {"manual", "rule"}
         row.classification = str(payload.get("classification") or row.classification)
         row.confidence = str(payload.get("confidence") or row.confidence)
-        row.expense_category = str(payload.get("expense_category") or row.expense_category or "uncategorized")
-        row.expense_subcategory = payload.get("expense_subcategory") or None
-        row.category_confidence = str(payload.get("category_confidence") or row.category_confidence or "low")
-        row.category_reason = str(payload.get("category_reason") or "")
+        if not preserve_category:
+            row.expense_category = str(payload.get("expense_category") or row.expense_category or "uncategorized")
+            row.expense_subcategory = payload.get("expense_subcategory") or None
+            row.category_confidence = str(payload.get("category_confidence") or row.category_confidence or "low")
+            row.category_reason = str(payload.get("category_reason") or "")
         row.match_reason = str(payload.get("match_reason") or "")
         row.matched_transaction_id = payload.get("matched_transaction_id")
         row.matched_source_message_id = payload.get("matched_source_message_id")

@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <link rel="manifest" href="/static/manifest.webmanifest">
+    <meta name="theme-color" content="#08090a">
+    <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon-180.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/icon-192.png">
+    <link rel="icon" type="image/png" sizes="512x512" href="/static/icons/icon-512.png">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+    <title>{{ title }}</title>
+    <style>
+        :root {
+            --panel: var(--lx-s1);
+            --panel-strong: var(--lx-s2);
+            --line: var(--lx-br);
+            --text: var(--lx-text);
+            --muted: var(--lx-muted);
+            --good: #22c55e;
+            --warn: #f59e0b;
+            --bad: #ef4444;
+            --info: #60a5fa;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            font-family: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+            color: var(--text);
+            background: var(--lx-bg);
+        }
+        a { color: inherit; text-decoration: none; }
+        .page { max-width: 1680px; margin: 0 auto; padding: 24px 24px 60px; }
+        .hero, .panel, .metric {
+            border: 1px solid var(--line);
+            background: var(--panel);
+            border-radius: 8px;
+        }
+        .hero { padding: 20px; margin-bottom: 14px; }
+        .eyebrow {
+            display: inline-flex;
+            align-items: center;
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            padding: 6px 10px;
+            color: var(--lx-red);
+            background: var(--panel-strong);
+            font-size: 11px;
+            font-weight: 800;
+            letter-spacing: .08em;
+            text-transform: uppercase;
+        }
+        h1 { margin: 12px 0 6px; font-size: 38px; line-height: 1; color: #fff; letter-spacing: 0; }
+        h2 { margin: 0; color: #fff; font-size: 18px; letter-spacing: 0; }
+        p { margin: 0; color: var(--muted); line-height: 1.5; max-width: 860px; }
+        .hero-actions, .filters, .row-actions, .assistant-actions {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        .hero-actions { margin-top: 14px; }
+        .button, button {
+            border: 1px solid var(--line);
+            background: var(--panel-strong);
+            color: #fff;
+            border-radius: 8px;
+            padding: 9px 12px;
+            font-weight: 800;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        .button.primary, button.primary { background: var(--lx-red); border-color: var(--lx-red); }
+        .button.tiny, button.tiny { padding: 6px 8px; font-size: 12px; }
+        .flash { margin-bottom: 12px; padding: 12px 14px; border-radius: 8px; border: 1px solid var(--line); font-weight: 800; }
+        .flash.success { color: #bbf7d0; border-color: rgba(34,197,94,.35); background: rgba(34,197,94,.1); }
+        .flash.error { color: #fecaca; border-color: rgba(239,68,68,.35); background: rgba(239,68,68,.1); }
+        .grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(340px, 420px); gap: 16px; align-items: start; }
+        .panel { padding: 16px; margin-bottom: 14px; }
+        .side { position: sticky; top: 14px; }
+        .metric-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
+        .metric { padding: 12px; min-height: 84px; }
+        .metric-label { color: var(--muted); font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
+        .metric-value { margin-top: 8px; font-size: 24px; color: #fff; font-weight: 800; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+        label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
+        input, select, textarea {
+            width: 100%;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: var(--panel-strong);
+            color: var(--text);
+            padding: 9px 10px;
+            font: inherit;
+            font-size: 13px;
+            min-height: 38px;
+        }
+        textarea { min-height: 96px; resize: vertical; line-height: 1.45; }
+        .filters { display: grid; grid-template-columns: repeat(8, minmax(110px, 1fr)); align-items: end; }
+        .filters label.search { grid-column: span 2; }
+        .sheet-wrap {
+            overflow: auto;
+            max-height: calc(100vh - 280px);
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: #0d0f12;
+        }
+        table { width: 100%; border-collapse: separate; border-spacing: 0; min-width: 1160px; }
+        th, td {
+            border-bottom: 1px solid var(--line);
+            padding: 10px 12px;
+            text-align: left;
+            vertical-align: top;
+            font-size: 13px;
+        }
+        th {
+            position: sticky;
+            top: 0;
+            z-index: 2;
+            background: #15171b;
+            color: var(--muted);
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: .08em;
+            white-space: nowrap;
+        }
+        td.amount { text-align: right; font-weight: 900; color: #fff; font-variant-numeric: tabular-nums; white-space: nowrap; }
+        .desc { max-width: 360px; color: #fff; font-weight: 700; }
+        .muted { color: var(--muted); }
+        .mini { color: var(--muted); font-size: 12px; line-height: 1.35; }
+        .pill {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 999px;
+            border: 1px solid var(--line);
+            padding: 4px 8px;
+            font-size: 11px;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: .04em;
+            white-space: nowrap;
+        }
+        .pill.needs_action { color: #fde68a; background: rgba(245,158,11,.12); border-color: rgba(245,158,11,.34); }
+        .pill.reconciled { color: #bbf7d0; background: rgba(34,197,94,.12); border-color: rgba(34,197,94,.34); }
+        .pill.force_unmatched { color: #bfdbfe; background: rgba(96,165,250,.12); border-color: rgba(96,165,250,.34); }
+        .pill.ignored { color: #cbd5e1; background: rgba(148,163,184,.12); border-color: rgba(148,163,184,.34); }
+        details { margin-top: 8px; color: var(--muted); }
+        summary { cursor: pointer; color: #dbeafe; font-weight: 800; }
+        .inline-form { display: grid; grid-template-columns: minmax(130px, 1fr) minmax(130px, 1fr) auto; gap: 8px; align-items: end; min-width: 340px; }
+        .assistant-preview { margin-top: 12px; border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: #0d0f12; display: none; }
+        .assistant-preview.is-visible { display: block; }
+        .sample-list { display: grid; gap: 8px; margin-top: 10px; }
+        .sample-row { border: 1px solid var(--line); border-radius: 8px; padding: 9px; background: var(--panel-strong); }
+        .rule-list { display: grid; gap: 10px; }
+        .rule-row { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: #0d0f12; }
+        .cash-list { display: grid; gap: 8px; margin-top: 10px; }
+        .cash-row { display: grid; grid-template-columns: 92px 90px minmax(0, 1fr); gap: 10px; align-items: start; border-top: 1px solid var(--line); padding-top: 10px; }
+        .empty { color: var(--muted); padding: 22px; text-align: center; }
+        @media (max-width: 1180px) {
+            .grid { grid-template-columns: 1fr; }
+            .side { position: static; }
+            .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .filters label.search { grid-column: span 2; }
+        }
+        @media (max-width: 700px) {
+            .page { padding: 14px 12px 36px; }
+            h1 { font-size: 30px; }
+            .metric-grid, .filters { grid-template-columns: 1fr; }
+            .filters label.search { grid-column: span 1; }
+            .inline-form { grid-template-columns: 1fr; min-width: 260px; }
+        }
+    </style>
+    <link rel="stylesheet" href="/static/linear.css?v=1776749171">
+    <link rel="stylesheet" href="/static/safe-area.css?v=1776747800">
+</head>
+<body>
+    <div class="page">
+        {% include "_linear_sidebar.html" %}
+
+        <section class="hero">
+            <div class="eyebrow">Unified Ledger</div>
+            <h1>Money Review Grid</h1>
+            <p>Bank rows are the counted ledger. Discord, Shopify, and TikTok stay attached as context so review decisions are fast and auditable.</p>
+            <div class="hero-actions">
+                <a class="button" href="/bookkeeping/bank">Bank Reconciliation</a>
+                <a class="button" href="/finance">Finance</a>
+                <a class="button primary" href="/ledger/export.csv?account={{ selected.account|urlencode }}&start={{ selected.start|urlencode }}&end={{ selected.end|urlencode }}&status={{ selected.status|urlencode }}&category={{ selected.category|urlencode }}&source={{ selected.source|urlencode }}&search={{ selected.search|urlencode }}&sort={{ selected.sort|urlencode }}&direction={{ selected.direction|urlencode }}">Export CSV</a>
+            </div>
+        </section>
+
+        {% if success %}<div class="flash success">{{ success }}</div>{% endif %}
+        {% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+
+        <section class="metric-grid">
+            <div class="metric"><div class="metric-label">Bank Inflow</div><div class="metric-value">{{ summary.bank_inflow_display }}</div></div>
+            <div class="metric"><div class="metric-label">Bank Outflow</div><div class="metric-value">{{ summary.bank_outflow_display }}</div></div>
+            <div class="metric"><div class="metric-label">Bank Net</div><div class="metric-value">{{ summary.bank_net_display }}</div></div>
+            <div class="metric"><div class="metric-label">Needs Action</div><div class="metric-value">{{ summary.needs_action_count }}</div></div>
+            <div class="metric"><div class="metric-label">Unbanked Cash</div><div class="metric-value">{{ summary.unbanked_cash_display }}</div></div>
+        </section>
+
+        <div class="grid">
+            <main>
+                <section class="panel">
+                    <form method="get" action="/ledger" class="filters">
+                        <label>Account
+                            <select name="account">
+                                <option value="">All accounts</option>
+                                {% for account in account_options %}
+                                <option value="{{ account }}" {% if selected.account == account %}selected{% endif %}>{{ account }}</option>
+                                {% endfor %}
+                            </select>
+                        </label>
+                        <label>Start
+                            <input type="date" name="start" value="{{ selected.start }}">
+                        </label>
+                        <label>End
+                            <input type="date" name="end" value="{{ selected.end }}">
+                        </label>
+                        <label>Status
+                            <select name="status">
+                                <option value="all" {% if selected.status == "all" %}selected{% endif %}>All</option>
+                                {% for choice in status_choices %}
+                                <option value="{{ choice.value }}" {% if selected.status == choice.value %}selected{% endif %}>{{ choice.label }}</option>
+                                {% endfor %}
+                            </select>
+                        </label>
+                        <label>Category
+                            <select name="category">
+                                <option value="">All categories</option>
+                                {% for choice in category_choices %}
+                                <option value="{{ choice.value }}" {% if selected.category == choice.value %}selected{% endif %}>{{ choice.label }}</option>
+                                {% endfor %}
+                            </select>
+                        </label>
+                        <label>Source
+                            <select name="source">
+                                <option value="">All sources</option>
+                                {% for choice in source_choices %}
+                                <option value="{{ choice.value }}" {% if selected.source == choice.value %}selected{% endif %}>{{ choice.label }}</option>
+                                {% endfor %}
+                            </select>
+                        </label>
+                        <label class="search">Search
+                            <input name="search" value="{{ selected.search }}" placeholder="Description, category, note">
+                        </label>
+                        <label>Sort
+                            <select name="sort">
+                                {% for value, label in [("posted_at", "Date"), ("amount", "Amount"), ("status", "Status"), ("category", "Category"), ("source", "Source"), ("account", "Account")] %}
+                                <option value="{{ value }}" {% if selected.sort == value %}selected{% endif %}>{{ label }}</option>
+                                {% endfor %}
+                            </select>
+                        </label>
+                        <label>Direction
+                            <select name="direction">
+                                <option value="desc" {% if selected.direction == "desc" %}selected{% endif %}>Desc</option>
+                                <option value="asc" {% if selected.direction == "asc" %}selected{% endif %}>Asc</option>
+                            </select>
+                        </label>
+                        <button class="primary" type="submit">Apply</button>
+                    </form>
+                </section>
+
+                <section class="panel">
+                    <div class="row-actions" style="justify-content: space-between; margin-bottom: 12px;">
+                        <h2>Categorized Activity</h2>
+                        <div class="mini">{{ summary.filtered_row_count }} rows in view{% if summary.hidden_row_count %}; {{ summary.hidden_row_count }} hidden by limit{% endif %}</div>
+                    </div>
+                    <div class="sheet-wrap">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th><input type="checkbox" aria-label="Select all visible rows"></th>
+                                    <th>Status</th>
+                                    <th>Date</th>
+                                    <th>Account</th>
+                                    <th>Amount</th>
+                                    <th>Category</th>
+                                    <th>Source</th>
+                                    <th>Description</th>
+                                    <th>Match / Context</th>
+                                    <th>Review</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for row in rows %}
+                                <tr>
+                                    <td><input type="checkbox" name="row_id" value="{{ row.id }}" aria-label="Select row {{ row.id }}"></td>
+                                    <td>
+                                        <span class="pill {{ row.ledger_status }}">{{ row.ledger_status_label }}</span>
+                                        <div class="mini">{{ row.confidence|upper }}</div>
+                                    </td>
+                                    <td>{{ row.posted_at_display }}</td>
+                                    <td>
+                                        <strong>{{ row.account_label }}</strong>
+                                        <div class="mini">{{ row.account_type }}</div>
+                                    </td>
+                                    <td class="amount">{{ row.amount_display }}</td>
+                                    <td>
+                                        <strong>{{ row.expense_category_label }}</strong>
+                                        <div class="mini">{{ row.category_confidence }}{% if row.expense_subcategory %} · {{ row.expense_subcategory }}{% endif %}</div>
+                                    </td>
+                                    <td>
+                                        <span class="pill">{{ row.source_label }}</span>
+                                        {% if row.payment_rail %}<div class="mini">{{ row.payment_rail }}</div>{% endif %}
+                                    </td>
+                                    <td class="desc">
+                                        {{ row.description }}
+                                        {% if row.details %}<div class="mini">{{ row.details }}</div>{% endif %}
+                                        <details>
+                                            <summary>Open row</summary>
+                                            <div class="mini">Classification: {{ row.classification_label }}</div>
+                                            {% if row.category_reason %}<div class="mini">Category: {{ row.category_reason }}</div>{% endif %}
+                                            {% if row.review_note %}<div class="mini">Note: {{ row.review_note }}</div>{% endif %}
+                                            {% if row.match_override_note %}<div class="mini">Override: {{ row.match_override_note }}</div>{% endif %}
+                                        </details>
+                                    </td>
+                                    <td>
+                                        {% if row.matched_transaction %}
+                                        <strong>{{ row.matched_transaction.entry_kind or "Discord" }}</strong>
+                                        <div class="mini">{{ row.matched_transaction.occurred_at_display }} · {{ row.matched_transaction.payment_method }}</div>
+                                        <div class="mini">{{ row.matched_transaction.source_content }}</div>
+                                        {% elif row.source in ["shopify", "tiktok", "processor", "paypal"] %}
+                                        <strong>{{ row.source_label }} payout</strong>
+                                        <div class="mini">Orders stay as context until payout/deposit reconciliation is expanded.</div>
+                                        {% else %}
+                                        <span class="muted">No attached transaction</span>
+                                        {% endif %}
+                                        {% if row.match_reason %}<div class="mini">{{ row.match_reason }}</div>{% endif %}
+                                        <form method="post" action="/ledger/rows/{{ row.id }}/force-unmatch-form" class="row-actions" style="margin-top: 8px;">
+                                            <input type="hidden" name="selected_account" value="{{ selected.account }}">
+                                            <input type="hidden" name="selected_start" value="{{ selected.start }}">
+                                            <input type="hidden" name="selected_end" value="{{ selected.end }}">
+                                            <input type="hidden" name="selected_status" value="{{ selected.status }}">
+                                            <input type="hidden" name="selected_category" value="{{ selected.category }}">
+                                            <input type="hidden" name="selected_source" value="{{ selected.source }}">
+                                            <input type="hidden" name="selected_search" value="{{ selected.search }}">
+                                            <input type="hidden" name="selected_sort" value="{{ selected.sort }}">
+                                            <input type="hidden" name="selected_direction" value="{{ selected.direction }}">
+                                            {% if row.match_override_status == "force_unmatched" %}
+                                            <input type="hidden" name="mode" value="clear">
+                                            <button class="tiny" type="submit">Clear</button>
+                                            {% else %}
+                                            <input type="hidden" name="mode" value="force">
+                                            <button class="tiny" type="submit">Unmatch</button>
+                                            {% endif %}
+                                        </form>
+                                    </td>
+                                    <td>
+                                        <form method="post" action="/ledger/rows/{{ row.id }}/status-form" class="inline-form">
+                                            <input type="hidden" name="selected_account" value="{{ selected.account }}">
+                                            <input type="hidden" name="selected_start" value="{{ selected.start }}">
+                                            <input type="hidden" name="selected_end" value="{{ selected.end }}">
+                                            <input type="hidden" name="selected_status" value="{{ selected.status }}">
+                                            <input type="hidden" name="selected_category" value="{{ selected.category }}">
+                                            <input type="hidden" name="selected_source" value="{{ selected.source }}">
+                                            <input type="hidden" name="selected_search" value="{{ selected.search }}">
+                                            <input type="hidden" name="selected_sort" value="{{ selected.sort }}">
+                                            <input type="hidden" name="selected_direction" value="{{ selected.direction }}">
+                                            <label>Status
+                                                <select name="review_status">
+                                                    {% for value in ["open", "reviewed", "ignored"] %}
+                                                    <option value="{{ value }}" {% if row.review_status == value %}selected{% endif %}>{{ value|title }}</option>
+                                                    {% endfor %}
+                                                </select>
+                                            </label>
+                                            <label>Category
+                                                <select name="expense_category">
+                                                    {% for choice in category_choices %}
+                                                    <option value="{{ choice.value }}" {% if row.expense_category == choice.value %}selected{% endif %}>{{ choice.label }}</option>
+                                                    {% endfor %}
+                                                </select>
+                                            </label>
+                                            <button class="tiny primary" type="submit">Save</button>
+                                        </form>
+                                    </td>
+                                </tr>
+                                {% else %}
+                                <tr><td colspan="10" class="empty">No bank rows match this view.</td></tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+            </main>
+
+            <aside class="side">
+                <section class="panel">
+                    <h2>Ledger Assistant</h2>
+                    <div class="mini" style="margin: 8px 0 12px;">Preview a bank-row rule before saving or applying it.</div>
+                    <textarea id="assistant-instruction" placeholder="Example: categorize Apple Cash sent as inventory purchases and mark reviewed"></textarea>
+                    <div class="assistant-actions" style="margin-top: 10px;">
+                        <button class="primary" type="button" id="assistant-preview-btn">Preview</button>
+                        <span class="mini" id="assistant-state"></span>
+                    </div>
+                    <div class="assistant-preview" id="assistant-preview">
+                        <div id="assistant-summary" class="mini"></div>
+                        <div class="sample-list" id="assistant-samples"></div>
+                        <form method="post" action="/ledger/rules/create-form" class="assistant-actions" style="margin-top: 12px;">
+                            <input type="hidden" name="selected_account" value="{{ selected.account }}">
+                            <input type="hidden" name="selected_start" value="{{ selected.start }}">
+                            <input type="hidden" name="selected_end" value="{{ selected.end }}">
+                            <input type="hidden" name="selected_status" value="{{ selected.status }}">
+                            <input type="hidden" name="selected_category" value="{{ selected.category }}">
+                            <input type="hidden" name="selected_source" value="{{ selected.source }}">
+                            <input type="hidden" name="selected_search" value="{{ selected.search }}">
+                            <input type="hidden" name="selected_sort" value="{{ selected.sort }}">
+                            <input type="hidden" name="selected_direction" value="{{ selected.direction }}">
+                            <input type="hidden" name="name" id="assistant-rule-name">
+                            <input type="hidden" name="description" id="assistant-rule-description">
+                            <input type="hidden" name="conditions_json" id="assistant-rule-conditions">
+                            <input type="hidden" name="actions_json" id="assistant-rule-actions">
+                            <button type="submit">Save Rule</button>
+                        </form>
+                    </div>
+                </section>
+
+                <section class="panel">
+                    <h2>Saved Rules</h2>
+                    <div class="rule-list" style="margin-top: 12px;">
+                        {% for rule in rules %}
+                        <div class="rule-row">
+                            <strong>{{ rule.name }}</strong>
+                            <div class="mini">{{ rule.description }}</div>
+                            <div class="mini">Applied {{ rule.applied_count }} time(s){% if rule.last_applied_at %} · last applied {{ rule.last_applied_at }}{% endif %}</div>
+                            <form method="post" action="/ledger/rules/{{ rule.id }}/apply-form" style="margin-top: 8px;">
+                                <input type="hidden" name="selected_account" value="{{ selected.account }}">
+                                <input type="hidden" name="selected_start" value="{{ selected.start }}">
+                                <input type="hidden" name="selected_end" value="{{ selected.end }}">
+                                <input type="hidden" name="selected_status" value="{{ selected.status }}">
+                                <input type="hidden" name="selected_category" value="{{ selected.category }}">
+                                <input type="hidden" name="selected_source" value="{{ selected.source }}">
+                                <input type="hidden" name="selected_search" value="{{ selected.search }}">
+                                <input type="hidden" name="selected_sort" value="{{ selected.sort }}">
+                                <input type="hidden" name="selected_direction" value="{{ selected.direction }}">
+                                <button class="tiny primary" type="submit">Apply</button>
+                            </form>
+                        </div>
+                        {% else %}
+                        <div class="mini">No saved ledger rules yet.</div>
+                        {% endfor %}
+                    </div>
+                </section>
+
+                <section class="panel">
+                    <h2>Unbanked Cash</h2>
+                    <div class="mini" style="margin-top: 8px;">Discord cash deals that are not matched to bank rows.</div>
+                    <div class="cash-list">
+                        {% for row in unbanked_cash_rows %}
+                        <div class="cash-row">
+                            <strong>{{ row.occurred_at_display }}</strong>
+                            <strong>{{ row.amount_display }}</strong>
+                            <div>
+                                <strong>{{ row.expense_category_label }}</strong>
+                                <div class="mini">{{ row.source_content }}</div>
+                            </div>
+                        </div>
+                        {% else %}
+                        <div class="mini">No unbanked cash deals found.</div>
+                        {% endfor %}
+                    </div>
+                </section>
+            </aside>
+        </div>
+    </div>
+
+    <script>
+    (function () {
+        var button = document.getElementById("assistant-preview-btn");
+        var state = document.getElementById("assistant-state");
+        var box = document.getElementById("assistant-preview");
+        var summary = document.getElementById("assistant-summary");
+        var samples = document.getElementById("assistant-samples");
+        var instruction = document.getElementById("assistant-instruction");
+        var nameInput = document.getElementById("assistant-rule-name");
+        var descriptionInput = document.getElementById("assistant-rule-description");
+        var conditionsInput = document.getElementById("assistant-rule-conditions");
+        var actionsInput = document.getElementById("assistant-rule-actions");
+        if (!button) return;
+        button.addEventListener("click", function () {
+            var text = (instruction.value || "").trim();
+            if (!text) {
+                state.textContent = "Enter a rule first.";
+                return;
+            }
+            state.textContent = "Previewing...";
+            samples.innerHTML = "";
+            fetch("/ledger/rules/preview", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({
+                    instruction: text,
+                    account: {{ selected.account|tojson }},
+                    start: {{ selected.start|tojson }},
+                    end: {{ selected.end|tojson }},
+                    status: "all",
+                    category: {{ selected.category|tojson }},
+                    source: {{ selected.source|tojson }},
+                    search: {{ selected.search|tojson }},
+                    sort: {{ selected.sort|tojson }},
+                    direction: {{ selected.direction|tojson }}
+                })
+            }).then(function (response) {
+                return response.json();
+            }).then(function (payload) {
+                if (!payload.ok) throw new Error(payload.error || "Preview failed");
+                var draft = payload.draft || {};
+                var preview = payload.preview || {};
+                box.classList.add("is-visible");
+                state.textContent = (preview.affected_count || 0) + " row(s)";
+                summary.textContent = (draft.summary || preview.summary || "") + " Confidence: " + (draft.confidence || "unknown") + ".";
+                nameInput.value = draft.name || "Ledger rule";
+                descriptionInput.value = draft.summary || preview.summary || "";
+                conditionsInput.value = JSON.stringify(draft.conditions || {});
+                actionsInput.value = JSON.stringify(draft.actions || {});
+                samples.innerHTML = "";
+                (preview.sample_rows || []).forEach(function (row) {
+                    var item = document.createElement("div");
+                    item.className = "sample-row";
+                    item.textContent = "#" + row.id + " " + row.posted_at + " " + row.amount_display + " · " + row.description;
+                    samples.appendChild(item);
+                });
+                (draft.warnings || []).forEach(function (warning) {
+                    var item = document.createElement("div");
+                    item.className = "sample-row";
+                    item.textContent = warning;
+                    samples.appendChild(item);
+                });
+            }).catch(function (err) {
+                box.classList.add("is-visible");
+                state.textContent = "Preview failed";
+                summary.textContent = err.message || String(err);
+            });
+        });
+    })();
+    </script>
+    {% include "_csrf_bootstrap.html" %}
+</body>
+</html>
