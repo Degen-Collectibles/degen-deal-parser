@@ -107,19 +107,42 @@
         .flash { padding: 12px 14px; border-radius: 14px; margin-bottom: 14px; font-weight: 700; }
         .flash.success { color: #bbf7d0; background: rgba(34,197,94,.14); border: 1px solid rgba(34,197,94,.3); }
         .flash.error { color: #fecaca; background: rgba(239,68,68,.14); border: 1px solid rgba(239,68,68,.3); }
-        .table-shell { overflow: visible; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); }
-        table { width: 100%; min-width: 0; border-collapse: collapse; table-layout: fixed; }
-        th, td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; text-align: left; font-size: 12px; overflow-wrap: anywhere; }
-        th { position: sticky; top: 0; z-index: 1; color: var(--muted); background: var(--panel-strong); text-transform: uppercase; letter-spacing: .08em; font-size: 11px; }
-        th:nth-child(1), td:nth-child(1) { width: 62px; }
-        th:nth-child(2), td:nth-child(2) { width: 92px; }
-        th:nth-child(3), td:nth-child(3) { width: 72px; }
-        th:nth-child(4), td:nth-child(4) { width: 90px; }
-        th:nth-child(5), td:nth-child(5) { width: 18%; }
-        th:nth-child(6), td:nth-child(6) { width: 18%; }
-        th:nth-child(8), td:nth-child(8) { width: 14%; }
-        th:nth-child(9), td:nth-child(9) { width: 96px; }
-        tr.needs-attention td:first-child { border-left: 4px solid var(--warn); }
+        .table-shell { overflow: visible; border: 0; background: transparent; }
+        table.activity-table,
+        .activity-table thead,
+        .activity-table tbody,
+        .activity-table tr,
+        .activity-table td {
+            display: block;
+        }
+        .activity-table { width: 100%; min-width: 0; border-collapse: separate; }
+        .activity-table thead { display: none; }
+        .activity-table tbody { display: grid; gap: 10px; }
+        .activity-table tr {
+            display: grid;
+            grid-template-columns: 58px 84px 78px 92px minmax(140px, 1fr) minmax(140px, 1fr) 76px;
+            grid-template-areas:
+                "line status date amount category bucket override"
+                "line status description description description match override";
+            gap: 8px 10px;
+            align-items: start;
+            position: relative;
+            padding: 12px;
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            background: var(--panel);
+        }
+        .activity-table tr.needs-attention { border-left: 4px solid var(--warn); }
+        .activity-table td { min-width: 0; padding: 0; border: 0; vertical-align: top; text-align: left; font-size: 13px; overflow-wrap: anywhere; }
+        .activity-table td:nth-child(1) { grid-area: line; }
+        .activity-table td:nth-child(2) { grid-area: status; }
+        .activity-table td:nth-child(3) { grid-area: date; }
+        .activity-table td:nth-child(4) { grid-area: amount; }
+        .activity-table td:nth-child(5) { grid-area: category; }
+        .activity-table td:nth-child(6) { grid-area: bucket; }
+        .activity-table td:nth-child(7) { grid-area: description; }
+        .activity-table td:nth-child(8) { grid-area: match; }
+        .activity-table td:nth-child(9) { grid-area: override; justify-self: end; }
         .amount { font-weight: 800; font-variant-numeric: tabular-nums; color: #fff; white-space: nowrap; }
         .amount.positive { color: #bbf7d0; }
         .amount.negative { color: #fecaca; }
@@ -132,7 +155,8 @@
         .row-actions { display: grid; gap: 8px; min-width: 0; }
         .row-editor summary {
             list-style: none;
-            width: max-content;
+            width: 100%;
+            min-width: 64px;
             min-height: 34px;
             padding: 8px 10px;
             border: 1px solid var(--line);
@@ -142,13 +166,25 @@
             font-size: 12px;
             font-weight: 800;
             cursor: pointer;
+            text-align: center;
         }
         .row-editor summary::-webkit-details-marker { display: none; }
         .row-editor[open] summary { margin-bottom: 8px; color: #fff; background: var(--lx-red); border-color: var(--lx-red); }
-        .row-editor[open] { min-width: min(320px, 42vw); }
+        .row-editor[open] {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            z-index: 3;
+            width: min(320px, calc(100vw - 48px));
+            padding: 10px;
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            background: var(--panel);
+            box-shadow: 0 18px 36px rgba(0,0,0,.35);
+        }
         .inline-form { display: grid; gap: 7px; }
-        .muted-desc { color: var(--muted); max-width: 420px; line-height: 1.45; }
-        .match-box { display: grid; gap: 6px; min-width: 170px; }
+        .muted-desc { color: var(--muted); max-width: none; line-height: 1.45; }
+        .match-box { display: grid; gap: 6px; min-width: 0; }
         .empty { padding: 28px; text-align: center; color: var(--muted); }
         .guide-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-top: 14px; }
         .guide-step { display: grid; gap: 7px; padding-top: 12px; border-top: 1px solid var(--line); }
@@ -190,28 +226,37 @@
         @media (max-width: 1180px) {
             .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
             .guide-list { grid-template-columns: 1fr; }
-            .table-shell { border: 0; background: transparent; }
-            table, thead, tbody, tr, td { display: block; width: 100%; }
-            table { table-layout: auto; }
-            thead { display: none; }
-            tr {
-                margin-bottom: 12px;
-                padding: 12px;
-                border: 1px solid var(--line);
-                border-radius: 14px;
-                background: var(--panel);
+            .activity-table tr {
+                grid-template-columns: 54px 82px 78px minmax(120px, 1fr) 68px;
+                grid-template-areas:
+                    "line status date amount override"
+                    "category category bucket bucket override"
+                    "description description description match match";
             }
-            tr.needs-attention { border-left: 4px solid var(--warn); }
-            tr.needs-attention td:first-child { border-left: 0; }
-            td {
+        }
+        @media (max-width: 760px) {
+            .activity-table tr {
+                grid-template-columns: 1fr;
+                grid-template-areas:
+                    "line"
+                    "status"
+                    "date"
+                    "amount"
+                    "category"
+                    "bucket"
+                    "description"
+                    "match"
+                    "override";
+            }
+            .activity-table td {
                 display: grid;
-                grid-template-columns: 128px minmax(0, 1fr);
+                grid-template-columns: 124px minmax(0, 1fr);
                 gap: 12px;
                 padding: 7px 0;
                 border-bottom: 1px solid rgba(255,255,255,.06);
             }
-            td:last-child { border-bottom: 0; }
-            td::before {
+            .activity-table td:last-child { border-bottom: 0; }
+            .activity-table td::before {
                 content: attr(data-label);
                 color: var(--muted);
                 font-size: 10px;
@@ -219,7 +264,9 @@
                 letter-spacing: .08em;
                 text-transform: uppercase;
             }
-            .row-editor[open] { min-width: 0; }
+            .activity-table td:nth-child(9) { justify-self: stretch; }
+            .row-editor summary { width: max-content; }
+            .row-editor[open] { position: static; width: 100%; box-shadow: none; }
         }
         @media (max-width: 700px) {
             .page { padding: 16px 14px 36px; }
@@ -372,7 +419,7 @@
                     <div class="queue-note"><strong>Needs context:</strong> These are the rows where the bank description is not enough for a confident accounting answer. Everything else is categorized for export.</div>
                     {% endif %}
                     <div class="table-shell">
-                        <table>
+                        <table class="activity-table">
                             <thead>
                                 <tr>
                                     <th>Line</th>
