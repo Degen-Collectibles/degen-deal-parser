@@ -24,7 +24,11 @@ from ..ledger import (
     create_ledger_rule,
     draft_ledger_rule_from_instruction,
     draft_ledger_rule_with_ai,
+    expense_category_label,
+    format_ledger_money,
     ledger_filters_from_values,
+    ledger_source_for_bank_row,
+    ledger_status_for_bank_row,
     preview_ledger_rule,
 )
 from ..models import BankTransaction, LedgerRule, utcnow
@@ -64,6 +68,31 @@ def _ledger_redirect_url(
         if value:
             params[key] = str(value)
     return "/ledger" + (f"?{urlencode(params)}" if params else "")
+
+
+def _wants_json(request: Request) -> bool:
+    requested_with = request.headers.get("x-requested-with", "").lower()
+    accept = request.headers.get("accept", "").lower()
+    return requested_with in {"fetch", "xmlhttprequest"} or "application/json" in accept
+
+
+def _ledger_row_json(row: BankTransaction) -> dict[str, object]:
+    status = ledger_status_for_bank_row(row)
+    source = ledger_source_for_bank_row(row)
+    category = row.expense_category or "uncategorized"
+    return {
+        "id": row.id,
+        "amount": float(row.amount or 0.0),
+        "amount_display": format_ledger_money(row.amount),
+        "ledger_status": status,
+        "ledger_status_label": LEDGER_STATUS_LABELS.get(status, status.replace("_", " ").title()),
+        "source": source,
+        "expense_category": category,
+        "expense_category_label": expense_category_label(category),
+        "review_status": row.review_status or "open",
+        "review_note": row.review_note or "",
+        "category_confidence": row.category_confidence or "",
+    }
 
 
 @router.get("/ledger")
@@ -151,6 +180,11 @@ def ledger_row_status_form(
             row.updated_at = utcnow()
             session.add(row)
             session.commit()
+            session.refresh(row)
+    if row and _wants_json(request):
+        return JSONResponse({"ok": True, "row": _ledger_row_json(row)})
+    if _wants_json(request):
+        return JSONResponse({"ok": False, "error": "Ledger row not found"}, status_code=404)
     return RedirectResponse(
         url=_ledger_redirect_url(
             account=selected_account,
@@ -460,4 +494,3 @@ def ledger_export_csv(
         media_type="text/csv",
         headers={"Content-Disposition": 'attachment; filename="ledger-export.csv"'},
     )
-
