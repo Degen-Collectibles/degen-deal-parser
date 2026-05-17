@@ -146,8 +146,10 @@ def test_ledger_builder_counts_bank_rows_and_separates_unbanked_cash():
         session.commit()
 
         data = build_ledger_page_data(session, LedgerFilters(status="all"))
+        with_cash = build_ledger_page_data(session, LedgerFilters(status="all", include_cash=True))
 
     rows_by_id = {row["id"]: row for row in data["rows"]}
+    cash_rows = [row for row in with_cash["rows"] if row["row_kind"] == "cash"]
     assert data["summary"]["bank_row_count"] == 3
     assert data["summary"]["bank_net_total"] == 70.0
     assert rows_by_id[10]["source"] == "discord"
@@ -157,6 +159,11 @@ def test_ledger_builder_counts_bank_rows_and_separates_unbanked_cash():
     assert rows_by_id[12]["ledger_status"] == "needs_action"
     assert data["unbanked_cash_rows"][0]["transaction_id"] == 501
     assert data["summary"]["unbanked_cash_total"] == 90.0
+    assert len(with_cash["rows"]) == 4
+    assert cash_rows[0]["id"] == "cash-501"
+    assert cash_rows[0]["source"] == "cash"
+    assert cash_rows[0]["description"] == "buy inventory 90 cash"
+    assert with_cash["summary"]["bank_net_total"] == 70.0
 
 
 def test_rule_draft_preview_and_apply_updates_only_matching_rows():
@@ -310,6 +317,21 @@ def test_ledger_route_renders_default_needs_action_grid():
                 expense_category="inventory_purchases",
             )
         )
+        session.add(
+            Transaction(
+                id=502,
+                source_message_id=2502,
+                occurred_at=posted_at,
+                parse_status="parsed",
+                entry_kind="buy",
+                payment_method="cash",
+                expense_category="inventory",
+                amount=75.0,
+                money_in=0.0,
+                money_out=75.0,
+                source_content="cash buy 75",
+            )
+        )
         session.commit()
 
         with patch("app.routers.ledger.require_role_response", return_value=None):
@@ -324,14 +346,34 @@ def test_ledger_route_renders_default_needs_action_grid():
                 search="",
                 sort="posted_at",
                 direction="desc",
+                include_cash=False,
+                session=session,
+            )
+            cash_response = ledger_page(
+                make_request("/ledger?include_cash=true&status=all"),
+                account="",
+                start="",
+                end="",
+                status="all",
+                category="",
+                source="",
+                search="",
+                sort="posted_at",
+                direction="desc",
+                include_cash=True,
                 session=session,
             )
 
     body = response.body.decode("utf-8")
+    cash_body = cash_response.body.decode("utf-8")
     assert response.status_code == 200
     assert "Unified Ledger" in body
     assert "Ledger Assistant" in body
     assert "PYMT SENT APPLE CASH" in body
+    assert 'data-ledger-row-id="cash-502"' not in body
+    assert "cash buy 75" in cash_body
+    assert 'data-ledger-row-id="cash-502"' in cash_body
+    assert "Cash in grid" in cash_body
 
 
 def test_ledger_template_uses_dense_full_width_review_surface():

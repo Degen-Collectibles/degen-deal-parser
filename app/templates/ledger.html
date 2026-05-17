@@ -207,6 +207,7 @@
         .pill.reconciled { color: #bbf7d0; background: rgba(34,197,94,.12); border-color: rgba(34,197,94,.34); }
         .pill.force_unmatched { color: #bfdbfe; background: rgba(96,165,250,.12); border-color: rgba(96,165,250,.34); }
         .pill.ignored { color: #cbd5e1; background: rgba(148,163,184,.12); border-color: rgba(148,163,184,.34); }
+        .pill.cash { color: #bae6fd; background: rgba(14,165,233,.12); border-color: rgba(14,165,233,.34); }
         details { margin-top: 8px; color: var(--muted); }
         summary { cursor: pointer; color: #dbeafe; font-weight: 800; }
         .inline-form { display: grid; grid-template-columns: minmax(130px, 1fr) minmax(130px, 1fr) auto; gap: 8px; align-items: end; min-width: 320px; margin-top: 8px; }
@@ -248,7 +249,7 @@
             <div class="hero-actions">
                 <a class="button" href="/bookkeeping/bank">Bank Reconciliation</a>
                 <a class="button" href="/finance">Finance</a>
-                <a class="button primary" href="/ledger/export.csv?account={{ selected.account|urlencode }}&start={{ selected.start|urlencode }}&end={{ selected.end|urlencode }}&status={{ selected.status|urlencode }}&category={{ selected.category|urlencode }}&source={{ selected.source|urlencode }}&search={{ selected.search|urlencode }}&sort={{ selected.sort|urlencode }}&direction={{ selected.direction|urlencode }}">Export CSV</a>
+                <a class="button primary" href="/ledger/export.csv?account={{ selected.account|urlencode }}&start={{ selected.start|urlencode }}&end={{ selected.end|urlencode }}&status={{ selected.status|urlencode }}&category={{ selected.category|urlencode }}&source={{ selected.source|urlencode }}&search={{ selected.search|urlencode }}&sort={{ selected.sort|urlencode }}&direction={{ selected.direction|urlencode }}&include_cash={{ 'true' if selected.include_cash else 'false' }}">Export CSV</a>
             </div>
         </section>
 
@@ -272,6 +273,7 @@
                         <a class="quick-chip{% if selected.status == 'force_unmatched' %} is-active{% endif %}" href="/ledger?status=force_unmatched">Unmatched</a>
                         <a class="quick-chip{% if selected.source == 'shopify' %} is-active{% endif %}" href="/ledger?status=all&source=shopify">Shopify</a>
                         <a class="quick-chip{% if selected.source == 'tiktok' %} is-active{% endif %}" href="/ledger?status=all&source=tiktok">TikTok</a>
+                        <a class="quick-chip{% if selected.include_cash %} is-active{% endif %}" href="/ledger?status=all&include_cash=true">Cash in grid</a>
                         <button class="quick-chip" type="button" id="ledger-tools-toggle">Tools</button>
                     </div>
                     <form method="get" action="/ledger" class="filters">
@@ -315,6 +317,12 @@
                         </label>
                         <label class="search">Search
                             <input name="search" value="{{ selected.search }}" placeholder="Description, category, note">
+                        </label>
+                        <label>Cash
+                            <select name="include_cash">
+                                <option value="false" {% if not selected.include_cash %}selected{% endif %}>Separate</option>
+                                <option value="true" {% if selected.include_cash %}selected{% endif %}>In grid</option>
+                            </select>
                         </label>
                         <label>Sort
                             <select name="sort">
@@ -385,7 +393,7 @@
                             <tbody>
                                 {% for row in rows %}
                                 <tr class="ledger-row" data-ledger-row-id="{{ row.id }}">
-                                    <td><input class="row-select" type="checkbox" name="row_id" value="{{ row.id }}" aria-label="Select row {{ row.id }}"></td>
+                                    <td>{% if row.row_kind == "bank" %}<input class="row-select" type="checkbox" name="row_id" value="{{ row.id }}" aria-label="Select row {{ row.id }}">{% endif %}</td>
                                     <td>
                                         <span class="pill {{ row.ledger_status }}" data-status-pill>{{ row.ledger_status_label }}</span>
                                         {% if row.confidence == "low" %}<div class="mini confidence-line">LOW</div>{% endif %}
@@ -415,7 +423,10 @@
                                         </div>
                                     </td>
                                     <td>
-                                        {% if row.matched_transaction %}
+                                        {% if row.row_kind == "cash" %}
+                                        <strong class="truncate">Discord cash deal</strong>
+                                        <div class="mini match-extra">Shown in-grid; not counted in bank totals.</div>
+                                        {% elif row.matched_transaction %}
                                         <strong class="truncate">{{ row.matched_transaction.entry_kind or "Discord" }}</strong>
                                         <div class="mini match-extra">{{ row.matched_transaction.occurred_at_display }} · {{ row.matched_transaction.payment_method }}</div>
                                         <div class="mini match-extra">{{ row.matched_transaction.source_content }}</div>
@@ -426,6 +437,7 @@
                                         <span class="muted">No attached transaction</span>
                                         {% endif %}
                                         {% if row.match_reason %}<div class="mini match-extra">{{ row.match_reason }}</div>{% endif %}
+                                        {% if row.row_kind == "bank" %}
                                         <form method="post" action="/ledger/rows/{{ row.id }}/force-unmatch-form" class="row-actions" style="margin-top: 8px;">
                                             <input type="hidden" name="selected_account" value="{{ selected.account }}">
                                             <input type="hidden" name="selected_start" value="{{ selected.start }}">
@@ -436,6 +448,7 @@
                                             <input type="hidden" name="selected_search" value="{{ selected.search }}">
                                             <input type="hidden" name="selected_sort" value="{{ selected.sort }}">
                                             <input type="hidden" name="selected_direction" value="{{ selected.direction }}">
+                                            <input type="hidden" name="selected_include_cash" value="{{ 'true' if selected.include_cash else '' }}">
                                             {% if row.match_override_status == "force_unmatched" %}
                                             <input type="hidden" name="mode" value="clear">
                                             <button class="tiny" type="submit">Clear</button>
@@ -444,8 +457,10 @@
                                             <button class="tiny" type="submit">Unmatch</button>
                                             {% endif %}
                                         </form>
+                                        {% endif %}
                                     </td>
                                     <td>
+                                        {% if row.row_kind == "bank" %}
                                         <form method="post" action="/ledger/rows/{{ row.id }}/status-form" class="inline-form" data-row-edit-form>
                                             <input type="hidden" name="selected_account" value="{{ selected.account }}">
                                             <input type="hidden" name="selected_start" value="{{ selected.start }}">
@@ -456,6 +471,7 @@
                                             <input type="hidden" name="selected_search" value="{{ selected.search }}">
                                             <input type="hidden" name="selected_sort" value="{{ selected.sort }}">
                                             <input type="hidden" name="selected_direction" value="{{ selected.direction }}">
+                                            <input type="hidden" name="selected_include_cash" value="{{ 'true' if selected.include_cash else '' }}">
                                             <label>Status
                                                 <select name="review_status">
                                                     {% for value in ["open", "reviewed", "ignored"] %}
@@ -472,6 +488,9 @@
                                             </label>
                                             <button class="tiny primary" type="submit">Save</button>
                                         </form>
+                                        {% else %}
+                                        <span class="mini">Cash row</span>
+                                        {% endif %}
                                     </td>
                                 </tr>
                                 {% else %}
@@ -505,6 +524,7 @@
                             <input type="hidden" name="selected_search" value="{{ selected.search }}">
                             <input type="hidden" name="selected_sort" value="{{ selected.sort }}">
                             <input type="hidden" name="selected_direction" value="{{ selected.direction }}">
+                            <input type="hidden" name="selected_include_cash" value="{{ 'true' if selected.include_cash else '' }}">
                             <input type="hidden" name="name" id="assistant-rule-name">
                             <input type="hidden" name="description" id="assistant-rule-description">
                             <input type="hidden" name="conditions_json" id="assistant-rule-conditions">
@@ -532,6 +552,7 @@
                                 <input type="hidden" name="selected_search" value="{{ selected.search }}">
                                 <input type="hidden" name="selected_sort" value="{{ selected.sort }}">
                                 <input type="hidden" name="selected_direction" value="{{ selected.direction }}">
+                                <input type="hidden" name="selected_include_cash" value="{{ 'true' if selected.include_cash else '' }}">
                                 <button class="tiny primary" type="submit">Apply</button>
                             </form>
                         </div>

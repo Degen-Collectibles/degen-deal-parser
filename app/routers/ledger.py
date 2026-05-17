@@ -48,6 +48,7 @@ def _ledger_redirect_url(
     search: str = "",
     sort: str = "posted_at",
     direction: str = "desc",
+    include_cash: bool | str = False,
     success: str = "",
     error: str = "",
 ) -> str:
@@ -62,6 +63,7 @@ def _ledger_redirect_url(
         "search": search,
         "sort": sort,
         "direction": direction,
+        "include_cash": "true" if include_cash is True or str(include_cash).lower() in {"1", "true", "yes", "on"} else "",
         "success": success,
         "error": error,
     }.items():
@@ -107,6 +109,7 @@ def ledger_page(
     search: str = Query(default=""),
     sort: str = Query(default="posted_at"),
     direction: str = Query(default="desc"),
+    include_cash: bool = Query(default=False),
     success: str = Query(default=""),
     error: str = Query(default=""),
     session: Session = Depends(get_session),
@@ -123,6 +126,7 @@ def ledger_page(
         search=search,
         sort=sort,
         direction=direction,
+        include_cash=include_cash,
     )
     data = build_ledger_page_data(session, filters)
     return templates.TemplateResponse(
@@ -156,6 +160,7 @@ def ledger_row_status_form(
     selected_search: str = Form(default=""),
     selected_sort: str = Form(default="posted_at"),
     selected_direction: str = Form(default="desc"),
+    selected_include_cash: str = Form(default=""),
     session: Session = Depends(get_session),
 ):
     if denial := require_role_response(request, "reviewer"):
@@ -196,6 +201,7 @@ def ledger_row_status_form(
             search=selected_search,
             sort=selected_sort,
             direction=selected_direction,
+            include_cash=selected_include_cash,
             success="Updated ledger row",
         ),
         status_code=303,
@@ -217,6 +223,7 @@ def ledger_row_force_unmatch_form(
     selected_search: str = Form(default=""),
     selected_sort: str = Form(default="posted_at"),
     selected_direction: str = Form(default="desc"),
+    selected_include_cash: str = Form(default=""),
     session: Session = Depends(get_session),
 ):
     if denial := require_role_response(request, "reviewer"):
@@ -255,6 +262,7 @@ def ledger_row_force_unmatch_form(
             search=selected_search,
             sort=selected_sort,
             direction=selected_direction,
+            include_cash=selected_include_cash,
             success=success,
         ),
         status_code=303,
@@ -306,6 +314,7 @@ async def ledger_rule_preview(
             search=str(payload.get("search") or ""),
             sort=str(payload.get("sort") or "posted_at"),
             direction=str(payload.get("direction") or "desc"),
+            include_cash=str(payload.get("include_cash") or ""),
         )
         preview = preview_ledger_rule(
             session,
@@ -336,6 +345,7 @@ def ledger_rule_create_form(
     selected_search: str = Form(default=""),
     selected_sort: str = Form(default="posted_at"),
     selected_direction: str = Form(default="desc"),
+    selected_include_cash: str = Form(default=""),
     session: Session = Depends(get_session),
 ):
     if denial := require_role_response(request, "reviewer"):
@@ -367,6 +377,7 @@ def ledger_rule_create_form(
             search=selected_search,
             sort=selected_sort,
             direction=selected_direction,
+            include_cash=selected_include_cash,
             success=success,
             error=error,
         ),
@@ -387,6 +398,7 @@ def ledger_rule_apply_form(
     selected_search: str = Form(default=""),
     selected_sort: str = Form(default="posted_at"),
     selected_direction: str = Form(default="desc"),
+    selected_include_cash: str = Form(default=""),
     session: Session = Depends(get_session),
 ):
     if denial := require_role_response(request, "reviewer"):
@@ -404,6 +416,7 @@ def ledger_rule_apply_form(
         search=selected_search,
         sort=selected_sort,
         direction=selected_direction,
+        include_cash=selected_include_cash,
     )
     result = apply_ledger_rule(session, rule, filters=filters, applied_by=current_user_label(request))
     return RedirectResponse(
@@ -417,6 +430,7 @@ def ledger_rule_apply_form(
             search=selected_search,
             sort=selected_sort,
             direction=selected_direction,
+            include_cash=selected_include_cash,
             success=f"Applied {rule.name} to {result['updated_count']} row(s)",
         ),
         status_code=303,
@@ -435,6 +449,7 @@ def ledger_export_csv(
     search: str = Query(default=""),
     sort: str = Query(default="posted_at"),
     direction: str = Query(default="desc"),
+    include_cash: bool = Query(default=False),
     session: Session = Depends(get_session),
 ):
     if denial := require_role_response(request, "reviewer"):
@@ -449,6 +464,7 @@ def ledger_export_csv(
         search=search,
         sort=sort,
         direction=direction,
+        include_cash=include_cash,
         limit=1000,
     )
     data = build_ledger_page_data(session, filters)
@@ -457,6 +473,7 @@ def ledger_export_csv(
     writer.writerow(
         [
             "row_id",
+            "row_kind",
             "posted_at",
             "account",
             "amount",
@@ -475,6 +492,7 @@ def ledger_export_csv(
         writer.writerow(
             [
                 row["id"],
+                row.get("row_kind", "bank"),
                 row["posted_at_display"],
                 row["account_label"],
                 row["amount"],
