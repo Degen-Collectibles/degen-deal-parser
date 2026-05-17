@@ -208,6 +208,19 @@
         .pill.force_unmatched { color: #bfdbfe; background: rgba(96,165,250,.12); border-color: rgba(96,165,250,.34); }
         .pill.ignored { color: #cbd5e1; background: rgba(148,163,184,.12); border-color: rgba(148,163,184,.34); }
         .pill.cash { color: #bae6fd; background: rgba(14,165,233,.12); border-color: rgba(14,165,233,.34); }
+        .reason-chip {
+            display: inline-flex;
+            align-items: center;
+            max-width: 100%;
+            margin-left: 5px;
+            color: #dbeafe;
+            font-size: 11px;
+            font-weight: 800;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            vertical-align: middle;
+            white-space: nowrap;
+        }
         details { margin-top: 8px; color: var(--muted); }
         summary { cursor: pointer; color: #dbeafe; font-weight: 800; }
         .inline-form { display: grid; grid-template-columns: minmax(130px, 1fr) minmax(130px, 1fr) auto; gap: 8px; align-items: end; min-width: 320px; margin-top: 8px; }
@@ -396,6 +409,7 @@
                                     <td>{% if row.row_kind == "bank" %}<input class="row-select" type="checkbox" name="row_id" value="{{ row.id }}" aria-label="Select row {{ row.id }}">{% endif %}</td>
                                     <td>
                                         <span class="pill {{ row.ledger_status }}" data-status-pill>{{ row.ledger_status_label }}</span>
+                                        <span class="reason-chip" data-action-reason title="{{ row.action_reason_label }}" {% if not row.action_reason_label %}style="display: none;"{% endif %}>{{ row.action_reason_label }}</span>
                                         {% if row.confidence == "low" %}<div class="mini confidence-line">LOW</div>{% endif %}
                                     </td>
                                     <td>{{ row.posted_at_display }}</td>
@@ -638,6 +652,12 @@
                 statusClasses.forEach(function (name) { pill.classList.remove(name); });
                 pill.classList.add(data.ledger_status);
                 pill.textContent = data.ledger_status_label;
+            }
+            var reason = row.querySelector("[data-action-reason]");
+            if (reason) {
+                reason.textContent = data.action_reason_label || "";
+                reason.setAttribute("title", data.action_reason_label || "");
+                reason.style.display = data.action_reason_label ? "inline-flex" : "none";
             }
             var category = row.querySelector("[data-category-label]");
             if (category) {

@@ -37,6 +37,18 @@ LEDGER_SOURCE_LABELS = {
     "cash": "Cash",
 }
 
+LEDGER_ACTION_REASON_LABELS = {
+    "possible_discord_match": "Check Discord match",
+    "needs_match_check": "Needs match check",
+    "needs_log_check": "Needs log check",
+    "needs_source": "Needs source",
+    "needs_category": "Needs category",
+    "expense_review": "Expense review",
+    "credit_review": "Credit review",
+    "payout_review": "Payout review",
+    "cash_only": "Cash only",
+}
+
 RULE_ALLOWED_REVIEW_STATUSES = {"open", "reviewed", "ignored"}
 RULE_ALLOWED_MATCH_OVERRIDES = {"force_unmatched", "clear", "none", ""}
 
@@ -167,9 +179,36 @@ def ledger_status_for_bank_row(row: BankTransaction) -> str:
     return "needs_action"
 
 
+def ledger_action_reason_for_bank_row(row: BankTransaction) -> str:
+    if ledger_status_for_bank_row(row) != "needs_action":
+        return ""
+    classification = (row.classification or "").strip()
+    category = (row.expense_category or "uncategorized").strip() or "uncategorized"
+    if classification == "logged_in_discord_possible":
+        return "possible_discord_match"
+    if classification == "direct_payment_out_needs_log_check":
+        return "needs_match_check"
+    if classification == "direct_customer_payment_needs_log_check":
+        return "needs_log_check"
+    if classification == "cash_deposit_needs_source":
+        return "needs_source"
+    if classification == "transfer_or_possible_processor_sweep":
+        return "payout_review"
+    if classification == "credit_needs_review":
+        return "credit_review"
+    if classification == "expense_or_purchase_needs_review":
+        return "expense_review"
+    if _money(row.amount) < 0 and category == "uncategorized":
+        return "needs_category"
+    if classification in ATTENTION_CLASSIFICATIONS:
+        return "expense_review"
+    return "needs_category"
+
+
 def _bank_row_view(row: BankTransaction, matched: Optional[Transaction] = None) -> dict[str, Any]:
     source = ledger_source_for_bank_row(row)
     status = ledger_status_for_bank_row(row)
+    action_reason = ledger_action_reason_for_bank_row(row)
     category = row.expense_category or "uncategorized"
     return {
         "row_kind": "bank",
@@ -201,6 +240,8 @@ def _bank_row_view(row: BankTransaction, matched: Optional[Transaction] = None) 
         "matched_platform": row.matched_platform or "",
         "ledger_status": status,
         "ledger_status_label": LEDGER_STATUS_LABELS.get(status, status.replace("_", " ").title()),
+        "action_reason": action_reason,
+        "action_reason_label": LEDGER_ACTION_REASON_LABELS.get(action_reason, ""),
         "source": source,
         "source_label": LEDGER_SOURCE_LABELS.get(source, source.title()),
         "payment_rail": _payment_rail_for_text(" ".join([row.description or "", row.details or "", row.raw_row_json or ""])),
@@ -287,6 +328,8 @@ def _cash_row_view(tx: Transaction) -> dict[str, Any]:
         "matched_platform": "discord",
         "ledger_status": "cash",
         "ledger_status_label": "Cash",
+        "action_reason": "cash_only",
+        "action_reason_label": LEDGER_ACTION_REASON_LABELS["cash_only"],
         "source": "cash",
         "source_label": "Cash",
         "payment_rail": "cash",
