@@ -15,16 +15,16 @@ from app.ledger import (
     preview_ledger_rule,
 )
 from app.models import BankStatementImport, BankTransaction, LedgerRule, Transaction
-from app.routers.ledger import ledger_page
+from app.routers.ledger import ledger_page, ledger_row_status_form
 
 
-def make_request(path: str, role: str = "admin") -> Request:
+def make_request(path: str, role: str = "admin", *, method: str = "GET", headers: list[tuple[bytes, bytes]] | None = None) -> Request:
     request = Request(
         {
             "type": "http",
-            "method": "GET",
+            "method": method,
             "path": path,
-            "headers": [],
+            "headers": headers or [],
             "scheme": "http",
             "server": ("testserver", 80),
             "client": ("testclient", 50000),
@@ -332,3 +332,71 @@ def test_ledger_route_renders_default_needs_action_grid():
     assert "Unified Ledger" in body
     assert "Ledger Assistant" in body
     assert "PYMT SENT APPLE CASH" in body
+
+
+def test_ledger_template_uses_dense_full_width_review_surface():
+    source = open("app/templates/ledger.html", encoding="utf-8").read()
+
+    assert "min-width: 1160px" not in source
+    assert "minmax(340px, 420px)" not in source
+    assert 'class="ledger-shell"' in source
+    assert 'class="quick-chip' in source
+    assert 'id="ledger-tools-drawer"' in source
+    assert "data-ledger-row-id" in source
+    assert "data-row-edit-form" in source
+    assert "document.addEventListener(\"keydown\"" in source
+    assert "focusSearch" in source
+
+
+def test_ledger_row_status_form_can_return_json_for_in_place_updates():
+    engine = make_engine()
+    posted_at = datetime(2026, 5, 15, 12, tzinfo=timezone.utc)
+
+    with Session(engine) as session:
+        bank_import = add_import(session)
+        session.add(
+            BankTransaction(
+                id=50,
+                import_id=bank_import.id,
+                row_index=1,
+                account_label="Chase Checking",
+                account_type="checking",
+                posted_at=posted_at,
+                description="PYMT SENT APPLE CASH SENT MONEY CUPERTINO CA",
+                amount=-280.0,
+                classification="direct_payment_out_needs_log_check",
+                expense_category="uncategorized",
+            )
+        )
+        session.commit()
+
+        with patch("app.routers.ledger.require_role_response", return_value=None):
+            response = ledger_row_status_form(
+                make_request(
+                    "/ledger/rows/50/status-form",
+                    method="POST",
+                    headers=[(b"x-requested-with", b"fetch")],
+                ),
+                row_id=50,
+                review_status="reviewed",
+                classification="",
+                expense_category="inventory_purchases",
+                note="handled in-grid",
+                selected_account="",
+                selected_start="",
+                selected_end="",
+                selected_status="needs_action",
+                selected_category="",
+                selected_source="",
+                selected_search="",
+                selected_sort="posted_at",
+                selected_direction="desc",
+                session=session,
+            )
+        row = session.get(BankTransaction, 50)
+
+    assert response.status_code == 200
+    assert json.loads(response.body)["ok"] is True
+    assert json.loads(response.body)["row"]["review_status"] == "reviewed"
+    assert row.review_status == "reviewed"
+    assert row.expense_category == "inventory_purchases"
