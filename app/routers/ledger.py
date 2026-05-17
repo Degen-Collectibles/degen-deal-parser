@@ -18,6 +18,7 @@ from sqlmodel import Session
 from ..csrf import CSRFProtectedRoute
 from ..db import get_session
 from ..ledger import (
+    LEDGER_ACTION_REASON_LABELS,
     LEDGER_STATUS_LABELS,
     apply_ledger_rule,
     build_ledger_page_data,
@@ -26,6 +27,7 @@ from ..ledger import (
     draft_ledger_rule_with_ai,
     expense_category_label,
     format_ledger_money,
+    ledger_action_reason_for_bank_row,
     ledger_filters_from_values,
     ledger_source_for_bank_row,
     ledger_status_for_bank_row,
@@ -80,6 +82,7 @@ def _wants_json(request: Request) -> bool:
 
 def _ledger_row_json(row: BankTransaction) -> dict[str, object]:
     status = ledger_status_for_bank_row(row)
+    action_reason = ledger_action_reason_for_bank_row(row)
     source = ledger_source_for_bank_row(row)
     category = row.expense_category or "uncategorized"
     return {
@@ -88,6 +91,8 @@ def _ledger_row_json(row: BankTransaction) -> dict[str, object]:
         "amount_display": format_ledger_money(row.amount),
         "ledger_status": status,
         "ledger_status_label": LEDGER_STATUS_LABELS.get(status, status.replace("_", " ").title()),
+        "action_reason": action_reason,
+        "action_reason_label": LEDGER_ACTION_REASON_LABELS.get(action_reason, ""),
         "source": source,
         "expense_category": category,
         "expense_category_label": expense_category_label(category),

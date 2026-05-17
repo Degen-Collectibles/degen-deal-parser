@@ -157,6 +157,7 @@ def test_ledger_builder_counts_bank_rows_and_separates_unbanked_cash():
     assert rows_by_id[11]["source"] == "shopify"
     assert rows_by_id[11]["ledger_status"] == "reconciled"
     assert rows_by_id[12]["ledger_status"] == "needs_action"
+    assert rows_by_id[12]["action_reason_label"] == "Needs match check"
     assert data["unbanked_cash_rows"][0]["transaction_id"] == 501
     assert data["summary"]["unbanked_cash_total"] == 90.0
     assert len(with_cash["rows"]) == 4
@@ -370,6 +371,7 @@ def test_ledger_route_renders_default_needs_action_grid():
     assert "Unified Ledger" in body
     assert "Ledger Assistant" in body
     assert "PYMT SENT APPLE CASH" in body
+    assert "Needs match check" in body
     assert 'data-ledger-row-id="cash-502"' not in body
     assert "cash buy 75" in cash_body
     assert 'data-ledger-row-id="cash-502"' in cash_body
@@ -386,6 +388,7 @@ def test_ledger_template_uses_dense_full_width_review_surface():
     assert 'id="ledger-tools-drawer"' in source
     assert "data-ledger-row-id" in source
     assert "data-row-edit-form" in source
+    assert "data-action-reason" in source
     assert "document.addEventListener(\"keydown\"" in source
     assert "focusSearch" in source
 
@@ -440,5 +443,6 @@ def test_ledger_row_status_form_can_return_json_for_in_place_updates():
     assert response.status_code == 200
     assert json.loads(response.body)["ok"] is True
     assert json.loads(response.body)["row"]["review_status"] == "reviewed"
+    assert json.loads(response.body)["row"]["action_reason_label"] == ""
     assert row.review_status == "reviewed"
     assert row.expense_category == "inventory_purchases"
