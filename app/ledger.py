@@ -24,6 +24,7 @@ LEDGER_STATUS_LABELS = {
     "reconciled": "Ready",
     "force_unmatched": "Forced Unmatched",
     "ignored": "Ignored",
+    "cash": "Cash",
 }
 
 LEDGER_SOURCE_LABELS = {
@@ -33,6 +34,7 @@ LEDGER_SOURCE_LABELS = {
     "tiktok": "TikTok",
     "processor": "Processor",
     "paypal": "PayPal",
+    "cash": "Cash",
 }
 
 RULE_ALLOWED_REVIEW_STATUSES = {"open", "reviewed", "ignored"}
@@ -51,6 +53,7 @@ class LedgerFilters:
     sort: str = "posted_at"
     direction: str = "desc"
     limit: int = 250
+    include_cash: bool = False
 
 
 def _as_dict(value: str | dict[str, Any] | None) -> dict[str, Any]:
@@ -169,6 +172,7 @@ def _bank_row_view(row: BankTransaction, matched: Optional[Transaction] = None) 
     status = ledger_status_for_bank_row(row)
     category = row.expense_category or "uncategorized"
     return {
+        "row_kind": "bank",
         "id": row.id,
         "row_index": row.row_index,
         "posted_at": row.posted_at,
@@ -223,6 +227,15 @@ def _cash_transaction_amount(tx: Transaction) -> float:
     return abs(_money(tx.amount))
 
 
+def _cash_transaction_signed_amount(tx: Transaction) -> float:
+    if tx.money_in or tx.money_out:
+        return _money((tx.money_in or 0.0) - (tx.money_out or 0.0))
+    amount = abs(_money(tx.amount))
+    if (tx.entry_kind or "").lower() in {"buy", "expense", "trade"}:
+        return -amount
+    return amount
+
+
 def _unbanked_cash_view(tx: Transaction) -> dict[str, Any]:
     amount = _cash_transaction_amount(tx)
     return {
@@ -238,6 +251,91 @@ def _unbanked_cash_view(tx: Transaction) -> dict[str, Any]:
         "amount_display": format_ledger_money(amount),
         "source_content": tx.source_content,
     }
+
+
+def _cash_row_view(tx: Transaction) -> dict[str, Any]:
+    category = tx.expense_category or tx.category or "uncategorized"
+    signed_amount = _cash_transaction_signed_amount(tx)
+    return {
+        "row_kind": "cash",
+        "id": f"cash-{tx.id}",
+        "transaction_id": tx.id,
+        "row_index": 0,
+        "posted_at": tx.occurred_at,
+        "posted_at_display": _short_date(tx.occurred_at),
+        "account_label": "Cash",
+        "account_type": "cash",
+        "description": tx.source_content or "Discord cash deal",
+        "details": "",
+        "amount": signed_amount,
+        "amount_display": format_ledger_money(signed_amount),
+        "classification": "unbanked_cash",
+        "classification_label": "Unbanked cash",
+        "confidence": "high",
+        "expense_category": category,
+        "expense_category_label": expense_category_label(category),
+        "expense_subcategory": "",
+        "category_confidence": "discord",
+        "category_reason": "Cash deal logged in Discord without a matching bank row.",
+        "review_status": "cash",
+        "review_note": "",
+        "match_reason": "Cash transaction is shown in-grid by request; it does not affect bank totals.",
+        "match_override_status": "",
+        "match_override_note": "",
+        "matched_transaction_id": tx.id,
+        "matched_source_message_id": tx.source_message_id,
+        "matched_platform": "discord",
+        "ledger_status": "cash",
+        "ledger_status_label": "Cash",
+        "source": "cash",
+        "source_label": "Cash",
+        "payment_rail": "cash",
+        "matched_transaction": {
+            "id": tx.id,
+            "source_message_id": tx.source_message_id,
+            "occurred_at_display": _short_date(tx.occurred_at),
+            "entry_kind": tx.entry_kind,
+            "payment_method": tx.payment_method,
+            "expense_category": category,
+            "amount": _cash_transaction_amount(tx),
+            "source_content": tx.source_content,
+        },
+    }
+
+
+def _cash_row_matches_filters(row: dict[str, Any], filters: LedgerFilters) -> bool:
+    source = (filters.source or "").strip()
+    if source and source != "cash":
+        return False
+    status = (filters.status or "").strip() or "needs_action"
+    if status not in {"all", "any", "needs_action", "cash"}:
+        return False
+    start = _parse_date(filters.start)
+    end = _parse_date(filters.end)
+    posted = _date_value(row.get("posted_at"))
+    if start and (posted is None or posted < start):
+        return False
+    if end and (posted is None or posted > end):
+        return False
+    category = (filters.category or "").strip()
+    if category and category != (row.get("expense_category") or "uncategorized"):
+        return False
+    account = (filters.account or "").strip().lower()
+    if account and account not in {"all", "any", "cash"}:
+        return False
+    search = (filters.search or "").strip().lower()
+    if search:
+        haystack = " ".join(
+            [
+                str(row.get("description") or ""),
+                str(row.get("expense_category") or ""),
+                str(row.get("source_label") or ""),
+                str(row.get("match_reason") or ""),
+            ]
+        ).lower()
+        if search not in haystack:
+            return False
+    return True
 
 
 def _row_matches_filters(row: BankTransaction, filters: LedgerFilters) -> bool:
@@ -305,6 +403,28 @@ def _sort_rows(rows: list[BankTransaction], sort: str, direction: str) -> list[B
     return sorted(rows, key=key, reverse=reverse)
 
 
+def _sort_row_views(rows: list[dict[str, Any]], sort: str, direction: str) -> list[dict[str, Any]]:
+    reverse = (direction or "desc").lower() == "desc"
+    sort_key = (sort or "posted_at").strip()
+
+    def key(row: dict[str, Any]) -> tuple[Any, str]:
+        if sort_key == "amount":
+            value: Any = _money(row.get("amount"))
+        elif sort_key == "account":
+            value = str(row.get("account_label") or "").lower()
+        elif sort_key == "status":
+            value = str(row.get("ledger_status") or "")
+        elif sort_key == "category":
+            value = str(row.get("expense_category") or "").lower()
+        elif sort_key == "source":
+            value = str(row.get("source") or "")
+        else:
+            value = row.get("posted_at") or datetime.min.replace(tzinfo=timezone.utc)
+        return value, str(row.get("id") or "")
+
+    return sorted(rows, key=key, reverse=reverse)
+
+
 def _load_bank_rows(session: Session) -> list[BankTransaction]:
     return list(session.exec(select(BankTransaction).where(BankTransaction.is_removed == False)).all())  # noqa: E712
 
@@ -347,11 +467,19 @@ def build_ledger_page_data(session: Session, filters: Optional[LedgerFilters] = 
     selected = filters or LedgerFilters()
     all_rows = _load_bank_rows(session)
     filtered = [row for row in all_rows if _row_matches_filters(row, selected)]
-    sorted_rows = _sort_rows(filtered, selected.sort, selected.direction)
-    visible_rows = sorted_rows[: max(int(selected.limit or 250), 1)]
-    matched_by_id = _matched_transactions_by_id(session, visible_rows)
-    row_views = [_bank_row_view(row, matched_by_id.get(row.matched_transaction_id or -1)) for row in visible_rows]
-    unbanked_cash = [_unbanked_cash_view(tx) for tx in _load_unbanked_cash_transactions(session)]
+    matched_by_id = _matched_transactions_by_id(session, filtered)
+    row_views = [_bank_row_view(row, matched_by_id.get(row.matched_transaction_id or -1)) for row in filtered]
+    unbanked_cash_transactions = _load_unbanked_cash_transactions(session)
+    unbanked_cash = [_unbanked_cash_view(tx) for tx in unbanked_cash_transactions]
+    if selected.include_cash or (selected.source or "").strip() == "cash":
+        cash_row_views = [
+            row
+            for row in (_cash_row_view(tx) for tx in unbanked_cash_transactions)
+            if _cash_row_matches_filters(row, selected)
+        ]
+        row_views.extend(cash_row_views)
+    sorted_row_views = _sort_row_views(row_views, selected.sort, selected.direction)
+    visible_row_views = sorted_row_views[: max(int(selected.limit or 250), 1)]
     status_counts: dict[str, int] = {}
     source_counts: dict[str, int] = {}
     for row in all_rows:
@@ -367,13 +495,13 @@ def build_ledger_page_data(session: Session, filters: Optional[LedgerFilters] = 
         ).all()
     )
     return {
-        "rows": row_views,
+        "rows": visible_row_views,
         "unbanked_cash_rows": unbanked_cash,
         "rules": recent_rules,
         "summary": {
             "bank_row_count": len(all_rows),
-            "filtered_row_count": len(filtered),
-            "hidden_row_count": max(len(sorted_rows) - len(visible_rows), 0),
+            "filtered_row_count": len(sorted_row_views),
+            "hidden_row_count": max(len(sorted_row_views) - len(visible_row_views), 0),
             "bank_inflow_total": bank_inflow,
             "bank_outflow_total": bank_outflow,
             "bank_net_total": bank_net,
@@ -746,7 +874,11 @@ def ledger_filters_from_values(
     sort: str = "posted_at",
     direction: str = "desc",
     limit: int = 250,
+    include_cash: bool | str = False,
 ) -> LedgerFilters:
+    include_cash_bool = include_cash
+    if isinstance(include_cash, str):
+        include_cash_bool = include_cash.strip().lower() in {"1", "true", "yes", "on"}
     return LedgerFilters(
         account=(account or "").strip(),
         start=(start or "").strip(),
@@ -758,4 +890,5 @@ def ledger_filters_from_values(
         sort=(sort or "posted_at").strip(),
         direction=(direction or "desc").strip(),
         limit=max(min(int(limit or 250), 1000), 1),
+        include_cash=bool(include_cash_bool),
     )
