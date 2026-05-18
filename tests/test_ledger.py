@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -793,6 +794,47 @@ def test_ledger_automation_apply_form_redirects_and_updates_matching_rows():
     assert "action_reason=needs_log_check" in response.headers["location"]
     assert "Automation+updated+1+of+1" in response.headers["location"]
     assert row.review_status == "reviewed"
+
+
+def test_ledger_automation_apply_form_hides_unexpected_exception_details(caplog):
+    engine = make_engine()
+    with Session(engine) as session:
+        with (
+            patch("app.routers.ledger.require_role_response", return_value=None),
+            patch(
+                "app.routers.ledger.apply_ledger_automation",
+                side_effect=RuntimeError("database password is super-secret"),
+            ),
+        ):
+            response = ledger_automation_apply_form(
+                make_request("/ledger/automation/mark_needs_log_checked/apply-form", method="POST"),
+                action_key="mark_needs_log_checked",
+                selected_account="",
+                selected_start="",
+                selected_end="",
+                selected_status="needs_action",
+                selected_category="",
+                selected_source="",
+                selected_action_reason="needs_log_check",
+                selected_search="",
+                selected_sort="posted_at",
+                selected_direction="desc",
+                selected_include_cash="",
+                session=session,
+            )
+
+    location = response.headers["location"]
+    assert response.status_code == 303
+    assert "An+unexpected+error+occurred" in location
+    assert "database" not in location
+    assert "super-secret" not in location
+    assert "ledger automation apply failed" in caplog.text
+
+
+def test_ledger_warning_uses_defined_css_variable():
+    template = Path("app/templates/ledger.html").read_text()
+    assert "var(--warning)" not in template
+    assert "var(--warn)" in template
 
 
 def test_apply_ledger_rule_appends_note_to_existing_review_note():

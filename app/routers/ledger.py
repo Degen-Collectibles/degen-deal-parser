@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 from io import StringIO
 from urllib.parse import urlencode
 
@@ -40,6 +41,7 @@ from ..models import BankTransaction, LedgerRule, utcnow
 from ..shared import *  # noqa: F401,F403 -- templates, auth helpers, user labels
 
 router = APIRouter(route_class=CSRFProtectedRoute)
+logger = logging.getLogger(__name__)
 
 
 def _ledger_redirect_url(
@@ -395,9 +397,13 @@ def ledger_automation_apply_form(
         )
         success = f"Automation updated {result['updated_count']} of {result['matched_count']} matching row(s)."
         error = ""
-    except Exception as exc:
+    except ValueError as exc:
         success = ""
         error = str(exc)
+    except Exception:
+        logger.exception("ledger automation apply failed")
+        success = ""
+        error = "An unexpected error occurred, please try again."
     return RedirectResponse(
         url=_ledger_redirect_url(
             account=selected_account,

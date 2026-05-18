@@ -593,7 +593,7 @@
                         <div class="mini">{{ automation.description }}</div>
                         <div class="mini">Preview: {{ automation.affected_count }} row(s) · {{ automation.summary }}</div>
                         {% if automation.warnings %}
-                        <div class="mini" style="color: var(--warning); margin-top: 6px;">
+                        <div class="mini" style="color: var(--warn); margin-top: 6px;">
                             {% for warning in automation.warnings %}{{ warning }}{% if not loop.last %}<br>{% endif %}{% endfor %}
                         </div>
                         {% endif %}
