@@ -32,6 +32,7 @@ from ..ledger import (
     ledger_source_for_bank_row,
     ledger_status_for_bank_row,
     preview_ledger_rule,
+    run_ledger_review_agent,
 )
 from ..models import BankTransaction, LedgerRule, utcnow
 from ..shared import *  # noqa: F401,F403 -- templates, auth helpers, user labels
@@ -47,6 +48,7 @@ def _ledger_redirect_url(
     status: str = "needs_action",
     category: str = "",
     source: str = "",
+    action_reason: str = "",
     search: str = "",
     sort: str = "posted_at",
     direction: str = "desc",
@@ -62,6 +64,7 @@ def _ledger_redirect_url(
         "status": status,
         "category": category,
         "source": source,
+        "action_reason": action_reason,
         "search": search,
         "sort": sort,
         "direction": direction,
@@ -111,6 +114,7 @@ def ledger_page(
     status: str = Query(default="needs_action"),
     category: str = Query(default=""),
     source: str = Query(default=""),
+    action_reason: str = Query(default=""),
     search: str = Query(default=""),
     sort: str = Query(default="posted_at"),
     direction: str = Query(default="desc"),
@@ -128,6 +132,7 @@ def ledger_page(
         status=status,
         category=category,
         source=source,
+        action_reason=action_reason,
         search=search,
         sort=sort,
         direction=direction,
@@ -162,6 +167,7 @@ def ledger_row_status_form(
     selected_status: str = Form(default="needs_action"),
     selected_category: str = Form(default=""),
     selected_source: str = Form(default=""),
+    selected_action_reason: str = Form(default=""),
     selected_search: str = Form(default=""),
     selected_sort: str = Form(default="posted_at"),
     selected_direction: str = Form(default="desc"),
@@ -203,6 +209,7 @@ def ledger_row_status_form(
             status=selected_status,
             category=selected_category,
             source=selected_source,
+            action_reason=selected_action_reason,
             search=selected_search,
             sort=selected_sort,
             direction=selected_direction,
@@ -225,6 +232,7 @@ def ledger_row_force_unmatch_form(
     selected_status: str = Form(default="needs_action"),
     selected_category: str = Form(default=""),
     selected_source: str = Form(default=""),
+    selected_action_reason: str = Form(default=""),
     selected_search: str = Form(default=""),
     selected_sort: str = Form(default="posted_at"),
     selected_direction: str = Form(default="desc"),
@@ -264,6 +272,69 @@ def ledger_row_force_unmatch_form(
             status=selected_status,
             category=selected_category,
             source=selected_source,
+            action_reason=selected_action_reason,
+            search=selected_search,
+            sort=selected_sort,
+            direction=selected_direction,
+            include_cash=selected_include_cash,
+            success=success,
+        ),
+        status_code=303,
+    )
+
+
+@router.post("/ledger/agent/run-form")
+def ledger_agent_run_form(
+    request: Request,
+    selected_account: str = Form(default=""),
+    selected_start: str = Form(default=""),
+    selected_end: str = Form(default=""),
+    selected_status: str = Form(default="needs_action"),
+    selected_category: str = Form(default=""),
+    selected_source: str = Form(default=""),
+    selected_action_reason: str = Form(default=""),
+    selected_search: str = Form(default=""),
+    selected_sort: str = Form(default="posted_at"),
+    selected_direction: str = Form(default="desc"),
+    selected_include_cash: str = Form(default=""),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "reviewer"):
+        return denial
+    filters = ledger_filters_from_values(
+        account=selected_account,
+        start=selected_start,
+        end=selected_end,
+        status=selected_status or "needs_action",
+        category=selected_category,
+        source=selected_source,
+        action_reason=selected_action_reason,
+        search=selected_search,
+        sort=selected_sort,
+        direction=selected_direction,
+        include_cash=selected_include_cash,
+        limit=1000,
+    )
+    result = run_ledger_review_agent(
+        session,
+        filters=filters,
+        limit=1000,
+        applied_by=current_user_label(request),
+    )
+    success = (
+        f"Ledger agent updated {result['updated_count']} row(s): "
+        f"{result['cleared_false_matches']} bad match(es) cleared, "
+        f"{result['auto_reviewed']} row(s) auto-reviewed."
+    )
+    return RedirectResponse(
+        url=_ledger_redirect_url(
+            account=selected_account,
+            start=selected_start,
+            end=selected_end,
+            status=selected_status,
+            category=selected_category,
+            source=selected_source,
+            action_reason=selected_action_reason,
             search=selected_search,
             sort=selected_sort,
             direction=selected_direction,
@@ -316,6 +387,7 @@ async def ledger_rule_preview(
             status=str(payload.get("status") or "all"),
             category=str(payload.get("category") or ""),
             source=str(payload.get("source") or ""),
+            action_reason=str(payload.get("action_reason") or ""),
             search=str(payload.get("search") or ""),
             sort=str(payload.get("sort") or "posted_at"),
             direction=str(payload.get("direction") or "desc"),
@@ -347,6 +419,7 @@ def ledger_rule_create_form(
     selected_status: str = Form(default="needs_action"),
     selected_category: str = Form(default=""),
     selected_source: str = Form(default=""),
+    selected_action_reason: str = Form(default=""),
     selected_search: str = Form(default=""),
     selected_sort: str = Form(default="posted_at"),
     selected_direction: str = Form(default="desc"),
@@ -379,6 +452,7 @@ def ledger_rule_create_form(
             status=selected_status,
             category=selected_category,
             source=selected_source,
+            action_reason=selected_action_reason,
             search=selected_search,
             sort=selected_sort,
             direction=selected_direction,
@@ -400,6 +474,7 @@ def ledger_rule_apply_form(
     selected_status: str = Form(default="all"),
     selected_category: str = Form(default=""),
     selected_source: str = Form(default=""),
+    selected_action_reason: str = Form(default=""),
     selected_search: str = Form(default=""),
     selected_sort: str = Form(default="posted_at"),
     selected_direction: str = Form(default="desc"),
@@ -418,6 +493,7 @@ def ledger_rule_apply_form(
         status=selected_status or "all",
         category=selected_category,
         source=selected_source,
+        action_reason=selected_action_reason,
         search=selected_search,
         sort=selected_sort,
         direction=selected_direction,
@@ -432,6 +508,7 @@ def ledger_rule_apply_form(
             status=selected_status,
             category=selected_category,
             source=selected_source,
+            action_reason=selected_action_reason,
             search=selected_search,
             sort=selected_sort,
             direction=selected_direction,
@@ -451,6 +528,7 @@ def ledger_export_csv(
     status: str = Query(default="needs_action"),
     category: str = Query(default=""),
     source: str = Query(default=""),
+    action_reason: str = Query(default=""),
     search: str = Query(default=""),
     sort: str = Query(default="posted_at"),
     direction: str = Query(default="desc"),
@@ -466,6 +544,7 @@ def ledger_export_csv(
         status=status,
         category=category,
         source=source,
+        action_reason=action_reason,
         search=search,
         sort=sort,
         direction=direction,
@@ -506,10 +585,10 @@ def ledger_export_csv(
                 row["expense_category"],
                 row["classification"],
                 row["description"],
-                row["matched_transaction_id"],
-                row["match_reason"],
-                row["review_status"],
-                row["review_note"],
+                row.get("matched_transaction_id"),
+                row.get("match_reason"),
+                row.get("review_status"),
+                row.get("review_note"),
             ]
         )
     return Response(

@@ -37,7 +37,13 @@ Thumbs.db
 
 # Local tool directories
 .claude/
+.claude-flow/
 .codex/
+.ruflo/
+.swarm/
+agentdb.rvf
+agentdb.rvf.lock
+ruvector.db
 
 # Temp test artifacts
 tests/.tmp_*/

@@ -234,3 +234,63 @@ def test_bank_credit_does_not_match_discord_buy_outflow():
     assert bank_rows[0]["matched_source_message_id"] is None
     assert bank_rows[0]["matched_platform"] is None
     assert bank_rows[0]["classification"] == "direct_customer_payment_needs_log_check"
+
+
+def test_amazon_prime_video_does_not_match_discord_inventory_buy():
+    bank_rows = [
+        {
+            "posted_at": datetime(2026, 5, 15, 12, tzinfo=timezone.utc),
+            "description": "Amazon Prime Video",
+            "amount": -11.99,
+            "raw_row_json": json.dumps({"Category": "Entertainment"}),
+        }
+    ]
+    discord_buy = Transaction(
+        id=1401,
+        source_message_id=3001,
+        occurred_at=datetime(2026, 5, 13, 12, tzinfo=timezone.utc),
+        parse_status="parsed",
+        entry_kind="buy",
+        payment_method="cash",
+        expense_category="inventory",
+        amount=11.99,
+        money_in=0.0,
+        money_out=11.99,
+        source_content="Bought for 12 cash",
+    )
+
+    match_bank_rows_to_transactions(bank_rows, [discord_buy])
+
+    assert bank_rows[0]["matched_transaction_id"] is None
+    assert bank_rows[0]["matched_platform"] is None
+    assert bank_rows[0]["classification"] == "expense_or_purchase_needs_review"
+    assert bank_rows[0]["expense_category"] == "meals_entertainment"
+
+
+def test_discord_owe_me_note_does_not_match_bank_outflow():
+    bank_rows = [
+        {
+            "posted_at": datetime(2026, 5, 16, 12, tzinfo=timezone.utc),
+            "description": "PYMT SENT APPLE CASH BALANCE CUPERTINO CA",
+            "amount": -2500.0,
+        }
+    ]
+    owed_later = Transaction(
+        id=1402,
+        source_message_id=3002,
+        occurred_at=datetime(2026, 5, 13, 12, tzinfo=timezone.utc),
+        parse_status="parsed",
+        entry_kind="buy",
+        payment_method="unknown",
+        expense_category="inventory",
+        amount=2500.0,
+        money_in=0.0,
+        money_out=2500.0,
+        source_content="Bought airbnb 2500$ (owe me)",
+    )
+
+    match_bank_rows_to_transactions(bank_rows, [owed_later])
+
+    assert bank_rows[0]["matched_transaction_id"] is None
+    assert bank_rows[0]["matched_platform"] is None
+    assert bank_rows[0]["classification"] == "direct_payment_out_needs_log_check"

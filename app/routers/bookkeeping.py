@@ -263,8 +263,18 @@ def bank_plaid_sync_form(
         added = int(result.get("added") or 0)
         modified = int(result.get("modified") or 0)
         removed = int(result.get("removed") or 0)
+        ledger_agent = result.get("ledger_agent") if isinstance(result.get("ledger_agent"), dict) else {}
+        agent_updated = int(ledger_agent.get("updated_count") or 0)
+        agent_cleared = int(ledger_agent.get("cleared_false_matches") or 0)
+        agent_reviewed = int(ledger_agent.get("auto_reviewed") or 0)
         return RedirectResponse(
-            url=_bank_redirect_url(success=f"Synced Plaid feed: {added} new, {modified} updated, {removed} removed"),
+            url=_bank_redirect_url(
+                success=(
+                    f"Synced Plaid feed: {added} new, {modified} updated, {removed} removed. "
+                    f"Ledger agent updated {agent_updated} row(s): "
+                    f"{agent_cleared} bad match(es) cleared, {agent_reviewed} auto-reviewed."
+                )
+            ),
             status_code=303,
         )
     except Exception as exc:

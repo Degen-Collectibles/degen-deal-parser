@@ -18,6 +18,7 @@ from .bank_reconciliation import (
     rerun_bank_reconciliation,
 )
 from .config import get_settings
+from .ledger import LedgerFilters, run_ledger_review_agent
 from .models import (
     BankFeedAccount,
     BankFeedConnection,
@@ -453,6 +454,35 @@ def _apply_payloads(session: Session, import_row: BankStatementImport, payloads:
     return (inserted, updated)
 
 
+def _ledger_agent_summary_empty() -> dict[str, Any]:
+    return {
+        "scanned_count": 0,
+        "updated_count": 0,
+        "cleared_false_matches": 0,
+        "auto_reviewed": 0,
+        "left_open": 0,
+        "sample_actions": [],
+    }
+
+
+def _merge_ledger_agent_results(results: list[dict[str, Any]]) -> dict[str, Any]:
+    merged = _ledger_agent_summary_empty()
+    for result in results:
+        for key in ("scanned_count", "updated_count", "cleared_false_matches", "auto_reviewed", "left_open"):
+            merged[key] += int(result.get(key) or 0)
+        merged["sample_actions"].extend(list(result.get("sample_actions") or [])[: max(10 - len(merged["sample_actions"]), 0)])
+    return merged
+
+
+def run_post_plaid_sync_ledger_agent(session: Session) -> dict[str, Any]:
+    return run_ledger_review_agent(
+        session,
+        filters=LedgerFilters(status="needs_action"),
+        limit=1000,
+        applied_by="Plaid sync",
+    )
+
+
 def _sync_accounts_from_response(
     session: Session,
     connection: BankFeedConnection,
@@ -613,6 +643,7 @@ def sync_plaid_connection(session: Session, connection_id: int) -> dict[str, Any
                 import_row.last_sync_error = None
                 session.add(import_row)
         session.commit()
+        ledger_agent = run_post_plaid_sync_ledger_agent(session)
         return {
             "connection_id": connection.id,
             "added": added_count,
@@ -620,6 +651,7 @@ def sync_plaid_connection(session: Session, connection_id: int) -> dict[str, Any
             "removed": removed_count,
             "pages": pages,
             "cursor_advanced": next_cursor != original_cursor,
+            "ledger_agent": ledger_agent,
         }
     except Exception as exc:
         connection.last_sync_error = str(exc)
@@ -641,12 +673,14 @@ def sync_all_plaid_connections(session: Session) -> dict[str, Any]:
     results = []
     for row in rows:
         results.append(sync_plaid_connection(session, row.id or 0))
+    ledger_agent_results = [item.get("ledger_agent") for item in results if isinstance(item.get("ledger_agent"), dict)]
     return {
         "connections": len(rows),
         "results": results,
         "added": sum(int(item.get("added") or 0) for item in results),
         "modified": sum(int(item.get("modified") or 0) for item in results),
         "removed": sum(int(item.get("removed") or 0) for item in results),
+        "ledger_agent": _merge_ledger_agent_results(ledger_agent_results),
     }
 
 

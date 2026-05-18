@@ -55,6 +55,34 @@ DISCORD_LOGGED_CLASSIFICATIONS = {
     "logged_in_discord_possible",
 }
 
+DISCORD_MATCH_BLOCKING_EXPENSE_CATEGORIES = {
+    "bank_fees",
+    "grading_fees",
+    "meals_entertainment",
+    "payroll",
+    "rent_facilities",
+    "shipping_postage",
+    "show_fees",
+    "software_subscriptions",
+    "supplies_packaging",
+    "taxes_licenses",
+    "travel_airfare",
+    "travel_ground_transport",
+    "travel_lodging",
+}
+
+UNPAID_DISCORD_MARKERS = (
+    "owe me",
+    "owes me",
+    "owed me",
+    "i owe",
+    "iou",
+    "not paid",
+    "unpaid",
+    "pay me back",
+    "payback pending",
+)
+
 EXPENSE_CATEGORY_LABELS = {
     "inventory_purchases": "Inventory purchases",
     "cash_inventory_purchases": "Cash inventory purchases",
@@ -205,7 +233,7 @@ def base_classification(description: str, amount: float) -> str:
         return "transfer_or_possible_processor_sweep" if amount > 0 else "transfer_or_card_payment"
     if any(token in lower for token in ("zelle payment from", "quickpay with zelle payment from")):
         return "direct_customer_payment_needs_log_check"
-    if any(token in lower for token in ("zelle payment to", "venmo", "cash app", "paypal inst xfer", "apple cash sent")):
+    if any(token in lower for token in ("zelle payment to", "venmo", "cash app", "paypal inst xfer", "apple cash sent", "apple cash balance")):
         return "direct_payment_out_needs_log_check"
     if amount > 0 and any(token in lower for token in ("deposit", "remote online deposit", "atm cash deposit", "cash deposit")):
         return "cash_deposit_needs_source"
@@ -300,6 +328,30 @@ def _payment_rails_compatible(bank_rails: set[str], transaction_rails: set[str])
     if not bank_rails or not transaction_rails:
         return True
     return bool(bank_rails & transaction_rails)
+
+
+def transaction_bank_match_block_reason(tx: Transaction) -> str:
+    text = " ".join([tx.source_content or "", tx.payment_method or "", tx.notes or ""]).lower()
+    if _contains_any(text, UNPAID_DISCORD_MARKERS):
+        return "Discord text says the money is owed or unpaid, so it should not be matched to a bank movement."
+    return ""
+
+
+def bank_payload_discord_match_block_reason(payload: dict[str, Any]) -> str:
+    if _bank_payment_rails(payload):
+        return ""
+    amount = float(payload.get("amount") or 0.0)
+    classification = str(payload.get("classification") or "") or base_classification(str(payload.get("description") or ""), amount)
+    probe = dict(payload)
+    probe["classification"] = classification
+    category = categorize_bank_payload(probe)
+    category_name = category.get("expense_category", "")
+    if category_name in DISCORD_MATCH_BLOCKING_EXPENSE_CATEGORIES:
+        return (
+            f"Bank descriptor looks like {category.get('expense_subcategory') or expense_category_label(category_name)}, "
+            "not a Discord inventory/customer payment."
+        )
+    return ""
 
 
 def _cash_flow_direction_compatible(bank_amount: float, transaction_signed_amount: float) -> bool:
@@ -415,9 +467,11 @@ def categorize_bank_payload(payload: dict[str, Any], matched_transaction: Option
         return _category_result("travel_airfare", "Airfare", "high", "Airline descriptor.")
     if _contains_any(text, ("turo", "uber", "parking", "clear *clearme", "chevron", "shell", "valero", "gas")):
         return _category_result("travel_ground_transport", "Ground/fuel/parking", "high", "Vehicle, rideshare, fuel, parking, or airport-service descriptor.")
-    if chase_category.lower() == "food & drink" or _contains_any(
+    if chase_category.lower() in {"food & drink", "entertainment"} or _contains_any(
         text,
         (
+            "amazon prime video",
+            "prime video",
             "doordash",
             "dd *",
             "starbucks",
@@ -555,36 +609,40 @@ def match_bank_rows_to_transactions(
             bank_row.update(categorize_bank_payload(bank_row))
             continue
         bank_payment_rails = _bank_payment_rails(bank_row)
+        discord_match_block_reason = bank_payload_discord_match_block_reason(bank_row)
         candidates: list[tuple[int, int, Transaction]] = []
-        for tx in transactions:
-            if tx.id in used_transaction_ids:
-                continue
-            if abs(_transaction_match_amount(tx) - abs(amount)) > 0.01:
-                continue
-            tx_date = _date_from_datetime(tx.occurred_at)
-            if not tx_date or not posted_date:
-                continue
-            day_delta = abs((tx_date - posted_date).days)
-            if day_delta > 5:
-                continue
-            score = 100 - (day_delta * 10)
-            transaction_payment_rails = _transaction_payment_rails(tx)
-            if not _payment_rails_compatible(bank_payment_rails, transaction_payment_rails):
-                continue
-            signed = _transaction_signed_amount(tx)
-            if not _cash_flow_direction_compatible(amount, signed):
-                continue
-            if bank_payment_rails and transaction_payment_rails and bank_payment_rails & transaction_payment_rails:
-                score += 15
-            if amount > 0 and signed > 0:
-                score += 15
-            if amount < 0 and signed < 0:
-                score += 15
-            if (tx.entry_kind or "") == "sale" and amount > 0:
-                score += 5
-            if (tx.entry_kind or "") in {"buy", "expense", "trade"} and amount < 0:
-                score += 5
-            candidates.append((score, day_delta, tx))
+        if not discord_match_block_reason:
+            for tx in transactions:
+                if tx.id in used_transaction_ids:
+                    continue
+                if transaction_bank_match_block_reason(tx):
+                    continue
+                if abs(_transaction_match_amount(tx) - abs(amount)) > 0.01:
+                    continue
+                tx_date = _date_from_datetime(tx.occurred_at)
+                if not tx_date or not posted_date:
+                    continue
+                day_delta = abs((tx_date - posted_date).days)
+                if day_delta > 5:
+                    continue
+                score = 100 - (day_delta * 10)
+                transaction_payment_rails = _transaction_payment_rails(tx)
+                if not _payment_rails_compatible(bank_payment_rails, transaction_payment_rails):
+                    continue
+                signed = _transaction_signed_amount(tx)
+                if not _cash_flow_direction_compatible(amount, signed):
+                    continue
+                if bank_payment_rails and transaction_payment_rails and bank_payment_rails & transaction_payment_rails:
+                    score += 15
+                if amount > 0 and signed > 0:
+                    score += 15
+                if amount < 0 and signed < 0:
+                    score += 15
+                if (tx.entry_kind or "") == "sale" and amount > 0:
+                    score += 5
+                if (tx.entry_kind or "") in {"buy", "expense", "trade"} and amount < 0:
+                    score += 5
+                candidates.append((score, day_delta, tx))
 
         if not candidates:
             classification = base_classification(str(bank_row.get("description") or ""), amount)
@@ -592,7 +650,7 @@ def match_bank_rows_to_transactions(
                 {
                     "classification": classification,
                     "confidence": classification_confidence(classification),
-                    "match_reason": "No exact app transaction amount/date match found.",
+                    "match_reason": discord_match_block_reason or "No exact app transaction amount/date match found.",
                     "matched_transaction_id": None,
                     "matched_source_message_id": None,
                     "matched_platform": (

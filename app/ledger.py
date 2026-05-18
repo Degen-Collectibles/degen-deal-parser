@@ -13,8 +13,13 @@ from .bank_reconciliation import (
     ATTENTION_CLASSIFICATIONS,
     HIGH_CONFIDENCE_CLASSIFICATIONS,
     all_expense_category_choices,
+    bank_payload_discord_match_block_reason,
+    base_classification,
+    categorize_bank_payload,
     classification_label,
+    classification_confidence,
     expense_category_label,
+    transaction_bank_match_block_reason,
 )
 from .models import BankStatementImport, BankTransaction, LedgerRule, Transaction, utcnow
 
@@ -52,6 +57,24 @@ LEDGER_ACTION_REASON_LABELS = {
 RULE_ALLOWED_REVIEW_STATUSES = {"open", "reviewed", "ignored"}
 RULE_ALLOWED_MATCH_OVERRIDES = {"force_unmatched", "clear", "none", ""}
 
+LEDGER_AGENT_AUTO_REVIEW_CATEGORIES = {
+    "bank_fees",
+    "grading_fees",
+    "meals_entertainment",
+    "payroll",
+    "rent_facilities",
+    "shipping_postage",
+    "show_fees",
+    "software_subscriptions",
+    "supplies_packaging",
+    "taxes_licenses",
+    "travel_airfare",
+    "travel_ground_transport",
+    "travel_lodging",
+}
+
+LEDGER_AGENT_REVIEW_CONFIDENCES = {"high", "medium", "manual", "rule"}
+
 
 @dataclass
 class LedgerFilters:
@@ -61,6 +84,7 @@ class LedgerFilters:
     status: str = "needs_action"
     category: str = ""
     source: str = ""
+    action_reason: str = ""
     search: str = ""
     sort: str = "posted_at"
     direction: str = "desc"
@@ -363,6 +387,9 @@ def _cash_row_matches_filters(row: dict[str, Any], filters: LedgerFilters) -> bo
     category = (filters.category or "").strip()
     if category and category != (row.get("expense_category") or "uncategorized"):
         return False
+    action_reason = (getattr(filters, "action_reason", "") or "").strip()
+    if action_reason and action_reason != (row.get("action_reason") or ""):
+        return False
     account = (filters.account or "").strip().lower()
     if account and account not in {"all", "any", "cash"}:
         return False
@@ -404,6 +431,9 @@ def _row_matches_filters(row: BankTransaction, filters: LedgerFilters) -> bool:
         return False
     status = (filters.status or "").strip() or "needs_action"
     if status not in {"all", "any"} and status != ledger_status_for_bank_row(row):
+        return False
+    action_reason = (getattr(filters, "action_reason", "") or "").strip()
+    if action_reason and action_reason != ledger_action_reason_for_bank_row(row):
         return False
     search = (filters.search or "").strip().lower()
     if search:
@@ -479,11 +509,129 @@ def _matched_transactions_by_id(session: Session, rows: list[BankTransaction]) -
     return {row.id: row for row in session.exec(select(Transaction).where(Transaction.id.in_(ids))).all() if row.id is not None}
 
 
+def _bank_row_payload(row: BankTransaction) -> dict[str, Any]:
+    return {
+        "description": row.description or "",
+        "raw_type": row.raw_type or "",
+        "details": row.details or "",
+        "check_or_slip": row.check_or_slip or "",
+        "amount": row.amount or 0.0,
+        "classification": row.classification or "",
+        "raw_row_json": row.raw_row_json or "{}",
+    }
+
+
+def _append_review_note(existing: str | None, note: str) -> str:
+    existing = (existing or "").strip()
+    return f"{existing}\n{note}" if existing else note
+
+
+def _set_category_from_payload(row: BankTransaction, payload: dict[str, str]) -> None:
+    row.expense_category = payload.get("expense_category") or row.expense_category or "uncategorized"
+    row.expense_subcategory = payload.get("expense_subcategory") or None
+    row.category_confidence = payload.get("category_confidence") or row.category_confidence or "low"
+    row.category_reason = payload.get("category_reason") or row.category_reason or ""
+
+
+def run_ledger_review_agent(
+    session: Session,
+    *,
+    filters: Optional[LedgerFilters] = None,
+    limit: int = 250,
+    applied_by: str = "Ledger agent",
+) -> dict[str, Any]:
+    selected = filters or LedgerFilters(status="needs_action")
+    rows = [
+        row
+        for row in _load_bank_rows(session)
+        if ledger_status_for_bank_row(row) == "needs_action" and _row_matches_filters(row, selected)
+    ][: max(min(int(limit or 250), 1000), 1)]
+    matched_by_id = _matched_transactions_by_id(session, rows)
+    result = {
+        "scanned_count": len(rows),
+        "updated_count": 0,
+        "cleared_false_matches": 0,
+        "auto_reviewed": 0,
+        "left_open": 0,
+        "sample_actions": [],
+    }
+    now = utcnow()
+    for row in rows:
+        changed = False
+        actions: list[str] = []
+        matched = matched_by_id.get(row.matched_transaction_id or -1)
+        bank_reason = bank_payload_discord_match_block_reason(_bank_row_payload(row))
+        transaction_reason = transaction_bank_match_block_reason(matched) if matched else ""
+
+        if row.matched_platform == "discord" and (bank_reason or transaction_reason):
+            reason = transaction_reason or bank_reason
+            classification = base_classification(row.description or "", _money(row.amount))
+            row.classification = classification
+            row.confidence = classification_confidence(classification)
+            row.matched_transaction_id = None
+            row.matched_source_message_id = None
+            row.matched_platform = None
+            row.match_reason = f"Ledger agent cleared Discord match: {reason}"
+            category_payload = _bank_row_payload(row)
+            category_payload["classification"] = classification
+            _set_category_from_payload(row, categorize_bank_payload(category_payload))
+            changed = True
+            result["cleared_false_matches"] += 1
+            actions.append("cleared false Discord match")
+
+        safe_category = row.expense_category in LEDGER_AGENT_AUTO_REVIEW_CATEGORIES
+        safe_confidence = (row.category_confidence or "").lower() in LEDGER_AGENT_REVIEW_CONFIDENCES
+        if row.review_status == "open" and not row.matched_transaction_id and safe_category and safe_confidence:
+            row.review_status = "reviewed"
+            row.review_note = _append_review_note(
+                row.review_note,
+                f"Auto-reviewed by {applied_by}: {expense_category_label(row.expense_category)} with {row.category_confidence} confidence.",
+            )
+            changed = True
+            result["auto_reviewed"] += 1
+            actions.append("auto-reviewed safe operating expense")
+
+        if changed:
+            row.updated_at = now
+            session.add(row)
+            result["updated_count"] += 1
+            if len(result["sample_actions"]) < 10:
+                result["sample_actions"].append(
+                    {
+                        "id": row.id,
+                        "description": row.description,
+                        "actions": actions,
+                        "category": row.expense_category,
+                        "review_status": row.review_status,
+                    }
+                )
+        else:
+            result["left_open"] += 1
+
+    if result["updated_count"]:
+        session.commit()
+    return result
+
+
+def _is_cash_payment_transaction(tx: Transaction) -> bool:
+    payment = (tx.payment_method or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if payment in {"cash_app", "cashapp", "apple_cash", "applepay", "apple_pay"}:
+        return False
+    if payment == "cash":
+        return True
+    content = (tx.source_content or "").lower()
+    if _payment_rail_for_text(content) in {"apple_cash", "cash_app"}:
+        return False
+    return bool(re.search(r"\bcash\b", content))
+
+
 def _load_unbanked_cash_transactions(session: Session) -> list[Transaction]:
     matched_ids = {
         int(matched_id)
         for matched_id in session.exec(
-            select(BankTransaction.matched_transaction_id).where(BankTransaction.matched_transaction_id.is_not(None))
+            select(BankTransaction.matched_transaction_id)
+            .where(BankTransaction.is_removed == False)  # noqa: E712
+            .where(BankTransaction.matched_transaction_id.is_not(None))
         ).all()
         if matched_id is not None
     }
@@ -498,9 +646,7 @@ def _load_unbanked_cash_transactions(session: Session) -> list[Transaction]:
     for tx in transactions:
         if tx.id in matched_ids:
             continue
-        payment = (tx.payment_method or "").lower()
-        content = (tx.source_content or "").lower()
-        if payment == "cash" or " cash" in f" {content} ":
+        if _is_cash_payment_transaction(tx):
             if _cash_transaction_amount(tx) > 0:
                 cash_rows.append(tx)
     return cash_rows
@@ -564,6 +710,11 @@ def build_ledger_page_data(session: Session, filters: Optional[LedgerFilters] = 
         "category_choices": all_expense_category_choices(),
         "source_choices": [{"value": key, "label": value} for key, value in LEDGER_SOURCE_LABELS.items()],
         "status_choices": [{"value": key, "label": value} for key, value in LEDGER_STATUS_LABELS.items()],
+        "action_reason_choices": [
+            {"value": key, "label": value}
+            for key, value in LEDGER_ACTION_REASON_LABELS.items()
+            if key != "cash_only"
+        ],
         "selected": selected,
     }
 
@@ -913,6 +1064,7 @@ def ledger_filters_from_values(
     status: str = "needs_action",
     category: str = "",
     source: str = "",
+    action_reason: str = "",
     search: str = "",
     sort: str = "posted_at",
     direction: str = "desc",
@@ -929,6 +1081,7 @@ def ledger_filters_from_values(
         status=(status or "needs_action").strip(),
         category=(category or "").strip(),
         source=(source or "").strip(),
+        action_reason=(action_reason or "").strip(),
         search=(search or "").strip(),
         sort=(sort or "posted_at").strip(),
         direction=(direction or "desc").strip(),
