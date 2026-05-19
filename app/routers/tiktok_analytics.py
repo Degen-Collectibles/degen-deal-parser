@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, Query, Request
@@ -20,11 +20,12 @@ import time
 import threading
 
 from ..reporting import (
-    TIKTOK_PAID_STATUSES,
     build_buyer_profiles,
     build_buyer_detail,
     build_product_velocity,
     build_product_detail,
+    classify_tiktok_reporting_status,
+    tiktok_order_is_paid,
 )
 from ..shared import (
     PACIFIC_TZ,
@@ -53,9 +54,6 @@ logger = logging.getLogger(__name__)
 # Helpers (only used by the routes in this file)
 # ---------------------------------------------------------------------------
 
-_REFUND_STATUSES = {"refunded", "refund_requested", "cancelled", "cancel_requested"}
-
-
 def _enrich_orders_for_range(session: Session, start_utc: datetime, end_utc: Optional[datetime]) -> dict:
     """Compute top sellers, top buyers, refund rate, and AOV from local orders in [start, end]."""
     q = select(TikTokOrder).where(TikTokOrder.created_at >= start_utc)
@@ -71,10 +69,10 @@ def _enrich_orders_for_range(session: Session, start_utc: datetime, end_utc: Opt
     customer_agg: dict[str, dict] = {}
 
     for o in rows:
-        status = (o.financial_status or o.order_status or "").lower().strip()
-        if status in _REFUND_STATUSES:
+        reporting_status = classify_tiktok_reporting_status(o)
+        if reporting_status == "refunded":
             refund_count += 1
-        if status not in TIKTOK_PAID_STATUSES:
+        if reporting_status != "paid":
             continue
         order_gmv = float(o.subtotal_price if o.subtotal_price is not None else (o.total_price or 0))
         gmv += order_gmv
@@ -196,8 +194,7 @@ def _build_daily_from_local_orders(session: Session, days: int) -> list[dict]:
         if day_key not in daily:
             daily[day_key] = {"date": day_key, "gmv": 0.0, "sku_orders": 0, "customers": 0, "items_sold": 0,
                               "click_to_order_rate": "", "click_through_rate": "", "_buyers": set()}
-        status = (o.financial_status or o.order_status or "").lower().strip()
-        if status not in TIKTOK_PAID_STATUSES:
+        if not tiktok_order_is_paid(o):
             continue
         order_gmv = float(o.subtotal_price if o.subtotal_price is not None else (o.total_price or 0))
         daily[day_key]["gmv"] += order_gmv

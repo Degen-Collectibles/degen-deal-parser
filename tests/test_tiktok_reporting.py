@@ -24,19 +24,16 @@ import app.routers.shopify as shopify_module
 import app.shared as shared_module
 from app.models import TikTokAuth, TikTokOrder, utcnow
 from app.reporting import (
-    build_tiktok_line_item_summary,
     build_tiktok_reporting_summary,
+    classify_tiktok_reporting_status,
     get_tiktok_reporting_rows,
 )
-from scripts.tiktok_backfill import build_tiktok_request
+from scripts.tiktok_backfill import build_tiktok_request, upsert_tiktok_order
 from app.tiktok_ingest import (
-    TIKTOK_DEFAULT_API_BASE_URL,
     TIKTOK_SHOP_AUTH_BASE_URL,
     TIKTOK_SHOP_TOKEN_GET_PATH,
-    TIKTOK_TOKEN_GET_PATH,
     TikTokIngestError,
     build_tiktok_auth_record,
-    build_tiktok_api_url,
     build_tiktok_reconciliation_snapshot,
     exchange_tiktok_authorization_code,
     normalize_tiktok_order_payload,
@@ -717,7 +714,8 @@ class TikTokRegressionTests(unittest.TestCase):
         )
         self.assertEqual(normalized["tiktok_order_id"], "577299788258775181")
         self.assertEqual(normalized["shop_id"], "7495987383262087496")
-        self.assertEqual(normalized["financial_status"], "COMPLETED")
+        self.assertEqual(normalized["financial_status"], "")
+        self.assertEqual(normalized["order_status"], "COMPLETED")
 
     def test_tiktok_order_upsert_persists_and_updates_existing_row(self) -> None:
         with Session(self.engine) as session:
@@ -760,6 +758,65 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(json.loads(stored.line_items_summary_json)[0]["unit_price"], 15.0)
         self.assertEqual(record["tiktok_order_id"], "tt-1")
 
+    def test_tiktok_backfill_thin_payload_preserves_existing_paid_status(self) -> None:
+        created_at = datetime(2026, 4, 1, 8, 0, tzinfo=timezone.utc)
+        created_ts = int(created_at.timestamp())
+        update_ts = int((created_at + timedelta(hours=1)).timestamp())
+        with Session(self.engine) as session:
+            upsert_tiktok_order(
+                session,
+                {
+                    "order_id": "thin-paid-1",
+                    "create_time": created_ts,
+                    "update_time": created_ts,
+                    "payment_status": "paid",
+                    "total_amount": "10.00",
+                    "line_items": [{"product_name": "Pack", "quantity": 1, "price": "10.00"}],
+                },
+                shop_id="shop-1",
+                shop_cipher="cipher-1",
+                source="backfill",
+            )
+            session.commit()
+
+            upsert_tiktok_order(
+                session,
+                {"order_id": "thin-paid-1", "update_time": update_ts, "order_status": "AWAITING_SHIPMENT"},
+                shop_id="shop-1",
+                shop_cipher="cipher-1",
+                source="webhook",
+            )
+            session.commit()
+
+            stored = session.exec(select(TikTokOrder).where(TikTokOrder.tiktok_order_id == "thin-paid-1")).first()
+
+        assert stored is not None
+        self.assertEqual(stored.financial_status, "paid")
+        self.assertEqual(stored.order_status, "AWAITING_SHIPMENT")
+        self.assertIsNotNone(stored.created_at)
+        self.assertEqual(int(stored.created_at.timestamp()), created_ts)
+        self.assertEqual(int(stored.updated_at.timestamp()), update_ts)
+        self.assertEqual(stored.total_price, 10.0)
+        self.assertEqual(classify_tiktok_reporting_status(stored), "paid")
+
+    def test_tiktok_refund_aliases_dominate_paid_status(self) -> None:
+        for alias in (
+            "cancel",
+            "in_cancel",
+            "reverse",
+            "refund",
+            "partially_refunded",
+            "refund_request",
+        ):
+            row = TikTokOrder(
+                tiktok_order_id=f"refund-alias-{alias}",
+                created_at=utcnow(),
+                updated_at=utcnow(),
+                financial_status="paid",
+                order_status=alias,
+            )
+            self.assertEqual(classify_tiktok_reporting_status(row), "refunded", alias)
+
     def test_tiktok_reporting_summary_counts_orders_and_line_items(self) -> None:
         with Session(self.engine) as session:
             session.add(
@@ -801,24 +858,39 @@ class TikTokRegressionTests(unittest.TestCase):
                     line_items_summary_json='[{"title":"Mew","quantity":1}]',
                 )
             )
+            session.add(
+                TikTokOrder(
+                    tiktok_order_id="tt-cancel-requested",
+                    shop_id="shop-1",
+                    order_number="#1004",
+                    created_at=utcnow(),
+                    updated_at=utcnow(),
+                    financial_status="paid",
+                    order_status="cancel_requested",
+                    total_price=99.00,
+                    line_items_summary_json='[{"title":"Refunded Pack","quantity":1}]',
+                )
+            )
             session.commit()
 
             rows = get_tiktok_reporting_rows(session)
             summary = build_tiktok_reporting_summary(rows)
+            cancel_requested = next(row for row in rows if row.tiktok_order_id == "tt-cancel-requested")
 
-        self.assertEqual(len(rows), 3)
-        self.assertEqual(summary["orders"], 3)
+        self.assertEqual(len(rows), 4)
+        self.assertEqual(summary["orders"], 4)
         self.assertEqual(summary["status_counts"]["paid"], 1)
         self.assertEqual(summary["status_counts"]["pending"], 1)
-        self.assertEqual(summary["status_counts"]["refunded"], 1)
+        self.assertEqual(summary["status_counts"]["refunded"], 2)
+        self.assertEqual(classify_tiktok_reporting_status(cancel_requested), "refunded")
         self.assertEqual(summary["paid_orders"], 1)
         self.assertEqual(summary["paid_orders_with_known_tax"], 1)
         self.assertEqual(summary["gross_revenue"], 12.5)
         self.assertEqual(summary["total_tax"], 1.5)
         self.assertEqual(summary["net_revenue"], 11.0)
         self.assertFalse(summary["has_missing_tax_data"])
-        self.assertEqual(summary["line_item_summary"]["orders_with_items"], 3)
-        self.assertEqual(summary["line_item_summary"]["line_items_total"], 4)
+        self.assertEqual(summary["line_item_summary"]["orders_with_items"], 4)
+        self.assertEqual(summary["line_item_summary"]["line_items_total"], 5)
 
     def test_tiktok_reporting_rows_filter_and_order_by_created_at(self) -> None:
         earlier = utcnow()
@@ -1894,6 +1966,87 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(payload["creator_order_attribution"], "time_window")
         self.assertEqual(legacy_payload["selected_creator"], "degenboss0")
 
+    def test_tiktok_streamer_poll_cursor_does_not_move_backward_after_refund_update(self) -> None:
+        import app.routers.tiktok_streamer as streamer_module
+        from starlette.requests import Request as _Request
+
+        now = datetime.now(timezone.utc)
+        older_paid_updated = now - timedelta(minutes=10)
+        refund_updated = now - timedelta(minutes=2)
+        with Session(self.engine) as session:
+            session.add(
+                TikTokOrder(
+                    tiktok_order_id="paid-old-cursor-order",
+                    order_number="#3001",
+                    created_at=now - timedelta(minutes=30),
+                    updated_at=older_paid_updated,
+                    financial_status="paid",
+                    subtotal_price=12.0,
+                    total_price=12.0,
+                )
+            )
+            session.add(
+                TikTokOrder(
+                    tiktok_order_id="refunded-cursor-order",
+                    order_number="#3002",
+                    created_at=now - timedelta(minutes=20),
+                    updated_at=refund_updated,
+                    financial_status="refunded",
+                    subtotal_price=20.0,
+                    total_price=20.0,
+                    line_items_json=json.dumps([
+                        {"product_id": "refund-product", "title": "Refunded item", "quantity": 1}
+                    ]),
+                )
+            )
+            session.commit()
+
+            req = _Request({
+                "type": "http",
+                "method": "GET",
+                "path": "/tiktok/streamer/poll",
+                "headers": [],
+                "scheme": "http",
+                "server": ("testserver", 80),
+            })
+            streamer_module._gmv_cache.clear()
+            stream_sessions = [
+                {
+                    "id": "main-live",
+                    "title": "Main live",
+                    "username": "degencollectibles",
+                    "start_time": int((now - timedelta(hours=1)).timestamp()),
+                    "end_time": 0,
+                    "gmv": 12.0,
+                    "sku_orders": 1,
+                    "items_sold": 1,
+                },
+            ]
+            with patch("app.routers.tiktok_streamer._require_live_stream", return_value=None), patch.object(
+                streamer_module,
+                "_get_live_sessions_list",
+                return_value=stream_sessions,
+            ):
+                first_payload = streamer_module.tiktok_streamer_poll(
+                    request=req,
+                    creator="degencollectibles",
+                    stream=None,
+                    since=(refund_updated - timedelta(seconds=1)).isoformat(),
+                    session=session,
+                )
+                second_payload = streamer_module.tiktok_streamer_poll(
+                    request=req,
+                    creator="degencollectibles",
+                    stream=None,
+                    since=refund_updated.isoformat(),
+                    session=session,
+                )
+
+        self.assertEqual([row["tiktok_order_id"] for row in first_payload["orders"]], ["refunded-cursor-order"])
+        self.assertEqual(first_payload["latest_updated_at"], refund_updated.isoformat())
+        self.assertEqual(second_payload["orders"], [])
+        self.assertEqual(second_payload["latest_updated_at"], refund_updated.isoformat())
+
     def test_tiktok_streamer_poll_scopes_overlapping_accounts_by_shop_identity(self) -> None:
         import app.routers.tiktok_streamer as streamer_module
         from starlette.requests import Request as _Request
@@ -2018,6 +2171,102 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(boss_payload["stream_top_buyers"][0]["name"], "Boss Buyer")
         self.assertEqual([row["name"] for row in boss_payload["top_buyers"]], ["Boss Buyer"])
         self.assertEqual(sum(point["count"] for point in boss_payload["order_velocity"]), 1)
+
+    def test_tiktok_streamer_poll_keeps_refund_updates_visible(self) -> None:
+        import app.routers.tiktok_streamer as streamer_module
+        from starlette.requests import Request as _Request
+
+        created_at = datetime.now(timezone.utc) - timedelta(minutes=20)
+        paid_updated_at = created_at + timedelta(minutes=1)
+        refund_updated_at = created_at + timedelta(minutes=10)
+        with Session(self.engine) as session:
+            session.add(
+                TikTokOrder(
+                    tiktok_order_id="paid-still-visible",
+                    order_number="#3001",
+                    created_at=created_at,
+                    updated_at=paid_updated_at,
+                    customer_name="Paid Buyer",
+                    financial_status="paid",
+                    order_status="awaiting_shipment",
+                    subtotal_price=25.0,
+                    total_price=27.5,
+                    line_items_json=json.dumps([
+                        {"product_id": "p-paid", "product_name": "Paid Pack", "quantity": 1, "sale_price": 25.0}
+                    ]),
+                )
+            )
+            session.add(
+                TikTokOrder(
+                    tiktok_order_id="refund-update-visible",
+                    order_number="#3002",
+                    created_at=created_at + timedelta(minutes=1),
+                    updated_at=refund_updated_at,
+                    customer_name="Refund Buyer",
+                    financial_status="paid",
+                    order_status="cancel_requested",
+                    subtotal_price=40.0,
+                    total_price=44.0,
+                    line_items_json=json.dumps([
+                        {"product_id": "p-refund", "product_name": "Refund Pack", "quantity": 1, "sale_price": 40.0}
+                    ]),
+                )
+            )
+            session.commit()
+
+            req = _Request({
+                "type": "http",
+                "method": "GET",
+                "path": "/tiktok/streamer/poll",
+                "headers": [],
+                "scheme": "http",
+                "server": ("testserver", 80),
+            })
+            streamer_module._gmv_cache.clear()
+            stream_sessions = [
+                {
+                    "id": "main-live",
+                    "title": "Main live",
+                    "username": "degencollectibles",
+                    "start_time": int((created_at - timedelta(minutes=5)).timestamp()),
+                    "end_time": 0,
+                    "gmv": 25.0,
+                    "sku_orders": 1,
+                    "items_sold": 1,
+                },
+            ]
+            with patch("app.routers.tiktok_streamer._require_live_stream", return_value=None), patch.object(
+                streamer_module,
+                "_get_live_sessions_list",
+                return_value=stream_sessions,
+            ):
+                payload = streamer_module.tiktok_streamer_poll(
+                    request=req,
+                    creator="degencollectibles",
+                    stream=None,
+                    since=(refund_updated_at - timedelta(seconds=1)).isoformat(),
+                    session=session,
+                )
+
+        self.assertEqual([row["tiktok_order_id"] for row in payload["orders"]], ["refund-update-visible"])
+        self.assertEqual(payload["orders"][0]["order_status"], "cancel_requested")
+        self.assertEqual(payload["latest_updated_at"], refund_updated_at.isoformat())
+        self.assertNotIn("#3002", payload["current_order_ids"])
+        self.assertEqual(payload["stream_gmv"], 25.0)
+        self.assertEqual(payload["stream_orders"], 1)
+        self.assertEqual(sum(point["count"] for point in payload["order_velocity"]), 1)
+
+    def test_tiktok_streamer_template_refund_statuses_match_backend_classifier(self) -> None:
+        template = (Path(__file__).parents[1] / "app" / "templates" / "tiktok_streamer.html").read_text()
+        for status in (
+            "canceled",
+            "cancel_requested",
+            "cancel_request",
+            "return_requested",
+            "return_or_refund_request_pending",
+            "refund_complete",
+        ):
+            self.assertIn(f"'{status}'", template)
 
     def test_tiktok_streamer_poll_uses_local_secondary_metrics_when_tiktok_session_zero(self) -> None:
         import app.routers.tiktok_streamer as streamer_module
@@ -2421,6 +2670,35 @@ class TikTokRegressionTests(unittest.TestCase):
                         ]),
                     )
                 )
+            session.add(
+                TikTokOrder(
+                    tiktok_order_id="main-cancel-requested-order",
+                    order_number="#1099",
+                    created_at=order_time + timedelta(seconds=1),
+                    updated_at=order_time + timedelta(seconds=1),
+                    financial_status="paid",
+                    order_status="cancel_requested",
+                    subtotal_price=50.0,
+                    total_price=55.0,
+                    line_items_json=json.dumps([
+                        {"product_id": "p-main", "product_name": "Main Pack", "quantity": 1, "sale_price": 50.0}
+                    ]),
+                )
+            )
+            session.add(
+                TikTokOrder(
+                    tiktok_order_id="main-pending-order",
+                    order_number="#1098",
+                    created_at=order_time + timedelta(seconds=2),
+                    updated_at=order_time + timedelta(seconds=2),
+                    financial_status="pending",
+                    subtotal_price=60.0,
+                    total_price=66.0,
+                    line_items_json=json.dumps([
+                        {"product_id": "p-main", "product_name": "Main Pack", "quantity": 1, "sale_price": 60.0}
+                    ]),
+                )
+            )
             session.add(
                 TikTokOrder(
                     tiktok_order_id="shop-order",

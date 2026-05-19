@@ -2257,8 +2257,9 @@
         renderLeaderboard();
 
         var REFUND_STATUSES = new Set([
-            'cancel', 'cancelled', 'in_cancel', 'reverse', 'refund', 'refunded',
-            'partially_refunded', 'refund_request', 'refund_requested',
+            'cancel', 'cancelled', 'canceled', 'in_cancel', 'reverse', 'refund', 'refunded',
+            'partially_refunded', 'refund_request', 'refund_requested', 'return_requested',
+            'cancel_requested', 'cancel_request', 'return_or_refund_request_pending', 'refund_complete',
         ]);
         function isRefundOrder(order) {
             var os = (order.order_status || '').toLowerCase().trim();

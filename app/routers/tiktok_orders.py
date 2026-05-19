@@ -29,6 +29,7 @@ from ..shared import (  # noqa: F401 - explicit imports for underscore-prefixed 
 from ..db import get_session, run_write_with_retry
 from ..config import get_settings
 from ..models import TikTokAuth, TikTokOrder, utcnow
+from ..ops_log import redact_log_details
 from ..reporting import build_tiktok_orders_page_data as build_tiktok_orders_page_reporting_data, parse_report_datetime
 from ..runtime_logging import structured_log_line
 from ..tiktok_ingest import (
@@ -287,13 +288,13 @@ async def tiktok_orders_webhook(request: Request):
             import pathlib as _pathlib
             _capture_path = _pathlib.Path("logs/webhook_capture.json")
             try:
-                _capture_path.write_text(json.dumps({
+                _capture_path.write_text(json.dumps(redact_log_details({
                     "received_signature": received_norm,
                     "parsed_header_signature": parsed_h.get("signature"),
                     "parsed_header_timestamp": header_ts,
                     "request_path": str(request.url.path),
                     "payload_timestamp": payload_ts,
-                }, indent=2))
+                }), indent=2))
             except Exception as exc:
                 print(
                     structured_log_line(

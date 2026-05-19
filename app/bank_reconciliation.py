@@ -136,6 +136,67 @@ def expense_category_label(category: str) -> str:
     return EXPENSE_CATEGORY_LABELS.get(category or "", (category or "uncategorized").replace("_", " ").title())
 
 
+def _dedupe_date_part(value: Optional[datetime]) -> str:
+    if value is None:
+        return ""
+    return value.date().isoformat()
+
+
+def compute_bank_row_dedupe_key(row: dict[str, Any], *, occurrence_index: int = 0) -> str:
+    """Stable per-row fingerprint for cross-import dedupe.
+
+    The key is independent of file ordering or column layout: it derives only
+    from the bank row's semantic content (account, dates, signed amount,
+    normalized description, raw type, check #) plus an occurrence index so
+    legitimately repeating same-day transactions still get distinct keys.
+    """
+    parts = (
+        str(row.get("account_label") or "").strip().lower(),
+        str(row.get("account_type") or "").strip().lower(),
+        _dedupe_date_part(row.get("posted_at")),
+        _dedupe_date_part(row.get("transaction_at")),
+        f"{round(float(row.get('amount') or 0.0), 2):.2f}",
+        str(row.get("description_stem") or normalize_description_stem(str(row.get("description") or ""))),
+        str(row.get("raw_type") or "").strip().lower(),
+        str(row.get("check_or_slip") or "").strip().lower(),
+        f"occ:{int(occurrence_index)}",
+    )
+    payload = "|".join(parts)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _bank_row_semantic_fingerprint(row: dict[str, Any]) -> str:
+    """Semantic row identity before adding the repeated-occurrence suffix."""
+    return compute_bank_row_dedupe_key(row, occurrence_index=0)
+
+
+def _bank_row_exact_fingerprint(row: dict[str, Any], *, include_balance: bool = True) -> str:
+    """Exact row identity for distinguishing duplicates from new normalized repeats."""
+    exact_row = dict(row)
+    exact_description = re.sub(r"\s+", " ", str(row.get("description") or "").upper()).strip()
+    exact_row["description_stem"] = exact_description
+    parts = (
+        str(exact_row.get("account_label") or "").strip().lower(),
+        str(exact_row.get("account_type") or "").strip().lower(),
+        _dedupe_date_part(exact_row.get("posted_at")),
+        _dedupe_date_part(exact_row.get("transaction_at")),
+        f"{round(float(exact_row.get('amount') or 0.0), 2):.2f}",
+        f"{round(float(exact_row.get('balance')), 2):.2f}"
+        if include_balance and exact_row.get("balance") not in (None, "")
+        else "",
+        str(exact_row.get("description_stem") or ""),
+        str(exact_row.get("raw_type") or "").strip().lower(),
+        str(exact_row.get("check_or_slip") or "").strip().lower(),
+        "occ:0",
+    )
+    payload = "|".join(parts)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _bank_row_has_balance(row: dict[str, Any]) -> bool:
+    return row.get("balance") not in (None, "")
+
+
 def parse_bank_date(value: Any) -> Optional[datetime]:
     text = str(value or "").strip()
     if not text:
@@ -382,6 +443,128 @@ def is_partner_payback_description(description: str) -> bool:
             "jeffrey lee",
         )
     )
+
+
+_BANK_REVIEW_REASONS = {
+    "cash_deposit_needs_source": "Cash deposit landed without a clear source in Discord or platform payouts.",
+    "direct_customer_payment_needs_log_check": (
+        "Incoming Zelle/Venmo/PayPal-style payment without a matched Discord transaction yet."
+    ),
+    "direct_payment_out_needs_log_check": (
+        "Outgoing Zelle/Venmo/PayPal-style payment that did not match a Discord buy/expense."
+    ),
+    "transfer_or_possible_processor_sweep": (
+        "Looks like a bank transfer or processor sweep — confirm it isn't a customer payment in disguise."
+    ),
+    "credit_needs_review": "Incoming bank credit with no matching log entry or platform payout.",
+    "expense_or_purchase_needs_review": "Outgoing charge could not be matched to an app expense or buy.",
+    "logged_in_discord_possible": (
+        "Bank row matched a Discord transaction by amount/date only — confirm the candidate is correct."
+    ),
+}
+
+_BANK_SUGGESTED_ACTIONS = {
+    "cash_deposit_needs_source": "Tag the deposit source (cash sale, ATM, owner contribution).",
+    "direct_customer_payment_needs_log_check": "Match the Discord sales log entry or log it manually.",
+    "direct_payment_out_needs_log_check": "Log the Discord buy/expense or pick the matching entry.",
+    "transfer_or_possible_processor_sweep": "Confirm whether this is a transfer or a real customer payment.",
+    "credit_needs_review": "Categorize as a payout, refund, or customer payment.",
+    "expense_or_purchase_needs_review": "Assign a real expense category and confirm the vendor.",
+    "logged_in_discord_possible": "Open the candidate Discord row and confirm the match.",
+}
+
+
+def bank_row_review_reason(row: Any) -> str:
+    """Return a short human-facing reason this bank row still needs review.
+
+    Returns an empty string when no review is required (already resolved or
+    confidently classified and matched).
+    """
+    review_status = (getattr(row, "review_status", None) or "").strip().lower()
+    if review_status and review_status != "open":
+        return ""
+    classification = (getattr(row, "classification", None) or "").strip()
+    expense_category = (getattr(row, "expense_category", None) or "").strip().lower()
+    category_confidence = (getattr(row, "category_confidence", None) or "").strip().lower()
+    matched = getattr(row, "matched_transaction_id", None)
+    confidence = (getattr(row, "confidence", None) or "").strip().lower()
+
+    if classification == "logged_in_discord_strong" and matched and confidence == "high":
+        return ""
+
+    # If a row is unmatched but its expense category is rock-solid (high
+    # confidence and not "uncategorized") we treat it as already actionable
+    # — the operator doesn't need to touch it.
+    if (
+        classification in {"expense_or_purchase_needs_review", "credit_needs_review"}
+        and category_confidence == "high"
+        and expense_category
+        and expense_category != "uncategorized"
+    ):
+        return ""
+
+    direct_reason = _BANK_REVIEW_REASONS.get(classification)
+    if direct_reason:
+        return direct_reason
+
+    if expense_category == "uncategorized":
+        return "Bank row is uncategorized."
+    return ""
+
+
+def bank_row_suggested_action(row: Any) -> str:
+    """Return a short suggested next action for the operator, or '' when none."""
+    review_status = (getattr(row, "review_status", None) or "").strip().lower()
+    if review_status and review_status != "open":
+        return ""
+    classification = (getattr(row, "classification", None) or "").strip()
+    expense_category = (getattr(row, "expense_category", None) or "").strip().lower()
+    category_confidence = (getattr(row, "category_confidence", None) or "").strip().lower()
+    matched = getattr(row, "matched_transaction_id", None)
+    confidence = (getattr(row, "confidence", None) or "").strip().lower()
+
+    if classification == "logged_in_discord_strong" and matched and confidence == "high":
+        return ""
+
+    if (
+        classification in {"expense_or_purchase_needs_review", "credit_needs_review"}
+        and category_confidence == "high"
+        and expense_category
+        and expense_category != "uncategorized"
+    ):
+        return ""
+
+    direct_action = _BANK_SUGGESTED_ACTIONS.get(classification)
+    if direct_action:
+        return direct_action
+
+    if expense_category == "uncategorized":
+        return "Assign an expense category."
+    return ""
+
+
+def build_bank_review_items(rows: list[Any]) -> list[dict[str, Any]]:
+    """Return only the rows that still need operator review, annotated with a
+    reason and a suggested next action. Resolved or confidently matched rows
+    are filtered out.
+    """
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        reason = bank_row_review_reason(row)
+        if not reason:
+            continue
+        items.append(
+            {
+                "id": getattr(row, "id", None),
+                "description": getattr(row, "description", None) or "",
+                "amount": float(getattr(row, "amount", 0.0) or 0.0),
+                "classification": getattr(row, "classification", None) or "",
+                "expense_category": getattr(row, "expense_category", None) or "",
+                "reason": reason,
+                "suggested_action": bank_row_suggested_action(row),
+            }
+        )
+    return items
 
 
 def bank_row_is_discord_logged(row: Any) -> bool:
@@ -681,6 +864,197 @@ def match_bank_rows_to_transactions(
         bank_row.update(categorize_bank_payload(bank_row, tx))
 
 
+def _bank_transaction_dedupe_payload(row: BankTransaction) -> dict[str, Any]:
+    return {
+        "account_label": row.account_label,
+        "account_type": row.account_type,
+        "posted_at": row.posted_at,
+        "transaction_at": row.transaction_at,
+        "amount": row.amount,
+        "balance": row.balance,
+        "description": row.description,
+        "description_stem": row.description_stem,
+        "raw_type": row.raw_type,
+        "check_or_slip": row.check_or_slip,
+    }
+
+
+def _backfill_account_bank_row_dedupe_keys(
+    session: Session,
+    *,
+    account_label: str,
+) -> tuple[set[str], dict[str, int], dict[str, int], dict[str, int], dict[str, set[bool]], set[str]]:
+    """Return existing row dedupe keys/counts, filling historical NULL keys first."""
+    existing_rows = session.exec(
+        select(BankTransaction)
+        .where(BankTransaction.account_label == account_label)
+        .order_by(BankTransaction.id)
+    ).all()
+    existing_keys: set[str] = set()
+    fingerprint_counter: dict[str, int] = {}
+    exact_counter: dict[str, int] = {}
+    exact_base_counter: dict[str, int] = {}
+    exact_base_balance_states: dict[str, set[bool]] = {}
+    backfilled_fingerprints: set[str] = set()
+    changed = False
+    for existing_row in existing_rows:
+        payload = _bank_transaction_dedupe_payload(existing_row)
+        fingerprint = _bank_row_semantic_fingerprint(payload)
+        exact_fingerprint = _bank_row_exact_fingerprint(payload)
+        exact_base_fingerprint = _bank_row_exact_fingerprint(payload, include_balance=False)
+        occurrence_index = fingerprint_counter.get(fingerprint, 0)
+        expected_key = compute_bank_row_dedupe_key(payload, occurrence_index=occurrence_index)
+        fingerprint_counter[fingerprint] = occurrence_index + 1
+        exact_counter[exact_fingerprint] = exact_counter.get(exact_fingerprint, 0) + 1
+        exact_base_counter[exact_base_fingerprint] = exact_base_counter.get(exact_base_fingerprint, 0) + 1
+        exact_base_balance_states.setdefault(exact_base_fingerprint, set()).add(_bank_row_has_balance(payload))
+        if not existing_row.row_dedupe_key:
+            existing_row.row_dedupe_key = expected_key
+            session.add(existing_row)
+            backfilled_fingerprints.add(fingerprint)
+            changed = True
+        existing_keys.add(existing_row.row_dedupe_key or expected_key)
+    if changed:
+        session.commit()
+    return existing_keys, fingerprint_counter, exact_counter, exact_base_counter, exact_base_balance_states, backfilled_fingerprints
+
+
+def _dedupe_incoming_bank_rows(
+    session: Session,
+    rows: list[dict[str, Any]],
+    *,
+    account_label: str,
+) -> list[dict[str, Any]]:
+    incoming_counts: dict[str, int] = {}
+    for row in rows:
+        fingerprint = _bank_row_semantic_fingerprint(row)
+        incoming_counts[fingerprint] = incoming_counts.get(fingerprint, 0) + 1
+
+    fingerprint_counter: dict[str, int] = {}
+    for row in rows:
+        fingerprint = _bank_row_semantic_fingerprint(row)
+        occurrence_index = fingerprint_counter.get(fingerprint, 0)
+        row["row_dedupe_key"] = compute_bank_row_dedupe_key(row, occurrence_index=occurrence_index)
+        fingerprint_counter[fingerprint] = occurrence_index + 1
+
+    incoming_keys = {row["row_dedupe_key"] for row in rows if row.get("row_dedupe_key")}
+    if not incoming_keys:
+        return rows
+    (
+        existing_keys,
+        existing_counts,
+        existing_exact_counts,
+        existing_exact_base_counts,
+        existing_exact_base_balance_states,
+        backfilled_fingerprints,
+    ) = _backfill_account_bank_row_dedupe_keys(
+        session,
+        account_label=account_label,
+    )
+    if not existing_keys:
+        return rows
+
+    # Most overlapping exports include at least one duplicate row and one new row.
+    # For single-row/single-fingerprint later imports, treat the row as a new
+    # legitimate repeat by assigning the next occurrence key; otherwise a second
+    # same-day $150 Zelle from the same buyer would be silently dropped forever.
+    single_row_single_fingerprint_import = len(rows) == 1 and len(incoming_counts) == 1
+    accepted_rows: list[dict[str, Any]] = []
+    seen_by_fingerprint: dict[str, int] = {}
+    seen_exact: dict[str, int] = {}
+    seen_exact_base: dict[str, int] = {}
+    incoming_exact_base_counts: dict[str, int] = {}
+    for row in rows:
+        exact_base_fingerprint = _bank_row_exact_fingerprint(row, include_balance=False)
+        incoming_exact_base_counts[exact_base_fingerprint] = incoming_exact_base_counts.get(exact_base_fingerprint, 0) + 1
+    accepted_by_fingerprint: dict[str, int] = {}
+    for row in rows:
+        fingerprint = _bank_row_semantic_fingerprint(row)
+        exact_fingerprint = _bank_row_exact_fingerprint(row)
+        exact_base_fingerprint = _bank_row_exact_fingerprint(row, include_balance=False)
+        incoming_index = seen_by_fingerprint.get(fingerprint, 0)
+        seen_by_fingerprint[fingerprint] = incoming_index + 1
+        incoming_exact_index = seen_exact.get(exact_fingerprint, 0)
+        seen_exact[exact_fingerprint] = incoming_exact_index + 1
+        incoming_exact_base_index = seen_exact_base.get(exact_base_fingerprint, 0)
+        seen_exact_base[exact_base_fingerprint] = incoming_exact_base_index + 1
+        existing_count = existing_counts.get(fingerprint, 0)
+        existing_exact_count = existing_exact_counts.get(exact_fingerprint, 0)
+        existing_exact_base_count = existing_exact_base_counts.get(exact_base_fingerprint, 0)
+        incoming_fingerprint_count = incoming_counts.get(fingerprint, 0)
+        leading_new_repeat_count = max(0, incoming_fingerprint_count - existing_count)
+        is_leading_new_repeat = incoming_index < leading_new_repeat_count
+
+        if incoming_exact_index < existing_exact_count and not is_leading_new_repeat:
+            continue
+
+        candidate_balance_states = existing_exact_base_balance_states.get(exact_base_fingerprint)
+        incoming_has_balance = _bank_row_has_balance(row)
+        if (
+            candidate_balance_states
+            and incoming_has_balance
+            and False in candidate_balance_states
+            and True not in candidate_balance_states
+        ):
+            if incoming_fingerprint_count <= existing_count:
+                continue
+            # Newer-first balance exports put new rows before the existing overlap.
+            # Preserve the leading new occurrences and skip the trailing overlap rows.
+            overlap_start_index = incoming_fingerprint_count - existing_count
+            if incoming_index >= overlap_start_index:
+                continue
+
+        if incoming_index < existing_count or incoming_exact_base_index < existing_exact_base_count:
+            existing_balance_states = candidate_balance_states
+        else:
+            existing_balance_states = None
+        if existing_balance_states:
+            incoming_has_balance = _bank_row_has_balance(row)
+            if single_row_single_fingerprint_import and incoming_counts.get(fingerprint, 0) <= existing_count:
+                # A later export can add or drop a Balance column for the exact same row.
+                # Treat both directions as duplicate re-exports while still allowing a
+                # distinct exact row with the same semantic fingerprint to continue into
+                # the legitimate-repeat path below.
+                if incoming_has_balance and False in existing_balance_states and True not in existing_balance_states:
+                    continue
+                if not incoming_has_balance and True in existing_balance_states:
+                    continue
+            elif incoming_has_balance and False in existing_balance_states and True not in existing_balance_states:
+                # Balance-column exports are commonly newest-first. If the prior import
+                # only had no-balance rows, preserve the leading new balanced repeats and
+                # skip the trailing overlap rows that correspond to the existing rows.
+                incoming_fingerprint_count = incoming_counts.get(fingerprint, 0)
+                if incoming_fingerprint_count <= existing_count:
+                    continue
+                overlap_start_index = incoming_fingerprint_count - existing_count
+                if incoming_index >= overlap_start_index:
+                    continue
+            elif not (incoming_has_balance and True in existing_balance_states):
+                continue
+
+        if (
+            single_row_single_fingerprint_import
+            and incoming_counts.get(fingerprint, 0) <= existing_count
+            and fingerprint not in backfilled_fingerprints
+        ):
+            row["row_dedupe_key"] = compute_bank_row_dedupe_key(
+                row,
+                occurrence_index=existing_count + incoming_index,
+            )
+            accepted_rows.append(row)
+            continue
+
+        if existing_count:
+            occurrence_index = existing_count + accepted_by_fingerprint.get(fingerprint, 0)
+        else:
+            occurrence_index = incoming_index
+        row["row_dedupe_key"] = compute_bank_row_dedupe_key(row, occurrence_index=occurrence_index)
+        if row.get("row_dedupe_key") not in existing_keys:
+            accepted_rows.append(row)
+            accepted_by_fingerprint[fingerprint] = accepted_by_fingerprint.get(fingerprint, 0) + 1
+    return accepted_rows
+
+
 def import_bank_statement_file(
     session: Session,
     *,
@@ -694,8 +1068,13 @@ def import_bank_statement_file(
 
     account_label = (account_label or "").strip() or "Bank account"
     file_hash = hashlib.sha256(content).hexdigest()
+    # Same-file idempotency is scoped to the account label so identical CSV
+    # bytes uploaded against a different account aren't treated as the same
+    # import.
     existing = session.exec(
-        select(BankStatementImport).where(BankStatementImport.file_hash == file_hash)
+        select(BankStatementImport)
+        .where(BankStatementImport.file_hash == file_hash)
+        .where(BankStatementImport.account_label == account_label)
     ).first()
     if existing:
         rerun_bank_reconciliation(session, existing.id)
@@ -704,6 +1083,21 @@ def import_bank_statement_file(
     rows, resolved_account_type = parse_bank_csv(content, account_label=account_label, account_type=account_type)
     if not rows:
         raise ValueError("CSV did not contain any transaction rows")
+
+    rows = _dedupe_incoming_bank_rows(session, rows, account_label=account_label)
+    if not rows:
+        shell = BankStatementImport(
+            label=f"{account_label} - {filename}",
+            account_label=account_label,
+            account_type=resolved_account_type,
+            source_name=filename,
+            file_hash=file_hash,
+            row_count=0,
+        )
+        session.add(shell)
+        session.commit()
+        session.refresh(shell)
+        return shell
 
     match_bank_rows_to_transactions(rows, load_matchable_transactions(session, rows))
 
@@ -754,6 +1148,7 @@ def import_bank_statement_file(
                 matched_source_message_id=row.get("matched_source_message_id"),
                 matched_platform=row.get("matched_platform"),
                 raw_row_json=str(row.get("raw_row_json") or "{}"),
+                row_dedupe_key=row.get("row_dedupe_key"),
             )
         )
     session.commit()

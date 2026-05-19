@@ -38,7 +38,11 @@ from ..shared import (  # noqa: F401 - explicit imports for underscore-prefixed 
 )
 from ..db import get_session, managed_session
 from ..models import TikTokAuth, TikTokOrder
-from ..reporting import TIKTOK_PAID_STATUSES
+from ..reporting import (
+    TIKTOK_PAID_STATUSES,
+    classify_tiktok_reporting_status,
+    tiktok_order_is_paid,
+)
 
 router = APIRouter(route_class=CSRFProtectedRoute)
 
@@ -870,6 +874,7 @@ def _load_scoped_stream_orders(
     *,
     since_updated_at: Optional[datetime] = None,
     order_by_updated: bool = False,
+    include_refund_updates: bool = False,
 ) -> tuple[list[TikTokOrder], dict[str, Any]]:
     account_scope = _stream_account_scope_for_context(session, stream_context)
     query = _apply_stream_order_scope(
@@ -885,7 +890,12 @@ def _load_scoped_stream_orders(
     else:
         query = query.order_by(TikTokOrder.created_at.desc())
     orders = session.exec(query).all()
-    orders = [order for order in orders if _is_enriched_order(order)]
+    orders = [
+        order
+        for order in orders
+        if _is_enriched_order(order)
+        and (tiktok_order_is_paid(order) or (include_refund_updates and _is_refund_update_order(order)))
+    ]
     return _filter_orders_to_live_products(orders, stream_context, db_session=session)
 
 
@@ -947,6 +957,11 @@ def _apply_tiktok_session_metrics(gmv_data: dict[str, Any], stream_context: Opti
     result["stream_metric_source"] = STREAM_METRIC_SOURCE_TIKTOK_LIVE_SESSION
     result["stream_metric_label"] = "TikTok live attribution"
     return result
+
+def _is_refund_update_order(order: TikTokOrder) -> bool:
+    """Return True when a row is a refund/cancel update worth polling to browsers."""
+    return classify_tiktok_reporting_status(order) == "refunded"
+
 
 def _is_enriched_order(o: TikTokOrder) -> bool:
     """Return True if the order has been enriched with full API data.
@@ -1078,21 +1093,27 @@ def _compute_buyer_lifetime_totals(session: Session) -> dict[str, float]:
         if now - _buyer_lifetime_cache.get("at", 0) < _BUYER_LIFETIME_CACHE_TTL and "data" in _buyer_lifetime_cache:
             return _buyer_lifetime_cache["data"]
 
-    status_col = func.coalesce(
-        func.lower(func.trim(TikTokOrder.financial_status)),
-        func.lower(func.trim(TikTokOrder.order_status)),
-        "",
+    # Pre-filter coarsely in SQL on either status field being a paid candidate;
+    # then refine in Python so refund/cancel on the OTHER status field overrides paid.
+    paid_list = list(TIKTOK_PAID_STATUSES)
+    fin_lower = func.lower(func.trim(func.coalesce(TikTokOrder.financial_status, "")))
+    ord_lower = func.lower(func.trim(func.coalesce(TikTokOrder.order_status, "")))
+    candidate_query = select(TikTokOrder).where(
+        (fin_lower.in_(paid_list)) | (ord_lower.in_(paid_list))
     )
-    buyer_name_expr = func.lower(func.trim(func.coalesce(TikTokOrder.customer_name, "guest")))
-    rows = session.exec(
-        select(
-            buyer_name_expr,
-            func.sum(func.coalesce(TikTokOrder.subtotal_price, TikTokOrder.total_price, 0.0)),
+    candidate_rows = session.exec(candidate_query).all()
+
+    agg: dict[str, float] = {}
+    for order in candidate_rows:
+        if not tiktok_order_is_paid(order):
+            continue
+        buyer = (order.customer_name or "guest").strip().lower() or "guest"
+        amount = float(
+            order.subtotal_price
+            if order.subtotal_price is not None
+            else (order.total_price or 0.0)
         )
-        .where(status_col.in_(list(TIKTOK_PAID_STATUSES)))
-        .group_by(buyer_name_expr)
-    ).all()
-    agg = {(name or "guest"): float(total or 0) for name, total in rows}
+        agg[buyer] = agg.get(buyer, 0.0) + amount
 
     with _buyer_lifetime_cache_lock:
         _buyer_lifetime_cache["data"] = agg
@@ -1146,8 +1167,7 @@ def _streamer_session_gmv_uncached(session: Session, stream_context: Optional[di
     customer_agg: dict[str, dict] = {}
 
     for o in today_orders:
-        status = (o.financial_status or o.order_status or "").lower().strip()
-        if status not in TIKTOK_PAID_STATUSES:
+        if not tiktok_order_is_paid(o):
             continue
         order_gmv = float(o.subtotal_price if o.subtotal_price is not None else (o.total_price or 0))
         gmv += order_gmv
@@ -1284,8 +1304,7 @@ def _streamer_session_gmv_uncached(session: Session, stream_context: Optional[di
                 db_session=session,
             )
         for o in stream_orders_rows:
-            status = (o.financial_status or o.order_status or "").lower().strip()
-            if status not in TIKTOK_PAID_STATUSES:
+            if not tiktok_order_is_paid(o):
                 continue
             o_gmv = float(o.subtotal_price if o.subtotal_price is not None else (o.total_price or 0))
             stream_gmv += o_gmv
@@ -1392,31 +1411,24 @@ def _compute_order_velocity(session: Session, stream_context: Optional[dict[str,
         end_dt = stream_context.get("end") or datetime.now(timezone.utc)
     else:
         end_dt = stream_context.get("end") or _stream_range.get("end") or datetime.now(timezone.utc)
-    order_times_query = (
-        select(TikTokOrder.created_at)
+    orders_query = (
+        select(TikTokOrder)
         .where(TikTokOrder.created_at >= start, TikTokOrder.created_at <= end_dt)
         .order_by(TikTokOrder.created_at)
     )
-    order_times_query = _apply_tiktok_account_scope(order_times_query, account_scope)
-    orders = session.exec(order_times_query).all()
+    orders_query = _apply_tiktok_account_scope(orders_query, account_scope)
+    scoped_orders = session.exec(orders_query).all()
     if _should_use_live_product_scope(stream_context):
-        scoped_orders_query = (
-            select(TikTokOrder)
-            .where(TikTokOrder.created_at >= start, TikTokOrder.created_at <= end_dt)
-            .order_by(TikTokOrder.created_at)
-        )
-        scoped_orders_query = _apply_tiktok_account_scope(scoped_orders_query, account_scope)
-        scoped_orders = session.exec(scoped_orders_query).all()
         scoped_orders, _scope = _filter_orders_to_live_products(
             scoped_orders,
             stream_context,
             db_session=session,
         )
-        orders = [order.created_at for order in scoped_orders]
-    if not orders:
+    order_times = [order.created_at for order in scoped_orders if tiktok_order_is_paid(order)]
+    if not order_times:
         return []
     buckets: dict[int, int] = {}
-    for ts in orders:
+    for ts in order_times:
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
         minute_key = int(ts.timestamp()) // 60
@@ -1596,6 +1608,7 @@ def tiktok_streamer_poll(
         created_at_floor,
         since_updated_at=since_dt,
         order_by_updated=True,
+        include_refund_updates=since_dt is not None,
     )
     orders = new_orders[:20]
     cards = [_build_streamer_order_card(o) for o in orders]
@@ -1605,8 +1618,13 @@ def tiktok_streamer_poll(
 
     # Scope MAX(updated_at) to the same 24h window used for order queries.
     # Using global MAX caused the cursor to jump forward when old orders got
-    # status-update webhooks, which made stale orders reappear at the top.
-    latest_updated_at = _latest_updated_at_for_orders(scoped_orders)
+    # status-update webhooks, which made stale orders reappear at the top. When
+    # polling with a cursor, include refund-only updates so clients do not replay
+    # the same cancel/refund alert forever.
+    cursor_orders = [*scoped_orders, *new_orders] if since_dt is not None else scoped_orders
+    latest_updated_at = _latest_updated_at_for_orders(cursor_orders)
+    if since_dt is not None and (latest_updated_at is None or latest_updated_at < since_dt):
+        latest_updated_at = since_dt
     latest_updated_at_text = None
     if latest_updated_at is not None:
         if latest_updated_at.tzinfo is None:
@@ -1964,7 +1982,7 @@ async def tiktok_giveaway_start(request: Request, body: dict = None):
     if denial := require_role_response(request, "admin"):
         return denial
 
-    from ..tiktok_giveaway import get_giveaway_state, run_giveaway, _giveaway_task
+    from ..tiktok_giveaway import get_giveaway_state, run_giveaway
     import app.tiktok_giveaway as _gmod
 
     state = get_giveaway_state()

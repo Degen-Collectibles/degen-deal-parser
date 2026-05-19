@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -8,16 +9,6 @@ from typing import Optional
 from sqlalchemy import func, or_
 from sqlmodel import Session, select
 from zoneinfo import ZoneInfo
-
-import logging
-
-def _ensure_utc(dt: datetime | None) -> datetime | None:
-    """Return a timezone-aware (UTC) datetime regardless of input."""
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt
 
 from .models import (
     DiscordMessage,
@@ -32,6 +23,15 @@ from .models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_utc(dt: datetime | None) -> datetime | None:
+    """Return a timezone-aware (UTC) datetime regardless of input."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 REPORTING_TZ = ZoneInfo("America/Los_Angeles")
@@ -355,6 +355,16 @@ def _tiktok_status_key(row: TikTokOrder) -> str:
     return (row.financial_status or row.order_status or "").strip().lower()
 
 
+def _tiktok_status_values(row: TikTokOrder) -> list[str]:
+    """Both status fields, normalized. Refund/cancel on EITHER field is dispositive."""
+    values: list[str] = []
+    for raw in (row.financial_status, row.order_status):
+        value = (raw or "").strip().lower()
+        if value:
+            values.append(value)
+    return values
+
+
 TIKTOK_PAID_STATUSES = {
     "paid",
     "completed",
@@ -373,25 +383,39 @@ _TIKTOK_PENDING_STATUSES = {
 }
 
 _TIKTOK_REFUNDED_STATUSES = {
+    "cancel",
     "refunded",
+    "refund",
     "cancelled",
     "canceled",
+    "in_cancel",
+    "reverse",
+    "partially_refunded",
+    "refund_request",
     "return_requested",
     "refund_requested",
+    "cancel_requested",
+    "cancel_request",
     "return_or_refund_request_pending",
     "refund_complete",
 }
 
 
 def classify_tiktok_reporting_status(row: TikTokOrder) -> str:
-    status = _tiktok_status_key(row)
-    if status in TIKTOK_PAID_STATUSES:
-        return "paid"
-    if status in _TIKTOK_PENDING_STATUSES:
-        return "pending"
-    if status in _TIKTOK_REFUNDED_STATUSES:
+    values = _tiktok_status_values(row)
+    # Refund/cancel signal on EITHER status field dominates paid/completed.
+    if any(value in _TIKTOK_REFUNDED_STATUSES for value in values):
         return "refunded"
+    if any(value in TIKTOK_PAID_STATUSES for value in values):
+        return "paid"
+    if any(value in _TIKTOK_PENDING_STATUSES for value in values):
+        return "pending"
     return "other"
+
+
+def tiktok_order_is_paid(row: TikTokOrder) -> bool:
+    """True when the order should count for GMV/buyer/velocity reporting."""
+    return classify_tiktok_reporting_status(row) == "paid"
 
 
 def _tiktok_day_key(value: Optional[datetime]) -> str:
@@ -884,8 +908,7 @@ def build_tiktok_buyer_insights(session: Session, days: int = 90) -> list[dict]:
 
     agg: dict[str, dict] = {}
     for o in orders:
-        status = (o.financial_status or o.order_status or "").lower().strip()
-        if status not in TIKTOK_PAID_STATUSES:
+        if not tiktok_order_is_paid(o):
             continue
         buyer_name = (o.customer_name or "").strip() or "Guest"
         buyer_key = buyer_name.lower()
@@ -954,8 +977,7 @@ def build_tiktok_product_performance(
 
     agg: dict[str, dict] = {}
     for o in orders:
-        status = (o.financial_status or o.order_status or "").lower().strip()
-        if status not in TIKTOK_PAID_STATUSES:
+        if not tiktok_order_is_paid(o):
             continue
         raw_items: list[dict] = []
         try:
@@ -1015,8 +1037,7 @@ def load_paid_tiktok_orders(session: Session, days: int = 90) -> list[TikTokOrde
     orders = session.exec(q).all()
     result = []
     for o in orders:
-        status = (o.financial_status or o.order_status or "").lower().strip()
-        if status in TIKTOK_PAID_STATUSES:
+        if tiktok_order_is_paid(o):
             result.append(o)
     return result
 

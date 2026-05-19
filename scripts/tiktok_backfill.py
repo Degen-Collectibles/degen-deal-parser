@@ -34,7 +34,6 @@ from app.tiktok_ingest import (  # noqa: E402
     TIKTOK_SHOP_TOKEN_REFRESH_PATH,
     TIKTOK_TOKEN_GET_PATH,
     TIKTOK_TOKEN_REFRESH_PATH,
-    TikTokIngestError,
     exchange_tiktok_authorization_code,
     structured_tiktok_log_line,
 )
@@ -485,6 +484,9 @@ def _first_present(payload: dict[str, Any], keys: tuple[str, ...]) -> Optional[A
     return None
 
 
+_TIKTOK_CREATED_AT_ALIASES = ("create_time", "created_time", "created_at", "order_create_time")
+
+
 def order_record_from_payload(
     payload: dict[str, Any],
     *,
@@ -499,9 +501,7 @@ def order_record_from_payload(
     if not order_id:
         raise ValueError("TikTok payload is missing order id")
 
-    created_at = parse_datetime(
-        _first_present(payload, ("create_time", "created_time", "created_at", "order_create_time"))
-    )
+    created_at = parse_datetime(_first_present(payload, _TIKTOK_CREATED_AT_ALIASES))
     updated_at = parse_datetime(
         _first_present(payload, ("update_time", "updated_time", "updated_at", "order_update_time"))
         or created_at
@@ -523,11 +523,11 @@ def order_record_from_payload(
         or _first_present(payload, ("tax_amount", "total_tax", "tax", "vat_amount"))
     )
     tax_value = money_to_float(total_tax_raw) if total_tax_raw is not None else None
-    subtotal_price = money_to_float(
-        _first_present(payment_info, ("sub_total",))
-        or _first_present(payload, ("subtotal_price", "goods_amount", "item_amount", "sub_total"))
+    subtotal_price_raw = _first_present(payment_info, ("sub_total",)) or _first_present(
+        payload, ("subtotal_price", "goods_amount", "item_amount", "sub_total")
     )
-    if subtotal_price == 0.0 and tax_value is not None:
+    subtotal_price = money_to_float(subtotal_price_raw)
+    if subtotal_price_raw is None and tax_value is not None:
         subtotal_price = round(max(total_price - tax_value, 0.0), 2)
     subtotal_ex_tax = round(total_price - tax_value, 2) if tax_value is not None else None
 
@@ -565,7 +565,7 @@ def order_record_from_payload(
         "total_tax": tax_value,
         "subtotal_ex_tax": subtotal_ex_tax,
         "financial_status": str(
-            _first_present(payload, ("payment_status", "financial_status", "pay_status", "order_status")) or ""
+            _first_present(payload, ("payment_status", "financial_status", "pay_status")) or ""
         ).strip(),
         "fulfillment_status": str(_first_present(payload, ("fulfillment_status", "shipping_status")) or "").strip() or None,
         "order_status": str(_first_present(payload, ("order_status", "status")) or "").strip() or None,
@@ -597,10 +597,104 @@ def upsert_tiktok_order(
         return "inserted"
 
     for field_name, value in record.items():
+        if (
+            field_name == "created_at"
+            and existing.created_at is not None
+            and _first_present(payload, _TIKTOK_CREATED_AT_ALIASES) is None
+        ):
+            continue
+        # Thin webhooks/list payloads must not blank already-enriched fields.
+        # Numeric money fields are tricky because missing payload values parse as
+        # 0.0, but a literal 0.00 is a valid correction. Only treat 0.0 as blank
+        # when the source payload did not explicitly include a field that feeds
+        # the stored column.
+        if field_name in _TIKTOK_ENRICHABLE_FIELDS:
+            missing_in_payload = not _tiktok_payload_has_enrichable_field(payload, field_name)
+            existing_value = getattr(existing, field_name, None)
+            if missing_in_payload and not _tiktok_value_is_blank(field_name, existing_value, missing_in_payload=False):
+                continue
+            if _tiktok_value_is_blank(field_name, value, missing_in_payload=missing_in_payload):
+                if not _tiktok_value_is_blank(field_name, existing_value, missing_in_payload=False):
+                    continue
         setattr(existing, field_name, value)
     if not dry_run:
         session.add(existing)
     return "updated"
+
+
+_TIKTOK_ENRICHABLE_FIELDS = (
+    "shop_id",
+    "shop_cipher",
+    "order_number",
+    "customer_name",
+    "customer_email",
+    "currency",
+    "financial_status",
+    "fulfillment_status",
+    "order_status",
+    "total_price",
+    "subtotal_price",
+    "total_tax",
+    "subtotal_ex_tax",
+    "line_items_json",
+    "line_items_summary_json",
+)
+
+_TIKTOK_EMPTY_LINE_ITEMS = {"[]", "", None}
+
+_TIKTOK_PAYLOAD_FIELD_ALIASES = {
+    "shop_id": ("shop_id", "shopId"),
+    "shop_cipher": ("shop_cipher", "shopCipher"),
+    "order_number": ("order_number", "order_no", "order_sn", "id"),
+    "customer_name": ("buyer_nickname", "buyer_name", "recipient_name", "consignee_name", "customer_name", "shipping_name"),
+    "customer_email": ("buyer_email", "customer_email", "email"),
+    "currency": ("currency", "currency_code"),
+    "financial_status": ("payment_status", "financial_status", "pay_status"),
+    "fulfillment_status": ("fulfillment_status", "shipping_status"),
+    "order_status": ("order_status", "status"),
+    "total_price": ("total_amount", "payment_amount", "pay_amount", "total_price", "actual_amount", "order_amount"),
+    "subtotal_price": ("subtotal_price", "goods_amount", "item_amount", "sub_total"),
+    "total_tax": ("tax_amount", "total_tax", "tax", "vat_amount"),
+    "subtotal_ex_tax": ("total_amount", "tax_amount", "total_tax", "tax", "vat_amount"),
+    "line_items_json": ("line_items", "item_list", "sku_list", "order_line_items", "items"),
+    "line_items_summary_json": ("line_items", "item_list", "sku_list", "order_line_items", "items"),
+}
+
+MAX_CONSECUTIVE_EMPTY_CURSOR_PAGES = 5
+
+
+def _tiktok_payload_has_enrichable_field(payload: dict[str, Any], field_name: str) -> bool:
+    aliases = _TIKTOK_PAYLOAD_FIELD_ALIASES.get(field_name, (field_name,))
+    if field_name == "total_price":
+        payment_info = payload.get("payment") or payload.get("payment_info") or {}
+        if isinstance(payment_info, dict) and _first_present(payment_info, ("total_amount", "sub_total")) is not None:
+            return True
+    if field_name == "subtotal_price":
+        payment_info = payload.get("payment") or payload.get("payment_info") or {}
+        if isinstance(payment_info, dict) and _first_present(payment_info, ("sub_total",)) is not None:
+            return True
+    if field_name == "subtotal_ex_tax":
+        payment_info = payload.get("payment") or payload.get("payment_info") or {}
+        if isinstance(payment_info, dict) and _first_present(payment_info, ("total_amount",)) is not None and _first_present(payment_info, ("tax", "taxes")) is not None:
+            return True
+    if field_name == "total_tax":
+        payment_info = payload.get("payment") or payload.get("payment_info") or {}
+        if isinstance(payment_info, dict) and _first_present(payment_info, ("tax", "taxes")) is not None:
+            return True
+    return _first_present(payload, aliases) is not None
+
+
+def _tiktok_value_is_blank(field_name: str, value: Any, *, missing_in_payload: bool = False) -> bool:
+    """True if the incoming payload value is effectively missing/empty."""
+    if value is None:
+        return True
+    if field_name in ("line_items_json", "line_items_summary_json"):
+        return value in _TIKTOK_EMPTY_LINE_ITEMS
+    if field_name in ("total_price", "subtotal_price", "total_tax", "subtotal_ex_tax"):
+        return value in (None, "") or (missing_in_payload and value == 0.0)
+    if isinstance(value, str):
+        return value.strip() == ""
+    return False
 
 
 def upsert_tiktok_auth(
@@ -684,6 +778,9 @@ def fetch_tiktok_order_list_page(
     if cursor:
         extra_query["page_token"] = cursor
     body: dict[str, Any] = {}
+    # TikTok Shop order search documents create_time filters for this endpoint.
+    # Refund/cancel updates are picked up by webhooks and detail enrichment; do
+    # not send unsupported update_time_* fields here.
     if since:
         body["create_time_ge"] = to_epoch_seconds(since)
     if until:
@@ -1848,11 +1945,13 @@ def backfill_tiktok_orders(
     runtime_name: str = "tiktok_backfill",
 ) -> TikTokPullSummary:
     summary = TikTokPullSummary()
-    if limit == 0:
-        return summary
+    # limit is "no cap" semantics: None or <=0 means scan exhaustively.
+    if limit is not None and limit <= 0:
+        limit = None
 
     remaining = limit if limit and limit > 0 else None
     cursor: Optional[str] = None
+    consecutive_empty_cursor_pages = 0
     until = utcnow()
 
     with httpx.Client(timeout=40.0, follow_redirects=True) as client:
@@ -1881,7 +1980,39 @@ def backfill_tiktok_orders(
                         dry_run=dry_run,
                     )
                 )
-                break
+                # Empty page: only stop when there is no continuation cursor.
+                # TikTok sometimes returns an empty page mid-stream with more
+                # pages to follow — keep paging while a cursor is present.
+                next_cursor = extract_next_cursor(payload)
+                if not next_cursor:
+                    break
+                if next_cursor == cursor:
+                    print(
+                        structured_log_line(
+                            runtime=runtime_name,
+                            action="tiktok.backfill.repeated_empty_cursor",
+                            success=False,
+                            dry_run=dry_run,
+                            cursor=next_cursor,
+                        )
+                    )
+                    break
+                consecutive_empty_cursor_pages += 1
+                if consecutive_empty_cursor_pages > MAX_CONSECUTIVE_EMPTY_CURSOR_PAGES:
+                    print(
+                        structured_log_line(
+                            runtime=runtime_name,
+                            action="tiktok.backfill.empty_cursor_page_limit",
+                            success=False,
+                            dry_run=dry_run,
+                            empty_pages=consecutive_empty_cursor_pages,
+                        )
+                    )
+                    break
+                cursor = next_cursor
+                continue
+
+            consecutive_empty_cursor_pages = 0
 
             for order_payload in search_orders:
                 if remaining is not None and remaining <= 0:

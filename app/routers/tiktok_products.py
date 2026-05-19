@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import threading
 from typing import Any, Optional
+from urllib.parse import quote_plus
 
 import httpx
 from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
@@ -23,6 +24,7 @@ from ..shared import (  # noqa: F401 - explicit imports for underscore-prefixed 
 from ..db import get_session, managed_session
 from ..config import get_settings
 from ..models import TikTokProduct, utcnow
+from ..ops_log import redact_log_details
 from ..runtime_logging import structured_log_line
 
 try:
@@ -64,11 +66,12 @@ _tiktok_product_sync_lock = threading.Lock()
 
 def _read_tiktok_product_sync_state() -> dict[str, object]:
     with _tiktok_product_sync_lock:
-        return dict(_tiktok_product_sync_state)
+        return redact_log_details(dict(_tiktok_product_sync_state))
 
 def _update_tiktok_product_sync_state(**changes: object) -> None:
+    safe_changes = redact_log_details(changes)
     with _tiktok_product_sync_lock:
-        _tiktok_product_sync_state.update(changes)
+        _tiktok_product_sync_state.update(safe_changes)
 
 def run_tiktok_product_sync_background(*, limit: Optional[int], trigger: str = "manual") -> None:
     runtime_name = f"{settings.runtime_name}_tiktok_product_sync"
@@ -114,13 +117,15 @@ def run_tiktok_product_sync_background(*, limit: Optional[int], trigger: str = "
             )
         _update_tiktok_product_sync_state(is_running=False, last_finished_at=utcnow(), last_error=None)
     except Exception as exc:
-        _update_tiktok_product_sync_state(is_running=False, last_finished_at=utcnow(), last_error=str(exc))
+        raw_error_text = str(exc).strip() or exc.__class__.__name__
+        safe_error_text = str(redact_log_details({"error": raw_error_text}).get("error") or exc.__class__.__name__)
+        _update_tiktok_product_sync_state(is_running=False, last_finished_at=utcnow(), last_error=safe_error_text[:500])
         print(
             structured_log_line(
                 runtime=runtime_name,
                 action="tiktok.products.sync_failed",
                 success=False,
-                error=str(exc),
+                error=safe_error_text[:500],
                 trigger=trigger,
             )
         )
@@ -426,7 +431,8 @@ async def tiktok_products_upload_image(
                 **ctx,
             )
         except Exception as exc:
-            return JSONResponse({"error": str(exc)}, status_code=500)
+            safe_error = str(redact_log_details({"error": str(exc)}).get("error") or exc.__class__.__name__)[:200]
+            return JSONResponse({"error": safe_error}, status_code=500)
     return {"uri": uri}
 
 @router.get("/tiktok/products/new", response_class=HTMLResponse)
@@ -524,7 +530,8 @@ async def tiktok_products_create(
         with httpx.Client(timeout=60.0, follow_redirects=True) as client:
             result = _create_tiktok_product(client, product_body=product_body, **ctx)
     except Exception as exc:
-        error_msg = str(exc)[:200].replace(" ", "+")
+        safe_error = str(redact_log_details({"error": str(exc)}).get("error") or exc.__class__.__name__)[:200]
+        error_msg = quote_plus(safe_error)
         return RedirectResponse(url=f"/tiktok/products/new?error={error_msg}", status_code=303)
 
     new_product_id = result.get("product_id") or result.get("id") or ""
