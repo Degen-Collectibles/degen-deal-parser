@@ -258,6 +258,7 @@ SQLITE_ADDITIVE_MIGRATIONS = {
         "match_override_note": "TEXT",
         "match_override_at": "TIMESTAMP",
         "match_override_by": "TEXT",
+        "row_dedupe_key": "TEXT",
     },
     "bank_statement_imports": {
         "provider": "TEXT",
@@ -364,6 +365,7 @@ SQLITE_INDEX_MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS idx_bank_transactions_match_override_status ON bank_transactions (match_override_status)",
     "CREATE INDEX IF NOT EXISTS idx_bank_transactions_match_override_at ON bank_transactions (match_override_at)",
     "CREATE INDEX IF NOT EXISTS idx_bank_transactions_match_override_by ON bank_transactions (match_override_by)",
+    "CREATE INDEX IF NOT EXISTS idx_bank_transactions_row_dedupe_key ON bank_transactions (row_dedupe_key)",
     "CREATE INDEX IF NOT EXISTS idx_ledger_rules_name ON ledger_rules (name)",
     "CREATE INDEX IF NOT EXISTS idx_ledger_rules_status ON ledger_rules (status)",
     "CREATE INDEX IF NOT EXISTS idx_ledger_rules_created_by ON ledger_rules (created_by)",
@@ -592,6 +594,7 @@ POSTGRES_ADDITIVE_MIGRATIONS = {
         "match_override_note": "TEXT",
         "match_override_at": "TIMESTAMP",
         "match_override_by": "TEXT",
+        "row_dedupe_key": "TEXT",
     },
     "bank_statement_imports": {
         "provider": "TEXT",
@@ -698,6 +701,7 @@ POSTGRES_INDEX_MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS idx_bank_transactions_match_override_status ON bank_transactions (match_override_status)",
     "CREATE INDEX IF NOT EXISTS idx_bank_transactions_match_override_at ON bank_transactions (match_override_at)",
     "CREATE INDEX IF NOT EXISTS idx_bank_transactions_match_override_by ON bank_transactions (match_override_by)",
+    "CREATE INDEX IF NOT EXISTS idx_bank_transactions_row_dedupe_key ON bank_transactions (row_dedupe_key)",
     "CREATE INDEX IF NOT EXISTS idx_ledger_rules_name ON ledger_rules (name)",
     "CREATE INDEX IF NOT EXISTS idx_ledger_rules_status ON ledger_rules (status)",
     "CREATE INDEX IF NOT EXISTS idx_ledger_rules_created_by ON ledger_rules (created_by)",
@@ -1445,14 +1449,11 @@ def seed_staff_schedule_defaults(session: Session) -> None:
 def init_db() -> None:
     attempts = 1 if database_url.startswith("sqlite") else 6
     delay_seconds = 1.0
-    last_error: OperationalError | None = None
-
     for attempt in range(1, attempts + 1):
         try:
             SQLModel.metadata.create_all(engine)
             break
-        except OperationalError as exc:
-            last_error = exc
+        except OperationalError:
             if attempt >= attempts:
                 if postgres_schema_ready():
                     print("[db] metadata create_all failed, but existing Postgres schema was detected; continuing startup")

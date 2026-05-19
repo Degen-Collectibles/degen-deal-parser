@@ -402,6 +402,11 @@ class BankTransaction(SQLModel, table=True):
     pending_transaction_id: Optional[str] = Field(default=None, index=True)
     is_removed: bool = Field(default=False, index=True)
     raw_row_json: str = "{}"
+    # Deterministic dedupe key derived from (account, posted date, amount,
+    # normalized description, ...) plus an occurrence counter. Lets overlapping
+    # CSV imports skip rows that were already ingested while still allowing
+    # legitimately repeating same-day transactions to land.
+    row_dedupe_key: Optional[str] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=utcnow, index=True)
     updated_at: datetime = Field(default_factory=utcnow, index=True)
 

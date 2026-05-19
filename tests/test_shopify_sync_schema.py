@@ -46,6 +46,10 @@ class ShopifySyncSchemaTests(unittest.TestCase):
         self.assertTrue(expected.issubset(db.SQLITE_ADDITIVE_MIGRATIONS["inventory_items"]))
         self.assertTrue(expected.issubset(db.POSTGRES_ADDITIVE_MIGRATIONS["inventory_items"]))
 
+    def test_additive_migrations_cover_bank_row_dedupe_key(self):
+        self.assertIn("row_dedupe_key", db.SQLITE_ADDITIVE_MIGRATIONS["bank_transactions"])
+        self.assertIn("row_dedupe_key", db.POSTGRES_ADDITIVE_MIGRATIONS["bank_transactions"])
+
     def test_index_migrations_cover_shopify_sync_lookup_paths(self):
         sqlite_indexes = "\n".join(db.SQLITE_INDEX_MIGRATIONS)
         postgres_indexes = "\n".join(db.POSTGRES_INDEX_MIGRATIONS)

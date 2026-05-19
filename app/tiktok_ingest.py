@@ -6,7 +6,7 @@ import hmac
 import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Iterable, MutableMapping, Optional
+from typing import Any, Callable, MutableMapping, Optional
 
 import httpx
 from sqlmodel import Session, select
@@ -448,16 +448,15 @@ def normalize_tiktok_order_payload(
             "modified_time",
         )
     ) or created_at or received_at or datetime.now(timezone.utc)
-    total_price = money_to_float(
-        _pick_first(
-            payload,
-            "total_price",
-            "pay_amount",
-            "total_amount",
-            "order_amount",
-            "payment_amount",
-        )
+    total_price_raw = _pick_first(
+        payload,
+        "total_price",
+        "pay_amount",
+        "total_amount",
+        "order_amount",
+        "payment_amount",
     )
+    total_price = money_to_float(total_price_raw)
     subtotal_price = money_to_float(
         _pick_first(
             payload,
@@ -471,19 +470,11 @@ def normalize_tiktok_order_payload(
     total_tax_value = money_to_float(total_tax) if total_tax not in (None, "") else None
     subtotal_ex_tax = (
         round(total_price - total_tax_value, 2)
-        if total_tax_value is not None and total_price
+        if total_tax_value is not None and total_price_raw not in (None, "")
         else None
     )
-    financial_status = str(
-        _pick_first(
-            payload,
-            "financial_status",
-            "payment_status",
-            "order_status",
-            "status",
-        )
-        or ""
-    ).strip()
+    financial_status = str(_pick_first(payload, "financial_status", "payment_status", "pay_status") or "").strip()
+    order_status = str(_pick_first(payload, "order_status", "status") or "").strip() or None
     fulfillment_status = str(
         _pick_first(
             payload,
@@ -543,6 +534,7 @@ def normalize_tiktok_order_payload(
         "subtotal_ex_tax": subtotal_ex_tax,
         "financial_status": financial_status,
         "fulfillment_status": fulfillment_status,
+        "order_status": order_status,
         "line_items_json": json_dumps(line_items if isinstance(line_items, list) else []),
         "line_items_summary_json": json_dumps(normalized_line_items),
         "raw_payload": json_dumps(payload),
@@ -709,21 +701,120 @@ def upsert_tiktok_auth(
     )
 
 
+_TIKTOK_ORDER_ENRICHABLE_FIELDS = (
+    "shop_id",
+    "shop_cipher",
+    "order_number",
+    "customer_name",
+    "customer_email",
+    "currency",
+    "financial_status",
+    "fulfillment_status",
+    "order_status",
+    "total_price",
+    "subtotal_price",
+    "total_tax",
+    "subtotal_ex_tax",
+    "line_items_json",
+    "line_items_summary_json",
+)
+
+_TIKTOK_ORDER_EMPTY_LINE_ITEMS = {"[]", "", None}
+
+_TIKTOK_ORDER_PAYLOAD_FIELD_ALIASES = {
+    "shop_id": ("shop_id", "shopId"),
+    "shop_cipher": ("shop_cipher", "shopCipher"),
+    "order_number": ("order_number", "order_no", "order_sn", "id"),
+    "customer_name": (
+        "buyer_name",
+        "recipient_name",
+        "consignee_name",
+        "recipient_address.name",
+        "shipping_address.name",
+        "shipping_name",
+        "buyer_nickname",
+        "customer_name",
+    ),
+    "customer_email": ("buyer_email", "email", "contact_email", "customer_email"),
+    "currency": ("currency", "currency_code"),
+    "financial_status": ("financial_status", "payment_status", "pay_status"),
+    "fulfillment_status": ("fulfillment_status", "shipping_status", "logistics_status", "package_status"),
+    "order_status": ("order_status", "status"),
+    "total_price": ("total_price", "pay_amount", "total_amount", "order_amount", "payment_amount"),
+    "subtotal_price": ("subtotal_price", "sub_total", "original_amount", "items_amount"),
+    "total_tax": ("tax_amount", "total_tax", "vat_amount"),
+    "subtotal_ex_tax": ("total_price", "pay_amount", "total_amount", "order_amount", "payment_amount", "tax_amount", "total_tax", "vat_amount"),
+    "line_items_json": ("line_items", "sku_list", "order_line_items", "items", "product_list"),
+    "line_items_summary_json": ("line_items", "sku_list", "order_line_items", "items", "product_list"),
+}
+
+_TIKTOK_ORDER_CREATED_AT_ALIASES = ("create_time", "created_time", "created_at", "order_create_time")
+
+
+def _tiktok_order_payload_has_field(payload: dict[str, Any], field_name: str) -> bool:
+    if field_name == "created_at":
+        return _pick_first(payload, *_TIKTOK_ORDER_CREATED_AT_ALIASES) is not None
+    aliases = _TIKTOK_ORDER_PAYLOAD_FIELD_ALIASES.get(field_name, (field_name,))
+    return _pick_first(payload, *aliases) is not None
+
+
+def _tiktok_order_value_is_blank(field_name: str, value: Any, *, missing_in_payload: bool = False) -> bool:
+    if value is None:
+        return True
+    if field_name in ("line_items_json", "line_items_summary_json"):
+        return value in _TIKTOK_ORDER_EMPTY_LINE_ITEMS
+    if field_name in ("total_price", "subtotal_price", "total_tax", "subtotal_ex_tax"):
+        return value in (None, "") or (missing_in_payload and value == 0.0)
+    if isinstance(value, str):
+        return value.strip() == ""
+    return False
+
+
 def upsert_tiktok_order(
     session: Session,
     order_model_type: type[Any],
     order_record: dict[str, Any],
     *,
     lookup_field: str = "tiktok_order_id",
+    source_payload: dict[str, Any] | None = None,
     dry_run: bool = False,
 ) -> str:
-    return upsert_model_row(
-        session,
-        order_model_type,
-        order_record,
-        lookup_field=lookup_field,
-        dry_run=dry_run,
-    )
+    lookup_value = order_record.get(lookup_field)
+    if lookup_value in (None, ""):
+        raise TikTokIngestError(f"Missing lookup value for {lookup_field}")
+
+    lookup_column = getattr(order_model_type, lookup_field, None)
+    if lookup_column is None:
+        raise TikTokIngestError(f"Model {order_model_type.__name__} has no field named {lookup_field}")
+
+    existing = session.exec(select(order_model_type).where(lookup_column == lookup_value)).first()
+    model_kwargs = _build_model_kwargs(order_model_type, order_record)
+
+    if existing is None:
+        if not dry_run:
+            session.add(order_model_type(**model_kwargs))
+        return "inserted"
+
+    for field_name, value in model_kwargs.items():
+        if (
+            field_name == "created_at"
+            and source_payload is not None
+            and not _tiktok_order_payload_has_field(source_payload, field_name)
+            and getattr(existing, field_name, None) is not None
+        ):
+            continue
+        if field_name in _TIKTOK_ORDER_ENRICHABLE_FIELDS:
+            missing_in_payload = source_payload is not None and not _tiktok_order_payload_has_field(source_payload, field_name)
+            existing_value = getattr(existing, field_name, None)
+            if missing_in_payload and not _tiktok_order_value_is_blank(field_name, existing_value, missing_in_payload=False):
+                continue
+            if _tiktok_order_value_is_blank(field_name, value, missing_in_payload=missing_in_payload):
+                if not _tiktok_order_value_is_blank(field_name, existing_value, missing_in_payload=False):
+                    continue
+        setattr(existing, field_name, value)
+    if not dry_run:
+        session.add(existing)
+    return "updated"
 
 
 def upsert_tiktok_auth_from_callback(
@@ -766,6 +857,7 @@ def upsert_tiktok_order_from_payload(
     received_at: Optional[datetime] = None,
     dry_run: bool = False,
 ) -> tuple[str, dict[str, Any]]:
+    source_payload = _extract_tiktok_order_payload(payload)
     order_record = normalize_tiktok_order_payload(
         payload,
         source=source,
@@ -775,6 +867,7 @@ def upsert_tiktok_order_from_payload(
         session,
         order_model_type,
         order_record,
+        source_payload=source_payload,
         dry_run=dry_run,
     )
     return status, order_record
@@ -784,7 +877,8 @@ def parse_tiktok_webhook_headers(headers: Any) -> dict[str, Optional[str]]:
     normalized_headers: dict[str, Optional[str]] = {}
     header_get = getattr(headers, "get", None)
     if not callable(header_get):
-        header_get = lambda _name, _default=None: _default  # type: ignore[assignment]
+        def header_get(_name: str, _default: Optional[str] = None) -> Optional[str]:
+            return _default
 
     combined_raw = header_get("tiktok-signature") or header_get("TikTok-Signature")
     combined_parts: dict[str, str] = {}

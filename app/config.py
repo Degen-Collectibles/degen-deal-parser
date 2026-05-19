@@ -12,8 +12,44 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_DB = BASE_DIR / "data" / "degen_live.db"
 DEFAULT_SESSION_SECRET = ""
 DEFAULT_ADMIN_PASSWORD = ""
+# Common placeholder values that operators sometimes leave in .env / secret
+# stores. We compare case-insensitively against the trimmed input.
+INSECURE_PLACEHOLDER_VALUES = frozenset(
+    {
+        "",
+        "changeme",
+        "change-me",
+        "change_me",
+        "replaceme",
+        "replace-me",
+        "replace_me",
+        "placeholder",
+        "todo",
+        "secret",
+        "password",
+        "default",
+        "example",
+        "test",
+        "test123",
+        "admin",
+        "admin123",
+        "letmein",
+        "qwerty",
+        "12345678",
+        "00000000",
+    }
+)
 INSECURE_SESSION_SECRET_VALUES = {"", "degen-dev-session-secret"}
 INSECURE_ADMIN_PASSWORD_VALUES = {"", "degen1234"}
+# Minimum lengths chosen to be resistant to casual brute-force / guessing.
+# SESSION_SECRET is used as HMAC keying material so we require a longer value.
+MIN_SESSION_SECRET_LENGTH = 32
+MIN_ADMIN_PASSWORD_LENGTH = 12
+
+
+def _is_insecure_placeholder(value: str) -> bool:
+    cleaned = (value or "").strip().lower()
+    return cleaned in INSECURE_PLACEHOLDER_VALUES
 
 
 def _resolve_root(value: str, fallback_subdir: str) -> Path:
@@ -375,9 +411,22 @@ class Settings(BaseSettings):
 
     def validate_runtime_secrets(self) -> None:
         insecure_fields: list[str] = []
-        if (self.session_secret or "").strip() in INSECURE_SESSION_SECRET_VALUES:
+        session_secret_raw = (self.session_secret or "").strip()
+        admin_password_raw = (self.admin_password or "").strip()
+        if (
+            session_secret_raw in INSECURE_SESSION_SECRET_VALUES
+            or _is_insecure_placeholder(session_secret_raw)
+        ):
             insecure_fields.append("SESSION_SECRET")
-        if (self.admin_password or "").strip() in INSECURE_ADMIN_PASSWORD_VALUES:
+        elif len(session_secret_raw) < MIN_SESSION_SECRET_LENGTH:
+            # Report by name only — never echo the value back.
+            insecure_fields.append("SESSION_SECRET")
+        if (
+            admin_password_raw in INSECURE_ADMIN_PASSWORD_VALUES
+            or _is_insecure_placeholder(admin_password_raw)
+        ):
+            insecure_fields.append("ADMIN_PASSWORD")
+        elif len(admin_password_raw) < MIN_ADMIN_PASSWORD_LENGTH:
             insecure_fields.append("ADMIN_PASSWORD")
         if self.employee_portal_enabled:
             if not self.employee_token_hmac_key:

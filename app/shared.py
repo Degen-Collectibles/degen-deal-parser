@@ -104,6 +104,7 @@ from .models import (
     utcnow,
 )
 from .ops_log import count_recent_errors, list_operations_logs, list_operations_logs_for_backfill_request, parse_operations_log_details
+from .ops_log import redact_log_details
 from .reparse_runs import list_recent_reparse_runs, safe_create_reparse_run, safe_finalize_reparse_run_queue
 from .reparse import reparse_message_row, reparse_message_rows
 from .reporting import (
@@ -1969,23 +1970,24 @@ _background_task_state = {
 
 def read_tiktok_integration_state() -> dict[str, object]:
     with _tiktok_state_lock:
-        return dict(_tiktok_state)
+        return redact_log_details(dict(_tiktok_state))
 
 
 def _tiktok_state_to_db_row(state: dict) -> TikTokSyncState:
     import json as _json
+    safe_state = redact_log_details(state)
     return TikTokSyncState(
         id=1,
-        last_authorization_at=state.get("last_authorization_at"),
-        last_callback_json=_json.dumps(state.get("last_callback") or {}, default=str),
-        last_webhook_at=state.get("last_webhook_at"),
-        last_webhook_json=_json.dumps(state.get("last_webhook") or {}, default=str),
-        is_pull_running=bool(state.get("is_pull_running", False)),
-        last_pull_started_at=state.get("last_pull_started_at"),
-        last_pull_finished_at=state.get("last_pull_finished_at"),
-        last_pull_at=state.get("last_pull_at"),
-        last_pull_json=_json.dumps(state.get("last_pull") or {}, default=str),
-        last_error=str(state["last_error"]) if state.get("last_error") is not None else None,
+        last_authorization_at=safe_state.get("last_authorization_at"),
+        last_callback_json=_json.dumps(safe_state.get("last_callback") or {}, default=str),
+        last_webhook_at=safe_state.get("last_webhook_at"),
+        last_webhook_json=_json.dumps(safe_state.get("last_webhook") or {}, default=str),
+        is_pull_running=bool(safe_state.get("is_pull_running", False)),
+        last_pull_started_at=safe_state.get("last_pull_started_at"),
+        last_pull_finished_at=safe_state.get("last_pull_finished_at"),
+        last_pull_at=safe_state.get("last_pull_at"),
+        last_pull_json=_json.dumps(safe_state.get("last_pull") or {}, default=str),
+        last_error=str(safe_state["last_error"]) if safe_state.get("last_error") is not None else None,
         updated_at=utcnow(),
     )
 
@@ -2010,11 +2012,12 @@ def _persist_tiktok_state(state: dict) -> None:
 
 
 def update_tiktok_integration_state(**changes: object) -> dict[str, object]:
+    safe_changes = redact_log_details(changes)
     with _tiktok_state_lock:
-        _tiktok_state.update(changes)
+        _tiktok_state.update(safe_changes)
         snapshot = dict(_tiktok_state)
     _persist_tiktok_state(snapshot)
-    return snapshot
+    return redact_log_details(snapshot)
 
 
 def _load_tiktok_state_from_db() -> None:
@@ -2298,7 +2301,9 @@ def describe_tiktok_sync_status(auth_row: Optional[TikTokAuth], sync_state: dict
     )
     shop_key = (settings.tiktok_shop_id or "").strip() or (auth_row.tiktok_shop_id if auth_row else "")
     shop_cipher = (settings.tiktok_shop_cipher or "").strip() or (auth_row.shop_cipher if auth_row else "")
-    resolved_identifier = shop_key or shop_cipher or (auth_row.seller_id if auth_row else "") or (auth_row.open_id if auth_row else "")
+    resolved_identifier = shop_key or (auth_row.seller_id if auth_row else "") or (auth_row.open_id if auth_row else "")
+    if not resolved_identifier and shop_cipher:
+        resolved_identifier = "shop cipher configured"
 
     if auth_row and has_tokens:
         status_label = "Connected"
@@ -2504,7 +2509,13 @@ def run_tiktok_pull_cycle(
                 gap_since = max(newest_created - timedelta(hours=1), gap_floor)
                 if gap_since < since_dt:
                     since_dt = gap_since
-        safe_limit = max(int(limit or settings.tiktok_sync_limit or 0), 1)
+        # limit None/0 means "no cap" — preserve that intent. Otherwise clamp
+        # to >= 1 so a stray small positive value is still useful.
+        raw_limit = limit if limit is not None else settings.tiktok_sync_limit
+        if raw_limit is None or int(raw_limit or 0) <= 0:
+            safe_limit: Optional[int] = None
+        else:
+            safe_limit = max(int(raw_limit), 1)
         def _run_pull_with_current_credentials(current_access_token: str):
             return pull_tiktok_orders(
                 session,
@@ -2539,7 +2550,6 @@ def run_tiktok_pull_cycle(
             "status": "success",
             "runtime": runtime_name,
             "shop_id": shop_id or None,
-            "shop_cipher": shop_cipher or None,
             "trigger": trigger,
             "since": since_dt.isoformat(),
             "limit": safe_limit,
@@ -2558,13 +2568,20 @@ def run_tiktok_pull_cycle(
         )
         session.commit()
         return last_pull
-    except Exception:
+    except Exception as exc:
+        raw_error_text = str(exc).strip() or exc.__class__.__name__
+        safe_error_text = str(redact_log_details({"error": raw_error_text}).get("error") or exc.__class__.__name__)
         update_tiktok_integration_state(
             is_pull_running=False,
             last_pull_finished_at=utcnow(),
             last_pull_at=utcnow(),
-            last_pull={"status": "failed", "runtime": runtime_name, "trigger": trigger},
-            last_error="pull cycle crashed",
+            last_pull={
+                "status": "failed",
+                "runtime": runtime_name,
+                "trigger": trigger,
+                "error": safe_error_text[:500],
+            },
+            last_error=safe_error_text[:500],
         )
         raise
 
@@ -2609,17 +2626,19 @@ async def periodic_tiktok_pull_loop(stop_event: asyncio.Event) -> None:
             if stop_event.is_set():
                 break
         except Exception as exc:
+            raw_error_text = str(exc).strip() or exc.__class__.__name__
+            safe_error_text = str(redact_log_details({"error": raw_error_text}).get("error") or exc.__class__.__name__)
             update_tiktok_integration_state(
                 last_pull_at=utcnow(),
-                last_pull={"status": "failed", "runtime": runtime_name, "error": str(exc)},
-                last_error=str(exc),
+                last_pull={"status": "failed", "runtime": runtime_name, "error": safe_error_text[:500]},
+                last_error=safe_error_text[:500],
             )
             print(
                 structured_log_line(
                     runtime=runtime_name,
                     action="tiktok.pull.failed",
                     success=False,
-                    error=str(exc),
+                    error=safe_error_text[:500],
                 )
             )
 
@@ -2681,12 +2700,14 @@ async def tiktok_startup_backfill(stop_event: asyncio.Event) -> None:
             )
         )
     except Exception as exc:
+        raw_error_text = str(exc).strip() or exc.__class__.__name__
+        safe_error_text = str(redact_log_details({"error": raw_error_text}).get("error") or exc.__class__.__name__)
         print(
             structured_log_line(
                 runtime=runtime_name,
                 action="tiktok.startup_backfill.failed",
                 success=False,
-                error=str(exc),
+                error=safe_error_text[:500],
             )
         )
 
@@ -2875,19 +2896,21 @@ def run_tiktok_pull_in_background(*, since: Optional[str], limit: Optional[int],
             )
         )
     except Exception as exc:
+        raw_error_text = str(exc).strip() or exc.__class__.__name__
+        safe_error_text = str(redact_log_details({"error": raw_error_text}).get("error") or exc.__class__.__name__)
         update_tiktok_integration_state(
             is_pull_running=False,
             last_pull_finished_at=utcnow(),
             last_pull_at=utcnow(),
-            last_pull={"status": "failed", "runtime": runtime_name, "trigger": trigger, "error": str(exc)},
-            last_error=str(exc),
+            last_pull={"status": "failed", "runtime": runtime_name, "trigger": trigger, "error": safe_error_text[:500]},
+            last_error=safe_error_text[:500],
         )
         print(
             structured_log_line(
                 runtime=runtime_name,
                 action="tiktok.pull.background_failed",
                 success=False,
-                error=str(exc),
+                error=safe_error_text[:500],
                 trigger=trigger,
             )
         )

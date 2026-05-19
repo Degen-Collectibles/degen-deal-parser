@@ -7,6 +7,7 @@ from typing import TextIO
 
 from .config import BASE_DIR, get_settings
 from .models import utcnow
+from .ops_log import redact_log_details
 
 LOG_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
 LOG_BACKUP_COUNT = 5
@@ -61,7 +62,7 @@ class RotatingStream:
                     src.rename(dst)
                 except OSError:
                     pass
-        first_backup = self._path.with_suffix(f".log.1")
+        first_backup = self._path.with_suffix(".log.1")
         try:
             first_backup.unlink(missing_ok=True)
             self._path.rename(first_backup)
@@ -166,4 +167,5 @@ def structured_log_line(
         "error": error,
     }
     payload.update(details)
+    payload = redact_log_details(payload)
     return json.dumps(payload, default=str, sort_keys=True)
