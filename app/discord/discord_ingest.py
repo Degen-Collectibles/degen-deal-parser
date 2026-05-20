@@ -19,7 +19,7 @@ from ..attachment_storage import delete_attachment_cache_file, write_attachment_
 from .bookkeeping import auto_import_public_google_sheet, extract_google_sheet_url
 from ..config import get_settings
 from ..db import engine, managed_session, run_write_with_retry
-from ..models import (
+from .discord_models import (
     AttachmentAsset,
     AvailableDiscordChannel,
     DiscordMessage,

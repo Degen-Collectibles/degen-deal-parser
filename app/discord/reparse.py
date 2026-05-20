@@ -6,7 +6,7 @@ import asyncio
 from sqlmodel import Session
 
 from ..db import managed_session
-from ..models import DiscordMessage
+from .discord_models import DiscordMessage
 from .reparse_runs import safe_create_reparse_run, safe_finalize_reparse_run_queue
 from ..reporting import parse_report_datetime
 from .transactions import sync_transaction_from_message

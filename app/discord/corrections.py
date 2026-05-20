@@ -8,7 +8,8 @@ from sqlmodel import Session, select
 
 from ..db import engine, managed_session
 from .financials import EXPENSE_PATTERNS
-from ..models import DiscordMessage, PARSE_PARSED, PARSE_REVIEW_REQUIRED, ReviewCorrection, normalize_parse_status, utcnow
+from .discord_models import DiscordMessage, PARSE_PARSED, PARSE_REVIEW_REQUIRED
+from ..models import ReviewCorrection, normalize_parse_status, utcnow
 
 CORRECTION_SNAPSHOT_FIELDS = (
     "deal_type",

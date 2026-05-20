@@ -8,7 +8,7 @@ from typing import Iterable, Optional
 from sqlmodel import Session, select
 
 from ..db import managed_session
-from ..models import ReparseRun, utcnow
+from .discord_models import ReparseRun, utcnow
 
 
 def _duration_ms(started_at: datetime, finished_at: datetime) -> int:

@@ -25,12 +25,10 @@ from ..display_media import (
     parse_attachment_urls_json,
 )
 from .financials import compute_financials
-from ..models import (
+from .discord_models import (
     AttachmentAsset,
     DiscordMessage,
-    OperationsLog,
     ParseAttempt,
-    Transaction,
     WatchedChannel,
     PARSE_FAILED,
     PARSE_IGNORED,
@@ -38,6 +36,10 @@ from ..models import (
     PARSE_PENDING,
     PARSE_PROCESSING,
     PARSE_REVIEW_REQUIRED,
+)
+from ..models import (
+    OperationsLog,
+    Transaction,
     expand_parse_status_filter_values,
     normalize_parse_status,
 )

@@ -10,7 +10,7 @@ from .discord_ingest import (
     list_available_discord_channels,
     merge_available_discord_channel_rows,
 )
-from ..models import DiscordMessage, WatchedChannel, utcnow
+from .discord_models import DiscordMessage, WatchedChannel, utcnow
 
 
 def get_watched_channels(session: Session) -> list[WatchedChannel]:

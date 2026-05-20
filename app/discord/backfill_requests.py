@@ -7,7 +7,7 @@ from typing import Optional
 from sqlmodel import Session, select
 
 from ..db import managed_session
-from ..models import (
+from .discord_models import (
     BACKFILL_CANCELLED,
     BACKFILL_COMPLETED,
     BACKFILL_FAILED,

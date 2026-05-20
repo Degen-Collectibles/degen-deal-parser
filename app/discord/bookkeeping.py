@@ -14,10 +14,10 @@ import httpx
 from openpyxl import load_workbook
 from sqlmodel import Session, select
 
+from .discord_models import DiscordMessage
 from ..models import (
     BookkeepingEntry,
     BookkeepingImport,
-    DiscordMessage,
     Transaction,
     normalize_money_value,
     signed_money_delta,
