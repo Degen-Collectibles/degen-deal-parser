@@ -17,7 +17,7 @@ os.environ.setdefault("EMPLOYEE_EMAIL_HASH_SALT", "unit-test-salt")
 os.environ.setdefault("SESSION_SECRET", "test-secret-wave35-" + "x" * 32)
 os.environ.setdefault("EMPLOYEE_TOKEN_HMAC_KEY", "test-token-hmac-wave35-" + "x" * 24)
 
-from tests.test_employee_portal_wave3 import _PortalHarness  # noqa: E402
+from tests.team.test_employee_portal_wave3 import _PortalHarness  # noqa: E402
 
 
 class AuditLogOnAuthEventsTests(unittest.TestCase, _PortalHarness):
