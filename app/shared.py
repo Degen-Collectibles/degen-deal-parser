@@ -156,6 +156,7 @@ from .tiktok_enrichment_queue import (
     enqueue_tiktok_webhook_enrichment,
     get_tiktok_webhook_enrichment_queue_counts,
     process_due_tiktok_webhook_enrichment_jobs,
+    requeue_interrupted_tiktok_webhook_enrichment_jobs,
 )
 from .tiktok_live_chat import (
     get_chat_status,
@@ -2891,6 +2892,9 @@ def _process_tiktok_webhook_enrichment_queue_once(*, limit: int = 10) -> int:
     runtime_name = f"{settings.runtime_name}_tiktok_webhook_enrich"
     try:
         with managed_session() as session:
+            requeued = requeue_interrupted_tiktok_webhook_enrichment_jobs(session)
+            if requeued:
+                session.commit()
             attempted = process_due_tiktok_webhook_enrichment_jobs(
                 session,
                 enrich_fn=lambda order_id: _enrich_tiktok_order_from_api(order_id, raise_errors=True),
@@ -2905,6 +2909,7 @@ def _process_tiktok_webhook_enrichment_queue_once(*, limit: int = 10) -> int:
                         action="tiktok.webhook.enrichment_queue_processed",
                         success=True,
                         attempted=attempted,
+                        requeued_stale=requeued,
                         pending=counts.get("pending"),
                         failed=counts.get("failed"),
                     )

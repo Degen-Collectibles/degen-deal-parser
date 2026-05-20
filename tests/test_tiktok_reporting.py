@@ -982,6 +982,49 @@ class TikTokRegressionTests(unittest.TestCase):
                 interrupted_at + timedelta(minutes=11),
             )
 
+    def test_tiktok_webhook_enrichment_queue_processor_recovers_stale_processing_jobs(self) -> None:
+        interrupted_at = utcnow() - timedelta(minutes=20)
+        calls: list[tuple[str, bool]] = []
+
+        with Session(self.engine) as session:
+            job = enqueue_tiktok_webhook_enrichment(
+                session,
+                "tt-loop-recovery-1",
+                now=interrupted_at,
+            )
+            job.status = ENRICH_PROCESSING
+            job.last_attempt_at = interrupted_at
+            job.next_attempt_at = None
+            session.add(job)
+            session.commit()
+
+        @contextmanager
+        def fake_managed_session():
+            with Session(self.engine) as session:
+                yield session
+
+        def fake_enrich(order_id: str, *, raise_errors: bool = False) -> None:
+            calls.append((order_id, raise_errors))
+
+        with patch.object(shared_module, "managed_session", fake_managed_session), patch.object(
+            shared_module, "_fetch_tiktok_order_details", object()
+        ), patch.object(
+            shared_module, "_order_record_from_payload", object()
+        ), patch.object(
+            shared_module, "_enrich_tiktok_order_from_api", side_effect=fake_enrich
+        ):
+            attempted = shared_module._process_tiktok_webhook_enrichment_queue_once(limit=5)
+
+        self.assertEqual(attempted, 1)
+        self.assertEqual(calls, [("tt-loop-recovery-1", True)])
+        with Session(self.engine) as session:
+            job = session.exec(
+                select(TikTokWebhookEnrichmentJob).where(
+                    TikTokWebhookEnrichmentJob.tiktok_order_id == "tt-loop-recovery-1"
+                )
+            ).one()
+            self.assertEqual(job.status, "succeeded")
+
     def test_tiktok_webhook_enrichment_queue_reenqueue_resets_terminal_retry_budget(self) -> None:
         first_seen_at = datetime(2026, 4, 1, 8, 0, tzinfo=timezone.utc)
         second_seen_at = first_seen_at + timedelta(hours=1)
@@ -1061,6 +1104,31 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(counts["pending"], 1)
         self.assertEqual(counts["failed"], 1)
         self.assertEqual(counts["active"], 1)
+
+    def test_tiktok_webhook_enrichment_queue_counts_are_visible_in_status_surfaces(self) -> None:
+        now = datetime(2026, 4, 1, 8, 0, tzinfo=timezone.utc)
+        with Session(self.engine) as session:
+            enqueue_tiktok_webhook_enrichment(session, "tt-visible-pending", now=now)
+            failed = enqueue_tiktok_webhook_enrichment(session, "tt-visible-failed", now=now)
+            failed.status = "failed"
+            failed.last_error = "detail fetch failed"
+            session.add(failed)
+            session.commit()
+
+            status_snapshot = shared_module.build_tiktok_status_snapshot(session)
+            orders_page_data = tiktok_orders_module._collect_tiktok_orders_page_data(session)
+
+        self.assertEqual(status_snapshot["webhook_enrichment_queue"]["pending"], 1)
+        self.assertEqual(status_snapshot["webhook_enrichment_queue"]["failed"], 1)
+        self.assertEqual(orders_page_data["sync_snapshot"]["webhook_enrichment_queue"]["pending"], 1)
+        self.assertEqual(orders_page_data["sync_snapshot"]["webhook_enrichment_queue"]["failed"], 1)
+
+        status_template = (Path(__file__).parents[1] / "app" / "templates" / "status.html").read_text()
+        orders_template = (Path(__file__).parents[1] / "app" / "templates" / "tiktok_orders.html").read_text()
+        self.assertIn("webhook_enrichment_queue", status_template)
+        self.assertIn("Enrichment queue", status_template)
+        self.assertIn("webhook_enrichment_queue", orders_template)
+        self.assertIn("Enrichment queue", orders_template)
 
     def test_tiktok_backfill_thin_payload_preserves_existing_paid_status(self) -> None:
         created_at = datetime(2026, 4, 1, 8, 0, tzinfo=timezone.utc)
