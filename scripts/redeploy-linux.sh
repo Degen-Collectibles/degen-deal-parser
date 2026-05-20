@@ -80,6 +80,33 @@ PYENV
   fi
 }
 
+wait_for_systemd_unit() {
+  local unit="$1"
+  local elapsed=0
+  local stable_seconds="${DEGEN_UNIT_STABLE_SECONDS:-10}"
+  local state
+
+  while (( elapsed <= MAX_WAIT_SECONDS )); do
+    if systemctl is-active --quiet "$unit"; then
+      sleep "$stable_seconds"
+      elapsed=$((elapsed + stable_seconds))
+      if systemctl is-active --quiet "$unit"; then
+        log "$unit is active after ${elapsed}s"
+        return 0
+      fi
+    fi
+
+    state="$(systemctl is-active "$unit" 2>/dev/null || true)"
+    log "$unit state at ${elapsed}s: ${state:-unknown}"
+    sleep "$INTERVAL_SECONDS"
+    elapsed=$((elapsed + INTERVAL_SECONDS))
+  done
+
+  echo "ERROR: $unit did not become active within ${MAX_WAIT_SECONDS}s" >&2
+  sudo -n systemctl status "$unit" --no-pager || true
+  return 1
+}
+
 if [[ ! -d "$APP_DIR/.git" ]]; then
   echo "ERROR: APP_DIR is not a git checkout: $APP_DIR" >&2
   exit 2
@@ -149,6 +176,7 @@ sudo -n systemctl restart "$WEB_UNIT"
 if systemctl list-unit-files "$WORKER_UNIT" --no-legend 2>/dev/null | grep -q "^$WORKER_UNIT"; then
   log "Restarting $WORKER_UNIT"
   sudo -n systemctl restart "$WORKER_UNIT"
+  wait_for_systemd_unit "$WORKER_UNIT"
 else
   log "Worker unit $WORKER_UNIT not installed; skipping worker restart"
 fi
