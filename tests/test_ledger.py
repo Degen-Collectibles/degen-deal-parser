@@ -1,4 +1,5 @@
 import json
+from inspect import signature
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ from app.ledger import (
     apply_ledger_rule,
     build_ledger_page_data,
     draft_ledger_rule_from_instruction,
+    ledger_filters_from_values,
     ledger_status_for_bank_row,
     preview_ledger_automation,
     preview_ledger_rule,
@@ -172,6 +174,7 @@ def test_ledger_builder_counts_bank_rows_and_separates_unbanked_cash():
 
         data = build_ledger_page_data(session, LedgerFilters(status="all"))
         with_cash = build_ledger_page_data(session, LedgerFilters(status="all", include_cash=True))
+        needs_action_with_cash = build_ledger_page_data(session, LedgerFilters(status="needs_action", include_cash=True))
 
     rows_by_id = {row["id"]: row for row in data["rows"]}
     cash_rows = [row for row in with_cash["rows"] if row["row_kind"] == "cash"]
@@ -190,6 +193,7 @@ def test_ledger_builder_counts_bank_rows_and_separates_unbanked_cash():
     assert cash_rows[0]["source"] == "cash"
     assert cash_rows[0]["description"] == "buy inventory 90 cash"
     assert "cash-503" not in {row["id"] for row in with_cash["rows"]}
+    assert "cash-501" not in {row["id"] for row in needs_action_with_cash["rows"]}
     assert with_cash["summary"]["bank_net_total"] == 70.0
 
 
@@ -1020,7 +1024,7 @@ def test_ledger_route_renders_default_needs_action_grid():
     assert "Scope:" in body
     assert "Review log-check rows" in body
     assert "Ledger Assistant" in body
-    assert 'href="/ledger?status=all"' in body
+    assert 'href="/ledger?status=all&include_cash=true"' in body
     assert "All transactions" in body
     assert 'href="/ledger?status=needs_action&action_reason=needs_match_check"' in body
     assert 'name="action_reason"' in body
@@ -1032,7 +1036,59 @@ def test_ledger_route_renders_default_needs_action_grid():
     assert 'data-ledger-row-id="cash-502"' not in body
     assert "cash buy 75" in cash_body
     assert 'data-ledger-row-id="cash-502"' in cash_body
-    assert "Cash in grid" in cash_body
+    assert "Cash only" in cash_body
+
+
+def test_ledger_defaults_to_all_transactions_with_discord_cash_in_grid():
+    engine = make_engine()
+    posted_at = datetime(2026, 5, 15, 12, tzinfo=timezone.utc)
+    cash_at = datetime(2026, 5, 14, 12, tzinfo=timezone.utc)
+
+    with Session(engine) as session:
+        bank_import = add_import(session)
+        session.add(
+            BankTransaction(
+                id=91,
+                import_id=bank_import.id,
+                row_index=1,
+                account_label="Chase Checking",
+                account_type="checking",
+                posted_at=posted_at,
+                description="SHOPIFY PAYOUT 123",
+                amount=125.0,
+                classification="shopify_payout",
+                confidence="high",
+                expense_category="platform_payouts",
+            )
+        )
+        session.add(
+            Transaction(
+                id=591,
+                source_message_id=2591,
+                occurred_at=cash_at,
+                parse_status="parsed",
+                entry_kind="sale",
+                payment_method="cash",
+                expense_category="inventory",
+                amount=40.0,
+                money_in=40.0,
+                money_out=0.0,
+                source_content="sold pokemon singles 40 cash",
+            )
+        )
+        session.commit()
+
+        filters = ledger_filters_from_values()
+        data = build_ledger_page_data(session, filters)
+
+    route_params = signature(ledger_page).parameters
+    assert route_params["status"].default.default == "all"
+    assert route_params["include_cash"].default.default is True
+    assert filters.status == "all"
+    assert filters.include_cash is True
+    assert "SHOPIFY PAYOUT 123" in {row["description"] for row in data["rows"]}
+    assert "sold pokemon singles 40 cash" in {row["description"] for row in data["rows"]}
+    assert "cash-591" in {row["id"] for row in data["rows"]}
 
 
 def test_ledger_template_uses_dense_full_width_review_surface():
@@ -1048,6 +1104,23 @@ def test_ledger_template_uses_dense_full_width_review_surface():
     assert "data-action-reason" in source
     assert "document.addEventListener(\"keydown\"" in source
     assert "focusSearch" in source
+
+
+def test_ledger_template_has_mobile_card_layout_and_page_scroll():
+    source = open("app/templates/ledger.html", encoding="utf-8").read()
+
+    assert "@media (max-width: 700px)" in source
+    assert ".sheet-wrap {" in source
+    assert "max-height: none" in source
+    assert "overflow-y: visible" in source
+    assert "tbody tr.ledger-row" in source
+    assert "display: grid" in source
+    assert "td::before" in source
+    assert 'data-label="Status"' in source
+    assert 'data-label="Description"' in source
+    assert 'data-label="Review"' in source
+    assert "touch-action: manipulation" in source
+    assert "overflow-x: auto" not in source
 
 
 def test_ledger_row_status_form_can_return_json_for_in_place_updates():
@@ -1103,6 +1176,56 @@ def test_ledger_row_status_form_can_return_json_for_in_place_updates():
     assert json.loads(response.body)["row"]["action_reason_label"] == ""
     assert row.review_status == "reviewed"
     assert row.expense_category == "inventory_purchases"
+
+
+def test_ledger_row_status_form_redirect_preserves_cash_hidden_filter():
+    engine = make_engine()
+    posted_at = datetime(2026, 5, 15, 12, tzinfo=timezone.utc)
+
+    with Session(engine) as session:
+        bank_import = add_import(session)
+        session.add(
+            BankTransaction(
+                id=54,
+                import_id=bank_import.id,
+                row_index=1,
+                account_label="Chase Checking",
+                account_type="checking",
+                posted_at=posted_at,
+                description="WWW.PSACARD.COM",
+                amount=-140.0,
+                classification="expense_or_purchase_needs_review",
+                expense_category="uncategorized",
+            )
+        )
+        session.commit()
+
+        with patch("app.routers.ledger.require_role_response", return_value=None):
+            response = ledger_row_status_form(
+                make_request("/ledger/rows/54/status-form", method="POST"),
+                row_id=54,
+                review_status="reviewed",
+                classification="",
+                expense_category="grading_fees",
+                note="checked",
+                selected_account="",
+                selected_start="",
+                selected_end="",
+                selected_status="all",
+                selected_category="",
+                selected_source="",
+                selected_action_reason="",
+                selected_search="",
+                selected_sort="posted_at",
+                selected_direction="desc",
+                selected_include_cash="false",
+                session=session,
+            )
+
+    assert response.status_code == 303
+    location = response.headers["location"]
+    assert "include_cash=false" in location
+    assert "include_cash=true" not in location
 
 
 def test_ledger_row_status_form_preserves_existing_review_note_when_note_is_blank():

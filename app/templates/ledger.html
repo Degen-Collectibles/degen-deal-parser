@@ -71,6 +71,7 @@
             font-weight: 800;
             cursor: pointer;
             font-size: 13px;
+            touch-action: manipulation;
         }
         .button.primary, button.primary { background: var(--lx-red); border-color: var(--lx-red); }
         .button.tiny, button.tiny { padding: 6px 8px; font-size: 12px; }
@@ -243,9 +244,77 @@
         @media (max-width: 700px) {
             .page { padding: 14px 12px 36px; }
             h1 { font-size: 30px; }
-            .metric-grid, .filters { grid-template-columns: 1fr; }
-            .filters label.search { grid-column: span 1; }
-            .inline-form { grid-template-columns: 1fr; min-width: 260px; }
+            .hero { padding: 16px; }
+            .hero-actions .button { flex: 1 1 calc(50% - 8px); text-align: center; }
+            .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .metric:last-child { grid-column: span 2; }
+            .metric-value { font-size: 20px; }
+            .panel { padding: 12px; }
+            .quick-chips { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .quick-chip { justify-content: center; min-height: 38px; padding: 8px; text-align: center; white-space: normal; }
+            .filters { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+            .filters label.search { grid-column: span 2; }
+            .filters button.primary { grid-column: span 2; width: 100%; }
+            .bulk-bar { position: sticky; top: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+            .bulk-bar strong, .bulk-bar button { grid-column: span 2; width: 100%; }
+            .bulk-bar select { width: 100%; min-width: 0; }
+            .row-actions[style] { align-items: flex-start !important; }
+            .row-actions[style] > .mini:last-child { display: none; }
+            .sheet-wrap {
+                max-height: none;
+                overflow-y: visible;
+                overflow-x: hidden;
+                border: 0;
+                background: transparent;
+            }
+            table, tbody { display: block; width: 100%; }
+            colgroup, thead { display: none; }
+            tbody { display: grid; gap: 10px; }
+            tbody tr.ledger-row {
+                display: grid;
+                height: auto;
+                border: 1px solid var(--line);
+                border-radius: 8px;
+                background: #0d0f12;
+                padding: 10px;
+                cursor: pointer;
+            }
+            tbody tr.is-active { outline-offset: 2px; }
+            tbody tr.ledger-row td {
+                display: grid;
+                grid-template-columns: 94px minmax(0, 1fr);
+                align-items: start;
+                gap: 10px;
+                width: 100%;
+                border-bottom: 1px solid rgba(255,255,255,.06);
+                padding: 8px 0;
+                white-space: normal;
+                overflow: visible;
+                text-overflow: clip;
+            }
+            tbody tr.ledger-row td:first-child {
+                grid-template-columns: minmax(0, 1fr) auto;
+                align-items: center;
+            }
+            tbody tr.ledger-row td:last-child { border-bottom: 0; }
+            tbody tr.ledger-row td::before {
+                content: attr(data-label);
+                color: var(--muted);
+                font-size: 11px;
+                font-weight: 900;
+                letter-spacing: .06em;
+                text-transform: uppercase;
+            }
+            td.amount { text-align: left; }
+            .truncate { white-space: normal; overflow-wrap: anywhere; }
+            .reason-chip { display: flex; margin: 5px 0 0; white-space: normal; }
+            .pill { max-width: 100%; white-space: normal; text-align: center; }
+            input[type="checkbox"] { width: 22px; height: 22px; justify-self: end; }
+            .inline-form { min-width: 0; width: 100%; }
+            .tools-drawer.is-open { display: block; }
+            .cash-row { grid-template-columns: 1fr; }
+            .empty { display: block; border: 1px solid var(--line); border-radius: 8px; }
+            .inline-form { grid-template-columns: 1fr; }
         }
     </style>
     <link rel="stylesheet" href="/static/linear.css?v=1776749171">
@@ -281,7 +350,7 @@
             <main>
                 <section class="panel">
                     <div class="quick-chips">
-                        <a class="quick-chip{% if selected.status == 'all' and not selected.source and not selected.action_reason and not selected.include_cash %} is-active{% endif %}" href="/ledger?status=all">All transactions</a>
+                        <a class="quick-chip{% if selected.status == 'all' and not selected.source and not selected.action_reason and selected.include_cash %} is-active{% endif %}" href="/ledger?status=all&include_cash=true">All transactions</a>
                         <a class="quick-chip{% if selected.status == 'needs_action' and not selected.action_reason %} is-active{% endif %}" href="/ledger?status=needs_action" title="Rows that still need a category, match/source check, or review before they are ready.">Needs action</a>
                         <a class="quick-chip{% if selected.action_reason == 'needs_log_check' %} is-active{% endif %}" href="/ledger?status=needs_action&action_reason=needs_log_check">Log check</a>
                         <a class="quick-chip{% if selected.action_reason == 'expense_review' %} is-active{% endif %}" href="/ledger?status=needs_action&action_reason=expense_review">Expense review</a>
@@ -292,7 +361,7 @@
                         <a class="quick-chip{% if selected.status == 'force_unmatched' %} is-active{% endif %}" href="/ledger?status=force_unmatched">Unmatched</a>
                         <a class="quick-chip{% if selected.source == 'shopify' %} is-active{% endif %}" href="/ledger?status=all&source=shopify">Shopify</a>
                         <a class="quick-chip{% if selected.source == 'tiktok' %} is-active{% endif %}" href="/ledger?status=all&source=tiktok">TikTok</a>
-                        <a class="quick-chip{% if selected.include_cash %} is-active{% endif %}" href="/ledger?status=all&include_cash=true">Cash in grid</a>
+                        <a class="quick-chip{% if selected.source == 'cash' %} is-active{% endif %}" href="/ledger?status=all&source=cash&include_cash=true">Cash only</a>
                         <button class="quick-chip" type="button" id="ledger-tools-toggle">Tools</button>
                     </div>
                     <p class="mini">Needs action means rows that still need a category, match/source check, or review before they are ready.</p>
@@ -421,27 +490,27 @@
                             <tbody>
                                 {% for row in rows %}
                                 <tr class="ledger-row" data-ledger-row-id="{{ row.id }}">
-                                    <td>{% if row.row_kind == "bank" %}<input class="row-select" type="checkbox" name="row_id" value="{{ row.id }}" aria-label="Select row {{ row.id }}">{% endif %}</td>
-                                    <td>
+                                    <td data-label="Select">{% if row.row_kind == "bank" %}<input class="row-select" type="checkbox" name="row_id" value="{{ row.id }}" aria-label="Select row {{ row.id }}">{% endif %}</td>
+                                    <td data-label="Status">
                                         <span class="pill {{ row.ledger_status }}" data-status-pill>{{ row.ledger_status_label }}</span>
                                         <span class="reason-chip" data-action-reason title="{{ row.action_reason_label }}" {% if not row.action_reason_label %}style="display: none;"{% endif %}>{{ row.action_reason_label }}</span>
                                         {% if row.confidence == "low" %}<div class="mini confidence-line">LOW</div>{% endif %}
                                     </td>
-                                    <td>{{ row.posted_at_display }}</td>
-                                    <td>
+                                    <td data-label="Date">{{ row.posted_at_display }}</td>
+                                    <td data-label="Account">
                                         <strong class="truncate" title="{{ row.account_label }}">{{ row.account_label }}</strong>
                                         <div class="mini">{{ row.account_type }}</div>
                                     </td>
-                                    <td class="amount">{{ row.amount_display }}</td>
-                                    <td>
+                                    <td data-label="Amount" class="amount">{{ row.amount_display }}</td>
+                                    <td data-label="Category">
                                         <strong class="truncate" data-category-label title="{{ row.expense_category_label }}">{{ row.expense_category_label }}</strong>
-                                        <div class="mini">{{ row.category_confidence }}{% if row.expense_subcategory %} · {{ row.expense_subcategory }}{% endif %}</div>
+                                        <div class="mini">{{ row.category_confidence }}{% if row.expense_subcategory %} &middot; {{ row.expense_subcategory }}{% endif %}</div>
                                     </td>
-                                    <td>
+                                    <td data-label="Source">
                                         <span class="pill">{{ row.source_label }}</span>
                                         {% if row.payment_rail %}<div class="mini">{{ row.payment_rail }}</div>{% endif %}
                                     </td>
-                                    <td class="desc" title="{{ row.description }}">
+                                    <td data-label="Description" class="desc" title="{{ row.description }}">
                                         <span class="truncate">{{ row.description }}</span>
                                         <div class="row-expanded">
                                             {% if row.details %}<div class="mini">{{ row.details }}</div>{% endif %}
@@ -451,7 +520,7 @@
                                             {% if row.match_override_note %}<div class="mini">Override: {{ row.match_override_note }}</div>{% endif %}
                                         </div>
                                     </td>
-                                    <td>
+                                    <td data-label="Match">
                                         {% if row.row_kind == "cash" %}
                                         <strong class="truncate">Discord cash deal</strong>
                                         <div class="mini match-extra">Shown in-grid; not counted in bank totals.</div>
@@ -478,7 +547,7 @@
                                             <input type="hidden" name="selected_search" value="{{ selected.search }}">
                                             <input type="hidden" name="selected_sort" value="{{ selected.sort }}">
                                             <input type="hidden" name="selected_direction" value="{{ selected.direction }}">
-                                            <input type="hidden" name="selected_include_cash" value="{{ 'true' if selected.include_cash else '' }}">
+                                            <input type="hidden" name="selected_include_cash" value="{{ 'true' if selected.include_cash else 'false' }}">
                                             {% if row.match_override_status == "force_unmatched" %}
                                             <input type="hidden" name="mode" value="clear">
                                             <button class="tiny" type="submit">Clear</button>
@@ -489,7 +558,7 @@
                                         </form>
                                         {% endif %}
                                     </td>
-                                    <td>
+                                    <td data-label="Review">
                                         {% if row.row_kind == "bank" %}
                                         <form method="post" action="/ledger/rows/{{ row.id }}/status-form" class="inline-form" data-row-edit-form>
                                             <input type="hidden" name="selected_account" value="{{ selected.account }}">
@@ -502,7 +571,7 @@
                                             <input type="hidden" name="selected_search" value="{{ selected.search }}">
                                             <input type="hidden" name="selected_sort" value="{{ selected.sort }}">
                                             <input type="hidden" name="selected_direction" value="{{ selected.direction }}">
-                                            <input type="hidden" name="selected_include_cash" value="{{ 'true' if selected.include_cash else '' }}">
+                                            <input type="hidden" name="selected_include_cash" value="{{ 'true' if selected.include_cash else 'false' }}">
                                             <label>Status
                                                 <select name="review_status">
                                                     {% for value in ["open", "reviewed", "ignored"] %}
@@ -547,7 +616,7 @@
                         <input type="hidden" name="selected_search" value="{{ selected.search }}">
                         <input type="hidden" name="selected_sort" value="{{ selected.sort }}">
                         <input type="hidden" name="selected_direction" value="{{ selected.direction }}">
-                        <input type="hidden" name="selected_include_cash" value="{{ 'true' if selected.include_cash else '' }}">
+                        <input type="hidden" name="selected_include_cash" value="{{ 'true' if selected.include_cash else 'false' }}">
                         <button class="primary" type="submit">Run Ledger Agent</button>
                     </form>
                     <div class="mini" style="margin-top: 8px;">Auto-clears obvious bad Discord matches and reviews safe operating expenses in this view.</div>
@@ -571,7 +640,7 @@
                             <input type="hidden" name="selected_search" value="{{ selected.search }}">
                             <input type="hidden" name="selected_sort" value="{{ selected.sort }}">
                             <input type="hidden" name="selected_direction" value="{{ selected.direction }}">
-                            <input type="hidden" name="selected_include_cash" value="{{ 'true' if selected.include_cash else '' }}">
+                            <input type="hidden" name="selected_include_cash" value="{{ 'true' if selected.include_cash else 'false' }}">
                             <input type="hidden" name="name" id="assistant-rule-name">
                             <input type="hidden" name="description" id="assistant-rule-description">
                             <input type="hidden" name="conditions_json" id="assistant-rule-conditions">
@@ -619,7 +688,7 @@
                             <input type="hidden" name="selected_search" value="{{ selected.search }}">
                             <input type="hidden" name="selected_sort" value="{{ selected.sort }}">
                             <input type="hidden" name="selected_direction" value="{{ selected.direction }}">
-                            <input type="hidden" name="selected_include_cash" value="{{ 'true' if selected.include_cash else '' }}">
+                            <input type="hidden" name="selected_include_cash" value="{{ 'true' if selected.include_cash else 'false' }}">
                             <button class="tiny primary" type="submit" {% if automation.affected_count == 0 %}disabled{% endif %}>Mark {{ automation.affected_count }} reviewed</button>
                         </form>
                     </div>
@@ -647,7 +716,7 @@
                                 <input type="hidden" name="selected_search" value="{{ selected.search }}">
                                 <input type="hidden" name="selected_sort" value="{{ selected.sort }}">
                                 <input type="hidden" name="selected_direction" value="{{ selected.direction }}">
-                                <input type="hidden" name="selected_include_cash" value="{{ 'true' if selected.include_cash else '' }}">
+                                <input type="hidden" name="selected_include_cash" value="{{ 'true' if selected.include_cash else 'false' }}">
                                 <button class="tiny primary" type="submit">Apply</button>
                             </form>
                         </div>

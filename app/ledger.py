@@ -89,7 +89,7 @@ class LedgerFilters:
     account: str = ""
     start: str = ""
     end: str = ""
-    status: str = "needs_action"
+    status: str = "all"
     category: str = ""
     source: str = ""
     action_reason: str = ""
@@ -97,7 +97,7 @@ class LedgerFilters:
     sort: str = "posted_at"
     direction: str = "desc"
     limit: int = 250
-    include_cash: bool = False
+    include_cash: bool = True
 
 
 def _as_dict(value: str | dict[str, Any] | None) -> dict[str, Any]:
@@ -382,8 +382,8 @@ def _cash_row_matches_filters(row: dict[str, Any], filters: LedgerFilters) -> bo
     source = (filters.source or "").strip()
     if source and source != "cash":
         return False
-    status = (filters.status or "").strip() or "needs_action"
-    if status not in {"all", "any", "needs_action", "cash"}:
+    status = (filters.status or "").strip() or "all"
+    if status not in {"all", "any", "cash"}:
         return False
     start = _parse_date(filters.start)
     end = _parse_date(filters.end)
@@ -1143,7 +1143,7 @@ def ledger_filters_from_values(
     account: str = "",
     start: str = "",
     end: str = "",
-    status: str = "needs_action",
+    status: str = "all",
     category: str = "",
     source: str = "",
     action_reason: str = "",
@@ -1151,7 +1151,7 @@ def ledger_filters_from_values(
     sort: str = "posted_at",
     direction: str = "desc",
     limit: int = 250,
-    include_cash: bool | str = False,
+    include_cash: bool | str = True,
 ) -> LedgerFilters:
     include_cash_bool = include_cash
     if isinstance(include_cash, str):
@@ -1160,7 +1160,7 @@ def ledger_filters_from_values(
         account=(account or "").strip(),
         start=(start or "").strip(),
         end=(end or "").strip(),
-        status=(status or "needs_action").strip(),
+        status=(status or "all").strip(),
         category=(category or "").strip(),
         source=(source or "").strip(),
         action_reason=(action_reason or "").strip(),
