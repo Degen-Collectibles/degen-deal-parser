@@ -6,7 +6,7 @@ to end, exactly like a new hire on a phone. It prints a summary of what
 happened at each step plus a couple of phone-specific sanity checks so we
 can eyeball the flow without having to click through the UI by hand.
 
-Run with:  .\\.venv\\Scripts\\python.exe -m tests._walkthrough_portal
+Run with:  .\\.venv\\Scripts\\python.exe -m tests.team._walkthrough_portal
 """
 from __future__ import annotations
 

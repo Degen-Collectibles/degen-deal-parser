@@ -1,6 +1,6 @@
 """Regression tests for scanner debt fixes (M5, H4, H7)."""
 import sys, os, time
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import asyncio
 

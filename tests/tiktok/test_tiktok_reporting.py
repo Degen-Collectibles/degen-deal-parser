@@ -53,6 +53,8 @@ from app.tiktok_enrichment_queue import (
     requeue_interrupted_tiktok_webhook_enrichment_jobs,
 )
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
 
 class FakeTikTokRequest:
     def __init__(
@@ -1124,8 +1126,8 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(orders_page_data["sync_snapshot"]["webhook_enrichment_queue"]["pending"], 1)
         self.assertEqual(orders_page_data["sync_snapshot"]["webhook_enrichment_queue"]["failed"], 1)
 
-        status_template = (Path(__file__).parents[1] / "app" / "templates" / "status.html").read_text()
-        orders_template = (Path(__file__).parents[1] / "app" / "templates" / "tiktok_orders.html").read_text()
+        status_template = (PROJECT_ROOT / "app" / "templates" / "status.html").read_text()
+        orders_template = (PROJECT_ROOT / "app" / "templates" / "tiktok_orders.html").read_text()
         self.assertIn("webhook_enrichment_queue", status_template)
         self.assertIn("Enrichment queue", status_template)
         self.assertIn("webhook_enrichment_queue", orders_template)
@@ -2632,7 +2634,7 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(sum(point["count"] for point in payload["order_velocity"]), 1)
 
     def test_tiktok_streamer_template_refund_statuses_match_backend_classifier(self) -> None:
-        template = (Path(__file__).parents[1] / "app" / "templates" / "tiktok_streamer.html").read_text()
+        template = (PROJECT_ROOT / "app" / "templates" / "tiktok_streamer.html").read_text()
         for status in (
             "canceled",
             "cancel_requested",

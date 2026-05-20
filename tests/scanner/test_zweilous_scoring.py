@@ -1,6 +1,6 @@
 """Test: Zweilous should never match Staraptor despite collector number match."""
 import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from app.inventory.pokemon_scanner import (
     ExtractedFields, CandidateCard, score_candidates,
