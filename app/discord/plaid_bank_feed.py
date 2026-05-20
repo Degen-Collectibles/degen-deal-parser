@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
+import hmac
 import json
+import time as time_module
 from datetime import datetime, time, timezone
 from typing import Any, Optional
 
 import httpx
+from cryptography.exceptions import InvalidSignature
 from cryptography.fernet import Fernet, InvalidToken
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec, utils
 from sqlalchemy import func
 from sqlmodel import Session, select
 
@@ -48,6 +54,14 @@ class PlaidConfigurationError(ValueError):
 
 class PlaidAPIError(RuntimeError):
     pass
+
+
+class PlaidWebhookVerificationError(ValueError):
+    pass
+
+
+PLAID_WEBHOOK_MAX_AGE_SECONDS = 5 * 60
+PLAID_WEBHOOK_CLOCK_SKEW_SECONDS = 60
 
 
 def _split_csv(value: str, *, default: list[str]) -> list[str]:
@@ -161,6 +175,107 @@ def _plaid_post(path: str, payload: dict[str, Any], *, timeout: float = 30.0) ->
         code = data.get("error_code") or response.status_code
         raise PlaidAPIError(f"Plaid {code}: {message}")
     return data
+
+
+def _b64url_decode(value: str) -> bytes:
+    try:
+        return base64.urlsafe_b64decode((value + "=" * (-len(value) % 4)).encode("ascii"))
+    except (binascii.Error, UnicodeEncodeError, ValueError) as exc:
+        raise PlaidWebhookVerificationError("Malformed Plaid verification token") from exc
+
+
+def _decode_jwt_json(segment: str) -> dict[str, Any]:
+    try:
+        decoded = json.loads(_b64url_decode(segment).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PlaidWebhookVerificationError("Malformed Plaid verification token") from exc
+    if not isinstance(decoded, dict):
+        raise PlaidWebhookVerificationError("Malformed Plaid verification token")
+    return decoded
+
+
+def _plaid_webhook_public_key(jwk: dict[str, Any], *, kid: str) -> ec.EllipticCurvePublicKey:
+    if jwk.get("kid") != kid:
+        raise PlaidWebhookVerificationError("Plaid verification key ID mismatch")
+    if jwk.get("alg") != "ES256" or jwk.get("kty") != "EC" or jwk.get("crv") != "P-256":
+        raise PlaidWebhookVerificationError("Unsupported Plaid verification key")
+    try:
+        x = int.from_bytes(_b64url_decode(str(jwk["x"])), "big")
+        y = int.from_bytes(_b64url_decode(str(jwk["y"])), "big")
+    except KeyError as exc:
+        raise PlaidWebhookVerificationError("Incomplete Plaid verification key") from exc
+    try:
+        return ec.EllipticCurvePublicNumbers(x, y, ec.SECP256R1()).public_key()
+    except ValueError as exc:
+        raise PlaidWebhookVerificationError("Invalid Plaid verification key") from exc
+
+
+def _get_plaid_webhook_verification_key(kid: str) -> dict[str, Any]:
+    try:
+        data = _plaid_post("/webhook_verification_key/get", {"key_id": kid})
+    except (PlaidConfigurationError, PlaidAPIError) as exc:
+        raise PlaidWebhookVerificationError("Could not fetch Plaid verification key") from exc
+    key = data.get("key") if isinstance(data, dict) else None
+    if not isinstance(key, dict):
+        raise PlaidWebhookVerificationError("Plaid verification key was not returned")
+    return key
+
+
+def verify_plaid_webhook_signature(
+    raw_body: bytes,
+    verification_header: str | None,
+    *,
+    now: int | None = None,
+) -> bool:
+    if not verification_header:
+        raise PlaidWebhookVerificationError("Missing Plaid-Verification header")
+
+    parts = verification_header.split(".")
+    if len(parts) != 3 or not all(parts):
+        raise PlaidWebhookVerificationError("Malformed Plaid verification token")
+    header_segment, payload_segment, signature_segment = parts
+    header = _decode_jwt_json(header_segment)
+    if header.get("alg") != "ES256":
+        raise PlaidWebhookVerificationError("Unsupported Plaid verification algorithm")
+    kid = header.get("kid")
+    if not isinstance(kid, str) or not kid.strip():
+        raise PlaidWebhookVerificationError("Missing Plaid verification key ID")
+
+    jwk = _get_plaid_webhook_verification_key(kid)
+    public_key = _plaid_webhook_public_key(jwk, kid=kid)
+    signature = _b64url_decode(signature_segment)
+    if len(signature) != 64:
+        raise PlaidWebhookVerificationError("Invalid Plaid verification signature")
+    r = int.from_bytes(signature[:32], "big")
+    s = int.from_bytes(signature[32:], "big")
+    signing_input = f"{header_segment}.{payload_segment}".encode("ascii")
+    try:
+        public_key.verify(
+            utils.encode_dss_signature(r, s),
+            signing_input,
+            ec.ECDSA(hashes.SHA256()),
+        )
+    except InvalidSignature as exc:
+        raise PlaidWebhookVerificationError("Invalid Plaid verification signature") from exc
+
+    payload = _decode_jwt_json(payload_segment)
+    try:
+        issued_at = int(payload["iat"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise PlaidWebhookVerificationError("Missing Plaid verification timestamp") from exc
+    current_time = int(now if now is not None else time_module.time())
+    if issued_at > current_time + PLAID_WEBHOOK_CLOCK_SKEW_SECONDS:
+        raise PlaidWebhookVerificationError("Plaid verification token is from the future")
+    if current_time - issued_at > PLAID_WEBHOOK_MAX_AGE_SECONDS:
+        raise PlaidWebhookVerificationError("Plaid verification token is stale")
+
+    claimed_hash = payload.get("request_body_sha256")
+    if not isinstance(claimed_hash, str) or not claimed_hash:
+        raise PlaidWebhookVerificationError("Missing Plaid webhook body hash")
+    actual_hash = hashlib.sha256(raw_body).hexdigest()
+    if not hmac.compare_digest(actual_hash, claimed_hash):
+        raise PlaidWebhookVerificationError("Plaid webhook body hash mismatch")
+    return True
 
 
 def create_plaid_link_token(*, user_id: str, user_name: str = "") -> str:

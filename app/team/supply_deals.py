@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote_plus, urljoin
+from urllib.parse import quote_plus, urljoin, urlparse
 
 import httpx
 
@@ -216,6 +216,19 @@ def _clean_text(value: str) -> str:
     value = html.unescape(value)
     value = re.sub(r"\s+", " ", value)
     return value.strip()
+
+
+_UNSAFE_LISTING_URL_CHARS = re.compile(r"[\s<>\"']")
+
+
+def sanitize_supply_listing_url(value: Any) -> str:
+    url = str(value or "").strip()
+    if not url or _UNSAFE_LISTING_URL_CHARS.search(url):
+        return ""
+    parsed = urlparse(url)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return url
 
 
 def _parse_money(value: str | None) -> float | None:
@@ -530,6 +543,7 @@ def _dedupe_and_rank(
     seen: set[str] = set()
     unique = []
     for row in rows:
+        row = {**row, "url": sanitize_supply_listing_url(row.get("url"))}
         if item is not None:
             row = _normalize_listing_units(row, item)
         if item is not None and not _title_matches_item(str(row.get("title") or ""), item):

@@ -518,6 +518,29 @@
         )).join("");
     }
 
+    function escapeAttr(value) {
+        return String(value || "")
+            .replace(/&/g, "&amp;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#39;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;");
+    }
+
+    function safeListingUrl(value) {
+        const raw = String(value || "").trim();
+        if (!/^https?:\/\//i.test(raw)) return "";
+        try {
+            const url = new URL(raw);
+            if (url.protocol === "http:" || url.protocol === "https:") {
+                return url.href;
+            }
+        } catch (error) {
+            return "";
+        }
+        return "";
+    }
+
     function listingPassesFilters(row, filters) {
         if (filters.source && row.source !== filters.source) return false;
         if (filters.reliability && (row.risk_level || "medium") !== filters.reliability) return false;
@@ -561,16 +584,21 @@
             const unitPrice = row.unit_price !== null && row.unit_price !== undefined
                 ? `${formatMoney(row.unit_price)} / ${row.unit_label || "unit"}`
                 : "unit price n/a";
+            const safeUrl = safeListingUrl(row.url);
+            const listingOpen = safeUrl
+                ? `<a class="supply-listing" href="${escapeAttr(safeUrl)}" target="_blank" rel="noopener noreferrer">`
+                : '<div class="supply-listing" aria-disabled="true">';
+            const listingClose = safeUrl ? "</a>" : "</div>";
             return `
-                <a class="supply-listing" href="${row.url}" target="_blank" rel="noopener">
+                ${listingOpen}
                     <div>
                         <div class="supply-listing-title">
-                            <span class="supply-listing-source">${row.source}</span>
-                            <span class="supply-risk-badge ${row.risk_level || "medium"}">${escapeHtml(row.reliability_badge || "Check details")}</span>
+                            <span class="supply-listing-source">${escapeHtml(row.source)}</span>
+                            <span class="supply-risk-badge ${escapeAttr(row.risk_level || "medium")}">${escapeHtml(row.reliability_badge || "Check details")}</span>
                             ${row.cached_listing ? '<span class="supply-risk-badge medium">Saved</span>' : ""}
                             ${escapeHtml(row.title)}
                         </div>
-                        <div class="supply-listing-meta">${formatRating(row)} · ${units}</div>
+                        <div class="supply-listing-meta">${escapeHtml(formatRating(row))} · ${escapeHtml(units)}</div>
                         ${formatMarketProof(row) ? `<div class="supply-listing-meta">${escapeHtml(formatMarketProof(row))}</div>` : ""}
                         <div class="supply-listing-meta">${escapeHtml(formatShipping(row))}</div>
                         <div class="supply-listing-meta">${escapeHtml(reliabilityText(row))}</div>
@@ -579,7 +607,7 @@
                         <div class="supply-unit-price">${unitPrice}</div>
                         <div class="supply-total-price">${formatMoney(row.delivered_price)} delivered</div>
                     </div>
-                </a>
+                ${listingClose}
             `;
         }).join("") : '<div class="supply-muted">No live listings yet — use the marketplace links below to search direct.</div>';
         liveResults.innerHTML = `

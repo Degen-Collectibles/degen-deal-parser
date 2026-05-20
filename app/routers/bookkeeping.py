@@ -6,11 +6,12 @@ Extracted from app/main.py — all routes under /bookkeeping/.
 from __future__ import annotations
 
 import csv
+import json
 from io import StringIO
 from typing import Optional
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from sqlmodel import Session
 
@@ -42,6 +43,7 @@ from ..discord.bank_reconciliation import (
 )
 from ..db import get_session
 from ..discord.plaid_bank_feed import (
+    PlaidWebhookVerificationError,
     create_plaid_link_token,
     exchange_public_token,
     handle_plaid_webhook,
@@ -49,6 +51,7 @@ from ..discord.plaid_bank_feed import (
     plaid_config_status,
     sync_all_plaid_connections,
     sync_plaid_connection,
+    verify_plaid_webhook_signature,
 )
 
 router = APIRouter(route_class=CSRFProtectedRoute)
@@ -289,10 +292,20 @@ async def plaid_webhook(
     request: Request,
     session: Session = Depends(get_session),
 ):
+    raw_body = await request.body()
+    verification_header = request.headers.get("Plaid-Verification")
     try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
+        verify_plaid_webhook_signature(raw_body, verification_header)
+    except PlaidWebhookVerificationError as exc:
+        raise HTTPException(status_code=401, detail="Invalid Plaid webhook verification") from exc
+
+    try:
+        payload = json.loads(raw_body.decode("utf-8") if raw_body else "{}")
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
     try:
         return JSONResponse(handle_plaid_webhook(session, payload))
     except Exception as exc:

@@ -568,12 +568,27 @@ async def hits_upload_image(
 
 
 @router.get("/hit-images/{filename}")
-def serve_hit_image(filename: str):
+def serve_hit_image(
+    filename: str,
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    if denial := _require_live_hits(request, session):
+        return denial
     if ".." in filename or "/" in filename or "\\" in filename:
         return JSONResponse({"error": "Invalid filename"}, status_code=400)
+
+    referenced = session.exec(
+        select(LiveHit.id).where(
+            LiveHit.is_deleted == False,
+            LiveHit.image_filename == filename,
+        )
+    ).first()
+    if referenced is None:
+        return JSONResponse({"error": "Not found"}, status_code=404)
 
     path = _hit_images_dir() / filename
     if not path.is_file():
         return JSONResponse({"error": "Not found"}, status_code=404)
 
-    return FileResponse(path)
+    return FileResponse(path, headers={"Cache-Control": "private, max-age=300"})

@@ -22,6 +22,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -52,6 +53,8 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         from app import rate_limit
         rate_limit.reset()
 
+        self._tmp_media = tempfile.TemporaryDirectory()
+        os.environ["MEDIA_ROOT"] = self._tmp_media.name
         self.engine = _fresh_engine()
         from app.db import seed_employee_portal_defaults
         self.session = Session(self.engine)
@@ -80,6 +83,8 @@ class EmployeeOpsAccessTests(unittest.TestCase):
     def tearDown(self):
         self.app_main.app.dependency_overrides.clear()
         self.session.close()
+        os.environ.pop("MEDIA_ROOT", None)
+        self._tmp_media.cleanup()
         for attr in ("_patcher_shared", "_patcher_main"):
             p = getattr(self, attr, None)
             if p:
@@ -125,6 +130,22 @@ class EmployeeOpsAccessTests(unittest.TestCase):
             raise AssertionError("no csrf token rendered")
         raw = html[start + len(marker):].split(";", 1)[0].strip()
         return json.loads(raw)
+
+    def _seed_hit_image(self, filename: str = "hit-photo.jpg", content: bytes = b"hit-image"):
+        from app.config import get_settings
+        from app.models import LiveHit
+
+        hit_dir = get_settings().media_path("hit_images")
+        hit_dir.mkdir(parents=True, exist_ok=True)
+        (hit_dir / filename).write_bytes(content)
+        hit = LiveHit(
+            streamer_name="Streamer",
+            hit_note="Big pull",
+            image_filename=filename,
+        )
+        self.session.add(hit)
+        self.session.commit()
+        return hit
 
     # ---------- Sidebar "Tools" group ----------
 
@@ -1271,6 +1292,42 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         ):
             r = self.client.get(url, follow_redirects=False)
             self.assertEqual(r.status_code, 403, f"{url} should honor ops permissions")
+
+    def test_anonymous_cannot_fetch_live_hit_image_file(self):
+        self._seed_hit_image()
+        from app import shared
+        import app.main as app_main
+
+        self._patcher_shared = patch.object(shared, "get_request_user", return_value=None)
+        self._patcher_shared.start()
+        self._patcher_main = patch.object(app_main, "get_request_user", return_value=None)
+        self._patcher_main.start()
+
+        response = self.client.get("/hit-images/hit-photo.jpg", follow_redirects=False)
+
+        self.assertIn(response.status_code, (302, 303, 307))
+
+    def test_authorized_live_hits_user_can_fetch_referenced_hit_image(self):
+        self._seed_hit_image(content=b"authorized-image")
+        self._login_as("employee", user_id=225, username="emp25")
+
+        response = self.client.get("/hit-images/hit-photo.jpg", follow_redirects=False)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"authorized-image")
+        self.assertIn("private", response.headers.get("cache-control", ""))
+
+    def test_authorized_live_hits_user_cannot_fetch_unreferenced_hit_image(self):
+        from app.config import get_settings
+
+        hit_dir = get_settings().media_path("hit_images")
+        hit_dir.mkdir(parents=True, exist_ok=True)
+        (hit_dir / "orphan.jpg").write_bytes(b"orphan")
+        self._login_as("employee", user_id=226, username="emp26")
+
+        response = self.client.get("/hit-images/orphan.jpg", follow_redirects=False)
+
+        self.assertEqual(response.status_code, 404)
 
     def test_streamer_dashboard_hides_ops_links_for_employees(self):
         self._login_as("employee", user_id=209, username="emp8")

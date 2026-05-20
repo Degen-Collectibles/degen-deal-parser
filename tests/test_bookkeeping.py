@@ -1,8 +1,17 @@
 import asyncio
+import base64
+import hashlib
+import importlib
+import json
+import os
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
 
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec, utils
+from fastapi.testclient import TestClient
+from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, Session, create_engine
 
 from app.discord.bookkeeping import fetch_google_sheet_export, read_tabular_rows, reconcile_bookkeeping_import
@@ -14,6 +23,11 @@ from app.models import (
     PARSE_PARSED,
 )
 
+os.environ.setdefault("EMPLOYEE_PORTAL_ENABLED", "true")
+os.environ.setdefault("SESSION_SECRET", "bookkeeping-test-session-xxxxxxxxxxxxxxxx")
+os.environ.setdefault("ADMIN_PASSWORD", "bookkeeping-test-admin-password")
+os.environ.setdefault("EMPLOYEE_TOKEN_HMAC_KEY", "bookkeeping-test-token-key")
+
 
 def _utcnow():
     return datetime.now(timezone.utc)
@@ -21,6 +35,56 @@ def _utcnow():
 
 def _dt(year, month, day):
     return datetime(year, month, day, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _fresh_engine():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    return engine
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _plaid_jwk(private_key: ec.EllipticCurvePrivateKey, kid: str) -> dict[str, object]:
+    numbers = private_key.public_key().public_numbers()
+    return {
+        "kty": "EC",
+        "crv": "P-256",
+        "alg": "ES256",
+        "use": "sig",
+        "kid": kid,
+        "x": _b64url(numbers.x.to_bytes(32, "big")),
+        "y": _b64url(numbers.y.to_bytes(32, "big")),
+    }
+
+
+def _plaid_verification_jwt(
+    private_key: ec.EllipticCurvePrivateKey,
+    *,
+    kid: str = "kid-1",
+    raw_body: bytes = b'{"item_id":"item-1","webhook_code":"DEFAULT_UPDATE"}',
+    iat: int = 1_700_000_000,
+    alg: str = "ES256",
+) -> str:
+    header = {"alg": alg, "kid": kid, "typ": "JWT"}
+    payload = {
+        "iat": iat,
+        "request_body_sha256": hashlib.sha256(raw_body).hexdigest(),
+    }
+    signing_input = (
+        f"{_b64url(json.dumps(header, separators=(',', ':')).encode('utf-8'))}."
+        f"{_b64url(json.dumps(payload, separators=(',', ':')).encode('utf-8'))}"
+    ).encode("ascii")
+    der_signature = private_key.sign(signing_input, ec.ECDSA(hashes.SHA256()))
+    r, s = utils.decode_dss_signature(der_signature)
+    raw_signature = r.to_bytes(32, "big") + s.to_bytes(32, "big")
+    return f"{signing_input.decode('ascii')}.{_b64url(raw_signature)}"
 
 
 class ReadTabularRowsTests(unittest.TestCase):
@@ -131,6 +195,147 @@ class GoogleSheetExportFetchTests(unittest.TestCase):
         with patch("app.discord.bookkeeping.httpx.AsyncClient", return_value=FakeAsyncClient()):
             with self.assertRaises(ValueError):
                 asyncio.run(fetch_google_sheet_export(export_url))
+
+
+class PlaidWebhookVerificationTests(unittest.TestCase):
+    def test_plaid_webhook_verifier_accepts_valid_es256_jwt_and_body_hash(self):
+        from app.discord import plaid_bank_feed
+
+        raw_body = b'{"item_id":"item-1","webhook_code":"DEFAULT_UPDATE"}'
+        private_key = ec.generate_private_key(ec.SECP256R1())
+        token = _plaid_verification_jwt(private_key, raw_body=raw_body, iat=1_700_000_000)
+        jwk = _plaid_jwk(private_key, "kid-1")
+
+        with patch.object(plaid_bank_feed, "_plaid_post", return_value={"key": jwk}) as plaid_post:
+            verified = plaid_bank_feed.verify_plaid_webhook_signature(
+                raw_body,
+                token,
+                now=1_700_000_120,
+            )
+
+        self.assertTrue(verified)
+        plaid_post.assert_called_once_with("/webhook_verification_key/get", {"key_id": "kid-1"})
+
+    def test_plaid_webhook_verifier_rejects_missing_stale_or_mismatched_tokens(self):
+        from app.discord import plaid_bank_feed
+
+        raw_body = b'{"item_id":"item-1","webhook_code":"DEFAULT_UPDATE"}'
+        private_key = ec.generate_private_key(ec.SECP256R1())
+        jwk = _plaid_jwk(private_key, "kid-1")
+        stale = _plaid_verification_jwt(private_key, raw_body=raw_body, iat=1_700_000_000)
+        mismatched = _plaid_verification_jwt(
+            private_key,
+            raw_body=b'{"item_id":"different"}',
+            iat=1_700_000_100,
+        )
+
+        with patch.object(plaid_bank_feed, "_plaid_post", return_value={"key": jwk}):
+            with self.assertRaises(plaid_bank_feed.PlaidWebhookVerificationError):
+                plaid_bank_feed.verify_plaid_webhook_signature(raw_body, "", now=1_700_000_120)
+            with self.assertRaises(plaid_bank_feed.PlaidWebhookVerificationError):
+                plaid_bank_feed.verify_plaid_webhook_signature(raw_body, stale, now=1_700_000_400)
+            with self.assertRaises(plaid_bank_feed.PlaidWebhookVerificationError):
+                plaid_bank_feed.verify_plaid_webhook_signature(raw_body, mismatched, now=1_700_000_120)
+
+    def test_plaid_webhook_route_rejects_missing_verification_before_handler(self):
+        from app.db import get_session
+        import app.main as app_main
+
+        engine = _fresh_engine()
+
+        def override_get_session():
+            with Session(engine) as session:
+                yield session
+
+        app_main.app.dependency_overrides[get_session] = override_get_session
+        client = TestClient(app_main.app)
+        raw_body = b'{"item_id":"item-1","webhook_code":"DEFAULT_UPDATE"}'
+
+        try:
+            with patch("app.routers.bookkeeping.handle_plaid_webhook") as handler:
+                response = client.post(
+                    "/webhooks/plaid",
+                    content=raw_body,
+                    headers={"content-type": "application/json"},
+                )
+        finally:
+            app_main.app.dependency_overrides.clear()
+            engine.dispose()
+
+        self.assertEqual(response.status_code, 401)
+        handler.assert_not_called()
+
+    def test_plaid_webhook_route_rejects_invalid_json_after_valid_verification(self):
+        from app.db import get_session
+        import app.main as app_main
+
+        engine = _fresh_engine()
+
+        def override_get_session():
+            with Session(engine) as session:
+                yield session
+
+        app_main.app.dependency_overrides[get_session] = override_get_session
+        client = TestClient(app_main.app)
+        raw_body = b"{not-json"
+
+        try:
+            with (
+                patch("app.routers.bookkeeping.verify_plaid_webhook_signature", return_value=True) as verifier,
+                patch("app.routers.bookkeeping.handle_plaid_webhook") as handler,
+            ):
+                response = client.post(
+                    "/webhooks/plaid",
+                    content=raw_body,
+                    headers={
+                        "content-type": "application/json",
+                        "Plaid-Verification": "signed.jwt",
+                    },
+                )
+        finally:
+            app_main.app.dependency_overrides.clear()
+            engine.dispose()
+
+        self.assertEqual(response.status_code, 400)
+        verifier.assert_called_once_with(raw_body, "signed.jwt")
+        handler.assert_not_called()
+
+    def test_plaid_webhook_route_verifies_raw_body_then_calls_handler(self):
+        from app.db import get_session
+        import app.main as app_main
+
+        engine = _fresh_engine()
+
+        def override_get_session():
+            with Session(engine) as session:
+                yield session
+
+        app_main.app.dependency_overrides[get_session] = override_get_session
+        client = TestClient(app_main.app)
+        raw_body = b'{"item_id":"item-1","webhook_code":"DEFAULT_UPDATE"}'
+
+        try:
+            with (
+                patch("app.routers.bookkeeping.verify_plaid_webhook_signature", return_value=True) as verifier,
+                patch("app.routers.bookkeeping.handle_plaid_webhook", return_value={"ok": True}) as handler,
+            ):
+                response = client.post(
+                    "/webhooks/plaid",
+                    content=raw_body,
+                    headers={
+                        "content-type": "application/json",
+                        "Plaid-Verification": "signed.jwt",
+                    },
+                )
+        finally:
+            app_main.app.dependency_overrides.clear()
+            engine.dispose()
+
+        self.assertEqual(response.status_code, 200)
+        verifier.assert_called_once_with(raw_body, "signed.jwt")
+        handler.assert_called_once()
+        args, _kwargs = handler.call_args
+        self.assertEqual(args[1]["item_id"], "item-1")
 
 
 class ReconcileBookkeepingTests(unittest.TestCase):

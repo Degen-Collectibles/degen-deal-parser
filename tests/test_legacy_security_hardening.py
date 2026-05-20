@@ -174,6 +174,37 @@ class LegacySecurityHardeningTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             download_attachment("https://example.com/file.png")
 
+    def test_supply_listing_url_sanitizer_allows_only_http_marketplace_urls(self):
+        from app.team.supply_deals import sanitize_supply_listing_url
+
+        self.assertEqual(
+            sanitize_supply_listing_url("https://www.ebay.com/itm/123?hash=abc"),
+            "https://www.ebay.com/itm/123?hash=abc",
+        )
+        self.assertEqual(
+            sanitize_supply_listing_url("http://example.com/listing"),
+            "http://example.com/listing",
+        )
+
+        unsafe_urls = [
+            "javascript:alert(1)",
+            "data:text/html,boom",
+            "/relative/listing",
+            'https://example.com/" onclick="alert(1)',
+            "https://example.com/<svg>",
+        ]
+        for url in unsafe_urls:
+            with self.subTest(url=url):
+                self.assertEqual(sanitize_supply_listing_url(url), "")
+
+    def test_admin_supply_template_escapes_listing_href_attributes(self):
+        from pathlib import Path
+
+        template = Path("app/templates/team/admin/supply.html").read_text(encoding="utf-8")
+        self.assertIn("function escapeAttr", template)
+        self.assertIn('href="${escapeAttr(safeUrl)}"', template)
+        self.assertIn("const safeUrl = safeListingUrl(row.url)", template)
+
     def test_attachment_download_rejects_redirects_and_declared_large_files(self):
         from unittest.mock import patch
 
