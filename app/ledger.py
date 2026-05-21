@@ -22,7 +22,15 @@ from .discord.bank_reconciliation import (
     expense_category_label,
     transaction_bank_match_block_reason,
 )
-from .models import BankTransaction, LedgerRule, Transaction, utcnow
+from .models import (
+    BankTransaction,
+    LedgerRule,
+    PARSE_PARSED,
+    PARSE_REVIEW_REQUIRED,
+    Transaction,
+    expand_parse_status_filter_values,
+    utcnow,
+)
 
 
 LEDGER_STATUS_LABELS = {
@@ -54,6 +62,8 @@ LEDGER_ACTION_REASON_LABELS = {
     "payout_review": "Payout review",
     "cash_only": "Cash only",
 }
+
+DISCORD_FINANCIAL_LEDGER_CHANNEL_NAMES = {"financials", "loan", "loans"}
 
 RULE_ALLOWED_REVIEW_STATUSES = {"open", "reviewed", "ignored"}
 RULE_ALLOWED_MATCH_OVERRIDES = {"force_unmatched", "clear", "none", ""}
@@ -346,6 +356,17 @@ def _cash_transaction_signed_amount(tx: Transaction) -> float:
     return amount
 
 
+def _normalized_transaction_channel_name(tx: Transaction) -> str:
+    text = (tx.channel_name or "").strip().lower()
+    if "#" in text:
+        text = text.rsplit("#", 1)[-1].strip()
+    return text.lstrip("║# ").strip()
+
+
+def _is_discord_financial_ledger_transaction(tx: Transaction) -> bool:
+    return _normalized_transaction_channel_name(tx) in DISCORD_FINANCIAL_LEDGER_CHANNEL_NAMES
+
+
 def _unbanked_cash_view(tx: Transaction) -> dict[str, Any]:
     amount = _cash_transaction_amount(tx)
     return {
@@ -360,6 +381,85 @@ def _unbanked_cash_view(tx: Transaction) -> dict[str, Any]:
         "amount": amount,
         "amount_display": format_ledger_money(amount),
         "source_content": tx.source_content,
+    }
+
+
+def _discord_financial_ledger_status(tx: Transaction) -> str:
+    entry_kind = (tx.entry_kind or "").strip().lower()
+    expense_category = (tx.expense_category or tx.category or "").strip().lower()
+    if tx.needs_review or tx.parse_status == PARSE_REVIEW_REQUIRED:
+        return "needs_action"
+    if entry_kind in {"", "unknown"}:
+        return "needs_action"
+    if expense_category in {"", "uncategorized"}:
+        return "needs_action"
+    return "reconciled"
+
+
+def _discord_financial_action_reason(tx: Transaction) -> str:
+    if _discord_financial_ledger_status(tx) != "needs_action":
+        return ""
+    entry_kind = (tx.entry_kind or "").strip().lower()
+    expense_category = (tx.expense_category or tx.category or "").strip().lower()
+    if entry_kind in {"", "unknown"} or expense_category in {"", "uncategorized"}:
+        return "needs_category"
+    return "expense_review"
+
+
+def _discord_financial_row_view(tx: Transaction) -> dict[str, Any]:
+    category = tx.expense_category or tx.category or "uncategorized"
+    signed_amount = _cash_transaction_signed_amount(tx)
+    status = _discord_financial_ledger_status(tx)
+    action_reason = _discord_financial_action_reason(tx)
+    channel_name = _normalized_transaction_channel_name(tx)
+    account_label = "Discord Loans" if channel_name in {"loan", "loans"} else "Discord Financials"
+    payment_rail = (tx.payment_method or "").strip().lower().replace(" ", "_").replace("-", "_")
+    return {
+        "row_kind": "discord_financial",
+        "id": f"discord-financial-{tx.id}",
+        "transaction_id": tx.id,
+        "row_index": 0,
+        "posted_at": tx.occurred_at,
+        "posted_at_display": _short_date(tx.occurred_at),
+        "account_label": account_label,
+        "account_type": "discord",
+        "description": tx.source_content or f"{account_label} transaction",
+        "details": tx.notes or "",
+        "amount": signed_amount,
+        "amount_display": format_ledger_money(signed_amount),
+        "classification": "discord_financial_log",
+        "classification_label": "Discord financial log",
+        "confidence": "high" if status == "reconciled" else "low",
+        "expense_category": category,
+        "expense_category_label": expense_category_label(category),
+        "expense_subcategory": "",
+        "category_confidence": "discord",
+        "category_reason": "Financial Discord channel entry without a linked bank row.",
+        "review_status": "reviewed" if status == "reconciled" else "open",
+        "review_note": "",
+        "match_reason": "Discord financial log shown in-grid; reconcile against bank activity when applicable.",
+        "match_override_status": "",
+        "match_override_note": "",
+        "matched_transaction_id": tx.id,
+        "matched_source_message_id": tx.source_message_id,
+        "matched_platform": "discord",
+        "ledger_status": status,
+        "ledger_status_label": LEDGER_STATUS_LABELS[status],
+        "action_reason": action_reason,
+        "action_reason_label": LEDGER_ACTION_REASON_LABELS.get(action_reason, ""),
+        "source": "discord",
+        "source_label": LEDGER_SOURCE_LABELS["discord"],
+        "payment_rail": payment_rail,
+        "matched_transaction": {
+            "id": tx.id,
+            "source_message_id": tx.source_message_id,
+            "occurred_at_display": _short_date(tx.occurred_at),
+            "entry_kind": tx.entry_kind,
+            "payment_method": tx.payment_method,
+            "expense_category": category,
+            "amount": _cash_transaction_amount(tx),
+            "source_content": tx.source_content,
+        },
     }
 
 
@@ -413,6 +513,48 @@ def _cash_row_view(tx: Transaction) -> dict[str, Any]:
             "source_content": tx.source_content,
         },
     }
+
+
+def _discord_financial_row_matches_filters(row: dict[str, Any], filters: LedgerFilters) -> bool:
+    source = (filters.source or "").strip()
+    if source and source != "discord":
+        return False
+    status = (filters.status or "").strip() or "all"
+    if status not in {"all", "any"} and status != (row.get("ledger_status") or ""):
+        return False
+    start = _parse_date(filters.start)
+    end = _parse_date(filters.end)
+    posted = _date_value(row.get("posted_at"))
+    if start and (posted is None or posted < start):
+        return False
+    if end and (posted is None or posted > end):
+        return False
+    category = (filters.category or "").strip()
+    if category and category != (row.get("expense_category") or "uncategorized"):
+        return False
+    action_reason = (getattr(filters, "action_reason", "") or "").strip()
+    if action_reason and action_reason != (row.get("action_reason") or ""):
+        return False
+    account = (filters.account or "").strip().lower()
+    if account and account not in {"all", "any", "discord"}:
+        account_text = " ".join([str(row.get("account_label") or ""), str(row.get("account_type") or "")]).lower()
+        if account not in account_text:
+            return False
+    search = (filters.search or "").strip().lower()
+    if search:
+        haystack = " ".join(
+            [
+                str(row.get("description") or ""),
+                str(row.get("details") or ""),
+                str(row.get("expense_category") or ""),
+                str(row.get("source_label") or ""),
+                str(row.get("match_reason") or ""),
+                str((row.get("matched_transaction") or {}).get("source_content") or ""),
+            ]
+        ).lower()
+        if search not in haystack:
+            return False
+    return True
 
 
 def _cash_row_matches_filters(row: dict[str, Any], filters: LedgerFilters) -> bool:
@@ -827,6 +969,40 @@ def _load_unbanked_cash_transactions(session: Session) -> list[Transaction]:
     return cash_rows
 
 
+def _load_discord_financial_transactions(session: Session) -> list[Transaction]:
+    matched_ids = {
+        int(matched_id)
+        for matched_id in session.exec(
+            select(BankTransaction.matched_transaction_id)
+            .where(BankTransaction.is_removed == False)  # noqa: E712
+            .where(BankTransaction.matched_transaction_id.is_not(None))
+        ).all()
+        if matched_id is not None
+    }
+    transactions = list(
+        session.exec(
+            select(Transaction)
+            .where(Transaction.is_deleted == False)  # noqa: E712
+            .where(
+                Transaction.parse_status.in_(
+                    sorted(expand_parse_status_filter_values([PARSE_PARSED, PARSE_REVIEW_REQUIRED]))
+                )
+            )
+            .order_by(Transaction.occurred_at.desc(), Transaction.id.desc())
+        ).all()
+    )
+    rows: list[Transaction] = []
+    for tx in transactions:
+        if tx.id in matched_ids:
+            continue
+        if not _is_discord_financial_ledger_transaction(tx):
+            continue
+        if _is_cash_payment_transaction(tx):
+            continue
+        rows.append(tx)
+    return rows
+
+
 def _tax_bucket_view(reason: str) -> dict[str, Any]:
     meta = LEDGER_TAX_BUCKET_GUIDANCE.get(
         reason,
@@ -920,7 +1096,14 @@ def build_ledger_page_data(session: Session, filters: Optional[LedgerFilters] = 
     row_views = [_bank_row_view(row, matched_by_id.get(row.matched_transaction_id or -1)) for row in filtered]
     unbanked_cash_transactions = _load_unbanked_cash_transactions(session)
     unbanked_cash = [_unbanked_cash_view(tx) for tx in unbanked_cash_transactions]
+    discord_financial_transactions = _load_discord_financial_transactions(session)
     tax_cleanup = build_tax_cleanup_summary(session, all_rows, unbanked_cash_transactions)
+    discord_financial_row_views = [
+        row
+        for row in (_discord_financial_row_view(tx) for tx in discord_financial_transactions)
+        if _discord_financial_row_matches_filters(row, selected)
+    ]
+    row_views.extend(discord_financial_row_views)
     if selected.include_cash or (selected.source or "").strip() == "cash":
         cash_row_views = [
             row
@@ -935,6 +1118,9 @@ def build_ledger_page_data(session: Session, filters: Optional[LedgerFilters] = 
     for row in all_rows:
         status_counts[ledger_status_for_bank_row(row)] = status_counts.get(ledger_status_for_bank_row(row), 0) + 1
         source_counts[ledger_source_for_bank_row(row)] = source_counts.get(ledger_source_for_bank_row(row), 0) + 1
+    for row in discord_financial_row_views:
+        status_counts[str(row["ledger_status"])] = status_counts.get(str(row["ledger_status"]), 0) + 1
+        source_counts[str(row["source"])] = source_counts.get(str(row["source"]), 0) + 1
     bank_net = round(sum(_money(row.amount) for row in all_rows), 2)
     bank_inflow = round(sum(_money(row.amount) for row in all_rows if _money(row.amount) > 0), 2)
     bank_outflow = round(sum(_money(row.amount) for row in all_rows if _money(row.amount) < 0), 2)
@@ -965,6 +1151,7 @@ def build_ledger_page_data(session: Session, filters: Optional[LedgerFilters] = 
             "unbanked_cash_count": len(unbanked_cash),
             "unbanked_cash_total": round(sum(row["amount"] for row in unbanked_cash), 2),
             "unbanked_cash_display": format_ledger_money(sum(row["amount"] for row in unbanked_cash)),
+            "discord_financial_count": len(discord_financial_transactions),
         },
         "status_counts": status_counts,
         "source_counts": source_counts,

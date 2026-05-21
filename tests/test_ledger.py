@@ -711,6 +711,62 @@ def test_ledger_export_handles_cash_rows():
     assert "buy inventory 90 cash" in body
 
 
+def test_ledger_includes_non_cash_discord_financial_channel_rows():
+    engine = make_engine()
+    posted_at = datetime(2026, 5, 19, 12, tzinfo=timezone.utc)
+    with Session(engine) as session:
+        session.add(
+            Transaction(
+                id=610,
+                source_message_id=1610,
+                discord_message_id="financial-payroll",
+                channel_id="financials-channel",
+                channel_name="financials",
+                occurred_at=posted_at,
+                parse_status="parsed",
+                entry_kind="expense",
+                payment_method="zelle",
+                expense_category="payroll",
+                amount=6500.0,
+                money_in=0.0,
+                money_out=6500.0,
+                source_content="Pay Sam payroll of may 6500$",
+            )
+        )
+        session.add(
+            Transaction(
+                id=611,
+                source_message_id=1611,
+                discord_message_id="store-zelle",
+                channel_id="store-channel",
+                channel_name="store-sales-and-trades",
+                occurred_at=posted_at,
+                parse_status="parsed",
+                entry_kind="sale",
+                payment_method="zelle",
+                expense_category="inventory",
+                amount=100.0,
+                money_in=100.0,
+                money_out=0.0,
+                source_content="sold slab 100 zelle",
+            )
+        )
+        session.commit()
+
+        data = build_ledger_page_data(session, LedgerFilters(status="all", source="discord", include_cash=True))
+
+    ids = {row["id"] for row in data["rows"]}
+    financial_row = next(row for row in data["rows"] if row["id"] == "discord-financial-610")
+
+    assert "discord-financial-610" in ids
+    assert "discord-financial-611" not in ids
+    assert financial_row["row_kind"] == "discord_financial"
+    assert financial_row["source"] == "discord"
+    assert financial_row["amount"] == -6500.0
+    assert financial_row["ledger_status"] == "reconciled"
+    assert financial_row["matched_transaction_id"] == 610
+
+
 def test_ledger_export_includes_all_matching_rows_not_just_first_page():
     engine = make_engine()
     posted_at = datetime(2026, 5, 15, 12, tzinfo=timezone.utc)

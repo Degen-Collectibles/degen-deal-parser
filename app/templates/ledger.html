@@ -654,6 +654,9 @@
                                         {% if row.row_kind == "cash" %}
                                         <strong class="truncate">Discord cash deal</strong>
                                         <div class="mini match-extra">Shown in-grid; not counted in bank totals.</div>
+                                        {% elif row.row_kind == "discord_financial" %}
+                                        <strong class="truncate">Discord financial log</strong>
+                                        <div class="mini match-extra">Shown in-grid; not counted in bank totals.</div>
                                         {% elif row.matched_transaction %}
                                         <strong class="truncate">{{ row.matched_transaction.entry_kind or "Discord" }}</strong>
                                         <div class="mini match-extra">{{ row.matched_transaction.occurred_at_display }} · {{ row.matched_transaction.payment_method }}</div>
@@ -719,7 +722,7 @@
                                             <button class="tiny primary" type="submit">Save</button>
                                         </form>
                                         {% else %}
-                                        <span class="mini">Cash row</span>
+                                        <span class="mini">{{ "Discord row" if row.row_kind == "discord_financial" else "Cash row" }}</span>
                                         {% endif %}
                                     </td>
                                 </tr>
