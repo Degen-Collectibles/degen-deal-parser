@@ -146,8 +146,8 @@
             </div>
             <form method="get" action="/reports" class="filters">
                 <input type="hidden" name="source" value="{{ selected_source }}">
-                <label>Start<input type="date" name="start" value="{{ selected_start }}"></label>
-                <label>End<input type="date" name="end" value="{{ selected_end }}"></label>
+                <label>Start (Pacific Time)<input type="date" name="start" value="{{ selected_start }}"></label>
+                <label>End (Pacific Time)<input type="date" name="end" value="{{ selected_end }}"></label>
                 <label>Channel<select name="channel_id"><option value="">All channels</option>{% for ch in channels %}<option value="{{ ch['channel_id'] }}" {% if selected_channel_id == ch['channel_id'] %}selected{% endif %}>{{ ch["channel_name"] }}</option>{% endfor %}</select></label>
                 <label>Financial Kind<select name="entry_kind"><option value="">All</option><option value="sale" {% if selected_entry_kind == "sale" %}selected{% endif %}>sale</option><option value="buy" {% if selected_entry_kind == "buy" %}selected{% endif %}>buy</option><option value="trade" {% if selected_entry_kind == "trade" %}selected{% endif %}>trade</option><option value="expense" {% if selected_entry_kind == "expense" %}selected{% endif %}>expense</option><option value="unknown" {% if selected_entry_kind == "unknown" %}selected{% endif %}>unknown</option></select></label>
                 <button type="submit" class="secondary-button">Apply</button>

@@ -1,16 +1,17 @@
 import shutil
 import unittest
 import uuid
+import json
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 from starlette.requests import Request
 
 from app.routers.channels_api import edit_message_form
 from app.routers.messages import messages_table, review_table, reviewer_queue_page
-from app.models import DiscordMessage, PARSE_PARSED, utcnow
+from app.models import AuditLog, DiscordMessage, PARSE_PARSED, utcnow
 
 
 def make_request(path: str) -> Request:
@@ -287,6 +288,75 @@ class TableExpenseCategoryTests(unittest.TestCase):
         self.assertTrue(compute_manual_financials.called)
         self.assertTrue(save_review_correction.called)
         self.assertTrue(sync_transaction_from_message.called)
+
+    def test_message_financial_edit_writes_audit_log(self) -> None:
+        with Session(self.engine) as session, patch("app.routers.channels_api.require_role_response", return_value=None), patch(
+            "app.routers.channels_api.save_review_correction"
+        ), patch("app.routers.channels_api.sync_transaction_from_message"):
+            row = DiscordMessage(
+                discord_message_id="row-audit",
+                channel_id="chan-1",
+                channel_name="deals",
+                author_name="tester",
+                content="sold slab 10 cash",
+                created_at=utcnow(),
+                parse_status=PARSE_PARSED,
+                deal_type="sell",
+                amount=10.0,
+                payment_method="cash",
+                entry_kind="sale",
+                money_in=10.0,
+                money_out=0.0,
+                expense_category="inventory",
+            )
+            session.add(row)
+            session.commit()
+            row_id = row.id
+
+            request = make_request("/messages/1/edit-form")
+            request.state.current_user = SimpleNamespace(id=42, username="reviewer", display_name="Reviewer")
+
+            edit_message_form(
+                request,
+                message_id=row.id,
+                return_path="/table",
+                status=None,
+                channel_id=None,
+                filter_expense_category=None,
+                after=None,
+                before=None,
+                sort_by="time",
+                sort_dir="desc",
+                page=1,
+                limit=100,
+                parse_status=PARSE_PARSED,
+                needs_review=None,
+                deal_type="sell",
+                amount="25.00",
+                payment_method="zelle",
+                cash_direction=None,
+                category="singles",
+                entry_kind="sale",
+                expense_category="inventory",
+                confidence="0.9",
+                notes="corrected amount",
+                trade_summary=None,
+                item_names_text=None,
+                items_in_text=None,
+                items_out_text=None,
+                approve_after_save=None,
+                stay_on_detail=None,
+                session=session,
+            )
+
+            audit = session.exec(select(AuditLog).where(AuditLog.action == "financial.message.edit")).one()
+            payload = json.loads(audit.details_json)
+
+        self.assertEqual(audit.actor_user_id, 42)
+        self.assertEqual(audit.resource_key, f"discordmessage:{row_id}")
+        self.assertEqual(payload["before"]["amount"], 10.0)
+        self.assertEqual(payload["after"]["amount"], 25.0)
+        self.assertEqual(payload["after"]["payment_method"], "zelle")
 
 
 if __name__ == "__main__":

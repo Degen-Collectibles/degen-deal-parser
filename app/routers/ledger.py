@@ -18,6 +18,7 @@ from sqlmodel import Session
 
 from ..csrf import CSRFProtectedRoute
 from ..db import get_session
+from ..financial_audit import record_financial_audit
 from ..ledger import (
     LEDGER_ACTION_REASON_LABELS,
     LEDGER_STATUS_LABELS,
@@ -110,6 +111,25 @@ def _ledger_row_json(row: BankTransaction) -> dict[str, object]:
     }
 
 
+def _bank_transaction_audit_snapshot(row: BankTransaction) -> dict[str, object]:
+    return {
+        "classification": row.classification,
+        "confidence": row.confidence,
+        "expense_category": row.expense_category,
+        "expense_subcategory": row.expense_subcategory,
+        "category_confidence": row.category_confidence,
+        "category_reason": row.category_reason,
+        "review_status": row.review_status,
+        "review_note": row.review_note,
+        "matched_transaction_id": row.matched_transaction_id,
+        "matched_source_message_id": row.matched_source_message_id,
+        "matched_platform": row.matched_platform,
+        "match_reason": row.match_reason,
+        "match_override_status": row.match_override_status,
+        "match_override_note": row.match_override_note,
+    }
+
+
 @router.get("/ledger")
 def ledger_page(
     request: Request,
@@ -186,6 +206,7 @@ def ledger_row_status_form(
         return denial
     row = session.get(BankTransaction, row_id)
     if row:
+        before = _bank_transaction_audit_snapshot(row)
         changed = False
         if classification:
             row.classification = classification
@@ -206,6 +227,15 @@ def ledger_row_status_form(
         if changed:
             row.updated_at = utcnow()
             session.add(row)
+            record_financial_audit(
+                session,
+                action="financial.ledger.row_edit",
+                resource_key=f"bank_transactions:{row.id}",
+                before=before,
+                after=_bank_transaction_audit_snapshot(row),
+                actor_user_id=getattr(getattr(request.state, "current_user", None), "id", None),
+                actor_label=current_user_label(request),
+            )
             session.commit()
             session.refresh(row)
     if row and _wants_json(request):
@@ -254,6 +284,7 @@ def ledger_row_force_unmatch_form(
         return denial
     row = session.get(BankTransaction, row_id)
     if row:
+        before = _bank_transaction_audit_snapshot(row)
         if mode in {"clear", "none"}:
             row.match_override_status = None
             row.match_override_note = None
@@ -272,6 +303,16 @@ def ledger_row_force_unmatch_form(
             success = "Forced row unmatched"
         row.updated_at = utcnow()
         session.add(row)
+        record_financial_audit(
+            session,
+            action="financial.ledger.force_unmatch" if mode not in {"clear", "none"} else "financial.ledger.clear_unmatch",
+            resource_key=f"bank_transactions:{row.id}",
+            before=before,
+            after=_bank_transaction_audit_snapshot(row),
+            actor_user_id=getattr(getattr(request.state, "current_user", None), "id", None),
+            actor_label=current_user_label(request),
+            note=(note or "").strip(),
+        )
         session.commit()
     else:
         success = ""
@@ -631,6 +672,7 @@ def ledger_export_csv(
         include_cash=include_cash,
         limit=1000,
     )
+    filters.limit = 1_000_000
     data = build_ledger_page_data(session, filters)
     output = StringIO()
     writer = csv.writer(output)

@@ -4818,6 +4818,9 @@ def recompute_financial_fields(session: Session) -> int:
         row.money_in = financials.money_in
         row.money_out = financials.money_out
         row.expense_category = financials.expense_category
+        if financials.requires_review:
+            row.parse_status = PARSE_REVIEW_REQUIRED
+            row.needs_review = True
         session.add(row)
         sync_transaction_from_message(session, row)
         updated += 1

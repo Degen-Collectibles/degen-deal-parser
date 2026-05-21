@@ -9,6 +9,7 @@ from typing import Any, Iterable, Optional
 from sqlmodel import Session, select
 
 from .ai_client import get_ai_client, get_fast_model, has_ai_key
+from .financial_audit import record_financial_audit
 from .discord.bank_reconciliation import (
     ATTENTION_CLASSIFICATIONS,
     HIGH_CONFIDENCE_CLASSIFICATIONS,
@@ -565,6 +566,25 @@ def _bank_row_payload(row: BankTransaction) -> dict[str, Any]:
     }
 
 
+def _bank_row_audit_snapshot(row: BankTransaction) -> dict[str, Any]:
+    return {
+        "classification": row.classification,
+        "confidence": row.confidence,
+        "expense_category": row.expense_category,
+        "expense_subcategory": row.expense_subcategory,
+        "category_confidence": row.category_confidence,
+        "category_reason": row.category_reason,
+        "review_status": row.review_status,
+        "review_note": row.review_note,
+        "matched_transaction_id": row.matched_transaction_id,
+        "matched_source_message_id": row.matched_source_message_id,
+        "matched_platform": row.matched_platform,
+        "match_reason": row.match_reason,
+        "match_override_status": row.match_override_status,
+        "match_override_note": row.match_override_note,
+    }
+
+
 def _bounded_ledger_agent_limit(limit: int | None) -> int:
     try:
         requested = int(limit or 250)
@@ -651,6 +671,7 @@ def apply_ledger_automation(
     else:
         note = f"{note}."
     for row in rows:
+        before = _bank_row_audit_snapshot(row)
         changed = False
         if row.review_status != "reviewed":
             row.review_status = "reviewed"
@@ -661,6 +682,14 @@ def apply_ledger_automation(
         if changed:
             row.updated_at = now
             session.add(row)
+            record_financial_audit(
+                session,
+                action=f"financial.ledger.automation.{action_key}",
+                resource_key=f"bank_transactions:{row.id}",
+                before=before,
+                after=_bank_row_audit_snapshot(row),
+                actor_label=applied_by or "system",
+            )
             updated += 1
     session.commit()
     return {"action_key": action_key, "matched_count": len(rows), "updated_count": updated}
@@ -697,6 +726,7 @@ def run_ledger_review_agent(
     }
     now = utcnow()
     for row in rows:
+        before = _bank_row_audit_snapshot(row)
         changed = False
         actions: list[str] = []
         matched = matched_by_id.get(row.matched_transaction_id or -1)
@@ -731,6 +761,14 @@ def run_ledger_review_agent(
         if changed:
             row.updated_at = now
             session.add(row)
+            record_financial_audit(
+                session,
+                action="financial.ledger.agent_review",
+                resource_key=f"bank_transactions:{row.id}",
+                before=before,
+                after=_bank_row_audit_snapshot(row),
+                actor_label=applied_by or "Ledger agent",
+            )
             result["updated_count"] += 1
             if len(result["sample_actions"]) < 10:
                 result["sample_actions"].append(
@@ -1233,6 +1271,7 @@ def apply_ledger_rule(
     now = utcnow()
     updated = 0
     for row in rows:
+        before = _bank_row_audit_snapshot(row)
         changed = False
         category = str(actions.get("category") or "").strip()
         if category and category != (row.expense_category or ""):
@@ -1274,6 +1313,15 @@ def apply_ledger_rule(
         if changed:
             row.updated_at = now
             session.add(row)
+            record_financial_audit(
+                session,
+                action="financial.ledger.rule_apply",
+                resource_key=f"bank_transactions:{row.id}",
+                before=before,
+                after=_bank_row_audit_snapshot(row),
+                actor_label=applied_by or "system",
+                note=f"Rule #{rule.id}: {rule.name}",
+            )
             updated += 1
     rule.applied_count = int(rule.applied_count or 0) + updated
     rule.last_applied_at = now

@@ -989,6 +989,68 @@ class StitchedChildTransactionCleanupTests(unittest.TestCase):
         self.assertIsNone(entry_after.matched_transaction_id)
         self.assertEqual(entry_after.match_status, "unmatched")
 
+    def test_stitched_child_clears_bank_transaction_match(self):
+        from app.models import (
+            BankStatementImport,
+            BankTransaction,
+            DiscordMessage,
+        )
+        from app.discord.transactions import sync_transaction_from_message
+
+        with Session(self.engine) as session:
+            row_id = self._seed_parsed_row(session, discord_message_id="d-bank")
+            row = session.get(DiscordMessage, row_id)
+            sync_transaction_from_message(session, row)
+            session.commit()
+            tx = self._fetch_transaction(session, row_id)
+            self.assertIsNotNone(tx)
+
+            import_row = BankStatementImport(
+                label="Chase feed",
+                account_label="Chase Checking",
+                account_type="checking",
+                source_kind="csv",
+                provider="manual",
+            )
+            session.add(import_row)
+            session.commit()
+            session.refresh(import_row)
+            bank_row = BankTransaction(
+                import_id=import_row.id,
+                row_index=1,
+                account_label="Chase Checking",
+                account_type="checking",
+                description="matched discord row",
+                amount=-50.0,
+                classification="logged_in_discord_strong",
+                confidence="high",
+                matched_transaction_id=tx.id,
+                matched_source_message_id=row.id,
+                matched_platform="discord",
+                match_reason="Original match",
+            )
+            session.add(bank_row)
+            session.commit()
+            session.refresh(bank_row)
+
+            row.stitched_group_id = "grp-bank"
+            row.stitched_primary = False
+            session.add(row)
+            session.commit()
+            sync_transaction_from_message(session, row)
+            session.commit()
+
+            bank_after = session.get(BankTransaction, bank_row.id)
+            tx_after = self._fetch_transaction(session, row_id)
+
+        self.assertIsNone(tx_after)
+        self.assertIsNotNone(bank_after)
+        self.assertIsNone(bank_after.matched_transaction_id)
+        self.assertIsNone(bank_after.matched_source_message_id)
+        self.assertIsNone(bank_after.matched_platform)
+        self.assertEqual(bank_after.classification, "needs_review")
+        self.assertEqual(bank_after.confidence, "low")
+
     def test_marking_row_as_ignored_also_deletes_transaction(self):
         from app.models import DiscordMessage, PARSE_IGNORED
         from app.discord.transactions import sync_transaction_from_message

@@ -8,6 +8,7 @@ from typing import Optional
 from sqlmodel import Session, select
 
 from ..models import (
+    BankTransaction,
     BookkeepingEntry,
     DiscordMessage,
     expand_parse_status_filter_values,
@@ -24,6 +25,7 @@ from ..models import (
     signed_money_delta,
     utcnow,
 )
+from .financials import compute_financials
 
 
 NON_OPERATING_ENTRY_KINDS = {"loan_draw", "loan_repayment", "transfer"}
@@ -85,6 +87,20 @@ def sync_transaction_from_message(session: Session, row: DiscordMessage) -> Opti
                 bookkeeping_row.match_status = "unmatched"
                 session.add(bookkeeping_row)
 
+            bank_rows = session.exec(
+                select(BankTransaction).where(BankTransaction.matched_transaction_id == existing.id)
+            ).all()
+            for bank_row in bank_rows:
+                bank_row.matched_transaction_id = None
+                bank_row.matched_source_message_id = None
+                bank_row.matched_platform = None
+                bank_row.match_reason = "Unmatched because the source Discord transaction is no longer importable."
+                if (bank_row.classification or "").startswith("logged_in_discord"):
+                    bank_row.classification = "needs_review"
+                    bank_row.confidence = "low"
+                bank_row.updated_at = utcnow()
+                session.add(bank_row)
+
             items = session.exec(
                 select(TransactionItem).where(TransactionItem.transaction_id == existing.id)
             ).all()
@@ -101,6 +117,26 @@ def sync_transaction_from_message(session: Session, row: DiscordMessage) -> Opti
         )
     else:
         transaction = existing
+
+    financials = compute_financials(
+        parsed_type=row.deal_type,
+        parsed_category=row.category,
+        amount=row.amount,
+        cash_direction=row.cash_direction,
+        message_text=row.content or "",
+    )
+    if financials.requires_review:
+        row.parse_status = PARSE_REVIEW_REQUIRED
+        row.needs_review = True
+        session.add(row)
+    if not row.entry_kind:
+        row.entry_kind = financials.entry_kind
+    if row.money_in is None:
+        row.money_in = financials.money_in
+    if row.money_out is None:
+        row.money_out = financials.money_out
+    if not row.expense_category and financials.expense_category:
+        row.expense_category = financials.expense_category
 
     transaction.discord_message_id = row.discord_message_id
     transaction.guild_id = row.guild_id
@@ -222,11 +258,17 @@ def transaction_base_query(
     channel_id: Optional[str] = None,
     entry_kind: Optional[str] = None,
 ):
-    stmt = select(Transaction).where(Transaction.is_deleted == False)
+    stmt = select(Transaction).outerjoin(DiscordMessage, Transaction.source_message_id == DiscordMessage.id)
+    stmt = stmt.where(Transaction.is_deleted == False)
     stmt = stmt.where(
         Transaction.parse_status.in_(
             sorted(expand_parse_status_filter_values([PARSE_PARSED, PARSE_REVIEW_REQUIRED]))
         )
+    )
+    stmt = stmt.where(
+        (DiscordMessage.id == None)  # noqa: E711
+        | (DiscordMessage.stitched_group_id == None)  # noqa: E711
+        | (DiscordMessage.stitched_primary == True)  # noqa: E712
     )
 
     if start:

@@ -71,6 +71,7 @@ class FinancialSummary:
     money_in: float
     money_out: float
     expense_category: Optional[str]
+    requires_review: bool = False
 
 
 def normalize_payment_amount(amount: Optional[float]) -> float:
@@ -122,11 +123,11 @@ def derive_entry_kind(
         return "expense", expense_category
 
     if parsed_type == "sell":
-        return "sale", None
+        return "sale", "inventory"
     if parsed_type == "buy":
-        return "buy", None
+        return "buy", "inventory"
     if parsed_type == "trade":
-        return "trade", None
+        return "trade", "inventory"
 
     return "unknown", expense_category
 
@@ -149,6 +150,7 @@ def compute_financials(
     normalized_amount = normalize_payment_amount(amount)
     money_in = 0.0
     money_out = 0.0
+    requires_review = False
 
     if entry_kind == "sale":
         money_in = normalized_amount
@@ -163,10 +165,16 @@ def compute_financials(
             money_in = normalized_amount
         elif cash_direction == "from_store":
             money_out = normalized_amount
+        elif normalized_amount:
+            requires_review = True
+
+    if amount is None and entry_kind in {"sale", "buy", "expense"}:
+        requires_review = True
 
     return FinancialSummary(
         entry_kind=entry_kind,
         money_in=money_in,
         money_out=money_out,
         expense_category=expense_category,
+        requires_review=requires_review,
     )

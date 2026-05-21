@@ -21,12 +21,13 @@ from app.ledger import (
     preview_ledger_rule,
     run_ledger_review_agent,
 )
-from app.models import BankStatementImport, BankTransaction, LedgerRule, Transaction
+from app.models import AuditLog, BankStatementImport, BankTransaction, LedgerRule, Transaction
 from app.routers.ledger import (
     ledger_agent_run_form,
     ledger_automation_apply_form,
     ledger_export_csv,
     ledger_page,
+    ledger_row_force_unmatch_form,
     ledger_row_status_form,
 )
 
@@ -708,6 +709,91 @@ def test_ledger_export_handles_cash_rows():
     assert response.status_code == 200
     assert "cash-504" in body
     assert "buy inventory 90 cash" in body
+
+
+def test_ledger_export_includes_all_matching_rows_not_just_first_page():
+    engine = make_engine()
+    posted_at = datetime(2026, 5, 15, 12, tzinfo=timezone.utc)
+    with Session(engine) as session:
+        bank_import = add_import(session)
+        for idx in range(1005):
+            session.add(
+                BankTransaction(
+                    id=2000 + idx,
+                    import_id=bank_import.id,
+                    row_index=idx + 1,
+                    account_label="Chase Checking",
+                    account_type="checking",
+                    posted_at=posted_at,
+                    description=f"SUPPLIES ROW {idx}",
+                    amount=-1.0,
+                    classification="expense_or_purchase_needs_review",
+                    expense_category="supplies_packaging",
+                )
+            )
+        session.commit()
+
+        with patch("app.routers.ledger.require_role_response", return_value=None):
+            response = ledger_export_csv(
+                make_request("/ledger/export.csv?status=all&include_cash=false"),
+                account="",
+                start="",
+                end="",
+                status="all",
+                category="",
+                source="",
+                action_reason="",
+                search="",
+                sort="posted_at",
+                direction="desc",
+                include_cash=False,
+                session=session,
+            )
+
+    body = response.body.decode("utf-8")
+    assert body.count("SUPPLIES ROW") == 1005
+
+
+def test_ledger_force_unmatch_writes_financial_audit_log():
+    engine = make_engine()
+    posted_at = datetime(2026, 5, 15, 12, tzinfo=timezone.utc)
+    with Session(engine) as session:
+        bank_import = add_import(session)
+        session.add(
+            BankTransaction(
+                id=190,
+                import_id=bank_import.id,
+                row_index=1,
+                account_label="Chase Checking",
+                account_type="checking",
+                posted_at=posted_at,
+                description="Zelle payment to inventory seller",
+                amount=-250.0,
+                classification="logged_in_discord_strong",
+                confidence="high",
+                expense_category="inventory_purchases",
+                matched_transaction_id=500,
+                matched_source_message_id=1500,
+                matched_platform="discord",
+            )
+        )
+        session.commit()
+
+        with patch("app.routers.ledger.require_role_response", return_value=None):
+            ledger_row_force_unmatch_form(
+                make_request("/ledger/rows/190/force-unmatch-form", method="POST"),
+                190,
+                mode="force",
+                note="Bad match",
+                session=session,
+            )
+
+        audit = session.exec(select(AuditLog).where(AuditLog.action == "financial.ledger.force_unmatch")).one()
+        payload = json.loads(audit.details_json)
+
+    assert audit.resource_key == "bank_transactions:190"
+    assert payload["before"]["matched_transaction_id"] == 500
+    assert payload["after"]["match_override_status"] == "force_unmatched"
 
 
 def test_rule_draft_preview_and_apply_updates_only_matching_rows():

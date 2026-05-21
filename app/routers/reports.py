@@ -103,8 +103,8 @@ def report_summary(
         return denial
     start_dt = parse_report_datetime(start)
     end_dt = parse_report_datetime(end, end_of_day=True)
-    rows = get_financial_rows(session, start=start_dt, end=end_dt, channel_id=channel_id)
-    summary = build_financial_summary(rows)
+    rows = get_transactions(session, start=start_dt, end=end_dt, channel_id=channel_id)
+    summary = build_transaction_summary(rows)
     summary["filters"] = {
         "start": start_dt.isoformat() if start_dt else None,
         "end": end_dt.isoformat() if end_dt else None,

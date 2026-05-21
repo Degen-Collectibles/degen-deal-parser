@@ -19,6 +19,7 @@ from ..shared import *  # noqa: F401,F403 -- shared helpers, constants, state
 from ..discord.channels import get_channel_filter_choices
 from ..discord.corrections import promote_correction_pattern, save_review_correction, snapshot_message_parse
 from ..db import get_session
+from ..financial_audit import record_financial_audit
 from ..models import (
     DiscordMessage,
     PARSE_PARSED,
@@ -358,9 +359,34 @@ def edit_message_form(
         row.reviewed_by = reviewer_label
         row.reviewed_at = utcnow()
 
+    computed_financials = compute_financials(
+        parsed_type=row.deal_type,
+        parsed_category=row.category,
+        amount=row.amount,
+        cash_direction=row.cash_direction,
+        message_text=row.content or "",
+    )
+    if computed_financials.requires_review:
+        row.parse_status = PARSE_REVIEW_REQUIRED
+        row.needs_review = True
+        row.reviewed_by = None
+        row.reviewed_at = None
+
     session.add(row)
     save_review_correction(session, row, parsed_before=parsed_before)
     sync_transaction_from_message(session, row)
+    parsed_after = snapshot_message_parse(row)
+    if parsed_before != parsed_after:
+        user = getattr(request.state, "current_user", None)
+        record_financial_audit(
+            session,
+            action="financial.message.edit",
+            resource_key=f"discordmessage:{row.id}",
+            before=parsed_before,
+            after=parsed_after,
+            actor_user_id=getattr(user, "id", None),
+            actor_label=reviewer_label,
+        )
     session.commit()
 
     if normalized_review_action in {"save_next", "approve_next"} and next_message_id:

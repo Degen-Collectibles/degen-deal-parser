@@ -36,3 +36,10 @@ def test_finance_kpi_grid_does_not_force_clipped_desktop_cards():
 
     assert "repeat(auto-fit, minmax(170px, 1fr))" in template
     assert ".kpi-grid { grid-template-columns: repeat(3" not in template
+
+
+def test_finance_date_filters_label_pacific_time():
+    template = _template_text()
+
+    assert "Start (Pacific Time)" in template
+    assert "End (Pacific Time)" in template

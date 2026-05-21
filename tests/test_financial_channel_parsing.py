@@ -4,8 +4,10 @@ from unittest.mock import patch
 
 from app.discord.financials import compute_financials
 from app.discord.parser import parse_message
-from app.discord.transactions import build_transaction_summary
-from app.models import Transaction
+from app.discord.transactions import build_transaction_summary, sync_transaction_from_message
+from sqlmodel import select
+
+from app.models import DiscordMessage, PARSE_REVIEW_REQUIRED, Transaction
 
 
 def _parse_financial_message(text: str, *, channel_name: str, attachments: list[str] | None = None) -> dict:
@@ -237,6 +239,89 @@ def test_financials_channel_preserves_review_row_category_when_amount_missing() 
 
     assert financials.entry_kind == "unknown"
     assert financials.expense_category == "rent_facilities"
+
+
+def test_sync_flags_parsed_sale_without_amount_for_review() -> None:
+    from sqlmodel import Session, SQLModel, create_engine
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        row = DiscordMessage(
+            discord_message_id="missing-amount-sale",
+            channel_id="sales",
+            channel_name="store-sales-and-trades",
+            author_name="tester",
+            content="sold slab zelle amount unknown",
+            created_at=datetime(2026, 5, 20, 12, tzinfo=timezone.utc),
+            parse_status="parsed",
+            deal_type="sell",
+            amount=None,
+            payment_method="zelle",
+            needs_review=False,
+        )
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+
+        sync_transaction_from_message(session, row)
+        session.commit()
+        session.refresh(row)
+        tx = session.exec(select(Transaction).where(Transaction.source_message_id == row.id)).one()
+
+    assert row.parse_status == PARSE_REVIEW_REQUIRED
+    assert row.needs_review is True
+    assert tx.needs_review is True
+    assert tx.money_in == 0.0
+
+
+def test_sync_flags_trade_amount_without_cash_direction_for_review() -> None:
+    from sqlmodel import Session, SQLModel, create_engine
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        row = DiscordMessage(
+            discord_message_id="trade-missing-direction",
+            channel_id="sales",
+            channel_name="store-sales-and-trades",
+            author_name="tester",
+            content="trade plus 200 zelle direction unclear",
+            created_at=datetime(2026, 5, 20, 12, tzinfo=timezone.utc),
+            parse_status="parsed",
+            deal_type="trade",
+            amount=200.0,
+            payment_method="zelle",
+            cash_direction=None,
+            needs_review=False,
+        )
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+
+        sync_transaction_from_message(session, row)
+        session.commit()
+        session.refresh(row)
+        tx = session.exec(select(Transaction).where(Transaction.source_message_id == row.id)).one()
+
+    assert row.parse_status == PARSE_REVIEW_REQUIRED
+    assert row.needs_review is True
+    assert tx.needs_review is True
+    assert tx.money_in == 0.0
+    assert tx.money_out == 0.0
+
+
+def test_card_deal_financials_default_to_inventory_category() -> None:
+    for parsed_type in ("sell", "buy", "trade"):
+        financials = compute_financials(
+            parsed_type=parsed_type,
+            parsed_category=None,
+            amount=25.0,
+            cash_direction="to_store",
+            message_text="card deal 25 zelle",
+        )
+
+        assert financials.expense_category == "inventory"
 
 
 def test_loan_principal_is_not_counted_as_sales_or_expense_net() -> None:
