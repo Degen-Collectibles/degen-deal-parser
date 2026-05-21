@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import csv
 import json
+import secrets
 from io import StringIO
 from typing import Optional
 from urllib.parse import urlencode
@@ -53,6 +54,18 @@ from ..discord.plaid_bank_feed import (
     sync_plaid_connection,
     verify_plaid_webhook_signature,
 )
+from ..discord.gmail_financials import (
+    build_gmail_oauth_url,
+    exchange_gmail_oauth_code,
+    gmail_config_status,
+    link_gmail_evidence_to_bank_row,
+    list_gmail_connections,
+    list_gmail_receipts,
+    sync_gmail_connection,
+    upsert_gmail_receipt_from_message,
+    upsert_gmail_connection_from_oauth,
+)
+from ..models import GmailReceipt
 
 router = APIRouter(route_class=CSRFProtectedRoute)
 
@@ -151,6 +164,9 @@ def bank_reconciliation_page(
     matched_by_id = {}
     plaid_status = plaid_config_status()
     bank_feed_connections = list_bank_feed_connections(session)
+    gmail_status = gmail_config_status()
+    gmail_connections = list_gmail_connections(session)
+    gmail_receipts = list_gmail_receipts(session, limit=20)
 
     if selected_import:
         all_rows = get_bank_transactions(session, import_id=selected_import.id)
@@ -209,8 +225,174 @@ def bank_reconciliation_page(
             "error": error,
             "plaid_status": plaid_status,
             "bank_feed_connections": bank_feed_connections,
+            "gmail_status": gmail_status,
+            "gmail_connections": gmail_connections,
+            "gmail_receipts": gmail_receipts,
         },
     )
+
+
+@router.get("/bookkeeping/gmail/connect")
+def gmail_connect_start(request: Request):
+    if denial := require_role_response(request, "reviewer"):
+        return denial
+    try:
+        state = secrets.token_urlsafe(24)
+        request.session["gmail_oauth_state"] = state
+        return RedirectResponse(url=build_gmail_oauth_url(state), status_code=303)
+    except Exception as exc:
+        return RedirectResponse(
+            url=_bank_redirect_url(error=f"Gmail connect failed: {exc}"),
+            status_code=303,
+        )
+
+
+@router.get("/bookkeeping/gmail/callback")
+def gmail_connect_callback(
+    request: Request,
+    code: str = Query(default=""),
+    state: str = Query(default=""),
+    error: str = Query(default=""),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "reviewer"):
+        return denial
+    stored_state = request.session.pop("gmail_oauth_state", None)
+    if error:
+        return RedirectResponse(url=_bank_redirect_url(error=f"Gmail denied access: {error}"), status_code=303)
+    if not code or not stored_state or stored_state != state:
+        return RedirectResponse(url=_bank_redirect_url(error="Invalid Gmail OAuth callback"), status_code=303)
+    try:
+        token_payload = exchange_gmail_oauth_code(code)
+        connection = upsert_gmail_connection_from_oauth(session, token_payload)
+        return RedirectResponse(
+            url=_bank_redirect_url(success=f"Connected Gmail account {connection.email_address}"),
+            status_code=303,
+        )
+    except Exception as exc:
+        return RedirectResponse(url=_bank_redirect_url(error=f"Gmail callback failed: {exc}"), status_code=303)
+
+
+@router.post("/bookkeeping/gmail/sync-form")
+def gmail_sync_form(
+    request: Request,
+    connection_id: int = Form(default=0),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "reviewer"):
+        return denial
+    try:
+        connections = list_gmail_connections(session)
+        target_id = connection_id or (connections[0].id if connections else 0)
+        if not target_id:
+            raise ValueError("Connect Gmail before syncing")
+        result = sync_gmail_connection(session, int(target_id))
+        return RedirectResponse(
+            url=_bank_redirect_url(
+                success=(
+                    f"Gmail sync scanned {result.get('scanned', 0)} message(s), "
+                    f"imported {result.get('imported', 0)} receipt(s), "
+                    f"created/updated {result.get('transactions', 0)} transaction(s)."
+                )
+            ),
+            status_code=303,
+        )
+    except Exception as exc:
+        return RedirectResponse(url=_bank_redirect_url(error=f"Gmail sync failed: {exc}"), status_code=303)
+
+
+@router.post("/bookkeeping/gmail/receipts/{receipt_id}/ignore-form")
+def gmail_receipt_ignore_form(
+    request: Request,
+    receipt_id: int,
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "reviewer"):
+        return denial
+    row = session.get(GmailReceipt, receipt_id)
+    if row:
+        row.status = "ignored"
+        row.updated_at = utcnow()
+        session.add(row)
+        session.commit()
+    return RedirectResponse(url=_bank_redirect_url(success="Ignored Gmail receipt"), status_code=303)
+
+
+@router.post("/bookkeeping/gmail/receipts/{receipt_id}/approve-form")
+def gmail_receipt_approve_form(
+    request: Request,
+    receipt_id: int,
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "reviewer"):
+        return denial
+    row = session.get(GmailReceipt, receipt_id)
+    if row:
+        row.status = "approved"
+        row.updated_at = utcnow()
+        if row.transaction_id:
+            tx = session.get(Transaction, row.transaction_id)
+            if tx:
+                tx.needs_review = False
+                tx.parse_status = "parsed"
+                tx.updated_at = utcnow()
+                source_row = session.get(DiscordMessage, tx.source_message_id)
+                if source_row:
+                    source_row.needs_review = False
+                    source_row.parse_status = "parsed"
+                    session.add(source_row)
+                session.add(tx)
+        session.add(row)
+        session.commit()
+    return RedirectResponse(url=_bank_redirect_url(success="Approved Gmail receipt"), status_code=303)
+
+
+@router.post("/bookkeeping/gmail/receipts/{receipt_id}/reparse-form")
+def gmail_receipt_reparse_form(
+    request: Request,
+    receipt_id: int,
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "reviewer"):
+        return denial
+    row = session.get(GmailReceipt, receipt_id)
+    if not row:
+        return RedirectResponse(url=_bank_redirect_url(error="Gmail receipt not found"), status_code=303)
+    try:
+        upsert_gmail_receipt_from_message(
+            session,
+            gmail_message_id=row.gmail_message_id,
+            thread_id=row.thread_id,
+            sender=row.sender,
+            subject=row.subject,
+            received_at=row.received_at,
+            html_body=row.raw_text or row.snippet,
+            snippet=row.snippet,
+            connection_id=row.connection_id,
+        )
+        session.commit()
+        return RedirectResponse(url=_bank_redirect_url(success="Reparsed Gmail receipt"), status_code=303)
+    except Exception as exc:
+        return RedirectResponse(url=_bank_redirect_url(error=f"Gmail reparse failed: {exc}"), status_code=303)
+
+
+@router.post("/bookkeeping/gmail/receipts/{receipt_id}/link-bank-form")
+def gmail_receipt_link_bank_form(
+    request: Request,
+    receipt_id: int,
+    bank_transaction_id: int = Form(...),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "reviewer"):
+        return denial
+    try:
+        current_user = getattr(request.state, "current_user", None)
+        linked_by = str(getattr(current_user, "username", None) or "")
+        link_gmail_evidence_to_bank_row(session, receipt_id, bank_transaction_id, linked_by=linked_by)
+        session.commit()
+        return RedirectResponse(url=_bank_redirect_url(success="Linked Gmail receipt to bank row"), status_code=303)
+    except Exception as exc:
+        return RedirectResponse(url=_bank_redirect_url(error=f"Gmail link failed: {exc}"), status_code=303)
 
 
 @router.post("/bookkeeping/bank/plaid/link-token")

@@ -88,6 +88,12 @@ class Settings(BaseSettings):
     plaid_country_codes: str = Field(default="US", alias="PLAID_COUNTRY_CODES")
     plaid_webhook_url: str = Field(default="", alias="PLAID_WEBHOOK_URL")
     bank_feed_encryption_key: str = Field(default="", alias="BANK_FEED_ENCRYPTION_KEY")
+    google_gmail_client_id: str = Field(default="", alias="GOOGLE_GMAIL_CLIENT_ID")
+    google_gmail_client_secret: str = Field(default="", alias="GOOGLE_GMAIL_CLIENT_SECRET")
+    google_gmail_redirect_uri: str = Field(default="", alias="GOOGLE_GMAIL_REDIRECT_URI")
+    google_gmail_account: str = Field(default="degencollectiblesllc@gmail.com", alias="GOOGLE_GMAIL_ACCOUNT")
+    gmail_sync_days: int = Field(default=180, alias="GMAIL_SYNC_DAYS")
+    gmail_sync_limit: int = Field(default=50, alias="GMAIL_SYNC_LIMIT")
 
     # Durable runtime data root. Defaults to repo-relative `data/` for local
     # dev; Green/Linux production should set DATA_ROOT=/opt/degen/data so

@@ -241,6 +241,8 @@ class ReparseRun(SQLModel, table=True):
 class Transaction(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     source_message_id: int = Field(index=True, unique=True, foreign_key="discordmessage.id")
+    source_kind: str = Field(default="discord", index=True)
+    source_external_id: Optional[str] = Field(default=None, index=True)
 
     discord_message_id: Optional[str] = Field(default=None, index=True)
     guild_id: Optional[str] = Field(default=None, index=True)
@@ -277,6 +279,99 @@ class TransactionItem(SQLModel, table=True):
     direction: str = Field(index=True)
     item_name: str
     created_at: datetime = Field(default_factory=utcnow, index=True)
+
+
+class GmailConnection(SQLModel, table=True):
+    __tablename__ = "gmail_connections"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    email_address: str = Field(index=True, unique=True)
+    refresh_token_enc: Optional[bytes] = Field(default=None, sa_column=Column(LargeBinary, nullable=True))
+    access_token_enc: Optional[bytes] = Field(default=None, sa_column=Column(LargeBinary, nullable=True))
+    access_token_expires_at: Optional[datetime] = Field(default=None, index=True)
+    scopes_json: str = "[]"
+    status: str = Field(default="active", index=True)
+    sync_query: str = ""
+    history_id: Optional[str] = Field(default=None, index=True)
+    last_sync_at: Optional[datetime] = Field(default=None, index=True)
+    last_sync_error: Optional[str] = None
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+    updated_at: datetime = Field(default_factory=utcnow, index=True)
+
+
+class GmailSyncRun(SQLModel, table=True):
+    __tablename__ = "gmail_sync_runs"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    connection_id: int = Field(index=True, foreign_key="gmail_connections.id")
+    status: str = Field(default="running", index=True)
+    query: str = ""
+    scanned_count: int = 0
+    imported_count: int = 0
+    transaction_count: int = 0
+    error: Optional[str] = None
+    started_at: datetime = Field(default_factory=utcnow, index=True)
+    finished_at: Optional[datetime] = Field(default=None, index=True)
+
+
+class GmailReceipt(SQLModel, table=True):
+    __tablename__ = "gmail_receipts"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    connection_id: Optional[int] = Field(default=None, index=True, foreign_key="gmail_connections.id")
+    gmail_message_id: str = Field(index=True, unique=True)
+    thread_id: Optional[str] = Field(default=None, index=True)
+    sender: str = Field(default="", index=True)
+    subject: str = Field(default="", index=True)
+    received_at: Optional[datetime] = Field(default=None, index=True)
+    detected_vendor: str = Field(default="", index=True)
+    detected_type: str = Field(default="receipt", index=True)
+    total_amount: Optional[float] = Field(default=None, index=True)
+    tender: Optional[str] = Field(default=None, index=True)
+    status: str = Field(default="unmatched", index=True)
+    confidence: str = Field(default="low", index=True)
+    snippet: str = ""
+    parsed_json: str = "{}"
+    raw_text: str = ""
+    dedupe_hash: str = Field(default="", index=True)
+    transaction_id: Optional[int] = Field(default=None, index=True, foreign_key="transaction.id")
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+    updated_at: datetime = Field(default_factory=utcnow, index=True)
+
+
+class GmailReceiptLineItem(SQLModel, table=True):
+    __tablename__ = "gmail_receipt_line_items"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    gmail_receipt_id: int = Field(index=True, foreign_key="gmail_receipts.id")
+    row_index: int = Field(index=True)
+    name: str
+    set_name: Optional[str] = Field(default=None, index=True)
+    card_number: Optional[str] = Field(default=None, index=True)
+    condition: Optional[str] = Field(default=None, index=True)
+    language: Optional[str] = Field(default=None, index=True)
+    print_type: Optional[str] = Field(default=None, index=True)
+    quantity: int = Field(default=1, index=True)
+    cash_amount: Optional[float] = None
+    credit_amount: Optional[float] = None
+    notes: Optional[str] = None
+    raw_json: str = "{}"
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+
+
+class GmailEvidenceLink(SQLModel, table=True):
+    __tablename__ = "gmail_evidence_links"
+
+    __table_args__ = (UniqueConstraint("gmail_receipt_id", "bank_transaction_id"),)
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    gmail_receipt_id: int = Field(index=True, foreign_key="gmail_receipts.id")
+    bank_transaction_id: Optional[int] = Field(default=None, index=True, foreign_key="bank_transactions.id")
+    transaction_id: Optional[int] = Field(default=None, index=True, foreign_key="transaction.id")
+    link_status: str = Field(default="linked", index=True)
+    linked_by: Optional[str] = Field(default=None, index=True)
+    linked_at: datetime = Field(default_factory=utcnow, index=True)
+    note: Optional[str] = None
 
 
 class ReviewCorrection(SQLModel, table=True):
