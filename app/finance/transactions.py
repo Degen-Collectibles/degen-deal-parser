@@ -7,7 +7,7 @@ from typing import Optional
 
 from sqlmodel import Session, select
 
-from .discord_models import (
+from ..discord.discord_models import (
     DiscordMessage,
     PARSE_FAILED,
     PARSE_IGNORED,

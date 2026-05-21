@@ -1613,3 +1613,4 @@ def delete_bank_import(session: Session, import_id: int) -> None:
     if import_row:
         session.delete(import_row)
     session.commit()
+

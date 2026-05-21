@@ -31,7 +31,7 @@ from sqlmodel import Session, select
 
 from .auth import authenticate_user, has_legacy_role, has_role
 from .attachment_storage import attachment_cache_path, generate_thumbnail, warm_attachment_cache, write_attachment_cache_file
-from .discord.bookkeeping import (
+from .finance.bookkeeping import (
     get_bookkeeping_status_by_message_ids,
 )
 from .cache import cache_get, cache_invalidate, cache_set
@@ -63,7 +63,7 @@ from .discord.discord_ingest import (
     discord_runtime_state,
     parse_iso_datetime,
 )
-from .discord.financials import compute_financials
+from .finance.financials import compute_financials
 from .models import (
     AppSetting,
     AttachmentAsset,
@@ -141,7 +141,7 @@ from .display_media import (
     normalize_attachment_urls_for_row,
     row_has_images,
 )
-from .discord.transactions import build_transaction_summary, get_transactions, rebuild_transactions, sync_transaction_from_message
+from .finance.transactions import build_transaction_summary, get_transactions, rebuild_transactions, sync_transaction_from_message
 from .tiktok.tiktok_auth_refresh import refresh_tiktok_auth_if_needed as _refresh_tiktok_auth_fn
 from .tiktok.tiktok_ingest import (
     TikTokIngestError,

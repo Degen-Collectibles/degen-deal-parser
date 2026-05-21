@@ -24,7 +24,7 @@ from ..display_media import (
     extract_image_urls,
     parse_attachment_urls_json,
 )
-from .financials import compute_financials
+from ..finance.financials import compute_financials
 from .discord_models import (
     AttachmentAsset,
     DiscordMessage,
@@ -47,7 +47,7 @@ from ..ai_client import get_model, get_provider
 from .parser import parse_message, TimedOutRowError
 from .reparse_runs import safe_record_reparse_run_outcome
 from ..runtime_logging import structured_log_line
-from .transactions import sync_transaction_from_message
+from ..finance.transactions import sync_transaction_from_message
 
 settings = get_settings()
 STALE_PROCESSING_AFTER = timedelta(minutes=10)

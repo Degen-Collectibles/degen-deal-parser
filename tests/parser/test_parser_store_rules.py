@@ -1,6 +1,6 @@
 import unittest
 
-from app.discord.financials import compute_financials
+from app.finance.financials import compute_financials
 from app.discord.parser import (
     detect_non_transaction_message,
     build_prompt,

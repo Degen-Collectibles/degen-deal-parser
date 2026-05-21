@@ -7,7 +7,7 @@ from typing import Any, Optional
 from sqlmodel import Session, select
 
 from ..db import engine, managed_session
-from .financials import EXPENSE_PATTERNS
+from ..finance.financials import EXPENSE_PATTERNS
 from .discord_models import DiscordMessage, PARSE_PARSED, PARSE_REVIEW_REQUIRED
 from ..models import ReviewCorrection, normalize_parse_status, utcnow
 

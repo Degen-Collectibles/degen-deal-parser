@@ -16,7 +16,7 @@ from ..attachment_repair import (
     row_status_snapshot,
 )
 from ..attachment_storage import delete_attachment_cache_file, write_attachment_cache_file
-from .bookkeeping import auto_import_public_google_sheet, extract_google_sheet_url
+from ..finance.bookkeeping import auto_import_public_google_sheet, extract_google_sheet_url
 from ..config import get_settings
 from ..db import engine, managed_session, run_write_with_retry
 from .discord_models import (
@@ -29,7 +29,7 @@ from .discord_models import (
 )
 from .ops_log import write_operations_log
 from ..runtime_logging import structured_log_line
-from .transactions import sync_transaction_from_message
+from ..finance.transactions import sync_transaction_from_message
 
 settings = get_settings()
 

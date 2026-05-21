@@ -26,7 +26,7 @@ from ..models import (
     normalize_parse_status,
     utcnow,
 )
-from ..discord.transactions import sync_transaction_from_message
+from ..finance.transactions import sync_transaction_from_message
 
 router = APIRouter(route_class=CSRFProtectedRoute)
 

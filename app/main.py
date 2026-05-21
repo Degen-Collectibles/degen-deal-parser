@@ -34,7 +34,7 @@ from .auth import (
     seed_default_users,
 )
 from .attachment_storage import attachment_cache_path, generate_thumbnail, warm_attachment_cache, write_attachment_cache_file
-from .discord.bookkeeping import (
+from .finance.bookkeeping import (
     refresh_bookkeeping_import_from_source,
     import_bookkeeping_file,
     get_bookkeeping_status_by_message_ids,
@@ -90,7 +90,7 @@ from .discord.discord_ingest import (
     run_discord_bot,
     seed_channels_from_env,
 )
-from .discord.financials import compute_financials
+from .finance.financials import compute_financials
 from .models import (
     AppSetting,
     AttachmentAsset,
@@ -165,7 +165,7 @@ from .display_media import (
     normalize_attachment_urls_for_row,
     row_has_images,
 )
-from .discord.transactions import build_transaction_summary, get_transactions, rebuild_transactions, sync_transaction_from_message
+from .finance.transactions import build_transaction_summary, get_transactions, rebuild_transactions, sync_transaction_from_message
 from .tiktok.tiktok_auth_refresh import refresh_tiktok_auth_if_needed as _refresh_tiktok_auth_fn
 from .tiktok.tiktok_ingest import (
     TikTokIngestError,

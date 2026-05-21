@@ -41,7 +41,7 @@ from app.discord.reparse_runs import (
     record_reparse_run_outcome,
 )
 from app.reporting import get_financial_rows
-from app.discord.transactions import get_transactions, sync_transaction_from_message
+from app.finance.transactions import get_transactions, sync_transaction_from_message
 from app.discord.worker import MAX_ATTEMPTS_ERROR, close_or_recover_unfinished_attempts, queue_reparse_range
 from app.discord.worker import process_once, process_row
 

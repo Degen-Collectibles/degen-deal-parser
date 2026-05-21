@@ -14,7 +14,7 @@ import httpx
 from openpyxl import load_workbook
 from sqlmodel import Session, select
 
-from .discord_models import DiscordMessage
+from ..discord.discord_models import DiscordMessage
 from ..models import (
     BookkeepingEntry,
     BookkeepingImport,
@@ -23,8 +23,8 @@ from ..models import (
     signed_money_delta,
     utcnow,
 )
-from .transactions import transaction_base_query
 from ..db import engine, managed_session
+from .transactions import transaction_base_query
 
 
 KIND_ALIASES = {
@@ -1142,3 +1142,4 @@ def get_bookkeeping_status_by_message_ids(session: Session, message_ids: list[in
             "sheet_name": matched_entry.sheet_name or "",
         }
     return result
+

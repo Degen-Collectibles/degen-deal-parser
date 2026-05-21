@@ -16,7 +16,7 @@ from sqlmodel import Session
 
 from ..csrf import CSRFProtectedRoute
 from ..shared import *  # noqa: F401,F403 — shared helpers, constants, state
-from ..discord.bookkeeping import (
+from ..finance.bookkeeping import (
     extract_google_sheet_url,
     auto_import_public_google_sheet,
     import_bookkeeping_file,
@@ -25,7 +25,7 @@ from ..discord.bookkeeping import (
     reconcile_bookkeeping_import,
     refresh_bookkeeping_import_from_source,
 )
-from ..discord.bank_reconciliation import (
+from ..finance.bank_reconciliation import (
     ATTENTION_CLASSIFICATIONS,
     all_classification_choices,
     all_expense_category_choices,
@@ -41,7 +41,7 @@ from ..discord.bank_reconciliation import (
     summarize_bank_transactions,
 )
 from ..db import get_session
-from ..discord.plaid_bank_feed import (
+from ..finance.plaid_bank_feed import (
     create_plaid_link_token,
     exchange_public_token,
     handle_plaid_webhook,

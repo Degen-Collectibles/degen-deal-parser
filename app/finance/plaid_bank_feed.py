@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import base64
 import hashlib
@@ -732,3 +732,4 @@ def rerun_all_feed_imports(session: Session) -> int:
         if row.id:
             rerun_bank_reconciliation(session, row.id)
     return len(imports)
+
