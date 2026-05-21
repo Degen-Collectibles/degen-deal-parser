@@ -690,6 +690,46 @@ def extract_multi_payment_summary(text: str) -> dict[str, Any] | None:
 FINANCIALS_CHANNEL_NAMES = {"financials"}
 LOAN_CHANNEL_NAMES = {"loan", "loans"}
 FINANCIAL_REVIEW_CATEGORY = "uncategorized"
+FINANCIAL_PAYEE_AMOUNT_STOPWORDS = {
+    "and",
+    "april",
+    "aug",
+    "august",
+    "card",
+    "cash",
+    "dec",
+    "december",
+    "feb",
+    "february",
+    "for",
+    "front",
+    "jan",
+    "january",
+    "jul",
+    "july",
+    "jun",
+    "june",
+    "mar",
+    "march",
+    "may",
+    "nov",
+    "november",
+    "oct",
+    "october",
+    "paid",
+    "pay",
+    "row",
+    "sent",
+    "sep",
+    "september",
+    "show",
+    "table",
+    "tables",
+    "tax",
+    "the",
+    "total",
+    "zelle",
+}
 
 
 def _canonical_channel_leaf_name(channel_name: str | None) -> str:
@@ -789,6 +829,95 @@ def _financial_amount_candidates(text: str) -> list[float]:
     return candidates
 
 
+def _financial_amount_candidate_matches(text: str) -> list[re.Match[str]]:
+    cleaned = _normalize_amount_text(strip_urls(text or "").lower())
+    cleaned = re.sub(r"\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b", " ", cleaned)
+    cleaned = re.sub(r"\b\d{1,2}\s*-\s*\d{1,2}\b", " ", cleaned)
+    matches: list[re.Match[str]] = []
+
+    for match in re.finditer(r"\$?\s*(\d+(?:\.\d{1,2})?)", cleaned):
+        try:
+            amount = float(match.group(1))
+        except ValueError:
+            continue
+
+        after = cleaned[match.end():match.end() + 30]
+        before = cleaned[max(0, match.start() - 12):match.start()]
+        if "%" in after[:2]:
+            continue
+        if has_quantity_unit_after(cleaned, match.end()):
+            continue
+        if re.match(r"\s*(?:x\b|days?\b|front\s+row\b|tables?\b)", after, re.I) and amount <= 31:
+            continue
+        if amount <= 31 and re.search(r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s*$", before, re.I):
+            continue
+        matches.append(match)
+
+    return matches
+
+
+def _looks_like_financial_payee_amount_list(text: str) -> bool:
+    cleaned = _normalize_amount_text(strip_urls(text or "").lower())
+    cleaned = re.sub(r"\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b", " ", cleaned)
+    cleaned = re.sub(r"\b\d{1,2}\s*-\s*\d{1,2}\b", " ", cleaned)
+    payee_pair_count = 0
+
+    for match in _financial_amount_candidate_matches(cleaned):
+        prefix = cleaned[:match.start()]
+        words = re.findall(r"[a-z][a-z0-9_'-]*", prefix)
+        if not words:
+            continue
+        for token in reversed(words[-5:]):
+            if token in FINANCIAL_PAYEE_AMOUNT_STOPWORDS:
+                continue
+            payee_pair_count += 1
+            break
+
+    return payee_pair_count >= 2
+
+
+def _financial_multi_payee_amount_total(text: str) -> float | None:
+    if re.search(r"\btotal\b", text or "", re.I):
+        return None
+    if not _looks_like_financial_payee_amount_list(text):
+        return None
+    candidates = _financial_amount_candidates(text)
+    if len(candidates) < 2:
+        return None
+    return round(sum(candidates), 2)
+
+
+def _financial_each_payee_amount_total(text: str) -> float | None:
+    cleaned = _normalize_amount_text(strip_urls(text or "").lower())
+    cleaned = re.sub(r"\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b", " ", cleaned)
+    cleaned = re.sub(r"\b\d{1,2}\s*-\s*\d{1,2}\b", " ", cleaned)
+    match = re.search(r"\$?\s*(\d+(?:\.\d{1,2})?)\s*each\b", cleaned)
+    if not match:
+        return None
+
+    try:
+        amount = float(match.group(1))
+    except ValueError:
+        return None
+
+    prefix = cleaned[:match.start()]
+    payee_part = re.split(r"\b(?:pay|paid|sent|zelle)\b", prefix)[-1]
+    payee_part = re.split(
+        r"\b(?:for|show|card|today|tonight|sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b",
+        payee_part,
+        maxsplit=1,
+    )[0]
+    payee_tokens = [
+        token
+        for token in re.findall(r"[a-z][a-z0-9_'-]*", payee_part)
+        if token not in FINANCIAL_PAYEE_AMOUNT_STOPWORDS
+    ]
+    if len(payee_tokens) < 2:
+        return None
+
+    return round(amount * len(payee_tokens), 2)
+
+
 def _extract_financial_channel_amount(text: str) -> float | None:
     normalized = _normalize_amount_text(normalize_message_part(text or ""))
     if not normalized:
@@ -812,6 +941,17 @@ def _extract_financial_channel_amount(text: str) -> float | None:
     if not candidates:
         return None
     return round(candidates[0], 2)
+
+
+def _financial_channel_amount_for_category(text: str, category: str | None) -> float | None:
+    if category == "payroll":
+        each_payee_total = _financial_each_payee_amount_total(text)
+        if each_payee_total is not None:
+            return each_payee_total
+        multi_payee_total = _financial_multi_payee_amount_total(text)
+        if multi_payee_total is not None:
+            return multi_payee_total
+    return _extract_financial_channel_amount(text)
 
 
 def _financial_channel_payment_method(text: str) -> str:
@@ -967,7 +1107,13 @@ def _parse_financials_channel_message(message_text: str, image_urls: list[str]) 
         category = "insurance"
         notes = "financials channel insurance expense"
     elif re.search(r"\b(table|tables|front\s+row|booth|vendor\s+fee|card\s+show|show)\b", lower):
-        if re.search(r"\bpay\s+(?!rent\b|tax\b)[a-z0-9_'-]+", lower) and not re.search(r"\b(table|tables|booth|vendor\s+fee)\b", lower):
+        if (
+            (
+                re.search(r"\b(?:pay|paid|sent|zelle)\s+(?!rent\b|tax\b)[a-z0-9_'-]+", lower)
+                or _looks_like_financial_payee_amount_list(text)
+            )
+            and not re.search(r"\b(table|tables|booth|vendor\s+fee)\b", lower)
+        ):
             category = "payroll"
             notes = "financials channel show labor expense"
         else:
@@ -1006,6 +1152,7 @@ def _parse_financials_channel_message(message_text: str, image_urls: list[str]) 
             )
         return _financial_ignore_parse("ignored financials channel informational note without ledger amount")
 
+    amount = _financial_channel_amount_for_category(text, category)
     if amount is None:
         return _financial_review_parse(
             amount=None,

@@ -116,6 +116,77 @@ def test_financials_channel_logs_payroll_and_show_costs_as_expenses() -> None:
     assert show_cost["needs_review"] is False
 
 
+def test_financials_channel_sums_multi_payee_payroll_rows_without_total() -> None:
+    parsed = _parse_financial_message(
+        "Pay cow bow 200 Marsh 300 Dat 450 For show",
+        channel_name="financials",
+    )
+
+    assert parsed["parsed_type"] == "expense"
+    assert parsed["parsed_amount"] == 950.0
+    assert parsed["parsed_category"] == "payroll"
+    assert parsed["needs_review"] is False
+
+
+def test_financials_channel_treats_show_payee_amount_lists_as_payroll() -> None:
+    parsed = _parse_financial_message(
+        "San Jose card show 18-19 Dat 600 Peter 400 Ranz 300 Mars 150",
+        channel_name="financials",
+    )
+
+    assert parsed["parsed_type"] == "expense"
+    assert parsed["parsed_amount"] == 1450.0
+    assert parsed["parsed_category"] == "payroll"
+    assert parsed["needs_review"] is False
+
+
+def test_financials_channel_sums_payee_rows_when_show_words_sit_between_name_and_amount() -> None:
+    parsed = _parse_financial_message(
+        "Pay ranz show 150 Dat 400 East bay show Jan 3-4",
+        channel_name="financials",
+    )
+
+    assert parsed["parsed_type"] == "expense"
+    assert parsed["parsed_amount"] == 550.0
+    assert parsed["parsed_category"] == "payroll"
+    assert parsed["needs_review"] is False
+
+
+def test_financials_channel_sums_payee_rows_with_for_show_between_name_and_amount() -> None:
+    parsed = _parse_financial_message(
+        "Pay dat for show 680 500$ Pay rocky 200$",
+        channel_name="financials",
+    )
+
+    assert parsed["parsed_type"] == "expense"
+    assert parsed["parsed_amount"] == 1380.0
+    assert parsed["parsed_category"] == "payroll"
+    assert parsed["needs_review"] is False
+
+
+def test_financials_channel_multiplies_each_amount_by_named_payees() -> None:
+    parsed = _parse_financial_message(
+        "Pay marsh and Brandon for Dan jose show Sunday 250 each!",
+        channel_name="financials",
+    )
+
+    assert parsed["parsed_type"] == "expense"
+    assert parsed["parsed_amount"] == 500.0
+    assert parsed["parsed_category"] == "payroll"
+    assert parsed["needs_review"] is False
+
+
+def test_loans_channel_does_not_sum_product_quantity_numbers_into_loan_amount() -> None:
+    parsed = _parse_financial_message(
+        "take out $8486.90 loan for 100 mega dream and 1 case op15",
+        channel_name="loans",
+    )
+
+    assert parsed["parsed_type"] == "loan_draw"
+    assert parsed["parsed_amount"] == 8486.9
+    assert parsed["parsed_category"] == "loan_owner_payments"
+
+
 def test_financials_channel_marks_statement_links_as_ignored_evidence_not_transactions() -> None:
     parsed = _parse_financial_message(
         "Red Tab is the Total Financials up to 9/30(May-September 2025)\nhttps://1drv.ms/example",
