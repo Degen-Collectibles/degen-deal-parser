@@ -18,6 +18,7 @@ from sqlmodel import Session
 
 from ..csrf import CSRFProtectedRoute
 from ..db import get_session
+from ..discord.corrections import save_review_correction, snapshot_message_parse
 from ..financial_audit import record_financial_audit
 from ..ledger import (
     LEDGER_ACTION_REASON_LABELS,
@@ -39,11 +40,27 @@ from ..ledger import (
     preview_ledger_rule,
     run_ledger_review_agent,
 )
-from ..models import BankTransaction, LedgerRule, utcnow
+from ..models import BankTransaction, DiscordMessage, LedgerRule, PARSE_PARSED, PARSE_REVIEW_REQUIRED, utcnow
 from ..shared import *  # noqa: F401,F403 -- templates, auth helpers, user labels
 
 router = APIRouter(route_class=CSRFProtectedRoute)
 logger = logging.getLogger(__name__)
+
+
+def _deal_type_for_ledger_entry_kind(entry_kind: str) -> str | None:
+    if entry_kind == "sale":
+        return "sell"
+    if entry_kind in {"buy", "trade", "expense", "loan_draw", "loan_repayment", "transfer", "unknown"}:
+        return entry_kind
+    return None
+
+
+def _money_for_ledger_entry(entry_kind: str, amount: float) -> tuple[float, float]:
+    if entry_kind in {"sale", "loan_draw"}:
+        return amount, 0.0
+    if entry_kind in {"buy", "expense", "loan_repayment", "transfer"}:
+        return 0.0, amount
+    return 0.0, 0.0
 
 
 def _ledger_redirect_url(
@@ -178,6 +195,141 @@ def ledger_page(
             "error": error,
             **data,
         },
+    )
+
+
+@router.post("/ledger/transactions/{source_message_id}/edit-form")
+def ledger_transaction_edit_form(
+    request: Request,
+    source_message_id: int,
+    entry_kind: str = Form(default="unknown"),
+    amount: str = Form(default=""),
+    payment_method: str = Form(default="unknown"),
+    expense_category: str = Form(default="uncategorized"),
+    notes: str = Form(default=""),
+    selected_account: str = Form(default=""),
+    selected_start: str = Form(default=""),
+    selected_end: str = Form(default=""),
+    selected_status: str = Form(default="all"),
+    selected_category: str = Form(default=""),
+    selected_source: str = Form(default=""),
+    selected_action_reason: str = Form(default=""),
+    selected_search: str = Form(default=""),
+    selected_sort: str = Form(default="posted_at"),
+    selected_direction: str = Form(default="desc"),
+    selected_include_cash: str = Form(default="true"),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "reviewer"):
+        return denial
+
+    row = session.get(DiscordMessage, source_message_id)
+    if not row:
+        return RedirectResponse(
+            _ledger_redirect_url(
+                account=selected_account,
+                start=selected_start,
+                end=selected_end,
+                status=selected_status or "all",
+                category=selected_category,
+                source=selected_source,
+                action_reason=selected_action_reason,
+                search=selected_search,
+                sort=selected_sort,
+                direction=selected_direction,
+                include_cash=selected_include_cash,
+                error=f"Discord message {source_message_id} was not found.",
+            ),
+            status_code=303,
+        )
+
+    try:
+        parsed_amount = parse_optional_float(amount)
+    except ValueError:
+        return RedirectResponse(
+            _ledger_redirect_url(
+                account=selected_account,
+                start=selected_start,
+                end=selected_end,
+                status=selected_status or "all",
+                category=selected_category,
+                source=selected_source,
+                action_reason=selected_action_reason,
+                search=selected_search,
+                sort=selected_sort,
+                direction=selected_direction,
+                include_cash=selected_include_cash,
+                error="Amount must be a valid number.",
+            ),
+            status_code=303,
+        )
+
+    normalized_entry_kind = (entry_kind or "unknown").strip().lower() or "unknown"
+    normalized_amount = round(abs(float(parsed_amount or 0.0)), 2)
+    normalized_payment_method = (payment_method or "unknown").strip().lower() or "unknown"
+    normalized_expense_category = (expense_category or "uncategorized").strip() or "uncategorized"
+    money_in, money_out = _money_for_ledger_entry(normalized_entry_kind, normalized_amount)
+    incomplete = (
+        parsed_amount is None
+        or normalized_entry_kind == "unknown"
+        or normalized_expense_category in {"", "uncategorized"}
+    )
+
+    parsed_before = snapshot_message_parse(row)
+    row.deal_type = _deal_type_for_ledger_entry_kind(normalized_entry_kind)
+    row.entry_kind = normalized_entry_kind
+    row.amount = normalized_amount if parsed_amount is not None else None
+    row.payment_method = normalized_payment_method
+    row.cash_direction = None
+    row.category = normalized_expense_category
+    row.expense_category = normalized_expense_category
+    row.money_in = money_in
+    row.money_out = money_out
+    row.notes = (notes or "").strip() or row.notes
+    row.confidence = max(float(row.confidence or 0.0), 0.99)
+    row.parse_status = PARSE_REVIEW_REQUIRED if incomplete else PARSE_PARSED
+    row.needs_review = incomplete
+    if incomplete:
+        row.reviewed_by = None
+        row.reviewed_at = None
+    else:
+        row.reviewed_by = current_user_label(request)
+        row.reviewed_at = utcnow()
+    row.last_error = None
+
+    session.add(row)
+    save_review_correction(session, row, parsed_before=parsed_before)
+    sync_transaction_from_message(session, row)
+    parsed_after = snapshot_message_parse(row)
+    if parsed_before != parsed_after:
+        user = getattr(request.state, "current_user", None)
+        record_financial_audit(
+            session,
+            action="financial.ledger_transaction.edit",
+            resource_key=f"discordmessage:{row.id}",
+            before=parsed_before,
+            after=parsed_after,
+            actor_user_id=getattr(user, "id", None),
+            actor_label=current_user_label(request),
+        )
+    session.commit()
+
+    return RedirectResponse(
+        _ledger_redirect_url(
+            account=selected_account,
+            start=selected_start,
+            end=selected_end,
+            status=selected_status or "all",
+            category=selected_category,
+            source=selected_source,
+            action_reason=selected_action_reason,
+            search=selected_search,
+            sort=selected_sort,
+            direction=selected_direction,
+            include_cash=selected_include_cash,
+            success=f"Updated Discord transaction {source_message_id}.",
+        ),
+        status_code=303,
     )
 
 

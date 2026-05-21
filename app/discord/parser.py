@@ -1187,6 +1187,51 @@ def parse_channel_financial_message(
     return None
 
 
+def _financial_parse_needs_image_amount(parse: Dict[str, Any] | None, image_urls: list[str]) -> bool:
+    if not parse or not image_urls:
+        return False
+    if parse.get("ignore_message"):
+        return False
+    return parse.get("parsed_amount") is None
+
+
+def _merge_financial_image_parse(rule_parse: Dict[str, Any], image_parse: Dict[str, Any] | None) -> Dict[str, Any]:
+    if not image_parse or image_parse.get("parsed_amount") is None:
+        return rule_parse
+
+    merged = dict(rule_parse)
+    rule_type = (merged.get("parsed_type") or "").strip().lower()
+    image_type = (image_parse.get("parsed_type") or "").strip().lower()
+    if rule_type in {"", "unknown"} and image_type:
+        merged["parsed_type"] = image_parse.get("parsed_type")
+
+    rule_method = (merged.get("parsed_payment_method") or "").strip().lower()
+    image_method = (image_parse.get("parsed_payment_method") or "").strip().lower()
+    if rule_method in {"", "unknown"} and image_method:
+        merged["parsed_payment_method"] = image_parse.get("parsed_payment_method")
+
+    rule_category = (merged.get("parsed_category") or "").strip().lower()
+    image_category = (image_parse.get("parsed_category") or "").strip()
+    if rule_category in {"", "uncategorized"} and image_category:
+        merged["parsed_category"] = image_category
+
+    merged["parsed_amount"] = image_parse.get("parsed_amount")
+    merged["image_summary"] = image_parse.get("image_summary") or merged.get("image_summary")
+    merged["confidence"] = min(float(image_parse.get("confidence") or 0.78), 0.90)
+    merged["needs_review"] = True
+
+    existing_notes = (merged.get("parsed_notes") or "").strip()
+    image_notes = (image_parse.get("parsed_notes") or "").strip()
+    review_note = "image amount extracted by AI; review before approving"
+    note_parts = [part for part in (existing_notes, image_notes, review_note) if part]
+    merged["parsed_notes"] = " | ".join(dict.fromkeys(note_parts))
+
+    for key in ("_openai_usage", "_openai_model", "_ai_provider"):
+        if key in image_parse:
+            merged[key] = image_parse[key]
+    return merged
+
+
 def parse_stitched_rule_hint(message_text: str) -> Dict[str, Any] | None:
     message_parts = split_stitched_messages(message_text)
     if len(message_parts) <= 1:
@@ -2231,6 +2276,163 @@ def parse_deal_with_ai(
     ) | {"_openai_usage": usage_metrics, "_openai_model": MODEL, "_ai_provider": get_provider()}
 
 
+def _normalize_financial_image_parse(parsed: Dict[str, Any]) -> Dict[str, Any]:
+    parsed_type = str(parsed.get("parsed_type") or "unknown").strip().lower()
+    if parsed_type == "sale":
+        parsed_type = "sell"
+    if parsed_type not in {"sell", "buy", "expense", "loan_draw", "loan_repayment", "transfer", "unknown"}:
+        parsed_type = "unknown"
+
+    amount = parsed.get("parsed_amount")
+    try:
+        normalized_amount = round(abs(float(amount)), 2) if amount not in (None, "") else None
+    except (TypeError, ValueError):
+        normalized_amount = None
+
+    payment_method = str(parsed.get("parsed_payment_method") or "unknown").strip().lower()
+    payment_method = normalize_payment_method(payment_method) if payment_method else "unknown"
+    category = str(parsed.get("parsed_category") or "").strip() or None
+
+    try:
+        confidence = float(parsed.get("confidence") or 0.78)
+    except (TypeError, ValueError):
+        confidence = 0.78
+
+    return {
+        "parsed_type": parsed_type,
+        "parsed_amount": normalized_amount,
+        "parsed_payment_method": payment_method,
+        "parsed_cash_direction": None,
+        "parsed_category": category,
+        "parsed_items": [],
+        "parsed_items_in": [],
+        "parsed_items_out": [],
+        "parsed_trade_summary": "",
+        "parsed_notes": str(parsed.get("parsed_notes") or "").strip(),
+        "image_summary": str(parsed.get("image_summary") or "financial image reviewed").strip(),
+        "confidence": max(0.0, min(confidence, 0.90)),
+        "needs_review": True,
+    }
+
+
+def parse_financial_image_with_ai(
+    author_name: str,
+    message_text: str,
+    image_urls: List[str] | None = None,
+    channel_name: str = "",
+) -> Dict[str, Any]:
+    image_urls = image_urls or []
+    channel_label = _canonical_channel_leaf_name(channel_name) or "financials"
+    prompt = f"""
+You are parsing a Discord financial ledger message for Degen Collectibles.
+
+Channel: {channel_label}
+Author: {author_name or "unknown"}
+Text: {message_text or "(no text)"}
+
+Use the attached image(s) only to extract the visible financial transaction details.
+Return JSON only with these fields:
+- parsed_type: one of "expense", "sell", "buy", "loan_draw", "loan_repayment", "transfer", "unknown"
+- parsed_amount: the main visible dollar amount as a positive number, or null if no amount is visible
+- parsed_payment_method: "cash", "zelle", "venmo", "paypal", "card", "check", "mixed", or "unknown"
+- parsed_category: one of "payroll", "rent_facilities", "show_fees", "taxes_licenses", "insurance", "loan_interest", "loan_owner_payments", "other_business_expense", "transfers", "uncategorized"
+- parsed_notes: short reason for the parse
+- image_summary: short description of the evidence visible in the image
+- confidence: number from 0 to 1
+
+If the visible amount is ambiguous, cropped, or not readable, set parsed_amount to null and confidence below 0.70.
+Do not invent card inventory details. This is not the normal deal parser.
+""".strip()
+
+    content: list[dict] = [{"type": "text", "text": prompt}]
+    for url in image_urls:
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": url, "detail": "auto"},
+        })
+
+    client = get_ai_client().with_options(timeout=60.0)
+    if is_nvidia():
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "user", "content": content}],
+            response_format={"type": "json_object"},
+            max_tokens=1024,
+        )
+        raw_text = response.choices[0].message.content or "{}"
+    else:
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "parsed_type": {"type": "string"},
+                "parsed_amount": {"type": ["number", "null"]},
+                "parsed_payment_method": {"type": "string"},
+                "parsed_category": {"type": "string"},
+                "parsed_notes": {"type": "string"},
+                "image_summary": {"type": "string"},
+                "confidence": {"type": "number"},
+            },
+            "required": [
+                "parsed_type",
+                "parsed_amount",
+                "parsed_payment_method",
+                "parsed_category",
+                "parsed_notes",
+                "image_summary",
+                "confidence",
+            ],
+        }
+        response = client.responses.create(
+            model=MODEL,
+            input=[{
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": prompt}
+                ] + [
+                    {"type": "input_image", "image_url": url, "detail": "auto"}
+                    for url in image_urls
+                ],
+            }],
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "financial_image_parse",
+                    "schema": schema,
+                    "strict": True,
+                }
+            },
+        )
+        raw_text = response.output_text
+
+    normalized = _normalize_financial_image_parse(json.loads(raw_text))
+    usage_metrics = extract_usage_metrics(response, model=MODEL)
+    normalized.update({"_openai_usage": usage_metrics, "_openai_model": MODEL, "_ai_provider": get_provider()})
+    return normalized
+
+
+async def parse_financial_image_with_ai_async(
+    author_name: str,
+    message_text: str,
+    image_urls: List[str] | None = None,
+    channel_name: str = "",
+) -> Dict[str, Any]:
+    async with api_semaphore:
+        try:
+            return await asyncio.to_thread(
+                parse_financial_image_with_ai,
+                author_name,
+                message_text,
+                image_urls,
+                channel_name,
+            )
+        except Exception as e:
+            error_text = str(e).lower()
+            if "timed out" in error_text or "timeout" in error_text:
+                raise TimedOutRowError(str(e))
+            raise
+
+
 async def parse_deal_with_ai_async(
     author_name: str,
     message_text: str,
@@ -2377,6 +2579,26 @@ async def parse_message(content: str, attachment_urls: list[str], author_name: s
         image_urls=image_urls,
     )
     if channel_financial is not None:
+        if _financial_parse_needs_image_amount(channel_financial, image_urls):
+            try:
+                image_financial = await parse_financial_image_with_ai_async(
+                    author_name=author_name,
+                    message_text=content or "",
+                    image_urls=image_urls,
+                    channel_name=channel_name,
+                )
+                return _merge_financial_image_parse(channel_financial, image_financial)
+            except TimedOutRowError as e:
+                logger.warning(
+                    "parser.parse_message: financial image parse timed out, using rule review fallback: %s",
+                    e,
+                )
+            except Exception as e:
+                logger.warning(
+                    "parser.parse_message: financial image parse failed, using rule review fallback: %s",
+                    e,
+                    exc_info=True,
+                )
         return channel_financial
 
     non_transaction = detect_non_transaction_message(content or "", image_urls=image_urls)

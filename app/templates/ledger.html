@@ -237,6 +237,14 @@
         tbody tr:not(.is-expanded) .mini { display: none; }
         .desc { color: #fff; font-weight: 700; }
         .truncate { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .deal-link {
+            color: #dbeafe;
+            font-weight: 900;
+            text-decoration: underline;
+            text-decoration-color: rgba(96,165,250,.55);
+            text-underline-offset: 2px;
+        }
+        .deal-link:hover { color: #fff; text-decoration-color: #fff; }
         .row-expanded {
             margin-top: 8px;
             border: 1px solid var(--line);
@@ -280,6 +288,10 @@
         details { margin-top: 8px; color: var(--muted); }
         summary { cursor: pointer; color: #dbeafe; font-weight: 800; }
         .inline-form { display: grid; grid-template-columns: minmax(130px, 1fr) minmax(130px, 1fr) auto; gap: 8px; align-items: end; min-width: 320px; margin-top: 8px; }
+        .transaction-edit-form {
+            grid-template-columns: minmax(96px, .75fr) minmax(88px, .6fr) minmax(96px, .7fr) minmax(150px, 1fr) auto;
+            min-width: 620px;
+        }
         .assistant-preview { margin-top: 12px; border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: #0d0f12; display: none; }
         .assistant-preview.is-visible { display: block; }
         .sample-list { display: grid; gap: 8px; margin-top: 10px; }
@@ -375,6 +387,7 @@
             .pill { max-width: 100%; white-space: normal; text-align: center; }
             input[type="checkbox"] { width: 22px; height: 22px; justify-self: end; }
             .inline-form { min-width: 0; width: 100%; }
+            .transaction-edit-form { min-width: 0; }
             .tools-drawer.is-open { display: block; }
             .cash-row { grid-template-columns: 1fr; }
             .empty { display: block; border: 1px solid var(--line); border-radius: 8px; }
@@ -651,14 +664,27 @@
                                         </div>
                                     </td>
                                     <td data-label="Match">
+                                        {% set match_url = row.matched_transaction.detail_url if row.matched_transaction else "" %}
                                         {% if row.row_kind == "cash" %}
+                                        {% if match_url %}
+                                        <a class="deal-link truncate" href="{{ match_url }}">Discord cash deal</a>
+                                        {% else %}
                                         <strong class="truncate">Discord cash deal</strong>
+                                        {% endif %}
                                         <div class="mini match-extra">Shown in-grid; not counted in bank totals.</div>
                                         {% elif row.row_kind == "discord_financial" %}
+                                        {% if match_url %}
+                                        <a class="deal-link truncate" href="{{ match_url }}">Discord financial log</a>
+                                        {% else %}
                                         <strong class="truncate">Discord financial log</strong>
+                                        {% endif %}
                                         <div class="mini match-extra">Shown in-grid; not counted in bank totals.</div>
                                         {% elif row.matched_transaction %}
+                                        {% if match_url %}
+                                        <a class="deal-link truncate" href="{{ match_url }}">{{ row.matched_transaction.entry_kind or "Discord" }}</a>
+                                        {% else %}
                                         <strong class="truncate">{{ row.matched_transaction.entry_kind or "Discord" }}</strong>
+                                        {% endif %}
                                         <div class="mini match-extra">{{ row.matched_transaction.occurred_at_display }} · {{ row.matched_transaction.payment_method }}</div>
                                         <div class="mini match-extra">{{ row.matched_transaction.source_content }}</div>
                                         {% elif row.source in ["shopify", "tiktok", "processor", "paypal"] %}
@@ -721,8 +747,48 @@
                                             </label>
                                             <button class="tiny primary" type="submit">Save</button>
                                         </form>
-                                        {% else %}
+                                        {% elif row.matched_transaction and row.matched_source_message_id %}
                                         <span class="mini">{{ "Discord row" if row.row_kind == "discord_financial" else "Cash row" }}</span>
+                                        <form method="post" action="/ledger/transactions/{{ row.matched_source_message_id }}/edit-form" class="inline-form transaction-edit-form">
+                                            <input type="hidden" name="selected_account" value="{{ selected.account }}">
+                                            <input type="hidden" name="selected_start" value="{{ selected.start }}">
+                                            <input type="hidden" name="selected_end" value="{{ selected.end }}">
+                                            <input type="hidden" name="selected_status" value="{{ selected.status }}">
+                                            <input type="hidden" name="selected_category" value="{{ selected.category }}">
+                                            <input type="hidden" name="selected_source" value="{{ selected.source }}">
+                                            <input type="hidden" name="selected_action_reason" value="{{ selected.action_reason }}">
+                                            <input type="hidden" name="selected_search" value="{{ selected.search }}">
+                                            <input type="hidden" name="selected_sort" value="{{ selected.sort }}">
+                                            <input type="hidden" name="selected_direction" value="{{ selected.direction }}">
+                                            <input type="hidden" name="selected_include_cash" value="{{ 'true' if selected.include_cash else 'false' }}">
+                                            <label>Kind
+                                                <select name="entry_kind">
+                                                    {% for choice in transaction_entry_kind_choices %}
+                                                    <option value="{{ choice.value }}" {% if row.matched_transaction.entry_kind == choice.value %}selected{% endif %}>{{ choice.label }}</option>
+                                                    {% endfor %}
+                                                </select>
+                                            </label>
+                                            <label>Amount
+                                                <input type="text" name="amount" value="{{ row.matched_transaction.amount if row.matched_transaction.amount is not none else '' }}">
+                                            </label>
+                                            <label>Payment
+                                                <select name="payment_method">
+                                                    {% for choice in transaction_payment_method_choices %}
+                                                    <option value="{{ choice.value }}" {% if row.matched_transaction.payment_method == choice.value %}selected{% endif %}>{{ choice.label }}</option>
+                                                    {% endfor %}
+                                                </select>
+                                            </label>
+                                            <label>Category
+                                                <select name="expense_category">
+                                                    {% for choice in category_choices %}
+                                                    <option value="{{ choice.value }}" {% if row.expense_category == choice.value %}selected{% endif %}>{{ choice.label }}</option>
+                                                    {% endfor %}
+                                                </select>
+                                            </label>
+                                            <button class="tiny primary" type="submit">Edit transaction</button>
+                                        </form>
+                                        {% else %}
+                                        <span class="mini">Discord row</span>
                                         {% endif %}
                                     </td>
                                 </tr>
@@ -868,7 +934,11 @@
                             <strong>{{ row.occurred_at_display }}</strong>
                             <strong>{{ row.amount_display }}</strong>
                             <div>
+                                {% if row.detail_url %}
+                                <a class="deal-link" href="{{ row.detail_url }}">{{ row.expense_category_label }}</a>
+                                {% else %}
                                 <strong>{{ row.expense_category_label }}</strong>
+                                {% endif %}
                                 <div class="mini">{{ row.source_content }}</div>
                             </div>
                         </div>

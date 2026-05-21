@@ -22,6 +22,7 @@ from app.ledger import (
     run_ledger_review_agent,
 )
 from app.models import AuditLog, BankStatementImport, BankTransaction, LedgerRule, Transaction
+from app.models import DiscordMessage, PARSE_PARSED, PARSE_REVIEW_REQUIRED
 from app.routers.ledger import (
     ledger_agent_run_form,
     ledger_automation_apply_form,
@@ -765,6 +766,175 @@ def test_ledger_includes_non_cash_discord_financial_channel_rows():
     assert financial_row["amount"] == -6500.0
     assert financial_row["ledger_status"] == "reconciled"
     assert financial_row["matched_transaction_id"] == 610
+
+
+def test_ledger_page_links_discord_matches_to_deal_detail():
+    engine = make_engine()
+    posted_at = datetime(2026, 5, 19, 12, tzinfo=timezone.utc)
+    with Session(engine) as session:
+        bank_import = add_import(session)
+        session.add(
+            Transaction(
+                id=620,
+                source_message_id=1620,
+                occurred_at=posted_at,
+                parse_status="parsed",
+                entry_kind="buy",
+                payment_method="zelle",
+                expense_category="inventory",
+                amount=250.0,
+                money_in=0.0,
+                money_out=250.0,
+                source_content="buy cards 250 zelle",
+            )
+        )
+        session.add(
+            Transaction(
+                id=621,
+                source_message_id=1621,
+                channel_name="financials",
+                occurred_at=posted_at,
+                parse_status="parsed",
+                entry_kind="expense",
+                payment_method="zelle",
+                expense_category="payroll",
+                amount=650.0,
+                money_in=0.0,
+                money_out=650.0,
+                source_content="payroll 650 zelle",
+            )
+        )
+        session.add(
+            BankTransaction(
+                id=120,
+                import_id=bank_import.id,
+                row_index=1,
+                account_label="Chase Checking",
+                account_type="checking",
+                posted_at=posted_at,
+                description="Zelle payment to seller",
+                amount=-250.0,
+                classification="logged_in_discord_strong",
+                confidence="high",
+                expense_category="inventory_purchases",
+                matched_transaction_id=620,
+                matched_source_message_id=1620,
+                matched_platform="discord",
+            )
+        )
+        session.commit()
+
+        with patch("app.routers.ledger.require_role_response", return_value=None):
+            response = ledger_page(
+                make_request("/ledger?status=all&source=discord"),
+                account="",
+                start="",
+                end="",
+                status="all",
+                category="",
+                source="discord",
+                action_reason="",
+                search="",
+                sort="posted_at",
+                direction="desc",
+                include_cash=True,
+                session=session,
+            )
+
+    body = response.body.decode("utf-8")
+    assert response.status_code == 200
+    assert 'href="/deals/1620?return_path=%2Fledger"' in body
+    assert 'href="/deals/1621?return_path=%2Fledger"' in body
+    assert 'action="/ledger/transactions/1621/edit-form"' in body
+    assert "Edit transaction" in body
+
+
+def test_ledger_transaction_edit_form_updates_discord_source_transaction():
+    from app.routers import ledger as ledger_router
+
+    edit_form = getattr(ledger_router, "ledger_transaction_edit_form", None)
+    assert edit_form is not None
+
+    engine = make_engine()
+    occurred_at = datetime(2026, 5, 19, 12, tzinfo=timezone.utc)
+    with Session(engine) as session:
+        message = DiscordMessage(
+            id=1801,
+            discord_message_id="financial-image-only",
+            channel_id="financials-channel",
+            channel_name="financials",
+            author_name="tester",
+            content="April check!",
+            created_at=occurred_at,
+            parse_status=PARSE_REVIEW_REQUIRED,
+            deal_type="unknown",
+            entry_kind="unknown",
+            amount=None,
+            money_in=0.0,
+            money_out=0.0,
+            expense_category="uncategorized",
+            needs_review=True,
+        )
+        session.add(message)
+        session.add(
+            Transaction(
+                id=1802,
+                source_message_id=1801,
+                occurred_at=occurred_at,
+                parse_status=PARSE_REVIEW_REQUIRED,
+                entry_kind="unknown",
+                payment_method="unknown",
+                expense_category="uncategorized",
+                amount=None,
+                money_in=0.0,
+                money_out=0.0,
+                source_content="April check!",
+                needs_review=True,
+            )
+        )
+        session.commit()
+
+        with patch("app.routers.ledger.require_role_response", return_value=None):
+            response = edit_form(
+                make_request("/ledger/transactions/1801/edit-form", method="POST"),
+                source_message_id=1801,
+                entry_kind="expense",
+                amount="-1200",
+                payment_method="check",
+                expense_category="taxes_licenses",
+                notes="corrected from check image",
+                selected_account="",
+                selected_start="",
+                selected_end="",
+                selected_status="all",
+                selected_category="",
+                selected_source="discord",
+                selected_action_reason="",
+                selected_search="",
+                selected_sort="posted_at",
+                selected_direction="desc",
+                selected_include_cash="true",
+                session=session,
+            )
+
+        session.refresh(message)
+        tx = session.exec(select(Transaction).where(Transaction.source_message_id == message.id)).one()
+
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/ledger?")
+    assert "source=discord" in response.headers["location"]
+    assert message.parse_status == PARSE_PARSED
+    assert message.needs_review is False
+    assert message.deal_type == "expense"
+    assert message.entry_kind == "expense"
+    assert message.amount == 1200.0
+    assert message.money_in == 0.0
+    assert message.money_out == 1200.0
+    assert message.payment_method == "check"
+    assert message.expense_category == "taxes_licenses"
+    assert tx.amount == 1200.0
+    assert tx.money_out == 1200.0
+    assert tx.expense_category == "taxes_licenses"
 
 
 def test_ledger_export_includes_all_matching_rows_not_just_first_page():

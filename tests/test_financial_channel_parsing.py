@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 
 from app.discord.financials import compute_financials
-from app.discord.parser import parse_message
+from app.discord.parser import TimedOutRowError, parse_message
 from app.discord.transactions import build_transaction_summary, sync_transaction_from_message
 from sqlmodel import select
 
@@ -210,11 +210,86 @@ def test_financials_channel_ignores_informational_policy_notes_without_ai() -> N
 
 
 def test_financials_channel_marks_ambiguous_attachment_rows_for_review() -> None:
-    parsed = _parse_financial_message(
-        "",
-        channel_name="financials",
-        attachments=["https://cdn.discordapp.com/attachments/example.png"],
-    )
+    with patch(
+        "app.discord.parser.parse_financial_image_with_ai_async",
+        return_value={"parsed_amount": None},
+    ):
+        parsed = _parse_financial_message(
+            "",
+            channel_name="financials",
+            attachments=["https://cdn.discordapp.com/attachments/example.png"],
+        )
+
+    assert parsed["parsed_type"] == "unknown"
+    assert parsed["parsed_amount"] is None
+    assert parsed["needs_review"] is True
+    assert "needs review" in parsed["parsed_notes"]
+
+
+def test_financials_channel_uses_image_ai_when_amount_is_only_in_attachment() -> None:
+    image_parse = {
+        "parsed_type": "expense",
+        "parsed_amount": 1200.0,
+        "parsed_payment_method": "check",
+        "parsed_cash_direction": None,
+        "parsed_category": "taxes_licenses",
+        "parsed_items": [],
+        "parsed_items_in": [],
+        "parsed_items_out": [],
+        "parsed_trade_summary": "",
+        "parsed_notes": "image shows April check for 1200",
+        "image_summary": "check image with visible $1,200.00 amount",
+        "confidence": 0.84,
+        "needs_review": True,
+    }
+    with patch("app.discord.parser.get_exact_correction_match", return_value=None), patch(
+        "app.discord.parser.get_learned_rule_match",
+        return_value=(None, None),
+    ), patch(
+        "app.discord.parser.parse_deal_with_ai_async",
+        side_effect=AssertionError("financial channel image parser should not call deal AI"),
+    ), patch(
+        "app.discord.parser.parse_financial_image_with_ai_async",
+        return_value=image_parse,
+        create=True,
+    ) as image_ai:
+        parsed = asyncio.run(
+            parse_message(
+                "April check!",
+                ["https://cdn.discordapp.com/attachments/april-check.png"],
+                author_name="tester",
+                channel_name="financials",
+            )
+        )
+
+    assert image_ai.called
+    assert parsed["parsed_type"] == "expense"
+    assert parsed["parsed_amount"] == 1200.0
+    assert parsed["parsed_payment_method"] == "check"
+    assert parsed["parsed_category"] == "taxes_licenses"
+    assert parsed["needs_review"] is True
+    assert "image amount" in parsed["parsed_notes"].lower()
+
+
+def test_financials_channel_image_ai_timeout_keeps_review_fallback() -> None:
+    with patch("app.discord.parser.get_exact_correction_match", return_value=None), patch(
+        "app.discord.parser.get_learned_rule_match",
+        return_value=(None, None),
+    ), patch(
+        "app.discord.parser.parse_deal_with_ai_async",
+        side_effect=AssertionError("financial channel image parser should not call deal AI"),
+    ), patch(
+        "app.discord.parser.parse_financial_image_with_ai_async",
+        side_effect=TimedOutRowError("vision timeout"),
+    ):
+        parsed = asyncio.run(
+            parse_message(
+                "April check!",
+                ["https://cdn.discordapp.com/attachments/april-check.png"],
+                author_name="tester",
+                channel_name="financials",
+            )
+        )
 
     assert parsed["parsed_type"] == "unknown"
     assert parsed["parsed_amount"] is None

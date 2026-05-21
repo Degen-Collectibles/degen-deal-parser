@@ -134,6 +134,23 @@ class AdminTableDetailRoutingTests(unittest.TestCase):
 
         self.assertTrue(any(call.args[1] == "admin" for call in require_role.call_args_list))
 
+    def test_ledger_detail_link_uses_reviewer_visibility_rules(self) -> None:
+        with Session(self.engine) as session, patch(
+            "app.routers.deals.require_role_response",
+            return_value=None,
+        ) as require_role, patch(
+            "app.routers.deals.get_watched_channels",
+            return_value=[],
+        ):
+            row = self._message(session, parse_status=PARSE_REVIEW_REQUIRED, needs_review=True)
+            response = self._detail(session, row, return_path="/ledger", role="reviewer")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["deal"]["id"], row.id)
+        self.assertTrue(response.context["back_url"].startswith("/ledger"))
+        self.assertTrue(response.context["can_view_operator_controls"])
+        self.assertTrue(any(call.args[1] == "reviewer" for call in require_role.call_args_list))
+
     def test_public_deal_detail_stays_parsed_only_for_enabled_watched_channels(self) -> None:
         watched = [WatchedChannel(channel_id="chan-public", channel_name="deals", is_enabled=True)]
         with Session(self.engine) as session, patch(

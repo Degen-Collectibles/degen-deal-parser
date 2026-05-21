@@ -25,7 +25,13 @@ router = APIRouter()
 
 
 def _is_admin_message_detail_return_path(return_path: str) -> bool:
-    return return_path in {"/table", "/review-table"}
+    return return_path in {"/table", "/review-table", "/ledger"}
+
+
+def _message_detail_required_role(return_path: str) -> str:
+    if return_path == "/ledger":
+        return "reviewer"
+    return "admin" if _is_admin_message_detail_return_path(return_path) else "viewer"
 
 
 def _can_view_operator_controls(request: Request, *, admin_message_detail: bool) -> bool:
@@ -127,7 +133,7 @@ def deal_detail_page(
     session: Session = Depends(get_session),
 ):
     admin_message_detail = _is_admin_message_detail_return_path(return_path)
-    if denial := require_role_response(request, "admin" if admin_message_detail else "viewer"):
+    if denial := require_role_response(request, _message_detail_required_role(return_path)):
         return denial
 
     row = session.get(DiscordMessage, message_id)

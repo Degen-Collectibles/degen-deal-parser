@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any, Iterable, Optional
+from urllib.parse import urlencode
 
 from sqlmodel import Session, select
 
@@ -64,6 +65,26 @@ LEDGER_ACTION_REASON_LABELS = {
 }
 
 DISCORD_FINANCIAL_LEDGER_CHANNEL_NAMES = {"financials", "loan", "loans"}
+LEDGER_TRANSACTION_ENTRY_KIND_CHOICES = [
+    {"value": "expense", "label": "Expense"},
+    {"value": "sale", "label": "Sale"},
+    {"value": "buy", "label": "Buy"},
+    {"value": "loan_draw", "label": "Loan Draw"},
+    {"value": "loan_repayment", "label": "Loan Repayment"},
+    {"value": "transfer", "label": "Transfer"},
+    {"value": "trade", "label": "Trade"},
+    {"value": "unknown", "label": "Unknown"},
+]
+LEDGER_TRANSACTION_PAYMENT_METHOD_CHOICES = [
+    {"value": "unknown", "label": "Unknown"},
+    {"value": "cash", "label": "Cash"},
+    {"value": "zelle", "label": "Zelle"},
+    {"value": "venmo", "label": "Venmo"},
+    {"value": "paypal", "label": "PayPal"},
+    {"value": "card", "label": "Card"},
+    {"value": "check", "label": "Check"},
+    {"value": "mixed", "label": "Mixed"},
+]
 
 RULE_ALLOWED_REVIEW_STATUSES = {"open", "reviewed", "ignored"}
 RULE_ALLOWED_MATCH_OVERRIDES = {"force_unmatched", "clear", "none", ""}
@@ -284,6 +305,12 @@ def ledger_action_reason_for_bank_row(row: BankTransaction) -> str:
     return "needs_category"
 
 
+def _discord_deal_detail_url(source_message_id: Optional[int]) -> str:
+    if source_message_id is None:
+        return ""
+    return f"/deals/{source_message_id}?{urlencode({'return_path': '/ledger'})}"
+
+
 def _bank_row_view(row: BankTransaction, matched: Optional[Transaction] = None) -> dict[str, Any]:
     source = ledger_source_for_bank_row(row)
     status = ledger_status_for_bank_row(row)
@@ -327,6 +354,7 @@ def _bank_row_view(row: BankTransaction, matched: Optional[Transaction] = None) 
         "matched_transaction": {
             "id": matched.id,
             "source_message_id": matched.source_message_id,
+            "detail_url": _discord_deal_detail_url(matched.source_message_id),
             "occurred_at_display": _short_date(matched.occurred_at),
             "entry_kind": matched.entry_kind,
             "payment_method": matched.payment_method,
@@ -372,6 +400,7 @@ def _unbanked_cash_view(tx: Transaction) -> dict[str, Any]:
     return {
         "transaction_id": tx.id,
         "source_message_id": tx.source_message_id,
+        "detail_url": _discord_deal_detail_url(tx.source_message_id),
         "occurred_at": tx.occurred_at,
         "occurred_at_display": _short_date(tx.occurred_at),
         "entry_kind": tx.entry_kind or "",
@@ -453,6 +482,7 @@ def _discord_financial_row_view(tx: Transaction) -> dict[str, Any]:
         "matched_transaction": {
             "id": tx.id,
             "source_message_id": tx.source_message_id,
+            "detail_url": _discord_deal_detail_url(tx.source_message_id),
             "occurred_at_display": _short_date(tx.occurred_at),
             "entry_kind": tx.entry_kind,
             "payment_method": tx.payment_method,
@@ -505,6 +535,7 @@ def _cash_row_view(tx: Transaction) -> dict[str, Any]:
         "matched_transaction": {
             "id": tx.id,
             "source_message_id": tx.source_message_id,
+            "detail_url": _discord_deal_detail_url(tx.source_message_id),
             "occurred_at_display": _short_date(tx.occurred_at),
             "entry_kind": tx.entry_kind,
             "payment_method": tx.payment_method,
@@ -1157,6 +1188,8 @@ def build_ledger_page_data(session: Session, filters: Optional[LedgerFilters] = 
         "source_counts": source_counts,
         "account_options": account_options,
         "category_choices": all_expense_category_choices(),
+        "transaction_entry_kind_choices": LEDGER_TRANSACTION_ENTRY_KIND_CHOICES,
+        "transaction_payment_method_choices": LEDGER_TRANSACTION_PAYMENT_METHOD_CHOICES,
         "source_choices": [{"value": key, "label": value} for key, value in LEDGER_SOURCE_LABELS.items()],
         "status_choices": [{"value": key, "label": value} for key, value in LEDGER_STATUS_LABELS.items()],
         "action_reason_choices": [
