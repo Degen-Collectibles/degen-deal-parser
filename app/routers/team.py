@@ -57,6 +57,7 @@ from ..models import (
     AuditLog,
     EmployeeProfile,
     InviteToken,
+    PasswordResetToken,
     SHIFT_KIND_ALL,
     SHIFT_KIND_BLANK,
     SHIFT_KIND_OFF,
@@ -299,11 +300,19 @@ def _try_send_password_reset_sms(
         body=_password_reset_sms_body(_password_reset_url(request, raw_token)),
         settings=get_settings(),
     )
+    token_revoked = False
+    if not (result.success and not result.dry_run):
+        token_row = _find_token_row(session, PasswordResetToken, raw_token)
+        if token_row is not None and token_row.used_at is None:
+            token_row.used_at = utcnow()
+            session.add(token_row)
+            token_revoked = True
     details = {
         "provider": result.provider,
         "status": result.status,
         "dry_run": result.dry_run,
         "success": result.success and not result.dry_run,
+        "token_revoked": token_revoked,
         "phone": mask_sms_phone(to_phone),
         "phone_fingerprint": sms_phone_fingerprint(to_phone),
         "identifier_hash": probe_hash,
