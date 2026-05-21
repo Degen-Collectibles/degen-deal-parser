@@ -23,6 +23,12 @@ from .models import (
 )
 
 logger = logging.getLogger(__name__)
+NON_OPERATING_ENTRY_KINDS = {"loan_draw", "loan_repayment", "transfer"}
+NON_OPERATING_EXPENSE_CATEGORIES = {"loan_owner_payments", "partner_paybacks", "transfers"}
+
+
+def _is_non_operating_transaction(entry_kind: str, expense_category: str) -> bool:
+    return entry_kind in NON_OPERATING_ENTRY_KINDS or expense_category in NON_OPERATING_EXPENSE_CATEGORIES
 
 
 def _ensure_utc(dt: datetime | None) -> datetime | None:
@@ -815,16 +821,24 @@ def build_financial_summary(rows: list[DiscordMessage]) -> dict:
         expense_category = (row.expense_category or "").strip().lower()
         day_key = row.created_at.date().isoformat()
         net_value = signed_money_delta(money_in, money_out)
+        is_non_operating = _is_non_operating_transaction(entry_kind, expense_category)
         amount_value = row.amount if row.amount is not None else money_in or money_out
 
         totals["money_in"] += money_in
         totals["money_out"] += money_out
-        totals["net"] += net_value
+        if is_non_operating:
+            totals["non_operating_money_in"] += money_in
+            totals["non_operating_money_out"] += money_out
+            totals["non_operating_net"] += net_value
+        else:
+            totals["net"] += net_value
         count_by_kind[entry_kind] += 1
         if row.needs_review:
             count_by_kind["needs_review"] += 1
 
-        if entry_kind == "sale":
+        if is_non_operating:
+            pass
+        elif entry_kind == "sale":
             totals["sales"] += money_in
             timeline[day_key]["sales"] += money_in
         elif entry_kind == "buy":
@@ -847,7 +861,7 @@ def build_financial_summary(rows: list[DiscordMessage]) -> dict:
         elif money_out:
             totals["operating_expenses"] += money_out
 
-        if row.expense_category:
+        if row.expense_category and not is_non_operating:
             expense_categories[row.expense_category] += money_out
 
         if row.category:

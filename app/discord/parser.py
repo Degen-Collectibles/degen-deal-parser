@@ -687,6 +687,359 @@ def extract_multi_payment_summary(text: str) -> dict[str, Any] | None:
     return summary
 
 
+FINANCIALS_CHANNEL_NAMES = {"financials"}
+LOAN_CHANNEL_NAMES = {"loan", "loans"}
+FINANCIAL_REVIEW_CATEGORY = "uncategorized"
+
+
+def _canonical_channel_leaf_name(channel_name: str | None) -> str:
+    lower = (channel_name or "").strip().lower()
+    if "#" in lower:
+        lower = lower.rsplit("#", 1)[-1]
+    return lower.strip()
+
+
+def _base_channel_financial_parse(
+    *,
+    parsed_type: str | None,
+    amount: float | None,
+    payment_method: str | None,
+    category: str | None,
+    notes: str,
+    confidence: float,
+    needs_review: bool,
+    ignore_message: bool = False,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "parsed_type": parsed_type,
+        "parsed_amount": amount,
+        "parsed_payment_method": payment_method,
+        "parsed_cash_direction": None,
+        "parsed_category": category,
+        "parsed_items": [],
+        "parsed_items_in": [],
+        "parsed_items_out": [],
+        "parsed_trade_summary": "",
+        "parsed_notes": notes,
+        "image_summary": "financial channel rule",
+        "confidence": confidence,
+        "needs_review": needs_review,
+    }
+    if ignore_message:
+        payload["ignore_message"] = True
+    return payload
+
+
+def _financial_review_parse(
+    *,
+    amount: float | None,
+    payment_method: str | None,
+    category: str | None,
+    notes: str,
+) -> Dict[str, Any]:
+    return _base_channel_financial_parse(
+        parsed_type="unknown",
+        amount=amount,
+        payment_method=payment_method,
+        category=category or FINANCIAL_REVIEW_CATEGORY,
+        notes=notes,
+        confidence=0.72,
+        needs_review=True,
+    )
+
+
+def _financial_ignore_parse(notes: str) -> Dict[str, Any]:
+    return _base_channel_financial_parse(
+        parsed_type=None,
+        amount=None,
+        payment_method=None,
+        category=None,
+        notes=notes,
+        confidence=0.98,
+        needs_review=False,
+        ignore_message=True,
+    )
+
+
+def _financial_amount_candidates(text: str) -> list[float]:
+    cleaned = _normalize_amount_text(strip_urls(text or "").lower())
+    cleaned = re.sub(r"\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b", " ", cleaned)
+    cleaned = re.sub(r"\b\d{1,2}\s*-\s*\d{1,2}\b", " ", cleaned)
+    candidates: list[float] = []
+
+    for match in re.finditer(r"\$?\s*(\d+(?:\.\d{1,2})?)", cleaned):
+        token = match.group(1)
+        try:
+            amount = float(token)
+        except ValueError:
+            continue
+
+        after = cleaned[match.end():match.end() + 30]
+        before = cleaned[max(0, match.start() - 12):match.start()]
+        if "%" in after[:2]:
+            continue
+        if has_quantity_unit_after(cleaned, match.end()):
+            continue
+        if re.match(r"\s*(?:x\b|days?\b|front\s+row\b|tables?\b)", after, re.I) and amount <= 31:
+            continue
+        if amount <= 31 and re.search(r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s*$", before, re.I):
+            continue
+        candidates.append(amount)
+
+    return candidates
+
+
+def _extract_financial_channel_amount(text: str) -> float | None:
+    normalized = _normalize_amount_text(normalize_message_part(text or ""))
+    if not normalized:
+        return None
+
+    total_equals = re.search(r"\btotal\b[^|=\n]*=\s*\$?\s*(\d+(?:\.\d{1,2})?)", normalized, re.I)
+    if total_equals:
+        return round(float(total_equals.group(1)), 2)
+
+    total_match = re.search(r"\btotal\b([^|\n]*)", normalized, re.I)
+    if total_match:
+        total_candidates = _financial_amount_candidates(total_match.group(1))
+        if total_candidates:
+            return round(max(total_candidates), 2)
+
+    payment_summary = extract_payment_summary(normalized)
+    if payment_summary:
+        return round(float(payment_summary["amount"]), 2)
+
+    candidates = _financial_amount_candidates(normalized)
+    if not candidates:
+        return None
+    return round(candidates[0], 2)
+
+
+def _financial_channel_payment_method(text: str) -> str:
+    summary = extract_payment_summary(text)
+    if summary:
+        return summary["payment_method"]
+
+    lower = _normalize_payment_tokens((text or "").lower())
+    found = [
+        normalize_payment_method(method)
+        for method in ("zelle", "venmo", "paypal", "cash", "card", "apple_pay")
+        if re.search(rf"\b{re.escape(method)}\b", lower)
+    ]
+    if not found:
+        return "unknown"
+    return found[0] if len(set(found)) == 1 else "mixed"
+
+
+def _looks_like_financial_statement_evidence(text: str) -> bool:
+    lower = (text or "").lower()
+    statement_hints = (
+        "financial statement",
+        "financials up to",
+        "red tab",
+        "yellow tab",
+        "profit overview",
+        "spreadsheet",
+        "1drv.ms",
+        "onedrive",
+    )
+    return any(hint in lower for hint in statement_hints) or bool(
+        re.fullmatch(r"\s*(jan|january|feb|february|mar|march|apr|april|may|june?|july?|aug|august|sep|september|oct|october|nov|november|dec|december)\s*:\s*https?://\S+\s*", text or "", re.I)
+    )
+
+
+def _parse_loans_channel_message(message_text: str, image_urls: list[str]) -> Dict[str, Any]:
+    text = normalize_message_part(message_text or "")
+    lower = _normalize_payment_tokens(text.lower())
+    amount = _extract_financial_channel_amount(text)
+    payment_method = _financial_channel_payment_method(text)
+
+    if not text:
+        return _financial_review_parse(
+            amount=None,
+            payment_method=None,
+            category="loan_owner_payments",
+            notes="loans channel attachment needs review" if image_urls else "loans channel blank note needs review",
+        )
+
+    if "interest" in lower:
+        if amount is None:
+            return _financial_review_parse(
+                amount=None,
+                payment_method=payment_method,
+                category="loan_interest",
+                notes="loans channel interest note needs amount review",
+            )
+        return _base_channel_financial_parse(
+            parsed_type="expense",
+            amount=amount,
+            payment_method=payment_method,
+            category="loan_interest",
+            notes="loans channel interest expense",
+            confidence=0.94,
+            needs_review=False,
+        )
+
+    if re.search(r"\b(paid\s+back|pay\s+back|payback|repaid|paid\s+loan|pay\s+loan)\b", lower):
+        if amount is None:
+            return _financial_review_parse(
+                amount=None,
+                payment_method=payment_method,
+                category="loan_owner_payments",
+                notes="loans channel repayment needs amount review",
+            )
+        return _base_channel_financial_parse(
+            parsed_type="loan_repayment",
+            amount=amount,
+            payment_method=payment_method,
+            category="loan_owner_payments",
+            notes="loans channel principal repayment",
+            confidence=0.95,
+            needs_review=False,
+        )
+
+    if re.search(r"\b(take\s+out|took\s+out|loan)\b", lower):
+        if amount is None:
+            return _financial_review_parse(
+                amount=None,
+                payment_method=payment_method,
+                category="loan_owner_payments",
+                notes="loans channel draw needs amount review",
+            )
+        return _base_channel_financial_parse(
+            parsed_type="loan_draw",
+            amount=amount,
+            payment_method=payment_method,
+            category="loan_owner_payments",
+            notes="loans channel principal draw",
+            confidence=0.95,
+            needs_review=False,
+        )
+
+    return _financial_review_parse(
+        amount=amount,
+        payment_method=payment_method,
+        category="loan_owner_payments",
+        notes="loans channel note needs review",
+    )
+
+
+def _parse_financials_channel_message(message_text: str, image_urls: list[str]) -> Dict[str, Any] | None:
+    text = normalize_message_part(message_text or "")
+    lower = _normalize_payment_tokens(text.lower())
+    amount = _extract_financial_channel_amount(text)
+    payment_method = _financial_channel_payment_method(text)
+
+    if not text:
+        if image_urls:
+            return _financial_review_parse(
+                amount=None,
+                payment_method=None,
+                category=FINANCIAL_REVIEW_CATEGORY,
+                notes="financials channel attachment needs review",
+            )
+        return None
+
+    if _looks_like_financial_statement_evidence(message_text):
+        return _financial_ignore_parse("ignored financial statement evidence link or summary")
+
+    if "withdraw" in lower:
+        return _financial_review_parse(
+            amount=amount,
+            payment_method=payment_method,
+            category="transfers",
+            notes="financials channel cash withdrawal/allocation needs review",
+        )
+
+    category: str | None = None
+    notes = "financials channel expense"
+    needs_review = False
+
+    if re.search(r"\b(pay\s*roll|payroll|labor|wages?|salary|commission|days?\s+work)\b", lower):
+        category = "payroll"
+        notes = "financials channel payroll/labor expense"
+    elif re.search(r"\brent\b", lower):
+        category = "rent_facilities"
+        notes = "financials channel rent/facilities expense"
+    elif re.search(r"\btax(?:es)?\b", lower):
+        category = "taxes_licenses"
+        notes = "financials channel tax/license expense"
+    elif "insurance" in lower:
+        category = "insurance"
+        notes = "financials channel insurance expense"
+    elif re.search(r"\b(table|tables|front\s+row|booth|vendor\s+fee|card\s+show|show)\b", lower):
+        if re.search(r"\bpay\s+(?!rent\b|tax\b)[a-z0-9_'-]+", lower) and not re.search(r"\b(table|tables|booth|vendor\s+fee)\b", lower):
+            category = "payroll"
+            notes = "financials channel show labor expense"
+        else:
+            category = "show_fees"
+            notes = "financials channel show/table expense"
+    elif re.search(r"\bpay\s+(?!rent\b|tax\b)[a-z0-9_'-]+", lower):
+        category = "payroll"
+        notes = "financials channel payee note needs payroll review"
+        needs_review = True
+    elif re.search(r"\b(deposit|deposited)\b", lower):
+        return _financial_review_parse(
+            amount=amount,
+            payment_method=payment_method,
+            category=FINANCIAL_REVIEW_CATEGORY,
+            notes="financials channel deposit/prepayment needs review",
+        )
+    elif re.search(r"\b(bought|buy)\b", lower):
+        return _financial_review_parse(
+            amount=amount,
+            payment_method=payment_method,
+            category=FINANCIAL_REVIEW_CATEGORY,
+            notes="financials channel purchase note needs review",
+        )
+    elif amount is not None and re.search(r"\b(pay|paid|sent|zelle|venmo|cash|expense|costco)\b", lower):
+        category = "other_business_expense"
+        notes = "financials channel business expense needs review"
+        needs_review = True
+
+    if category is None:
+        if amount is not None or image_urls:
+            return _financial_review_parse(
+                amount=amount,
+                payment_method=payment_method,
+                category=FINANCIAL_REVIEW_CATEGORY,
+                notes="financials channel note needs review",
+            )
+        return _financial_ignore_parse("ignored financials channel informational note without ledger amount")
+
+    if amount is None:
+        return _financial_review_parse(
+            amount=None,
+            payment_method=payment_method,
+            category=category,
+            notes=f"{notes}; amount needs review",
+        )
+
+    return _base_channel_financial_parse(
+        parsed_type="expense",
+        amount=amount,
+        payment_method=payment_method,
+        category=category,
+        notes=notes,
+        confidence=0.91 if needs_review else 0.94,
+        needs_review=needs_review,
+    )
+
+
+def parse_channel_financial_message(
+    message_text: str,
+    *,
+    channel_name: str | None,
+    image_urls: list[str] | None = None,
+) -> Dict[str, Any] | None:
+    channel = _canonical_channel_leaf_name(channel_name)
+    image_urls = image_urls or []
+    if channel in LOAN_CHANNEL_NAMES:
+        return _parse_loans_channel_message(message_text, image_urls)
+    if channel in FINANCIALS_CHANNEL_NAMES:
+        return _parse_financials_channel_message(message_text, image_urls)
+    return None
+
+
 def parse_stitched_rule_hint(message_text: str) -> Dict[str, Any] | None:
     message_parts = split_stitched_messages(message_text)
     if len(message_parts) <= 1:
@@ -1870,6 +2223,14 @@ async def parse_message(content: str, attachment_urls: list[str], author_name: s
         use_first_image_only=True,
         max_images=2,
     )
+
+    channel_financial = parse_channel_financial_message(
+        content or "",
+        channel_name=channel_name,
+        image_urls=image_urls,
+    )
+    if channel_financial is not None:
+        return channel_financial
 
     non_transaction = detect_non_transaction_message(content or "", image_urls=image_urls)
     if non_transaction:

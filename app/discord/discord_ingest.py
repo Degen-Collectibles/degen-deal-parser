@@ -53,11 +53,14 @@ DISCORD_RETRY_MIN_SECONDS = 15
 DISCORD_RETRY_MAX_SECONDS = 900
 ALLOWED_CHANNEL_CATEGORIES = {
     "Employees",
+    "Financials",
     "Show Deals",
     "Past Shows",
     "Offline Deals",
 }
 AUTO_WATCHED_CHANNEL_CATEGORY = "Show Deals"
+AUTO_WATCHED_FINANCIALS_CATEGORY = "Financials"
+FINANCIALS_LEDGER_CHANNEL_NAMES = {"financials", "loan", "loans"}
 # Backfill cancellation is enforced from progress callbacks, so keep this
 # cadence small enough to react promptly without adding a database check for
 # every single message fetched from Discord history.
@@ -227,22 +230,31 @@ def _show_deals_watched_channel_name(channel: dict) -> str:
     )
 
 
-def _sync_show_deals_watched_channels(
+def _should_auto_watch_discord_channel(channel: dict) -> bool:
+    category_name = str(channel.get("category_name") or "").strip()
+    channel_name = str(channel.get("channel_name") or "").strip().lower()
+
+    if category_name == AUTO_WATCHED_CHANNEL_CATEGORY:
+        return looks_like_transaction_channel(channel_name, category_name)
+
+    if category_name == AUTO_WATCHED_FINANCIALS_CATEGORY:
+        return channel_name in FINANCIALS_LEDGER_CHANNEL_NAMES
+
+    return False
+
+
+def _sync_auto_watched_discord_channels(
     session: Session,
     channels: list[dict],
     *,
     now: datetime,
 ) -> None:
-    show_deals_channels = [
+    auto_watched_channels = [
         channel
         for channel in channels
-        if str(channel.get("category_name") or "").strip() == AUTO_WATCHED_CHANNEL_CATEGORY
-        and looks_like_transaction_channel(
-            str(channel.get("channel_name") or ""),
-            str(channel.get("category_name") or ""),
-        )
+        if _should_auto_watch_discord_channel(channel)
     ]
-    if not show_deals_channels:
+    if not auto_watched_channels:
         return
 
     existing_rows = session.exec(select(WatchedChannel)).all()
@@ -250,7 +262,7 @@ def _sync_show_deals_watched_channels(
     changed_count = 0
     created_count = 0
 
-    for channel in show_deals_channels:
+    for channel in auto_watched_channels:
         channel_id = str(channel.get("channel_id") or "").strip()
         if not channel_id:
             continue
@@ -279,7 +291,7 @@ def _sync_show_deals_watched_channels(
 
     if created_count or changed_count:
         print(
-            "[discord] synced Show Deals watched channels: "
+            "[discord] synced auto-watched Discord channels: "
             f"created={created_count}, renamed={changed_count}"
         )
 
@@ -311,7 +323,7 @@ def persist_available_discord_channels(channels: list[dict], *, remove_missing: 
                 row.updated_at = now
                 session.add(row)
 
-            _sync_show_deals_watched_channels(session, channels, now=now)
+            _sync_auto_watched_discord_channels(session, channels, now=now)
             session.commit()
     except ProgrammingError:
         return
@@ -1642,6 +1654,8 @@ def looks_like_transaction_channel(channel_name: str, category_name: Optional[st
 
     if lower_category in {"show deals", "past shows", "offline deals"}:
         return True
+    if lower_category == "financials":
+        return lower_name in FINANCIALS_LEDGER_CHANNEL_NAMES
 
     return any(token in lower_name for token in TRANSACTION_CHANNEL_NAME_HINTS)
 

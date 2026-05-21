@@ -98,6 +98,8 @@ EXPENSE_CATEGORY_LABELS = {
     "travel_lodging": "Travel - lodging",
     "travel_ground_transport": "Travel - ground/fuel/parking",
     "meals_entertainment": "Meals/entertainment",
+    "insurance": "Insurance",
+    "loan_interest": "Loan interest",
     "partner_paybacks": "Partner paybacks",
     "loan_owner_payments": "Loans/owner payments",
     "bank_fees": "Bank/finance fees",

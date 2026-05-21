@@ -451,6 +451,34 @@ class AvailableDiscordChannelInventoryTests(unittest.TestCase):
         self.assertTrue(authoritative)
         self.assertEqual(pairs, [(guild, text_channel, "Show Deals")])
 
+    def test_financials_channels_are_discoverable_for_ledger_ingest(self):
+        guild = types.SimpleNamespace(id=111, name="Degen Guild")
+        financials = types.SimpleNamespace(
+            id=7001,
+            name="financials",
+            created_at=datetime(2026, 5, 20, tzinfo=timezone.utc),
+            last_message_id=None,
+        )
+        loans = types.SimpleNamespace(
+            id=7002,
+            name="loans",
+            created_at=datetime(2026, 5, 20, tzinfo=timezone.utc),
+            last_message_id=None,
+        )
+
+        rows = discord_ingest_module._build_available_discord_channel_rows(
+            [
+                (guild, financials, "Financials"),
+                (guild, loans, "Financials"),
+            ]
+        )
+
+        self.assertEqual({row["channel_id"] for row in rows}, {"7001", "7002"})
+        self.assertEqual(
+            {row["label"] for row in rows},
+            {"Financials / #financials", "Financials / #loans"},
+        )
+
 
 class AvailableDiscordChannelPersistenceTests(unittest.TestCase):
     def setUp(self):
@@ -561,6 +589,28 @@ class AvailableDiscordChannelPersistenceTests(unittest.TestCase):
         self.assertEqual(len(watched_rows), 1)
         self.assertEqual(watched_rows[0].channel_id, "4001")
         self.assertEqual(len(available_rows), 1)
+
+    def test_auto_adds_financials_channels_as_backfill_ready(self):
+        self._persist(
+            [
+                self._channel("7001", category_name="Financials", channel_name="financials"),
+                self._channel("7002", category_name="Financials", channel_name="loans"),
+            ]
+        )
+
+        with Session(self.engine) as session:
+            watched_rows = session.exec(select(WatchedChannel)).all()
+            available_rows = session.exec(select(AvailableDiscordChannel)).all()
+
+        watched_by_id = {row.channel_id: row for row in watched_rows}
+        self.assertEqual(set(watched_by_id), {"7001", "7002"})
+        self.assertEqual({row.channel_id for row in available_rows}, {"7001", "7002"})
+        self.assertEqual(watched_by_id["7001"].channel_name, "Financials / #financials")
+        self.assertEqual(watched_by_id["7002"].channel_name, "Financials / #loans")
+        self.assertTrue(watched_by_id["7001"].is_enabled)
+        self.assertTrue(watched_by_id["7002"].is_enabled)
+        self.assertTrue(watched_by_id["7001"].backfill_enabled)
+        self.assertTrue(watched_by_id["7002"].backfill_enabled)
 
 
 class ShowDealsAutoWatchMessageTests(unittest.TestCase):

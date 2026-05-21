@@ -5,7 +5,29 @@ from dataclasses import dataclass
 from typing import Optional
 
 
-ENTRY_KINDS = {"sale", "buy", "trade", "expense", "unknown"}
+ENTRY_KINDS = {
+    "sale",
+    "buy",
+    "trade",
+    "expense",
+    "unknown",
+    "loan_draw",
+    "loan_repayment",
+    "transfer",
+}
+NON_OPERATING_ENTRY_KINDS = {"loan_draw", "loan_repayment", "transfer"}
+PARSED_EXPENSE_CATEGORIES = {
+    "insurance",
+    "loan_interest",
+    "loan_owner_payments",
+    "other_business_expense",
+    "payroll",
+    "rent_facilities",
+    "show_fees",
+    "taxes_licenses",
+    "transfers",
+    "uncategorized",
+}
 
 INVENTORY_HINTS: tuple[str, ...] = (
     "single",
@@ -81,6 +103,20 @@ def derive_entry_kind(
     cash_direction: Optional[str],
     message_text: str,
 ) -> tuple[str, Optional[str]]:
+    if parsed_type == "loan_draw":
+        return "loan_draw", "loan_owner_payments"
+    if parsed_type == "loan_repayment":
+        return "loan_repayment", "loan_owner_payments"
+    if parsed_type == "transfer":
+        return "transfer", parsed_category or "transfers"
+    if parsed_type == "expense":
+        if parsed_category and parsed_category in PARSED_EXPENSE_CATEGORIES:
+            return "expense", parsed_category
+        expense_category = detect_expense_category(message_text)
+        return "expense", expense_category or parsed_category or "uncategorized"
+    if parsed_type in {None, "unknown"} and parsed_category in PARSED_EXPENSE_CATEGORIES:
+        return "unknown", parsed_category
+
     expense_category = detect_expense_category(message_text)
     if expense_category and parsed_type in {None, "unknown", "buy"}:
         return "expense", expense_category
@@ -117,6 +153,10 @@ def compute_financials(
     if entry_kind == "sale":
         money_in = normalized_amount
     elif entry_kind in {"buy", "expense"}:
+        money_out = normalized_amount
+    elif entry_kind == "loan_draw":
+        money_in = normalized_amount
+    elif entry_kind in {"loan_repayment", "transfer"}:
         money_out = normalized_amount
     elif entry_kind == "trade":
         if cash_direction == "to_store":
