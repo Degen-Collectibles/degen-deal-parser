@@ -479,6 +479,23 @@ class AvailableDiscordChannelInventoryTests(unittest.TestCase):
             {"Financials / #financials", "Financials / #loans"},
         )
 
+    def test_year_past_shows_channels_are_discoverable_for_ledger_ingest(self):
+        guild = types.SimpleNamespace(id=111, name="Degen Guild")
+        show_channel = types.SimpleNamespace(
+            id=8001,
+            name="2026-may-9-eastbaycardshow",
+            created_at=datetime(2026, 5, 9, tzinfo=timezone.utc),
+            last_message_id=None,
+        )
+
+        rows = discord_ingest_module._build_available_discord_channel_rows(
+            [(guild, show_channel, "2026 Past Shows")]
+        )
+
+        self.assertEqual({row["channel_id"] for row in rows}, {"8001"})
+        self.assertEqual(rows[0]["category_name"], "2026 Past Shows")
+        self.assertEqual(rows[0]["label"], "2026 Past Shows / #2026-may-9-eastbaycardshow")
+
 
 class AvailableDiscordChannelPersistenceTests(unittest.TestCase):
     def setUp(self):
@@ -533,9 +550,25 @@ class AvailableDiscordChannelPersistenceTests(unittest.TestCase):
         self.assertIsNone(watched.backfill_after)
         self.assertIsNone(watched.backfill_before)
 
+    def test_auto_adds_year_past_shows_channels_as_backfill_ready(self):
+        self._persist([
+            self._channel("2001", category_name="2026 Past Shows", channel_name="2026-may-9-eastbaycardshow")
+        ])
+
+        with Session(self.engine) as session:
+            available = session.exec(select(AvailableDiscordChannel)).one()
+            watched = session.exec(select(WatchedChannel)).one()
+
+        self.assertEqual(available.channel_id, "2001")
+        self.assertEqual(watched.channel_id, "2001")
+        self.assertEqual(watched.channel_name, "2026 Past Shows / #2026-may-9-eastbaycardshow")
+        self.assertTrue(watched.is_enabled)
+        self.assertTrue(watched.backfill_enabled)
+        self.assertIsNone(watched.backfill_after)
+        self.assertIsNone(watched.backfill_before)
+
     def test_does_not_auto_add_other_deal_categories(self):
         self._persist([
-            self._channel("2001", category_name="Past Shows", channel_name="2025-show-deals"),
             self._channel("2002", category_name="Offline Deals", channel_name="offline-deals"),
             self._channel("2003", category_name="Employees", channel_name="employee-deals"),
         ])
@@ -545,7 +578,7 @@ class AvailableDiscordChannelPersistenceTests(unittest.TestCase):
             available_rows = session.exec(select(AvailableDiscordChannel)).all()
 
         self.assertEqual(watched_rows, [])
-        self.assertEqual({row.channel_id for row in available_rows}, {"2001", "2002", "2003"})
+        self.assertEqual({row.channel_id for row in available_rows}, {"2002", "2003"})
 
     def test_preserves_existing_channel_flags_and_backfill_windows(self):
         after = datetime(2026, 4, 1, tzinfo=timezone.utc)

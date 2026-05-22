@@ -670,6 +670,13 @@
                                         <strong class="truncate">Discord financial log</strong>
                                         {% endif %}
                                         <div class="mini match-extra">Shown in-grid; not counted in bank totals.</div>
+                                        {% elif row.row_kind == "discord_deal" %}
+                                        {% if match_url %}
+                                        <a class="deal-link truncate" href="{{ match_url }}">Discord deal log</a>
+                                        {% else %}
+                                        <strong class="truncate">Discord deal log</strong>
+                                        {% endif %}
+                                        <div class="mini match-extra">Shown in-grid; not counted in bank totals.</div>
                                         {% elif row.matched_transaction %}
                                         {% if match_url %}
                                         <a class="deal-link truncate" href="{{ match_url }}">{{ row.matched_transaction.entry_kind or "Discord" }}</a>
@@ -739,7 +746,7 @@
                                             <button class="tiny primary" type="submit">Save</button>
                                         </form>
                                         {% elif row.matched_transaction and row.matched_source_message_id %}
-                                        <span class="mini">{{ "Discord row" if row.row_kind == "discord_financial" else "Cash row" }}</span>
+                                        <span class="mini">{{ "Discord row" if row.row_kind in ["discord_financial", "discord_deal"] else "Cash row" }}</span>
                                         <form method="post" action="/ledger/transactions/{{ row.matched_source_message_id }}/edit-form" class="inline-form transaction-edit-form">
                                             <input type="hidden" name="selected_account" value="{{ selected.account }}">
                                             <input type="hidden" name="selected_start" value="{{ selected.start }}">

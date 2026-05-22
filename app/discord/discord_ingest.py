@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -61,6 +62,7 @@ ALLOWED_CHANNEL_CATEGORIES = {
 AUTO_WATCHED_CHANNEL_CATEGORY = "Show Deals"
 AUTO_WATCHED_FINANCIALS_CATEGORY = "Financials"
 FINANCIALS_LEDGER_CHANNEL_NAMES = {"financials", "loan", "loans"}
+YEAR_PAST_SHOWS_CATEGORY_RE = re.compile(r"^\d{4}\s+past shows$", re.IGNORECASE)
 # Backfill cancellation is enforced from progress callbacks, so keep this
 # cadence small enough to react promptly without adding a database check for
 # every single message fetched from Discord history.
@@ -230,11 +232,21 @@ def _show_deals_watched_channel_name(channel: dict) -> str:
     )
 
 
+def is_past_shows_category(category_name: Optional[str]) -> bool:
+    cleaned = str(category_name or "").strip()
+    return cleaned.lower() == "past shows" or bool(YEAR_PAST_SHOWS_CATEGORY_RE.match(cleaned))
+
+
+def is_allowed_channel_category(category_name: Optional[str]) -> bool:
+    cleaned = str(category_name or "").strip()
+    return cleaned in ALLOWED_CHANNEL_CATEGORIES or is_past_shows_category(cleaned)
+
+
 def _should_auto_watch_discord_channel(channel: dict) -> bool:
     category_name = str(channel.get("category_name") or "").strip()
     channel_name = str(channel.get("channel_name") or "").strip().lower()
 
-    if category_name == AUTO_WATCHED_CHANNEL_CATEGORY:
+    if category_name == AUTO_WATCHED_CHANNEL_CATEGORY or is_past_shows_category(category_name):
         return looks_like_transaction_channel(channel_name, category_name)
 
     if category_name == AUTO_WATCHED_FINANCIALS_CATEGORY:
@@ -1652,7 +1664,7 @@ def looks_like_transaction_channel(channel_name: str, category_name: Optional[st
     lower_name = (channel_name or "").lower()
     lower_category = (category_name or "").lower()
 
-    if lower_category in {"show deals", "past shows", "offline deals"}:
+    if lower_category in {"show deals", "offline deals"} or is_past_shows_category(category_name):
         return True
     if lower_category == "financials":
         return lower_name in FINANCIALS_LEDGER_CHANNEL_NAMES
@@ -1708,7 +1720,7 @@ def _gateway_guild_channel_pairs(client) -> list[tuple]:
 def _build_available_discord_channel_rows(guild_channel_pairs: list[tuple]) -> list[dict]:
     channels: list[dict] = []
     for guild, channel, category_name in guild_channel_pairs:
-        if category_name not in ALLOWED_CHANNEL_CATEGORIES:
+        if not is_allowed_channel_category(category_name):
             continue
         if not looks_like_transaction_channel(channel.name, category_name):
             continue
