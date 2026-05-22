@@ -448,7 +448,7 @@
                     <div class="mini">Discord cash deals outside bank totals.</div>
                 </div>
                 <div class="cleanup-actions">
-                    <form method="post" action="/ledger/agent/run-form">
+                    <form method="post" action="/ledger/agent/preview-form">
                         <input type="hidden" name="selected_account" value="">
                         <input type="hidden" name="selected_start" value="{{ selected.start }}">
                         <input type="hidden" name="selected_end" value="{{ selected.end }}">
@@ -460,7 +460,7 @@
                         <input type="hidden" name="selected_sort" value="amount">
                         <input type="hidden" name="selected_direction" value="asc">
                         <input type="hidden" name="selected_include_cash" value="false">
-                        <button class="primary" type="submit" {% if tax_cleanup.agent_ready_count == 0 %}disabled{% endif %}>Run Tax Agent</button>
+                        <button class="primary" type="submit" {% if tax_cleanup.agent_ready_count == 0 %}disabled{% endif %}>Preview Tax Agent</button>
                     </form>
                     <a class="button" href="/ledger?status=needs_action&sort=amount&direction=asc&include_cash=false">Open Cleanup Queue</a>
                 </div>
@@ -493,18 +493,9 @@
             <main>
                 <section class="panel">
                     <div class="quick-chips">
-                        <a class="quick-chip{% if selected.status == 'all' and not selected.source and not selected.action_reason and selected.include_cash %} is-active{% endif %}" href="/ledger?status=all&include_cash=true">All transactions</a>
-                        <a class="quick-chip{% if selected.status == 'needs_action' and not selected.action_reason %} is-active{% endif %}" href="/ledger?status=needs_action" title="Rows that still need a category, match/source check, or review before they are ready.">Needs action</a>
-                        <a class="quick-chip{% if selected.action_reason == 'needs_log_check' %} is-active{% endif %}" href="/ledger?status=needs_action&action_reason=needs_log_check">Log check</a>
-                        <a class="quick-chip{% if selected.action_reason == 'expense_review' %} is-active{% endif %}" href="/ledger?status=needs_action&action_reason=expense_review">Expense review</a>
-                        <a class="quick-chip{% if selected.action_reason == 'needs_match_check' %} is-active{% endif %}" href="/ledger?status=needs_action&action_reason=needs_match_check">Match check</a>
-                        <a class="quick-chip{% if selected.action_reason == 'needs_source' %} is-active{% endif %}" href="/ledger?status=needs_action&action_reason=needs_source">Source check</a>
-                        <a class="quick-chip{% if selected.action_reason == 'payout_review' %} is-active{% endif %}" href="/ledger?status=needs_action&action_reason=payout_review">Payout review</a>
-                        <a class="quick-chip{% if selected.status == 'reconciled' %} is-active{% endif %}" href="/ledger?status=reconciled">Ready</a>
-                        <a class="quick-chip{% if selected.status == 'force_unmatched' %} is-active{% endif %}" href="/ledger?status=force_unmatched">Unmatched</a>
-                        <a class="quick-chip{% if selected.source == 'shopify' %} is-active{% endif %}" href="/ledger?status=all&source=shopify">Shopify</a>
-                        <a class="quick-chip{% if selected.source == 'tiktok' %} is-active{% endif %}" href="/ledger?status=all&source=tiktok">TikTok</a>
-                        <a class="quick-chip{% if selected.source == 'cash' %} is-active{% endif %}" href="/ledger?status=all&source=cash&include_cash=true">Cash only</a>
+                        {% for chip in quick_chips %}
+                        <a class="quick-chip{% if chip.active %} is-active{% endif %}" href="{{ chip.href }}" {% if chip.title %}title="{{ chip.title }}"{% endif %}>{{ chip.label }}</a>
+                        {% endfor %}
                         <button class="quick-chip" type="button" id="ledger-tools-toggle">Tools</button>
                     </div>
                     <p class="mini">Needs action means rows that still need a category, match/source check, or review before they are ready.</p>
@@ -560,8 +551,8 @@
                         </label>
                         <label>Cash
                             <select name="include_cash">
-                                <option value="false" {% if not selected.include_cash %}selected{% endif %}>Separate</option>
-                                <option value="true" {% if selected.include_cash %}selected{% endif %}>In grid</option>
+                                <option value="false" {% if not selected.include_cash %}selected{% endif %}>No, side panel only</option>
+                                <option value="true" {% if selected.include_cash %}selected{% endif %}>Yes, include rows</option>
                             </select>
                         </label>
                         <label>Sort
@@ -804,7 +795,7 @@
             <section class="tools-drawer" id="ledger-tools-drawer">
                 <section class="panel">
                     <h2>Ledger Assistant</h2>
-                    <form method="post" action="/ledger/agent/run-form" class="inline-form" style="margin-top: 10px;">
+                    <form method="post" action="/ledger/agent/preview-form" class="inline-form" style="margin-top: 10px;">
                         <input type="hidden" name="selected_account" value="{{ selected.account }}">
                         <input type="hidden" name="selected_start" value="{{ selected.start }}">
                         <input type="hidden" name="selected_end" value="{{ selected.end }}">
@@ -816,7 +807,7 @@
                         <input type="hidden" name="selected_sort" value="{{ selected.sort }}">
                         <input type="hidden" name="selected_direction" value="{{ selected.direction }}">
                         <input type="hidden" name="selected_include_cash" value="{{ 'true' if selected.include_cash else 'false' }}">
-                        <button class="primary" type="submit">Run Ledger Agent</button>
+                        <button class="primary" type="submit">Preview Ledger Agent</button>
                     </form>
                     <div class="mini" style="margin-top: 8px;">Auto-clears obvious bad Discord matches and reviews safe operating expenses in this view.</div>
                     <div class="mini" style="margin: 8px 0 12px;">Preview a bank-row rule before saving or applying it.</div>

@@ -18,11 +18,13 @@ from app.ledger import (
     ledger_filters_from_values,
     ledger_status_for_bank_row,
     preview_ledger_automation,
+    preview_ledger_review_agent,
     preview_ledger_rule,
     run_ledger_review_agent,
 )
 from app.models import AuditLog, BankStatementImport, BankTransaction, LedgerRule, Transaction
 from app.models import DiscordMessage, PARSE_PARSED, PARSE_REVIEW_REQUIRED
+import app.routers.ledger as ledger_routes
 from app.routers.ledger import (
     ledger_agent_run_form,
     ledger_automation_apply_form,
@@ -431,6 +433,81 @@ def test_ledger_review_agent_can_process_prod_sized_safe_expense_batches():
     assert reviewed_count == 1200
 
 
+def test_preview_ledger_review_agent_reports_actions_without_mutating_rows():
+    engine = make_engine()
+    posted_at = datetime(2026, 5, 15, 12, tzinfo=timezone.utc)
+
+    with Session(engine) as session:
+        bank_import = add_import(session)
+        session.add(
+            Transaction(
+                id=552,
+                source_message_id=2552,
+                occurred_at=posted_at,
+                parse_status="parsed",
+                entry_kind="buy",
+                payment_method="cash",
+                expense_category="inventory",
+                amount=11.99,
+                money_in=0.0,
+                money_out=11.99,
+                source_content="Bought for 12 cash",
+            )
+        )
+        session.add(
+            BankTransaction(
+                id=52,
+                import_id=bank_import.id,
+                row_index=1,
+                account_label="Chase Checking",
+                account_type="checking",
+                posted_at=posted_at,
+                description="Amazon Prime Video",
+                amount=-11.99,
+                classification="logged_in_discord_possible",
+                expense_category="inventory_purchases",
+                category_confidence="high",
+                matched_transaction_id=552,
+                matched_source_message_id=2552,
+                matched_platform="discord",
+                raw_row_json=json.dumps({"Category": "Entertainment"}),
+            )
+        )
+        session.add(
+            BankTransaction(
+                id=53,
+                import_id=bank_import.id,
+                row_index=2,
+                account_label="Chase Checking",
+                account_type="checking",
+                posted_at=posted_at,
+                description="USPS POSTAGE",
+                amount=-8.25,
+                classification="expense_or_purchase_needs_review",
+                confidence="high",
+                expense_category="shipping_postage",
+                category_confidence="high",
+            )
+        )
+        session.commit()
+
+        preview = preview_ledger_review_agent(session, filters=LedgerFilters(status="needs_action"), limit=50)
+        amazon = session.get(BankTransaction, 52)
+        postage = session.get(BankTransaction, 53)
+        audits = session.exec(select(AuditLog).where(AuditLog.action == "financial.ledger.agent_review")).all()
+
+    assert preview["scanned_count"] == 2
+    assert preview["updated_count"] == 2
+    assert preview["cleared_false_matches"] == 1
+    assert preview["auto_reviewed"] == 1
+    assert {sample["id"] for sample in preview["sample_actions"]} == {52, 53}
+    assert amazon.matched_transaction_id == 552
+    assert amazon.matched_platform == "discord"
+    assert amazon.review_status == "open"
+    assert postage.review_status == "open"
+    assert audits == []
+
+
 def test_ledger_page_data_builds_tax_cleanup_summary():
     engine = make_engine()
     posted_at = datetime(2026, 5, 15, 12, tzinfo=timezone.utc)
@@ -517,6 +594,51 @@ def test_ledger_page_data_builds_tax_cleanup_summary():
     assert buckets["possible_discord_match"]["href"] == "/ledger?status=needs_action&action_reason=possible_discord_match"
 
 
+def test_ledger_page_data_builds_quick_chip_urls_from_selected_filters():
+    engine = make_engine()
+    posted_at = datetime(2026, 5, 15, 12, tzinfo=timezone.utc)
+
+    with Session(engine) as session:
+        bank_import = add_import(session)
+        session.add(
+            BankTransaction(
+                id=2451,
+                import_id=bank_import.id,
+                row_index=1,
+                account_label="Chase Checking",
+                account_type="checking",
+                posted_at=posted_at,
+                description="SHOPIFY PAYOUT",
+                amount=125.0,
+                classification="shopify_payout",
+                expense_category="platform_payouts",
+            )
+        )
+        session.commit()
+
+        data = build_ledger_page_data(
+            session,
+            LedgerFilters(
+                start="2026-05-01",
+                status="needs_action",
+                search="apple",
+                sort="amount",
+                direction="asc",
+                include_cash=False,
+            ),
+        )
+
+    chips = {chip["label"]: chip for chip in data["quick_chips"]}
+    assert chips["Shopify"]["href"] == (
+        "/ledger?start=2026-05-01&status=all&source=shopify&search=apple&sort=amount"
+        "&direction=asc&include_cash=false"
+    )
+    assert chips["Cash only"]["href"] == (
+        "/ledger?start=2026-05-01&status=all&source=cash&search=apple&sort=amount"
+        "&direction=asc&include_cash=true"
+    )
+
+
 def test_ledger_review_agent_preserves_manual_category_when_clearing_false_discord_match():
     _assert_ledger_review_agent_preserves_locked_category_when_clearing_false_discord_match("manual")
 
@@ -586,7 +708,7 @@ def _assert_ledger_review_agent_preserves_locked_category_when_clearing_false_di
     assert row.category_reason == category_reason
 
 
-def test_ledger_agent_route_auto_applies_and_redirects_to_selected_view():
+def test_ledger_agent_route_requires_preview_before_apply():
     engine = make_engine()
     posted_at = datetime(2026, 5, 15, 12, tzinfo=timezone.utc)
 
@@ -645,11 +767,154 @@ def test_ledger_agent_route_auto_applies_and_redirects_to_selected_view():
                 session=session,
             )
         row = session.get(BankTransaction, 19)
+        audits = session.exec(select(AuditLog).where(AuditLog.action == "financial.ledger.agent_review")).all()
+
+    assert response.status_code == 303
+    assert "Preview+required" in response.headers["location"]
+    assert row.matched_transaction_id == 522
+    assert row.matched_platform == "discord"
+    assert row.review_status == "open"
+    assert audits == []
+
+
+def test_ledger_agent_preview_route_renders_confirmation_without_mutating_rows():
+    engine = make_engine()
+    posted_at = datetime(2026, 5, 15, 12, tzinfo=timezone.utc)
+
+    with Session(engine) as session:
+        bank_import = add_import(session)
+        session.add(
+            Transaction(
+                id=524,
+                source_message_id=1524,
+                occurred_at=posted_at,
+                parse_status="parsed",
+                entry_kind="buy",
+                payment_method="cash",
+                expense_category="inventory",
+                amount=11.99,
+                money_in=0.0,
+                money_out=11.99,
+                source_content="Bought for 12 cash",
+            )
+        )
+        session.add(
+            BankTransaction(
+                id=24,
+                import_id=bank_import.id,
+                row_index=1,
+                account_label="Chase Checking",
+                account_type="checking",
+                posted_at=posted_at,
+                description="Amazon Prime Video",
+                amount=-11.99,
+                classification="logged_in_discord_possible",
+                expense_category="inventory_purchases",
+                category_confidence="high",
+                matched_transaction_id=524,
+                matched_source_message_id=1524,
+                matched_platform="discord",
+                raw_row_json=json.dumps({"Category": "Entertainment"}),
+            )
+        )
+        session.commit()
+
+        with patch("app.routers.ledger.require_role_response", return_value=None):
+            response = ledger_routes.ledger_agent_preview_form(
+                make_request("/ledger/agent/preview-form", method="POST"),
+                selected_account="",
+                selected_start="",
+                selected_end="",
+                selected_status="needs_action",
+                selected_category="",
+                selected_source="",
+                selected_action_reason="possible_discord_match",
+                selected_search="",
+                selected_sort="posted_at",
+                selected_direction="desc",
+                selected_include_cash="",
+                session=session,
+            )
+        row = session.get(BankTransaction, 24)
+
+    body = response.body.decode("utf-8")
+    assert response.status_code == 200
+    assert "Ledger Agent Preview" in body
+    assert "This will update 1 row(s)" in body
+    assert 'name="confirm" value="run_agent"' in body
+    assert row.matched_transaction_id == 524
+    assert row.matched_platform == "discord"
+
+
+def test_ledger_agent_route_confirm_applies_and_redirects_to_selected_view():
+    engine = make_engine()
+    posted_at = datetime(2026, 5, 15, 12, tzinfo=timezone.utc)
+
+    with Session(engine) as session:
+        bank_import = add_import(session)
+        session.add(
+            Transaction(
+                id=525,
+                source_message_id=1525,
+                occurred_at=posted_at,
+                parse_status="parsed",
+                entry_kind="buy",
+                payment_method="cash",
+                expense_category="inventory",
+                amount=11.99,
+                money_in=0.0,
+                money_out=11.99,
+                source_content="Bought for 12 cash",
+            )
+        )
+        session.add(
+            BankTransaction(
+                id=25,
+                import_id=bank_import.id,
+                row_index=1,
+                account_label="Chase Checking",
+                account_type="checking",
+                posted_at=posted_at,
+                description="Amazon Prime Video",
+                amount=-11.99,
+                classification="logged_in_discord_possible",
+                expense_category="inventory_purchases",
+                category_confidence="high",
+                matched_transaction_id=525,
+                matched_source_message_id=1525,
+                matched_platform="discord",
+                raw_row_json=json.dumps({"Category": "Entertainment"}),
+            )
+        )
+        session.commit()
+
+        with patch("app.routers.ledger.require_role_response", return_value=None):
+            response = ledger_agent_run_form(
+                make_request("/ledger/agent/run-form", method="POST"),
+                confirm="run_agent",
+                selected_account="",
+                selected_start="",
+                selected_end="",
+                selected_status="needs_action",
+                selected_category="",
+                selected_source="",
+                selected_action_reason="possible_discord_match",
+                selected_search="",
+                selected_sort="posted_at",
+                selected_direction="desc",
+                selected_include_cash="",
+                session=session,
+            )
+        row = session.get(BankTransaction, 25)
+        audits = session.exec(select(AuditLog).where(AuditLog.action == "financial.ledger.agent_review")).all()
 
     assert response.status_code == 303
     assert "action_reason=possible_discord_match" in response.headers["location"]
     assert "Ledger+agent+updated+1" in response.headers["location"]
+    assert row.matched_transaction_id is None
+    assert row.matched_platform is None
     assert row.review_status == "open"
+    assert len(audits) == 1
 
 
 def test_ledger_export_handles_cash_rows():
@@ -1282,7 +1547,7 @@ def test_ledger_warning_uses_defined_css_variable():
 def test_ledger_template_exposes_tax_cleanup_panel():
     template = Path("app/templates/ledger.html").read_text()
     assert "Tax Cleanup" in template
-    assert "Run Tax Agent" in template
+    assert "Preview Tax Agent" in template
     assert "tax_cleanup.buckets" in template
     assert "agent_ready_count" in template
 
@@ -1470,13 +1735,15 @@ def test_ledger_route_renders_default_needs_action_grid():
     assert "Scope:" in body
     assert "Review log-check rows" in body
     assert "Ledger Assistant" in body
-    assert 'href="/ledger?status=all&include_cash=true"' in body
+    assert 'href="/ledger?status=all&amp;sort=posted_at&amp;direction=desc&amp;include_cash=true"' in body
     assert "All transactions" in body
-    assert 'href="/ledger?status=needs_action&action_reason=needs_match_check"' in body
+    assert 'href="/ledger?status=needs_action&amp;action_reason=needs_match_check&amp;sort=posted_at&amp;direction=desc&amp;include_cash=false"' in body
     assert 'name="action_reason"' in body
-    assert 'action="/ledger/agent/run-form"' in body
-    assert "Run Ledger Agent" in body
+    assert 'action="/ledger/agent/preview-form"' in body
+    assert "Preview Ledger Agent" in body
     assert "Needs action means rows that still need a category" in body
+    assert "No, side panel only" in body
+    assert "Yes, include rows" in body
     assert "PYMT SENT APPLE CASH" in body
     assert "Needs match check" in body
     assert 'data-ledger-row-id="cash-502"' not in body

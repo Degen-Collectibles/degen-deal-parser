@@ -1632,6 +1632,7 @@ def build_finance_kpi_rows(
 
         rows.append(
             {
+                "key": key,
                 "label": label,
                 "value_display": value_display,
                 "delta_display": delta_display,

@@ -9,7 +9,7 @@ import csv
 import json
 import secrets
 from io import StringIO
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
@@ -197,6 +197,20 @@ def bank_reconciliation_page(
             for row in visible_rows
         ]
 
+    def bank_url(**overrides: Any) -> str:
+        values: dict[str, Any] = {
+            "import_id": selected_import.id if selected_import else import_id,
+            "classification": classification,
+            "expense_category": expense_category,
+            "review_status": review_status,
+            "attention": attention,
+            "expenses_only": expenses_only,
+            "search": search,
+            "limit": limit,
+        }
+        values.update(overrides)
+        return _bank_redirect_url(**values)
+
     return templates.TemplateResponse(
         request,
         "bank_reconciliation.html",
@@ -228,6 +242,7 @@ def bank_reconciliation_page(
             "gmail_status": gmail_status,
             "gmail_connections": gmail_connections,
             "gmail_receipts": gmail_receipts,
+            "bank_url": bank_url,
         },
     )
 

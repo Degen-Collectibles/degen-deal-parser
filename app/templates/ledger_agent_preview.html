@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>{{ title }}</title>
+    <style>
+        :root {
+            --bg: #08090a;
+            --panel: #111215;
+            --panel-strong: #17191d;
+            --line: #24262c;
+            --text: #f7f7f8;
+            --muted: #9ca3af;
+            --accent: #ef4444;
+            --warn: #f59e0b;
+        }
+        * { box-sizing: border-box; }
+        body { margin: 0; background: var(--bg); color: var(--text); font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif; }
+        a { color: inherit; text-decoration: none; }
+        .page { max-width: 1180px; margin: 0 auto; padding: 24px 24px 60px; }
+        .hero, .panel { border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 18px; margin-bottom: 14px; }
+        .eyebrow { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; padding: 6px 10px; color: var(--accent); background: var(--panel-strong); font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+        h1 { margin: 12px 0 6px; font-size: 34px; line-height: 1; color: #fff; letter-spacing: 0; }
+        h2 { margin: 0 0 10px; color: #fff; font-size: 18px; letter-spacing: 0; }
+        p, .mini { margin: 0; color: var(--muted); line-height: 1.5; }
+        .actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 14px; }
+        .button, button { border: 1px solid var(--line); background: var(--panel-strong); color: #fff; border-radius: 8px; padding: 9px 12px; font-weight: 800; cursor: pointer; font-size: 13px; }
+        button.primary { background: var(--accent); border-color: var(--accent); }
+        button.primary:disabled { opacity: .45; cursor: not-allowed; }
+        .summary-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
+        .metric { border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 12px; }
+        .metric-label { color: var(--muted); font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
+        .metric-value { margin-top: 6px; font-size: 24px; font-weight: 800; color: #fff; }
+        .sample-list { display: grid; gap: 8px; margin-top: 12px; }
+        .sample-row { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: var(--panel-strong); }
+        .sample-actions { color: #fecaca; font-weight: 800; margin-top: 5px; }
+        .warning { color: var(--warn); margin-top: 10px; }
+        @media (max-width: 760px) { .page { padding: 16px 14px 40px; } .summary-grid { grid-template-columns: 1fr; } }
+    </style>
+    <link rel="stylesheet" href="/static/linear.css?v=1776749171">
+    <link rel="stylesheet" href="/static/safe-area.css?v=1776747800">
+</head>
+<body>
+    <div class="page">
+        {% include "_linear_sidebar.html" %}
+        <section class="hero">
+            <div class="eyebrow">Ledger Assistant</div>
+            <h1>Ledger Agent Preview</h1>
+            <p>This will update {{ preview.updated_count }} row(s) if confirmed. Review the sample before applying; no rows have been changed yet.</p>
+            <div class="actions">
+                <a class="button" href="/ledger?status={{ selected_status|urlencode }}&action_reason={{ selected_action_reason|urlencode }}&include_cash={{ selected_include_cash|urlencode }}">Back to ledger</a>
+            </div>
+        </section>
+
+        <section class="summary-grid">
+            <div class="metric"><div class="metric-label">Scanned</div><div class="metric-value">{{ preview.scanned_count }}</div></div>
+            <div class="metric"><div class="metric-label">Will Update</div><div class="metric-value">{{ preview.updated_count }}</div></div>
+            <div class="metric"><div class="metric-label">Clear Matches</div><div class="metric-value">{{ preview.cleared_false_matches }}</div></div>
+            <div class="metric"><div class="metric-label">Auto Review</div><div class="metric-value">{{ preview.auto_reviewed }}</div></div>
+        </section>
+
+        <section class="panel">
+            <h2>Planned Actions</h2>
+            <p class="mini">Limit: {{ preview.limit }} needs-action row(s). Confirming records the same financial audit entries as the current ledger agent.</p>
+            {% if preview.warnings %}
+            <div class="warning">
+                {% for warning in preview.warnings %}{{ warning }}{% if not loop.last %}<br>{% endif %}{% endfor %}
+            </div>
+            {% endif %}
+            {% if preview.sample_actions %}
+            <div class="sample-list">
+                {% for sample in preview.sample_actions %}
+                <div class="sample-row">
+                    <strong>#{{ sample.id }} · {{ sample.amount_display }}</strong> · {{ sample.description }}
+                    <div class="mini">{{ sample.posted_at_display }} · {{ sample.account_label or 'Account n/a' }} · {{ sample.expense_category_label }}</div>
+                    <div class="sample-actions">{{ ", ".join(sample.actions) }}</div>
+                </div>
+                {% endfor %}
+            </div>
+            <p class="mini" style="margin-top: 10px;">Showing first {{ preview.sample_actions|length }} of {{ preview.updated_count }} row(s) that would change.</p>
+            {% endif %}
+            <form method="post" action="/ledger/agent/run-form" class="actions">
+                <input type="hidden" name="confirm" value="run_agent">
+                <input type="hidden" name="selected_account" value="{{ selected_account }}">
+                <input type="hidden" name="selected_start" value="{{ selected_start }}">
+                <input type="hidden" name="selected_end" value="{{ selected_end }}">
+                <input type="hidden" name="selected_status" value="{{ selected_status }}">
+                <input type="hidden" name="selected_category" value="{{ selected_category }}">
+                <input type="hidden" name="selected_source" value="{{ selected_source }}">
+                <input type="hidden" name="selected_action_reason" value="{{ selected_action_reason }}">
+                <input type="hidden" name="selected_search" value="{{ selected_search }}">
+                <input type="hidden" name="selected_sort" value="{{ selected_sort }}">
+                <input type="hidden" name="selected_direction" value="{{ selected_direction }}">
+                <input type="hidden" name="selected_include_cash" value="{{ selected_include_cash }}">
+                <button class="primary" type="submit" {% if preview.updated_count == 0 %}disabled{% endif %}>Confirm and run ledger agent</button>
+                <a class="button" href="/ledger?status={{ selected_status|urlencode }}&action_reason={{ selected_action_reason|urlencode }}&include_cash={{ selected_include_cash|urlencode }}">Cancel</a>
+            </form>
+        </section>
+    </div>
+    {% include '_mobile_bottom_nav.html' %}
+{% include "_csrf_bootstrap.html" %}
+</body>
+</html>

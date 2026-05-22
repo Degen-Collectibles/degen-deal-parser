@@ -37,6 +37,7 @@ from ..ledger import (
     ledger_status_for_bank_row,
     LEDGER_AGENT_MAX_LIMIT,
     preview_ledger_automation,
+    preview_ledger_review_agent,
     preview_ledger_rule,
     run_ledger_review_agent,
 )
@@ -490,6 +491,7 @@ def ledger_row_force_unmatch_form(
 @router.post("/ledger/agent/run-form")
 def ledger_agent_run_form(
     request: Request,
+    confirm: str = Form(default=""),
     selected_account: str = Form(default=""),
     selected_start: str = Form(default=""),
     selected_end: str = Form(default=""),
@@ -505,6 +507,24 @@ def ledger_agent_run_form(
 ):
     if denial := require_role_response(request, "reviewer"):
         return denial
+    if confirm != "run_agent":
+        return RedirectResponse(
+            url=_ledger_redirect_url(
+                account=selected_account,
+                start=selected_start,
+                end=selected_end,
+                status=selected_status,
+                category=selected_category,
+                source=selected_source,
+                action_reason=selected_action_reason,
+                search=selected_search,
+                sort=selected_sort,
+                direction=selected_direction,
+                include_cash=selected_include_cash,
+                error="Preview required before running the ledger agent",
+            ),
+            status_code=303,
+        )
     filters = ledger_filters_from_values(
         account=selected_account,
         start=selected_start,
@@ -546,6 +566,66 @@ def ledger_agent_run_form(
             success=success,
         ),
         status_code=303,
+    )
+
+
+@router.post("/ledger/agent/preview-form")
+def ledger_agent_preview_form(
+    request: Request,
+    selected_account: str = Form(default=""),
+    selected_start: str = Form(default=""),
+    selected_end: str = Form(default=""),
+    selected_status: str = Form(default="needs_action"),
+    selected_category: str = Form(default=""),
+    selected_source: str = Form(default=""),
+    selected_action_reason: str = Form(default=""),
+    selected_search: str = Form(default=""),
+    selected_sort: str = Form(default="posted_at"),
+    selected_direction: str = Form(default="desc"),
+    selected_include_cash: str = Form(default=""),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "reviewer"):
+        return denial
+    filters = ledger_filters_from_values(
+        account=selected_account,
+        start=selected_start,
+        end=selected_end,
+        status=selected_status or "needs_action",
+        category=selected_category,
+        source=selected_source,
+        action_reason=selected_action_reason,
+        search=selected_search,
+        sort=selected_sort,
+        direction=selected_direction,
+        include_cash=selected_include_cash,
+        limit=LEDGER_AGENT_MAX_LIMIT,
+    )
+    preview = preview_ledger_review_agent(
+        session,
+        filters=filters,
+        limit=LEDGER_AGENT_MAX_LIMIT,
+    )
+    return templates.TemplateResponse(
+        request,
+        "ledger_agent_preview.html",
+        {
+            "request": request,
+            "title": "Ledger Agent Preview",
+            "current_user": getattr(request.state, "current_user", None),
+            "preview": preview,
+            "selected_account": selected_account,
+            "selected_start": selected_start,
+            "selected_end": selected_end,
+            "selected_status": selected_status,
+            "selected_category": selected_category,
+            "selected_source": selected_source,
+            "selected_action_reason": selected_action_reason,
+            "selected_search": selected_search,
+            "selected_sort": selected_sort,
+            "selected_direction": selected_direction,
+            "selected_include_cash": selected_include_cash,
+        },
     )
 
 

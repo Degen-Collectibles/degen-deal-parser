@@ -419,6 +419,12 @@ def finance_page(
         source_mix_rows=source_mix_rows,
         top_channels=top_channels,
     )
+    kpi_rows = build_finance_kpi_rows(current_statement, prior_statement)
+    kpi_by_key = {str(row.get("key") or ""): row for row in kpi_rows}
+    finance_hero_kpi = kpi_by_key.get("operating_profit") or {
+        "tone": "neutral",
+        "delta_display": "$0",
+    }
     quick_windows = [
         {
             "label": FINANCE_WINDOW_LABELS[window_key],
@@ -463,7 +469,8 @@ def finance_page(
             "bank_account_views": bank_account_views,
             "current_statement": current_statement,
             "prior_statement": prior_statement,
-            "kpi_rows": build_finance_kpi_rows(current_statement, prior_statement),
+            "kpi_rows": kpi_rows,
+            "finance_hero_kpi": finance_hero_kpi,
             "statement_rows": build_finance_statement_rows(current_statement, prior_statement),
             "source_mix_rows": source_mix_rows,
             "spend_mix_rows": spend_mix_rows,

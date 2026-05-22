@@ -110,7 +110,7 @@
 <div>
                 <div class="eyebrow">Ground Truth Reconciliation</div>
                 <h1>{{ title }}</h1>
-                <p>Upload the bookkeeper's show sheet, store it as trusted ground truth, and compare it against the parsed Discord ledger so we can learn from the misses.</p>
+                <p>Sheet import and reconciliation for show files: upload the trusted export, compare it against parsed Discord rows, and learn from the misses.</p>
                 <div class="actions">
                     <a href="/table" class="button secondary-button" style="width:auto;">Back to Table</a>
                     <a href="/reports" class="button secondary-button" style="width:auto;">Open Reports</a>
@@ -175,7 +175,7 @@
                                     <td>{{ row["row_index"] }}</td>
                                     <td>{{ row["occurred_at"]|pacific_datetime }}</td>
                                     <td>{{ row["entry_kind"] }}</td>
-                                    <td>{{ "$%.2f"|format(row["amount"]) if row["amount"] is not none else "" }}</td>
+                                    <td>{{ row["amount"]|money(2) if row["amount"] is not none else "" }}</td>
                                     <td>{{ row["payment_method"] }}</td>
                                     <td>{{ row["category"] }}</td>
                                     <td>
@@ -189,7 +189,7 @@
                                     </td>
                                     <td>
                                         {% if row["matched_transaction"] %}
-                                        {{ row["matched_transaction"].entry_kind or "" }} / {{ "$%.2f"|format(row["matched_transaction"].amount) if row["matched_transaction"].amount is not none else "" }}<br>
+                                        {{ row["matched_transaction"].entry_kind or "" }} / {{ row["matched_transaction"].amount|money(2) if row["matched_transaction"].amount is not none else "" }}<br>
                                         <span class="small">{{ row["matched_transaction"].channel_name or row["matched_transaction"].channel_id or "" }}</span>
                                         {% if row["action_links"] %}
                                         <div class="action-row">
@@ -214,7 +214,7 @@
                             <thead><tr><th>When</th><th>Channel</th><th>Kind</th><th>Amount</th><th>Payment</th><th>Category</th><th>Notes</th></tr></thead>
                             <tbody>
                                 {% for row in reconciliation["unmatched_transactions"] %}
-                                <tr><td>{{ row.occurred_at|pacific_datetime }}</td><td>{{ row.channel_name or row.channel_id or "" }}</td><td>{{ row.entry_kind or "" }}</td><td>{{ "$%.2f"|format(row.amount) if row.amount is not none else "" }}</td><td>{{ row.payment_method or "" }}</td><td>{{ row.category or row.expense_category or "" }}</td><td>{{ row.notes or "" }}{% if row.action_links %}<div class="action-row">{% if row.action_links["open_row"] %}<a class="button secondary-button" href="{{ row.action_links['open_row'] }}" style="width:auto;">Open Row</a>{% endif %}{% if row.action_links["open_table"] %}<a class="button secondary-button" href="{{ row.action_links['open_table'] }}" style="width:auto;">Open Filtered Table</a>{% endif %}{% if row.action_links["open_review_queue"] %}<a class="button secondary-button" href="{{ row.action_links['open_review_queue'] }}" style="width:auto;">Open Review Queue</a>{% endif %}</div>{% endif %}</td></tr>
+                                <tr><td>{{ row.occurred_at|pacific_datetime }}</td><td>{{ row.channel_name or row.channel_id or "" }}</td><td>{{ row.entry_kind or "" }}</td><td>{{ row.amount|money(2) if row.amount is not none else "" }}</td><td>{{ row.payment_method or "" }}</td><td>{{ row.category or row.expense_category or "" }}</td><td>{{ row.notes or "" }}{% if row.action_links %}<div class="action-row">{% if row.action_links["open_row"] %}<a class="button secondary-button" href="{{ row.action_links['open_row'] }}" style="width:auto;">Open Row</a>{% endif %}{% if row.action_links["open_table"] %}<a class="button secondary-button" href="{{ row.action_links['open_table'] }}" style="width:auto;">Open Filtered Table</a>{% endif %}{% if row.action_links["open_review_queue"] %}<a class="button secondary-button" href="{{ row.action_links['open_review_queue'] }}" style="width:auto;">Open Review Queue</a>{% endif %}</div>{% endif %}</td></tr>
                                 {% else %}
                                 <tr><td colspan="7" class="small">No unmatched parsed transactions in the selected import window.</td></tr>
                                 {% endfor %}

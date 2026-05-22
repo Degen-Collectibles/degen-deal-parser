@@ -789,6 +789,117 @@ def _append_review_note(existing: str | None, note: str) -> str:
     return f"{existing}\n{note}" if existing else note
 
 
+def _ledger_agent_candidate_rows(
+    session: Session,
+    *,
+    filters: Optional[LedgerFilters] = None,
+    limit: int = 250,
+) -> list[BankTransaction]:
+    selected = filters or LedgerFilters(status="needs_action")
+    return [
+        row
+        for row in _load_bank_rows(session)
+        if ledger_status_for_bank_row(row) == "needs_action" and _row_matches_filters(row, selected)
+    ][: _bounded_ledger_agent_limit(limit)]
+
+
+def _ledger_agent_plan_for_row(row: BankTransaction, matched: Optional[Transaction]) -> dict[str, Any]:
+    false_match_reason = _ledger_agent_false_discord_reason(row, matched)
+    planned_classification = row.classification
+    planned_confidence = row.confidence
+    planned_matched_transaction_id = row.matched_transaction_id
+    planned_category = row.expense_category
+    planned_category_confidence = row.category_confidence
+    category_payload: dict[str, str] = {}
+    actions: list[str] = []
+
+    if false_match_reason:
+        planned_classification = base_classification(row.description or "", _money(row.amount))
+        planned_confidence = classification_confidence(planned_classification)
+        planned_matched_transaction_id = None
+        if (row.category_confidence or "").lower() not in {"manual", "rule"}:
+            payload = _bank_row_payload(row)
+            payload["classification"] = planned_classification
+            category_payload = categorize_bank_payload(payload)
+            planned_category = category_payload.get("expense_category") or planned_category or "uncategorized"
+            planned_category_confidence = (
+                category_payload.get("category_confidence") or planned_category_confidence or "low"
+            )
+        actions.append("cleared false Discord match")
+
+    safe_category = planned_category in LEDGER_AGENT_AUTO_REVIEW_CATEGORIES
+    safe_confidence = (planned_category_confidence or "").lower() in LEDGER_AGENT_REVIEW_CONFIDENCES
+    auto_review = (
+        row.review_status == "open"
+        and not planned_matched_transaction_id
+        and safe_category
+        and safe_confidence
+    )
+    if auto_review:
+        actions.append("auto-reviewed safe operating expense")
+
+    return {
+        "changed": bool(actions),
+        "false_match_reason": false_match_reason,
+        "classification": planned_classification,
+        "confidence": planned_confidence,
+        "category_payload": category_payload,
+        "expense_category": planned_category or "uncategorized",
+        "category_confidence": planned_category_confidence or "",
+        "auto_review": auto_review,
+        "actions": actions,
+        "review_status": "reviewed" if auto_review else (row.review_status or "open"),
+    }
+
+
+def _ledger_agent_preview_sample(row: BankTransaction, plan: dict[str, Any]) -> dict[str, Any]:
+    sample = _preview_sample_view(row)
+    category = str(plan.get("expense_category") or sample["expense_category"] or "uncategorized")
+    sample.update(
+        {
+            "actions": list(plan.get("actions") or []),
+            "expense_category": category,
+            "expense_category_label": expense_category_label(category),
+            "review_status": plan.get("review_status") or sample.get("review_status") or "open",
+        }
+    )
+    return sample
+
+
+def preview_ledger_review_agent(
+    session: Session,
+    *,
+    filters: Optional[LedgerFilters] = None,
+    limit: int = 250,
+    sample_limit: int = 10,
+) -> dict[str, Any]:
+    rows = _ledger_agent_candidate_rows(session, filters=filters, limit=limit)
+    matched_by_id = _matched_transactions_by_id(session, rows)
+    result = {
+        "scanned_count": len(rows),
+        "updated_count": 0,
+        "cleared_false_matches": 0,
+        "auto_reviewed": 0,
+        "left_open": 0,
+        "limit": _bounded_ledger_agent_limit(limit),
+        "sample_actions": [],
+        "warnings": [] if rows else ["No needs-action rows match the current filters."],
+    }
+    for row in rows:
+        plan = _ledger_agent_plan_for_row(row, matched_by_id.get(row.matched_transaction_id or -1))
+        if plan["false_match_reason"]:
+            result["cleared_false_matches"] += 1
+        if plan["auto_review"]:
+            result["auto_reviewed"] += 1
+        if plan["changed"]:
+            result["updated_count"] += 1
+            if len(result["sample_actions"]) < sample_limit:
+                result["sample_actions"].append(_ledger_agent_preview_sample(row, plan))
+        else:
+            result["left_open"] += 1
+    return result
+
+
 def _automation_matching_rows(
     session: Session,
     *,
@@ -882,12 +993,7 @@ def run_ledger_review_agent(
     limit: int = 250,
     applied_by: str = "Ledger agent",
 ) -> dict[str, Any]:
-    selected = filters or LedgerFilters(status="needs_action")
-    rows = [
-        row
-        for row in _load_bank_rows(session)
-        if ledger_status_for_bank_row(row) == "needs_action" and _row_matches_filters(row, selected)
-    ][: _bounded_ledger_agent_limit(limit)]
+    rows = _ledger_agent_candidate_rows(session, filters=filters, limit=limit)
     matched_by_id = _matched_transactions_by_id(session, rows)
     result = {
         "scanned_count": len(rows),
@@ -900,38 +1006,29 @@ def run_ledger_review_agent(
     now = utcnow()
     for row in rows:
         before = _bank_row_audit_snapshot(row)
-        changed = False
-        actions: list[str] = []
         matched = matched_by_id.get(row.matched_transaction_id or -1)
-        false_match_reason = _ledger_agent_false_discord_reason(row, matched)
+        plan = _ledger_agent_plan_for_row(row, matched)
 
-        if false_match_reason:
-            classification = base_classification(row.description or "", _money(row.amount))
-            row.classification = classification
-            row.confidence = classification_confidence(classification)
+        if plan["false_match_reason"]:
+            row.classification = str(plan["classification"] or "")
+            row.confidence = str(plan["confidence"] or "")
             row.matched_transaction_id = None
             row.matched_source_message_id = None
             row.matched_platform = None
-            row.match_reason = f"Ledger agent cleared Discord match: {false_match_reason}"
-            if (row.category_confidence or "").lower() not in {"manual", "rule"}:
-                category_payload = _bank_row_payload(row)
-                category_payload["classification"] = classification
-                _set_category_from_payload(row, categorize_bank_payload(category_payload))
-            changed = True
+            row.match_reason = f"Ledger agent cleared Discord match: {plan['false_match_reason']}"
+            if plan["category_payload"]:
+                _set_category_from_payload(row, plan["category_payload"])
             result["cleared_false_matches"] += 1
-            actions.append("cleared false Discord match")
 
-        if _ledger_agent_safe_review_candidate(row):
+        if plan["auto_review"]:
             row.review_status = "reviewed"
             row.review_note = _append_review_note(
                 row.review_note,
                 f"Auto-reviewed by {applied_by}: {expense_category_label(row.expense_category)} with {row.category_confidence} confidence.",
             )
-            changed = True
             result["auto_reviewed"] += 1
-            actions.append("auto-reviewed safe operating expense")
 
-        if changed:
+        if plan["changed"]:
             row.updated_at = now
             session.add(row)
             record_financial_audit(
@@ -948,7 +1045,7 @@ def run_ledger_review_agent(
                     {
                         "id": row.id,
                         "description": row.description,
-                        "actions": actions,
+                        "actions": plan["actions"],
                         "category": row.expense_category,
                         "review_status": row.review_status,
                     }
@@ -1119,6 +1216,89 @@ def build_tax_cleanup_summary(
     }
 
 
+def _ledger_url_from_filters(selected: LedgerFilters, **overrides: Any) -> str:
+    values: dict[str, Any] = {
+        "account": selected.account,
+        "start": selected.start,
+        "end": selected.end,
+        "status": selected.status,
+        "category": selected.category,
+        "source": selected.source,
+        "action_reason": selected.action_reason,
+        "search": selected.search,
+        "sort": selected.sort,
+        "direction": selected.direction,
+        "include_cash": selected.include_cash,
+    }
+    values.update(overrides)
+    params: dict[str, str] = {}
+    for key in (
+        "account",
+        "start",
+        "end",
+        "status",
+        "category",
+        "source",
+        "action_reason",
+        "search",
+        "sort",
+        "direction",
+    ):
+        value = str(values.get(key) or "").strip()
+        if value:
+            params[key] = value
+    include_cash = values.get("include_cash")
+    params["include_cash"] = (
+        "true" if include_cash is True or str(include_cash).lower() in {"1", "true", "yes", "on"} else "false"
+    )
+    return "/ledger" + (f"?{urlencode(params)}" if params else "")
+
+
+def build_ledger_quick_chips(selected: LedgerFilters) -> list[dict[str, Any]]:
+    def chip(
+        label: str,
+        *,
+        title: str = "",
+        active: bool = False,
+        **overrides: Any,
+    ) -> dict[str, Any]:
+        return {
+            "label": label,
+            "href": _ledger_url_from_filters(selected, **overrides),
+            "title": title,
+            "active": active,
+        }
+
+    return [
+        chip(
+            "All transactions",
+            status="all",
+            source="",
+            action_reason="",
+            include_cash=True,
+            active=selected.status == "all" and not selected.source and not selected.action_reason and selected.include_cash,
+        ),
+        chip(
+            "Needs action",
+            status="needs_action",
+            source="",
+            action_reason="",
+            title="Rows that still need a category, match/source check, or review before they are ready.",
+            active=selected.status == "needs_action" and not selected.action_reason,
+        ),
+        chip("Log check", status="needs_action", source="", action_reason="needs_log_check", active=selected.action_reason == "needs_log_check"),
+        chip("Expense review", status="needs_action", source="", action_reason="expense_review", active=selected.action_reason == "expense_review"),
+        chip("Match check", status="needs_action", source="", action_reason="needs_match_check", active=selected.action_reason == "needs_match_check"),
+        chip("Source check", status="needs_action", source="", action_reason="needs_source", active=selected.action_reason == "needs_source"),
+        chip("Payout review", status="needs_action", source="", action_reason="payout_review", active=selected.action_reason == "payout_review"),
+        chip("Ready", status="reconciled", source="", action_reason="", active=selected.status == "reconciled"),
+        chip("Unmatched", status="force_unmatched", source="", action_reason="", active=selected.status == "force_unmatched"),
+        chip("Shopify", status="all", source="shopify", action_reason="", active=selected.source == "shopify"),
+        chip("TikTok", status="all", source="tiktok", action_reason="", active=selected.source == "tiktok"),
+        chip("Cash only", status="all", source="cash", action_reason="", include_cash=True, active=selected.source == "cash"),
+    ]
+
+
 def build_ledger_page_data(session: Session, filters: Optional[LedgerFilters] = None) -> dict[str, Any]:
     selected = filters or LedgerFilters()
     all_rows = _load_bank_rows(session)
@@ -1166,6 +1346,7 @@ def build_ledger_page_data(session: Session, filters: Optional[LedgerFilters] = 
         "unbanked_cash_rows": unbanked_cash,
         "tax_cleanup": tax_cleanup,
         "rules": recent_rules,
+        "quick_chips": build_ledger_quick_chips(selected),
         "summary": {
             "bank_row_count": len(all_rows),
             "filtered_row_count": len(sorted_row_views),

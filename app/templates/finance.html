@@ -655,7 +655,7 @@
             <div class="hero-copy">
                 <div class="eyebrow">Finance</div>
                 <h1>Finance Dashboard</h1>
-                <p>Cash-based operating view across Discord, Shopify, and TikTok. Paid product revenue, inventory cash out, operating spend, and tax are separated so the headline numbers line up with how the shop actually runs.</p>
+                <p>Owner finance check-in across Discord, Shopify, TikTok, and bank context. Paid product revenue, inventory cash out, operating spend, and tax are separated so the headline numbers line up with how the shop actually runs.</p>
                 <div class="hero-meta">
                     <span class="chip">{{ range_data["window_label"] }}</span>
                     <span class="chip">{{ range_data["label"] }}</span>
@@ -668,7 +668,7 @@
                     <div class="hero-label">Operating Cash Profit</div>
                     <div class="hero-value">{{ current_statement["operating_profit_display"] }}</div>
                     <div class="hero-subline">Product revenue {{ current_statement["revenue_display"] }} with {{ current_statement["operating_margin_display"] }} operating cash margin.</div>
-                    <div class="trend {{ kpi_rows[2]['tone'] }}">{{ kpi_rows[2]["delta_display"] }} vs {{ range_data["previous_label"] }}</div>
+                    <div class="trend {{ finance_hero_kpi['tone'] }}">{{ finance_hero_kpi["delta_display"] }} vs {{ range_data["previous_label"] }}</div>
                 </div>
                 <div class="hero-foot">
                     Average daily revenue {{ current_statement["avg_daily_revenue_display"] }}.<br>
@@ -716,7 +716,7 @@
                 <a href="{{ item['url'] }}" class="quick-link{% if item['active'] %} active{% endif %}">{{ item["label"] }}</a>
                 {% endfor %}
                 <a href="/bookkeeping/bank" class="quick-link legacy">Bank reconciliation</a>
-                <a href="/reports" class="quick-link legacy">Legacy reports</a>
+                <a href="/reports" class="quick-link legacy">Channel comparison</a>
             </div>
         </section>
 
@@ -992,7 +992,7 @@
                     <div class="section-head">
                         <div>
                             <p class="section-kicker">Coverage</p>
-                            <h2 class="section-title">Data Quality</h2>
+                            <h2 class="section-title">Data Quality Details</h2>
                             <p class="section-copy">A quick confidence check for the numbers on this page.</p>
                         </div>
                     </div>

@@ -284,7 +284,7 @@
         <section class="hero">
             <div class="eyebrow">Bank Reconciliation</div>
             <h1>Bank Activity Review</h1>
-            <p>Upload Chase bank and card CSV exports, auto-categorize expenses, preserve payout/match evidence, and export a clean accountant-friendly ledger.</p>
+            <p>Bank feed and category review for CSV, Plaid, and receipt-backed rows: inspect categorization, preserve payout/match evidence, and export a clean accountant-friendly ledger.</p>
             <div class="hero-actions">
                 <a class="button" href="/finance">Finance</a>
                 <a class="button" href="/bookkeeping">Sheet reconciliation</a>
@@ -301,10 +301,10 @@
             <main>
                 {% if selected_import and summary %}
                 <section class="metric-grid">
-                    <div class="metric"><div class="metric-label">Expense Total</div><div class="metric-value">{{ summary["expense_total"]|money }}</div></div>
+                    <div class="metric"><div class="metric-label">Expense Total</div><div class="metric-value">{{ summary["expense_total"]|money(2) }}</div></div>
                     <div class="metric"><div class="metric-label">Categories</div><div class="metric-value">{{ summary["expense_categories"] }}</div></div>
                     <div class="metric"><div class="metric-label">Uncategorized</div><div class="metric-value">{{ summary["uncategorized_expenses"] }}</div></div>
-                    <div class="metric"><div class="metric-label">Transfers/Loans</div><div class="metric-value">{{ summary["non_operating_debits"]|money }}</div></div>
+                    <div class="metric"><div class="metric-label">Transfers/Loans</div><div class="metric-value">{{ summary["non_operating_debits"]|money(2) }}</div></div>
                     <div class="metric"><div class="metric-label">Payouts</div><div class="metric-value">{{ summary["payouts"] }}</div></div>
                 </section>
 
@@ -345,7 +345,7 @@
                                 {% endif %}
                             </div>
                         </div>
-                        <form method="post" action="/bookkeeping/bank/{{ selected_import.id }}/rerun-form">
+                        <form method="post" action="/bookkeeping/bank/{{ selected_import.id }}/rerun-form" onsubmit="return confirm('Re-categorize this bank import? Manual overrides may be updated.');">
                             <button type="submit">Re-categorize</button>
                         </form>
                     </div>
@@ -396,15 +396,15 @@
                             </select>
                         </label>
                         <button type="submit" class="primary">Apply</button>
-                        <a class="button" href="/bookkeeping/bank?import_id={{ selected_import.id }}">Clear</a>
+                        <a class="button" href="{{ bank_url(classification='', expense_category='', review_status='', attention=False, expenses_only=True, search='', limit=250) }}">Clear</a>
                     </form>
                     <div class="tabs" style="margin-top:12px;">
-                        <a class="tab{% if selected_expenses_only and not selected_expense_category and not selected_attention %} active{% endif %}" href="/bookkeeping/bank?import_id={{ selected_import.id }}">Categorized expenses</a>
-                        <a class="tab{% if selected_attention %} active{% endif %}" href="/bookkeeping/bank?import_id={{ selected_import.id }}&attention=true">Needs context</a>
-                        <a class="tab{% if not selected_expenses_only and not selected_attention %} active{% endif %}" href="/bookkeeping/bank?import_id={{ selected_import.id }}&expenses_only=false">All bank rows</a>
-                        <a class="tab{% if not selected_attention and selected_review_status == 'open' %} active{% endif %}" href="/bookkeeping/bank?import_id={{ selected_import.id }}&review_status=open">Open rows</a>
-                        <a class="tab{% if selected_classification == 'shopify_payout' %} active{% endif %}" href="/bookkeeping/bank?import_id={{ selected_import.id }}&classification=shopify_payout">Shopify payouts</a>
-                        <a class="tab{% if selected_classification == 'tiktok_payout' %} active{% endif %}" href="/bookkeeping/bank?import_id={{ selected_import.id }}&classification=tiktok_payout">TikTok payouts</a>
+                        <a class="tab{% if selected_expenses_only and not selected_expense_category and not selected_attention %} active{% endif %}" href="{{ bank_url(classification='', expense_category='', review_status='', attention=False, expenses_only=True) }}">Categorized expenses</a>
+                        <a class="tab{% if selected_attention %} active{% endif %}" href="{{ bank_url(classification='', expense_category='', review_status='', attention=True, expenses_only=selected_expenses_only) }}">Needs context</a>
+                        <a class="tab{% if not selected_expenses_only and not selected_attention %} active{% endif %}" href="{{ bank_url(classification='', expense_category='', review_status='', attention=False, expenses_only=False) }}">All bank rows</a>
+                        <a class="tab{% if not selected_attention and selected_review_status == 'open' %} active{% endif %}" href="{{ bank_url(classification='', expense_category='', review_status='open', attention=False, expenses_only=selected_expenses_only) }}">Open rows</a>
+                        <a class="tab{% if selected_classification == 'shopify_payout' %} active{% endif %}" href="{{ bank_url(classification='shopify_payout', expense_category='', review_status='', attention=False, expenses_only=False) }}">Shopify payouts</a>
+                        <a class="tab{% if selected_classification == 'tiktok_payout' %} active{% endif %}" href="{{ bank_url(classification='tiktok_payout', expense_category='', review_status='', attention=False, expenses_only=False) }}">TikTok payouts</a>
                     </div>
                 </section>
 
@@ -443,7 +443,7 @@
                                         <span class="pill {{ row.confidence }}" style="margin-top:6px;">{{ row.confidence }}</span>
                                     </td>
                                     <td data-label="Date">{{ row.posted_at.date() if row.posted_at else "" }}</td>
-                                    <td data-label="Amount" class="amount {{ 'positive' if row.amount > 0 else 'negative' }}">{{ row.amount|money }}</td>
+                                    <td data-label="Amount" class="amount {{ 'positive' if row.amount > 0 else 'negative' }}">{{ row.amount|money(2) }}</td>
                                     <td data-label="Expense Category">
                                         <strong>{{ item.expense_category_label }}</strong>
                                         <div class="small">{{ row.expense_subcategory or row.category_reason or "" }}</div>
@@ -572,7 +572,7 @@
                             <div class="small">{{ receipt.subject }}</div>
                             <div class="small">
                                 {{ receipt.detected_type|replace("_", " ")|title }} · {{ receipt.status|replace("_", " ")|title }}
-                                {% if receipt.total_amount is not none %} · {{ receipt.total_amount|money }}{% endif %}
+                                {% if receipt.total_amount is not none %} · {{ receipt.total_amount|money(2) }}{% endif %}
                             </div>
                             <div class="button-row" style="margin-top:10px;">
                                 <form method="post" action="/bookkeeping/gmail/receipts/{{ receipt.id }}/approve-form">
@@ -687,7 +687,7 @@
                     <div class="import-card{% if selected_import and selected_import.id == item.id %} active{% endif %}">
                         <strong>{{ item.account_label }}</strong>
                         <div class="small">{{ item.source_name or "" }}</div>
-                        <div class="small">{{ item.row_count }} rows · {{ item.net_amount|money }} net</div>
+                        <div class="small">{{ item.row_count }} rows · {{ item.net_amount|money(2) }} net</div>
                         {% if item.range_start and item.range_end %}<div class="small">{{ item.range_start.date() }} to {{ item.range_end.date() }}</div>{% endif %}
                         <div class="button-row" style="margin-top:10px;">
                             <a class="button" href="/bookkeeping/bank?import_id={{ item.id }}">Open</a>
@@ -708,7 +708,7 @@
                     <h2>Expense Categories</h2>
                     <div style="display:grid; gap:8px; margin-top:12px;">
                         {% for option in expense_category_options %}
-                        <a class="tab{% if selected_expense_category == option.value %} active{% endif %}" href="/bookkeeping/bank?import_id={{ selected_import.id }}&expense_category={{ option.value }}&limit={{ limit }}">{{ option.label }} - {{ option.total|money }} ({{ option.count }})</a>
+                        <a class="tab{% if selected_expense_category == option.value %} active{% endif %}" href="{{ bank_url(classification='', expense_category=option.value, review_status='', attention=False, expenses_only=selected_expenses_only) }}">{{ option.label }} - {{ option.total|money(2) }} ({{ option.count }})</a>
                         {% endfor %}
                     </div>
                 </section>

@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from app.shared import build_finance_kpi_rows
+
 
 FINANCE_TEMPLATE = Path(__file__).resolve().parents[1] / "app" / "templates" / "finance.html"
 
@@ -28,7 +30,39 @@ def test_finance_surfaces_readiness_before_kpis():
 
     data_quality_anchor = template.index('id="data-quality"')
     data_quality_block = template[data_quality_anchor : data_quality_anchor + 500]
-    assert '<h2 class="section-title">Data Quality</h2>' in data_quality_block
+    assert '<h2 class="section-title">Data Quality Details</h2>' in data_quality_block
+
+
+def test_finance_hero_uses_named_kpi_context():
+    template = _template_text()
+
+    assert "kpi_rows[2]" not in template
+    assert "finance_hero_kpi" in template
+
+
+def test_finance_kpi_rows_expose_stable_keys():
+    current = {
+        "revenue": 1000.0,
+        "gross_profit": 700.0,
+        "operating_profit": 450.0,
+        "operating_margin_pct": 45.0,
+        "inventory_spend": 300.0,
+        "external_tax": 82.0,
+    }
+    prior = {
+        "revenue": 900.0,
+        "gross_profit": 600.0,
+        "operating_profit": 400.0,
+        "operating_margin_pct": 44.0,
+        "inventory_spend": 280.0,
+        "external_tax": 80.0,
+    }
+
+    rows = build_finance_kpi_rows(current, prior)
+    rows_by_key = {row["key"]: row for row in rows}
+
+    assert rows_by_key["operating_profit"]["label"] == "Operating Cash Profit"
+    assert rows_by_key["operating_profit"]["value_display"] == "$450"
 
 
 def test_finance_kpi_grid_does_not_force_clipped_desktop_cards():
