@@ -1225,23 +1225,29 @@ def _rebuild_shift_entry_without_unique(connection) -> None:
             pass
 
 
+def _quote_sqlite_identifier(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
+
+
 def ensure_sqlite_schema() -> None:
     if not database_url.startswith("sqlite"):
         return
 
     with engine.begin() as connection:
         for table_name, columns in SQLITE_ADDITIVE_MIGRATIONS.items():
+            quoted_table_name = _quote_sqlite_identifier(table_name)
             existing = {
                 row[1]
-                for row in connection.execute(text(f"PRAGMA table_info({table_name})"))
+                for row in connection.execute(text(f"PRAGMA table_info({quoted_table_name})"))
             }
             for column_name, column_type in columns.items():
                 if column_name in existing:
                     continue
+                quoted_column_name = _quote_sqlite_identifier(column_name)
                 connection.execute(
                     text(
-                        f"ALTER TABLE {table_name} "
-                        f"ADD COLUMN {column_name} {column_type}"
+                        f"ALTER TABLE {quoted_table_name} "
+                        f"ADD COLUMN {quoted_column_name} {column_type}"
                     )
                 )
 
