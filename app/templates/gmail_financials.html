@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <link rel="manifest" href="/static/manifest.webmanifest">
+    <meta name="theme-color" content="#08090a">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="Degen">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="mobile-web-app-capable" content="yes">
+    <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon-180.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/icon-192.png">
+    <link rel="icon" type="image/png" sizes="512x512" href="/static/icons/icon-512.png">
+    <title>{{ title }}</title>
+    <style>
+        :root {
+            --bg: var(--lx-bg);
+            --panel: var(--lx-s1);
+            --panel-strong: var(--lx-s2);
+            --line: var(--lx-br);
+            --text: var(--lx-text);
+            --muted: var(--lx-muted);
+            --red: var(--lx-red);
+            --green: #22c55e;
+            --yellow: #eab308;
+            --blue: #60a5fa;
+        }
+        * { box-sizing: border-box; }
+        body { margin: 0; font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--text); background: var(--bg); }
+        a { color: inherit; text-decoration: none; }
+        .page { max-width: 1500px; margin: 0 auto; padding: 28px 28px 60px; }
+        .hero, .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,.4); }
+        .hero { padding: 24px; margin-bottom: 16px; }
+        .eyebrow, .pill, .tab { display: inline-flex; align-items: center; border-radius: 999px; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
+        .eyebrow { padding: 6px 10px; background: var(--panel-strong); color: var(--muted); }
+        h1 { margin: 10px 0 8px; color: #fff; font-size: 34px; line-height: 1; letter-spacing: 0; }
+        h2 { margin: 0; color: #fff; font-size: 18px; letter-spacing: 0; }
+        p, .small { color: var(--muted); }
+        p { max-width: 900px; margin: 0; line-height: 1.5; }
+        .hero-actions, .filters, .button-row, .tabs { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+        .hero-actions { margin-top: 16px; }
+        .layout { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 16px; align-items: start; }
+        .panel { padding: 16px; margin-bottom: 16px; }
+        .section-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 12px; }
+        .button, button { appearance: none; border: 1px solid var(--line); border-radius: 8px; padding: 10px 13px; background: var(--panel-strong); color: var(--text); font: inherit; font-size: 13px; font-weight: 800; cursor: pointer; }
+        .primary, .button.primary { background: var(--red); border-color: var(--red); color: #fff; }
+        .danger { color: #fecaca; border-color: rgba(239,68,68,.42); }
+        label { display: flex; flex-direction: column; gap: 6px; color: var(--muted); font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
+        input, select { min-height: 39px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--text); padding: 8px 10px; font: inherit; }
+        .table-shell { overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+        table { width: 100%; min-width: 1120px; border-collapse: separate; border-spacing: 0; }
+        th, td { padding: 10px 12px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; font-size: 13px; }
+        th { position: sticky; top: 0; background: var(--panel-strong); color: var(--muted); z-index: 1; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+        td { color: #f3f4f6; }
+        tr:last-child td { border-bottom: 0; }
+        .amount { font-weight: 800; font-variant-numeric: tabular-nums; color: #fff; white-space: nowrap; }
+        .muted-desc { color: #d7d7dc; overflow-wrap: anywhere; }
+        .pill { padding: 5px 8px; border: 1px solid var(--line); background: var(--panel-strong); color: var(--muted); }
+        .pill.transaction_created, .pill.approved, .pill.matched { color: var(--green); border-color: rgba(34,197,94,.35); }
+        .pill.unmatched, .pill.low { color: var(--yellow); border-color: rgba(234,179,8,.35); }
+        .pill.ignored { color: #9ca3af; }
+        .pill.sortswift_buylist { color: var(--blue); border-color: rgba(96,165,250,.35); }
+        .tab { padding: 8px 11px; border: 1px solid var(--line); color: var(--muted); background: var(--panel-strong); }
+        .tab.active { color: #fff; background: var(--red); border-color: var(--red); }
+        .feed-card { border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-top: 10px; background: var(--panel-strong); }
+        .feed-status { display: flex; gap: 8px; align-items: center; color: var(--muted); }
+        .status-dot { width: 9px; height: 9px; border-radius: 50%; background: #6b7280; }
+        .status-dot.ready { background: var(--green); box-shadow: 0 0 0 4px rgba(34,197,94,.12); }
+        .missing-list { display: grid; gap: 6px; margin-top: 10px; }
+        code { display: inline-block; padding: 4px 6px; border-radius: 6px; border: 1px solid var(--line); background: #111827; color: #f9fafb; }
+        .flash { margin-bottom: 12px; padding: 12px 14px; border-radius: 8px; font-weight: 800; }
+        .flash.success { background: rgba(34,197,94,.14); color: var(--green); border: 1px solid rgba(34,197,94,.3); }
+        .flash.error { background: rgba(239,68,68,.14); color: #fca5a5; border: 1px solid rgba(239,68,68,.3); }
+        .empty { padding: 18px; color: var(--muted); }
+        @media (max-width: 1050px) {
+            .layout { grid-template-columns: 1fr; }
+        }
+        @media (max-width: 760px) {
+            .page { padding: 16px 14px 36px; }
+            table, thead, tbody, tr, td { display: block; min-width: 0; width: 100%; }
+            thead { display: none; }
+            tbody { display: grid; gap: 10px; }
+            tr { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 10px; }
+            td { display: grid; grid-template-columns: 116px minmax(0, 1fr); gap: 10px; border: 0; padding: 7px 0; }
+            td::before { content: attr(data-label); color: var(--muted); font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
+        }
+    </style>
+    <link rel="stylesheet" href="/static/linear.css?v=1776749171">
+    <link rel="stylesheet" href="/static/safe-area.css?v=1776747800">
+</head>
+<body>
+    <div class="page">
+        {% include "_linear_sidebar.html" %}
+
+        <section class="hero">
+            <div class="eyebrow">Gmail Receipts</div>
+            <h1>Receipt Source Review</h1>
+            <p>SortSwift buys, invoices, and receipt evidence imported from Gmail.</p>
+            <div class="hero-actions">
+                <a class="button" href="/bookkeeping">Sheet imports</a>
+                <a class="button" href="/bookkeeping/bank">Bank reconciliation</a>
+                <a class="button" href="/finance">Finance</a>
+            </div>
+        </section>
+
+        {% if success %}<div class="flash success">{{ success }}</div>{% endif %}
+        {% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+
+        <div class="layout">
+            <main>
+                <section class="panel">
+                    <div class="section-head">
+                        <div>
+                            <h2>Gmail Receipts</h2>
+                            <div class="small">{{ receipt_views|length }} imported rows in this view. SortSwift rows show the created buy transaction; other invoices can be linked to bank rows when useful.</div>
+                        </div>
+                    </div>
+                    <form method="get" action="/bookkeeping/gmail" class="filters">
+                        <label>Status
+                            <select name="status">
+                                <option value="">All statuses</option>
+                                {% for option in ["unmatched", "transaction_created", "approved", "matched", "ignored"] %}
+                                <option value="{{ option }}" {% if selected_status == option %}selected{% endif %}>{{ option|replace("_", " ")|title }}</option>
+                                {% endfor %}
+                            </select>
+                        </label>
+                        <label>Type
+                            <select name="receipt_type">
+                                <option value="">All types</option>
+                                <option value="sortswift_buylist" {% if selected_receipt_type == "sortswift_buylist" %}selected{% endif %}>SortSwift</option>
+                                <option value="invoice_or_receipt" {% if selected_receipt_type == "invoice_or_receipt" %}selected{% endif %}>Invoice or receipt</option>
+                            </select>
+                        </label>
+                        <label>Search
+                            <input type="search" name="search" value="{{ selected_search }}" placeholder="Vendor, sender, subject">
+                        </label>
+                        <label>Limit
+                            <select name="limit">
+                                {% for item in [50,100,250,500] %}
+                                <option value="{{ item }}" {% if limit == item %}selected{% endif %}>{{ item }}</option>
+                                {% endfor %}
+                            </select>
+                        </label>
+                        <button type="submit" class="primary">Apply</button>
+                        <a class="button" href="/bookkeeping/gmail">Clear</a>
+                    </form>
+                    <div class="tabs" style="margin-top:12px;">
+                        <a class="tab{% if not selected_status and not selected_receipt_type %} active{% endif %}" href="{{ gmail_url(status='', receipt_type='') }}">All Gmail</a>
+                        <a class="tab{% if selected_receipt_type == 'sortswift_buylist' %} active{% endif %}" href="{{ gmail_url(receipt_type='sortswift_buylist', status='') }}">SortSwift</a>
+                        <a class="tab{% if selected_receipt_type == 'invoice_or_receipt' %} active{% endif %}" href="{{ gmail_url(receipt_type='invoice_or_receipt', status='') }}">Invoices</a>
+                        <a class="tab{% if selected_status == 'unmatched' %} active{% endif %}" href="{{ gmail_url(status='unmatched', receipt_type='') }}">Unmatched</a>
+                        <a class="tab{% if selected_status == 'matched' %} active{% endif %}" href="{{ gmail_url(status='matched', receipt_type='') }}">Bank linked</a>
+                    </div>
+                </section>
+
+                <section class="panel">
+                    <div class="table-shell">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Received</th>
+                                    <th>Source</th>
+                                    <th>Type</th>
+                                    <th>Amount</th>
+                                    <th>Transaction</th>
+                                    <th>Bank Link</th>
+                                    <th>Status</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for item in receipt_views %}
+                                {% set receipt = item.receipt %}
+                                {% set tx = item.transaction %}
+                                {% set bank_row = item.bank_row %}
+                                <tr>
+                                    <td data-label="Received">
+                                        {% if receipt.received_at %}{{ receipt.received_at.strftime("%Y-%m-%d %H:%M") }} UTC{% endif %}
+                                        <div class="small">Gmail ID {{ receipt.gmail_message_id }}</div>
+                                    </td>
+                                    <td data-label="Source">
+                                        <strong>{{ receipt.detected_vendor or "Gmail" }}</strong>
+                                        <div class="small">{{ receipt.sender }}</div>
+                                        <div class="muted-desc" style="margin-top:5px;">{{ receipt.subject }}</div>
+                                    </td>
+                                    <td data-label="Type">
+                                        <span class="pill {{ receipt.detected_type }}">{{ receipt.detected_type|replace("_", " ")|title }}</span>
+                                        {% if receipt.tender %}<div class="small" style="margin-top:6px;">Tender: {{ receipt.tender }}</div>{% endif %}
+                                    </td>
+                                    <td data-label="Amount" class="amount">
+                                        {% if receipt.total_amount is not none %}{{ receipt.total_amount|money(2) }}{% else %}<span class="small">No total</span>{% endif %}
+                                    </td>
+                                    <td data-label="Transaction">
+                                        {% if tx %}
+                                        <strong>{{ tx.entry_kind|replace("_", " ")|title }}</strong>
+                                        <div class="small">{{ tx.source_kind|replace("_", " ")|title }}</div>
+                                        <div class="amount">{% if tx.amount is not none %}{{ tx.amount|money(2) }}{% endif %}</div>
+                                        {% if item.action_links and item.action_links["open_row"] %}
+                                        <a class="button" href="{{ item.action_links['open_row'] }}" style="margin-top:8px;">Open row</a>
+                                        {% endif %}
+                                        {% else %}
+                                        <span class="small">Evidence only</span>
+                                        {% endif %}
+                                    </td>
+                                    <td data-label="Bank Link">
+                                        {% if bank_row %}
+                                        <strong>Bank row #{{ bank_row.id }}</strong>
+                                        <div class="small">{{ bank_row.posted_at.date() if bank_row.posted_at else "" }} {% if bank_row.amount is not none %}{{ bank_row.amount|money(2) }}{% endif %}</div>
+                                        <div class="muted-desc">{{ bank_row.description }}</div>
+                                        {% else %}
+                                        <form method="post" action="/bookkeeping/gmail/receipts/{{ receipt.id }}/link-bank-form" class="button-row">
+                                            <input type="number" name="bank_transaction_id" placeholder="Bank row ID" style="max-width:130px;">
+                                            <button type="submit">Link</button>
+                                        </form>
+                                        {% endif %}
+                                    </td>
+                                    <td data-label="Status">
+                                        <span class="pill {{ receipt.status }}">{{ receipt.status|replace("_", " ")|title }}</span>
+                                        <div class="small" style="margin-top:6px;">{{ receipt.confidence|title }} confidence</div>
+                                    </td>
+                                    <td data-label="Actions">
+                                        <div class="button-row">
+                                            <form method="post" action="/bookkeeping/gmail/receipts/{{ receipt.id }}/approve-form">
+                                                <button type="submit">Approve</button>
+                                            </form>
+                                            <form method="post" action="/bookkeeping/gmail/receipts/{{ receipt.id }}/reparse-form">
+                                                <button type="submit">Reparse</button>
+                                            </form>
+                                            <form method="post" action="/bookkeeping/gmail/receipts/{{ receipt.id }}/ignore-form">
+                                                <button type="submit" class="danger">Ignore</button>
+                                            </form>
+                                        </div>
+                                    </td>
+                                </tr>
+                                {% else %}
+                                <tr><td colspan="8"><div class="empty">No Gmail receipts match this view.</div></td></tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+            </main>
+
+            <aside>
+                <section class="panel">
+                    <div class="section-head">
+                        <div>
+                            <h2>Mailbox</h2>
+                            <div class="small">{{ gmail_status.account }}</div>
+                        </div>
+                    </div>
+                    <div class="feed-status">
+                        <span class="status-dot{% if gmail_connections %} ready{% endif %}"></span>
+                        <span>{{ "Connected" if gmail_connections else "Not connected" }}</span>
+                    </div>
+                    {% if not gmail_status.configured %}
+                    <div class="missing-list">
+                        {% for item in gmail_status.missing %}
+                        <code>{{ item }}</code>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <div class="button-row" style="margin-top:12px;">
+                        <a class="button primary" href="/bookkeeping/gmail/connect">Connect Gmail</a>
+                        <form method="post" action="/bookkeeping/gmail/sync-form">
+                            <button type="submit">Sync Gmail</button>
+                        </form>
+                    </div>
+                    {% endif %}
+                    {% for conn in gmail_connections %}
+                    <div class="feed-card">
+                        <strong>{{ conn.email_address }}</strong>
+                        <div class="small">{{ conn.status|title }}{% if conn.last_sync_at %} - synced {{ conn.last_sync_at.strftime("%Y-%m-%d %H:%M") }} UTC{% endif %}</div>
+                        {% if conn.last_sync_error %}<div class="small" style="color:#fecaca;">{{ conn.last_sync_error }}</div>{% endif %}
+                        <form method="post" action="/bookkeeping/gmail/sync-form" style="margin-top:10px;">
+                            <input type="hidden" name="connection_id" value="{{ conn.id }}">
+                            <button type="submit">Sync this mailbox</button>
+                        </form>
+                    </div>
+                    {% endfor %}
+                </section>
+            </aside>
+        </div>
+    </div>
+    {% include '_mobile_bottom_nav.html' %}
+{% include "_csrf_bootstrap.html" %}
+</body>
+</html>

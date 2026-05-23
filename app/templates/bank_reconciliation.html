@@ -288,6 +288,7 @@
             <div class="hero-actions">
                 <a class="button" href="/finance">Finance</a>
                 <a class="button" href="/bookkeeping">Sheet reconciliation</a>
+                <a class="button" href="/bookkeeping/gmail">Gmail receipts</a>
                 {% if selected_import %}
                 <a class="button primary" href="/bookkeeping/bank/{{ selected_import.id }}/export.csv?classification={{ selected_classification|urlencode }}&expense_category={{ selected_expense_category|urlencode }}&review_status={{ selected_review_status|urlencode }}&attention={{ 'true' if selected_attention else 'false' }}&expenses_only={{ 'true' if selected_expenses_only else 'false' }}&search={{ selected_search|urlencode }}">Export current view</a>
                 {% endif %}
@@ -527,78 +528,6 @@
             </main>
 
             <aside class="side">
-                <section class="panel">
-                    <div class="section-head">
-                        <div>
-                            <h2>Gmail Evidence</h2>
-                            <div class="small">Scan {{ gmail_status.account }} for invoices, receipts, and SortSwift buylists. SortSwift receipts create review-required inventory buy transactions.</div>
-                        </div>
-                    </div>
-                    <div class="feed-status">
-                        <span class="status-dot{% if gmail_connections %} ready{% endif %}"></span>
-                        <span>{{ "Connected" if gmail_connections else "Not connected" }}</span>
-                    </div>
-                    {% if not gmail_status.configured %}
-                    <div class="missing-list">
-                        {% for item in gmail_status.missing %}
-                        <code>{{ item }}</code>
-                        {% endfor %}
-                    </div>
-                    <div class="small" style="margin-top:10px;">Uses Gmail readonly access. Restricted Google scope; keep this account limited to business receipts.</div>
-                    {% else %}
-                    <div class="button-row" style="margin-top:12px;">
-                        <a class="button primary" href="/bookkeeping/gmail/connect">Connect Gmail</a>
-                        <form method="post" action="/bookkeeping/gmail/sync-form">
-                            <button type="submit">Sync Gmail</button>
-                        </form>
-                    </div>
-                    {% endif %}
-                    {% for conn in gmail_connections %}
-                    <div class="feed-card">
-                        <strong>{{ conn.email_address }}</strong>
-                        <div class="small">{{ conn.status|title }}{% if conn.last_sync_at %} - synced {{ conn.last_sync_at.strftime("%Y-%m-%d %H:%M") }} UTC{% endif %}</div>
-                        {% if conn.last_sync_error %}<div class="small" style="color:#fecaca;">{{ conn.last_sync_error }}</div>{% endif %}
-                        <form method="post" action="/bookkeeping/gmail/sync-form" style="margin-top:10px;">
-                            <input type="hidden" name="connection_id" value="{{ conn.id }}">
-                            <button type="submit">Sync this mailbox</button>
-                        </form>
-                    </div>
-                    {% endfor %}
-                    {% if gmail_receipts %}
-                    <div style="display:grid; gap:10px; margin-top:12px;">
-                        {% for receipt in gmail_receipts %}
-                        <div class="feed-card">
-                            <strong>{{ receipt.detected_vendor or "Gmail receipt" }}</strong>
-                            <div class="small">{{ receipt.subject }}</div>
-                            <div class="small">
-                                {{ receipt.detected_type|replace("_", " ")|title }} · {{ receipt.status|replace("_", " ")|title }}
-                                {% if receipt.total_amount is not none %} · {{ receipt.total_amount|money(2) }}{% endif %}
-                            </div>
-                            <div class="button-row" style="margin-top:10px;">
-                                <form method="post" action="/bookkeeping/gmail/receipts/{{ receipt.id }}/approve-form">
-                                    <button type="submit">Approve</button>
-                                </form>
-                                <form method="post" action="/bookkeeping/gmail/receipts/{{ receipt.id }}/reparse-form">
-                                    <button type="submit">Reparse</button>
-                                </form>
-                                <form method="post" action="/bookkeeping/gmail/receipts/{{ receipt.id }}/ignore-form">
-                                    <button type="submit">Ignore</button>
-                                </form>
-                                {% if selected_import %}
-                                <form method="post" action="/bookkeeping/gmail/receipts/{{ receipt.id }}/link-bank-form" style="display:flex; gap:8px; align-items:center;">
-                                    <input type="number" name="bank_transaction_id" placeholder="Bank row ID" style="max-width:130px;">
-                                    <button type="submit">Link row</button>
-                                </form>
-                                {% endif %}
-                            </div>
-                        </div>
-                        {% endfor %}
-                    </div>
-                    {% else %}
-                    <div class="small" style="margin-top:12px;">No Gmail receipts imported yet.</div>
-                    {% endif %}
-                </section>
-
                 <section class="panel">
                     <div class="section-head">
                         <div>

@@ -18,6 +18,7 @@ from app.routers.messages import reviewer_queue_page, review_table, messages_tab
 from app.routers.admin import admin_home_page, admin_debug_page, admin_health_page
 from app.routers.reports import reports_page, finance_page
 from app.routers.bookkeeping import bookkeeping_page
+from app.routers.bookkeeping import gmail_financials_page
 from app.routers.shopify import shopify_orders_page
 
 
@@ -307,6 +308,19 @@ class NavigationValidationTests(unittest.TestCase):
                     lambda request: bookkeeping_page(
                         request,
                         import_id=None,
+                        success=None,
+                        error=None,
+                        session=session,
+                    ),
+                ),
+                (
+                    "/bookkeeping/gmail",
+                    lambda request: gmail_financials_page(
+                        request,
+                        status="",
+                        receipt_type="",
+                        search="",
+                        limit=100,
                         success=None,
                         error=None,
                         session=session,

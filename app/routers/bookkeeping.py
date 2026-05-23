@@ -14,7 +14,7 @@ from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from ..csrf import CSRFProtectedRoute
 from ..shared import *  # noqa: F401,F403 — shared helpers, constants, state
@@ -60,12 +60,11 @@ from ..discord.gmail_financials import (
     gmail_config_status,
     link_gmail_evidence_to_bank_row,
     list_gmail_connections,
-    list_gmail_receipts,
     sync_gmail_connection,
     upsert_gmail_receipt_from_message,
     upsert_gmail_connection_from_oauth,
 )
-from ..models import GmailReceipt
+from ..models import BankTransaction, GmailEvidenceLink, GmailReceipt, Transaction
 
 router = APIRouter(route_class=CSRFProtectedRoute)
 
@@ -107,6 +106,31 @@ def _bank_redirect_url(
     return "/bookkeeping/bank" + (f"?{urlencode(params)}" if params else "")
 
 
+def _gmail_redirect_url(
+    *,
+    status: str = "",
+    receipt_type: str = "",
+    search: str = "",
+    limit: Optional[int] = None,
+    success: str = "",
+    error: str = "",
+) -> str:
+    params: dict[str, str] = {}
+    if status:
+        params["status"] = status
+    if receipt_type:
+        params["receipt_type"] = receipt_type
+    if search:
+        params["search"] = search
+    if limit and limit != 100:
+        params["limit"] = str(limit)
+    if success:
+        params["success"] = success
+    if error:
+        params["error"] = error
+    return "/bookkeeping/gmail" + (f"?{urlencode(params)}" if params else "")
+
+
 def _bank_row_view(row: BankTransaction, matched_transaction: Optional[Transaction]) -> dict[str, object]:
     action_links = None
     if matched_transaction:
@@ -124,6 +148,89 @@ def _bank_row_view(row: BankTransaction, matched_transaction: Optional[Transacti
         "matched_transaction": matched_transaction,
         "action_links": action_links,
     }
+
+
+def _gmail_receipt_views(
+    session: Session,
+    *,
+    status: str = "",
+    receipt_type: str = "",
+    search: str = "",
+    limit: int = 100,
+) -> list[dict[str, object]]:
+    query = select(GmailReceipt)
+    if status:
+        query = query.where(GmailReceipt.status == status)
+    if receipt_type:
+        query = query.where(GmailReceipt.detected_type == receipt_type)
+    receipts = list(
+        session.exec(
+            query.order_by(GmailReceipt.received_at.desc(), GmailReceipt.id.desc()).limit(max(1, min(limit, 500)))
+        ).all()
+    )
+    if search:
+        needle = search.strip().lower()
+        receipts = [
+            row
+            for row in receipts
+            if needle in " ".join(
+                [
+                    row.sender or "",
+                    row.subject or "",
+                    row.detected_vendor or "",
+                    row.detected_type or "",
+                    row.status or "",
+                ]
+            ).lower()
+        ]
+    ids = [row.id for row in receipts if row.id is not None]
+    links = []
+    if ids:
+        links = list(
+            session.exec(select(GmailEvidenceLink).where(GmailEvidenceLink.gmail_receipt_id.in_(ids))).all()
+        )
+    link_by_receipt: dict[int, GmailEvidenceLink] = {}
+    bank_ids: set[int] = set()
+    for link in links:
+        if link.gmail_receipt_id not in link_by_receipt:
+            link_by_receipt[link.gmail_receipt_id] = link
+        if link.bank_transaction_id:
+            bank_ids.add(link.bank_transaction_id)
+    tx_ids = {row.transaction_id for row in receipts if row.transaction_id}
+    transactions = {
+        row.id: row
+        for row in session.exec(select(Transaction).where(Transaction.id.in_(tx_ids))).all()
+        if row.id is not None
+    } if tx_ids else {}
+    bank_rows = {
+        row.id: row
+        for row in session.exec(select(BankTransaction).where(BankTransaction.id.in_(bank_ids))).all()
+        if row.id is not None
+    } if bank_ids else {}
+    views = []
+    for receipt in receipts:
+        tx = transactions.get(receipt.transaction_id)
+        link = link_by_receipt.get(receipt.id or 0)
+        bank_row = bank_rows.get(link.bank_transaction_id) if link and link.bank_transaction_id else None
+        views.append(
+            {
+                "receipt": receipt,
+                "transaction": tx,
+                "bank_link": link,
+                "bank_row": bank_row,
+                "action_links": (
+                    build_row_action_links(
+                        tx.source_message_id,
+                        channel_id=tx.channel_id,
+                        created_at=tx.occurred_at,
+                        status=tx.parse_status,
+                    )
+                    if tx
+                    else None
+                ),
+            }
+        )
+    return views
 
 
 @router.get("/bookkeeping/bank", response_class=HTMLResponse)
@@ -164,9 +271,6 @@ def bank_reconciliation_page(
     matched_by_id = {}
     plaid_status = plaid_config_status()
     bank_feed_connections = list_bank_feed_connections(session)
-    gmail_status = gmail_config_status()
-    gmail_connections = list_gmail_connections(session)
-    gmail_receipts = list_gmail_receipts(session, limit=20)
 
     if selected_import:
         all_rows = get_bank_transactions(session, import_id=selected_import.id)
@@ -239,10 +343,63 @@ def bank_reconciliation_page(
             "error": error,
             "plaid_status": plaid_status,
             "bank_feed_connections": bank_feed_connections,
-            "gmail_status": gmail_status,
-            "gmail_connections": gmail_connections,
-            "gmail_receipts": gmail_receipts,
             "bank_url": bank_url,
+        },
+    )
+
+
+@router.get("/bookkeeping/gmail", response_class=HTMLResponse)
+def gmail_financials_page(
+    request: Request,
+    status: str = Query(default=""),
+    receipt_type: str = Query(default=""),
+    search: str = Query(default=""),
+    limit: int = Query(default=100, ge=25, le=500),
+    success: Optional[str] = Query(default=None),
+    error: Optional[str] = Query(default=None),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "reviewer"):
+        return denial
+    status = status if isinstance(status, str) else ""
+    receipt_type = receipt_type if isinstance(receipt_type, str) else ""
+    search = search if isinstance(search, str) else ""
+    limit = limit if isinstance(limit, int) else 100
+    receipt_views = _gmail_receipt_views(
+        session,
+        status=status,
+        receipt_type=receipt_type,
+        search=search,
+        limit=limit,
+    )
+
+    def gmail_url(**overrides: Any) -> str:
+        values: dict[str, Any] = {
+            "status": status,
+            "receipt_type": receipt_type,
+            "search": search,
+            "limit": limit,
+        }
+        values.update(overrides)
+        return _gmail_redirect_url(**values)
+
+    return templates.TemplateResponse(
+        request,
+        "gmail_financials.html",
+        {
+            "request": request,
+            "title": "Gmail Receipts",
+            "current_user": getattr(request.state, "current_user", None),
+            "gmail_status": gmail_config_status(),
+            "gmail_connections": list_gmail_connections(session),
+            "receipt_views": receipt_views,
+            "selected_status": status,
+            "selected_receipt_type": receipt_type,
+            "selected_search": search,
+            "limit": limit,
+            "success": success,
+            "error": error,
+            "gmail_url": gmail_url,
         },
     )
 
@@ -257,7 +414,7 @@ def gmail_connect_start(request: Request):
         return RedirectResponse(url=build_gmail_oauth_url(state), status_code=303)
     except Exception as exc:
         return RedirectResponse(
-            url=_bank_redirect_url(error=f"Gmail connect failed: {exc}"),
+            url=_gmail_redirect_url(error=f"Gmail connect failed: {exc}"),
             status_code=303,
         )
 
@@ -274,18 +431,18 @@ def gmail_connect_callback(
         return denial
     stored_state = request.session.pop("gmail_oauth_state", None)
     if error:
-        return RedirectResponse(url=_bank_redirect_url(error=f"Gmail denied access: {error}"), status_code=303)
+        return RedirectResponse(url=_gmail_redirect_url(error=f"Gmail denied access: {error}"), status_code=303)
     if not code or not stored_state or stored_state != state:
-        return RedirectResponse(url=_bank_redirect_url(error="Invalid Gmail OAuth callback"), status_code=303)
+        return RedirectResponse(url=_gmail_redirect_url(error="Invalid Gmail OAuth callback"), status_code=303)
     try:
         token_payload = exchange_gmail_oauth_code(code)
         connection = upsert_gmail_connection_from_oauth(session, token_payload)
         return RedirectResponse(
-            url=_bank_redirect_url(success=f"Connected Gmail account {connection.email_address}"),
+            url=_gmail_redirect_url(success=f"Connected Gmail account {connection.email_address}"),
             status_code=303,
         )
     except Exception as exc:
-        return RedirectResponse(url=_bank_redirect_url(error=f"Gmail callback failed: {exc}"), status_code=303)
+        return RedirectResponse(url=_gmail_redirect_url(error=f"Gmail callback failed: {exc}"), status_code=303)
 
 
 @router.post("/bookkeeping/gmail/sync-form")
@@ -303,7 +460,7 @@ def gmail_sync_form(
             raise ValueError("Connect Gmail before syncing")
         result = sync_gmail_connection(session, int(target_id))
         return RedirectResponse(
-            url=_bank_redirect_url(
+            url=_gmail_redirect_url(
                 success=(
                     f"Gmail sync scanned {result.get('scanned', 0)} message(s), "
                     f"imported {result.get('imported', 0)} receipt(s), "
@@ -313,7 +470,7 @@ def gmail_sync_form(
             status_code=303,
         )
     except Exception as exc:
-        return RedirectResponse(url=_bank_redirect_url(error=f"Gmail sync failed: {exc}"), status_code=303)
+        return RedirectResponse(url=_gmail_redirect_url(error=f"Gmail sync failed: {exc}"), status_code=303)
 
 
 @router.post("/bookkeeping/gmail/receipts/{receipt_id}/ignore-form")
@@ -330,7 +487,7 @@ def gmail_receipt_ignore_form(
         row.updated_at = utcnow()
         session.add(row)
         session.commit()
-    return RedirectResponse(url=_bank_redirect_url(success="Ignored Gmail receipt"), status_code=303)
+    return RedirectResponse(url=_gmail_redirect_url(success="Ignored Gmail receipt"), status_code=303)
 
 
 @router.post("/bookkeeping/gmail/receipts/{receipt_id}/approve-form")
@@ -359,7 +516,7 @@ def gmail_receipt_approve_form(
                 session.add(tx)
         session.add(row)
         session.commit()
-    return RedirectResponse(url=_bank_redirect_url(success="Approved Gmail receipt"), status_code=303)
+    return RedirectResponse(url=_gmail_redirect_url(success="Approved Gmail receipt"), status_code=303)
 
 
 @router.post("/bookkeeping/gmail/receipts/{receipt_id}/reparse-form")
@@ -372,7 +529,7 @@ def gmail_receipt_reparse_form(
         return denial
     row = session.get(GmailReceipt, receipt_id)
     if not row:
-        return RedirectResponse(url=_bank_redirect_url(error="Gmail receipt not found"), status_code=303)
+        return RedirectResponse(url=_gmail_redirect_url(error="Gmail receipt not found"), status_code=303)
     try:
         upsert_gmail_receipt_from_message(
             session,
@@ -386,9 +543,9 @@ def gmail_receipt_reparse_form(
             connection_id=row.connection_id,
         )
         session.commit()
-        return RedirectResponse(url=_bank_redirect_url(success="Reparsed Gmail receipt"), status_code=303)
+        return RedirectResponse(url=_gmail_redirect_url(success="Reparsed Gmail receipt"), status_code=303)
     except Exception as exc:
-        return RedirectResponse(url=_bank_redirect_url(error=f"Gmail reparse failed: {exc}"), status_code=303)
+        return RedirectResponse(url=_gmail_redirect_url(error=f"Gmail reparse failed: {exc}"), status_code=303)
 
 
 @router.post("/bookkeeping/gmail/receipts/{receipt_id}/link-bank-form")
@@ -405,9 +562,9 @@ def gmail_receipt_link_bank_form(
         linked_by = str(getattr(current_user, "username", None) or "")
         link_gmail_evidence_to_bank_row(session, receipt_id, bank_transaction_id, linked_by=linked_by)
         session.commit()
-        return RedirectResponse(url=_bank_redirect_url(success="Linked Gmail receipt to bank row"), status_code=303)
+        return RedirectResponse(url=_gmail_redirect_url(success="Linked Gmail receipt to bank row"), status_code=303)
     except Exception as exc:
-        return RedirectResponse(url=_bank_redirect_url(error=f"Gmail link failed: {exc}"), status_code=303)
+        return RedirectResponse(url=_gmail_redirect_url(error=f"Gmail link failed: {exc}"), status_code=303)
 
 
 @router.post("/bookkeeping/bank/plaid/link-token")
