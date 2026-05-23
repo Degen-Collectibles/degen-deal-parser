@@ -1,18 +1,33 @@
 import asyncio
 import base64
 import hashlib
-import importlib
 import json
 import os
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
 
+from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec, utils
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, Session, create_engine
+
+
+def _set_test_env_default(key: str, value: str) -> None:
+    if not os.environ.get(key):
+        os.environ[key] = value
+
+
+# These tests import app.main to exercise the Plaid webhook route. Keep the
+# unrelated employee portal middleware disabled, and still provide a valid PII
+# key so an externally-enabled portal env cannot fail closed during collection.
+os.environ["EMPLOYEE_PORTAL_ENABLED"] = "false"
+_set_test_env_default("EMPLOYEE_PII_KEY", Fernet.generate_key().decode("ascii"))
+_set_test_env_default("SESSION_SECRET", "bookkeeping-test-session-xxxxxxxxxxxxxxxx")
+_set_test_env_default("ADMIN_PASSWORD", "bookkeeping-test-admin-password")
+_set_test_env_default("EMPLOYEE_TOKEN_HMAC_KEY", "bookkeeping-test-token-key")
 
 from app.discord.bookkeeping import fetch_google_sheet_export, read_tabular_rows, reconcile_bookkeeping_import
 from app.models import (
@@ -22,11 +37,6 @@ from app.models import (
     Transaction,
     PARSE_PARSED,
 )
-
-os.environ.setdefault("EMPLOYEE_PORTAL_ENABLED", "true")
-os.environ.setdefault("SESSION_SECRET", "bookkeeping-test-session-xxxxxxxxxxxxxxxx")
-os.environ.setdefault("ADMIN_PASSWORD", "bookkeeping-test-admin-password")
-os.environ.setdefault("EMPLOYEE_TOKEN_HMAC_KEY", "bookkeeping-test-token-key")
 
 
 def _utcnow():
