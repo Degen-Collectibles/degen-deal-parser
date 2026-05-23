@@ -154,6 +154,51 @@ class QueueReparseValidationTests(unittest.TestCase):
             ).all()
             self.assertEqual(len(logs), 1)
 
+    def test_process_once_prioritizes_recent_pending_rows_before_old_backlog(self) -> None:
+        now = utcnow()
+        with self.session() as session:
+            old_backlog = self.make_message(
+                discord_message_id="old-backlog",
+                content="old backlog buy 10 cash",
+                created_at=now - timedelta(days=90),
+                parse_status=PARSE_PENDING,
+            )
+            recent_first = self.make_message(
+                discord_message_id="recent-first",
+                content="recent first sell 20 cash",
+                created_at=now - timedelta(minutes=40),
+                parse_status=PARSE_PENDING,
+            )
+            recent_second = self.make_message(
+                discord_message_id="recent-second",
+                content="recent second sell 30 cash",
+                created_at=now - timedelta(minutes=5),
+                parse_status=PARSE_PENDING,
+            )
+            session.add(old_backlog)
+            session.add(recent_first)
+            session.add(recent_second)
+            session.commit()
+
+            @contextmanager
+            def fake_managed_session():
+                yield session
+
+            with patch("app.discord.worker.managed_session", new=fake_managed_session), patch(
+                "app.discord.worker.process_row", new_callable=AsyncMock
+            ) as process_row_mock, patch("app.discord.worker.settings.parser_batch_size", 2):
+                asyncio.run(process_once())
+
+            processed_ids = [call.args[0] for call in process_row_mock.await_args_list]
+            self.assertEqual(processed_ids, [recent_first.id, recent_second.id])
+
+            session.refresh(old_backlog)
+            session.refresh(recent_first)
+            session.refresh(recent_second)
+            self.assertEqual(old_backlog.parse_status, PARSE_PENDING)
+            self.assertEqual(recent_first.parse_status, PARSE_PROCESSING)
+            self.assertEqual(recent_second.parse_status, PARSE_PROCESSING)
+
     def test_choose_image_urls_accepts_data_image_urls(self) -> None:
         urls = [
             "data:image/png;base64,ZmFrZS1pbWFnZS1ieXRlcw==",

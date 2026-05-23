@@ -11,7 +11,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, or_
+from sqlalchemy import case, func, or_
 from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, select
 
@@ -785,6 +785,13 @@ async def process_once():
     with managed_session() as session:
         normalize_legacy_queue_states(session)
         close_or_recover_unfinished_attempts(session)
+        live_priority_cutoff = utcnow() - timedelta(
+            hours=max(settings.parser_live_priority_lookback_hours, 0.0)
+        )
+        live_priority_bucket = case(
+            (DiscordMessage.created_at >= live_priority_cutoff, 0),
+            else_=1,
+        )
 
         rows = session.exec(
             select(DiscordMessage)
@@ -794,7 +801,7 @@ async def process_once():
                 )
             )
             .where(DiscordMessage.parse_attempts < settings.parser_max_attempts)
-            .order_by(DiscordMessage.created_at)
+            .order_by(live_priority_bucket, DiscordMessage.created_at, DiscordMessage.id)
             .limit(settings.parser_batch_size)
         ).all()
 
@@ -806,7 +813,7 @@ async def process_once():
                 )
             )
             .where(DiscordMessage.parse_attempts >= settings.parser_max_attempts)
-            .order_by(DiscordMessage.created_at)
+            .order_by(live_priority_bucket, DiscordMessage.created_at, DiscordMessage.id)
             .limit(settings.parser_batch_size)
         ).all()
         for row in skipped_rows:
