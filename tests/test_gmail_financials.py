@@ -1,6 +1,7 @@
 import json
 from datetime import datetime, timedelta, timezone
 
+from sqlalchemy import event, text
 from sqlmodel import SQLModel, Session, create_engine, select
 
 from app.config import get_settings
@@ -109,6 +110,72 @@ def test_upsert_sortswift_email_creates_deduped_gmail_transaction():
     assert tx.money_out == 82.87
     assert tx.amount == 82.87
     assert tx.needs_review is True
+
+
+def test_upsert_gmail_receipt_handles_concurrent_duplicate_insert(tmp_path):
+    db_path = tmp_path / "gmail-race.db"
+    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(engine)
+    injected = {"done": False}
+
+    def inject_duplicate(_conn, _cursor, statement, _parameters, _context, _executemany):
+        if injected["done"] or "INSERT INTO gmail_receipts" not in str(statement):
+            return
+        injected["done"] = True
+        now = datetime(2026, 5, 23, 22, 3, 27, tzinfo=timezone.utc).isoformat()
+        with engine.begin() as other:
+            other.execute(
+                text(
+                    """
+                    INSERT INTO gmail_receipts
+                    (gmail_message_id, thread_id, sender, subject, detected_vendor, detected_type,
+                     status, confidence, snippet, parsed_json, raw_text, dedupe_hash, created_at, updated_at)
+                    VALUES
+                    (:gmail_message_id, :thread_id, :sender, :subject, :detected_vendor, :detected_type,
+                     :status, :confidence, :snippet, :parsed_json, :raw_text, :dedupe_hash, :created_at, :updated_at)
+                    """
+                ),
+                {
+                    "gmail_message_id": "race-message-1",
+                    "thread_id": "race-thread",
+                    "sender": "Race Sender <race@example.com>",
+                    "subject": "Existing raced receipt",
+                    "detected_vendor": "Race Sender",
+                    "detected_type": "invoice_or_receipt",
+                    "status": "unmatched",
+                    "confidence": "low",
+                    "snippet": "existing",
+                    "parsed_json": "{}",
+                    "raw_text": "existing",
+                    "dedupe_hash": "existing",
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+
+    event.listen(engine, "before_cursor_execute", inject_duplicate)
+    try:
+        with Session(engine) as session:
+            receipt = upsert_gmail_receipt_from_message(
+                session,
+                gmail_message_id="race-message-1",
+                thread_id="race-thread",
+                sender="PG&E Customer Service <PGECustomerService@notifications.pge.com>",
+                subject="Protect Yourself Against Utility Scams",
+                received_at=datetime(2026, 5, 23, 16, 24, 16, tzinfo=timezone.utc),
+                html_body="<html><body>Recognize and Avoid Utility Scams</body></html>",
+                snippet="Recognize and Avoid Utility Scams",
+            )
+            session.commit()
+            receipts = session.exec(select(GmailReceipt)).all()
+    finally:
+        event.remove(engine, "before_cursor_execute", inject_duplicate)
+
+    assert injected["done"] is True
+    assert len(receipts) == 1
+    assert receipt.gmail_message_id == "race-message-1"
+    assert receipt.sender == "PG&E Customer Service <PGECustomerService@notifications.pge.com>"
+    assert receipt.subject == "Protect Yourself Against Utility Scams"
 
 
 def test_generic_gmail_receipt_links_to_bank_row_as_evidence():

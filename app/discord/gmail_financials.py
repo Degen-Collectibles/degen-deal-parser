@@ -14,6 +14,7 @@ from urllib.parse import urlencode
 
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, delete, select
 
 from ..config import get_settings
@@ -521,9 +522,21 @@ def upsert_gmail_receipt_from_message(
         received_at=received_at,
     )
 
-    receipt = session.exec(select(GmailReceipt).where(GmailReceipt.gmail_message_id == gmail_message_id)).first()
+    with session.no_autoflush:
+        receipt = session.exec(select(GmailReceipt).where(GmailReceipt.gmail_message_id == gmail_message_id)).first()
     if receipt is None:
-        receipt = GmailReceipt(gmail_message_id=gmail_message_id)
+        try:
+            with session.begin_nested():
+                receipt = GmailReceipt(gmail_message_id=gmail_message_id)
+                session.add(receipt)
+                session.flush()
+        except IntegrityError:
+            with session.no_autoflush:
+                receipt = session.exec(
+                    select(GmailReceipt).where(GmailReceipt.gmail_message_id == gmail_message_id)
+                ).first()
+            if receipt is None:
+                raise
 
     receipt.connection_id = connection_id
     receipt.thread_id = thread_id
