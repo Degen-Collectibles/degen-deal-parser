@@ -655,7 +655,7 @@
             <div class="hero-copy">
                 <div class="eyebrow">Finance</div>
                 <h1>Finance Dashboard</h1>
-                <p>Owner finance check-in across Discord, Shopify, TikTok, and bank context. Paid product revenue comes from Discord operating sales and paid order rows; loans, transfers, paybacks, bank deposits, and platform payouts stay out of revenue.</p>
+                <p>Owner finance check-in across Discord, Shopify, TikTok, and bank context. Paid product revenue uses a 20% gross product margin assumption; inventory purchases are shown as cash deployed, not as immediate profit loss.</p>
                 <div class="hero-meta">
                     <span class="chip">{{ range_data["window_label"] }}</span>
                     <span class="chip">{{ range_data["label"] }}</span>
@@ -665,14 +665,14 @@
             </div>
             <div class="hero-stat">
                 <div>
-                    <div class="hero-label">Operating Cash Profit</div>
+                    <div class="hero-label">Estimated Operating Profit</div>
                     <div class="hero-value">{{ current_statement["operating_profit_display"] }}</div>
-                    <div class="hero-subline">Product revenue {{ current_statement["revenue_display"] }} with {{ current_statement["operating_margin_display"] }} operating cash margin.</div>
+                    <div class="hero-subline">Product revenue {{ current_statement["revenue_display"] }} with {{ current_statement["operating_margin_display"] }} operating margin after the 20% gross product margin assumption.</div>
                     <div class="trend {{ finance_hero_kpi['tone'] }}">{{ finance_hero_kpi["delta_display"] }} vs {{ range_data["previous_label"] }}</div>
                 </div>
                 <div class="hero-foot">
                     Average daily revenue {{ current_statement["avg_daily_revenue_display"] }}.<br>
-                    Average daily profit {{ current_statement["avg_daily_profit_display"] }}.
+                    Average daily estimated profit {{ current_statement["avg_daily_profit_display"] }}.
                 </div>
             </div>
         </section>
@@ -737,7 +737,7 @@
                     <div>
                         <p class="section-kicker">Trend</p>
                         <h2 class="section-title">Daily Operating View</h2>
-                        <p class="section-copy">Revenue, Discord cash out, and bank-only outflows by day. Matched Discord rows and platform payout deposits are excluded from the bank add-back.</p>
+                        <p class="section-copy">Revenue, inventory cash deployed, operating spend, and estimated profit by day. Matched Discord rows and platform payout deposits are excluded from the bank add-back.</p>
                     </div>
                     <span class="tag">{{ range_data["day_count"] }} days</span>
                 </div>
@@ -747,7 +747,7 @@
                         <div class="chart-stat-value">{{ current_statement["revenue_display"] }}</div>
                     </div>
                     <div class="chart-stat">
-                        <div class="chart-stat-label">Inventory out</div>
+                        <div class="chart-stat-label">Inventory deployed</div>
                         <div class="chart-stat-value">{{ current_statement["inventory_spend_display"] }}</div>
                     </div>
                     <div class="chart-stat">
@@ -930,7 +930,7 @@
                 <div>
                     <p class="section-kicker">Cadence</p>
                     <h2 class="section-title">Six-Month Revenue And Profit</h2>
-                    <p class="section-copy">Monthly product revenue, operating cash profit, and operating margin.</p>
+                    <p class="section-copy">Monthly product revenue, estimated operating profit, and operating margin.</p>
                 </div>
             </div>
             <div class="chart-wrap monthly"><canvas id="finance-monthly-chart"></canvas></div>
@@ -941,7 +941,7 @@
                 <div class="section-head">
                     <div>
                         <p class="section-kicker">Statement</p>
-                        <h2 class="section-title">Cash Operating Statement</h2>
+                        <h2 class="section-title">Estimated Operating Statement</h2>
                         <p class="section-copy">Current range against the immediately preceding period of the same length.</p>
                     </div>
                     <span class="tag">{{ range_data["label"] }}</span>
@@ -966,7 +966,7 @@
                         </tbody>
                     </table>
                 </div>
-                <p class="caption">Paid platform orders use product subtotal or tax-excluded subtotal for revenue. Known tax is tracked separately. Discord non-operating cash in is excluded from revenue. Bank-only negative outflows are subtracted as inventory or operating spend, while platform payout deposits are excluded to avoid counting Shopify/TikTok twice.</p>
+                <p class="caption">Paid platform orders use product subtotal or tax-excluded subtotal for revenue. Known tax is tracked separately. Discord non-operating cash in is excluded from revenue. Inventory/grading outflows are shown as cash deployed, while operating outflows reduce estimated profit. Platform payout deposits are excluded to avoid counting Shopify/TikTok twice.</p>
             </article>
 
             <div class="stack">
@@ -1091,7 +1091,7 @@
                             <tr>
                                 <th>Month</th>
                                 <th>Revenue</th>
-                                <th>Operating Profit</th>
+                                <th>Estimated Operating Profit</th>
                                 <th>Margin</th>
                                 <th>Discord</th>
                                 <th>Shopify</th>
@@ -1212,7 +1212,7 @@
                         },
                         {
                             type: "bar",
-                            label: "Inventory cash out",
+                            label: "Inventory cash deployed",
                             data: chartData.daily.inventorySpend.map(function (value) { return -Number(value || 0); }),
                             backgroundColor: "rgba(245, 158, 11, 0.72)",
                             borderRadius: 6,
@@ -1228,7 +1228,7 @@
                         },
                         {
                             type: "line",
-                            label: "Operating cash profit",
+                            label: "Estimated operating profit",
                             data: chartData.daily.operatingProfit,
                             borderColor: palette.profit,
                             backgroundColor: "rgba(34, 197, 94, 0.14)",
@@ -1443,7 +1443,7 @@
                         },
                         {
                             type: "bar",
-                            label: "Operating cash profit",
+                            label: "Estimated operating profit",
                             data: chartData.monthly.operatingProfit,
                             backgroundColor: "rgba(34, 197, 94, 0.62)",
                             borderRadius: 6,

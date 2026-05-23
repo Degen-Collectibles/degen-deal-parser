@@ -258,6 +258,8 @@ FINANCE_WINDOW_LABELS = {
     FINANCE_WINDOW_YTD: "Year to date",
     "custom": "Custom range",
 }
+FINANCE_ASSUMED_GROSS_MARGIN_RATE = 0.20
+FINANCE_ASSUMED_COGS_RATE = round(1.0 - FINANCE_ASSUMED_GROSS_MARGIN_RATE, 2)
 
 
 def count_rows(session: Session, stmt) -> int:
@@ -1331,7 +1333,8 @@ def compose_finance_statement(
     tiktok_tax = round(float(tiktok_summary.get("total_tax", 0.0) or 0.0), 2)
 
     revenue = round(discord_money_in + shopify_net_revenue + tiktok_net_revenue, 2)
-    gross_profit = round(revenue - inventory_spend, 2)
+    estimated_cogs = round(revenue * FINANCE_ASSUMED_COGS_RATE, 2)
+    gross_profit = round(revenue * FINANCE_ASSUMED_GROSS_MARGIN_RATE, 2)
     operating_profit = round(gross_profit - operating_expenses, 2)
     external_tax = round(shopify_tax + tiktok_tax, 2)
 
@@ -1367,6 +1370,7 @@ def compose_finance_statement(
         "tiktok_paid_orders": int(tiktok_summary.get("paid_orders", 0) or 0),
         "tiktok_tax_unknown_orders": int(tiktok_summary.get("tax_unknown_orders", 0) or 0),
         "revenue": revenue,
+        "estimated_cogs": estimated_cogs,
         "gross_profit": gross_profit,
         "operating_profit": operating_profit,
         "external_tax": external_tax,
@@ -1381,6 +1385,7 @@ def compose_finance_statement(
         "avg_daily_revenue": round(revenue / max(day_count, 1), 2),
         "avg_daily_profit": round(operating_profit / max(day_count, 1), 2),
         "revenue_display": format_dashboard_money(revenue),
+        "estimated_cogs_display": format_dashboard_money(estimated_cogs),
         "gross_profit_display": format_dashboard_money(gross_profit),
         "operating_profit_display": format_dashboard_money(operating_profit),
         "inventory_spend_display": format_dashboard_money(inventory_spend),
@@ -1518,7 +1523,8 @@ def build_finance_daily_rows(
         )
         inventory_spend = round(float(bucket["inventory_spend"]), 2)
         operating_expenses = round(float(bucket["operating_expenses"]), 2)
-        gross_profit = round(revenue - inventory_spend, 2)
+        estimated_cogs = round(revenue * FINANCE_ASSUMED_COGS_RATE, 2)
+        gross_profit = round(revenue * FINANCE_ASSUMED_GROSS_MARGIN_RATE, 2)
         operating_profit = round(gross_profit - operating_expenses, 2)
         cumulative_profit = round(cumulative_profit + operating_profit, 2)
         rows.append(
@@ -1528,6 +1534,7 @@ def build_finance_daily_rows(
                 "shopify_revenue": round(float(bucket["shopify_revenue"]), 2),
                 "tiktok_revenue": round(float(bucket["tiktok_revenue"]), 2),
                 "revenue": revenue,
+                "estimated_cogs": estimated_cogs,
                 "inventory_spend": inventory_spend,
                 "operating_expenses": operating_expenses,
                 "gross_profit": gross_profit,
@@ -1623,14 +1630,15 @@ def build_finance_statement_rows(
         ("Shopify product revenue", "shopify_net_revenue", "money"),
         ("TikTok Shop product revenue", "tiktok_net_revenue", "money"),
         ("Total revenue", "revenue", "money"),
+        ("Estimated product COGS (80%)", "estimated_cogs", "money"),
+        ("Estimated gross product profit (20%)", "gross_profit", "money"),
         ("Discord inventory cash out", "discord_inventory_spend", "money"),
         ("Bank-only inventory/grading outflow", "bank_inventory_spend", "money"),
-        ("Inventory cash out", "inventory_spend", "money"),
-        ("Gross cash profit", "gross_profit", "money"),
+        ("Inventory cash deployed", "inventory_spend", "money"),
         ("Discord operating expenses", "discord_operating_expenses", "money"),
         ("Bank-only operating outflow", "bank_operating_expenses", "money"),
         ("Operating expenses", "operating_expenses", "money"),
-        ("Operating cash profit", "operating_profit", "money"),
+        ("Estimated operating profit", "operating_profit", "money"),
         ("Operating margin", "operating_margin_pct", "percent"),
     ]
 
@@ -1660,10 +1668,10 @@ def build_finance_kpi_rows(
 ) -> list[dict[str, object]]:
     kpi_specs = [
         ("Product Revenue", "revenue", "money", "up", "Discord operating cash in + paid platform product sales; loans, transfers, paybacks, and bank payouts are excluded"),
-        ("Gross Cash Profit", "gross_profit", "money", "up", "Revenue less Discord and bank-only inventory cash out"),
-        ("Operating Cash Profit", "operating_profit", "money", "up", "Gross cash profit after Discord and bank-only operating expenses"),
-        ("Operating Margin", "operating_margin_pct", "percent", "up", "Operating cash profit divided by product revenue"),
-        ("Inventory Cash Out", "inventory_spend", "money", "down", "Buys, trade cash out, inventory expense rows, and bank-only inventory/grading outflows"),
+        ("Estimated Gross Profit", "gross_profit", "money", "up", "20% gross product margin assumption; inventory purchases are shown separately as cash deployed"),
+        ("Estimated Operating Profit", "operating_profit", "money", "up", "Estimated gross profit less Discord and bank-only operating expenses"),
+        ("Operating Margin", "operating_margin_pct", "percent", "up", "Estimated operating profit divided by product revenue"),
+        ("Inventory Cash Deployed", "inventory_spend", "money", "down", "Buys, trade cash out, inventory expense rows, and bank-only inventory/grading outflows; not subtracted from estimated profit"),
         ("Tax Collected", "external_tax", "money", "neutral", "Known Shopify and TikTok tax tracked outside revenue"),
     ]
 
@@ -1809,7 +1817,7 @@ def build_finance_notes(
                 "title": "Profit posture",
                 "body": (
                     f"{range_label} closed at {current_statement['operating_profit_display']} "
-                    f"of operating profit and {margin_label} margin, "
+                    f"of estimated operating profit and {margin_label} margin, "
                     f"{format_signed_money(profit_delta)} versus {prior_label}."
                 ),
             }
@@ -1820,7 +1828,7 @@ def build_finance_notes(
                 "title": "Profit posture",
                 "body": (
                     f"{range_label} is currently running at {current_statement['operating_profit_display']} "
-                    f"operating profit with {margin_label} margin, "
+                    f"estimated operating profit with {margin_label} margin, "
                     f"{format_signed_money(profit_delta)} versus {prior_label}."
                 ),
             }

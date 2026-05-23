@@ -370,7 +370,7 @@ def finance_page(
 
     range_data = resolve_finance_range(start=start, end=end, window=window)
     selected_bank_account = normalize_bank_account_filter(bank_account if isinstance(bank_account, str) else "all")
-    finance_cache_key = f"finance:v2:{start or ''}:{end or ''}:{window or ''}"
+    finance_cache_key = f"finance:v3:{start or ''}:{end or ''}:{window or ''}"
     cached_finance = cache_get(finance_cache_key)
     if cached_finance is None:
         current_snapshot = build_finance_range_snapshot(

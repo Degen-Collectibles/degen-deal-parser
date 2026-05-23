@@ -10,7 +10,7 @@ from app.shared import (
 from app.models import Transaction
 
 
-def test_finance_statement_subtracts_bank_only_expenses_without_double_counting_logged_rows():
+def test_finance_statement_uses_assumed_gross_margin_and_keeps_inventory_as_cash_deployed():
     statement = compose_finance_statement(
         discord_summary={
             "rows": 4,
@@ -37,9 +37,11 @@ def test_finance_statement_subtracts_bank_only_expenses_without_double_counting_
 
     assert statement["revenue"] == 1300.0
     assert statement["inventory_spend"] == 340.0
+    assert statement["estimated_cogs"] == 1040.0
     assert statement["operating_expenses"] == 220.0
-    assert statement["gross_profit"] == 960.0
-    assert statement["operating_profit"] == 740.0
+    assert statement["gross_profit"] == 260.0
+    assert statement["operating_profit"] == 40.0
+    assert statement["gross_margin_pct"] == 20.0
     assert statement["bank_operating_expenses"] == 170.0
     assert statement["bank_inventory_spend"] == 40.0
 
@@ -74,16 +76,17 @@ def test_finance_breakdowns_label_discord_and_bank_only_outflows_separately():
         "shopify_net_revenue": 200.0,
         "tiktok_net_revenue": 100.0,
         "revenue": 1300.0,
+        "estimated_cogs": 1040.0,
         "discord_non_operating_money_in": 5000.0,
         "discord_inventory_spend": 300.0,
         "bank_inventory_spend": 40.0,
         "inventory_spend": 340.0,
-        "gross_profit": 960.0,
+        "gross_profit": 260.0,
         "discord_operating_expenses": 50.0,
         "bank_operating_expenses": 170.0,
         "operating_expenses": 220.0,
-        "operating_profit": 740.0,
-        "operating_margin_pct": 56.9,
+        "operating_profit": 40.0,
+        "operating_margin_pct": 3.1,
     }
     prior = {key: 0.0 for key in current}
 
@@ -92,15 +95,27 @@ def test_finance_breakdowns_label_discord_and_bank_only_outflows_separately():
 
     assert "Discord operating cash-in sales" in statement_labels
     assert "Discord non-operating cash in excluded" in statement_labels
+    assert "Estimated product COGS (80%)" in statement_labels
+    assert "Estimated gross product profit (20%)" in statement_labels
     assert "Bank-only inventory/grading outflow" in statement_labels
     assert "Bank-only operating outflow" in statement_labels
     assert "Bank-only inventory/grading" in spend_labels
     assert "Bank-only operating outflow" in spend_labels
 
 
-def test_finance_daily_rows_include_bank_only_outflows():
+def test_finance_daily_rows_keep_inventory_cash_out_outside_profit():
     rows = build_finance_daily_rows(
-        transactions=[],
+        transactions=[
+            Transaction(
+                occurred_at=datetime(2026, 5, 1, 18, tzinfo=timezone.utc),
+                channel_id="sales",
+                channel_name="Sales",
+                entry_kind="sale",
+                amount=1000.0,
+                money_in=1000.0,
+                money_out=0.0,
+            ),
+        ],
         shopify_rows=[],
         tiktok_rows=[],
         bank_daily_rows=[
@@ -121,7 +136,9 @@ def test_finance_daily_rows_include_bank_only_outflows():
     assert len(rows) == 1
     assert rows[0]["inventory_spend"] == 40.0
     assert rows[0]["operating_expenses"] == 170.0
-    assert rows[0]["operating_profit"] == -210.0
+    assert rows[0]["estimated_cogs"] == 800.0
+    assert rows[0]["gross_profit"] == 200.0
+    assert rows[0]["operating_profit"] == 30.0
 
 
 def test_finance_daily_rows_exclude_discord_non_operating_money_in_from_revenue():

@@ -10,12 +10,13 @@ def _template_text() -> str:
     return FINANCE_TEMPLATE.read_text(encoding="utf-8")
 
 
-def test_finance_hero_uses_cash_specific_owner_language():
+def test_finance_hero_uses_estimated_margin_owner_language():
     template = _template_text()
 
     assert "<h1>Finance Dashboard</h1>" in template
-    assert '<div class="hero-label">Operating Cash Profit</div>' in template
-    assert '<div class="hero-label">Operating Profit</div>' not in template
+    assert '<div class="hero-label">Estimated Operating Profit</div>' in template
+    assert "20% gross product margin" in template
+    assert '<div class="hero-label">Operating Cash Profit</div>' not in template
 
 
 def test_finance_surfaces_readiness_before_kpis():
@@ -61,7 +62,7 @@ def test_finance_kpi_rows_expose_stable_keys():
     rows = build_finance_kpi_rows(current, prior)
     rows_by_key = {row["key"]: row for row in rows}
 
-    assert rows_by_key["operating_profit"]["label"] == "Operating Cash Profit"
+    assert rows_by_key["operating_profit"]["label"] == "Estimated Operating Profit"
     assert rows_by_key["operating_profit"]["value_display"] == "$450"
 
 
