@@ -73,6 +73,18 @@ def test_finance_kpi_grid_does_not_force_clipped_desktop_cards():
     assert ".kpi-grid { grid-template-columns: repeat(3" not in template
 
 
+def test_finance_kpi_values_stay_on_one_line_in_narrow_cards():
+    template = _template_text()
+
+    assert ".metric-card {" in template
+    assert "container-type: inline-size;" in template
+    assert ".metric-value {" in template
+    assert "white-space: nowrap;" in template
+    assert "overflow-wrap: normal;" in template
+    assert "font-size: clamp(28px, 18cqw, 40px);" in template
+    assert "font-size: clamp(28px, 2.6vw, 40px);" not in template
+
+
 def test_finance_date_filters_label_pacific_time():
     template = _template_text()
 
