@@ -10,8 +10,9 @@ from sqlmodel import Session, SQLModel, create_engine, select
 from starlette.requests import Request
 
 from app.routers.channels_api import edit_message_form
+import app.routers.messages as messages_module
 from app.routers.messages import messages_table, review_table, reviewer_queue_page
-from app.models import AuditLog, DiscordMessage, PARSE_PARSED, utcnow
+from app.models import AuditLog, DiscordMessage, PARSE_IGNORED, PARSE_PARSED, Transaction, utcnow
 
 
 def make_request(path: str) -> Request:
@@ -357,6 +358,125 @@ class TableExpenseCategoryTests(unittest.TestCase):
         self.assertEqual(payload["before"]["amount"], 10.0)
         self.assertEqual(payload["after"]["amount"], 25.0)
         self.assertEqual(payload["after"]["payment_method"], "zelle")
+
+    def test_manual_ignore_deal_clears_transaction_without_marking_discord_deleted(self) -> None:
+        with Session(self.engine) as session, patch("app.routers.messages.require_role_response", return_value=None):
+            row = DiscordMessage(
+                discord_message_id="duplicate-ignore",
+                channel_id="chan-1",
+                channel_name="deals",
+                author_name="tester",
+                content="duplicate deal",
+                created_at=utcnow(),
+                parse_status=PARSE_PARSED,
+                deal_type="sell",
+                amount=25.0,
+                payment_method="cash",
+                entry_kind="sale",
+                money_in=25.0,
+                money_out=0.0,
+                expense_category="inventory",
+            )
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            session.add(Transaction(source_message_id=row.id, occurred_at=row.created_at, amount=25.0, money_in=25.0))
+            session.commit()
+
+            request = make_request("/messages/1/ignore-form")
+            request.state.current_user = SimpleNamespace(username="reviewer", display_name="Reviewer")
+            response = messages_module.ignore_message_form(
+                request,
+                message_id=row.id,
+                return_path="/table",
+                status="parsed",
+                channel_id="chan-1",
+                expense_category=None,
+                filter_expense_category=None,
+                after=None,
+                before=None,
+                sort_by="time",
+                sort_dir="desc",
+                page=1,
+                limit=100,
+                session=session,
+            )
+
+            session.refresh(row)
+            transaction = session.exec(select(Transaction).where(Transaction.source_message_id == row.id)).first()
+
+        self.assertEqual(response.status_code, 303)
+        self.assertIn("success=Ignored+deal", response.headers["location"])
+        self.assertEqual(row.parse_status, PARSE_IGNORED)
+        self.assertFalse(row.is_deleted)
+        self.assertFalse(row.needs_review)
+        self.assertIsNone(row.amount)
+        self.assertIsNone(transaction)
+
+    def test_manual_delete_duplicate_deal_marks_deleted_and_clears_transaction(self) -> None:
+        with Session(self.engine) as session, patch("app.routers.messages.require_role_response", return_value=None):
+            row = DiscordMessage(
+                discord_message_id="duplicate-delete",
+                channel_id="chan-1",
+                channel_name="deals",
+                author_name="tester",
+                content="duplicate deal",
+                created_at=utcnow(),
+                parse_status=PARSE_PARSED,
+                deal_type="sell",
+                amount=25.0,
+                payment_method="cash",
+                entry_kind="sale",
+                money_in=25.0,
+                money_out=0.0,
+                expense_category="inventory",
+            )
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            session.add(Transaction(source_message_id=row.id, occurred_at=row.created_at, amount=25.0, money_in=25.0))
+            session.commit()
+
+            request = make_request("/messages/1/delete-form")
+            request.state.current_user = SimpleNamespace(username="reviewer", display_name="Reviewer")
+            response = messages_module.delete_message_form(
+                request,
+                message_id=row.id,
+                return_path="/deals",
+                status=None,
+                channel_id=None,
+                expense_category=None,
+                filter_expense_category=None,
+                after=None,
+                before=None,
+                sort_by=None,
+                sort_dir=None,
+                page=1,
+                limit=25,
+                session=session,
+            )
+
+            session.refresh(row)
+            transaction = session.exec(select(Transaction).where(Transaction.source_message_id == row.id)).first()
+
+        self.assertEqual(response.status_code, 303)
+        self.assertIn("success=Deleted+duplicate+deal", response.headers["location"])
+        self.assertEqual(row.parse_status, PARSE_IGNORED)
+        self.assertTrue(row.is_deleted)
+        self.assertIsNotNone(row.deleted_at)
+        self.assertIsNone(row.amount)
+        self.assertIsNone(transaction)
+
+    def test_table_and_deal_templates_expose_ignore_and_delete_duplicate_actions(self) -> None:
+        table_source = Path("app/templates/messages_table.html").read_text(encoding="utf-8")
+        detail_source = Path("app/templates/deal_detail.html").read_text(encoding="utf-8")
+
+        self.assertIn('/messages/{{ row[\'id\'] }}/ignore-form', table_source)
+        self.assertIn('/messages/{{ row[\'id\'] }}/delete-form', table_source)
+        self.assertIn("/messages/{{ deal['id'] }}/ignore-form", detail_source)
+        self.assertIn("/messages/{{ deal['id'] }}/delete-form", detail_source)
+        self.assertIn("Delete duplicate", table_source)
+        self.assertIn("Delete Duplicate", detail_source)
 
 
 if __name__ == "__main__":

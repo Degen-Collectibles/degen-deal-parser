@@ -385,8 +385,40 @@ def mark_incorrect_message_form(
         status_code=303,
     )
 
-@router.post("/messages/{message_id}/disregard-form")
-def disregard_message_form(
+def _redirect_after_message_action(
+    *,
+    return_path: str,
+    status: Optional[str],
+    channel_id: Optional[str],
+    expense_category: Optional[str],
+    filter_expense_category: Optional[str],
+    after: Optional[str],
+    before: Optional[str],
+    sort_by: Optional[str],
+    sort_dir: Optional[str],
+    page: int,
+    limit: int,
+    success: str,
+) -> RedirectResponse:
+    selected_expense_category = filter_expense_category or expense_category
+    redirect_url = build_return_url(
+        return_path,
+        status=status,
+        channel_id=channel_id,
+        expense_category=selected_expense_category,
+        after=after,
+        before=before,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        page=page,
+        limit=limit,
+    )
+    separator = "&" if "?" in redirect_url else "?"
+    return RedirectResponse(url=f"{redirect_url}{separator}success={success}", status_code=303)
+
+
+@router.post("/messages/{message_id}/ignore-form")
+def ignore_message_form(
     request: Request,
     message_id: int,
     return_path: str = Form(default="/table"),
@@ -414,28 +446,113 @@ def disregard_message_form(
     row.last_error = None
     row.reviewed_by = current_user_label(request)
     row.reviewed_at = utcnow()
-    row.notes = "Manually disregarded in review."
+    row.notes = "Manually ignored by reviewer."
     session.add(row)
     sync_transaction_from_message(session, row)
     session.commit()
 
-    selected_expense_category = filter_expense_category or expense_category
-    redirect_url = build_return_url(
-        return_path,
+    return _redirect_after_message_action(
+        return_path=return_path,
         status=status,
         channel_id=channel_id,
-        expense_category=selected_expense_category,
+        expense_category=expense_category,
+        filter_expense_category=filter_expense_category,
         after=after,
         before=before,
         sort_by=sort_by,
         sort_dir=sort_dir,
         page=page,
         limit=limit,
+        success=f"Ignored+deal+{message_id}",
     )
-    separator = "&" if "?" in redirect_url else "?"
-    return RedirectResponse(
-        url=f"{redirect_url}{separator}success=Disregarded+message+{message_id}",
-        status_code=303,
+
+
+@router.post("/messages/{message_id}/disregard-form")
+def disregard_message_form(
+    request: Request,
+    message_id: int,
+    return_path: str = Form(default="/table"),
+    status: Optional[str] = Form(default=None),
+    channel_id: Optional[str] = Form(default=None),
+    expense_category: Optional[str] = Form(default=None),
+    filter_expense_category: Optional[str] = Form(default=None),
+    after: Optional[str] = Form(default=None),
+    before: Optional[str] = Form(default=None),
+    sort_by: Optional[str] = Form(default=None),
+    sort_dir: Optional[str] = Form(default=None),
+    page: int = Form(default=1),
+    limit: int = Form(default=100),
+    session: Session = Depends(get_session),
+):
+    return ignore_message_form(
+        request,
+        message_id,
+        return_path,
+        status,
+        channel_id,
+        expense_category,
+        filter_expense_category,
+        after,
+        before,
+        sort_by,
+        sort_dir,
+        page,
+        limit,
+        session,
+    )
+
+
+@router.post("/messages/{message_id}/delete-form")
+def delete_message_form(
+    request: Request,
+    message_id: int,
+    return_path: str = Form(default="/table"),
+    status: Optional[str] = Form(default=None),
+    channel_id: Optional[str] = Form(default=None),
+    expense_category: Optional[str] = Form(default=None),
+    filter_expense_category: Optional[str] = Form(default=None),
+    after: Optional[str] = Form(default=None),
+    before: Optional[str] = Form(default=None),
+    sort_by: Optional[str] = Form(default=None),
+    sort_dir: Optional[str] = Form(default=None),
+    page: int = Form(default=1),
+    limit: int = Form(default=100),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "reviewer"):
+        return denial
+    row = session.get(DiscordMessage, message_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    now = utcnow()
+    clear_parsed_fields(row)
+    row.is_deleted = True
+    row.deleted_at = now
+    row.edited_at = now
+    row.parse_status = PARSE_IGNORED
+    row.needs_review = False
+    row.last_error = "Manually deleted duplicate deal."
+    row.reviewed_by = current_user_label(request)
+    row.reviewed_at = now
+    row.notes = "Manually deleted duplicate deal."
+    session.add(row)
+    sync_transaction_from_message(session, row)
+    session.commit()
+
+    return _redirect_after_message_action(
+        return_path=return_path,
+        status=status,
+        channel_id=channel_id,
+        expense_category=expense_category,
+        filter_expense_category=filter_expense_category,
+        after=after,
+        before=before,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        page=page,
+        limit=limit,
+        success=f"Deleted+duplicate+deal+{message_id}",
     )
 
 

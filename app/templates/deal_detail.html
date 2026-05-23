@@ -219,6 +219,8 @@
 
                         <div class="lx-action-row" style="margin-top:16px;">
                             <button type="submit" class="lx-btn lx-btn-primary">Save Changes</button>
+                            <button type="submit" class="lx-btn" formaction="/messages/{{ deal['id'] }}/ignore-form" formmethod="post">Ignore Deal</button>
+                            <button type="submit" class="lx-btn" formaction="/messages/{{ deal['id'] }}/delete-form" formmethod="post" onclick="return confirm('Delete this duplicate deal from tables and deals? The raw Discord log will be kept.');">Delete Duplicate</button>
                             <a href="{{ back_url }}" class="lx-btn">Back to Deals</a>
                         </div>
                     </form>
