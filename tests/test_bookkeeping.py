@@ -20,10 +20,10 @@ def _set_test_env_default(key: str, value: str) -> None:
         os.environ[key] = value
 
 
-# These tests import app.main to exercise the Plaid webhook route. Keep the
-# unrelated employee portal middleware disabled, and still provide a valid PII
-# key so an externally-enabled portal env cannot fail closed during collection.
-os.environ["EMPLOYEE_PORTAL_ENABLED"] = "false"
+# These tests import app.main to exercise the Plaid webhook route. Provide a
+# valid PII key so an externally-enabled employee portal env cannot fail closed
+# during app import, but do not flip EMPLOYEE_PORTAL_ENABLED globally: unittest
+# discovery runs later employee-portal tests in this same Python process.
 _set_test_env_default("EMPLOYEE_PII_KEY", Fernet.generate_key().decode("ascii"))
 _set_test_env_default("SESSION_SECRET", "bookkeeping-test-session-xxxxxxxxxxxxxxxx")
 _set_test_env_default("ADMIN_PASSWORD", "bookkeeping-test-admin-password")
