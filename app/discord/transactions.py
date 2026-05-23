@@ -36,6 +36,13 @@ def _is_non_operating_transaction(entry_kind: str, expense_category: str) -> boo
     return entry_kind in NON_OPERATING_ENTRY_KINDS or expense_category in NON_OPERATING_EXPENSE_CATEGORIES
 
 
+def is_non_operating_transaction(entry_kind: str | None, expense_category: str | None) -> bool:
+    return _is_non_operating_transaction(
+        (entry_kind or "").strip().lower(),
+        (expense_category or "").strip().lower(),
+    )
+
+
 def is_transaction_message(row: DiscordMessage) -> bool:
     if row.is_deleted:
         return False

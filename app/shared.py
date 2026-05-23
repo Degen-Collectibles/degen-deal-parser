@@ -44,6 +44,7 @@ from .discord.channels import (
     get_watched_channels,
     update_backfill_window,
 )
+from .discord.bank_reconciliation import build_finance_bank_expense_data
 from .config import get_settings
 from .discord.corrections import (
     get_learning_signal,
@@ -141,7 +142,13 @@ from .display_media import (
     normalize_attachment_urls_for_row,
     row_has_images,
 )
-from .discord.transactions import build_transaction_summary, get_transactions, rebuild_transactions, sync_transaction_from_message
+from .discord.transactions import (
+    build_transaction_summary,
+    get_transactions,
+    is_non_operating_transaction,
+    rebuild_transactions,
+    sync_transaction_from_message,
+)
 from .tiktok.tiktok_auth_refresh import refresh_tiktok_auth_if_needed as _refresh_tiktok_auth_fn
 from .tiktok.tiktok_ingest import (
     TikTokIngestError,
@@ -1281,11 +1288,14 @@ def compose_finance_statement(
     discord_summary: dict[str, object],
     shopify_summary: dict[str, object],
     tiktok_summary: dict[str, object],
+    bank_expense_data: Optional[dict[str, object]] = None,
     day_count: int,
 ) -> dict[str, object]:
     discord_totals = discord_summary.get("totals", {})
 
-    discord_money_in = round(float(discord_totals.get("money_in", 0.0) or 0.0), 2)
+    discord_gross_money_in = round(float(discord_totals.get("money_in", 0.0) or 0.0), 2)
+    discord_non_operating_money_in = round(float(discord_totals.get("non_operating_money_in", 0.0) or 0.0), 2)
+    discord_money_in = round(max(discord_gross_money_in - discord_non_operating_money_in, 0.0), 2)
     discord_money_out = round(float(discord_totals.get("money_out", 0.0) or 0.0), 2)
     discord_sales = round(float(discord_totals.get("sales", 0.0) or 0.0), 2)
     discord_buys = round(float(discord_totals.get("buys", 0.0) or 0.0), 2)
@@ -1293,18 +1303,27 @@ def compose_finance_statement(
     discord_trade_out = round(float(discord_totals.get("trade_cash_out", 0.0) or 0.0), 2)
     inventory_expense = round(float(discord_totals.get("inventory_expenses", 0.0) or 0.0), 2)
 
-    inventory_spend = round(
+    discord_inventory_spend = round(
         float(discord_totals.get("inventory_spend", 0.0) or 0.0),
         2,
     )
-    if not inventory_spend:
-        inventory_spend = round(discord_buys + discord_trade_out + inventory_expense, 2)
-    operating_expenses = round(
+    if not discord_inventory_spend:
+        discord_inventory_spend = round(discord_buys + discord_trade_out + inventory_expense, 2)
+
+    bank_expenses = bank_expense_data or {}
+    bank_inventory_spend = round(float(bank_expenses.get("inventory_total", 0.0) or 0.0), 2)
+    bank_non_operating_outflow = round(float(bank_expenses.get("non_operating_total", 0.0) or 0.0), 2)
+    bank_only_outflow = round(float(bank_expenses.get("bank_only_total", 0.0) or 0.0), 2)
+    bank_operating_expenses = round(max(bank_only_outflow - bank_inventory_spend - bank_non_operating_outflow, 0.0), 2)
+    inventory_spend = round(discord_inventory_spend + bank_inventory_spend, 2)
+
+    discord_operating_expenses = round(
         float(discord_totals.get("operating_expenses", 0.0) or 0.0),
         2,
     )
-    if not operating_expenses:
-        operating_expenses = round(max(discord_money_out - inventory_spend, 0.0), 2)
+    if not discord_operating_expenses:
+        discord_operating_expenses = round(max(discord_money_out - discord_inventory_spend, 0.0), 2)
+    operating_expenses = round(discord_operating_expenses + bank_operating_expenses, 2)
 
     shopify_net_revenue = round(float(shopify_summary.get("net_revenue", 0.0) or 0.0), 2)
     shopify_tax = round(float(shopify_summary.get("total_tax", 0.0) or 0.0), 2)
@@ -1323,6 +1342,8 @@ def compose_finance_statement(
 
     return {
         "discord_rows": int(discord_summary.get("rows", 0) or 0),
+        "discord_gross_money_in": discord_gross_money_in,
+        "discord_non_operating_money_in": discord_non_operating_money_in,
         "discord_revenue": discord_money_in,
         "discord_money_out": discord_money_out,
         "discord_sales": discord_sales,
@@ -1330,7 +1351,12 @@ def compose_finance_statement(
         "discord_trade_in": discord_trade_in,
         "discord_trade_out": discord_trade_out,
         "inventory_expense": inventory_expense,
+        "discord_inventory_spend": discord_inventory_spend,
+        "bank_inventory_spend": bank_inventory_spend,
         "inventory_spend": inventory_spend,
+        "discord_operating_expenses": discord_operating_expenses,
+        "bank_operating_expenses": bank_operating_expenses,
+        "bank_non_operating_outflow": bank_non_operating_outflow,
         "operating_expenses": operating_expenses,
         "shopify_net_revenue": shopify_net_revenue,
         "shopify_tax": shopify_tax,
@@ -1360,6 +1386,8 @@ def compose_finance_statement(
         "inventory_spend_display": format_dashboard_money(inventory_spend),
         "operating_expenses_display": format_dashboard_money(operating_expenses),
         "external_tax_display": format_dashboard_money(external_tax),
+        "discord_gross_money_in_display": format_dashboard_money(discord_gross_money_in),
+        "discord_non_operating_money_in_display": format_dashboard_money(discord_non_operating_money_in),
         "discord_revenue_display": format_dashboard_money(discord_money_in),
         "shopify_net_revenue_display": format_dashboard_money(shopify_net_revenue),
         "tiktok_net_revenue_display": format_dashboard_money(tiktok_net_revenue),
@@ -1368,6 +1396,11 @@ def compose_finance_statement(
         "discord_trade_in_display": format_dashboard_money(discord_trade_in),
         "discord_trade_out_display": format_dashboard_money(discord_trade_out),
         "inventory_expense_display": format_dashboard_money(inventory_expense),
+        "discord_inventory_spend_display": format_dashboard_money(discord_inventory_spend),
+        "bank_inventory_spend_display": format_dashboard_money(bank_inventory_spend),
+        "discord_operating_expenses_display": format_dashboard_money(discord_operating_expenses),
+        "bank_operating_expenses_display": format_dashboard_money(bank_operating_expenses),
+        "bank_non_operating_outflow_display": format_dashboard_money(bank_non_operating_outflow),
         "avg_daily_revenue_display": format_dashboard_money(round(revenue / max(day_count, 1), 2)),
         "avg_daily_profit_display": format_dashboard_money(round(operating_profit / max(day_count, 1), 2)),
         "gross_margin_display": format_percent_value(gross_margin_pct),
@@ -1410,6 +1443,7 @@ def build_finance_daily_rows(
     transactions,
     shopify_rows,
     tiktok_rows,
+    bank_daily_rows: Optional[list[dict[str, object]]] = None,
     start: datetime,
     end: datetime,
 ) -> list[dict[str, object]]:
@@ -1431,6 +1465,8 @@ def build_finance_daily_rows(
         money_out = normalize_money_value(row.money_out)
         entry_kind = (row.entry_kind or "unknown").strip().lower()
         expense_category = (row.expense_category or "").strip().lower()
+        if is_non_operating_transaction(entry_kind, expense_category):
+            continue
         bucket["discord_revenue"] = float(bucket["discord_revenue"]) + money_in
         bucket["transaction_count"] = int(bucket["transaction_count"]) + 1
         if entry_kind in {"buy", "trade"} or (entry_kind == "expense" and expense_category == "inventory"):
@@ -1457,6 +1493,18 @@ def build_finance_daily_rows(
         bucket = daily[day_key]
         bucket["tiktok_revenue"] = float(bucket["tiktok_revenue"]) + external_order_net_revenue(row)
         bucket["platform_orders"] = int(bucket["platform_orders"]) + 1
+
+    for row in bank_daily_rows or []:
+        day_key = str(row.get("date") or "")
+        if day_key not in daily:
+            continue
+        bucket = daily[day_key]
+        bucket["inventory_spend"] = float(bucket["inventory_spend"]) + float(row.get("inventory", 0.0) or 0.0)
+        bucket["operating_expenses"] = (
+            float(bucket["operating_expenses"])
+            + float(row.get("operating", 0.0) or 0.0)
+            + float(row.get("uncategorized", 0.0) or 0.0)
+        )
 
     cumulative_profit = 0.0
     rows: list[dict[str, object]] = []
@@ -1538,16 +1586,19 @@ def build_finance_range_snapshot(
     shopify_summary = build_shopify_reporting_summary(shopify_rows)
     tiktok_rows = get_tiktok_reporting_rows(session, start=start, end=end)
     tiktok_summary = build_tiktok_reporting_summary(tiktok_rows)
+    bank_expense_data = build_finance_bank_expense_data(session, start=start, end=end, account_filter="all")
     statement = compose_finance_statement(
         discord_summary=discord_summary,
         shopify_summary=shopify_summary,
         tiktok_summary=tiktok_summary,
+        bank_expense_data=bank_expense_data,
         day_count=day_count,
     )
     daily_rows = build_finance_daily_rows(
         transactions=transactions,
         shopify_rows=shopify_rows,
         tiktok_rows=tiktok_rows,
+        bank_daily_rows=bank_expense_data["daily_rows"],
         start=start,
         end=end,
     )
@@ -1556,6 +1607,7 @@ def build_finance_range_snapshot(
         "discord_summary": discord_summary,
         "shopify_summary": shopify_summary,
         "tiktok_summary": tiktok_summary,
+        "bank_expense_data": bank_expense_data,
         "statement": statement,
         "daily_rows": daily_rows,
     }
@@ -1566,12 +1618,17 @@ def build_finance_statement_rows(
     prior_statement: dict[str, object],
 ) -> list[dict[str, object]]:
     row_specs = [
-        ("Discord cash-in sales", "discord_revenue", "money"),
+        ("Discord operating cash-in sales", "discord_revenue", "money"),
+        ("Discord non-operating cash in excluded", "discord_non_operating_money_in", "money"),
         ("Shopify product revenue", "shopify_net_revenue", "money"),
         ("TikTok Shop product revenue", "tiktok_net_revenue", "money"),
         ("Total revenue", "revenue", "money"),
+        ("Discord inventory cash out", "discord_inventory_spend", "money"),
+        ("Bank-only inventory/grading outflow", "bank_inventory_spend", "money"),
         ("Inventory cash out", "inventory_spend", "money"),
         ("Gross cash profit", "gross_profit", "money"),
+        ("Discord operating expenses", "discord_operating_expenses", "money"),
+        ("Bank-only operating outflow", "bank_operating_expenses", "money"),
         ("Operating expenses", "operating_expenses", "money"),
         ("Operating cash profit", "operating_profit", "money"),
         ("Operating margin", "operating_margin_pct", "percent"),
@@ -1602,11 +1659,11 @@ def build_finance_kpi_rows(
     prior_statement: dict[str, object],
 ) -> list[dict[str, object]]:
     kpi_specs = [
-        ("Product Revenue", "revenue", "money", "up", "Discord cash in + paid platform product sales"),
-        ("Gross Cash Profit", "gross_profit", "money", "up", "Revenue less inventory cash out"),
-        ("Operating Cash Profit", "operating_profit", "money", "up", "Gross cash profit after operating expenses"),
+        ("Product Revenue", "revenue", "money", "up", "Discord operating cash in + paid platform product sales; loans, transfers, paybacks, and bank payouts are excluded"),
+        ("Gross Cash Profit", "gross_profit", "money", "up", "Revenue less Discord and bank-only inventory cash out"),
+        ("Operating Cash Profit", "operating_profit", "money", "up", "Gross cash profit after Discord and bank-only operating expenses"),
         ("Operating Margin", "operating_margin_pct", "percent", "up", "Operating cash profit divided by product revenue"),
-        ("Inventory Cash Out", "inventory_spend", "money", "down", "Buys, trade cash out, and inventory expense rows"),
+        ("Inventory Cash Out", "inventory_spend", "money", "down", "Buys, trade cash out, inventory expense rows, and bank-only inventory/grading outflows"),
         ("Tax Collected", "external_tax", "money", "neutral", "Known Shopify and TikTok tax tracked outside revenue"),
     ]
 
@@ -1669,10 +1726,10 @@ def build_finance_source_mix_rows(statement: dict[str, object]) -> list[dict[str
 
 def build_finance_spend_mix_rows(statement: dict[str, object]) -> list[dict[str, object]]:
     spend_values = {
-        "Buys": float(statement.get("discord_buys", 0.0) or 0.0),
-        "Trade cash out": float(statement.get("discord_trade_out", 0.0) or 0.0),
-        "Inventory-tagged expenses": float(statement.get("inventory_expense", 0.0) or 0.0),
-        "Operating expenses": float(statement.get("operating_expenses", 0.0) or 0.0),
+        "Discord inventory cash out": float(statement.get("discord_inventory_spend", 0.0) or 0.0),
+        "Bank-only inventory/grading": float(statement.get("bank_inventory_spend", 0.0) or 0.0),
+        "Discord operating expenses": float(statement.get("discord_operating_expenses", 0.0) or 0.0),
+        "Bank-only operating outflow": float(statement.get("bank_operating_expenses", 0.0) or 0.0),
     }
     filtered = {label: value for label, value in spend_values.items() if value > 0}
     if not filtered:
@@ -1695,6 +1752,8 @@ def build_finance_spend_mix_rows(statement: dict[str, object]) -> list[dict[str,
 def build_finance_channel_rows(transactions) -> list[dict[str, object]]:
     channel_totals: dict[str, dict[str, object]] = {}
     for row in transactions:
+        if is_non_operating_transaction(row.entry_kind, row.expense_category):
+            continue
         channel_label = row.channel_name or row.channel_id or "Unknown channel"
         bucket = channel_totals.setdefault(
             channel_label,

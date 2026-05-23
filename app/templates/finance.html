@@ -655,11 +655,11 @@
             <div class="hero-copy">
                 <div class="eyebrow">Finance</div>
                 <h1>Finance Dashboard</h1>
-                <p>Owner finance check-in across Discord, Shopify, TikTok, and bank context. Paid product revenue, inventory cash out, operating spend, and tax are separated so the headline numbers line up with how the shop actually runs.</p>
+                <p>Owner finance check-in across Discord, Shopify, TikTok, and bank context. Paid product revenue comes from Discord operating sales and paid order rows; loans, transfers, paybacks, bank deposits, and platform payouts stay out of revenue.</p>
                 <div class="hero-meta">
                     <span class="chip">{{ range_data["window_label"] }}</span>
                     <span class="chip">{{ range_data["label"] }}</span>
-                    <span class="chip">Bank: {{ bank_expense_data["account_filter_label"] }}</span>
+                    <span class="chip">Bank detail: {{ bank_expense_data["account_filter_label"] }}</span>
                     <span class="chip">Updated {{ range_data["as_of_label"] }} PT</span>
                 </div>
             </div>
@@ -737,7 +737,7 @@
                     <div>
                         <p class="section-kicker">Trend</p>
                         <h2 class="section-title">Daily Operating View</h2>
-                        <p class="section-copy">Revenue, inventory cash out, operating spend, and profit by day.</p>
+                        <p class="section-copy">Revenue, Discord cash out, and bank-only outflows by day. Matched Discord rows and platform payout deposits are excluded from the bank add-back.</p>
                     </div>
                     <span class="tag">{{ range_data["day_count"] }} days</span>
                 </div>
@@ -792,7 +792,7 @@
                 <div>
                     <p class="section-kicker">Bank ledger</p>
                     <h2 class="section-title">Categorized Bank Expenses</h2>
-                    <p class="section-copy">Checking and credit-card outflows from Chase, reconciled against Discord logs. Rows already matched to Discord transactions are shown separately and excluded from bank-only totals to avoid double counting.</p>
+                    <p class="section-copy">Checking and credit-card outflows from Chase, reconciled against Discord logs. The headline statement uses all bank accounts; these account buttons only filter the detail charts below. Rows already matched to Discord transactions are shown separately and excluded from bank-only totals to avoid double counting. Shopify/TikTok payout deposits are not counted here because paid order rows carry platform revenue.</p>
                 </div>
                 <span class="tag">{{ bank_expense_data["row_count"] }} rows</span>
             </div>
@@ -966,7 +966,7 @@
                         </tbody>
                     </table>
                 </div>
-                <p class="caption">Paid platform orders use product subtotal or tax-excluded subtotal for revenue. Known tax is tracked separately, and missing tax affects tax completeness instead of removing the order from revenue.</p>
+                <p class="caption">Paid platform orders use product subtotal or tax-excluded subtotal for revenue. Known tax is tracked separately. Discord non-operating cash in is excluded from revenue. Bank-only negative outflows are subtracted as inventory or operating spend, while platform payout deposits are excluded to avoid counting Shopify/TikTok twice.</p>
             </article>
 
             <div class="stack">
@@ -1035,7 +1035,7 @@
                     <div>
                         <p class="section-kicker">Outflow</p>
                         <h2 class="section-title">Cash Deployment</h2>
-                        <p class="section-copy">How the selected range is consuming cash once revenue lands.</p>
+                        <p class="section-copy">Cash out from Discord plus bank-only negative outflows, excluding matched Discord rows, transfers/paybacks, and platform payout deposits.</p>
                     </div>
                 </div>
                 <div class="bar-list">
