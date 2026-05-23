@@ -654,11 +654,18 @@ def trigger_backfill_claim_attempt(client) -> bool:
     if client is None or client.is_closed() or not client.is_ready():
         return False
 
-    loop = asyncio.get_running_loop()
-    loop.create_task(
-        process_backfill_request_once(client),
-        name="backfill-queue-kick",
-    )
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+
+    # This kick is opportunistic; the persistent worker loop still claims queued requests.
+    coro = process_backfill_request_once(client)
+    try:
+        loop.create_task(coro, name="backfill-queue-kick")
+    except Exception:
+        coro.close()
+        return False
     return True
 
 

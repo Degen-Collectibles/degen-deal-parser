@@ -1,9 +1,15 @@
+import asyncio
 import json
 import unittest
+from unittest.mock import patch
 
 from sqlmodel import Session, SQLModel, create_engine
 
-from app.discord.backfill_requests import apply_backfill_request_state, repair_backfill_request_state_rows
+from app.discord.backfill_requests import (
+    apply_backfill_request_state,
+    repair_backfill_request_state_rows,
+    trigger_backfill_claim_attempt,
+)
 from app.models import (
     BACKFILL_CANCELLED,
     BACKFILL_COMPLETED,
@@ -85,6 +91,34 @@ class BackfillStateNormalizationTests(unittest.TestCase):
                 self.assertIn("final_result", payload)
         finally:
             engine.dispose()
+
+    def test_trigger_claim_attempt_is_noop_without_running_loop(self) -> None:
+        class ReadyClient:
+            def is_closed(self) -> bool:
+                return False
+
+            def is_ready(self) -> bool:
+                return True
+
+        self.assertFalse(trigger_backfill_claim_attempt(ReadyClient()))
+
+    def test_trigger_claim_attempt_schedules_when_loop_is_running(self) -> None:
+        class ReadyClient:
+            def is_closed(self) -> bool:
+                return False
+
+            def is_ready(self) -> bool:
+                return True
+
+        async def run_check() -> None:
+            async def noop(_client):
+                return False
+
+            with patch("app.discord.backfill_requests.process_backfill_request_once", side_effect=noop):
+                self.assertTrue(trigger_backfill_claim_attempt(ReadyClient()))
+                await asyncio.sleep(0)
+
+        asyncio.run(run_check())
 
 
 if __name__ == "__main__":
