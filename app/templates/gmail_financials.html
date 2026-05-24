@@ -289,6 +289,19 @@
                                     <button type="submit">Sync Gmail</button>
                                 </form>
                             </div>
+                            <form method="post" action="/bookkeeping/gmail/sync-form" class="filters" style="margin-top:12px;">
+                                <label>Backfill since
+                                    <input type="date" name="start_date" value="2026-01-01">
+                                </label>
+                                <label>Scan limit
+                                    <select name="sync_limit">
+                                        {% for item in [100,500,1000,2000] %}
+                                        <option value="{{ item }}" {% if item == 1000 %}selected{% endif %}>{{ item }}</option>
+                                        {% endfor %}
+                                    </select>
+                                </label>
+                                <button type="submit">Backfill Gmail</button>
+                            </form>
                             {% endif %}
                         </div>
                     </div>
@@ -301,6 +314,20 @@
                             <form method="post" action="/bookkeeping/gmail/sync-form" style="margin-top:10px;">
                                 <input type="hidden" name="connection_id" value="{{ conn.id }}">
                                 <button type="submit">Sync this mailbox</button>
+                            </form>
+                            <form method="post" action="/bookkeeping/gmail/sync-form" class="filters" style="margin-top:10px;">
+                                <input type="hidden" name="connection_id" value="{{ conn.id }}">
+                                <label>Backfill since
+                                    <input type="date" name="start_date" value="2026-01-01">
+                                </label>
+                                <label>Scan limit
+                                    <select name="sync_limit">
+                                        {% for item in [100,500,1000,2000] %}
+                                        <option value="{{ item }}" {% if item == 1000 %}selected{% endif %}>{{ item }}</option>
+                                        {% endfor %}
+                                    </select>
+                                </label>
+                                <button type="submit">Backfill this mailbox</button>
                             </form>
                         </div>
                         {% endfor %}

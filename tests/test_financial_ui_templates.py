@@ -66,3 +66,6 @@ def test_gmail_financials_template_has_receipt_transaction_table():
     assert "SortSwift" in source
     assert "<th>Transaction</th>" in source
     assert "<th>Bank Link</th>" in source
+    assert 'name="start_date"' in source
+    assert 'value="2026-01-01"' in source
+    assert 'name="sync_limit"' in source

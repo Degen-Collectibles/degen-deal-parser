@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import event, text
 from sqlmodel import SQLModel, Session, create_engine, select
@@ -47,6 +47,73 @@ def test_gmail_financial_query_targets_receipts_and_sortswift():
     assert "receipt" in query
     assert "no-reply@mail.sortswift.com" in query
     assert "-category:promotions" in query
+
+
+def test_gmail_financial_query_accepts_explicit_start_date():
+    query = build_gmail_financial_search_query(start_date=date(2026, 1, 1))
+
+    assert "after:2026/01/01" in query
+    assert "newer_than:" not in query
+    assert "invoice" in query
+    assert "no-reply@mail.sortswift.com" in query
+
+
+def test_sync_gmail_connection_can_backfill_from_start_date_and_paginate(monkeypatch):
+    import app.discord.gmail_financials as gmail_module
+
+    engine = make_engine()
+    list_calls = []
+
+    def fake_access_token(_session, _connection):
+        return "access-token"
+
+    def fake_gmail_get(_access_token, path, *, params=None):
+        if path == "/users/me/messages":
+            list_calls.append(dict(params or {}))
+            if "pageToken" not in (params or {}):
+                return {"messages": [{"id": "msg-1"}, {"id": "msg-2"}], "nextPageToken": "page-2"}
+            return {"messages": [{"id": "msg-3"}]}
+        message_id = path.rsplit("/", 1)[-1]
+        return {
+            "id": message_id,
+            "threadId": f"thread-{message_id}",
+            "internalDate": str(int(datetime(2026, 1, 5, 12, 0, tzinfo=timezone.utc).timestamp() * 1000)),
+            "snippet": "Receipt total USD $10.00",
+            "payload": {
+                "mimeType": "text/html",
+                "headers": [
+                    {"name": "From", "value": "Vendor <vendor@example.com>"},
+                    {"name": "Subject", "value": f"Receipt {message_id}"},
+                ],
+                "body": {"data": "UmVjZWlwdCB0b3RhbCBVU0QgJDEwLjAw"},
+            },
+        }
+
+    monkeypatch.setattr(gmail_module, "access_token_for_gmail_connection", fake_access_token)
+    monkeypatch.setattr(gmail_module, "_gmail_get", fake_gmail_get)
+
+    with Session(engine) as session:
+        connection = GmailConnection(email_address="degencollectiblesllc@gmail.com", status="active")
+        session.add(connection)
+        session.commit()
+        session.refresh(connection)
+
+        result = gmail_module.sync_gmail_connection(
+            session,
+            connection.id or 0,
+            start_date=date(2026, 1, 1),
+            limit=3,
+        )
+        receipts = session.exec(select(GmailReceipt)).all()
+
+    assert result["scanned"] == 3
+    assert result["imported"] == 3
+    assert len(receipts) == 3
+    assert len(list_calls) == 2
+    assert "after:2026/01/01" in list_calls[0]["q"]
+    assert list_calls[0]["maxResults"] == 3
+    assert list_calls[1]["pageToken"] == "page-2"
+    assert list_calls[1]["maxResults"] == 1
 
 
 def test_parse_sortswift_buylist_email_extracts_total_and_line_items():

@@ -6,7 +6,7 @@ import html
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from html.parser import HTMLParser
 from typing import Any, Optional
@@ -166,14 +166,24 @@ def build_gmail_oauth_url(state: str) -> str:
     return f"{GMAIL_AUTH_URL}?{urlencode(params)}"
 
 
-def build_gmail_financial_search_query(*, days: int = 180) -> str:
-    safe_days = max(1, min(int(days or 180), 3650))
+def _gmail_date_token(value: date | datetime | str) -> str:
+    if isinstance(value, datetime):
+        target = value.date()
+    elif isinstance(value, date):
+        target = value
+    else:
+        target = date.fromisoformat(str(value).strip())
+    return target.strftime("%Y/%m/%d")
+
+
+def build_gmail_financial_search_query(*, days: int = 180, start_date: date | datetime | str | None = None) -> str:
+    date_filter = f"after:{_gmail_date_token(start_date)}" if start_date else f"newer_than:{max(1, min(int(days or 180), 3650))}d"
     terms = (
         "invoice OR receipt OR \"order confirmation\" OR \"payment received\" OR "
         "\"your bill\" OR \"tax invoice\" OR \"purchase confirmation\" OR "
         "\"Buylist Confirmation\" OR from:no-reply@mail.sortswift.com"
     )
-    return f"newer_than:{safe_days}d ({terms}) -category:promotions -category:social"
+    return f"{date_filter} ({terms}) -category:promotions -category:social"
 
 
 def exchange_gmail_oauth_code(code: str) -> dict[str, Any]:
@@ -687,13 +697,23 @@ def _message_html(payload: dict[str, Any]) -> str:
     return "\n".join(part for part in text_parts if part) or _decode_part_body(payload)
 
 
-def sync_gmail_connection(session: Session, connection_id: int, *, limit: Optional[int] = None) -> dict[str, Any]:
+def sync_gmail_connection(
+    session: Session,
+    connection_id: int,
+    *,
+    limit: Optional[int] = None,
+    start_date: date | datetime | str | None = None,
+) -> dict[str, Any]:
     settings = get_settings()
     connection = session.get(GmailConnection, connection_id)
     if not connection:
         raise ValueError("Gmail connection not found")
     access_token = access_token_for_gmail_connection(session, connection)
-    query = connection.sync_query or build_gmail_financial_search_query(days=settings.gmail_sync_days)
+    query = (
+        build_gmail_financial_search_query(start_date=start_date)
+        if start_date
+        else connection.sync_query or build_gmail_financial_search_query(days=settings.gmail_sync_days)
+    )
     run = GmailSyncRun(connection_id=connection.id or 0, query=query)
     session.add(run)
     session.flush()
@@ -701,37 +721,51 @@ def sync_gmail_connection(session: Session, connection_id: int, *, limit: Option
     transaction_count = 0
     scanned = 0
     try:
-        search = _gmail_get(
-            access_token,
-            "/users/me/messages",
-            params={"q": query, "maxResults": max(1, min(limit or settings.gmail_sync_limit, 100))},
-        )
-        messages = search.get("messages") if isinstance(search.get("messages"), list) else []
-        for item in messages:
-            message_id = str(item.get("id") or "")
-            if not message_id:
-                continue
-            scanned += 1
-            message = _gmail_get(access_token, f"/users/me/messages/{message_id}", params={"format": "full"})
-            payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
-            received_at = None
-            internal_date = message.get("internalDate")
-            if internal_date:
-                received_at = datetime.fromtimestamp(int(internal_date) / 1000, tz=timezone.utc)
-            receipt = upsert_gmail_receipt_from_message(
-                session,
-                gmail_message_id=message_id,
-                thread_id=str(message.get("threadId") or ""),
-                sender=_message_header(payload, "From"),
-                subject=_message_header(payload, "Subject"),
-                received_at=received_at,
-                html_body=_message_html(payload),
-                snippet=str(message.get("snippet") or ""),
-                connection_id=connection.id,
+        total_limit = max(1, min(int(limit or settings.gmail_sync_limit), 2000))
+        page_token: Optional[str] = None
+        while scanned < total_limit:
+            remaining = total_limit - scanned
+            params: dict[str, Any] = {"q": query, "maxResults": min(remaining, 500)}
+            if page_token:
+                params["pageToken"] = page_token
+            search = _gmail_get(
+                access_token,
+                "/users/me/messages",
+                params=params,
             )
-            imported += 1
-            if receipt.transaction_id:
-                transaction_count += 1
+            messages = search.get("messages") if isinstance(search.get("messages"), list) else []
+            if not messages:
+                break
+            for item in messages:
+                if scanned >= total_limit:
+                    break
+                message_id = str(item.get("id") or "")
+                if not message_id:
+                    continue
+                scanned += 1
+                message = _gmail_get(access_token, f"/users/me/messages/{message_id}", params={"format": "full"})
+                payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
+                received_at = None
+                internal_date = message.get("internalDate")
+                if internal_date:
+                    received_at = datetime.fromtimestamp(int(internal_date) / 1000, tz=timezone.utc)
+                receipt = upsert_gmail_receipt_from_message(
+                    session,
+                    gmail_message_id=message_id,
+                    thread_id=str(message.get("threadId") or ""),
+                    sender=_message_header(payload, "From"),
+                    subject=_message_header(payload, "Subject"),
+                    received_at=received_at,
+                    html_body=_message_html(payload),
+                    snippet=str(message.get("snippet") or ""),
+                    connection_id=connection.id,
+                )
+                imported += 1
+                if receipt.transaction_id:
+                    transaction_count += 1
+            page_token = str(search.get("nextPageToken") or "")
+            if not page_token:
+                break
         connection.last_sync_at = utcnow()
         connection.last_sync_error = None
         connection.updated_at = utcnow()

@@ -8,6 +8,7 @@ from __future__ import annotations
 import csv
 import json
 import secrets
+from datetime import date
 from io import StringIO
 from typing import Any, Optional
 from urllib.parse import urlencode
@@ -129,6 +130,16 @@ def _gmail_redirect_url(
     if error:
         params["error"] = error
     return "/bookkeeping/gmail" + (f"?{urlencode(params)}" if params else "")
+
+
+def _parse_gmail_start_date(value: str) -> date | None:
+    cleaned = (value or "").strip()
+    if not cleaned:
+        return None
+    try:
+        return date.fromisoformat(cleaned)
+    except ValueError as exc:
+        raise ValueError("Use a Gmail start date like 2026-01-01") from exc
 
 
 def _bank_row_view(row: BankTransaction, matched_transaction: Optional[Transaction]) -> dict[str, object]:
@@ -449,6 +460,8 @@ def gmail_connect_callback(
 def gmail_sync_form(
     request: Request,
     connection_id: int = Form(default=0),
+    start_date: str = Form(default=""),
+    sync_limit: int = Form(default=0),
     session: Session = Depends(get_session),
 ):
     if denial := require_role_response(request, "reviewer"):
@@ -458,11 +471,18 @@ def gmail_sync_form(
         target_id = connection_id or (connections[0].id if connections else 0)
         if not target_id:
             raise ValueError("Connect Gmail before syncing")
-        result = sync_gmail_connection(session, int(target_id))
+        parsed_start_date = _parse_gmail_start_date(start_date)
+        result = sync_gmail_connection(
+            session,
+            int(target_id),
+            limit=sync_limit or None,
+            start_date=parsed_start_date,
+        )
+        sync_scope = f" since {parsed_start_date.isoformat()}" if parsed_start_date else ""
         return RedirectResponse(
             url=_gmail_redirect_url(
                 success=(
-                    f"Gmail sync scanned {result.get('scanned', 0)} message(s), "
+                    f"Gmail sync{sync_scope} scanned {result.get('scanned', 0)} message(s), "
                     f"imported {result.get('imported', 0)} receipt(s), "
                     f"created/updated {result.get('transactions', 0)} transaction(s)."
                 )
