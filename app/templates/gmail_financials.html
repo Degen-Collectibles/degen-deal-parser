@@ -50,7 +50,15 @@
         label { display: flex; flex-direction: column; gap: 6px; color: var(--muted); font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
         input, select { min-height: 39px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--text); padding: 8px 10px; font: inherit; }
         .table-shell { max-width: 100%; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
-        table { width: 100%; min-width: 1080px; border-collapse: separate; border-spacing: 0; }
+        table { width: 100%; min-width: 0; table-layout: fixed; border-collapse: separate; border-spacing: 0; }
+        th:nth-child(1), td:nth-child(1) { width: 12%; }
+        th:nth-child(2), td:nth-child(2) { width: 30%; }
+        th:nth-child(3), td:nth-child(3) { width: 11%; }
+        th:nth-child(4), td:nth-child(4) { width: 8%; }
+        th:nth-child(5), td:nth-child(5) { width: 10%; }
+        th:nth-child(6), td:nth-child(6) { width: 12%; }
+        th:nth-child(7), td:nth-child(7) { width: 9%; }
+        th:nth-child(8), td:nth-child(8) { width: 8%; }
         th, td { padding: 10px 12px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; font-size: 13px; }
         th { position: sticky; top: 0; background: var(--panel-strong); color: var(--muted); z-index: 1; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
         td { color: #f3f4f6; }
@@ -65,7 +73,7 @@
         .tab { padding: 8px 11px; border: 1px solid var(--line); color: var(--muted); background: var(--panel-strong); }
         .tab.active { color: #fff; background: var(--red); border-color: var(--red); }
         .feed-card { border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-top: 10px; background: var(--panel-strong); }
-        .mailbox-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: start; }
+        .mailbox-controls { display: grid; grid-template-columns: 1fr; gap: 12px; align-items: start; }
         .connection-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; }
         .feed-status { display: flex; gap: 8px; align-items: center; color: var(--muted); }
         .status-dot { width: 9px; height: 9px; border-radius: 50%; background: #6b7280; }
@@ -77,9 +85,11 @@
         .flash.error { background: rgba(239,68,68,.14); color: #fca5a5; border: 1px solid rgba(239,68,68,.3); }
         .empty { padding: 18px; color: var(--muted); }
         .actions-cell form { margin: 0; }
-        @media (max-width: 1050px) {
-            .mailbox-controls { grid-template-columns: 1fr; }
-        }
+        .actions-cell .button-row { flex-direction: column; align-items: stretch; }
+        .actions-cell button { width: 100%; padding: 9px 8px; }
+        .bank-link-form { display: grid; gap: 8px; align-items: stretch; }
+        .bank-link-form input { width: 100%; max-width: none !important; }
+        .bank-link-form button { width: 100%; }
         @media (max-width: 760px) {
             .page { padding: 16px 14px 36px; }
             table, thead, tbody, tr, td { display: block; min-width: 0; width: 100%; }
@@ -217,7 +227,7 @@
                                         <span class="pill">Optional</span>
                                         <div class="small" style="margin:6px 0 8px;">Cash/store-credit buy. Bank link is optional.</div>
                                         {% endif %}
-                                        <form method="post" action="/bookkeeping/gmail/receipts/{{ receipt.id }}/link-bank-form" class="button-row">
+                                        <form method="post" action="/bookkeeping/gmail/receipts/{{ receipt.id }}/link-bank-form" class="bank-link-form">
                                             <input type="number" name="bank_transaction_id" placeholder="Bank row ID" style="max-width:130px;">
                                             <button type="submit">Link</button>
                                         </form>
