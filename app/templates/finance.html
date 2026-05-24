@@ -293,7 +293,11 @@
             background: var(--lx-s2);
             border-radius: 14px;
             padding: 12px;
+            color: inherit;
+            text-decoration: none;
+            transition: border-color .18s ease, transform .18s ease;
         }
+        .readiness-card:hover { border-color: var(--line-strong); transform: translateY(-1px); }
         .readiness-label {
             color: var(--muted);
             font-size: 10px;
@@ -315,6 +319,15 @@
             font-size: 12px;
             line-height: 1.45;
         }
+        .readiness-action-link {
+            display: inline-flex;
+            margin-top: 10px;
+            color: #ffffff;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: .06em;
+            text-transform: uppercase;
+        }
         .readiness-actions {
             display: flex;
             flex-direction: column;
@@ -334,6 +347,37 @@
             margin-bottom: 20px;
         }
         .kpi-grid { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+        .model-strip {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 14px;
+            padding: 14px 16px;
+            border: 1px solid var(--line);
+            border-radius: 18px;
+            background: var(--lx-s1);
+            margin-bottom: 20px;
+        }
+        .model-chip {
+            flex: 0 0 auto;
+            padding: 8px 10px;
+            border-radius: 999px;
+            background: rgba(34, 197, 94, .12);
+            border: 1px solid rgba(34, 197, 94, .28);
+            color: #bbf7d0;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: .08em;
+            text-transform: uppercase;
+            white-space: nowrap;
+        }
+        .model-copy {
+            min-width: 0;
+            color: #cfd7df;
+            font-size: 13px;
+            line-height: 1.45;
+        }
+        .model-strip .quick-link { white-space: nowrap; }
         .chart-grid { grid-template-columns: minmax(0, 1.3fr) minmax(300px, .7fr); align-items: stretch; }
         .chart-stack { display: grid; gap: 20px; }
         .chart-panel-wide { min-height: 390px; }
@@ -429,6 +473,73 @@
             color: #b8c0ca;
             font-size: 13px;
             line-height: 1.6;
+        }
+        .metric-drilldown-link {
+            display: inline-flex;
+            margin-top: 12px;
+            color: #ffffff;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: .06em;
+            text-transform: uppercase;
+        }
+        .drilldown-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 16px;
+            margin-bottom: 20px;
+        }
+        .drilldown-card {
+            padding: 18px;
+            border-radius: 20px;
+            border: 1px solid var(--line);
+            background: var(--lx-s1);
+        }
+        .drilldown-card h3 {
+            margin: 0;
+            color: #ffffff;
+            font-size: 18px;
+            letter-spacing: -.02em;
+        }
+        .drilldown-card p {
+            margin: 8px 0 14px;
+            color: #b8c0ca;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+        .drilldown-row {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 12px;
+            padding: 9px 0;
+            border-top: 1px solid var(--line);
+        }
+        .drilldown-label {
+            color: #e5e7eb;
+            font-size: 13px;
+            font-weight: 700;
+        }
+        .drilldown-detail {
+            margin-top: 3px;
+            color: #9ca3af;
+            font-size: 12px;
+            line-height: 1.4;
+        }
+        .drilldown-value {
+            color: #ffffff;
+            font-size: 13px;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+        }
+        .drilldown-action {
+            display: inline-flex;
+            margin-top: 14px;
+            color: #ffffff;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: .06em;
+            text-transform: uppercase;
         }
         .section-head {
             display: flex;
@@ -607,6 +718,10 @@
             .hero {
                 grid-template-columns: 1fr;
             }
+            .model-strip {
+                align-items: flex-start;
+                flex-direction: column;
+            }
             .quick-row { justify-content: flex-start; }
             .readiness-actions {
                 flex-direction: row;
@@ -688,11 +803,12 @@
             </div>
             <div class="readiness-grid">
                 {% for row in quality_rows %}
-                <div class="readiness-card">
+                {% if row["action_url"] %}<a class="readiness-card" href="{{ row['action_url'] }}">{% else %}<div class="readiness-card">{% endif %}
                     <div class="readiness-label">{{ row["label"] }}</div>
                     <div class="readiness-value">{{ row["value"] }}</div>
                     <div class="readiness-detail">{{ row["detail"] }}</div>
-                </div>
+                    {% if row["action_url"] %}<div class="readiness-action-link">{{ row["action_label"] }}</div>{% endif %}
+                {% if row["action_url"] %}</a>{% else %}</div>{% endif %}
                 {% endfor %}
             </div>
             <div class="readiness-actions">
@@ -701,7 +817,7 @@
             </div>
         </section>
 
-        <section class="panel toolbar">
+        <section class="panel toolbar" id="finance-range-controls">
             <form method="get" action="/finance" class="filters">
                 <label>
                     Start (Pacific Time)
@@ -723,6 +839,12 @@
             </div>
         </section>
 
+        <section class="model-strip" id="finance-model">
+            <span class="model-chip">Model: 20% gross product margin</span>
+            <div class="model-copy">Estimated gross profit is product revenue multiplied by 20%. Inventory and grading purchases remain visible as cash deployed, but they are not treated as immediate profit loss.</div>
+            <a href="#finance-drilldown-gross-profit" class="quick-link legacy">View model math</a>
+        </section>
+
         <section class="kpi-grid">
             {% for row in kpi_rows %}
             <article class="metric-card">
@@ -730,6 +852,26 @@
                 <div class="metric-value">{{ row["value_display"] }}</div>
                 <div class="metric-delta {{ row['tone'] }}">{{ row["delta_display"] }} vs {{ range_data["previous_label"] }}</div>
                 <div class="metric-footnote">{{ row["footnote"] }}</div>
+                <a class="metric-drilldown-link" href="{{ row['drilldown_href'] }}">View breakdown</a>
+            </article>
+            {% endfor %}
+        </section>
+
+        <section class="drilldown-grid" aria-label="Explain the numbers">
+            {% for row in kpi_drilldown_rows %}
+            <article class="drilldown-card" id="{{ row['drilldown_id'] }}">
+                <h3>{{ row["title"] }}</h3>
+                <p>{{ row["body"] }}</p>
+                {% for item in row["items"] %}
+                <div class="drilldown-row">
+                    <div>
+                        <div class="drilldown-label">{{ item["label"] }}</div>
+                        {% if item["detail"] %}<div class="drilldown-detail">{{ item["detail"] }}</div>{% endif %}
+                    </div>
+                    <div class="drilldown-value">{{ item["value"] }}</div>
+                </div>
+                {% endfor %}
+                <a class="drilldown-action" href="{{ row['action_url'] }}">{{ row["action_label"] }}</a>
             </article>
             {% endfor %}
         </section>
@@ -940,7 +1082,7 @@
         </section>
 
         <section class="content-grid">
-            <article class="panel">
+            <article class="panel" id="finance-statement">
                 <div class="section-head">
                     <div>
                         <p class="section-kicker">Statement</p>
@@ -1005,6 +1147,7 @@
                             <div class="quality-label">{{ row["label"] }}</div>
                             <div class="quality-value">{{ row["value"] }}</div>
                             <div class="quality-detail">{{ row["detail"] }}</div>
+                            {% if row["action_url"] %}<a class="readiness-action-link" href="{{ row['action_url'] }}">{{ row["action_label"] }}</a>{% endif %}
                         </div>
                         {% endfor %}
                     </div>
@@ -1013,7 +1156,7 @@
         </section>
 
         <section class="data-grid">
-            <article class="panel">
+            <article class="panel" id="revenue-sources">
                 <div class="section-head">
                     <div>
                         <p class="section-kicker">Mix</p>
@@ -1033,7 +1176,7 @@
                 </div>
             </article>
 
-            <article class="panel">
+            <article class="panel" id="cash-deployment">
                 <div class="section-head">
                     <div>
                         <p class="section-kicker">Outflow</p>

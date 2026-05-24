@@ -471,6 +471,10 @@ def finance_page(
             "prior_statement": prior_statement,
             "kpi_rows": kpi_rows,
             "finance_hero_kpi": finance_hero_kpi,
+            "kpi_drilldown_rows": build_finance_kpi_drilldown_rows(
+                current_statement,
+                range_data=range_data,
+            ),
             "statement_rows": build_finance_statement_rows(current_statement, prior_statement),
             "source_mix_rows": source_mix_rows,
             "spend_mix_rows": spend_mix_rows,

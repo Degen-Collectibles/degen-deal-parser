@@ -85,6 +85,29 @@ def test_finance_kpi_values_stay_on_one_line_in_narrow_cards():
     assert "font-size: clamp(28px, 2.6vw, 40px);" not in template
 
 
+def test_finance_kpis_link_to_drilldowns_and_model_explanation():
+    template = _template_text()
+
+    assert 'id="finance-range-controls"' in template
+    assert 'class="model-strip"' in template
+    assert "Model: 20% gross product margin" in template
+    assert 'href="{{ row[\'drilldown_href\'] }}"' in template
+    assert "View breakdown" in template
+    assert "kpi_drilldown_rows" in template
+    assert 'id="{{ row[\'drilldown_id\'] }}"' in template
+    assert "Explain the numbers" in template
+    assert 'id="revenue-sources"' in template
+    assert 'id="cash-deployment"' in template
+
+
+def test_finance_quality_cards_link_to_cleanup_actions():
+    template = _template_text()
+
+    assert "row[\"action_url\"]" in template
+    assert "row[\"action_label\"]" in template
+    assert "readiness-action-link" in template
+
+
 def test_finance_date_filters_label_pacific_time():
     template = _template_text()
 

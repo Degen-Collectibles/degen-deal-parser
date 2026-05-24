@@ -3,6 +3,9 @@ from datetime import datetime, timezone
 from app.shared import (
     build_finance_daily_rows,
     build_finance_channel_rows,
+    build_finance_kpi_drilldown_rows,
+    build_finance_kpi_rows,
+    build_finance_quality_rows,
     build_finance_spend_mix_rows,
     build_finance_statement_rows,
     compose_finance_statement,
@@ -44,6 +47,90 @@ def test_finance_statement_uses_assumed_gross_margin_and_keeps_inventory_as_cash
     assert statement["gross_margin_pct"] == 20.0
     assert statement["bank_operating_expenses"] == 170.0
     assert statement["bank_inventory_spend"] == 40.0
+
+
+def test_finance_kpi_rows_link_to_drilldown_sections():
+    current = {
+        "revenue": 1300.0,
+        "gross_profit": 260.0,
+        "operating_profit": 40.0,
+        "operating_margin_pct": 3.1,
+        "inventory_spend": 340.0,
+        "external_tax": 27.0,
+    }
+    prior = {key: 0.0 for key in current}
+
+    rows = build_finance_kpi_rows(current, prior)
+    by_key = {row["key"]: row for row in rows}
+
+    assert by_key["revenue"]["drilldown_href"] == "#finance-drilldown-revenue"
+    assert by_key["gross_profit"]["drilldown_href"] == "#finance-drilldown-gross-profit"
+    assert by_key["operating_profit"]["drilldown_href"] == "#finance-drilldown-operating-profit"
+    assert by_key["inventory_spend"]["drilldown_href"] == "#finance-drilldown-inventory-spend"
+
+
+def test_finance_kpi_drilldowns_explain_margin_model_and_actions():
+    statement = {
+        "discord_revenue": 1000.0,
+        "shopify_net_revenue": 200.0,
+        "tiktok_net_revenue": 100.0,
+        "revenue": 1300.0,
+        "estimated_cogs": 1040.0,
+        "gross_profit": 260.0,
+        "discord_inventory_spend": 300.0,
+        "bank_inventory_spend": 40.0,
+        "inventory_spend": 340.0,
+        "discord_operating_expenses": 50.0,
+        "bank_operating_expenses": 170.0,
+        "operating_expenses": 220.0,
+        "operating_profit": 40.0,
+        "operating_margin_pct": 3.1,
+        "shopify_tax": 18.0,
+        "tiktok_tax": 9.0,
+        "external_tax": 27.0,
+    }
+    range_data = {"selected_start": "2026-05-01", "selected_end": "2026-05-23"}
+
+    rows = build_finance_kpi_drilldown_rows(statement, range_data=range_data)
+    by_key = {row["key"]: row for row in rows}
+
+    gross_items = [item["label"] for item in by_key["gross_profit"]["items"]]
+    operating_items = [item["label"] for item in by_key["operating_profit"]["items"]]
+    inventory = by_key["inventory_spend"]
+
+    assert by_key["gross_profit"]["title"] == "Estimated Gross Profit"
+    assert "20% gross product margin" in by_key["gross_profit"]["body"]
+    assert "Estimated product COGS (80%)" in gross_items
+    assert "Estimated gross product profit (20%)" in gross_items
+    assert "Operating expenses" in operating_items
+    assert inventory["action_url"] == "/bookkeeping/bank?expense_category=inventory"
+    assert by_key["revenue"]["action_url"] == "/reports?start=2026-05-01&end=2026-05-23"
+
+
+def test_finance_quality_rows_have_direct_action_links():
+    rows = build_finance_quality_rows(
+        current_statement={
+            "discord_rows": 571,
+            "review_required": 39,
+            "shopify_paid_orders": 1657,
+            "tiktok_paid_orders": 6787,
+            "tax_unknown_orders": 0,
+        },
+        range_data={
+            "day_count": 23,
+            "label": "May 01 - May 23, 2026",
+            "selected_start": "2026-05-01",
+            "selected_end": "2026-05-23",
+        },
+    )
+    by_label = {row["label"]: row for row in rows}
+
+    assert by_label["Range length"]["action_url"] == "#finance-range-controls"
+    assert by_label["Discord rows"]["action_label"] == "Review rows"
+    assert "/review-table" in by_label["Discord rows"]["action_url"]
+    assert "after=2026-05-01" in by_label["Discord rows"]["action_url"]
+    assert by_label["Paid platform orders"]["action_url"] == "/reports?start=2026-05-01&end=2026-05-23"
+    assert by_label["Tax completeness"]["action_label"] == "View tax detail"
 
 
 def test_finance_statement_excludes_discord_non_operating_money_in_from_revenue():

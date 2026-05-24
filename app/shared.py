@@ -1703,9 +1703,165 @@ def build_finance_kpi_rows(
                 "delta_display": delta_display,
                 "footnote": footnote,
                 "tone": tone,
+                "drilldown_id": f"finance-drilldown-{key.replace('_', '-')}",
+                "drilldown_href": f"#finance-drilldown-{key.replace('_', '-')}",
             }
         )
     return rows
+
+
+def _finance_selected_dates(range_data: dict[str, object]) -> tuple[str, str]:
+    return str(range_data.get("selected_start") or ""), str(range_data.get("selected_end") or "")
+
+
+def _finance_ledger_url(
+    range_data: dict[str, object],
+    *,
+    status: str = "all",
+    category: str = "",
+    source: str = "",
+    action_reason: str = "",
+) -> str:
+    start, end = _finance_selected_dates(range_data)
+    params: dict[str, str] = {
+        "include_cash": "false",
+        "sort": "amount",
+        "direction": "desc",
+    }
+    if start:
+        params["start"] = start
+    if end:
+        params["end"] = end
+    if status and status != "all":
+        params["status"] = status
+    if category:
+        params["category"] = category
+    if source:
+        params["source"] = source
+    if action_reason:
+        params["action_reason"] = action_reason
+    return f"/ledger?{urlencode(params)}"
+
+
+def _finance_reports_url(range_data: dict[str, object], *, source: str = REPORT_SOURCE_ALL) -> str:
+    start, end = _finance_selected_dates(range_data)
+    return build_reports_url(source=source, start=start, end=end)
+
+
+def build_finance_kpi_drilldown_rows(
+    current_statement: dict[str, object],
+    *,
+    range_data: dict[str, object],
+) -> list[dict[str, object]]:
+    def money_item(label: str, key: str, detail: str = "") -> dict[str, str]:
+        value = float(current_statement.get(key, 0.0) or 0.0)
+        return {
+            "label": label,
+            "value": format_dashboard_money(value),
+            "detail": detail,
+        }
+
+    operating_expenses = money_item(
+        "Operating expenses",
+        "operating_expenses",
+        "Discord operating spend plus bank-only operating/uncategorized outflows.",
+    )
+    product_revenue = money_item(
+        "Product revenue",
+        "revenue",
+        "Discord operating cash in plus paid Shopify and TikTok product sales.",
+    )
+    gross_profit = money_item(
+        "Estimated gross product profit (20%)",
+        "gross_profit",
+        "Revenue multiplied by the owner's average gross product margin assumption.",
+    )
+
+    return [
+        {
+            "key": "revenue",
+            "drilldown_id": "finance-drilldown-revenue",
+            "title": "Product Revenue",
+            "body": "Paid product sales only. Loans, transfers, partner paybacks, bank deposits, and platform payouts stay out of revenue.",
+            "items": [
+                money_item("Discord operating sales", "discord_revenue"),
+                money_item("Shopify product revenue", "shopify_net_revenue"),
+                money_item("TikTok Shop product revenue", "tiktok_net_revenue"),
+                product_revenue,
+            ],
+            "action_label": "Open channel comparison",
+            "action_url": _finance_reports_url(range_data),
+        },
+        {
+            "key": "gross_profit",
+            "drilldown_id": "finance-drilldown-gross-profit",
+            "title": "Estimated Gross Profit",
+            "body": "Uses the 20% gross product margin assumption because item-level cost basis is not fully tracked.",
+            "items": [
+                product_revenue,
+                money_item("Estimated product COGS (80%)", "estimated_cogs"),
+                gross_profit,
+            ],
+            "action_label": "Review the model",
+            "action_url": "#finance-model",
+        },
+        {
+            "key": "operating_profit",
+            "drilldown_id": "finance-drilldown-operating-profit",
+            "title": "Estimated Operating Profit",
+            "body": "Estimated gross product profit after operating expenses. Inventory purchases stay in cash deployment, not profit loss.",
+            "items": [
+                gross_profit,
+                operating_expenses,
+                money_item("Estimated operating profit", "operating_profit"),
+            ],
+            "action_label": "Open ledger cleanup",
+            "action_url": _finance_ledger_url(range_data, status="needs_action"),
+        },
+        {
+            "key": "operating_margin_pct",
+            "drilldown_id": "finance-drilldown-operating-margin-pct",
+            "title": "Operating Margin",
+            "body": "Estimated operating profit divided by product revenue.",
+            "items": [
+                money_item("Estimated operating profit", "operating_profit"),
+                product_revenue,
+                {
+                    "label": "Operating margin",
+                    "value": format_percent_value(float(current_statement.get("operating_margin_pct", 0.0) or 0.0)),
+                    "detail": "Estimated operating profit / product revenue.",
+                },
+            ],
+            "action_label": "Open statement",
+            "action_url": "#finance-statement",
+        },
+        {
+            "key": "inventory_spend",
+            "drilldown_id": "finance-drilldown-inventory-spend",
+            "title": "Inventory Cash Deployed",
+            "body": "Cash put into inventory, grading, buys, and trades. This is tracked as cash movement and does not reduce estimated profit.",
+            "items": [
+                money_item("Discord inventory cash out", "discord_inventory_spend"),
+                money_item("Bank-only inventory/grading", "bank_inventory_spend"),
+                money_item("Inventory cash deployed", "inventory_spend"),
+            ],
+            "action_label": "Open bank inventory rows",
+            "action_url": "/bookkeeping/bank?expense_category=inventory",
+        },
+        {
+            "key": "external_tax",
+            "drilldown_id": "finance-drilldown-external-tax",
+            "title": "Tax Collected",
+            "body": "Known Shopify and TikTok tax is shown separately from product revenue.",
+            "items": [
+                money_item("Shopify tax", "shopify_tax"),
+                money_item("TikTok tax", "tiktok_tax"),
+                money_item("Tax collected", "external_tax"),
+            ],
+            "action_label": "Open platform reports",
+            "action_url": _finance_reports_url(range_data),
+        },
+    ]
 
 
 def build_finance_source_mix_rows(statement: dict[str, object]) -> list[dict[str, object]]:
@@ -1897,16 +2053,33 @@ def build_finance_quality_rows(
     current_statement: dict[str, object],
     range_data: dict[str, object],
 ) -> list[dict[str, str]]:
+    start, end = _finance_selected_dates(range_data)
+    review_params = {
+        "status": "review_required",
+        "sort_by": "time",
+        "sort_dir": "desc",
+        "limit": "100",
+    }
+    if start:
+        review_params["after"] = start
+    if end:
+        review_params["before"] = end
+    review_url = f"/review-table?{urlencode(review_params)}"
+    reports_url = _finance_reports_url(range_data)
     return [
         {
             "label": "Range length",
             "value": f"{range_data['day_count']} days",
             "detail": str(range_data["label"]),
+            "action_label": "Adjust range",
+            "action_url": "#finance-range-controls",
         },
         {
             "label": "Discord rows",
             "value": str(current_statement["discord_rows"]),
             "detail": f"{current_statement['review_required']} still flagged for review",
+            "action_label": "Review rows",
+            "action_url": review_url,
         },
         {
             "label": "Paid platform orders",
@@ -1917,11 +2090,15 @@ def build_finance_quality_rows(
                 f"Shopify {current_statement['shopify_paid_orders']} | "
                 f"TikTok {current_statement['tiktok_paid_orders']}"
             ),
+            "action_label": "Compare channels",
+            "action_url": reports_url,
         },
         {
             "label": "Tax completeness",
             "value": str(current_statement["tax_unknown_orders"]),
             "detail": "Orders missing tax detail on external platforms",
+            "action_label": "View tax detail",
+            "action_url": reports_url,
         },
     ]
 
