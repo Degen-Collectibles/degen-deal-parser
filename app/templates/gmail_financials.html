@@ -40,7 +40,8 @@
         p { max-width: 900px; margin: 0; line-height: 1.5; }
         .hero-actions, .filters, .button-row, .tabs { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
         .hero-actions { margin-top: 16px; }
-        .layout { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 16px; align-items: start; }
+        .layout { display: grid; grid-template-columns: 1fr; gap: 16px; align-items: start; }
+        aside { order: -1; }
         .panel { padding: 16px; margin-bottom: 16px; }
         .section-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 12px; }
         .button, button { appearance: none; border: 1px solid var(--line); border-radius: 8px; padding: 10px 13px; background: var(--panel-strong); color: var(--text); font: inherit; font-size: 13px; font-weight: 800; cursor: pointer; }
@@ -48,8 +49,8 @@
         .danger { color: #fecaca; border-color: rgba(239,68,68,.42); }
         label { display: flex; flex-direction: column; gap: 6px; color: var(--muted); font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
         input, select { min-height: 39px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--text); padding: 8px 10px; font: inherit; }
-        .table-shell { overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
-        table { width: 100%; min-width: 1120px; border-collapse: separate; border-spacing: 0; }
+        .table-shell { max-width: 100%; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+        table { width: 100%; min-width: 1080px; border-collapse: separate; border-spacing: 0; }
         th, td { padding: 10px 12px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; font-size: 13px; }
         th { position: sticky; top: 0; background: var(--panel-strong); color: var(--muted); z-index: 1; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
         td { color: #f3f4f6; }
@@ -64,6 +65,8 @@
         .tab { padding: 8px 11px; border: 1px solid var(--line); color: var(--muted); background: var(--panel-strong); }
         .tab.active { color: #fff; background: var(--red); border-color: var(--red); }
         .feed-card { border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-top: 10px; background: var(--panel-strong); }
+        .mailbox-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: start; }
+        .connection-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; }
         .feed-status { display: flex; gap: 8px; align-items: center; color: var(--muted); }
         .status-dot { width: 9px; height: 9px; border-radius: 50%; background: #6b7280; }
         .status-dot.ready { background: var(--green); box-shadow: 0 0 0 4px rgba(34,197,94,.12); }
@@ -73,8 +76,9 @@
         .flash.success { background: rgba(34,197,94,.14); color: var(--green); border: 1px solid rgba(34,197,94,.3); }
         .flash.error { background: rgba(239,68,68,.14); color: #fca5a5; border: 1px solid rgba(239,68,68,.3); }
         .empty { padding: 18px; color: var(--muted); }
+        .actions-cell form { margin: 0; }
         @media (max-width: 1050px) {
-            .layout { grid-template-columns: 1fr; }
+            .mailbox-controls { grid-template-columns: 1fr; }
         }
         @media (max-width: 760px) {
             .page { padding: 16px 14px 36px; }
@@ -209,6 +213,10 @@
                                         <div class="small">{{ bank_row.posted_at.date() if bank_row.posted_at else "" }} {% if bank_row.amount is not none %}{{ bank_row.amount|money(2) }}{% endif %}</div>
                                         <div class="muted-desc">{{ bank_row.description }}</div>
                                         {% else %}
+                                        {% if tx and receipt.detected_type == "sortswift_buylist" %}
+                                        <span class="pill">Optional</span>
+                                        <div class="small" style="margin:6px 0 8px;">Cash/store-credit buy. Bank link is optional.</div>
+                                        {% endif %}
                                         <form method="post" action="/bookkeeping/gmail/receipts/{{ receipt.id }}/link-bank-form" class="button-row">
                                             <input type="number" name="bank_transaction_id" placeholder="Bank row ID" style="max-width:130px;">
                                             <button type="submit">Link</button>
@@ -219,7 +227,7 @@
                                         <span class="pill {{ receipt.status }}">{{ receipt.status|replace("_", " ")|title }}</span>
                                         <div class="small" style="margin-top:6px;">{{ receipt.confidence|title }} confidence</div>
                                     </td>
-                                    <td data-label="Actions">
+                                    <td data-label="Actions" class="actions-cell">
                                         <div class="button-row">
                                             <form method="post" action="/bookkeeping/gmail/receipts/{{ receipt.id }}/approve-form">
                                                 <button type="submit">Approve</button>
@@ -244,41 +252,49 @@
 
             <aside>
                 <section class="panel">
-                    <div class="section-head">
+                    <div class="mailbox-controls">
                         <div>
-                            <h2>Mailbox</h2>
-                            <div class="small">{{ gmail_status.account }}</div>
+                            <div class="section-head" style="margin-bottom:8px;">
+                                <div>
+                                    <h2>Mailbox</h2>
+                                    <div class="small">{{ gmail_status.account }}</div>
+                                </div>
+                            </div>
+                            <div class="feed-status">
+                                <span class="status-dot{% if gmail_connections %} ready{% endif %}"></span>
+                                <span>{{ "Connected" if gmail_connections else "Not connected" }}</span>
+                            </div>
+                        </div>
+                        <div>
+                            {% if not gmail_status.configured %}
+                            <div class="missing-list">
+                                {% for item in gmail_status.missing %}
+                                <code>{{ item }}</code>
+                                {% endfor %}
+                            </div>
+                            {% else %}
+                            <div class="button-row">
+                                <a class="button primary" href="/bookkeeping/gmail/connect">Connect Gmail</a>
+                                <form method="post" action="/bookkeeping/gmail/sync-form">
+                                    <button type="submit">Sync Gmail</button>
+                                </form>
+                            </div>
+                            {% endif %}
                         </div>
                     </div>
-                    <div class="feed-status">
-                        <span class="status-dot{% if gmail_connections %} ready{% endif %}"></span>
-                        <span>{{ "Connected" if gmail_connections else "Not connected" }}</span>
-                    </div>
-                    {% if not gmail_status.configured %}
-                    <div class="missing-list">
-                        {% for item in gmail_status.missing %}
-                        <code>{{ item }}</code>
+                    <div class="connection-grid">
+                        {% for conn in gmail_connections %}
+                        <div class="feed-card">
+                            <strong>{{ conn.email_address }}</strong>
+                            <div class="small">{{ conn.status|title }}{% if conn.last_sync_at %} - synced {{ conn.last_sync_at.strftime("%Y-%m-%d %H:%M") }} UTC{% endif %}</div>
+                            {% if conn.last_sync_error %}<div class="small" style="color:#fecaca;">{{ conn.last_sync_error }}</div>{% endif %}
+                            <form method="post" action="/bookkeeping/gmail/sync-form" style="margin-top:10px;">
+                                <input type="hidden" name="connection_id" value="{{ conn.id }}">
+                                <button type="submit">Sync this mailbox</button>
+                            </form>
+                        </div>
                         {% endfor %}
                     </div>
-                    {% else %}
-                    <div class="button-row" style="margin-top:12px;">
-                        <a class="button primary" href="/bookkeeping/gmail/connect">Connect Gmail</a>
-                        <form method="post" action="/bookkeeping/gmail/sync-form">
-                            <button type="submit">Sync Gmail</button>
-                        </form>
-                    </div>
-                    {% endif %}
-                    {% for conn in gmail_connections %}
-                    <div class="feed-card">
-                        <strong>{{ conn.email_address }}</strong>
-                        <div class="small">{{ conn.status|title }}{% if conn.last_sync_at %} - synced {{ conn.last_sync_at.strftime("%Y-%m-%d %H:%M") }} UTC{% endif %}</div>
-                        {% if conn.last_sync_error %}<div class="small" style="color:#fecaca;">{{ conn.last_sync_error }}</div>{% endif %}
-                        <form method="post" action="/bookkeeping/gmail/sync-form" style="margin-top:10px;">
-                            <input type="hidden" name="connection_id" value="{{ conn.id }}">
-                            <button type="submit">Sync this mailbox</button>
-                        </form>
-                    </div>
-                    {% endfor %}
                 </section>
             </aside>
         </div>
