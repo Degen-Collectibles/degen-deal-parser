@@ -856,6 +856,55 @@ class SealedInventoryTests(unittest.TestCase):
             self.assertEqual(response.status_code, 303)
             self.assertIn("single_error=Location+is+required", response.headers["location"])
 
+    def test_shopify_pos_sale_decrements_single_quantity_and_logs_movement(self) -> None:
+        from app.inventory.shopify_ingest import mark_inventory_sold_from_shopify_order
+        from app.models import ShopifySyncJob
+
+        with Session(self.engine) as session:
+            item = InventoryItem(
+                barcode="DGN-POS1",
+                item_type=ITEM_TYPE_SINGLE,
+                game="Pokemon",
+                card_name="Pikachu",
+                condition="NM",
+                location="Case A",
+                quantity=2,
+            )
+            session.add(item)
+            session.commit()
+            session.refresh(item)
+
+            marked = mark_inventory_sold_from_shopify_order(
+                session,
+                {
+                    "id": "shop-order-pos-single-1",
+                    "name": "#POS1",
+                    "line_items": [
+                        {"sku": "DGN-POS1", "quantity": 1, "price": "4.99"},
+                    ],
+                },
+                runtime_name="unit-test",
+            )
+
+            self.assertEqual(marked, 1)
+            session.refresh(item)
+            self.assertEqual(item.quantity, 1)
+            self.assertNotEqual(item.status, INVENTORY_SOLD)
+            movement = session.exec(
+                select(InventoryStockMovement).where(InventoryStockMovement.item_id == item.id)
+            ).one()
+            self.assertEqual(movement.reason, "sale")
+            self.assertEqual(movement.source, "Shopify")
+            self.assertEqual(movement.quantity_delta, -1)
+            self.assertEqual(movement.quantity_before, 2)
+            self.assertEqual(movement.quantity_after, 1)
+            sync_job = session.exec(
+                select(ShopifySyncJob).where(ShopifySyncJob.item_id == item.id)
+            ).one()
+            self.assertEqual(sync_job.action, "quantity")
+            self.assertEqual(sync_job.status, "pending")
+            self.assertEqual(sync_job.source, "Shopify order webhook")
+
     def test_shopify_sale_decrements_sealed_quantity_and_logs_movement(self) -> None:
         from app.inventory.shopify_ingest import mark_inventory_sold_from_shopify_order
         from app.models import ShopifySyncJob
@@ -917,7 +966,7 @@ class SealedInventoryTests(unittest.TestCase):
             self.assertEqual(item.quantity, 0)
             self.assertEqual(item.status, INVENTORY_SOLD)
 
-    def test_shopify_sale_webhook_retry_does_not_double_decrement(self) -> None:
+    def test_shopify_order_retry_does_not_double_decrement_inventory(self) -> None:
         from app.inventory.shopify_ingest import mark_inventory_sold_from_shopify_order
         from app.models import ShopifySyncJob
 
