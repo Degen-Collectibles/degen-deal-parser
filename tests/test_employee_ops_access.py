@@ -325,6 +325,44 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         self.assertEqual(items, [])
         self.assertEqual(movements, [])
 
+    def test_employee_batch_confirm_missing_location_does_not_partially_persist(self):
+        from app.models import InventoryItem, InventoryStockMovement, ITEM_TYPE_SINGLE
+
+        self._login_as("employee", user_id=236, username="emp36")
+        page = self.client.get("/inventory/add-stock", follow_redirects=False)
+        token = page.text.split("var token = ", 1)[1].split(";", 1)[0].strip().strip('"')
+
+        response = self.client.post(
+            "/inventory/batch/confirm",
+            headers={"X-CSRF-Token": token},
+            json=[
+                {
+                    "card_name": "Valid Before Missing Location",
+                    "game": "Pokemon",
+                    "condition": "NM",
+                    "quantity": 1,
+                    "location": "Case A",
+                },
+                {
+                    "card_name": "Missing Location After Valid",
+                    "game": "Pokemon",
+                    "condition": "NM",
+                    "quantity": 1,
+                    "location": "   ",
+                },
+            ],
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Location is required", response.json()["error"])
+        self.session.expire_all()
+        items = self.session.exec(
+            select(InventoryItem).where(InventoryItem.item_type == ITEM_TYPE_SINGLE)
+        ).all()
+        movements = self.session.exec(select(InventoryStockMovement)).all()
+        self.assertEqual(items, [])
+        self.assertEqual(movements, [])
+
     def test_employee_batch_confirm_slab_then_invalid_single_does_not_partially_persist(self):
         from app.models import InventoryItem, InventoryStockMovement
 

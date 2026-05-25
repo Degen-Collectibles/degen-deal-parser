@@ -352,7 +352,8 @@
         }
         var payload = batch.map(function(item) {
             var copy = Object.assign({}, item);
-            if (!copy.location) copy.location = location;
+            var itemLocation = (copy.location || '').trim();
+            copy.location = itemLocation || location;
             if (!copy.source) copy.source = 'Degen Eye';
             return copy;
         });
