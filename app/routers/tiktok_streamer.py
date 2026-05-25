@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import and_, func, or_
 from sqlmodel import Session, select
 
@@ -27,6 +27,7 @@ from ..shared import (  # noqa: F401 - explicit imports for underscore-prefixed 
     _get_live_analytics_snapshot,
     _get_live_session_snapshot,
     _get_live_sessions_list,
+    _get_live_sessions_list_checked_at,
     _fetch_live_product_performance_list,
     _gmv_cache,
     _gmv_cache_lock,
@@ -78,6 +79,13 @@ STREAM_METRIC_SOURCE_LOCAL_ORDER_ESTIMATE = "local_order_estimate"
 _LIVE_PRODUCTS_CACHE_TTL_SECONDS = 10.0
 _live_products_cache: dict[str, Any] = {}
 _live_products_cache_lock = threading.Lock()
+PUBLIC_LIVE_STATUS_STALE_SECONDS = 900
+PUBLIC_TIKTOK_LIVE_STATUS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+    "Cache-Control": "no-store, max-age=0",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +276,71 @@ def _build_stream_context(
         "creator_order_attribution": order_attribution,
         "creator_order_overlap_handles": overlap_handles,
     }
+
+
+def _isoformat_utc(value: Optional[datetime]) -> Optional[str]:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def _timestamp_iso(session_data: dict[str, Any], key: str) -> Optional[str]:
+    try:
+        timestamp = int(session_data.get(key) or 0)
+    except (TypeError, ValueError):
+        timestamp = 0
+    if timestamp <= 0:
+        return None
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+
+
+def _public_tiktok_live_status_payload() -> dict[str, Any]:
+    checked_at = _get_live_sessions_list_checked_at()
+    checked_at_text = _isoformat_utc(checked_at)
+    channels: list[dict[str, Any]] = []
+
+    for choice in STREAM_CREATOR_CHOICES:
+        context = _build_stream_context(choice["id"])
+        live_session = context.get("live_session") or {}
+        session_title = str(live_session.get("title") or "").strip() or None
+        is_live = bool(context.get("is_live")) and checked_at is not None
+        channels.append(
+            {
+                "id": choice["id"],
+                "label": choice["label"],
+                "handle": f"@{choice['handle']}",
+                "url": f"https://www.tiktok.com/@{choice['handle']}",
+                "isLive": is_live,
+                "title": session_title,
+                "startedAt": _timestamp_iso(live_session, "start_time"),
+                "endedAt": _timestamp_iso(live_session, "end_time"),
+                "lastCheckedAt": checked_at_text,
+            }
+        )
+
+    return {
+        "ok": checked_at is not None,
+        "source": "ops-tiktok-live-session-cache",
+        "generatedAt": datetime.now(timezone.utc).isoformat(),
+        "updatedAt": checked_at_text,
+        "staleAfterSeconds": PUBLIC_LIVE_STATUS_STALE_SECONDS,
+        "channels": channels,
+    }
+
+
+@router.options("/public/tiktok/live-status")
+def public_tiktok_live_status_options():
+    return JSONResponse({}, headers=PUBLIC_TIKTOK_LIVE_STATUS_HEADERS)
+
+
+@router.get("/public/tiktok/live-status")
+def public_tiktok_live_status():
+    return JSONResponse(
+        _public_tiktok_live_status_payload(),
+        headers=PUBLIC_TIKTOK_LIVE_STATUS_HEADERS,
+    )
 
 
 def _stream_context_cache_key(stream_context: Optional[dict[str, Any]]) -> tuple:
