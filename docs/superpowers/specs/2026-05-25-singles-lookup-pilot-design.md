@@ -269,7 +269,7 @@ The pilot should be reversible:
 - Should labels be printed during the pilot, or is lookup by name/location enough?
 - How should employees flag "lookup says yes but I cannot find it"?
 - Who owns the daily cleanup pass during the first week?
-- Should the pilot create POS-only Shopify products automatically, or should managers manually create/link POS-only products during the first week?
+- When, if ever, should we build a verified automatic POS-only Shopify product creation flow after managers/admins have proven safe linking to existing POS-only variants?
 - Which Shopify sales channels are currently installed and need explicit exclusion for pilot singles?
 - What is the exact POS location ID that should hold tracked single inventory?
 - Should Shopify POS-only products be Active but POS-only, Draft plus manually added to POS, or another Shopify-supported state after live verification?

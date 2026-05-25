@@ -621,7 +621,7 @@ Expected: PASS with current code. If it fails, fix only `mark_inventory_sold_fro
 Run:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests/test_sealed_inventory.py::SealedInventoryTests::test_shopify_sale_webhook_retry_does_not_double_decrement tests/test_sealed_inventory.py::SealedInventoryTests::test_shopify_unknown_sku_creates_visible_sync_issue -q
+.\.venv\Scripts\python.exe -m pytest tests/test_sealed_inventory.py::SealedInventoryTests::test_shopify_order_retry_does_not_double_decrement_inventory tests/test_sealed_inventory.py::SealedInventoryTests::test_shopify_unknown_sku_creates_visible_sync_issue -q
 ```
 
 Expected: PASS.
