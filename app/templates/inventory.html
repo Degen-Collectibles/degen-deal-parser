@@ -264,6 +264,18 @@
             <a href="/inventory?resticker=1&item_type=slab" class="btn-sm">Review Slabs</a>
         </div>
         {% endif %}
+        {% if inventory_summary.missing_single_locations %}
+        <div class="warning-banner">
+            <span>{{ inventory_summary.missing_single_locations }} single{% if inventory_summary.missing_single_locations != 1 %}s{% endif %} need{% if inventory_summary.missing_single_locations == 1 %}s{% endif %} a location before the shop floor can trust lookup results.</span>
+            <a href="/inventory?missing_location=1&item_type=single" class="btn-sm">Review Locations</a>
+        </div>
+        {% endif %}
+        {% if inventory_summary.missing_single_conditions %}
+        <div class="warning-banner">
+            <span>{{ inventory_summary.missing_single_conditions }} single{% if inventory_summary.missing_single_conditions != 1 %}s{% endif %} need{% if inventory_summary.missing_single_conditions == 1 %}s{% endif %} a condition for clean lookup and pricing.</span>
+            <a href="/inventory?missing_condition=1&item_type=single" class="btn-sm">Review Conditions</a>
+        </div>
+        {% endif %}
     </div>
 
     <div class="card">
@@ -283,6 +295,8 @@
             {% if archived_filter %}<input type="hidden" name="archived" value="{{ archived_filter }}">{% endif %}
             {% if resticker_filter %}<input type="hidden" name="resticker" value="{{ resticker_filter }}">{% endif %}
             {% if price_review_filter %}<input type="hidden" name="price_review" value="{{ price_review_filter }}">{% endif %}
+            {% if missing_location_filter %}<input type="hidden" name="missing_location" value="{{ missing_location_filter }}">{% endif %}
+            {% if missing_condition_filter %}<input type="hidden" name="missing_condition" value="{{ missing_condition_filter }}">{% endif %}
             {% if edit_mode %}<input type="hidden" name="edit" value="1">{% endif %}
             <label>Search
                 <input type="text" name="q" value="{{ q }}" placeholder="Card, sealed product, barcode, UPC, cert #...">
@@ -527,9 +541,9 @@
 
         {% if total_pages > 1 %}
         <div class="pagination">
-            {% if page > 1 %}<a class="page-btn" href="?page={{ page - 1 }}&q={{ q }}&status={{ status_filter }}&game={{ game_filter }}&item_type={{ type_filter }}{% if edit_mode %}&edit=1{% endif %}">‹ Prev</a>{% endif %}
+            {% if page > 1 %}<a class="page-btn" href="{{ previous_page_url }}">‹ Prev</a>{% endif %}
             <span style="font-size:13px;color: var(--lx-muted);">Page {{ page }} of {{ total_pages }}</span>
-            {% if page < total_pages %}<a class="page-btn" href="?page={{ page + 1 }}&q={{ q }}&status={{ status_filter }}&game={{ game_filter }}&item_type={{ type_filter }}{% if edit_mode %}&edit=1{% endif %}">Next ›</a>{% endif %}
+            {% if page < total_pages %}<a class="page-btn" href="{{ next_page_url }}">Next ›</a>{% endif %}
         </div>
         {% endif %}
     </div>

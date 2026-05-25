@@ -2555,24 +2555,51 @@ async def inventory_list(
     archived: str = Query(default=""),
     resticker: str = Query(default=""),
     price_review: str = Query(default=""),
+    missing_location: str = Query(default=""),
+    missing_condition: str = Query(default=""),
     edit: str = Query(default=""),
     page: int = Query(default=1, ge=1),
 ):
     if denial := _require_employee_permission(request, "ops.inventory.view", session):
         return denial
 
+    active_items = InventoryItem.archived_at == None  # noqa: E711
+    missing_location_filter_active = missing_location == "1"
+    missing_condition_filter_active = missing_condition == "1"
+    cleanup_filter_active = missing_location_filter_active or missing_condition_filter_active
+    missing_location_condition = (InventoryItem.location == None) | (InventoryItem.location == "")  # noqa: E711
+    missing_condition_condition = (InventoryItem.condition == None) | (InventoryItem.condition == "")  # noqa: E711
+    missing_single_location_condition = (
+        active_items
+        & (InventoryItem.item_type == ITEM_TYPE_SINGLE)
+        & missing_location_condition
+    )
+    missing_single_condition_condition = (
+        active_items
+        & (InventoryItem.item_type == ITEM_TYPE_SINGLE)
+        & missing_condition_condition
+    )
+
     query = select(InventoryItem)
     price_review_condition = _inventory_price_review_sql_condition()
-    if archived == "1":
+    if cleanup_filter_active:
+        query = query.where(active_items)
+    elif archived == "1":
         query = query.where(InventoryItem.archived_at != None)  # noqa: E711
     elif archived != "all":
-        query = query.where(InventoryItem.archived_at == None)  # noqa: E711
+        query = query.where(active_items)
     if status and status in ALL_INVENTORY_STATUSES:
         query = query.where(InventoryItem.status == status)
     if game:
         query = query.where(InventoryItem.game == game)
-    if item_type and item_type in (ITEM_TYPE_SINGLE, ITEM_TYPE_SLAB, ITEM_TYPE_SEALED):
+    if cleanup_filter_active:
+        query = query.where(InventoryItem.item_type == ITEM_TYPE_SINGLE)
+    elif item_type and item_type in (ITEM_TYPE_SINGLE, ITEM_TYPE_SLAB, ITEM_TYPE_SEALED):
         query = query.where(InventoryItem.item_type == item_type)
+    if missing_location_filter_active:
+        query = query.where(missing_location_condition)
+    if missing_condition_filter_active:
+        query = query.where(missing_condition_condition)
     if resticker == "1":
         query = query.where(InventoryItem.resticker_alert_active == True)  # noqa: E712
     if price_review == "1":
@@ -2607,7 +2634,6 @@ async def inventory_list(
 
     can_manage_inventory = _can_inventory_manage(request, session)
     edit_mode = can_manage_inventory and edit == "1"
-    active_items = InventoryItem.archived_at == None  # noqa: E711
     stale_cutoff = utcnow() - timedelta(
         hours=max(float(getattr(settings, "inventory_price_stale_hours", 24.0) or 24.0), 1.0)
     )
@@ -2641,6 +2667,12 @@ async def inventory_list(
         "price_stale": session.exec(
             select(func.count()).where(active_items, stale_price_condition)
         ).one(),
+        "missing_single_locations": session.exec(
+            select(func.count()).where(missing_single_location_condition)
+        ).one(),
+        "missing_single_conditions": session.exec(
+            select(func.count()).where(missing_single_condition_condition)
+        ).one(),
         "in_stock": session.exec(
             select(func.count()).where(InventoryItem.status == INVENTORY_IN_STOCK, active_items)
         ).one(),
@@ -2664,7 +2696,7 @@ async def inventory_list(
             "total_pages": total_pages,
             "status_filter": status,
             "game_filter": game,
-            "type_filter": item_type,
+            "type_filter": ITEM_TYPE_SINGLE if cleanup_filter_active else item_type,
             "q": q,
             "deleted": deleted,
             "updated": updated,
@@ -2675,9 +2707,13 @@ async def inventory_list(
             "archived_filter": archived,
             "resticker_filter": resticker,
             "price_review_filter": price_review,
+            "missing_location_filter": missing_location,
+            "missing_condition_filter": missing_condition,
             "edit_mode": edit_mode,
             "edit_mode_url": _inventory_url_with_params(request, {"edit": "1"}),
             "view_mode_url": _inventory_url_with_params(request, {"edit": ""}),
+            "previous_page_url": _inventory_url_with_params(request, {"page": page - 1}) if page > 1 else "",
+            "next_page_url": _inventory_url_with_params(request, {"page": page + 1}) if page < total_pages else "",
             "can_manage_inventory": can_manage_inventory,
             "list_return_url": list_return_url,
             "games": GAMES,

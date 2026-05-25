@@ -479,6 +479,106 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         self.assertNotIn("<th>Cost</th>", r.text)
         self.assertNotIn("$12.34", r.text)
 
+    def test_inventory_lookup_can_filter_missing_single_locations(self):
+        self._login_as("employee", user_id=237, username="emp37")
+        from datetime import datetime, timezone
+
+        from app.models import InventoryItem
+
+        missing = InventoryItem(
+            barcode="DGN-MISSLOC1",
+            item_type="single",
+            game="Pokemon",
+            card_name="Missing Location Pikachu",
+            condition="NM",
+            location="",
+        )
+        located = InventoryItem(
+            barcode="DGN-HASLOC1",
+            item_type="single",
+            game="Pokemon",
+            card_name="Located Bulbasaur",
+            condition="NM",
+            location="Case A",
+        )
+        archived_missing = InventoryItem(
+            barcode="DGN-ARCHLOC1",
+            item_type="single",
+            game="Pokemon",
+            card_name="Archived Missing Location",
+            condition="NM",
+            archived_at=datetime.now(timezone.utc),
+        )
+        sealed_missing = InventoryItem(
+            barcode="DGN-SEALOC1",
+            item_type="sealed",
+            game="Pokemon",
+            card_name="Sealed Missing Location",
+        )
+        self.session.add_all([missing, located, archived_missing, sealed_missing])
+        self.session.commit()
+
+        page = self.client.get("/inventory?item_type=single&missing_location=1", follow_redirects=False)
+
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("Missing Location Pikachu", page.text)
+        self.assertNotIn("Located Bulbasaur", page.text)
+        self.assertNotIn("Archived Missing Location", page.text)
+        self.assertNotIn("Sealed Missing Location", page.text)
+        self.assertIn('name="missing_location" value="1"', page.text)
+        self.assertIn("Review Locations", page.text)
+
+    def test_inventory_lookup_can_filter_missing_single_conditions(self):
+        self._login_as("employee", user_id=238, username="emp38")
+        from datetime import datetime, timezone
+
+        from app.models import InventoryItem
+
+        missing = InventoryItem(
+            barcode="DGN-MISSCOND1",
+            item_type="single",
+            game="Pokemon",
+            card_name="Missing Condition Charmander",
+            condition="",
+            location="Case B",
+        )
+        conditioned = InventoryItem(
+            barcode="DGN-HASCOND1",
+            item_type="single",
+            game="Pokemon",
+            card_name="Conditioned Squirtle",
+            condition="LP",
+            location="Case B",
+        )
+        archived_missing = InventoryItem(
+            barcode="DGN-ARCHCOND1",
+            item_type="single",
+            game="Pokemon",
+            card_name="Archived Missing Condition",
+            location="Case B",
+            archived_at=datetime.now(timezone.utc),
+        )
+        sealed_missing = InventoryItem(
+            barcode="DGN-SEACOND1",
+            item_type="sealed",
+            game="Pokemon",
+            card_name="Sealed Missing Condition",
+            location="Case B",
+        )
+        self.session.add_all([missing, conditioned, archived_missing, sealed_missing])
+        self.session.commit()
+
+        page = self.client.get("/inventory?missing_condition=1", follow_redirects=False)
+
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("Missing Condition Charmander", page.text)
+        self.assertNotIn("Conditioned Squirtle", page.text)
+        self.assertNotIn("Archived Missing Condition", page.text)
+        self.assertNotIn("Sealed Missing Condition", page.text)
+        self.assertIn('name="missing_condition" value="1"', page.text)
+        self.assertIn('option value="single" selected', page.text)
+        self.assertIn("Review Conditions", page.text)
+
     def test_employee_inventory_detail_hides_manager_fields(self):
         self._login_as("employee", user_id=222, username="emp22")
         from app.models import InventoryItem
