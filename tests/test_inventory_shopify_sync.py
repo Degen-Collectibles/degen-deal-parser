@@ -13,9 +13,11 @@ from app.inventory.shopify import (
     sync_shopify_inventory_quantity,
 )
 from app.models import (
+    INVENTORY_IN_STOCK,
     InventoryItem,
     ShopifySyncIssue,
     ITEM_TYPE_SEALED,
+    ITEM_TYPE_SINGLE,
 )
 from app.shopify_sync import (
     SHOPIFY_SYNC_ISSUE_OPEN,
@@ -220,6 +222,57 @@ class ShopifySyncIssueTests(unittest.TestCase):
 
 
 class ShopifySyncWorkerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_single_without_existing_shopify_variant_is_not_created_publicly(self):
+        engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+        SQLModel.metadata.create_all(engine)
+        try:
+            with Session(engine) as session:
+                item = InventoryItem(
+                    barcode="DGN-SINGLE1",
+                    item_type=ITEM_TYPE_SINGLE,
+                    game="Pokemon",
+                    card_name="Pikachu",
+                    set_name="Base Set",
+                    card_number="58/102",
+                    condition="NM",
+                    quantity=1,
+                    list_price=9.99,
+                )
+                session.add(item)
+                session.commit()
+                session.refresh(item)
+
+                with patch("app.shopify_sync_worker.settings") as mocked_settings, patch(
+                    "app.shopify_sync_worker.find_shopify_variant_by_sku",
+                    new=AsyncMock(return_value=None),
+                ) as mocked_find, patch(
+                    "app.shopify_sync_worker.push_item_to_shopify",
+                    new=AsyncMock(return_value={"shopify_product_id": "111", "shopify_variant_id": "222"}),
+                ) as mocked_push:
+                    mocked_settings.shopify_store_domain = "degen-test.myshopify.com"
+                    mocked_settings.shopify_access_token = "shpat_test"
+                    mocked_settings.shopify_api_key = ""
+                    mocked_settings.shopify_location_id = "444"
+
+                    ok, error = await sync_inventory_item_to_shopify(
+                        session,
+                        item,
+                        source="unit-test",
+                    )
+
+                self.assertFalse(ok)
+                self.assertIn("Singles must be linked to an existing POS-only Shopify variant", error)
+                mocked_find.assert_awaited_once()
+                mocked_push.assert_not_awaited()
+                session.refresh(item)
+                self.assertIsNone(item.shopify_product_id)
+                self.assertIsNone(item.shopify_variant_id)
+                self.assertIsNone(item.shopify_inventory_item_id)
+                self.assertEqual(item.status, INVENTORY_IN_STOCK)
+                self.assertNotEqual(item.shopify_sync_status, "synced")
+        finally:
+            engine.dispose()
+
     async def test_sync_inventory_item_updates_price_quantity_and_status(self):
         engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
         SQLModel.metadata.create_all(engine)

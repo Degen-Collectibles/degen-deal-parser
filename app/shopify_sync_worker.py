@@ -20,7 +20,7 @@ from .inventory.shopify import (
     sync_shopify_inventory_quantity,
     update_shopify_variant_price,
 )
-from .models import INVENTORY_LISTED, InventoryItem, ShopifySyncJob, utcnow
+from .models import INVENTORY_LISTED, ITEM_TYPE_SINGLE, InventoryItem, ShopifySyncJob, utcnow
 from .runtime_logging import structured_log_line
 from .shopify_sync import (
     SHOPIFY_SYNC_ERROR,
@@ -111,6 +111,13 @@ async def sync_inventory_item_to_shopify(
                 session.commit()
 
         if not item.shopify_variant_id:
+            if item.item_type == ITEM_TYPE_SINGLE:
+                return (
+                    False,
+                    "Singles must be linked to an existing POS-only Shopify variant before sync. "
+                    "Automatic Shopify product creation for singles is blocked to avoid publishing pilot inventory.",
+                )
+
             ids_resp = await push_item_to_shopify(
                 item,
                 store_domain=settings.shopify_store_domain,
