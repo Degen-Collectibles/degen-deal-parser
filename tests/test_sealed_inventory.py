@@ -819,6 +819,43 @@ class SealedInventoryTests(unittest.TestCase):
             self.assertEqual(item.condition, "LP")
             self.assertEqual(item.auto_price, 386.73)
 
+    def test_single_receive_route_requires_location(self) -> None:
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/inventory/singles/receive",
+                "headers": [],
+            }
+        )
+        with Session(self.engine) as session:
+            with patch("app.inventory.routes._require_employee_permission", return_value=None):
+                response = asyncio.run(
+                    inventory_singles_receive(
+                        request=request,
+                        session=session,
+                        game="Pokemon",
+                        card_name="Missing Location Pikachu",
+                        set_name="",
+                        set_code="",
+                        card_number="",
+                        variant="",
+                        search_type="cards",
+                        variants_json="[]",
+                        condition="NM",
+                        image_url="",
+                        quantity="1",
+                        unit_cost="",
+                        list_price="",
+                        location="",
+                        source="Manual Lookup",
+                        notes="",
+                    )
+                )
+
+            self.assertEqual(response.status_code, 303)
+            self.assertIn("single_error=Location+is+required", response.headers["location"])
+
     def test_shopify_sale_decrements_sealed_quantity_and_logs_movement(self) -> None:
         from app.inventory.shopify_ingest import mark_inventory_sold_from_shopify_order
         from app.models import ShopifySyncJob

@@ -209,11 +209,32 @@ class EmployeeOpsAccessTests(unittest.TestCase):
                     "variant": "Normal",
                     "condition": "NM",
                     "auto_price": 12.34,
+                    "location": "Case A",
                 }
             ],
         )
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["created"], 1)
+
+    def test_employee_batch_confirm_requires_location_for_singles(self):
+        self._login_as("employee", user_id=232, username="emp32")
+        page = self.client.get("/inventory/add-stock", follow_redirects=False)
+        token = page.text.split("var token = ", 1)[1].split(";", 1)[0].strip().strip('"')
+
+        response = self.client.post(
+            "/inventory/batch/confirm",
+            headers={"X-CSRF-Token": token},
+            json=[
+                {
+                    "card_name": "No Location Pikachu",
+                    "game": "Pokemon",
+                    "condition": "NM",
+                }
+            ],
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Location is required", response.json()["error"])
 
     def test_employee_batch_confirm_merges_single_and_logs_stock_movements(self):
         from app.models import InventoryItem, InventoryStockMovement, ITEM_TYPE_SINGLE

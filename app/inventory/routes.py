@@ -2960,6 +2960,14 @@ async def inventory_singles_receive(
     if list_price_value is not None and list_price_value < 0:
         params = urlencode({"game": selected_game, "search_type": selected_search_type, "q": card_name or "", "single_error": "Sell price cannot be negative."})
         return RedirectResponse(f"/inventory/add-stock?{params}", status_code=303)
+    if not location.strip():
+        params = urlencode({
+            "game": selected_game,
+            "search_type": selected_search_type,
+            "q": card_name or "",
+            "single_error": "Location is required.",
+        })
+        return RedirectResponse(f"/inventory/add-stock?{params}", status_code=303)
 
     try:
         parsed_variants = json.loads(variants_json or "[]")
@@ -5725,6 +5733,13 @@ async def inventory_batch_confirm(
                     {"error": quantity_error, "card_name": card_name},
                     status_code=400,
                 )
+            location_value = (raw.get("location") or "").strip()
+            if not location_value:
+                session.rollback()
+                return JSONResponse(
+                    {"error": "Location is required for scanned singles.", "card_name": card_name},
+                    status_code=400,
+                )
 
             try:
                 item, _movement, _created = _receive_single_stock(
@@ -5742,7 +5757,7 @@ async def inventory_batch_confirm(
                     list_price=_parse_float(str(raw.get("list_price") or "")),
                     auto_price=_parse_float(str(raw.get("auto_price") or "")),
                     low_price=_parse_float(str(raw.get("low_price") or "")),
-                    location=(raw.get("location") or "").strip(),
+                    location=location_value,
                     source=(raw.get("source") or "Degen Eye").strip(),
                     notes=(raw.get("notes") or "").strip(),
                     price_payload={
