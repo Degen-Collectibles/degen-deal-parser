@@ -62,8 +62,11 @@ from ..config import get_settings
 from ..csrf import CSRFProtectedRoute, issue_token
 from ..db import get_session, managed_session
 from .barcode import (
+    LABEL_FIELD_OPTIONS,
+    LABEL_LAYOUT_OPTIONS,
     generate_barcode_value,
     label_context_for_items,
+    parse_label_fields,
     render_barcode_svg,
 )
 from .pricing import (
@@ -3074,7 +3077,7 @@ async def inventory_labels(
     session: Session = Depends(get_session),
     ids: str = Query(default=""),
     status: str = Query(default=""),
-    layout: str = Query(default="sheet"),
+    layout: str = Query(default="wrap"),
 ):
     if denial := _require_employee_permission(request, "ops.inventory.view", session):
         return denial
@@ -3097,12 +3100,22 @@ async def inventory_labels(
             )
         ).all()
 
-    labels = label_context_for_items(items)
-    layout = layout if layout in {"sheet", "thermal"} else "sheet"
+    selected_fields = parse_label_fields(request.query_params.getlist("fields"))
+    labels = label_context_for_items(items, selected_fields=selected_fields)
+    layout = layout if layout in {option["value"] for option in LABEL_LAYOUT_OPTIONS} else "wrap"
     return _templates.TemplateResponse(
         request,
         "inventory_labels.html",
-        {"current_user": _current_user(request), "labels": labels, "layout": layout},
+        {
+            "current_user": _current_user(request),
+            "labels": labels,
+            "layout": layout,
+            "label_layout_options": LABEL_LAYOUT_OPTIONS,
+            "label_field_options": LABEL_FIELD_OPTIONS,
+            "selected_fields": selected_fields,
+            "ids": ids,
+            "status": status,
+        },
     )
 
 
@@ -4157,7 +4170,7 @@ async def inventory_resticker_apply(
     clear_slab_resticker_alert(item, reason="Sticker price applied.")
     session.add(item)
     session.commit()
-    return RedirectResponse(f"/inventory/labels?ids={item_id}&layout=thermal", status_code=303)
+    return RedirectResponse(f"/inventory/labels?ids={item_id}&layout=wrap", status_code=303)
 
 
 @router.post("/inventory/{item_id}/resticker/dismiss")

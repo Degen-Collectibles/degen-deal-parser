@@ -21,6 +21,31 @@ if TYPE_CHECKING:
     from ..models import InventoryItem
 
 
+LABEL_LAYOUT_OPTIONS = [
+    {"value": "wrap", "label": "Wraparound"},
+    {"value": "sheet", "label": "Sheet Labels"},
+    {"value": "thermal", "label": '2.25" Thermal'},
+]
+
+LABEL_FIELD_OPTIONS = [
+    {"value": "barcode", "label": "Barcode"},
+    {"value": "name", "label": "Product name"},
+    {"value": "set", "label": "Set"},
+    {"value": "card_number", "label": "Card #"},
+    {"value": "variant", "label": "Variant"},
+    {"value": "type", "label": "Type"},
+    {"value": "condition", "label": "Condition"},
+    {"value": "grade", "label": "Grade"},
+    {"value": "cert", "label": "Cert #"},
+    {"value": "location", "label": "Location"},
+    {"value": "game", "label": "Game"},
+]
+DEFAULT_LABEL_FIELDS = ("barcode", "name", "set", "condition", "location")
+_LABEL_FIELD_LABELS = {option["value"]: option["label"] for option in LABEL_FIELD_OPTIONS}
+_LABEL_FIELD_LABELS["name"] = "Item"
+_VALID_LABEL_FIELDS = tuple(option["value"] for option in LABEL_FIELD_OPTIONS)
+
+
 def _money(value: float | None) -> str:
     if value is None:
         return ""
@@ -45,6 +70,54 @@ def _label_product_type(item: "InventoryItem") -> str:
     if item_type == "single":
         return "Single"
     return item.item_type or "Inventory"
+
+
+def parse_label_fields(raw_fields: list[str] | tuple[str, ...] | None) -> tuple[str, ...]:
+    """Return valid employee-facing label fields in display order."""
+    selected: list[str] = []
+    for raw in raw_fields or []:
+        for part in str(raw).split(","):
+            field = part.strip().lower()
+            if field in _VALID_LABEL_FIELDS and field not in selected:
+                selected.append(field)
+    return tuple(selected) or DEFAULT_LABEL_FIELDS
+
+
+def _label_grade(item: "InventoryItem") -> str:
+    parts = [part for part in [item.grading_company, item.grade] if part]
+    return " ".join(parts)
+
+
+def _label_field_value(
+    item: "InventoryItem",
+    field: str,
+    *,
+    grade_or_condition: str,
+    product_type: str,
+) -> str:
+    if field == "barcode":
+        return item.barcode or ""
+    if field == "name":
+        return item.card_name or ""
+    if field == "set":
+        return item.set_name or ""
+    if field == "card_number":
+        return f"#{item.card_number}" if item.card_number else ""
+    if field == "variant":
+        return item.variant or ""
+    if field == "type":
+        return product_type
+    if field == "condition":
+        return grade_or_condition
+    if field == "grade":
+        return _label_grade(item)
+    if field == "cert":
+        return f"Cert {item.cert_number}" if item.cert_number else ""
+    if field == "location":
+        return item.location or ""
+    if field == "game":
+        return item.game or ""
+    return ""
 
 
 def generate_barcode_value(item_id: int) -> str:
@@ -90,12 +163,13 @@ def _fallback_svg(barcode_value: str) -> str:
     )
 
 
-def label_context_for_items(items: list) -> list[dict]:
+def label_context_for_items(items: list, selected_fields: list[str] | tuple[str, ...] | None = None) -> list[dict]:
     """
     Build a list of label context dicts for use in the print-labels template.
     Each dict contains barcode_value, barcode_svg, and display fields.
     """
     labels = []
+    parsed_fields = parse_label_fields(selected_fields)
     for item in items:
         barcode_value = item.barcode
         svg = render_barcode_svg(barcode_value)
@@ -104,13 +178,31 @@ def label_context_for_items(items: list) -> list[dict]:
             else item.condition or ""
         )
         price_text, price_source = _label_price(item)
+        product_type = _label_product_type(item)
+        employee_lines = []
+        for field in parsed_fields:
+            value = _label_field_value(
+                item,
+                field,
+                grade_or_condition=grade_or_condition,
+                product_type=product_type,
+            )
+            if value:
+                employee_lines.append({
+                    "field": field,
+                    "label": _LABEL_FIELD_LABELS[field],
+                    "value": value,
+                })
         labels.append({
             "item": item,
+            "item_title": item.card_name or item.barcode,
             "barcode_value": barcode_value,
             "barcode_svg": svg,
             "grade_or_condition": grade_or_condition,
-            "product_type": _label_product_type(item),
+            "product_type": product_type,
             "price_text": price_text,
             "price_source": price_source,
+            "selected_fields": parsed_fields,
+            "employee_lines": employee_lines,
         })
     return labels

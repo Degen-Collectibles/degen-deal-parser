@@ -56,6 +56,16 @@
         .back-link:hover { color:var(--text); }
         .eyebrow { display:inline-flex; align-items:center; padding:5px 10px; border-radius:999px; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.08em; background:var(--lx-s2); color:var(--lx-muted); margin-bottom:10px; }
         .toolbar { display:flex; gap:10px; align-items:center; margin-bottom:18px; flex-wrap:wrap; }
+        .label-config { display:grid; grid-template-columns:minmax(220px,.8fr) minmax(260px,1.2fr); gap:14px; margin-top:14px; }
+        .config-block { border:1px solid var(--line); border-radius:14px; background:rgba(255,255,255,.03); padding:12px; }
+        .config-title { margin:0 0 8px; font-size:12px; font-weight:900; color:#fff; text-transform:uppercase; letter-spacing:.08em; }
+        .layout-options, .field-options { display:flex; flex-wrap:wrap; gap:8px; }
+        .check-pill { display:inline-flex; align-items:center; gap:7px; border:1px solid var(--line); border-radius:999px; padding:7px 10px; color:var(--text); font-size:12px; font-weight:800; cursor:pointer; background:var(--lx-s1); }
+        .check-pill input { width:auto; margin:0; accent-color:var(--lx-red); }
+        .side-map { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:12px; }
+        .side-card { border:1px solid var(--line); border-radius:12px; padding:10px; background:var(--lx-s1); }
+        .side-card strong { display:block; color:#fff; font-size:12px; margin-bottom:4px; }
+        .side-card span { display:block; color:var(--lx-muted); font-size:12px; line-height:1.35; }
 
         /* Label grid — screen view */
         .labels-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:12px; }
@@ -76,7 +86,40 @@
         .label-sub { font-size:11px; color: var(--lx-muted); }
         .label-price { font-size:20px; font-weight:900; line-height:1; color:#fff; margin-top:2px; }
         .label-type { font-size:10px; color:var(--lx-muted); text-transform:uppercase; letter-spacing:.08em; font-weight:800; max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .employee-line { display:flex; gap:4px; justify-content:center; max-width:200px; font-size:10px; line-height:1.2; color:var(--lx-muted); }
+        .employee-line span { font-weight:800; color:var(--lx-muted); text-transform:uppercase; letter-spacing:.04em; }
+        .employee-line strong { color:var(--text); font-weight:800; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
         .empty-state { text-align:center; padding:48px 24px; color: var(--lx-muted); }
+        body.label-layout-wrap .labels-grid {
+            grid-template-columns:repeat(auto-fill, minmax(3.5in, 3.5in));
+            justify-content:start;
+        }
+        body.label-layout-wrap .wrap-label-card {
+            width:3.5in;
+            min-height:1in;
+            display:grid;
+            grid-template-columns:.95in .22in 1fr;
+            gap:0;
+            padding:0;
+            align-items:stretch;
+            overflow:hidden;
+            color:#000;
+            background:#fff;
+            border:1px solid #d4d4d8;
+            border-radius:8px;
+            text-align:left;
+        }
+        .wrap-customer, .wrap-employee { padding:.08in; min-width:0; }
+        .wrap-customer { display:grid; place-items:center; border-right:1px dashed #b8b8b8; }
+        .wrap-price { font-size:22pt; font-weight:950; line-height:1; color:#000; letter-spacing:0; }
+        .wrap-fold { border-right:1px dashed #b8b8b8; display:flex; align-items:center; justify-content:center; gap:4px; writing-mode:vertical-rl; transform:rotate(180deg); font-size:5.5pt; font-weight:900; color:#52525b; text-align:center; }
+        .wrap-fold strong { color:#000; font-family:monospace; font-size:5.5pt; }
+        .wrap-employee { display:flex; flex-direction:column; justify-content:center; gap:1.5pt; min-width:0; }
+        .wrap-employee .label-barcode svg { width:100%; max-width:1.9in; max-height:.32in; }
+        .wrap-employee .label-code { color:#000; font-size:6pt; text-align:center; line-height:1; }
+        .wrap-employee .employee-line { justify-content:flex-start; max-width:1.95in; color:#000; font-size:6.3pt; line-height:1.05; }
+        .wrap-employee .employee-line span { color:#52525b; flex:0 0 auto; }
+        .wrap-employee .employee-line strong { color:#000; min-width:0; }
         body.label-layout-thermal .labels-grid {
             grid-template-columns:repeat(auto-fill, minmax(2.25in, 2.25in));
             justify-content:start;
@@ -94,6 +137,11 @@
         body.label-layout-thermal .label-name { max-width:2.05in; font-size:8pt; }
         body.label-layout-thermal .label-type,
         body.label-layout-thermal .label-sub { max-width:2.05in; font-size:6.5pt; }
+        @media(max-width:760px) {
+            .label-config, .side-map { grid-template-columns:1fr; }
+            body.label-layout-wrap .labels-grid { grid-template-columns:1fr; }
+            body.label-layout-wrap .wrap-label-card { width:100%; max-width:3.5in; }
+        }
 
         /* Print styles */
         @media print {
@@ -114,6 +162,28 @@
                 page-break-inside:avoid;
             }
             .label-barcode svg { max-width:100%; }
+            body.label-layout-wrap { background:#fff; }
+            body.label-layout-wrap .labels-grid {
+                display:grid;
+                grid-template-columns:repeat(2,3.5in);
+                gap:.12in;
+                padding:.15in;
+            }
+            body.label-layout-wrap .wrap-label-card {
+                width:3.5in;
+                height:1in;
+                min-height:1in;
+                border:0.5pt solid #999;
+                border-radius:0;
+                box-shadow:none;
+                page-break-inside:avoid;
+                break-inside:avoid;
+            }
+            body.label-layout-wrap .wrap-price,
+            body.label-layout-wrap .label-code,
+            body.label-layout-wrap .employee-line,
+            body.label-layout-wrap .employee-line span,
+            body.label-layout-wrap .employee-line strong { color:#000; }
             body.label-layout-thermal { background:#fff; }
             body.label-layout-thermal .labels-grid {
                 display:block;
@@ -143,7 +213,7 @@
     <link rel="stylesheet" href="/static/linear.css?v=1776749171">
     <link rel="stylesheet" href="/static/safe-area.css?v=1776747800">
 </head>
-<body class="label-layout-{{ layout|default('sheet') }}">
+<body class="label-layout-{{ layout|default('wrap') }}">
 <div class="page">
     <div class="no-print">
         {% include "_linear_sidebar.html" %}
@@ -151,28 +221,99 @@
         <div class="card">
             <span class="eyebrow">Inventory</span>
             <h1>Print Labels</h1>
-            <p>{{ labels|length }} label{% if labels|length != 1 %}s{% endif %} ready to print. Each label includes the Code 128 barcode, barcode number, product name, type/condition, and customer-facing price.</p>
+            <p>{{ labels|length }} label{% if labels|length != 1 %}s{% endif %} ready to print. Wraparound labels show price to the customer and item details for employees on the back side.</p>
             <div class="toolbar">
                 <button onclick="window.print()" class="primary-button">Print Labels</button>
-                <a href="{{ request.url.include_query_params(layout='sheet') }}" class="button secondary-button">Sheet Labels</a>
-                <a href="{{ request.url.include_query_params(layout='thermal') }}" class="button secondary-button">2.25&quot; Thermal</a>
                 <a href="/inventory" class="button secondary-button">Back</a>
             </div>
+            <form method="get" action="/inventory/labels" class="label-config">
+                {% if ids %}<input type="hidden" name="ids" value="{{ ids }}">{% endif %}
+                {% if status %}<input type="hidden" name="status" value="{{ status }}">{% endif %}
+                <div class="config-block">
+                    <div class="config-title">Layout</div>
+                    <div class="layout-options">
+                        {% for option in label_layout_options %}
+                        <label class="check-pill">
+                            <input type="radio" name="layout" value="{{ option.value }}" {% if layout == option.value %}checked{% endif %}>
+                            {{ option.label }}
+                        </label>
+                        {% endfor %}
+                    </div>
+                    <div class="side-map">
+                        <div class="side-card">
+                            <strong>Customer side</strong>
+                            <span>Price only.</span>
+                        </div>
+                        <div class="side-card">
+                            <strong>Employee side</strong>
+                            <span>Barcode plus the selected product fields.</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="config-block">
+                    <div class="config-title">Employee fields</div>
+                    <div class="field-options">
+                        {% for option in label_field_options %}
+                        <label class="check-pill">
+                            <input type="checkbox" name="fields" value="{{ option.value }}" {% if option.value in selected_fields %}checked{% endif %}>
+                            {{ option.label }}
+                        </label>
+                        {% endfor %}
+                    </div>
+                    <div class="toolbar" style="margin:12px 0 0;">
+                        <button type="submit" class="secondary-button">Update Preview</button>
+                    </div>
+                </div>
+            </form>
         </div>
     </div>
 
     {% if labels %}
     <div class="labels-grid">
         {% for label in labels %}
+        {% if layout == 'wrap' %}
+        <div class="label-card wrap-label-card">
+            <div class="wrap-customer" data-label-section="customer">
+                <div class="wrap-price">{{ label.price_text }}</div>
+            </div>
+            <div class="wrap-fold">
+                <span>Fold</span>
+                <strong>{{ label.barcode_value }}</strong>
+            </div>
+            <div class="wrap-employee" data-label-section="employee">
+                {% if 'barcode' in selected_fields %}
+                <div class="label-barcode">{{ label.barcode_svg | safe }}</div>
+                <div class="label-code">{{ label.barcode_value }}</div>
+                {% endif %}
+                {% for line in label.employee_lines %}
+                    {% if line.field != 'barcode' %}
+                    <div class="employee-line field-{{ line.field }}">
+                        <span>{{ line.label }}</span>
+                        <strong title="{{ line.value }}">{{ line.value }}</strong>
+                    </div>
+                    {% endif %}
+                {% endfor %}
+            </div>
+        </div>
+        {% else %}
         <div class="label-card">
+            {% if 'barcode' in selected_fields %}
             <div class="label-barcode">{{ label.barcode_svg | safe }}</div>
             <div class="label-code">{{ label.barcode_value }}</div>
+            {% endif %}
             <div class="label-price">{{ label.price_text }}</div>
-            <div class="label-name" title="{{ label.item.card_name }}">{{ label.item.card_name }}</div>
-            {% if label.product_type %}<div class="label-type">{{ label.product_type }}</div>{% endif %}
-            {% if label.item.set_name %}<div class="label-sub">{{ label.item.set_name }}</div>{% endif %}
-            {% if label.grade_or_condition %}<div class="label-sub">{{ label.grade_or_condition }}</div>{% endif %}
+            {% for line in label.employee_lines %}
+                {% if line.field == 'name' %}
+                <div class="label-name" title="{{ line.value }}">{{ line.value }}</div>
+                {% elif line.field != 'barcode' %}
+                <div class="employee-line field-{{ line.field }}">
+                    <span>{{ line.label }}</span>
+                    <strong title="{{ line.value }}">{{ line.value }}</strong>
+                </div>
+                {% endif %}
+            {% endfor %}
         </div>
+        {% endif %}
         {% endfor %}
     </div>
     {% else %}
