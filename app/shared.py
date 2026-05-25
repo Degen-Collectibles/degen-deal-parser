@@ -456,6 +456,7 @@ _live_session_cache: dict[str, object] = {}
 _live_session_lock = threading.Lock()
 _live_sessions_list_cache: list[dict] = []
 _live_sessions_list_lock = threading.Lock()
+_live_sessions_list_checked_at: Optional[datetime] = None
 
 def _compute_build_version() -> str:
     import subprocess as _sp
@@ -498,6 +499,10 @@ def _is_currently_live() -> bool:
 def _get_live_sessions_list() -> list[dict]:
     with _live_sessions_list_lock:
         return list(_live_sessions_list_cache)
+
+def _get_live_sessions_list_checked_at() -> Optional[datetime]:
+    with _live_sessions_list_lock:
+        return _live_sessions_list_checked_at
 
 def _get_live_analytics_snapshot() -> dict:
     with _live_analytics_lock:
@@ -590,7 +595,7 @@ def _poll_tiktok_live_analytics(stop_event: threading.Event) -> None:
 
 def _poll_live_session_list(runtime_name: str, access_token: str, shop_cipher: str, shop_id: str = "") -> None:
     """Fetch the live session list and auto-update stream range if source is 'auto'."""
-    global _stream_range_source
+    global _stream_range_source, _live_sessions_list_checked_at
     if _fetch_live_session_list is None:
         return
     try:
@@ -618,6 +623,7 @@ def _poll_live_session_list(runtime_name: str, access_token: str, shop_cipher: s
         with _live_sessions_list_lock:
             _live_sessions_list_cache.clear()
             _live_sessions_list_cache.extend(sessions)
+            _live_sessions_list_checked_at = datetime.now(timezone.utc)
 
         if not sessions:
             return
@@ -4486,6 +4492,7 @@ def _warm_cache_sync() -> tuple[int, int]:
 PUBLIC_PATH_PREFIXES = (
     "/static",
     "/health",
+    "/public/tiktok/live-status",
     "/login",
     "/webhooks/shopify",
     "/webhooks/tiktok",
