@@ -129,6 +129,7 @@ logger = logging.getLogger(__name__)
 _CLIENT_LOG_RATE: dict[str, list[float]] = {}
 
 PAGE_SIZE = 50
+DEFAULT_SINGLE_LOCATION = "Ungrouped"
 PRICE_MARKUP_ACTIONS = {
     "reprice": 0.0,
     "reprice_5": 5.0,
@@ -2996,14 +2997,7 @@ async def inventory_singles_receive(
     if list_price_value is not None and list_price_value < 0:
         params = urlencode({"game": selected_game, "search_type": selected_search_type, "q": card_name or "", "single_error": "Sell price cannot be negative."})
         return RedirectResponse(f"/inventory/add-stock?{params}", status_code=303)
-    if not location.strip():
-        params = urlencode({
-            "game": selected_game,
-            "search_type": selected_search_type,
-            "q": card_name or "",
-            "single_error": "Location is required.",
-        })
-        return RedirectResponse(f"/inventory/add-stock?{params}", status_code=303)
+    location_value = location.strip() or DEFAULT_SINGLE_LOCATION
 
     try:
         parsed_variants = json.loads(variants_json or "[]")
@@ -3034,7 +3028,7 @@ async def inventory_singles_receive(
             list_price=list_price_value,
             auto_price=auto_price,
             low_price=low_price,
-            location=location,
+            location=location_value,
             source=source,
             notes=notes,
             price_payload={
@@ -5769,13 +5763,7 @@ async def inventory_batch_confirm(
                     {"error": quantity_error, "card_name": card_name},
                     status_code=400,
                 )
-            location_value = (raw.get("location") or "").strip()
-            if not location_value:
-                session.rollback()
-                return JSONResponse(
-                    {"error": "Location is required for scanned singles.", "card_name": card_name},
-                    status_code=400,
-                )
+            location_value = (raw.get("location") or "").strip() or DEFAULT_SINGLE_LOCATION
 
             try:
                 item, _movement, _created = _receive_single_stock(

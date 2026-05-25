@@ -17,7 +17,7 @@ from uuid import uuid4
 
 import httpx
 
-from ..models import InventoryItem, ITEM_TYPE_SEALED, ITEM_TYPE_SLAB, utcnow
+from ..models import InventoryItem, ITEM_TYPE_SEALED, ITEM_TYPE_SINGLE, ITEM_TYPE_SLAB, utcnow
 from .pricing import effective_price
 from ..shopify_api import SHOPIFY_API_VERSION
 
@@ -101,6 +101,17 @@ def _shopify_legacy_id(value: Any) -> str:
     return text
 
 
+def _graphql_error_messages(payload: dict[str, Any]) -> list[str]:
+    errors = payload.get("errors") or []
+    messages: list[str] = []
+    for error in errors:
+        if isinstance(error, dict):
+            messages.append(str(error.get("message") or error))
+        else:
+            messages.append(str(error))
+    return [message for message in messages if message]
+
+
 async def _graphql_post(
     client: httpx.AsyncClient,
     *,
@@ -116,6 +127,150 @@ async def _graphql_post(
     )
     response.raise_for_status()
     return response.json()
+
+
+def _publication_is_point_of_sale(publication: dict[str, Any]) -> bool:
+    channels = ((publication.get("channels") or {}).get("nodes") or [])
+    for channel in channels:
+        app = channel.get("app") or {}
+        candidates = [
+            channel.get("handle"),
+            channel.get("name"),
+            channel.get("specificationHandle"),
+            app.get("handle"),
+            app.get("title"),
+        ]
+        normalized = " ".join(str(value or "").strip().lower() for value in candidates)
+        dashed = normalized.replace("_", "-").replace(" ", "-")
+        bounded = f"-{dashed.strip('-')}-"
+        if "point-of-sale" in dashed or "shopify-pos" in dashed or "-pos-" in bounded:
+            return True
+    return False
+
+
+async def unpublish_non_pos_product_publications(
+    product_id: str,
+    *,
+    store_domain: str,
+    access_token: str,
+    client: Optional[httpx.AsyncClient] = None,
+) -> tuple[bool, list[str]]:
+    """Remove a product from published sales channels other than Shopify POS."""
+    product_gid = _shopify_gid("Product", product_id)
+    if not product_gid or not store_domain or not access_token:
+        return False, ["Shopify product id, store domain, and Admin token are required."]
+
+    query = """
+    query ProductPublications($id: ID!) {
+      product(id: $id) {
+        resourcePublicationsV2(first: 50, onlyPublished: true) {
+          nodes {
+            publication {
+              id
+              channels(first: 10) {
+                nodes {
+                  id
+                  handle
+                  name
+                  app {
+                    handle
+                    title
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+    mutation = """
+    mutation UnpublishProduct($id: ID!, $input: [PublicationInput!]!) {
+      publishableUnpublish(id: $id, input: $input) {
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+    """
+
+    async def _run(active_client: httpx.AsyncClient) -> tuple[bool, list[str]]:
+        try:
+            publication_payload = await _graphql_post(
+                active_client,
+                store_domain=store_domain,
+                access_token=access_token,
+                query=query,
+                variables={"id": product_gid},
+            )
+        except Exception as exc:
+            return False, [f"Could not inspect Shopify product publications: {exc}"]
+
+        errors = _graphql_error_messages(publication_payload)
+        if errors:
+            return False, errors
+
+        product = (publication_payload.get("data") or {}).get("product")
+        if not isinstance(product, dict):
+            return False, ["Could not inspect Shopify product publications: product not found."]
+        nodes = ((product.get("resourcePublicationsV2") or {}).get("nodes") or [])
+        publication_ids: list[str] = []
+        for node in nodes:
+            publication = (node or {}).get("publication") or {}
+            publication_id = str(publication.get("id") or "").strip()
+            if not publication_id or _publication_is_point_of_sale(publication):
+                continue
+            publication_ids.append(publication_id)
+
+        cleanup_errors: list[str] = []
+        for publication_id in publication_ids:
+            try:
+                unpublish_payload = await _graphql_post(
+                    active_client,
+                    store_domain=store_domain,
+                    access_token=access_token,
+                    query=mutation,
+                    variables={"id": product_gid, "input": [{"publicationId": publication_id}]},
+                )
+            except Exception as exc:
+                cleanup_errors.append(f"{publication_id}: {exc}")
+                continue
+
+            cleanup_errors.extend(_graphql_error_messages(unpublish_payload))
+            user_errors = (
+                ((unpublish_payload.get("data") or {}).get("publishableUnpublish") or {}).get("userErrors")
+                or []
+            )
+            for error in user_errors:
+                cleanup_errors.append(str((error or {}).get("message") or error))
+
+        return not cleanup_errors, [error for error in cleanup_errors if error]
+
+    if client is not None:
+        return await _run(client)
+    async with httpx.AsyncClient(timeout=20.0) as active_client:
+        return await _run(active_client)
+
+
+async def _draft_shopify_product(
+    product_id: str,
+    *,
+    store_domain: str,
+    access_token: str,
+    client: httpx.AsyncClient,
+) -> bool:
+    product_id = _shopify_legacy_id(product_id)
+    if not product_id:
+        return False
+    url = f"{_shopify_base(store_domain)}/products/{product_id}.json"
+    response = await client.put(
+        url,
+        json={"product": {"id": product_id, "status": "draft"}},
+        headers=_shopify_headers(access_token),
+    )
+    response.raise_for_status()
+    return True
 
 
 def _variant_ref_from_graphql_node(node: dict[str, Any]) -> ShopifyVariantRef:
@@ -402,23 +557,28 @@ def _build_product_tags(item: InventoryItem) -> list[str]:
 def build_shopify_product_payload(item: InventoryItem) -> dict[str, Any]:
     price = effective_price(item)
     price_str = f"{price:.2f}" if price is not None else "0.00"
-    return {
-        "product": {
-            "title": _build_product_title(item),
-            "body_html": _build_product_body(item),
-            "product_type": "Sealed Product" if item.item_type == ITEM_TYPE_SEALED else ("Slabs" if item.item_type == ITEM_TYPE_SLAB else "Singles"),
-            "tags": ", ".join(_build_product_tags(item)),
-            "variants": [
-                {
-                    "price": price_str,
-                    "sku": item.barcode,
-                    "inventory_quantity": item.quantity,
-                    "inventory_management": "shopify",
-                    "fulfillment_service": "manual",
-                }
-            ],
-        }
+    product = {
+        "title": _build_product_title(item),
+        "body_html": _build_product_body(item),
+        "product_type": "Sealed Product" if item.item_type == ITEM_TYPE_SEALED else ("Slabs" if item.item_type == ITEM_TYPE_SLAB else "Singles"),
+        "tags": ", ".join(_build_product_tags(item)),
+        "variants": [
+            {
+                "price": price_str,
+                "sku": item.barcode,
+                "inventory_quantity": item.quantity,
+                "inventory_management": "shopify",
+                "fulfillment_service": "manual",
+            }
+        ],
     }
+    if item.item_type == ITEM_TYPE_SINGLE:
+        product.update({
+            "status": "active",
+            "published_at": None,
+            "published_scope": "global",
+        })
+    return {"product": product}
 
 
 async def push_item_to_shopify(
@@ -426,6 +586,7 @@ async def push_item_to_shopify(
     *,
     store_domain: str,
     access_token: str,
+    client: Optional[httpx.AsyncClient] = None,
 ) -> Optional[dict[str, Any]]:
     """
     Create a new Shopify product for the inventory item.
@@ -440,9 +601,9 @@ async def push_item_to_shopify(
     url = f"{_shopify_base(store_domain)}/products.json"
     payload = build_shopify_product_payload(item)
 
-    try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            resp = await client.post(
+    async def _run(active_client: httpx.AsyncClient) -> Optional[dict[str, Any]]:
+        try:
+            resp = await active_client.post(
                 url,
                 json=payload,
                 headers=_shopify_headers(access_token),
@@ -452,7 +613,7 @@ async def push_item_to_shopify(
             product = data.get("product") or {}
             variants = product.get("variants") or [{}]
             variant = variants[0] if variants else {}
-            return {
+            result = {
                 "shopify_product_id": str(product.get("id") or ""),
                 "shopify_variant_id": str(variant.get("id") or ""),
                 "shopify_inventory_item_id": str(
@@ -462,17 +623,50 @@ async def push_item_to_shopify(
                 ),
                 "shopify_sku": str(variant.get("sku") or item.barcode),
             }
-    except httpx.HTTPStatusError as exc:
-        logger.error(
-            "[shopify-inventory] create product failed for item %s: %s %s",
-            item.barcode,
-            exc.response.status_code,
-            exc.response.text[:200],
-        )
-        return None
-    except Exception as exc:
-        logger.error("[shopify-inventory] create product error for item %s: %s", item.barcode, exc)
-        return None
+            if item.item_type == ITEM_TYPE_SINGLE and result["shopify_product_id"]:
+                cleanup_ok, cleanup_errors = await unpublish_non_pos_product_publications(
+                    result["shopify_product_id"],
+                    store_domain=store_domain,
+                    access_token=access_token,
+                    client=active_client,
+                )
+                if not cleanup_ok:
+                    logger.error(
+                        "[shopify-inventory] product publication cleanup failed for %s: %s",
+                        item.barcode,
+                        "; ".join(cleanup_errors),
+                    )
+                    try:
+                        await _draft_shopify_product(
+                            result["shopify_product_id"],
+                            store_domain=store_domain,
+                            access_token=access_token,
+                            client=active_client,
+                        )
+                    except Exception as draft_exc:
+                        logger.error(
+                            "[shopify-inventory] failed to draft unsafe single product %s: %s",
+                            result["shopify_product_id"],
+                            draft_exc,
+                        )
+                    return None
+            return result
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "[shopify-inventory] create product failed for item %s: %s %s",
+                item.barcode,
+                exc.response.status_code,
+                exc.response.text[:200],
+            )
+            return None
+        except Exception as exc:
+            logger.error("[shopify-inventory] create product error for item %s: %s", item.barcode, exc)
+            return None
+
+    if client is not None:
+        return await _run(client)
+    async with httpx.AsyncClient(timeout=20.0) as active_client:
+        return await _run(active_client)
 
 
 async def update_shopify_variant_price(

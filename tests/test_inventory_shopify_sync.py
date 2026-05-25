@@ -10,12 +10,13 @@ from app.inventory.shopify import (
     build_shopify_product_payload,
     get_shopify_inventory_item_location_id,
     get_shopify_primary_location_id,
+    push_item_to_shopify,
     resolve_shopify_access_token,
     sync_shopify_inventory_quantity,
+    unpublish_non_pos_product_publications,
 )
 from app.models import (
     INVENTORY_LISTED,
-    INVENTORY_IN_STOCK,
     InventoryItem,
     ShopifySyncIssue,
     ITEM_TYPE_SEALED,
@@ -50,6 +51,181 @@ class ShopifyInventoryApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(variant["sku"], "DGN-SKU1")
         self.assertEqual(variant["inventory_quantity"], 4)
         self.assertEqual(variant["price"], "39.99")
+
+    async def test_single_product_payload_is_pos_scoped_not_online_store_published(self):
+        item = InventoryItem(
+            barcode="DGN-SINGLE1",
+            item_type=ITEM_TYPE_SINGLE,
+            game="Pokemon",
+            card_name="Pikachu",
+            condition="NM",
+            quantity=1,
+            list_price=9.99,
+        )
+
+        payload = build_shopify_product_payload(item)
+
+        product = payload["product"]
+        self.assertEqual(product["product_type"], "Singles")
+        self.assertEqual(product["published_scope"], "global")
+        self.assertIsNone(product["published_at"])
+        self.assertEqual(product["status"], "active")
+        self.assertEqual(product["variants"][0]["sku"], "DGN-SINGLE1")
+
+    async def test_single_product_creation_unpublishes_non_pos_publications(self):
+        item = InventoryItem(
+            barcode="DGN-SINGLE2",
+            item_type=ITEM_TYPE_SINGLE,
+            game="Pokemon",
+            card_name="Raichu",
+            condition="NM",
+            quantity=1,
+            list_price=12.0,
+        )
+        create_payload = {
+            "product": {
+                "id": 111,
+                "variants": [{"id": 222, "inventory_item_id": 333, "sku": "DGN-SINGLE2"}],
+            }
+        }
+        publications_payload = {
+            "data": {
+                "product": {
+                    "resourcePublicationsV2": {
+                        "nodes": [
+                            {
+                                "publication": {
+                                    "id": "gid://shopify/Publication/pos",
+                                    "channels": {
+                                        "nodes": [
+                                            {
+                                                "id": "gid://shopify/Channel/pos",
+                                                "handle": "point-of-sale",
+                                                "name": "Point of Sale",
+                                                "app": {"handle": "point-of-sale", "title": "Point of Sale"},
+                                            }
+                                        ]
+                                    },
+                                }
+                            },
+                            {
+                                "publication": {
+                                    "id": "gid://shopify/Publication/shop",
+                                    "channels": {
+                                        "nodes": [
+                                            {
+                                                "id": "gid://shopify/Channel/shop",
+                                                "handle": "shop",
+                                                "name": "Shop",
+                                                "app": {"handle": "shop", "title": "Shop"},
+                                            }
+                                        ]
+                                    },
+                                }
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+        unpublish_payload = {
+            "data": {
+                "publishableUnpublish": {
+                    "userErrors": [],
+                }
+            }
+        }
+
+        async with _FakeAsyncClient([create_payload, publications_payload, unpublish_payload]) as client:
+            result = await push_item_to_shopify(
+                item,
+                store_domain="degen-test.myshopify.com",
+                access_token="shpat_test",
+                client=client,
+            )
+
+        self.assertEqual(result["shopify_product_id"], "111")
+        self.assertEqual(result["shopify_variant_id"], "222")
+        self.assertEqual(client.posts[0]["url"], "https://degen-test.myshopify.com/admin/api/2026-04/products.json")
+        self.assertEqual(client.posts[1]["url"], "https://degen-test.myshopify.com/admin/api/2026-04/graphql.json")
+        self.assertEqual(client.posts[2]["json"]["variables"]["input"], [{"publicationId": "gid://shopify/Publication/shop"}])
+        self.assertEqual(client.puts, [])
+
+    async def test_single_product_creation_drafts_product_when_publication_cleanup_fails(self):
+        item = InventoryItem(
+            barcode="DGN-SINGLE3",
+            item_type=ITEM_TYPE_SINGLE,
+            game="Pokemon",
+            card_name="Charmander",
+            condition="NM",
+            quantity=1,
+            list_price=15.0,
+        )
+        create_payload = {
+            "product": {
+                "id": 111,
+                "variants": [{"id": 222, "inventory_item_id": 333, "sku": "DGN-SINGLE3"}],
+            }
+        }
+        cleanup_failure = {"errors": [{"message": "Access denied for publications"}]}
+        draft_payload = {"product": {"id": 111, "status": "draft"}}
+
+        async with _FakeAsyncClient([create_payload, cleanup_failure, draft_payload]) as client:
+            result = await push_item_to_shopify(
+                item,
+                store_domain="degen-test.myshopify.com",
+                access_token="shpat_test",
+                client=client,
+            )
+
+        self.assertIsNone(result)
+        self.assertEqual(client.puts[0]["url"], "https://degen-test.myshopify.com/admin/api/2026-04/products/111.json")
+        self.assertEqual(client.puts[0]["json"]["product"]["status"], "draft")
+
+    async def test_unpublish_non_pos_product_publications_reports_user_errors(self):
+        publications_payload = {
+            "data": {
+                "product": {
+                    "resourcePublicationsV2": {
+                        "nodes": [
+                            {
+                                "publication": {
+                                    "id": "gid://shopify/Publication/shop",
+                                    "channels": {
+                                        "nodes": [
+                                            {
+                                                "id": "gid://shopify/Channel/shop",
+                                                "handle": "shop",
+                                                "name": "Shop",
+                                                "app": {"handle": "shop", "title": "Shop"},
+                                            }
+                                        ]
+                                    },
+                                }
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+        unpublish_payload = {
+            "data": {
+                "publishableUnpublish": {
+                    "userErrors": [{"message": "Publication does not exist"}],
+                }
+            }
+        }
+
+        async with _FakeAsyncClient([publications_payload, unpublish_payload]) as client:
+            ok, errors = await unpublish_non_pos_product_publications(
+                "111",
+                store_domain="degen-test.myshopify.com",
+                access_token="shpat_test",
+                client=client,
+            )
+
+        self.assertFalse(ok)
+        self.assertIn("Publication does not exist", errors[0])
 
     async def test_shopify_admin_token_falls_back_to_existing_api_key(self):
         self.assertEqual(
@@ -224,7 +400,7 @@ class ShopifySyncIssueTests(unittest.TestCase):
 
 
 class ShopifySyncWorkerTests(unittest.IsolatedAsyncioTestCase):
-    async def test_single_without_existing_shopify_variant_is_not_created_publicly(self):
+    async def test_single_without_existing_shopify_variant_can_create_pos_scoped_product(self):
         engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
         SQLModel.metadata.create_all(engine)
         try:
@@ -249,8 +425,19 @@ class ShopifySyncWorkerTests(unittest.IsolatedAsyncioTestCase):
                     new=AsyncMock(return_value=None),
                 ) as mocked_find, patch(
                     "app.shopify_sync_worker.push_item_to_shopify",
-                    new=AsyncMock(return_value={"shopify_product_id": "111", "shopify_variant_id": "222"}),
-                ) as mocked_push:
+                    new=AsyncMock(return_value={
+                        "shopify_product_id": "111",
+                        "shopify_variant_id": "222",
+                        "shopify_inventory_item_id": "333",
+                        "shopify_sku": "DGN-SINGLE1",
+                    }),
+                ) as mocked_push, patch(
+                    "app.shopify_sync_worker.update_shopify_variant_price",
+                    new=AsyncMock(return_value=True),
+                ) as mocked_price, patch(
+                    "app.shopify_sync_worker.sync_shopify_inventory_quantity",
+                    new=AsyncMock(return_value=(True, None)),
+                ) as mocked_qty:
                     mocked_settings.shopify_store_domain = "degen-test.myshopify.com"
                     mocked_settings.shopify_access_token = "shpat_test"
                     mocked_settings.shopify_api_key = ""
@@ -262,16 +449,21 @@ class ShopifySyncWorkerTests(unittest.IsolatedAsyncioTestCase):
                         source="unit-test",
                     )
 
-                self.assertFalse(ok)
-                self.assertIn("Singles must be linked to an existing POS-only Shopify variant", error)
+                self.assertTrue(ok)
+                self.assertEqual(error, "")
                 mocked_find.assert_awaited_once()
-                mocked_push.assert_not_awaited()
+                mocked_push.assert_awaited_once()
+                self.assertEqual(mocked_push.await_args.args[0].barcode, "DGN-SINGLE1")
+                mocked_price.assert_awaited_once()
+                mocked_qty.assert_awaited_once()
                 session.refresh(item)
-                self.assertIsNone(item.shopify_product_id)
-                self.assertIsNone(item.shopify_variant_id)
-                self.assertIsNone(item.shopify_inventory_item_id)
-                self.assertEqual(item.status, INVENTORY_IN_STOCK)
-                self.assertNotEqual(item.shopify_sync_status, "synced")
+                self.assertEqual(item.shopify_product_id, "111")
+                self.assertEqual(item.shopify_variant_id, "222")
+                self.assertEqual(item.shopify_inventory_item_id, "333")
+                self.assertEqual(item.shopify_location_id, "444")
+                self.assertEqual(item.shopify_sku, "DGN-SINGLE1")
+                self.assertEqual(item.status, INVENTORY_LISTED)
+                self.assertEqual(item.shopify_sync_status, "synced")
         finally:
             engine.dispose()
 
@@ -469,9 +661,10 @@ class _FakeResponse:
 
 class _FakeAsyncClient:
     def __init__(self, payload):
-        self.payload = payload
+        self.payloads = list(payload) if isinstance(payload, list) else [payload]
         self.posts = []
         self.gets = []
+        self.puts = []
 
     async def __aenter__(self):
         return self
@@ -481,11 +674,15 @@ class _FakeAsyncClient:
 
     async def post(self, url, **kwargs):
         self.posts.append({"url": url, **kwargs})
-        return _FakeResponse(self.payload)
+        return _FakeResponse(self.payloads.pop(0))
 
     async def get(self, url, **kwargs):
         self.gets.append({"url": url, **kwargs})
-        return _FakeResponse(self.payload)
+        return _FakeResponse(self.payloads.pop(0))
+
+    async def put(self, url, **kwargs):
+        self.puts.append({"url": url, **kwargs})
+        return _FakeResponse(self.payloads.pop(0))
 
 
 if __name__ == "__main__":

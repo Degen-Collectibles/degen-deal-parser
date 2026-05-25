@@ -216,7 +216,9 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["created"], 1)
 
-    def test_employee_batch_confirm_requires_location_for_singles(self):
+    def test_employee_batch_confirm_defaults_blank_location_for_singles(self):
+        from app.models import InventoryItem, InventoryStockMovement, ITEM_TYPE_SINGLE
+
         self._login_as("employee", user_id=232, username="emp32")
         page = self.client.get("/inventory/add-stock", follow_redirects=False)
         token = page.text.split("var token = ", 1)[1].split(";", 1)[0].strip().strip('"')
@@ -229,12 +231,21 @@ class EmployeeOpsAccessTests(unittest.TestCase):
                     "card_name": "No Location Pikachu",
                     "game": "Pokemon",
                     "condition": "NM",
+                    "location": "   ",
                 }
             ],
         )
 
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("Location is required", response.json()["error"])
+        self.assertEqual(response.status_code, 200)
+        self.session.expire_all()
+        item = self.session.exec(
+            select(InventoryItem).where(InventoryItem.item_type == ITEM_TYPE_SINGLE)
+        ).one()
+        self.assertEqual(item.location, "Ungrouped")
+        movement = self.session.exec(
+            select(InventoryStockMovement).where(InventoryStockMovement.item_id == item.id)
+        ).one()
+        self.assertEqual(movement.location, "Ungrouped")
 
     def test_employee_batch_confirm_merges_single_and_logs_stock_movements(self):
         from app.models import InventoryItem, InventoryStockMovement, ITEM_TYPE_SINGLE
@@ -325,7 +336,7 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         self.assertEqual(items, [])
         self.assertEqual(movements, [])
 
-    def test_employee_batch_confirm_missing_location_does_not_partially_persist(self):
+    def test_employee_batch_confirm_blank_location_defaults_without_partial_rollback(self):
         from app.models import InventoryItem, InventoryStockMovement, ITEM_TYPE_SINGLE
 
         self._login_as("employee", user_id=236, username="emp36")
@@ -353,15 +364,22 @@ class EmployeeOpsAccessTests(unittest.TestCase):
             ],
         )
 
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("Location is required", response.json()["error"])
+        self.assertEqual(response.status_code, 200)
         self.session.expire_all()
         items = self.session.exec(
-            select(InventoryItem).where(InventoryItem.item_type == ITEM_TYPE_SINGLE)
+            select(InventoryItem)
+            .where(InventoryItem.item_type == ITEM_TYPE_SINGLE)
+            .order_by(InventoryItem.card_name)
         ).all()
-        movements = self.session.exec(select(InventoryStockMovement)).all()
-        self.assertEqual(items, [])
-        self.assertEqual(movements, [])
+        self.assertEqual([item.card_name for item in items], ["Missing Location After Valid", "Valid Before Missing Location"])
+        self.assertEqual({item.card_name: item.location for item in items}, {
+            "Missing Location After Valid": "Ungrouped",
+            "Valid Before Missing Location": "Case A",
+        })
+        movements = self.session.exec(
+            select(InventoryStockMovement).order_by(InventoryStockMovement.id)
+        ).all()
+        self.assertEqual([movement.location for movement in movements], ["Case A", "Ungrouped"])
 
     def test_employee_batch_confirm_slab_then_invalid_single_does_not_partially_persist(self):
         from app.models import InventoryItem, InventoryStockMovement

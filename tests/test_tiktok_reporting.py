@@ -2426,10 +2426,19 @@ class TikTokRegressionTests(unittest.TestCase):
         import app.routers.tiktok_streamer as streamer_module
         from starlette.requests import Request as _Request
 
-        now_ts = int(time.time())
+        now_utc = datetime.now(timezone.utc)
+        now_ts = int(now_utc.timestamp())
         main_start = now_ts - 3600
         boss_start = now_ts - 1800
-        order_time = datetime.fromtimestamp(now_ts - 300, tz=timezone.utc)
+        today_start_utc = now_utc.astimezone(main_module.PACIFIC_TZ).replace(
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
+        ).astimezone(timezone.utc)
+        # Keep the order inside the dashboard's Pacific-day "today" window even
+        # when this test runs in the first few minutes after midnight.
+        order_time = max(now_utc - timedelta(minutes=5), today_start_utc)
         with Session(self.engine) as session:
             session.add(
                 TikTokOrder(

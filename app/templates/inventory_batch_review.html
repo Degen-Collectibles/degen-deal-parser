@@ -228,8 +228,8 @@
             <div class="confirm-summary">
                 <span id="confirm-count">0</span> cards ready to add to inventory
             </div>
-            <label class="field-label" for="batch-location">Location</label>
-            <input id="batch-location" class="name-input" type="text" placeholder="Case A, Binder 1, Back Stock" autocomplete="off">
+            <label class="field-label" for="batch-location">Location (optional)</label>
+            <input id="batch-location" class="name-input" type="text" placeholder="Case A, Binder 1, Back Stock, or Ungrouped" autocomplete="off">
             <button class="btn-outline" onclick="window.location.href='/inventory/scan/singles'">+ Scan More</button>
             <button class="btn-primary" id="confirm-btn" onclick="confirmBatch()">
                 Confirm &amp; Add All
@@ -344,12 +344,8 @@
     window.confirmBatch = async function() {
         if (!batch.length) return;
         var locationInput = document.getElementById('batch-location');
-        var location = locationInput ? locationInput.value.trim() : '';
-        if (!location) {
-            alert('Location is required before adding scanned singles to inventory.');
-            if (locationInput) locationInput.focus();
-            return;
-        }
+        var location = locationInput ? locationInput.value.trim() : 'Ungrouped';
+        if (!location) location = 'Ungrouped';
         var payload = batch.map(function(item) {
             var copy = Object.assign({}, item);
             var itemLocation = (copy.location || '').trim();

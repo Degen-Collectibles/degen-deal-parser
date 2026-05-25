@@ -42,7 +42,7 @@ The pilot is successful when:
 
 - Employees can answer a customer stock question from `/inventory` without asking the whole team.
 - A normal lookup by card name returns useful results in under 10 seconds of employee time.
-- Every pilot single has a condition and a usable location or bin.
+- Every pilot single has a condition and either a usable location/bin or the explicit default location `Ungrouped`.
 - Newly received pilot singles create an auditable stock movement.
 - Scanner-confirmed singles merge or create records consistently with manual single receive.
 - Duplicate records are rare and visible enough for manager cleanup.
@@ -58,10 +58,10 @@ In scope:
 - Internal employee lookup for singles.
 - Receiving singles through existing `/inventory/add-stock`, Degen Eye, and batch review flows.
 - Making scanned singles use the same receiving rules as manually received singles.
-- Requiring or strongly enforcing condition and location during pilot intake.
+- Requiring condition during pilot intake and defaulting blank locations to `Ungrouped`.
 - Preserving inventory movement history for received singles.
-- Adding or improving lookup filters needed for floor use, such as missing location, singles only, and potentially location/bin search.
-- Manager cleanup views for missing locations, duplicate-looking singles, and questionable scan results.
+- Adding or improving lookup filters needed for floor use, such as missing location, `Ungrouped` cleanup, singles only, and potentially location/bin search.
+- Manager cleanup views for missing/default locations, duplicate-looking singles, and questionable scan results.
 - POS-only Shopify linkage for tracked singles that employees will check out through Shopify POS.
 - Local inventory deduction from Shopify order webhooks when sold POS line items use the local Degen barcode as SKU.
 - Guardrails to prevent pilot singles from being published to customer-facing sales channels by default.
@@ -91,8 +91,8 @@ Out of scope for the pilot:
 - Do not require employees to enter every card in bulk boxes.
 - The current `InventoryItem` model has one `location` field per item. If identical cards exist in multiple places, the pilot needs an explicit operating rule or a future location-quantity model.
 - A Shopify-linked pilot single must use the local Degen barcode as the Shopify variant SKU so the existing webhook deduction path can match it.
-- The default Shopify state for pilot singles must be POS-only. Website and other customer-facing channel availability must be opt-in per product.
-- Before any code path creates or links a Shopify product for singles, it must verify the product cannot be purchased outside POS unless explicitly approved.
+- The default Shopify state for pilot singles must be POS-first and not Online Store published. Website and other customer-facing channel availability must be opt-in per product.
+- Product creation for singles is allowed when a manager/admin explicitly syncs the item, but the created product must keep the Degen barcode as SKU, be scoped for Point of Sale, avoid Online Store publication by default, and remove any non-POS sales-channel publications that Shopify reports.
 
 ## Recommended Design
 
@@ -119,7 +119,7 @@ For each single, employees must capture:
 - variant or printing when relevant
 - condition
 - quantity
-- location or bin
+- location or bin when known; blank location defaults to `Ungrouped`
 - optional sell price
 - optional notes
 
@@ -129,7 +129,7 @@ The lookup behavior should be simple:
 2. Searches card name or scans barcode.
 3. Filters to singles if needed.
 4. Reads quantity, condition, location, and price.
-5. If the result is missing location or looks wrong, employee flags it for manager cleanup rather than guessing.
+5. If the result is `Ungrouped`, missing data, or looks wrong, employee flags it for manager cleanup rather than guessing.
 
 The checkout behavior should also be simple:
 
@@ -165,20 +165,21 @@ Default rules:
 - Use the local Degen barcode as the Shopify variant SKU.
 - Make the product available to Point of Sale only.
 - Do not make the product available to Online Store, TikTok, Shop, Google, marketplaces, social commerce, or other customer-facing channels.
-- Do not auto-publish a single to the website just because it was scanned, received, repriced, or linked.
+- Auto-created synced singles should be POS-scoped and not Online Store published by default.
 - Only managers/admins can explicitly mark a product as customer-facing.
 - Any "publish outside POS" action must be visible, deliberate, and auditable.
 
 Implementation guardrail:
 
-- Until the code can prove POS-only channel availability, single-item Shopify creation should default to no public publication. Linking to an existing POS-only Shopify variant is safer than creating a new active product without channel controls.
+- Single-item Shopify creation should default to no Online Store publication, should use the Point of Sale scope where the Admin API supports it, and should unpublish reported non-POS publications after creation.
+- If Shopify publication cleanup cannot be verified, sync should fail safe by drafting the created product rather than leaving a possibly public single active.
 - If the Shopify API path cannot enforce sales-channel availability safely, the rollout should require a manager-side manual Shopify setup step for POS-only products before POS deduction is enabled.
 
 ### Manager Workflow
 
 Managers/admins should review pilot data daily at first:
 
-- missing location
+- missing or `Ungrouped` location
 - missing condition
 - likely duplicates
 - scanner low-confidence or manually corrected entries
@@ -196,7 +197,7 @@ Phase 1: tighten workflow
 - Ensure received singles have movement history.
 - Add or expose filters for missing location and singles-only lookup if current search is not enough.
 - Keep public sales-channel sync out of the pilot.
-- Add a POS-only Shopify linking/creation guardrail for singles before enabling POS checkout on pilot cards.
+- Add a Shopify creation guardrail for singles so explicit sync can create POS-scoped products without Online Store publication by default.
 - Keep the existing Shopify order webhook deduction path, but verify it covers POS orders whose line-item SKU matches the Degen barcode.
 
 Phase 2: shop-floor pilot
@@ -235,13 +236,13 @@ Before rollout, verify:
 - Scanner batch confirm creates or updates through the same receive logic.
 - Duplicate scanned copies of the same card increment quantity rather than creating unnecessary duplicate rows.
 - Condition and location are visible from `/inventory`.
-- Missing-location entries are easy to find.
+- Missing-location and `Ungrouped` entries are easy to find.
 - Employee users can search and receive pilot singles but cannot access manager-only destructive actions.
 - A Shopify POS order with line-item SKU equal to a local Degen barcode decrements local quantity once and logs a sale movement.
 - A repeated Shopify webhook for the same order does not double-decrement local inventory.
 - A Shopify POS order with an unknown SKU creates a visible Shopify sync issue.
 - Pilot singles are not available on Online Store, TikTok, Shop, Google, marketplaces, social commerce, or other non-POS customer-facing channels by default.
-- An explicit manager/admin action is required to publish a product outside POS.
+- An explicit manager/admin action is required to publish a product outside the default POS-scoped setup.
 
 Code verification should include:
 
@@ -269,7 +270,7 @@ The pilot should be reversible:
 - Should labels be printed during the pilot, or is lookup by name/location enough?
 - How should employees flag "lookup says yes but I cannot find it"?
 - Who owns the daily cleanup pass during the first week?
-- When, if ever, should we build a verified automatic POS-only Shopify product creation flow after managers/admins have proven safe linking to existing POS-only variants?
+- Which non-POS Shopify sales channels, if any, should be enabled for specific synced singles after manager review?
 - Which Shopify sales channels are currently installed and need explicit exclusion for pilot singles?
 - What is the exact POS location ID that should hold tracked single inventory?
 - Should Shopify POS-only products be Active but POS-only, Draft plus manually added to POS, or another Shopify-supported state after live verification?
@@ -282,6 +283,6 @@ Implementation should not start until Jeffrey approves:
 - internal lookup plus POS-only Shopify deduction
 - no website/TikTok/Shop/Google/marketplace/customer-facing sales-channel publication by default
 - tracked-singles-only intake policy
-- required condition and location
+- required condition plus optional/defaulted location
 - scanner batch-confirm cleanup as the first code change
 - Shopify POS linkage guardrail as a required part of the pilot before employees rely on automatic deduction

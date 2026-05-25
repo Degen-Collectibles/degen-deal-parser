@@ -4,7 +4,7 @@
 
 **Goal:** Make tracked singles usable for employee lookup and Shopify POS checkout deduction without exposing pilot singles on customer-facing sales channels by default.
 
-**Architecture:** Keep the existing `/inventory`, `/inventory/add-stock`, Degen Eye, and Shopify webhook surfaces. Route all single intake through the existing single receive helper so quantities and stock movements are consistent, then add lookup cleanup filters and Shopify guardrails that allow POS-linked deduction while blocking automatic public product creation for singles.
+**Architecture:** Keep the existing `/inventory`, `/inventory/add-stock`, Degen Eye, and Shopify webhook surfaces. Route all single intake through the existing single receive helper so quantities and stock movements are consistent, then add lookup cleanup filters and Shopify guardrails that allow explicit single product creation for POS while blocking Online Store publication by default.
 
 **Tech Stack:** Python 3.14, FastAPI, SQLModel, Jinja2 templates, existing Shopify REST/GraphQL helpers, pytest/unittest-style tests.
 
@@ -14,30 +14,30 @@
 
 - Spec: `docs/superpowers/specs/2026-05-25-singles-lookup-pilot-design.md`
 - Shopify inventory docs: inventory items have inventory levels per location, and variants map to inventory items.
-- Shopify product status docs: `ACTIVE` products are not automatically published to sales channels, while `DRAFT` products are unavailable to sales channels.
-- Shopify product publishing docs: product/channel visibility is controlled through publications; `resourcePublicationsV2` and `unpublishedPublications` can audit publication state.
+- Shopify REST Product docs: `published_at = null` unpublishes a product from Online Store, and `published_scope = "global"` publishes it to Point of Sale.
+- Shopify GraphQL publishing docs: `resourcePublicationsV2` lists published publications, and `publishableUnpublish` removes a publishable resource from a publication.
 
 ## File Map
 
 - `app/inventory/routes.py`
   - Route scanner batch-confirm singles through `_receive_single_stock()`.
-  - Enforce pilot-required location/condition for single receive and scanner batch confirm.
+  - Default blank single locations to `Ungrouped` for single receive and scanner batch confirm.
   - Add missing-location and missing-condition filters to `/inventory`.
   - Keep manager-only Shopify sync entry points manager-only.
 - `app/templates/inventory_batch_review.html`
-  - Add required batch location input and send that location with each scanned single.
+  - Add optional batch location input and default blank locations to `Ungrouped`.
 - `app/templates/inventory.html`
   - Add missing-location and missing-condition cleanup links/filter state.
 - `app/shopify_sync_worker.py`
-  - Block automatic Shopify product creation for singles unless the item is already linked or an existing Shopify variant with matching DGN SKU is found.
+  - Allow explicit Shopify product creation for singles with Point of Sale scope, no Online Store publication by default, and post-create cleanup of non-POS publications.
 - `app/inventory/shopify_ingest.py`
   - No expected behavior change; add a single-item POS deduction test around current webhook matching behavior.
 - `tests/test_employee_ops_access.py`
-  - Route-level tests for scanner batch confirm, receive movement history, merging, and required location.
+  - Route-level tests for scanner batch confirm, receive movement history, merging, and default location.
 - `tests/test_sealed_inventory.py`
   - Unit tests for single receive and Shopify POS deduction behavior.
 - `tests/test_inventory_shopify_sync.py`
-  - Unit tests for Shopify single-creation guardrails.
+  - Unit tests for Shopify single-creation channel defaults.
 - `docs/superpowers/specs/2026-05-25-singles-lookup-pilot-design.md`
   - Update if implementation discovers a channel-safety constraint different from the draft.
 
@@ -78,7 +78,7 @@ If the preflight prints `admin_configured=False`, do not implement automatic POS
 Add a short note to the eventual PR or final implementation summary:
 
 ```text
-Shopify preflight: admin_configured=true, configured_location_id=123456789, automatic single product creation=blocked.
+Shopify preflight: admin_configured=true, configured_location_id=123456789, automatic single product creation=allowed only with POS/no-Online-Store defaults.
 ```
 
 Expected: no code changes and no Shopify mutations.
@@ -233,7 +233,7 @@ Expected: commit succeeds only after the focused tests pass.
 
 ---
 
-### Task 2: Require Location For Pilot Single Intake
+### Task 2: Default Blank Location For Pilot Single Intake
 
 **Files:**
 - Modify: `tests/test_employee_ops_access.py`
@@ -241,166 +241,40 @@ Expected: commit succeeds only after the focused tests pass.
 - Modify: `app/inventory/routes.py`
 - Modify: `app/templates/inventory_batch_review.html`
 
-- [ ] **Step 1: Add missing-location tests**
+- [ ] **Step 1: Add blank-location default tests**
 
-Add this route-level test to `tests/test_employee_ops_access.py`:
+Cover manual receive and scanner batch confirm with blank or whitespace location. Expected behavior:
 
-```python
-    def test_employee_batch_confirm_requires_location_for_singles(self):
-        self._login_as("employee", user_id=232, username="emp32")
-        page = self.client.get("/inventory/add-stock", follow_redirects=False)
-        token = page.text.split("var token = ", 1)[1].split(";", 1)[0].strip().strip('"')
+- request succeeds instead of returning a location error
+- new single rows use `location = "Ungrouped"`
+- receive stock movements also record `location = "Ungrouped"`
+- valid rows before a blank-location row still persist because blank location is no longer a rollback condition
 
-        response = self.client.post(
-            "/inventory/batch/confirm",
-            headers={"X-CSRF-Token": token},
-            json=[
-                {
-                    "card_name": "No Location Pikachu",
-                    "game": "Pokemon",
-                    "condition": "NM",
-                }
-            ],
-        )
-
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("Location is required", response.json()["error"])
-```
-
-Add this manual receive test to `tests/test_sealed_inventory.py`:
-
-```python
-    def test_single_receive_route_requires_location(self) -> None:
-        request = Request(
-            {
-                "type": "http",
-                "method": "POST",
-                "path": "/inventory/singles/receive",
-                "headers": [],
-            }
-        )
-        with Session(self.engine) as session:
-            with patch("app.inventory.routes._require_employee_permission", return_value=None):
-                response = asyncio.run(
-                    inventory_singles_receive(
-                        request=request,
-                        session=session,
-                        game="Pokemon",
-                        card_name="Missing Location Pikachu",
-                        condition="NM",
-                        quantity="1",
-                        location="",
-                    )
-                )
-
-            self.assertEqual(response.status_code, 303)
-            self.assertIn("single_error=Location+is+required", response.headers["location"])
-```
-
-- [ ] **Step 2: Run tests and verify they fail**
-
-Run:
+Focused tests:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests/test_employee_ops_access.py::EmployeeOpsAccessTests::test_employee_batch_confirm_requires_location_for_singles tests/test_sealed_inventory.py::SealedInventoryTests::test_single_receive_route_requires_location -q
+.\.venv\Scripts\python.exe -m pytest tests/test_employee_ops_access.py::EmployeeOpsAccessTests::test_employee_batch_confirm_defaults_blank_location_for_singles tests/test_employee_ops_access.py::EmployeeOpsAccessTests::test_employee_batch_confirm_blank_location_defaults_without_partial_rollback tests/test_sealed_inventory.py::SealedInventoryTests::test_single_receive_route_defaults_blank_location_to_ungrouped -q
 ```
 
-Expected before implementation: FAIL because location is currently optional.
+- [ ] **Step 2: Default blank locations in routes**
 
-- [ ] **Step 3: Enforce location in manual single receive**
-
-In `inventory_singles_receive()` in `app/inventory/routes.py`, after the negative price checks and before parsing `variants_json`, add:
+Use a shared route constant:
 
 ```python
-    if not location.strip():
-        params = urlencode({
-            "game": selected_game,
-            "search_type": selected_search_type,
-            "q": card_name or "",
-            "single_error": "Location is required.",
-        })
-        return RedirectResponse(f"/inventory/add-stock?{params}", status_code=303)
+DEFAULT_SINGLE_LOCATION = "Ungrouped"
 ```
 
-- [ ] **Step 4: Enforce location in scanner batch confirm**
+Manual single receive and scanner batch confirm should pass `location.strip() or DEFAULT_SINGLE_LOCATION` into `_receive_single_stock()`.
 
-In `inventory_batch_confirm()` before calling `_receive_single_stock()` for singles, add:
+- [ ] **Step 3: Make the batch location UI optional**
 
-```python
-            location_value = (raw.get("location") or "").strip()
-            if not location_value:
-                return JSONResponse(
-                    {"error": "Location is required for scanned singles.", "card_name": card_name},
-                    status_code=400,
-                )
-```
+The batch review location input should be labeled optional. If the user leaves it blank, the payload should send `Ungrouped` instead of blocking confirm.
 
-Then pass `location=location_value` into `_receive_single_stock()`.
-
-- [ ] **Step 5: Add batch location to the review UI**
-
-In `app/templates/inventory_batch_review.html`, add a location control near the confirm bar:
-
-```html
-            <label class="field-label" for="batch-location">Location</label>
-            <input id="batch-location" class="name-input" type="text" placeholder="Case A, Binder 1, Back Stock" autocomplete="off">
-```
-
-In `confirmBatch()`, replace the fetch body with a payload that requires the location:
-
-```javascript
-        var locationInput = document.getElementById('batch-location');
-        var location = locationInput ? locationInput.value.trim() : '';
-        if (!location) {
-            alert('Location is required before adding scanned singles to inventory.');
-            if (locationInput) locationInput.focus();
-            return;
-        }
-        var payload = batch.map(function(item) {
-            var copy = Object.assign({}, item);
-            if (!copy.location) copy.location = location;
-            if (!copy.source) copy.source = 'Degen Eye';
-            return copy;
-        });
-```
-
-Then change:
-
-```javascript
-                body: JSON.stringify(batch)
-```
-
-to:
-
-```javascript
-                body: JSON.stringify(payload)
-```
-
-- [ ] **Step 6: Update the existing scanner confirm smoke test**
-
-In `tests/test_employee_ops_access.py`, update `test_employee_can_confirm_scanned_single_batch` so its JSON payload includes a location:
-
-```python
-                    "location": "Case A",
-```
-
-Expected: the existing smoke test continues to prove employees can confirm a scanned single, now using the required pilot location.
-
-- [ ] **Step 7: Run focused tests**
-
-Run:
-
-```powershell
-.\.venv\Scripts\python.exe -m pytest tests/test_employee_ops_access.py::EmployeeOpsAccessTests::test_employee_can_confirm_scanned_single_batch tests/test_employee_ops_access.py::EmployeeOpsAccessTests::test_employee_batch_confirm_requires_location_for_singles tests/test_employee_ops_access.py::EmployeeOpsAccessTests::test_employee_batch_confirm_merges_single_and_logs_stock_movements tests/test_sealed_inventory.py::SealedInventoryTests::test_single_receive_route_requires_location -q
-```
-
-Expected: PASS.
-
-- [ ] **Step 8: Commit task if committing this branch**
+- [ ] **Step 4: Commit task if committing this branch**
 
 ```powershell
 git add app/inventory/routes.py app/templates/inventory_batch_review.html tests/test_employee_ops_access.py tests/test_sealed_inventory.py
-git commit -m "Require locations for pilot single intake"
+git commit -m "Default blank pilot single locations"
 ```
 
 ---
@@ -635,110 +509,61 @@ git commit -m "Cover Shopify POS deduction for singles"
 
 ---
 
-### Task 5: Block Automatic Shopify Product Creation For Singles
+### Task 5: Auto-Create Singles With POS / No Online Store Defaults
 
 **Files:**
 - Modify: `tests/test_inventory_shopify_sync.py`
 - Modify: `app/shopify_sync_worker.py`
+- Modify: `app/inventory/shopify.py`
 
-- [ ] **Step 1: Add single-creation guardrail test**
+- [ ] **Step 1: Add single creation channel-default tests**
 
-In `tests/test_inventory_shopify_sync.py`, add `ITEM_TYPE_SINGLE` to the model import list:
+Add tests proving:
 
-```python
-    ITEM_TYPE_SINGLE,
-```
+- `build_shopify_product_payload()` gives singles `published_at = None`, `published_scope = "global"`, and `status = "active"` so the REST payload is Point of Sale scoped and not Online Store published by default.
+- `push_item_to_shopify()` inspects created single product publications, keeps Point of Sale, unpublishes reported non-POS publications, and drafts the product if publication cleanup fails.
+- `sync_inventory_item_to_shopify()` may create a Shopify product for an unlinked single when sync is explicitly run.
+- created singles still use the Degen barcode as SKU and then sync price/quantity like other inventory.
 
-Add this test to `ShopifySyncWorkerTests`:
-
-```python
-    async def test_single_without_existing_shopify_variant_is_not_created_publicly(self):
-        engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
-        SQLModel.metadata.create_all(engine)
-        try:
-            with Session(engine) as session:
-                item = InventoryItem(
-                    barcode="DGN-SINGLE1",
-                    item_type=ITEM_TYPE_SINGLE,
-                    game="Pokemon",
-                    card_name="Unsafe Public Single",
-                    quantity=1,
-                    list_price=19.99,
-                )
-                session.add(item)
-                session.commit()
-                session.refresh(item)
-
-                with patch("app.shopify_sync_worker.settings") as mocked_settings, patch(
-                    "app.shopify_sync_worker.find_shopify_variant_by_sku",
-                    new=AsyncMock(return_value=None),
-                ) as mocked_find, patch(
-                    "app.shopify_sync_worker.push_item_to_shopify",
-                    new=AsyncMock(return_value={"shopify_variant_id": "SHOULD_NOT_CREATE"}),
-                ) as mocked_push:
-                    mocked_settings.shopify_store_domain = "degen-test.myshopify.com"
-                    mocked_settings.shopify_access_token = "shpat_test"
-                    mocked_settings.shopify_api_key = ""
-                    mocked_settings.shopify_location_id = "444"
-
-                    ok, error = await sync_inventory_item_to_shopify(
-                        session,
-                        item,
-                        source="unit-test",
-                    )
-
-                self.assertFalse(ok)
-                self.assertIn("Singles must be linked to an existing POS-only Shopify variant", error)
-                mocked_find.assert_awaited_once_with(
-                    "DGN-SINGLE1",
-                    store_domain="degen-test.myshopify.com",
-                    access_token="shpat_test",
-                )
-                mocked_push.assert_not_awaited()
-        finally:
-            engine.dispose()
-```
-
-- [ ] **Step 2: Run the failing test**
-
-Run:
+Focused tests:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests/test_inventory_shopify_sync.py::ShopifySyncWorkerTests::test_single_without_existing_shopify_variant_is_not_created_publicly -q
+.\.venv\Scripts\python.exe -m pytest tests/test_inventory_shopify_sync.py::ShopifyInventoryApiTests::test_single_product_payload_is_pos_scoped_not_online_store_published tests/test_inventory_shopify_sync.py::ShopifySyncWorkerTests::test_single_without_existing_shopify_variant_can_create_pos_scoped_product -q
 ```
 
-Expected before implementation: FAIL because the worker currently calls `push_item_to_shopify()` when no variant is found.
+Expected before implementation: FAIL if singles are blocked or payload channel defaults are missing.
 
-- [ ] **Step 3: Block single creation after SKU lookup**
+- [ ] **Step 2: Add product payload defaults**
 
-In `sync_inventory_item_to_shopify()` in `app/shopify_sync_worker.py`, after the `find_shopify_variant_by_sku()` block and before `push_item_to_shopify()`, add:
+For `ITEM_TYPE_SINGLE`, include:
 
 ```python
-        if not item.shopify_variant_id and item.item_type == "single":
-            return (
-                False,
-                "Singles must be linked to an existing POS-only Shopify variant before sync. "
-                "Automatic Shopify product creation for singles is blocked to avoid publishing pilot inventory.",
-            )
+{
+    "status": "active",
+    "published_at": None,
+    "published_scope": "global",
+}
 ```
 
-Do not change sealed-product behavior in this task.
+Per the Shopify REST Product resource, `published_at = null` unpublishes from the Online Store channel and `published_scope = "global"` publishes to Point of Sale. Per Shopify's GraphQL publishing API, `publishableUnpublish` can then remove the product from specific non-POS publications.
 
-- [ ] **Step 4: Run focused and regression tests**
+- [ ] **Step 3: Remove the single creation block**
 
-Run:
+`sync_inventory_item_to_shopify()` should still try `find_shopify_variant_by_sku()` first. If no variant exists, singles can call `push_item_to_shopify()` just like other item types.
+
+- [ ] **Step 4: Add publication cleanup**
+
+After a single product is created, inspect `resourcePublicationsV2(onlyPublished: true)` and call `publishableUnpublish` for publications whose channel is not Point of Sale. If that inspection or cleanup fails, update the product to `draft` and make the sync fail instead of leaving a possibly public synced single active.
+
+- [ ] **Step 5: Run focused and regression tests**
+
+Run the two single tests plus existing sealed sync regressions.
+
+- [ ] **Step 6: Commit task if committing this branch**
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests/test_inventory_shopify_sync.py::ShopifySyncWorkerTests::test_single_without_existing_shopify_variant_is_not_created_publicly tests/test_inventory_shopify_sync.py::ShopifySyncWorkerTests::test_sync_inventory_item_updates_price_quantity_and_status -q
-```
-
-Expected: both PASS.
-
-- [ ] **Step 5: Commit task if committing this branch**
-
-```powershell
-git add app/shopify_sync_worker.py tests/test_inventory_shopify_sync.py
-git commit -m "Block automatic Shopify creation for singles"
+git add app/inventory/shopify.py app/shopify_sync_worker.py tests/test_inventory_shopify_sync.py
+git commit -m "Allow POS-scoped Shopify creation for singles"
 ```
 
 ---
@@ -970,7 +795,7 @@ Expected:
 
 - `/inventory` loads.
 - Missing-location cleanup link appears when seeded data has missing locations.
-- `/inventory/scan/batch-review` requires location before confirming.
+- `/inventory/scan/batch-review` confirms with an optional location and defaults blanks to `Ungrouped`.
 - No employee-facing flow publishes a single to customer-facing channels.
 
 - [ ] **Step 5: Final git scope check**

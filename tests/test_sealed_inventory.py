@@ -819,7 +819,7 @@ class SealedInventoryTests(unittest.TestCase):
             self.assertEqual(item.condition, "LP")
             self.assertEqual(item.auto_price, 386.73)
 
-    def test_single_receive_route_requires_location(self) -> None:
+    def test_single_receive_route_defaults_blank_location_to_ungrouped(self) -> None:
         request = Request(
             {
                 "type": "http",
@@ -854,7 +854,18 @@ class SealedInventoryTests(unittest.TestCase):
                 )
 
             self.assertEqual(response.status_code, 303)
-            self.assertIn("single_error=Location+is+required", response.headers["location"])
+            self.assertNotIn("single_error", response.headers["location"])
+            item = session.exec(
+                select(InventoryItem).where(
+                    InventoryItem.item_type == ITEM_TYPE_SINGLE,
+                    InventoryItem.card_name == "Missing Location Pikachu",
+                )
+            ).one()
+            self.assertEqual(item.location, "Ungrouped")
+            movement = session.exec(
+                select(InventoryStockMovement).where(InventoryStockMovement.item_id == item.id)
+            ).one()
+            self.assertEqual(movement.location, "Ungrouped")
 
     def test_shopify_pos_sale_decrements_single_quantity_and_logs_movement(self) -> None:
         from app.inventory.shopify_ingest import mark_inventory_sold_from_shopify_order
