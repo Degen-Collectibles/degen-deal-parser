@@ -2123,6 +2123,7 @@ def _receive_single_stock(
     notes: str = "",
     price_payload: Optional[dict[str, Any]] = None,
     actor_label: Optional[str] = None,
+    commit: bool = True,
 ) -> tuple[InventoryItem, InventoryStockMovement, bool]:
     if quantity < 1:
         raise ValueError("Quantity must be at least 1.")
@@ -2167,8 +2168,11 @@ def _receive_single_stock(
             created_at=utcnow(),
         )
         session.add(item)
-        session.commit()
-        session.refresh(item)
+        if commit:
+            session.commit()
+            session.refresh(item)
+        else:
+            session.flush()
         item.barcode = generate_barcode_value(item.id)
         created = True
     else:
@@ -2235,9 +2239,12 @@ def _receive_single_stock(
             )
         )
 
-    session.commit()
-    session.refresh(item)
-    session.refresh(movement)
+    if commit:
+        session.commit()
+        session.refresh(item)
+        session.refresh(movement)
+    else:
+        session.flush()
     return item, movement, created
 
 
@@ -2299,6 +2306,7 @@ def _receive_slab_stock(
     notes: str = "",
     price_payload: Optional[dict[str, Any]] = None,
     actor_label: Optional[str] = None,
+    commit: bool = True,
 ) -> tuple[InventoryItem, InventoryStockMovement, bool]:
     if quantity < 1:
         raise ValueError("Quantity must be at least 1.")
@@ -2338,8 +2346,11 @@ def _receive_slab_stock(
             created_at=utcnow(),
         )
         session.add(item)
-        session.commit()
-        session.refresh(item)
+        if commit:
+            session.commit()
+            session.refresh(item)
+        else:
+            session.flush()
         item.barcode = generate_barcode_value(item.id)
         created = True
     else:
@@ -2410,9 +2421,12 @@ def _receive_slab_stock(
             )
         )
 
-    session.commit()
-    session.refresh(item)
-    session.refresh(movement)
+    if commit:
+        session.commit()
+        session.refresh(item)
+        session.refresh(movement)
+    else:
+        session.flush()
     return item, movement, created
 
 
@@ -5597,6 +5611,29 @@ async def inventory_scan_cert(request: Request, session: Session = Depends(get_s
 # Batch confirm — bulk create inventory items from camera scan batch
 # ---------------------------------------------------------------------------
 
+def _parse_batch_quantity(raw_value: Any, *, default: int = 1) -> tuple[Optional[int], Optional[str]]:
+    if raw_value is None:
+        return default, None
+    if isinstance(raw_value, bool):
+        return None, "Quantity must be a whole number."
+    if isinstance(raw_value, int):
+        value = raw_value
+    elif isinstance(raw_value, float) and raw_value.is_integer():
+        value = int(raw_value)
+    elif isinstance(raw_value, str):
+        text = raw_value.strip()
+        if not text:
+            return default, None
+        if not text.lstrip("+-").isdigit():
+            return None, "Quantity must be a whole number."
+        value = int(text)
+    else:
+        return None, "Quantity must be a whole number."
+    if value < 1:
+        return None, "Quantity must be at least 1."
+    return value, None
+
+
 @router.post("/inventory/batch/confirm")
 async def inventory_batch_confirm(
     request: Request,
@@ -5645,6 +5682,13 @@ async def inventory_batch_confirm(
         item_type = (raw.get("item_type") or ITEM_TYPE_SINGLE).strip().lower()
 
         if item_type == ITEM_TYPE_SLAB:
+            quantity_value, quantity_error = _parse_batch_quantity(raw.get("quantity"))
+            if quantity_error:
+                session.rollback()
+                return JSONResponse(
+                    {"error": quantity_error, "card_name": card_name},
+                    status_code=400,
+                )
             auto_price = _parse_float(str(raw.get("auto_price") or raw.get("suggested_price") or ""))
             source = str(raw.get("price_source") or "card_ladder")
             item, _movement, _created = _receive_slab_stock(
@@ -5656,7 +5700,7 @@ async def inventory_batch_confirm(
                 grading_company=(raw.get("grading_company") or "").strip(),
                 grade=(raw.get("grade") or "").strip(),
                 cert_number=(raw.get("cert_number") or "").strip(),
-                quantity=1,
+                quantity=quantity_value or 1,
                 unit_cost=_parse_float(str(raw.get("cost_basis") or "")),
                 list_price=_parse_float(str(raw.get("list_price") or "")),
                 auto_price=auto_price,
@@ -5671,28 +5715,49 @@ async def inventory_batch_confirm(
                     "market_price": auto_price,
                 },
                 actor_label=_current_user_label(request),
+                commit=False,
             )
         else:
-            item = InventoryItem(
-                barcode="PENDING",
-                item_type=ITEM_TYPE_SINGLE,
-                game=(raw.get("game") or "Other").strip(),
-                card_name=card_name,
-                set_name=(raw.get("set_name") or "").strip() or None,
-                card_number=(raw.get("card_number") or "").strip() or None,
-                variant=(raw.get("variant") or "").strip() or None,
-                condition=(raw.get("condition") or "").strip() or None,
-                image_url=(raw.get("image_url") or "").strip() or None,
-                auto_price=_parse_float(str(raw.get("auto_price") or "")),
-                notes=(raw.get("notes") or "").strip() or None,
-                status=INVENTORY_IN_STOCK,
-                created_at=utcnow(),
-            )
-            session.add(item)
-            session.flush()  # get item.id without full commit
+            quantity_value, quantity_error = _parse_batch_quantity(raw.get("quantity"))
+            if quantity_error:
+                session.rollback()
+                return JSONResponse(
+                    {"error": quantity_error, "card_name": card_name},
+                    status_code=400,
+                )
 
-            item.barcode = generate_barcode_value(item.id)
-            session.add(item)
+            try:
+                item, _movement, _created = _receive_single_stock(
+                    session,
+                    game=(raw.get("game") or "Other").strip(),
+                    card_name=card_name,
+                    set_name=(raw.get("set_name") or "").strip(),
+                    set_code=(raw.get("set_code") or "").strip(),
+                    card_number=(raw.get("card_number") or "").strip(),
+                    variant=(raw.get("variant") or "").strip(),
+                    condition=(raw.get("condition") or "NM").strip(),
+                    image_url=(raw.get("image_url") or "").strip(),
+                    quantity=quantity_value or 1,
+                    unit_cost=_parse_float(str(raw.get("cost_basis") or raw.get("unit_cost") or "")),
+                    list_price=_parse_float(str(raw.get("list_price") or "")),
+                    auto_price=_parse_float(str(raw.get("auto_price") or "")),
+                    low_price=_parse_float(str(raw.get("low_price") or "")),
+                    location=(raw.get("location") or "").strip(),
+                    source=(raw.get("source") or "Degen Eye").strip(),
+                    notes=(raw.get("notes") or "").strip(),
+                    price_payload={
+                        "scanner_payload": raw,
+                        "source": raw.get("source") or "Degen Eye",
+                    },
+                    actor_label=_current_user_label(request),
+                    commit=False,
+                )
+            except ValueError as exc:
+                session.rollback()
+                return JSONResponse(
+                    {"error": str(exc), "card_name": card_name},
+                    status_code=400,
+                )
         created.append({"id": item.id, "barcode": item.barcode, "card_name": item.card_name})
         capture_id = (raw.get("_v2_capture_id") or raw.get("capture_id") or "").strip()
         if capture_id:

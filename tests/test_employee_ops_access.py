@@ -215,6 +215,168 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["created"], 1)
 
+    def test_employee_batch_confirm_merges_single_and_logs_stock_movements(self):
+        from app.models import InventoryItem, InventoryStockMovement, ITEM_TYPE_SINGLE
+
+        self._login_as("employee", user_id=231, username="emp31")
+        page = self.client.get("/inventory/add-stock", follow_redirects=False)
+        token = page.text.split("var token = ", 1)[1].split(";", 1)[0].strip().strip('"')
+        payload = [
+            {
+                "card_name": "Pikachu",
+                "game": "Pokemon",
+                "set_name": "Base Set",
+                "card_number": "58/102",
+                "variant": "Normal",
+                "condition": "NM",
+                "auto_price": 12.34,
+                "location": "Case A",
+                "source": "Degen Eye",
+            }
+        ]
+
+        first = self.client.post(
+            "/inventory/batch/confirm",
+            headers={"X-CSRF-Token": token},
+            json=payload,
+        )
+        second = self.client.post(
+            "/inventory/batch/confirm",
+            headers={"X-CSRF-Token": token},
+            json=payload,
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.session.expire_all()
+        items = self.session.exec(
+            select(InventoryItem).where(
+                InventoryItem.item_type == ITEM_TYPE_SINGLE,
+                InventoryItem.card_name == "Pikachu",
+            )
+        ).all()
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].quantity, 2)
+        self.assertEqual(items[0].location, "Case A")
+        movements = self.session.exec(
+            select(InventoryStockMovement)
+            .where(InventoryStockMovement.item_id == items[0].id)
+            .order_by(InventoryStockMovement.id)
+        ).all()
+        self.assertEqual(len(movements), 2)
+        self.assertEqual([m.quantity_delta for m in movements], [1, 1])
+
+    def test_employee_batch_confirm_invalid_quantity_does_not_partially_persist(self):
+        from app.models import InventoryItem, InventoryStockMovement, ITEM_TYPE_SINGLE
+
+        self._login_as("employee", user_id=234, username="emp34")
+        page = self.client.get("/inventory/add-stock", follow_redirects=False)
+        token = page.text.split("var token = ", 1)[1].split(";", 1)[0].strip().strip('"')
+
+        response = self.client.post(
+            "/inventory/batch/confirm",
+            headers={"X-CSRF-Token": token},
+            json=[
+                {
+                    "card_name": "Valid Before Failure",
+                    "game": "Pokemon",
+                    "condition": "NM",
+                    "quantity": 1,
+                    "location": "Case A",
+                },
+                {
+                    "card_name": "Invalid Quantity",
+                    "game": "Pokemon",
+                    "condition": "NM",
+                    "quantity": 0,
+                    "location": "Case A",
+                },
+            ],
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Quantity must be at least 1", response.json()["error"])
+        self.session.expire_all()
+        items = self.session.exec(
+            select(InventoryItem).where(InventoryItem.item_type == ITEM_TYPE_SINGLE)
+        ).all()
+        movements = self.session.exec(select(InventoryStockMovement)).all()
+        self.assertEqual(items, [])
+        self.assertEqual(movements, [])
+
+    def test_employee_batch_confirm_slab_then_invalid_single_does_not_partially_persist(self):
+        from app.models import InventoryItem, InventoryStockMovement
+
+        self._login_as("employee", user_id=235, username="emp35")
+        page = self.client.get("/inventory/add-stock", follow_redirects=False)
+        token = page.text.split("var token = ", 1)[1].split(";", 1)[0].strip().strip('"')
+
+        response = self.client.post(
+            "/inventory/batch/confirm",
+            headers={"X-CSRF-Token": token},
+            json=[
+                {
+                    "item_type": "slab",
+                    "card_name": "Valid Slab Before Failure",
+                    "game": "Pokemon",
+                    "grading_company": "PSA",
+                    "grade": "10",
+                    "cert_number": "12345678",
+                    "location": "Case A",
+                },
+                {
+                    "card_name": "Invalid Quantity Single",
+                    "game": "Pokemon",
+                    "condition": "NM",
+                    "quantity": 0,
+                    "location": "Case A",
+                },
+            ],
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Quantity must be at least 1", response.json()["error"])
+        self.session.expire_all()
+        self.assertEqual(self.session.exec(select(InventoryItem)).all(), [])
+        self.assertEqual(self.session.exec(select(InventoryStockMovement)).all(), [])
+
+    def test_employee_batch_confirm_invalid_slab_quantity_does_not_partially_persist(self):
+        from app.models import InventoryItem, InventoryStockMovement
+
+        self._login_as("employee", user_id=236, username="emp36")
+        page = self.client.get("/inventory/add-stock", follow_redirects=False)
+        token = page.text.split("var token = ", 1)[1].split(";", 1)[0].strip().strip('"')
+
+        response = self.client.post(
+            "/inventory/batch/confirm",
+            headers={"X-CSRF-Token": token},
+            json=[
+                {
+                    "card_name": "Valid Single Before Slab Failure",
+                    "game": "Pokemon",
+                    "condition": "NM",
+                    "quantity": 1,
+                    "location": "Case A",
+                },
+                {
+                    "item_type": "slab",
+                    "card_name": "Invalid Slab Quantity",
+                    "game": "Pokemon",
+                    "grading_company": "PSA",
+                    "grade": "10",
+                    "cert_number": "87654321",
+                    "quantity": "abc",
+                    "location": "Case A",
+                },
+            ],
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Quantity must be a whole number", response.json()["error"])
+        self.session.expire_all()
+        self.assertEqual(self.session.exec(select(InventoryItem)).all(), [])
+        self.assertEqual(self.session.exec(select(InventoryStockMovement)).all(), [])
+
     def test_employee_scan_shell_hides_inventory_admin_actions(self):
         self._login_as("employee", user_id=216, username="emp16")
         r = self.client.get("/inventory/scan?team_shell=1", follow_redirects=False)
