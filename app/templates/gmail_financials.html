@@ -134,7 +134,7 @@
                         <label>Status
                             <select name="status">
                                 <option value="">All statuses</option>
-                                {% for option in ["unmatched", "transaction_created", "approved", "matched", "ignored"] %}
+                                {% for option in ["needs_review", "unmatched", "transaction_created", "approved", "matched", "ignored"] %}
                                 <option value="{{ option }}" {% if selected_status == option %}selected{% endif %}>{{ option|replace("_", " ")|title }}</option>
                                 {% endfor %}
                             </select>
@@ -163,6 +163,7 @@
                         <a class="tab{% if not selected_status and not selected_receipt_type %} active{% endif %}" href="{{ gmail_url(status='', receipt_type='') }}">All Gmail</a>
                         <a class="tab{% if selected_receipt_type == 'sortswift_buylist' %} active{% endif %}" href="{{ gmail_url(receipt_type='sortswift_buylist', status='') }}">SortSwift</a>
                         <a class="tab{% if selected_receipt_type == 'invoice_or_receipt' %} active{% endif %}" href="{{ gmail_url(receipt_type='invoice_or_receipt', status='') }}">Invoices</a>
+                        <a class="tab{% if selected_status == 'needs_review' %} active{% endif %}" href="{{ gmail_url(status='needs_review', receipt_type='') }}">Needs review</a>
                         <a class="tab{% if selected_status == 'unmatched' %} active{% endif %}" href="{{ gmail_url(status='unmatched', receipt_type='') }}">Unmatched</a>
                         <a class="tab{% if selected_status == 'matched' %} active{% endif %}" href="{{ gmail_url(status='matched', receipt_type='') }}">Bank linked</a>
                     </div>
@@ -234,7 +235,12 @@
                                         {% endif %}
                                     </td>
                                     <td data-label="Status">
+                                        {% if tx and tx.needs_review %}
+                                        <span class="pill unmatched">Needs Review</span>
+                                        <div class="small" style="margin-top:6px;">Review in Gmail receipts</div>
+                                        {% else %}
                                         <span class="pill {{ receipt.status }}">{{ receipt.status|replace("_", " ")|title }}</span>
+                                        {% endif %}
                                         <div class="small" style="margin-top:6px;">{{ receipt.confidence|title }} confidence</div>
                                     </td>
                                     <td data-label="Actions" class="actions-cell">

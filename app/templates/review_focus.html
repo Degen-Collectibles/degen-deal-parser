@@ -67,8 +67,8 @@
         <div class="lx-layout-2">
             <div class="lx-card" style="margin-bottom:0;">
                 <div class="lx-sh" style="margin-bottom:10px;">
-                    <h2 class="lx-sh-title">Original Discord Message</h2>
-                    <span class="lx-sh-meta">Images · message · grouped context</span>
+                    <h2 class="lx-sh-title">{{ message["source_message_label"] or "Original Discord Message" }}</h2>
+                    <span class="lx-sh-meta">{{ message["source_context_label"] or "Images · message · grouped context" }}</span>
                 </div>
                 <div class="lx-media">
                     {% if message["image_urls"] %}

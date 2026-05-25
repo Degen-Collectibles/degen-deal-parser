@@ -22,7 +22,7 @@ from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 import httpx
-from sqlalchemy import distinct, func
+from sqlalchemy import distinct, func, or_
 from sqlalchemy.exc import OperationalError
 from fastapi import Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -3394,6 +3394,15 @@ def find_nearby_image_candidates(session: Session, rows: list[DiscordMessage]) -
     return results
 
 
+GMAIL_SOURCE_CHANNEL_ID = "gmail"
+
+
+def is_gmail_source_message(row: DiscordMessage) -> bool:
+    return (row.channel_id or "").strip().lower() == GMAIL_SOURCE_CHANNEL_ID or (
+        row.discord_message_id or ""
+    ).startswith("gmail:")
+
+
 def build_message_stmt(
     *,
     status: Optional[str] = None,
@@ -3415,6 +3424,13 @@ def build_message_stmt(
                     [*status_filter_values(PARSE_REVIEW_REQUIRED), PARSE_FAILED]
                 )
             )
+            if not channel_id:
+                stmt = stmt.where(
+                    ~or_(
+                        DiscordMessage.channel_id == GMAIL_SOURCE_CHANNEL_ID,
+                        DiscordMessage.discord_message_id.like("gmail:%"),
+                    )
+                )
         else:
             stmt = stmt.where(DiscordMessage.parse_status.in_(status_filter_values(normalized_status)))
     else:
@@ -3445,6 +3461,7 @@ def message_list_item(row: DiscordMessage) -> dict:
     stitched_ids = json.loads(row.stitched_message_ids_json or "[]")
 
     image_urls = extract_image_urls(attachment_urls)
+    is_gmail_source = is_gmail_source_message(row)
 
     amount_display = ""
     payment_display = row.payment_method or ""
@@ -3513,6 +3530,13 @@ def message_list_item(row: DiscordMessage) -> dict:
         "stitched_count": len(stitched_ids),
         "parse_disagreement": _safe_json_load(row.parse_disagreement_json),
         "ai_resolver_reasoning": _safe_json_load(row.ai_resolver_reasoning_json),
+        "is_gmail_source": is_gmail_source,
+        "source_message_label": "Original Source Message" if is_gmail_source else "Original Discord Message",
+        "source_context_label": (
+            "Email receipt text - parsed context"
+            if is_gmail_source
+            else "Images - message - grouped context"
+        ),
     }
 
 

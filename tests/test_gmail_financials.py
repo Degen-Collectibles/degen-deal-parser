@@ -14,6 +14,7 @@ from app.discord.gmail_financials import (
     upsert_gmail_receipt_from_message,
 )
 from app.models import BankTransaction, GmailConnection, GmailReceipt, GmailReceiptLineItem, Transaction, TransactionItem
+from app.routers.bookkeeping import _gmail_receipt_views
 
 
 SORTSWIFT_HTML = """
@@ -177,6 +178,46 @@ def test_upsert_sortswift_email_creates_deduped_gmail_transaction():
     assert tx.money_out == 82.87
     assert tx.amount == 82.87
     assert tx.needs_review is True
+
+
+def test_gmail_receipt_views_can_filter_sortswift_transactions_needing_review():
+    engine = make_engine()
+    received_at = datetime(2026, 5, 19, 19, 33, tzinfo=timezone.utc)
+
+    with Session(engine) as session:
+        sortswift = upsert_gmail_receipt_from_message(
+            session,
+            gmail_message_id="gmail-sortswift-review",
+            thread_id="thread-sortswift",
+            sender="SortSwift Buylist <no-reply@mail.sortswift.com>",
+            subject="Buylist Confirmation - Degen Collectibles",
+            received_at=received_at,
+            html_body=SORTSWIFT_HTML,
+            snippet="Buylist Confirmation - Degen Collectibles",
+        )
+        invoice = GmailReceipt(
+            gmail_message_id="gmail-invoice",
+            thread_id="thread-invoice",
+            sender="Vendor <vendor@example.com>",
+            subject="Invoice",
+            received_at=received_at,
+            detected_vendor="Vendor",
+            detected_type="invoice_or_receipt",
+            status="unmatched",
+            confidence="low",
+            snippet="Invoice",
+            parsed_json="{}",
+            raw_text="Invoice",
+            dedupe_hash="invoice",
+        )
+        session.add(invoice)
+        session.commit()
+        sortswift_id = sortswift.id
+
+        views = _gmail_receipt_views(session, status="needs_review", limit=100)
+
+    assert [view["receipt"].id for view in views] == [sortswift_id]
+    assert views[0]["transaction"].needs_review is True
 
 
 def test_upsert_gmail_receipt_handles_concurrent_duplicate_insert(tmp_path):

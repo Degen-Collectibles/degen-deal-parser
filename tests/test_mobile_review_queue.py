@@ -56,11 +56,20 @@ class MobileReviewQueueTests(unittest.TestCase):
         self.engine.dispose()
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def _review_row(self, session: Session, *, content: str, created_offset: int = 0) -> DiscordMessage:
+    def _review_row(
+        self,
+        session: Session,
+        *,
+        content: str,
+        created_offset: int = 0,
+        channel_id: str = "chan-review",
+        channel_name: str = "review-log",
+        discord_message_id: str | None = None,
+    ) -> DiscordMessage:
         row = DiscordMessage(
-            discord_message_id=f"mobile-review-{uuid.uuid4()}",
-            channel_id="chan-review",
-            channel_name="review-log",
+            discord_message_id=discord_message_id or f"mobile-review-{uuid.uuid4()}",
+            channel_id=channel_id,
+            channel_name=channel_name,
             author_name="tester",
             content=content,
             created_at=utcnow() + timedelta(seconds=created_offset),
@@ -143,6 +152,39 @@ class MobileReviewQueueTests(unittest.TestCase):
         self.assertIn("old sell 25 cash", body)
         self.assertIn("Review required 1", body)
 
+    def test_review_queue_hides_gmail_sortswift_rows_by_default(self) -> None:
+        with Session(self.engine) as session, patch("app.routers.messages.require_role_response", return_value=None):
+            self._review_row(session, content="discord sell 25 cash", created_offset=1)
+            self._review_row(
+                session,
+                content="Buylist Confirmation - Degen Collectibles",
+                created_offset=2,
+                channel_id="gmail",
+                channel_name="Gmail / SortSwift",
+                discord_message_id=f"gmail:{uuid.uuid4()}",
+            )
+
+            response = reviewer_queue_page(
+                make_request("/review"),
+                channel_id=None,
+                expense_category=None,
+                after=None,
+                before=None,
+                sort_by="time",
+                sort_dir="asc",
+                page=1,
+                limit=25,
+                success=None,
+                error=None,
+                session=session,
+            )
+
+        body = response.body.decode("utf-8")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([row["message"] for row in response.context["rows"]], ["discord sell 25 cash"])
+        self.assertIn("Review required 1", body)
+        self.assertNotIn("Buylist Confirmation - Degen Collectibles", body)
+
     def test_focus_page_preserves_queue_navigation_for_next_correction(self) -> None:
         with Session(self.engine) as session, patch("app.routers.messages.require_role_response", return_value=None):
             first = self._review_row(session, content="first sell 25 cash", created_offset=1)
@@ -169,6 +211,38 @@ class MobileReviewQueueTests(unittest.TestCase):
         self.assertIn(f"/review/focus/{second.id}", response.context["next_url"])
         self.assertIn("channel_id=chan-review", response.context["next_url"])
         self.assertIn("expense_category=inventory", response.context["next_url"])
+
+    def test_gmail_focus_page_uses_source_message_label(self) -> None:
+        with Session(self.engine) as session, patch("app.routers.messages.require_role_response", return_value=None):
+            gmail_row = self._review_row(
+                session,
+                content="Buylist Confirmation - Degen Collectibles",
+                channel_id="gmail",
+                channel_name="Gmail / SortSwift",
+                discord_message_id=f"gmail:{uuid.uuid4()}",
+            )
+
+            response = reviewer_focus_page(
+                gmail_row.id,
+                make_request(f"/review/focus/{gmail_row.id}"),
+                channel_id=None,
+                expense_category=None,
+                after=None,
+                before=None,
+                sort_by="time",
+                sort_dir="desc",
+                page=1,
+                limit=25,
+                success=None,
+                error=None,
+                session=session,
+            )
+
+        body = response.body.decode("utf-8")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Original Source Message", body)
+        self.assertIn("Email receipt text", body)
+        self.assertNotIn("Original Discord Message", body)
 
     def test_correction_form_can_save_approve_and_redirect_to_next_focus_row(self) -> None:
         with Session(self.engine) as session, patch(

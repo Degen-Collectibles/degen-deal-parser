@@ -169,8 +169,14 @@ def _gmail_receipt_views(
     search: str = "",
     limit: int = 100,
 ) -> list[dict[str, object]]:
+    needs_review_only = status == "needs_review"
     query = select(GmailReceipt)
-    if status:
+    if needs_review_only:
+        query = query.join(
+            Transaction,
+            GmailReceipt.transaction_id == Transaction.id,
+        ).where(Transaction.needs_review.is_(True))
+    elif status:
         query = query.where(GmailReceipt.status == status)
     if receipt_type:
         query = query.where(GmailReceipt.detected_type == receipt_type)
