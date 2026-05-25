@@ -13,6 +13,9 @@ from .discord_ingest import (
 from ..models import DiscordMessage, WatchedChannel, utcnow
 
 
+SYNTHETIC_GMAIL_CHANNEL_ID = "gmail"
+
+
 def get_watched_channels(session: Session) -> list[WatchedChannel]:
     return session.exec(
         select(WatchedChannel).order_by(WatchedChannel.channel_name, WatchedChannel.channel_id)
@@ -124,13 +127,14 @@ def get_channel_filter_choices(session: Session) -> list[dict]:
             "channel_name": channel.channel_name or channel.channel_id,
         }
         for channel in watched
+        if channel.channel_id != SYNTHETIC_GMAIL_CHANNEL_ID
     }
 
     stored_channels = session.exec(
         select(DiscordMessage.channel_id, DiscordMessage.channel_name).distinct()
     ).all()
     for channel_id, channel_name in stored_channels:
-        if not channel_id:
+        if not channel_id or channel_id == SYNTHETIC_GMAIL_CHANNEL_ID:
             continue
         choices.setdefault(
             channel_id,

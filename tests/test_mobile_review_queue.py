@@ -183,6 +183,7 @@ class MobileReviewQueueTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual([row["message"] for row in response.context["rows"]], ["discord sell 25 cash"])
         self.assertIn("Review required 1", body)
+        self.assertNotIn("Gmail / SortSwift", body)
         self.assertNotIn("Buylist Confirmation - Degen Collectibles", body)
 
     def test_focus_page_preserves_queue_navigation_for_next_correction(self) -> None:
