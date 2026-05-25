@@ -6,6 +6,7 @@ from sqlmodel import SQLModel, Session, create_engine, select
 
 from app.inventory.shopify import (
     SHOPIFY_API_VERSION,
+    ShopifyVariantRef,
     build_shopify_product_payload,
     get_shopify_inventory_item_location_id,
     get_shopify_primary_location_id,
@@ -13,6 +14,7 @@ from app.inventory.shopify import (
     sync_shopify_inventory_quantity,
 )
 from app.models import (
+    INVENTORY_LISTED,
     INVENTORY_IN_STOCK,
     InventoryItem,
     ShopifySyncIssue,
@@ -270,6 +272,81 @@ class ShopifySyncWorkerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(item.shopify_inventory_item_id)
                 self.assertEqual(item.status, INVENTORY_IN_STOCK)
                 self.assertNotEqual(item.shopify_sync_status, "synced")
+        finally:
+            engine.dispose()
+
+    async def test_single_with_existing_shopify_variant_can_sync_quantity(self):
+        engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+        SQLModel.metadata.create_all(engine)
+        try:
+            with Session(engine) as session:
+                item = InventoryItem(
+                    barcode="DGN-SINGLE2",
+                    item_type=ITEM_TYPE_SINGLE,
+                    game="Pokemon",
+                    card_name="Bulbasaur",
+                    condition="NM",
+                    location="Case A",
+                    quantity=3,
+                    list_price=4.99,
+                )
+                session.add(item)
+                session.commit()
+                session.refresh(item)
+
+                variant_ref = ShopifyVariantRef(
+                    sku="DGN-SINGLE2",
+                    product_id="111",
+                    variant_id="222",
+                    inventory_item_id="333",
+                    location_gid="gid://shopify/Location/444",
+                    product_handle="pos-only-single",
+                    product_status="draft",
+                )
+
+                with patch("app.shopify_sync_worker.settings") as mocked_settings, patch(
+                    "app.shopify_sync_worker.find_shopify_variant_by_sku",
+                    new=AsyncMock(return_value=variant_ref),
+                ) as mocked_find, patch(
+                    "app.shopify_sync_worker.push_item_to_shopify",
+                    new=AsyncMock(return_value={"shopify_product_id": "555", "shopify_variant_id": "666"}),
+                ) as mocked_push, patch(
+                    "app.shopify_sync_worker.update_shopify_variant_price",
+                    new=AsyncMock(return_value=True),
+                ) as mocked_price, patch(
+                    "app.shopify_sync_worker.sync_shopify_inventory_quantity",
+                    new=AsyncMock(return_value=(True, None)),
+                ) as mocked_qty:
+                    mocked_settings.shopify_store_domain = "degen-test.myshopify.com"
+                    mocked_settings.shopify_access_token = "shpat_test"
+                    mocked_settings.shopify_api_key = ""
+                    mocked_settings.shopify_location_id = "444"
+
+                    ok, error = await sync_inventory_item_to_shopify(
+                        session,
+                        item,
+                        source="unit-test",
+                    )
+
+                self.assertTrue(ok)
+                self.assertEqual(error, "")
+                mocked_find.assert_awaited_once()
+                mocked_push.assert_not_awaited()
+                mocked_price.assert_awaited_once()
+                mocked_qty.assert_awaited_once()
+                self.assertEqual(mocked_qty.await_args.kwargs["location_id"], "444")
+                self.assertEqual(mocked_qty.await_args.kwargs["access_token"], "shpat_test")
+
+                session.refresh(item)
+                self.assertEqual(item.shopify_product_id, "111")
+                self.assertEqual(item.shopify_variant_id, "222")
+                self.assertEqual(item.shopify_inventory_item_id, "333")
+                self.assertEqual(item.shopify_location_id, "444")
+                self.assertEqual(item.shopify_sku, "DGN-SINGLE2")
+                self.assertEqual(item.shopify_product_handle, "pos-only-single")
+                self.assertEqual(item.shopify_product_status, "draft")
+                self.assertEqual(item.shopify_sync_status, "synced")
+                self.assertEqual(item.status, INVENTORY_LISTED)
         finally:
             engine.dispose()
 
