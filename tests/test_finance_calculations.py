@@ -412,6 +412,15 @@ def test_finance_overall_expense_rows_combine_discord_and_bank_only_categories()
                     "is_non_operating": True,
                 },
                 {
+                    "amount": 1000.0,
+                    "category": "transfers",
+                    "category_label": "Bank/credit-card transfers",
+                    "group": "non_operating",
+                    "is_discord_logged": False,
+                    "is_non_operating": True,
+                    "excluded_from_finance": True,
+                },
+                {
                     "amount": 500.0,
                     "category": "cash_inventory_purchases",
                     "category_label": "Cash inventory purchases",
@@ -434,8 +443,8 @@ def test_finance_overall_expense_rows_combine_discord_and_bank_only_categories()
     assert by_key["supplies"]["total"] == 220.0
     assert by_key["supplies"]["discord_total"] == 50.0
     assert by_key["supplies"]["bank_only_total"] == 170.0
-    assert by_key["transfers"]["group"] == "non_operating"
     assert by_key["partner_paybacks"]["total"] == 20.0
+    assert "transfers" not in by_key
     assert "cash_inventory_purchases" not in by_key
     assert all(row["key"] != "already_logged_buy" for row in rows)
 

@@ -44,7 +44,11 @@ from .discord.channels import (
     get_watched_channels,
     update_backfill_window,
 )
-from .discord.bank_reconciliation import build_finance_bank_expense_data, expense_category_label
+from .discord.bank_reconciliation import (
+    FINANCE_EXCLUDED_EXPENSE_CATEGORIES,
+    build_finance_bank_expense_data,
+    expense_category_label,
+)
 from .config import get_settings
 from .discord.corrections import (
     get_learning_signal,
@@ -2392,6 +2396,8 @@ def build_finance_overall_expense_rows(
             continue
         entry_kind = (row.entry_kind or "").strip().lower()
         key = _finance_expense_category_key(entry_kind=entry_kind, expense_category=row.expense_category or "")
+        if key in FINANCE_EXCLUDED_EXPENSE_CATEGORIES:
+            continue
         group = _finance_expense_group(key=key, entry_kind=entry_kind)
         bucket = bucket_for(key, group=group)
         bucket["total"] = float(bucket["total"]) + money_out

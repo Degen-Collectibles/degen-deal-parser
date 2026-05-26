@@ -112,7 +112,7 @@ EXPENSE_CATEGORY_LABELS = {
 }
 
 NON_OPERATING_EXPENSE_CATEGORIES = {"transfers", "loan_owner_payments", "partner_paybacks"}
-FINANCE_EXCLUDED_EXPENSE_CATEGORIES = {"cash_inventory_purchases"}
+FINANCE_EXCLUDED_EXPENSE_CATEGORIES = {"cash_inventory_purchases", "transfers"}
 BANK_ACCOUNT_FILTERS = {"all", "checking", "credit_card"}
 BANK_ACCOUNT_FILTER_LABELS = {
     "all": "All bank accounts",
@@ -1359,7 +1359,7 @@ def build_expense_category_options(rows: list[BankTransaction]) -> list[dict[str
 
 def _bank_category_group(category: str) -> str:
     if category in FINANCE_EXCLUDED_EXPENSE_CATEGORIES:
-        return "cash_movement"
+        return "non_operating" if category in NON_OPERATING_EXPENSE_CATEGORIES else "cash_movement"
     if category in {"inventory_purchases", "grading_fees"}:
         return "inventory"
     if category == "partner_paybacks":
