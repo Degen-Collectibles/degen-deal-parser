@@ -131,6 +131,30 @@ def test_label_context_respects_selected_employee_fields():
     assert label["employee_lines"][3]["value"] == "Cert 12345678"
 
 
+def test_label_context_marks_price_length_for_wraparound_fit():
+    compact = InventoryItem(
+        id=47,
+        barcode="DGN-000047",
+        item_type="single",
+        game="Pokemon",
+        card_name="Bulbasaur",
+        list_price=10.84,
+    )
+    wide = InventoryItem(
+        id=48,
+        barcode="DGN-000048",
+        item_type="single",
+        game="Pokemon",
+        card_name="Blastoise",
+        list_price=1200,
+    )
+
+    compact_label, wide_label = label_context_for_items([compact, wide])
+
+    assert compact_label["price_class"] == "price-short"
+    assert wide_label["price_class"] == "price-medium"
+
+
 def test_parse_label_fields_defaults_and_filters_invalid_values():
     assert parse_label_fields([]) == DEFAULT_LABEL_FIELDS
     assert parse_label_fields(["name, set", "bogus", "location"]) == ("name", "set", "location")
@@ -177,3 +201,35 @@ def test_label_template_has_wrap_sheet_and_thermal_layouts():
     assert "Test Booster Box" in html
     assert "Customer side" in html
     assert "Employee side" in html
+
+
+def test_wraparound_template_uses_empty_fold_divider_and_fit_class():
+    item = InventoryItem(
+        id=60,
+        barcode="DGN-000060",
+        item_type="single",
+        game="Pokemon",
+        card_name="Charizard ex",
+        set_name="151",
+        condition="NM",
+        location="Ungrouped",
+        list_price=10.84,
+    )
+    label = label_context_for_items([item])[0]
+
+    html = templates.env.get_template("inventory_labels.html").render(
+        request=_FakeRequest(),
+        current_user=_FakeUser(),
+        csrf_token="",
+        labels=[label],
+        layout="wrap",
+        label_layout_options=[{"value": "wrap", "label": "Wraparound"}],
+        label_field_options=[{"value": "barcode", "label": "Barcode"}],
+        selected_fields=("barcode", "name", "set", "condition", "location"),
+        ids="60",
+        status="",
+    )
+
+    assert 'class="wrap-price price-short"' in html
+    assert '<div class="wrap-fold" aria-hidden="true"></div>' in html
+    assert "<span>Fold</span>" not in html

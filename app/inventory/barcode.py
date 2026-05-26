@@ -72,6 +72,15 @@ def _label_product_type(item: "InventoryItem") -> str:
     return item.item_type or "Inventory"
 
 
+def _label_price_class(price_text: str) -> str:
+    length = len((price_text or "").strip())
+    if length <= 6:
+        return "price-short"
+    if length <= 9:
+        return "price-medium"
+    return "price-long"
+
+
 def parse_label_fields(raw_fields: list[str] | tuple[str, ...] | None) -> tuple[str, ...]:
     """Return valid employee-facing label fields in display order."""
     selected: list[str] = []
@@ -202,6 +211,7 @@ def label_context_for_items(items: list, selected_fields: list[str] | tuple[str,
             "product_type": product_type,
             "price_text": price_text,
             "price_source": price_source,
+            "price_class": _label_price_class(price_text),
             "selected_fields": parsed_fields,
             "employee_lines": employee_lines,
         })
