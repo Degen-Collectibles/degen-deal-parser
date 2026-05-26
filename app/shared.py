@@ -2043,7 +2043,7 @@ def _finance_bank_support_rows(
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for row in bank_expense_data.get("detail_rows", []) or []:
-        if not isinstance(row, dict) or row.get("is_discord_logged"):
+        if not isinstance(row, dict) or row.get("is_discord_logged") or row.get("excluded_from_finance"):
             continue
         group = str(row.get("group") or "").strip().lower()
         is_non_operating = bool(row.get("is_non_operating"))
@@ -2400,7 +2400,7 @@ def build_finance_overall_expense_rows(
         bucket["discord_count"] = int(bucket["discord_count"]) + 1
 
     for row in bank_expense_data.get("detail_rows", []) or []:
-        if not isinstance(row, dict) or row.get("is_discord_logged"):
+        if not isinstance(row, dict) or row.get("is_discord_logged") or row.get("excluded_from_finance"):
             continue
         amount = abs(float(row.get("amount", 0.0) or 0.0))
         if amount <= 0:

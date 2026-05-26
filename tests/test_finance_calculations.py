@@ -411,6 +411,15 @@ def test_finance_overall_expense_rows_combine_discord_and_bank_only_categories()
                     "is_discord_logged": False,
                     "is_non_operating": True,
                 },
+                {
+                    "amount": 500.0,
+                    "category": "cash_inventory_purchases",
+                    "category_label": "Cash inventory purchases",
+                    "group": "cash_movement",
+                    "is_discord_logged": False,
+                    "is_non_operating": False,
+                    "excluded_from_finance": True,
+                },
             ]
         },
         range_data={"selected_start": "2026-05-01", "selected_end": "2026-05-23"},
@@ -427,6 +436,7 @@ def test_finance_overall_expense_rows_combine_discord_and_bank_only_categories()
     assert by_key["supplies"]["bank_only_total"] == 170.0
     assert by_key["transfers"]["group"] == "non_operating"
     assert by_key["partner_paybacks"]["total"] == 20.0
+    assert "cash_inventory_purchases" not in by_key
     assert all(row["key"] != "already_logged_buy" for row in rows)
 
 

@@ -181,6 +181,65 @@ def test_finance_bank_data_excludes_discord_matches_from_bank_only_totals():
     assert shipping["bank_only_total"] == 80.0
 
 
+def test_finance_bank_data_excludes_cash_withdrawals_from_expenses():
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(engine)
+    posted_at = datetime(2026, 5, 1, 12, tzinfo=timezone.utc)
+
+    with Session(engine) as session:
+        session.add(
+            BankStatementImport(
+                id=1,
+                label="Test import",
+                account_label="Checking",
+            )
+        )
+        session.add(
+            BankTransaction(
+                import_id=1,
+                row_index=1,
+                account_label="Checking",
+                account_type="checking",
+                posted_at=posted_at,
+                description="ATM withdrawal",
+                amount=-500.0,
+                classification="expense_or_purchase_needs_review",
+                expense_category="cash_inventory_purchases",
+            )
+        )
+        session.add(
+            BankTransaction(
+                import_id=1,
+                row_index=2,
+                account_label="Checking",
+                account_type="checking",
+                posted_at=posted_at,
+                description="PSA grading",
+                amount=-80.0,
+                classification="expense_or_purchase_needs_review",
+                expense_category="grading_fees",
+            )
+        )
+        session.commit()
+
+        data = build_finance_bank_expense_data(
+            session,
+            start=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            end=datetime(2026, 5, 2, tzinfo=timezone.utc),
+        )
+
+    cash_row = next(row for row in data["detail_rows"] if row["category"] == "cash_inventory_purchases")
+    category_keys = {row["category"] for row in data["category_rows"]}
+
+    assert cash_row["excluded_from_finance"] is True
+    assert data["gross_outflow_total"] == 580.0
+    assert data["bank_only_total"] == 80.0
+    assert data["inventory_total"] == 80.0
+    assert data["operating_total"] == 80.0
+    assert data["daily_rows"][0]["inventory"] == 80.0
+    assert "cash_inventory_purchases" not in category_keys
+
+
 def test_apple_cash_bank_row_does_not_match_cash_discord_buy():
     bank_rows = [
         {

@@ -112,6 +112,7 @@ EXPENSE_CATEGORY_LABELS = {
 }
 
 NON_OPERATING_EXPENSE_CATEGORIES = {"transfers", "loan_owner_payments", "partner_paybacks"}
+FINANCE_EXCLUDED_EXPENSE_CATEGORIES = {"cash_inventory_purchases"}
 BANK_ACCOUNT_FILTERS = {"all", "checking", "credit_card"}
 BANK_ACCOUNT_FILTER_LABELS = {
     "all": "All bank accounts",
@@ -1357,7 +1358,9 @@ def build_expense_category_options(rows: list[BankTransaction]) -> list[dict[str
 
 
 def _bank_category_group(category: str) -> str:
-    if category in {"inventory_purchases", "cash_inventory_purchases", "grading_fees"}:
+    if category in FINANCE_EXCLUDED_EXPENSE_CATEGORIES:
+        return "cash_movement"
+    if category in {"inventory_purchases", "grading_fees"}:
         return "inventory"
     if category == "partner_paybacks":
         return "partner_paybacks"
@@ -1411,6 +1414,8 @@ def build_finance_bank_expense_data(
     partner_paybacks_total = 0.0
     uncategorized_total = 0.0
     uncategorized_count = 0
+    finance_excluded_total = 0.0
+    finance_excluded_count = 0
     detail_rows: list[dict[str, Any]] = []
 
     for row in rows:
@@ -1418,12 +1423,16 @@ def build_finance_bank_expense_data(
         category = row.expense_category or "uncategorized"
         category_group = _bank_category_group(category)
         is_non_operating = category in NON_OPERATING_EXPENSE_CATEGORIES
+        is_finance_excluded = category in FINANCE_EXCLUDED_EXPENSE_CATEGORIES
         is_operating = not is_non_operating
         is_discord_logged = bank_row_is_discord_logged(row)
         gross_outflow_total += amount
         if is_discord_logged:
             discord_logged_total += amount
             discord_logged_count += 1
+        elif is_finance_excluded:
+            finance_excluded_total += amount
+            finance_excluded_count += 1
         else:
             bank_only_total += amount
             if is_operating:
@@ -1451,10 +1460,51 @@ def build_finance_bank_expense_data(
                 "group": category_group,
                 "is_discord_logged": is_discord_logged,
                 "is_non_operating": is_non_operating,
+                "excluded_from_finance": is_finance_excluded,
                 "classification": row.classification,
                 "review_status": row.review_status,
             }
         )
+
+        if is_finance_excluded:
+            account_key = row.account_label or row.account_type or "Unknown account"
+            account_bucket = account_totals.setdefault(
+                account_key,
+                {
+                    "label": account_key,
+                    "account_type": row.account_type or "unknown",
+                    "count": 0,
+                    "bank_only_count": 0,
+                    "discord_logged_count": 0,
+                    "total": 0.0,
+                    "bank_only_total": 0.0,
+                    "discord_logged_total": 0.0,
+                    "operating_total": 0.0,
+                    "non_operating_total": 0.0,
+                },
+            )
+            account_bucket["count"] = int(account_bucket["count"]) + 1
+            account_bucket["total"] = float(account_bucket["total"]) + amount
+
+            day_key = _bank_day_key(row.posted_at)
+            if day_key:
+                daily_bucket = daily_totals.setdefault(
+                    day_key,
+                    {
+                        "date": day_key,
+                        "label": _bank_day_label(day_key),
+                        "operating": 0.0,
+                        "inventory": 0.0,
+                        "partner_paybacks": 0.0,
+                        "non_operating": 0.0,
+                        "uncategorized": 0.0,
+                        "already_logged": 0.0,
+                        "total": 0.0,
+                        "bank_only_total": 0.0,
+                    },
+                )
+                daily_bucket["total"] = float(daily_bucket["total"]) + amount
+            continue
 
         category_bucket = category_totals.setdefault(
             category,
@@ -1606,9 +1656,11 @@ def build_finance_bank_expense_data(
         "row_count": len(rows),
         "gross_outflow_total": round(gross_outflow_total, 2),
         "bank_only_total": round(bank_only_total, 2),
-        "bank_only_count": len(rows) - discord_logged_count,
+        "bank_only_count": len(rows) - discord_logged_count - finance_excluded_count,
         "discord_logged_total": round(discord_logged_total, 2),
         "discord_logged_count": discord_logged_count,
+        "finance_excluded_total": round(finance_excluded_total, 2),
+        "finance_excluded_count": finance_excluded_count,
         "operating_total": round(operating_total, 2),
         "non_operating_total": round(non_operating_total, 2),
         "inventory_total": round(inventory_total, 2),
