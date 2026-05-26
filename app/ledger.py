@@ -66,7 +66,7 @@ LEDGER_ACTION_REASON_LABELS = {
 }
 
 DISCORD_FINANCIAL_LEDGER_CHANNEL_NAMES = {"financials", "loan", "loans"}
-DISCORD_DIRECT_LEDGER_CATEGORY_NAMES = {"show deals", "past shows"}
+DISCORD_DIRECT_LEDGER_CATEGORY_NAMES = {"show deals", "past shows", "offline deals"}
 YEAR_PAST_SHOWS_CATEGORY_RE = re.compile(r"^\d{4}\s+past shows$", re.IGNORECASE)
 LEDGER_TRANSACTION_ENTRY_KIND_CHOICES = [
     {"value": "expense", "label": "Expense"},

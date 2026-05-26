@@ -1080,6 +1080,52 @@ def test_ledger_includes_non_cash_year_past_show_discord_deal_rows():
     assert deal_row["matched_transaction_id"] == 612
 
 
+def test_ledger_includes_non_cash_offline_purchase_discord_deal_rows():
+    engine = make_engine()
+    posted_at = datetime(2026, 5, 25, 21, tzinfo=timezone.utc)
+    with Session(engine) as session:
+        session.add(
+            AvailableDiscordChannel(
+                channel_id="alex-purchases-channel",
+                channel_name="alex-purchases",
+                guild_id="1",
+                guild_name="Degen Guild",
+                category_name="Offline Deals",
+                label="Offline Deals / #alex-purchases",
+            )
+        )
+        session.add(
+            Transaction(
+                id=613,
+                source_message_id=1613,
+                discord_message_id="alex-purchase-zelle",
+                channel_id="alex-purchases-channel",
+                channel_name="alex-purchases",
+                occurred_at=posted_at,
+                parse_status="parsed",
+                entry_kind="buy",
+                payment_method="zelle",
+                expense_category="inventory",
+                amount=500.0,
+                money_in=0.0,
+                money_out=500.0,
+                source_content="Buy $500 zelle",
+            )
+        )
+        session.commit()
+
+        data = build_ledger_page_data(session, LedgerFilters(status="all", source="discord", include_cash=True))
+
+    deal_row = next(row for row in data["rows"] if row["id"] == "discord-deal-613")
+
+    assert deal_row["row_kind"] == "discord_deal"
+    assert deal_row["account_label"] == "Discord Deals"
+    assert deal_row["source"] == "discord"
+    assert deal_row["classification"] == "discord_deal_log"
+    assert deal_row["amount"] == -500.0
+    assert deal_row["matched_transaction_id"] == 613
+
+
 def test_ledger_page_links_discord_matches_to_deal_detail():
     engine = make_engine()
     posted_at = datetime(2026, 5, 19, 12, tzinfo=timezone.utc)
