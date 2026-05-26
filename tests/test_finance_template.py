@@ -100,6 +100,24 @@ def test_finance_kpis_link_to_drilldowns_and_model_explanation():
     assert 'id="cash-deployment"' in template
 
 
+def test_finance_drilldowns_render_supporting_source_rows():
+    template = _template_text()
+
+    assert "supporting_rows" in template
+    assert "supporting_row_count" in template
+    assert "drilldown-source-table" in template
+    assert "View row" in template
+
+
+def test_finance_renders_overall_expense_overview():
+    template = _template_text()
+
+    assert "Overall Expense Overview" in template
+    assert "overall_expense_rows" in template
+    assert "finance-overall-expense-chart" in template
+    assert "Discord + bank-only cash out" in template
+
+
 def test_finance_quality_cards_link_to_cleanup_actions():
     template = _template_text()
 

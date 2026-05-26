@@ -541,6 +541,91 @@
             letter-spacing: .06em;
             text-transform: uppercase;
         }
+        .drilldown-support {
+            margin-top: 16px;
+            padding-top: 14px;
+            border-top: 1px solid var(--line);
+        }
+        .drilldown-support-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        .drilldown-support-title {
+            color: #ffffff;
+            font-size: 12px;
+            font-weight: 700;
+        }
+        .drilldown-support-count {
+            color: var(--muted);
+            font-size: 11px;
+            white-space: nowrap;
+        }
+        .drilldown-source-table {
+            display: grid;
+            gap: 6px;
+        }
+        .drilldown-source-row {
+            display: grid;
+            grid-template-columns: 52px minmax(0, 1fr) auto;
+            gap: 10px;
+            align-items: center;
+            padding: 8px 0;
+            color: inherit;
+            text-decoration: none;
+            border-top: 1px solid rgba(255, 255, 255, .06);
+        }
+        .drilldown-source-row:first-child { border-top: 0; }
+        .drilldown-source-row:hover .drilldown-source-desc { color: #ffffff; }
+        .drilldown-source-date {
+            color: var(--muted);
+            font-size: 11px;
+            white-space: nowrap;
+        }
+        .drilldown-source-main {
+            min-width: 0;
+        }
+        .drilldown-source-meta {
+            color: var(--muted);
+            font-size: 11px;
+            line-height: 1.35;
+        }
+        .drilldown-source-desc {
+            overflow: hidden;
+            color: #dbe2ea;
+            font-size: 12px;
+            font-weight: 700;
+            line-height: 1.35;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .drilldown-source-amount {
+            color: #ffffff;
+            font-size: 12px;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+            text-align: right;
+        }
+        .drilldown-source-amount.positive { color: #8eedb0; }
+        .drilldown-source-amount.negative { color: #ffb4a8; }
+        .drilldown-source-link {
+            display: block;
+            margin-top: 2px;
+            color: var(--muted);
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: .06em;
+            text-transform: uppercase;
+        }
+        .drilldown-support-empty {
+            margin-top: 12px;
+            color: var(--muted);
+            font-size: 12px;
+            line-height: 1.4;
+        }
         .section-head {
             display: flex;
             align-items: flex-end;
@@ -669,6 +754,14 @@
             min-width: 0;
             overflow-wrap: anywhere;
         }
+        .bar-detail {
+            display: block;
+            margin-top: 3px;
+            color: var(--muted);
+            font-size: 11px;
+            font-weight: 600;
+            line-height: 1.35;
+        }
         .bar-track {
             height: 12px;
             border-radius: 999px;
@@ -692,6 +785,22 @@
             color: var(--muted-strong);
             white-space: nowrap;
         }
+        .expense-overview-grid {
+            display: grid;
+            grid-template-columns: minmax(260px, .7fr) minmax(0, 1.3fr);
+            gap: 20px;
+            align-items: stretch;
+        }
+        .expense-overview-list {
+            align-self: center;
+        }
+        .expense-link {
+            color: inherit;
+            text-decoration: none;
+        }
+        .expense-link:hover .bar-label {
+            color: #ffffff;
+        }
         .channel-top {
             display: flex;
             justify-content: space-between;
@@ -714,6 +823,7 @@
             .chart-grid,
             .content-grid,
             .data-grid,
+            .expense-overview-grid,
             .toolbar,
             .hero {
                 grid-template-columns: 1fr;
@@ -871,6 +981,31 @@
                     <div class="drilldown-value">{{ item["value"] }}</div>
                 </div>
                 {% endfor %}
+                <div class="drilldown-support">
+                    <div class="drilldown-support-head">
+                        <div class="drilldown-support-title">{{ row["supporting_title"] }}</div>
+                        <div class="drilldown-support-count">{{ row["supporting_row_count"] }} rows</div>
+                    </div>
+                    {% if row["supporting_rows"] %}
+                    <div class="drilldown-source-table">
+                        {% for source_row in row["supporting_rows"] %}
+                        <a class="drilldown-source-row" href="{{ source_row['url'] or row['action_url'] }}">
+                            <div class="drilldown-source-date">{{ source_row["date_label"] }}</div>
+                            <div class="drilldown-source-main">
+                                <div class="drilldown-source-meta">{{ source_row["source"] }}{% if source_row["context"] %} | {{ source_row["context"] }}{% endif %}</div>
+                                <div class="drilldown-source-desc">{{ source_row["description"] }}</div>
+                            </div>
+                            <div class="drilldown-source-amount {{ source_row['tone'] }}">
+                                {{ source_row["amount_display"] }}
+                                <span class="drilldown-source-link">View row</span>
+                            </div>
+                        </a>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <div class="drilldown-support-empty">{{ row["supporting_empty"] }}</div>
+                    {% endif %}
+                </div>
                 <a class="drilldown-action" href="{{ row['action_url'] }}">{{ row["action_label"] }}</a>
             </article>
             {% endfor %}
@@ -1005,6 +1140,38 @@
                     <div class="chart-wrap compact"><canvas id="finance-bank-account-chart"></canvas></div>
                     <div class="chart-empty" id="finance-bank-account-empty">No account outflows in this range.</div>
                 </article>
+            </div>
+        </section>
+
+        <section class="panel" id="overall-expenses">
+            <div class="section-head">
+                <div>
+                    <p class="section-kicker">Expenses</p>
+                    <h2 class="section-title">Overall Expense Overview</h2>
+                    <p class="section-copy">Discord + bank-only cash out by category for the selected range. Bank rows already matched to Discord are excluded so category totals are not double counted.</p>
+                </div>
+                <span class="tag">{{ overall_expense_rows|length }} categories</span>
+            </div>
+            <div class="expense-overview-grid">
+                <div>
+                    <div class="chart-wrap compact"><canvas id="finance-overall-expense-chart"></canvas></div>
+                    <div class="chart-empty" id="finance-overall-expense-empty">No expenses matched this range.</div>
+                </div>
+                <div class="bar-list expense-overview-list">
+                    {% for row in overall_expense_rows[:12] %}
+                    <a class="bar-row expense-link" href="{{ row['action_url'] }}">
+                        <div class="bar-label">
+                            {{ row["label"] }}
+                            <span class="bar-detail">{{ row["group_label"] }} | {{ row["row_count"] }} row{{ "" if row["row_count"] == 1 else "s" }} | Discord {{ row["discord_total_display"] }} | bank-only {{ row["bank_only_total_display"] }}</span>
+                        </div>
+                        <div class="bar-track"><div class="bar-fill spend" style="width: {{ row['width_pct'] }}%;"></div></div>
+                        <div class="bar-share">{{ row["share_display"] }}</div>
+                        <div class="bar-value">{{ row["total_display"] }}</div>
+                    </a>
+                    {% else %}
+                    <div class="empty">No Discord or bank-only expenses matched this range.</div>
+                    {% endfor %}
+                </div>
             </div>
         </section>
 
@@ -1473,6 +1640,21 @@
             chartData.spendMix.values,
             palette.spend
         );
+        if (chartData.overallExpenses) {
+            var overallExpenseColors = (chartData.overallExpenses.groups || []).map(function (group, index) {
+                if (group === "inventory") { return palette.bank.inventory; }
+                if (group === "non_operating") { return palette.bank.nonOperating; }
+                if (group === "uncategorized") { return palette.bank.uncategorized; }
+                return palette.bank.categories[index % palette.bank.categories.length];
+            });
+            renderDoughnut(
+                "finance-overall-expense-chart",
+                "finance-overall-expense-empty",
+                chartData.overallExpenses.labels,
+                chartData.overallExpenses.values,
+                overallExpenseColors
+            );
+        }
 
         if (chartData.bank) {
             var bankCategoryColors = (chartData.bank.categoryMix.groups || []).map(function (group, index) {

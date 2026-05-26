@@ -370,7 +370,7 @@ def finance_page(
 
     range_data = resolve_finance_range(start=start, end=end, window=window)
     selected_bank_account = normalize_bank_account_filter(bank_account if isinstance(bank_account, str) else "all")
-    finance_cache_key = f"finance:v3:{start or ''}:{end or ''}:{window or ''}"
+    finance_cache_key = f"finance:v4:{start or ''}:{end or ''}:{window or ''}"
     cached_finance = cache_get(finance_cache_key)
     if cached_finance is None:
         current_snapshot = build_finance_range_snapshot(
@@ -394,6 +394,11 @@ def finance_page(
     prior_statement = prior_snapshot["statement"]
     source_mix_rows = build_finance_source_mix_rows(current_statement)
     spend_mix_rows = build_finance_spend_mix_rows(current_statement)
+    overall_expense_rows = build_finance_overall_expense_rows(
+        transactions=current_snapshot["transactions"],
+        bank_expense_data=current_snapshot["bank_expense_data"],
+        range_data=range_data,
+    )
     top_channels = build_finance_channel_rows(current_snapshot["transactions"])
     monthly_rows = build_finance_monthly_rows(session)
     bank_expense_data = _decorate_bank_expense_data(
@@ -409,6 +414,7 @@ def finance_page(
         source_mix_rows=source_mix_rows,
         spend_mix_rows=spend_mix_rows,
         monthly_rows=monthly_rows,
+        overall_expense_rows=overall_expense_rows,
     )
     finance_chart_data["bank"] = _build_bank_expense_chart_data(bank_expense_data)
     analyst_notes = build_finance_notes(
@@ -474,10 +480,15 @@ def finance_page(
             "kpi_drilldown_rows": build_finance_kpi_drilldown_rows(
                 current_statement,
                 range_data=range_data,
+                transactions=current_snapshot["transactions"],
+                shopify_rows=current_snapshot["shopify_rows"],
+                tiktok_rows=current_snapshot["tiktok_rows"],
+                bank_expense_data=current_snapshot["bank_expense_data"],
             ),
             "statement_rows": build_finance_statement_rows(current_statement, prior_statement),
             "source_mix_rows": source_mix_rows,
             "spend_mix_rows": spend_mix_rows,
+            "overall_expense_rows": overall_expense_rows,
             "top_channels": top_channels,
             "analyst_notes": analyst_notes,
             "quality_rows": build_finance_quality_rows(

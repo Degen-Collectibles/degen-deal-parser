@@ -44,7 +44,7 @@ from .discord.channels import (
     get_watched_channels,
     update_backfill_window,
 )
-from .discord.bank_reconciliation import build_finance_bank_expense_data
+from .discord.bank_reconciliation import build_finance_bank_expense_data, expense_category_label
 from .config import get_settings
 from .discord.corrections import (
     get_learning_signal,
@@ -1558,7 +1558,9 @@ def build_finance_chart_data(
     source_mix_rows: list[dict[str, object]],
     spend_mix_rows: list[dict[str, object]],
     monthly_rows: list[dict[str, object]],
+    overall_expense_rows: Optional[list[dict[str, object]]] = None,
 ) -> dict[str, object]:
+    overall_expense_rows = overall_expense_rows or []
     return {
         "daily": {
             "labels": [row["label"] for row in daily_rows],
@@ -1576,6 +1578,11 @@ def build_finance_chart_data(
         "spendMix": {
             "labels": [row["label"] for row in spend_mix_rows],
             "values": [row["value"] for row in spend_mix_rows],
+        },
+        "overallExpenses": {
+            "labels": [row["label"] for row in overall_expense_rows[:12]],
+            "values": [row["total"] for row in overall_expense_rows[:12]],
+            "groups": [row["group"] for row in overall_expense_rows[:12]],
         },
         "monthly": {
             "labels": [row["label"] for row in monthly_rows],
@@ -1617,6 +1624,8 @@ def build_finance_range_snapshot(
     )
     return {
         "transactions": transactions,
+        "shopify_rows": shopify_rows,
+        "tiktok_rows": tiktok_rows,
         "discord_summary": discord_summary,
         "shopify_summary": shopify_summary,
         "tiktok_summary": tiktok_summary,
@@ -1754,10 +1763,328 @@ def _finance_reports_url(range_data: dict[str, object], *, source: str = REPORT_
     return build_reports_url(source=source, start=start, end=end)
 
 
+def _finance_detail_date_label(value: object) -> str:
+    if value in (None, ""):
+        return ""
+    parsed: Optional[datetime] = None
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return value
+    if parsed is None:
+        return str(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=PACIFIC_TZ)
+    localized = parsed.astimezone(PACIFIC_TZ)
+    return f"{localized.strftime('%b')} {localized.day}"
+
+
+def _finance_discord_detail_url(row: Transaction, range_data: dict[str, object]) -> str:
+    start, end = _finance_selected_dates(range_data)
+    return build_message_detail_url(
+        row.source_message_id,
+        return_path="/deals",
+        after=start,
+        before=end,
+        sort_by="time",
+        sort_dir="desc",
+        limit=100,
+    )
+
+
+def _finance_bank_detail_url(row: dict[str, object]) -> str:
+    params: dict[str, str] = {"expenses_only": "true"}
+    category = str(row.get("category") or "")
+    description = _finance_clean_snippet(str(row.get("description") or ""), limit=80)
+    if category:
+        params["expense_category"] = category
+    if description:
+        params["search"] = description
+    return f"/bookkeeping/bank?{urlencode(params)}"
+
+
+def _finance_clean_snippet(value: object, *, limit: int = 120) -> str:
+    text = " ".join(str(value or "").split())
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    return f"{text[: limit - 3].rstrip()}..."
+
+
+def _finance_supporting_row(
+    *,
+    date_value: object,
+    source: str,
+    description: str,
+    context: str,
+    amount: float,
+    url: str = "",
+    tone: str = "neutral",
+) -> dict[str, object]:
+    return {
+        "date_label": _finance_detail_date_label(date_value),
+        "source": source,
+        "description": _finance_clean_snippet(description, limit=96) or "Transaction row",
+        "context": _finance_clean_snippet(context, limit=90),
+        "amount": round(float(amount or 0.0), 2),
+        "amount_display": format_dashboard_money(float(amount or 0.0)),
+        "url": url,
+        "tone": tone,
+        "sort_amount": abs(float(amount or 0.0)),
+    }
+
+
+def _finance_limit_supporting_rows(
+    rows: list[dict[str, object]],
+    *,
+    row_limit: int,
+) -> list[dict[str, object]]:
+    limit = max(1, min(int(row_limit or 1), 20))
+    sorted_rows = sorted(
+        rows,
+        key=lambda row: (
+            -float(row.get("sort_amount", 0.0) or 0.0),
+            str(row.get("date_label") or ""),
+            str(row.get("description") or "").lower(),
+        ),
+    )
+    return [{key: value for key, value in row.items() if key != "sort_amount"} for row in sorted_rows[:limit]]
+
+
+def _finance_support_metadata(
+    rows: list[dict[str, object]],
+    *,
+    row_limit: int,
+    title: str,
+    empty: str,
+) -> dict[str, object]:
+    return {
+        "supporting_title": title,
+        "supporting_empty": empty,
+        "supporting_row_count": len(rows),
+        "supporting_rows": _finance_limit_supporting_rows(rows, row_limit=row_limit) if rows else [],
+    }
+
+
+def _finance_discord_support_rows(
+    transactions: list[Transaction],
+    *,
+    range_data: dict[str, object],
+    kind: str,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for row in transactions:
+        entry_kind = (row.entry_kind or "unknown").strip().lower()
+        expense_category = (row.expense_category or "").strip().lower()
+        if is_non_operating_transaction(entry_kind, expense_category):
+            continue
+        money_in = normalize_money_value(row.money_in)
+        money_out = normalize_money_value(row.money_out)
+        is_inventory = entry_kind in {"buy", "trade"} or (
+            entry_kind == "expense" and expense_category == "inventory"
+        )
+        include = False
+        amount = 0.0
+        tone = "neutral"
+        if kind == "revenue" and money_in > 0:
+            include = True
+            amount = money_in
+            tone = "positive"
+        elif kind == "inventory" and is_inventory and money_out > 0:
+            include = True
+            amount = money_out
+            tone = "negative"
+        elif kind == "operating" and not is_inventory and money_out > 0:
+            include = True
+            amount = money_out
+            tone = "negative"
+        if not include:
+            continue
+        context_parts = [
+            row.channel_name or row.channel_id or "Discord",
+            entry_kind.replace("_", " "),
+        ]
+        if expense_category:
+            context_parts.append(expense_category.replace("_", " "))
+        rows.append(
+            _finance_supporting_row(
+                date_value=row.occurred_at,
+                source="Discord",
+                description=row.source_content or row.trade_summary or row.notes or row.deal_type or "Discord transaction",
+                context=" | ".join(part for part in context_parts if part),
+                amount=amount,
+                url=_finance_discord_detail_url(row, range_data),
+                tone=tone,
+            )
+        )
+    return rows
+
+
+def _finance_shopify_support_row(
+    row: ShopifyOrder,
+    *,
+    amount: float,
+    range_data: dict[str, object],
+    context: str,
+    tone: str = "positive",
+) -> dict[str, object]:
+    start, end = _finance_selected_dates(range_data)
+    order_label = row.order_number or row.shopify_order_id or str(row.id or "")
+    return _finance_supporting_row(
+        date_value=row.created_at,
+        source="Shopify",
+        description=f"Order {order_label} {row.customer_name or ''}".strip(),
+        context=context,
+        amount=amount,
+        url=build_shopify_orders_url(start=start, end=end, search=order_label),
+        tone=tone,
+    )
+
+
+def _finance_tiktok_support_row(
+    row: TikTokOrder,
+    *,
+    amount: float,
+    range_data: dict[str, object],
+    context: str,
+    tone: str = "positive",
+) -> dict[str, object]:
+    start, end = _finance_selected_dates(range_data)
+    order_label = row.order_number or row.tiktok_order_id or str(row.id or "")
+    return _finance_supporting_row(
+        date_value=row.created_at,
+        source="TikTok",
+        description=f"Order {order_label} {row.customer_name or ''}".strip(),
+        context=context,
+        amount=amount,
+        url=build_tiktok_orders_url(start=start, end=end, search=order_label),
+        tone=tone,
+    )
+
+
+def _finance_platform_revenue_rows(
+    *,
+    shopify_rows: list[ShopifyOrder],
+    tiktok_rows: list[TikTokOrder],
+    range_data: dict[str, object],
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for row in shopify_rows:
+        if (row.financial_status or "").strip().lower() != "paid":
+            continue
+        rows.append(
+            _finance_shopify_support_row(
+                row,
+                amount=external_order_net_revenue(row),
+                range_data=range_data,
+                context="Paid product revenue",
+            )
+        )
+    for row in tiktok_rows:
+        if classify_tiktok_reporting_status(row) != "paid":
+            continue
+        rows.append(
+            _finance_tiktok_support_row(
+                row,
+                amount=external_order_net_revenue(row),
+                range_data=range_data,
+                context="Paid product revenue",
+            )
+        )
+    return rows
+
+
+def _finance_platform_tax_rows(
+    *,
+    shopify_rows: list[ShopifyOrder],
+    tiktok_rows: list[TikTokOrder],
+    range_data: dict[str, object],
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for row in shopify_rows:
+        if (row.financial_status or "").strip().lower() != "paid":
+            continue
+        tax_value = float(row.total_tax or 0.0) if row.total_tax is not None else 0.0
+        context = "Known tax" if row.total_tax is not None else "Missing tax detail"
+        rows.append(
+            _finance_shopify_support_row(
+                row,
+                amount=tax_value,
+                range_data=range_data,
+                context=context,
+                tone="neutral",
+            )
+        )
+    for row in tiktok_rows:
+        if classify_tiktok_reporting_status(row) != "paid":
+            continue
+        tax_value = float(row.total_tax or 0.0) if row.total_tax is not None else 0.0
+        context = "Known tax" if row.total_tax is not None else "Missing tax detail"
+        rows.append(
+            _finance_tiktok_support_row(
+                row,
+                amount=tax_value,
+                range_data=range_data,
+                context=context,
+                tone="neutral",
+            )
+        )
+    return rows
+
+
+def _finance_bank_support_rows(
+    bank_expense_data: dict[str, object],
+    *,
+    kind: str,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for row in bank_expense_data.get("detail_rows", []) or []:
+        if not isinstance(row, dict) or row.get("is_discord_logged"):
+            continue
+        group = str(row.get("group") or "").strip().lower()
+        is_non_operating = bool(row.get("is_non_operating"))
+        if kind == "inventory":
+            include = group == "inventory"
+        elif kind == "operating":
+            include = group not in {"inventory", "partner_paybacks"} and not is_non_operating
+        else:
+            include = False
+        if not include:
+            continue
+        rows.append(
+            _finance_supporting_row(
+                date_value=row.get("date"),
+                source="Bank",
+                description=str(row.get("description") or "Bank transaction"),
+                context=" | ".join(
+                    part
+                    for part in [
+                        str(row.get("account_label") or "Bank"),
+                        str(row.get("category_label") or ""),
+                    ]
+                    if part
+                ),
+                amount=float(row.get("amount", 0.0) or 0.0),
+                url=_finance_bank_detail_url(row),
+                tone="negative",
+            )
+        )
+    return rows
+
+
 def build_finance_kpi_drilldown_rows(
     current_statement: dict[str, object],
     *,
     range_data: dict[str, object],
+    transactions: Optional[list[Transaction]] = None,
+    shopify_rows: Optional[list[ShopifyOrder]] = None,
+    tiktok_rows: Optional[list[TikTokOrder]] = None,
+    bank_expense_data: Optional[dict[str, object]] = None,
+    row_limit: int = 8,
 ) -> list[dict[str, object]]:
     def money_item(label: str, key: str, detail: str = "") -> dict[str, str]:
         value = float(current_statement.get(key, 0.0) or 0.0)
@@ -1782,8 +2109,33 @@ def build_finance_kpi_drilldown_rows(
         "gross_profit",
         "Revenue multiplied by the owner's average gross product margin assumption.",
     )
+    transactions = transactions or []
+    shopify_rows = shopify_rows or []
+    tiktok_rows = tiktok_rows or []
+    bank_expense_data = bank_expense_data or {}
+    revenue_support_rows = (
+        _finance_discord_support_rows(transactions, range_data=range_data, kind="revenue")
+        + _finance_platform_revenue_rows(
+            shopify_rows=shopify_rows,
+            tiktok_rows=tiktok_rows,
+            range_data=range_data,
+        )
+    )
+    inventory_support_rows = (
+        _finance_discord_support_rows(transactions, range_data=range_data, kind="inventory")
+        + _finance_bank_support_rows(bank_expense_data, kind="inventory")
+    )
+    operating_support_rows = (
+        _finance_discord_support_rows(transactions, range_data=range_data, kind="operating")
+        + _finance_bank_support_rows(bank_expense_data, kind="operating")
+    )
+    tax_support_rows = _finance_platform_tax_rows(
+        shopify_rows=shopify_rows,
+        tiktok_rows=tiktok_rows,
+        range_data=range_data,
+    )
 
-    return [
+    cards = [
         {
             "key": "revenue",
             "drilldown_id": "finance-drilldown-revenue",
@@ -1797,6 +2149,12 @@ def build_finance_kpi_drilldown_rows(
             ],
             "action_label": "Open channel comparison",
             "action_url": _finance_reports_url(range_data),
+            **_finance_support_metadata(
+                revenue_support_rows,
+                row_limit=row_limit,
+                title="Top revenue source rows",
+                empty="No product revenue rows matched this range.",
+            ),
         },
         {
             "key": "gross_profit",
@@ -1810,6 +2168,12 @@ def build_finance_kpi_drilldown_rows(
             ],
             "action_label": "Review the model",
             "action_url": "#finance-model",
+            **_finance_support_metadata(
+                revenue_support_rows,
+                row_limit=row_limit,
+                title="Revenue rows feeding the 20% model",
+                empty="No revenue rows matched the gross profit model in this range.",
+            ),
         },
         {
             "key": "operating_profit",
@@ -1823,6 +2187,12 @@ def build_finance_kpi_drilldown_rows(
             ],
             "action_label": "Open ledger cleanup",
             "action_url": _finance_ledger_url(range_data, status="needs_action"),
+            **_finance_support_metadata(
+                operating_support_rows,
+                row_limit=row_limit,
+                title="Operating expense rows subtracted",
+                empty="No operating expense rows matched this range.",
+            ),
         },
         {
             "key": "operating_margin_pct",
@@ -1840,6 +2210,12 @@ def build_finance_kpi_drilldown_rows(
             ],
             "action_label": "Open statement",
             "action_url": "#finance-statement",
+            **_finance_support_metadata(
+                revenue_support_rows + operating_support_rows,
+                row_limit=row_limit,
+                title="Rows behind revenue and operating expense",
+                empty="No revenue or operating expense rows matched this range.",
+            ),
         },
         {
             "key": "inventory_spend",
@@ -1853,6 +2229,12 @@ def build_finance_kpi_drilldown_rows(
             ],
             "action_label": "Open bank inventory rows",
             "action_url": "/bookkeeping/bank?expense_category=inventory",
+            **_finance_support_metadata(
+                inventory_support_rows,
+                row_limit=row_limit,
+                title="Inventory and grading cash rows",
+                empty="No inventory cash deployment rows matched this range.",
+            ),
         },
         {
             "key": "external_tax",
@@ -1866,8 +2248,15 @@ def build_finance_kpi_drilldown_rows(
             ],
             "action_label": "Open platform reports",
             "action_url": _finance_reports_url(range_data),
+            **_finance_support_metadata(
+                tax_support_rows,
+                row_limit=row_limit,
+                title="Platform orders with tax detail",
+                empty="No paid platform tax rows matched this range.",
+            ),
         },
     ]
+    return cards
 
 
 def build_finance_source_mix_rows(statement: dict[str, object]) -> list[dict[str, object]]:
@@ -1917,6 +2306,147 @@ def build_finance_spend_mix_rows(statement: dict[str, object]) -> list[dict[str,
         }
         for label, value in sorted(filtered.items(), key=lambda item: (-item[1], item[0]))
     ]
+
+
+def _finance_expense_category_key(*, entry_kind: str = "", expense_category: str = "") -> str:
+    category = (expense_category or "").strip().lower()
+    kind = (entry_kind or "").strip().lower()
+    if category:
+        return category
+    if kind in {"buy", "trade"}:
+        return "inventory"
+    if kind in {"loan_draw", "loan_repayment", "transfer"}:
+        return "transfers"
+    return "uncategorized"
+
+
+def _finance_expense_group(
+    *,
+    key: str,
+    entry_kind: str = "",
+    bank_group: str = "",
+    is_non_operating: bool = False,
+) -> str:
+    normalized_key = (key or "").strip().lower()
+    normalized_kind = (entry_kind or "").strip().lower()
+    normalized_bank_group = (bank_group or "").strip().lower()
+    if (
+        is_non_operating
+        or is_non_operating_transaction(normalized_kind, normalized_key)
+        or normalized_bank_group in {"non_operating", "partner_paybacks"}
+    ):
+        return "non_operating"
+    if normalized_key == "uncategorized" or normalized_bank_group == "uncategorized":
+        return "uncategorized"
+    if normalized_key == "inventory" or normalized_kind in {"buy", "trade"} or normalized_bank_group == "inventory":
+        return "inventory"
+    return "operating"
+
+
+def _finance_expense_group_label(group: str) -> str:
+    return {
+        "inventory": "Cash deployed",
+        "operating": "Operating",
+        "non_operating": "Non-operating",
+        "uncategorized": "Needs category",
+    }.get(group, group.replace("_", " ").title())
+
+
+def _finance_expense_review_url(key: str, range_data: dict[str, object]) -> str:
+    return _finance_ledger_url(
+        range_data,
+        status="all",
+        category=key,
+    )
+
+
+def build_finance_overall_expense_rows(
+    *,
+    transactions: list[Transaction],
+    bank_expense_data: dict[str, object],
+    range_data: dict[str, object],
+) -> list[dict[str, object]]:
+    buckets: dict[str, dict[str, object]] = {}
+
+    def bucket_for(key: str, *, group: str) -> dict[str, object]:
+        normalized_key = key or "uncategorized"
+        return buckets.setdefault(
+            normalized_key,
+            {
+                "key": normalized_key,
+                "label": expense_category_label(normalized_key),
+                "group": group,
+                "group_label": _finance_expense_group_label(group),
+                "total": 0.0,
+                "discord_total": 0.0,
+                "bank_only_total": 0.0,
+                "row_count": 0,
+                "discord_count": 0,
+                "bank_only_count": 0,
+            },
+        )
+
+    for row in transactions:
+        money_out = normalize_money_value(row.money_out)
+        if money_out <= 0:
+            continue
+        entry_kind = (row.entry_kind or "").strip().lower()
+        key = _finance_expense_category_key(entry_kind=entry_kind, expense_category=row.expense_category or "")
+        group = _finance_expense_group(key=key, entry_kind=entry_kind)
+        bucket = bucket_for(key, group=group)
+        bucket["total"] = float(bucket["total"]) + money_out
+        bucket["discord_total"] = float(bucket["discord_total"]) + money_out
+        bucket["row_count"] = int(bucket["row_count"]) + 1
+        bucket["discord_count"] = int(bucket["discord_count"]) + 1
+
+    for row in bank_expense_data.get("detail_rows", []) or []:
+        if not isinstance(row, dict) or row.get("is_discord_logged"):
+            continue
+        amount = abs(float(row.get("amount", 0.0) or 0.0))
+        if amount <= 0:
+            continue
+        key = str(row.get("category") or "uncategorized").strip().lower() or "uncategorized"
+        group = _finance_expense_group(
+            key=key,
+            bank_group=str(row.get("group") or ""),
+            is_non_operating=bool(row.get("is_non_operating")),
+        )
+        bucket = bucket_for(key, group=group)
+        bucket["total"] = float(bucket["total"]) + amount
+        bucket["bank_only_total"] = float(bucket["bank_only_total"]) + amount
+        bucket["row_count"] = int(bucket["row_count"]) + 1
+        bucket["bank_only_count"] = int(bucket["bank_only_count"]) + 1
+
+    max_value = max([abs(float(bucket["total"])) for bucket in buckets.values()] or [1.0])
+    total_value = sum(float(bucket["total"] or 0.0) for bucket in buckets.values()) or 1.0
+    rows: list[dict[str, object]] = []
+    for bucket in buckets.values():
+        total = round(float(bucket["total"] or 0.0), 2)
+        discord_total = round(float(bucket["discord_total"] or 0.0), 2)
+        bank_only_total = round(float(bucket["bank_only_total"] or 0.0), 2)
+        key = str(bucket["key"])
+        rows.append(
+            {
+                **bucket,
+                "total": total,
+                "discord_total": discord_total,
+                "bank_only_total": bank_only_total,
+                "total_display": format_dashboard_money(total),
+                "discord_total_display": format_dashboard_money(discord_total),
+                "bank_only_total_display": format_dashboard_money(bank_only_total),
+                "share_display": format_percent_value(safe_percent(total, total_value)),
+                "width_pct": round((abs(total) / max_value) * 100.0, 1) if max_value else 0.0,
+                "action_url": _finance_expense_review_url(key, range_data),
+            }
+        )
+    return sorted(
+        rows,
+        key=lambda row: (
+            -float(row["total"]),
+            str(row["group"]),
+            str(row["label"]).lower(),
+        ),
+    )
 
 
 def build_finance_channel_rows(transactions) -> list[dict[str, object]]:

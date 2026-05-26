@@ -5,12 +5,15 @@ from app.shared import (
     build_finance_channel_rows,
     build_finance_kpi_drilldown_rows,
     build_finance_kpi_rows,
+    build_finance_overall_expense_rows,
     build_finance_quality_rows,
     build_finance_spend_mix_rows,
     build_finance_statement_rows,
     compose_finance_statement,
 )
 from app.models import Transaction
+from app.models import ShopifyOrder
+from app.models import TikTokOrder
 
 
 def test_finance_statement_uses_assumed_gross_margin_and_keeps_inventory_as_cash_deployed():
@@ -107,6 +110,160 @@ def test_finance_kpi_drilldowns_explain_margin_model_and_actions():
     assert by_key["revenue"]["action_url"] == "/reports?start=2026-05-01&end=2026-05-23"
 
 
+def test_finance_kpi_drilldowns_include_real_supporting_rows():
+    occurred_at = datetime(2026, 5, 2, 18, tzinfo=timezone.utc)
+    statement = {
+        "discord_revenue": 1000.0,
+        "shopify_net_revenue": 200.0,
+        "tiktok_net_revenue": 100.0,
+        "revenue": 1300.0,
+        "estimated_cogs": 1040.0,
+        "gross_profit": 260.0,
+        "discord_inventory_spend": 300.0,
+        "bank_inventory_spend": 40.0,
+        "inventory_spend": 340.0,
+        "discord_operating_expenses": 50.0,
+        "bank_operating_expenses": 170.0,
+        "operating_expenses": 220.0,
+        "operating_profit": 40.0,
+        "operating_margin_pct": 3.1,
+        "shopify_tax": 18.0,
+        "tiktok_tax": 9.0,
+        "external_tax": 27.0,
+    }
+    rows = build_finance_kpi_drilldown_rows(
+        statement,
+        range_data={"selected_start": "2026-05-01", "selected_end": "2026-05-23"},
+        transactions=[
+            Transaction(
+                id=1,
+                source_message_id=101,
+                occurred_at=occurred_at,
+                channel_name="Discord Financials",
+                author_name="Jeffrey",
+                entry_kind="sale",
+                money_in=1000.0,
+                money_out=0.0,
+                source_content="Sold sealed case",
+            ),
+            Transaction(
+                id=2,
+                source_message_id=102,
+                occurred_at=occurred_at,
+                channel_name="Loans",
+                entry_kind="loan_draw",
+                money_in=5000.0,
+                money_out=0.0,
+                expense_category="loan_owner_payments",
+                source_content="Owner loan",
+            ),
+            Transaction(
+                id=3,
+                source_message_id=103,
+                occurred_at=occurred_at,
+                channel_name="Discord Financials",
+                entry_kind="buy",
+                money_in=0.0,
+                money_out=300.0,
+                source_content="Bought inventory",
+            ),
+            Transaction(
+                id=4,
+                source_message_id=104,
+                occurred_at=occurred_at,
+                channel_name="Discord Financials",
+                entry_kind="expense",
+                money_in=0.0,
+                money_out=50.0,
+                expense_category="supplies",
+                source_content="Shipping supplies",
+            ),
+        ],
+        shopify_rows=[
+            ShopifyOrder(
+                id=10,
+                shopify_order_id="gid://shopify/Order/10",
+                order_number="#1001",
+                created_at=occurred_at,
+                updated_at=occurred_at,
+                customer_name="Shopify Buyer",
+                total_price=218.0,
+                subtotal_price=200.0,
+                total_tax=18.0,
+                financial_status="paid",
+            )
+        ],
+        tiktok_rows=[
+            TikTokOrder(
+                id=20,
+                tiktok_order_id="tt-20",
+                order_number="TT1001",
+                created_at=occurred_at,
+                updated_at=occurred_at,
+                customer_name="TikTok Buyer",
+                total_price=109.0,
+                subtotal_price=100.0,
+                total_tax=9.0,
+                financial_status="completed",
+            )
+        ],
+        bank_expense_data={
+            "detail_rows": [
+                {
+                    "id": 201,
+                    "date": "2026-05-02",
+                    "description": "PSA grading",
+                    "account_label": "Chase Checking",
+                    "amount": 40.0,
+                    "category_label": "Inventory",
+                    "group": "inventory",
+                    "is_discord_logged": False,
+                    "is_non_operating": False,
+                },
+                {
+                    "id": 202,
+                    "date": "2026-05-02",
+                    "description": "Software subscription",
+                    "account_label": "Credit Card",
+                    "amount": 170.0,
+                    "category_label": "Software",
+                    "group": "operating",
+                    "is_discord_logged": False,
+                    "is_non_operating": False,
+                },
+                {
+                    "id": 203,
+                    "date": "2026-05-02",
+                    "description": "Already logged buy",
+                    "account_label": "Chase Checking",
+                    "amount": 999.0,
+                    "category_label": "Inventory",
+                    "group": "inventory",
+                    "is_discord_logged": True,
+                    "is_non_operating": False,
+                },
+            ]
+        },
+        row_limit=10,
+    )
+    by_key = {row["key"]: row for row in rows}
+
+    revenue_sources = {row["source"] for row in by_key["revenue"]["supporting_rows"]}
+    inventory_labels = [row["description"] for row in by_key["inventory_spend"]["supporting_rows"]]
+    operating_labels = [row["description"] for row in by_key["operating_profit"]["supporting_rows"]]
+    tax_sources = {row["source"] for row in by_key["external_tax"]["supporting_rows"]}
+
+    assert revenue_sources == {"Discord", "Shopify", "TikTok"}
+    assert all("Owner loan" not in row["description"] for row in by_key["revenue"]["supporting_rows"])
+    assert "Bought inventory" in inventory_labels
+    assert "PSA grading" in inventory_labels
+    assert "Already logged buy" not in inventory_labels
+    assert "Shipping supplies" in operating_labels
+    assert "Software subscription" in operating_labels
+    assert tax_sources == {"Shopify", "TikTok"}
+    assert by_key["inventory_spend"]["supporting_row_count"] == 2
+
+
 def test_finance_quality_rows_have_direct_action_links():
     rows = build_finance_quality_rows(
         current_statement={
@@ -188,6 +345,89 @@ def test_finance_breakdowns_label_discord_and_bank_only_outflows_separately():
     assert "Bank-only operating outflow" in statement_labels
     assert "Bank-only inventory/grading" in spend_labels
     assert "Bank-only operating outflow" in spend_labels
+
+
+def test_finance_overall_expense_rows_combine_discord_and_bank_only_categories():
+    occurred_at = datetime(2026, 5, 2, 18, tzinfo=timezone.utc)
+
+    rows = build_finance_overall_expense_rows(
+        transactions=[
+            Transaction(
+                id=1,
+                source_message_id=101,
+                occurred_at=occurred_at,
+                entry_kind="buy",
+                money_out=300.0,
+                expense_category="inventory",
+            ),
+            Transaction(
+                id=2,
+                source_message_id=102,
+                occurred_at=occurred_at,
+                entry_kind="expense",
+                money_out=50.0,
+                expense_category="supplies",
+            ),
+            Transaction(
+                id=3,
+                source_message_id=103,
+                occurred_at=occurred_at,
+                entry_kind="transfer",
+                money_out=70.0,
+                expense_category="transfers",
+            ),
+        ],
+        bank_expense_data={
+            "detail_rows": [
+                {
+                    "amount": 40.0,
+                    "category": "inventory",
+                    "category_label": "Inventory",
+                    "group": "inventory",
+                    "is_discord_logged": False,
+                    "is_non_operating": False,
+                },
+                {
+                    "amount": 170.0,
+                    "category": "supplies",
+                    "category_label": "Supplies",
+                    "group": "operating",
+                    "is_discord_logged": False,
+                    "is_non_operating": False,
+                },
+                {
+                    "amount": 999.0,
+                    "category": "inventory",
+                    "category_label": "Inventory",
+                    "group": "inventory",
+                    "is_discord_logged": True,
+                    "is_non_operating": False,
+                },
+                {
+                    "amount": 20.0,
+                    "category": "partner_paybacks",
+                    "category_label": "Partner Paybacks",
+                    "group": "partner_paybacks",
+                    "is_discord_logged": False,
+                    "is_non_operating": True,
+                },
+            ]
+        },
+        range_data={"selected_start": "2026-05-01", "selected_end": "2026-05-23"},
+    )
+    by_key = {row["key"]: row for row in rows}
+
+    assert by_key["inventory"]["total"] == 340.0
+    assert by_key["inventory"]["discord_total"] == 300.0
+    assert by_key["inventory"]["bank_only_total"] == 40.0
+    assert by_key["inventory"]["row_count"] == 2
+    assert by_key["inventory"]["group"] == "inventory"
+    assert by_key["supplies"]["total"] == 220.0
+    assert by_key["supplies"]["discord_total"] == 50.0
+    assert by_key["supplies"]["bank_only_total"] == 170.0
+    assert by_key["transfers"]["group"] == "non_operating"
+    assert by_key["partner_paybacks"]["total"] == 20.0
+    assert all(row["key"] != "already_logged_buy" for row in rows)
 
 
 def test_finance_daily_rows_keep_inventory_cash_out_outside_profit():

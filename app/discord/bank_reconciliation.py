@@ -1411,6 +1411,7 @@ def build_finance_bank_expense_data(
     partner_paybacks_total = 0.0
     uncategorized_total = 0.0
     uncategorized_count = 0
+    detail_rows: list[dict[str, Any]] = []
 
     for row in rows:
         amount = abs(float(row.amount or 0.0))
@@ -1436,6 +1437,24 @@ def build_finance_bank_expense_data(
             elif category_group == "uncategorized":
                 uncategorized_total += amount
                 uncategorized_count += 1
+
+        detail_rows.append(
+            {
+                "id": row.id,
+                "date": _bank_day_key(row.posted_at),
+                "description": row.description or row.details or "",
+                "account_label": row.account_label or row.account_type or "Unknown account",
+                "account_type": row.account_type or "unknown",
+                "amount": round(amount, 2),
+                "category": category,
+                "category_label": expense_category_label(category),
+                "group": category_group,
+                "is_discord_logged": is_discord_logged,
+                "is_non_operating": is_non_operating,
+                "classification": row.classification,
+                "review_status": row.review_status,
+            }
+        )
 
         category_bucket = category_totals.setdefault(
             category,
@@ -1599,6 +1618,7 @@ def build_finance_bank_expense_data(
         "category_rows": category_rows,
         "account_rows": account_rows,
         "daily_rows": daily_rows,
+        "detail_rows": detail_rows,
     }
 
 
