@@ -22,7 +22,8 @@ if TYPE_CHECKING:
 
 
 LABEL_LAYOUT_OPTIONS = [
-    {"value": "wrap", "label": "Wraparound"},
+    {"value": "wrap", "label": '3.5" x 1" Wraparound'},
+    {"value": "wrap-3x1", "label": '3" x 1" Wraparound'},
     {"value": "sheet", "label": "Sheet Labels"},
     {"value": "thermal", "label": '2.25" Thermal'},
 ]

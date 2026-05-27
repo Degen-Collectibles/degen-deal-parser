@@ -1,6 +1,7 @@
 from app.inventory.barcode import (
     _BARCODE_AVAILABLE,
     DEFAULT_LABEL_FIELDS,
+    LABEL_LAYOUT_OPTIONS,
     generate_barcode_value,
     label_context_for_items,
     parse_label_fields,
@@ -201,6 +202,45 @@ def test_label_template_has_wrap_sheet_and_thermal_layouts():
     assert "Test Booster Box" in html
     assert "Customer side" in html
     assert "Employee side" in html
+
+
+def test_label_layout_options_include_compact_wrap_size():
+    assert LABEL_LAYOUT_OPTIONS[0] == {"value": "wrap", "label": '3.5" x 1" Wraparound'}
+    assert {"value": "wrap-3x1", "label": '3" x 1" Wraparound'} in LABEL_LAYOUT_OPTIONS
+
+
+def test_compact_wrap_layout_renders_wraparound_label_markup():
+    item = InventoryItem(
+        id=61,
+        barcode="DGN-000061",
+        item_type="single",
+        game="Pokemon",
+        card_name="Charizard ex",
+        set_name="151",
+        condition="NM",
+        location="Ungrouped",
+        list_price=10.84,
+    )
+    label = label_context_for_items([item])[0]
+
+    html = templates.env.get_template("inventory_labels.html").render(
+        request=_FakeRequest(),
+        current_user=_FakeUser(),
+        csrf_token="",
+        labels=[label],
+        layout="wrap-3x1",
+        label_layout_options=LABEL_LAYOUT_OPTIONS,
+        label_field_options=[{"value": "barcode", "label": "Barcode"}],
+        selected_fields=("barcode", "name", "condition", "location"),
+        ids="61",
+        status="",
+    )
+
+    assert 'class="label-layout-wrap-3x1"' in html
+    assert 'data-label-section="customer"' in html
+    assert 'data-label-section="employee"' in html
+    assert 'body.label-layout-wrap-3x1 .wrap-label-card' in html
+    assert "3in" in html
 
 
 def test_wraparound_template_uses_empty_fold_divider_and_fit_class():

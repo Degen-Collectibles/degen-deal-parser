@@ -90,15 +90,18 @@
         .employee-line span { font-weight:800; color:var(--lx-muted); text-transform:uppercase; letter-spacing:.04em; }
         .employee-line strong { color:var(--text); font-weight:800; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
         .empty-state { text-align:center; padding:48px 24px; color: var(--lx-muted); }
-        body.label-layout-wrap .labels-grid {
+        body.label-layout-wrap .labels-grid,
+        body.label-layout-wrap-3x1 .labels-grid {
             grid-template-columns:repeat(auto-fill, minmax(3.5in, 3.5in));
             justify-content:start;
         }
-        body.label-layout-wrap .wrap-label-card {
-            width:3.5in;
+        body.label-layout-wrap-3x1 .labels-grid {
+            grid-template-columns:repeat(auto-fill, minmax(3in, 3in));
+        }
+        body.label-layout-wrap .wrap-label-card,
+        body.label-layout-wrap-3x1 .wrap-label-card {
             min-height:1in;
             display:grid;
-            grid-template-columns:1.28in .04in 1fr;
             gap:0;
             padding:0;
             align-items:stretch;
@@ -109,11 +112,24 @@
             border-radius:8px;
             text-align:left;
         }
+        body.label-layout-wrap .wrap-label-card {
+            width:3.5in;
+            grid-template-columns:1.28in .04in 1fr;
+        }
+        body.label-layout-wrap-3x1 .wrap-label-card {
+            width:3in;
+            grid-template-columns:1.02in .04in 1fr;
+        }
         .wrap-customer, .wrap-employee { padding:.08in; min-width:0; }
+        body.label-layout-wrap-3x1 .wrap-customer,
+        body.label-layout-wrap-3x1 .wrap-employee { padding:.06in; }
         .wrap-customer { display:grid; place-items:center; overflow:hidden; }
         .wrap-price { max-width:100%; font-size:18pt; font-weight:950; line-height:1; color:#000; letter-spacing:0; white-space:nowrap; text-align:center; }
         .wrap-price.price-medium { font-size:16pt; }
         .wrap-price.price-long { font-size:13pt; }
+        body.label-layout-wrap-3x1 .wrap-price { font-size:16pt; }
+        body.label-layout-wrap-3x1 .wrap-price.price-medium { font-size:14pt; }
+        body.label-layout-wrap-3x1 .wrap-price.price-long { font-size:11pt; }
         .wrap-fold { border-left:1px dashed #b8b8b8; border-right:1px dashed #b8b8b8; background:#fff; }
         .wrap-employee { display:flex; flex-direction:column; justify-content:center; gap:1.3pt; min-width:0; overflow:hidden; }
         .wrap-employee .label-barcode svg { width:100%; max-width:2.02in; max-height:.32in; }
@@ -121,6 +137,11 @@
         .wrap-employee .employee-line { justify-content:flex-start; max-width:2.02in; color:#000; font-size:6pt; line-height:1.05; }
         .wrap-employee .employee-line span { color:#52525b; flex:0 0 .42in; }
         .wrap-employee .employee-line strong { color:#000; min-width:0; }
+        body.label-layout-wrap-3x1 .wrap-employee { gap:1pt; }
+        body.label-layout-wrap-3x1 .wrap-employee .label-barcode svg { max-width:1.8in; max-height:.3in; }
+        body.label-layout-wrap-3x1 .wrap-employee .label-code { font-size:5.5pt; }
+        body.label-layout-wrap-3x1 .wrap-employee .employee-line { max-width:1.8in; font-size:5.5pt; line-height:1; }
+        body.label-layout-wrap-3x1 .wrap-employee .employee-line span { flex-basis:.38in; }
         body.label-layout-thermal .labels-grid {
             grid-template-columns:repeat(auto-fill, minmax(2.25in, 2.25in));
             justify-content:start;
@@ -140,8 +161,10 @@
         body.label-layout-thermal .label-sub { max-width:2.05in; font-size:6.5pt; }
         @media(max-width:760px) {
             .label-config, .side-map { grid-template-columns:1fr; }
-            body.label-layout-wrap .labels-grid { grid-template-columns:1fr; }
+            body.label-layout-wrap .labels-grid,
+            body.label-layout-wrap-3x1 .labels-grid { grid-template-columns:1fr; }
             body.label-layout-wrap .wrap-label-card { width:100%; max-width:3.5in; }
+            body.label-layout-wrap-3x1 .wrap-label-card { width:100%; max-width:3in; }
         }
 
         /* Print styles */
@@ -163,15 +186,22 @@
                 page-break-inside:avoid;
             }
             .label-barcode svg { max-width:100%; }
-            body.label-layout-wrap { background:#fff; }
+            body.label-layout-wrap,
+            body.label-layout-wrap-3x1 { background:#fff; }
             body.label-layout-wrap .labels-grid {
                 display:grid;
                 grid-template-columns:repeat(2,3.5in);
                 gap:.12in;
                 padding:.15in;
             }
-            body.label-layout-wrap .wrap-label-card {
-                width:3.5in;
+            body.label-layout-wrap-3x1 .labels-grid {
+                display:grid;
+                grid-template-columns:repeat(2,3in);
+                gap:.12in;
+                padding:.15in;
+            }
+            body.label-layout-wrap .wrap-label-card,
+            body.label-layout-wrap-3x1 .wrap-label-card {
                 height:1in;
                 min-height:1in;
                 border:0.5pt solid #999;
@@ -180,11 +210,18 @@
                 page-break-inside:avoid;
                 break-inside:avoid;
             }
+            body.label-layout-wrap .wrap-label-card { width:3.5in; }
+            body.label-layout-wrap-3x1 .wrap-label-card { width:3in; }
             body.label-layout-wrap .wrap-price,
+            body.label-layout-wrap-3x1 .wrap-price,
             body.label-layout-wrap .label-code,
+            body.label-layout-wrap-3x1 .label-code,
             body.label-layout-wrap .employee-line,
+            body.label-layout-wrap-3x1 .employee-line,
             body.label-layout-wrap .employee-line span,
-            body.label-layout-wrap .employee-line strong { color:#000; }
+            body.label-layout-wrap-3x1 .employee-line span,
+            body.label-layout-wrap .employee-line strong,
+            body.label-layout-wrap-3x1 .employee-line strong { color:#000; }
             body.label-layout-thermal { background:#fff; }
             body.label-layout-thermal .labels-grid {
                 display:block;
@@ -272,7 +309,7 @@
     {% if labels %}
     <div class="labels-grid">
         {% for label in labels %}
-        {% if layout == 'wrap' %}
+        {% if layout in ['wrap', 'wrap-3x1'] %}
         <div class="label-card wrap-label-card">
             <div class="wrap-customer" data-label-section="customer">
                 <div class="wrap-price {{ label.price_class }}">{{ label.price_text }}</div>
