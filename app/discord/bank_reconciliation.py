@@ -882,6 +882,52 @@ def _bank_transaction_dedupe_payload(row: BankTransaction) -> dict[str, Any]:
     }
 
 
+def dedupe_bank_rows_for_reporting(rows: list[BankTransaction]) -> list[BankTransaction]:
+    """Hide duplicate Plaid relink copies while preserving real repeated rows.
+
+    Plaid can assign new account ids and transaction ids when the same Chase
+    account is linked again. Those rows are still the same real-world bank
+    movements, so finance/ledger reporting should keep the first copy of each
+    occurrence and ignore the relinked copy.
+    """
+    seen_occurrences: set[tuple[str, str, str, int]] = set()
+    occurrence_by_import: dict[tuple[str, str, int, str], int] = {}
+    accepted_indexes: list[int] = []
+
+    def normalized_sort_time(value: Optional[datetime]) -> datetime:
+        if value is None:
+            return datetime.min
+        if value.tzinfo is not None:
+            return value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value
+
+    def sort_key(item: tuple[int, BankTransaction]) -> tuple[Any, ...]:
+        index, row = item
+        return (
+            normalized_sort_time(row.created_at),
+            row.import_id or 0,
+            row.row_index or 0,
+            row.id or 0,
+            index,
+        )
+
+    for index, row in sorted(enumerate(rows), key=sort_key):
+        account_label = (row.account_label or "").strip().lower()
+        account_type = (row.account_type or "").strip().lower()
+        fingerprint = _bank_row_semantic_fingerprint(_bank_transaction_dedupe_payload(row))
+        import_key = (account_label, account_type, int(row.import_id or 0), fingerprint)
+        occurrence_index = occurrence_by_import.get(import_key, 0)
+        occurrence_by_import[import_key] = occurrence_index + 1
+        reporting_key = (account_label, account_type, fingerprint, occurrence_index)
+        if reporting_key in seen_occurrences:
+            continue
+        seen_occurrences.add(reporting_key)
+        accepted_indexes.append(index)
+
+    accepted = set(accepted_indexes)
+    return [row for index, row in enumerate(rows) if index in accepted]
+
+
 def _backfill_account_bank_row_dedupe_keys(
     session: Session,
     *,
@@ -1399,7 +1445,7 @@ def build_finance_bank_expense_data(
     )
     if selected_account != "all":
         stmt = stmt.where(BankTransaction.account_type == selected_account)
-    rows = [row for row in session.exec(stmt).all() if not row.is_removed]
+    rows = dedupe_bank_rows_for_reporting([row for row in session.exec(stmt).all() if not row.is_removed])
 
     category_totals: dict[str, dict[str, Any]] = {}
     account_totals: dict[str, dict[str, Any]] = {}

@@ -18,6 +18,7 @@ from sqlalchemy import func
 from sqlmodel import Session, select
 
 from .bank_reconciliation import (
+    _dedupe_incoming_bank_rows,
     load_matchable_transactions,
     match_bank_rows_to_transactions,
     normalize_description_stem,
@@ -491,7 +492,47 @@ def _refresh_import_totals(session: Session, import_id: int) -> None:
     session.add(import_row)
 
 
+def _dedupe_new_plaid_payloads(
+    session: Session,
+    import_row: BankStatementImport,
+    payloads: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    provider_ids = [str(payload.get("provider_transaction_id") or "").strip() for payload in payloads]
+    provider_ids = [provider_id for provider_id in provider_ids if provider_id]
+    if not provider_ids:
+        return []
+
+    existing_provider_ids = set(
+        session.exec(
+            select(BankTransaction.provider_transaction_id).where(
+                BankTransaction.provider_transaction_id.in_(provider_ids)
+            )
+        ).all()
+    )
+    existing_payloads: list[dict[str, Any]] = []
+    new_payloads: list[dict[str, Any]] = []
+    for payload in payloads:
+        provider_transaction_id = str(payload.get("provider_transaction_id") or "").strip()
+        if not provider_transaction_id:
+            continue
+        if provider_transaction_id in existing_provider_ids:
+            existing_payloads.append(payload)
+        else:
+            new_payloads.append(payload)
+
+    deduped_new_payloads = _dedupe_incoming_bank_rows(
+        session,
+        new_payloads,
+        account_label=import_row.account_label,
+    )
+    return existing_payloads + deduped_new_payloads
+
+
 def _apply_payloads(session: Session, import_row: BankStatementImport, payloads: list[dict[str, Any]]) -> tuple[int, int]:
+    if not payloads:
+        return (0, 0)
+
+    payloads = _dedupe_new_plaid_payloads(session, import_row, payloads)
     if not payloads:
         return (0, 0)
 
@@ -547,6 +588,7 @@ def _apply_payloads(session: Session, import_row: BankStatementImport, payloads:
         row.pending_transaction_id = payload.get("pending_transaction_id")
         row.is_removed = False
         row.raw_row_json = str(payload.get("raw_row_json") or "{}")
+        row.row_dedupe_key = payload.get("row_dedupe_key") or row.row_dedupe_key
         row.updated_at = utcnow()
         session.add(row)
 

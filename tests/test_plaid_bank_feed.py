@@ -72,3 +72,113 @@ def test_plaid_sync_runs_ledger_agent_after_successful_sync(monkeypatch):
     assert result["ledger_agent"]["auto_reviewed"] == 0
     assert row.expense_category == "meals_entertainment"
     assert row.review_status == "open"
+
+
+def test_plaid_sync_dedupes_relinked_account_transactions(monkeypatch):
+    engine = make_engine()
+    responses = [
+        {
+            "accounts": [
+                {
+                    "account_id": "acc_old",
+                    "name": "Chase Ultimate Rewards",
+                    "official_name": "Chase Ultimate Rewards 2024",
+                    "type": "credit",
+                    "subtype": "credit card",
+                    "mask": "2024",
+                    "balances": {"current": 100.0, "available": 900.0, "iso_currency_code": "USD"},
+                }
+            ],
+            "added": [
+                {
+                    "account_id": "acc_old",
+                    "transaction_id": "old_plaid_tx",
+                    "date": "2026-05-25",
+                    "authorized_date": "2026-05-25",
+                    "merchant_name": "Taco Bell",
+                    "name": "Taco Bell",
+                    "amount": 10.37,
+                    "category": ["Food and Drink", "Restaurants"],
+                    "payment_channel": "in store",
+                    "personal_finance_category": {
+                        "primary": "FOOD_AND_DRINK",
+                        "detailed": "FOOD_AND_DRINK_FAST_FOOD",
+                    },
+                }
+            ],
+            "modified": [],
+            "removed": [],
+            "next_cursor": "cursor_one",
+            "has_more": False,
+        },
+        {
+            "accounts": [
+                {
+                    "account_id": "acc_new",
+                    "name": "Chase Ultimate Rewards",
+                    "official_name": "Chase Ultimate Rewards 2024",
+                    "type": "credit",
+                    "subtype": "credit card",
+                    "mask": "2024",
+                    "balances": {"current": 100.0, "available": 900.0, "iso_currency_code": "USD"},
+                }
+            ],
+            "added": [
+                {
+                    "account_id": "acc_new",
+                    "transaction_id": "new_plaid_tx",
+                    "date": "2026-05-25",
+                    "authorized_date": "2026-05-25",
+                    "merchant_name": "Taco Bell",
+                    "name": "Taco Bell",
+                    "amount": 10.37,
+                    "category": ["Food and Drink", "Restaurants"],
+                    "payment_channel": "in store",
+                    "personal_finance_category": {
+                        "primary": "FOOD_AND_DRINK",
+                        "detailed": "FOOD_AND_DRINK_FAST_FOOD",
+                    },
+                }
+            ],
+            "modified": [],
+            "removed": [],
+            "next_cursor": "cursor_two",
+            "has_more": False,
+        },
+    ]
+
+    def fake_plaid_post(path, payload, *, timeout=30.0):
+        assert path == "/transactions/sync"
+        return responses.pop(0)
+
+    monkeypatch.setattr("app.discord.plaid_bank_feed.decrypt_access_token", lambda _blob: "access-token")
+    monkeypatch.setattr("app.discord.plaid_bank_feed._plaid_post", fake_plaid_post)
+
+    with Session(engine) as session:
+        first = BankFeedConnection(
+            provider="plaid",
+            provider_item_id="item_old",
+            access_token_enc=b"encrypted",
+            institution_name="Chase",
+            status="active",
+        )
+        second = BankFeedConnection(
+            provider="plaid",
+            provider_item_id="item_new",
+            access_token_enc=b"encrypted",
+            institution_name="Chase",
+            status="active",
+        )
+        session.add(first)
+        session.add(second)
+        session.commit()
+        session.refresh(first)
+        session.refresh(second)
+
+        first_result = sync_plaid_connection(session, first.id or 0)
+        second_result = sync_plaid_connection(session, second.id or 0)
+        rows = session.exec(select(BankTransaction).where(BankTransaction.is_removed == False)).all()
+
+    assert first_result["added"] == 1
+    assert second_result["added"] == 0
+    assert [row.description for row in rows] == ["Taco Bell"]

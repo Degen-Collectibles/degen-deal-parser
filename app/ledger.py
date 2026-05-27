@@ -20,6 +20,7 @@ from .discord.bank_reconciliation import (
     categorize_bank_payload,
     classification_label,
     classification_confidence,
+    dedupe_bank_rows_for_reporting,
     expense_category_label,
     transaction_bank_match_block_reason,
 )
@@ -790,7 +791,8 @@ def _sort_row_views(rows: list[dict[str, Any]], sort: str, direction: str) -> li
 
 
 def _load_bank_rows(session: Session) -> list[BankTransaction]:
-    return list(session.exec(select(BankTransaction).where(BankTransaction.is_removed == False)).all())  # noqa: E712
+    rows = list(session.exec(select(BankTransaction).where(BankTransaction.is_removed == False)).all())  # noqa: E712
+    return dedupe_bank_rows_for_reporting(rows)
 
 
 def _matched_transactions_by_id(session: Session, rows: list[BankTransaction]) -> dict[int, Transaction]:

@@ -300,6 +300,67 @@ def test_finance_bank_data_excludes_credit_card_payments_from_expenses():
     assert "transfers" not in category_keys
 
 
+def test_finance_bank_data_dedupes_relinked_plaid_account_rows():
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(engine)
+    posted_at = datetime(2026, 5, 25, 12, tzinfo=timezone.utc)
+
+    with Session(engine) as session:
+        session.add(
+            BankStatementImport(
+                id=1,
+                label="Original Chase feed",
+                account_label="Chase Ultimate Rewards 2024",
+                account_type="credit_card",
+                source_kind="plaid",
+                provider="plaid",
+                provider_account_id="acc_old",
+            )
+        )
+        session.add(
+            BankStatementImport(
+                id=2,
+                label="Relinked Chase feed",
+                account_label="Chase Ultimate Rewards 2024",
+                account_type="credit_card",
+                source_kind="plaid",
+                provider="plaid",
+                provider_account_id="acc_new",
+            )
+        )
+        for import_id, provider_prefix in ((1, "old"), (2, "new")):
+            for row_index in (1, 2):
+                session.add(
+                    BankTransaction(
+                        import_id=import_id,
+                        row_index=row_index,
+                        account_label="Chase Ultimate Rewards 2024",
+                        account_type="credit_card",
+                        posted_at=posted_at,
+                        transaction_at=posted_at,
+                        description="Stamps.com",
+                        description_stem="STAMPS.COM",
+                        amount=-10.0,
+                        classification="expense_or_purchase_needs_review",
+                        expense_category="shipping_postage",
+                        provider_transaction_id=f"{provider_prefix}_{row_index}",
+                    )
+                )
+        session.commit()
+
+        data = build_finance_bank_expense_data(
+            session,
+            start=datetime(2026, 5, 25, tzinfo=timezone.utc),
+            end=datetime(2026, 5, 26, tzinfo=timezone.utc),
+        )
+
+    shipping = next(row for row in data["category_rows"] if row["category"] == "shipping_postage")
+    assert data["gross_outflow_total"] == 20.0
+    assert data["bank_only_total"] == 20.0
+    assert shipping["count"] == 2
+    assert shipping["bank_only_total"] == 20.0
+
+
 def test_apple_cash_bank_row_does_not_match_cash_discord_buy():
     bank_rows = [
         {

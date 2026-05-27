@@ -201,6 +201,60 @@ def test_ledger_builder_counts_bank_rows_and_separates_unbanked_cash():
     assert with_cash["summary"]["bank_net_total"] == 70.0
 
 
+def test_ledger_dedupes_relinked_plaid_account_rows_but_keeps_repeated_charges():
+    engine = make_engine()
+    posted_at = datetime(2026, 5, 25, 12, tzinfo=timezone.utc)
+
+    with Session(engine) as session:
+        first_import = BankStatementImport(
+            label="Original Chase feed",
+            account_label="Chase Ultimate Rewards 2024",
+            account_type="credit_card",
+            source_kind="plaid",
+            provider="plaid",
+            provider_account_id="acc_old",
+        )
+        second_import = BankStatementImport(
+            label="Relinked Chase feed",
+            account_label="Chase Ultimate Rewards 2024",
+            account_type="credit_card",
+            source_kind="plaid",
+            provider="plaid",
+            provider_account_id="acc_new",
+        )
+        session.add(first_import)
+        session.add(second_import)
+        session.commit()
+        session.refresh(first_import)
+        session.refresh(second_import)
+        for import_id, provider_prefix in ((first_import.id, "old"), (second_import.id, "new")):
+            for row_index in (1, 2):
+                session.add(
+                    BankTransaction(
+                        import_id=import_id or 0,
+                        row_index=row_index,
+                        account_label="Chase Ultimate Rewards 2024",
+                        account_type="credit_card",
+                        posted_at=posted_at,
+                        transaction_at=posted_at,
+                        description="Stamps.com",
+                        description_stem="STAMPS.COM",
+                        amount=-10.0,
+                        classification="expense_or_purchase_needs_review",
+                        expense_category="shipping_postage",
+                        provider_transaction_id=f"{provider_prefix}_{row_index}",
+                    )
+                )
+        session.commit()
+
+        data = build_ledger_page_data(session, LedgerFilters(status="all", source="bank"))
+
+    assert data["summary"]["bank_row_count"] == 2
+    assert data["summary"]["filtered_row_count"] == 2
+    assert data["summary"]["bank_outflow_total"] == -20.0
+    assert [row["description"] for row in data["rows"]] == ["Stamps.com", "Stamps.com"]
+
+
 def test_ledger_filters_needs_action_rows_by_action_reason():
     engine = make_engine()
     posted_at = datetime(2026, 5, 15, 12, tzinfo=timezone.utc)
