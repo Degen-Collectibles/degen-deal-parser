@@ -29,6 +29,7 @@ LABEL_LAYOUT_OPTIONS = [
 ]
 
 LABEL_FIELD_OPTIONS = [
+    {"value": "logo", "label": "Logo"},
     {"value": "barcode", "label": "Barcode"},
     {"value": "name", "label": "Product name"},
     {"value": "set", "label": "Set"},
@@ -41,7 +42,7 @@ LABEL_FIELD_OPTIONS = [
     {"value": "location", "label": "Location"},
     {"value": "game", "label": "Game"},
 ]
-DEFAULT_LABEL_FIELDS = ("barcode", "name", "set", "condition", "location")
+DEFAULT_LABEL_FIELDS = ("logo", "barcode", "name", "set", "condition", "location")
 _LABEL_FIELD_LABELS = {option["value"]: option["label"] for option in LABEL_FIELD_OPTIONS}
 _LABEL_FIELD_LABELS["name"] = "Item"
 _VALID_LABEL_FIELDS = tuple(option["value"] for option in LABEL_FIELD_OPTIONS)
@@ -105,6 +106,8 @@ def _label_field_value(
     grade_or_condition: str,
     product_type: str,
 ) -> str:
+    if field == "logo":
+        return ""
     if field == "barcode":
         return item.barcode or ""
     if field == "name":

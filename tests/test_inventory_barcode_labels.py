@@ -109,6 +109,23 @@ def test_label_context_builds_default_employee_fields_for_wraparound_labels():
     ]
 
 
+def test_label_context_defaults_to_customer_logo():
+    item = InventoryItem(
+        id=49,
+        barcode="DGN-000049",
+        item_type="single",
+        game="Pokemon",
+        card_name="Charmander",
+        condition="NM",
+        list_price=4,
+    )
+
+    label = label_context_for_items([item])[0]
+
+    assert "logo" in label["selected_fields"]
+    assert [line["field"] for line in label["employee_lines"]] == ["barcode", "name", "condition"]
+
+
 def test_label_context_respects_selected_employee_fields():
     item = InventoryItem(
         id=46,
@@ -241,6 +258,66 @@ def test_compact_wrap_layout_renders_wraparound_label_markup():
     assert 'data-label-section="employee"' in html
     assert 'body.label-layout-wrap-3x1 .wrap-label-card' in html
     assert "3in" in html
+
+
+def test_wraparound_template_puts_optional_logo_above_customer_price():
+    item = InventoryItem(
+        id=62,
+        barcode="DGN-000062",
+        item_type="single",
+        game="Pokemon",
+        card_name="Pikachu",
+        condition="NM",
+        list_price=25,
+    )
+    label = label_context_for_items([item])[0]
+
+    html = templates.env.get_template("inventory_labels.html").render(
+        request=_FakeRequest(),
+        current_user=_FakeUser(),
+        csrf_token="",
+        labels=[label],
+        layout="wrap-3x1",
+        label_layout_options=LABEL_LAYOUT_OPTIONS,
+        label_field_options=[{"value": "logo", "label": "Logo"}],
+        selected_fields=("logo", "barcode", "name", "condition"),
+        ids="62",
+        status="",
+    )
+    customer_section = html.split('data-label-section="customer"', 1)[1].split('data-label-section="employee"', 1)[0]
+
+    assert 'class="wrap-logo"' in customer_section
+    assert 'src="/static/degen-logo.png"' in customer_section
+    assert customer_section.index('class="wrap-logo"') < customer_section.index('class="wrap-price price-short"')
+    assert "Logo and price." in html
+
+
+def test_wraparound_template_hides_customer_logo_when_not_selected():
+    item = InventoryItem(
+        id=63,
+        barcode="DGN-000063",
+        item_type="single",
+        game="Pokemon",
+        card_name="Squirtle",
+        condition="NM",
+        list_price=8,
+    )
+    label = label_context_for_items([item], selected_fields=("barcode", "name"))[0]
+
+    html = templates.env.get_template("inventory_labels.html").render(
+        request=_FakeRequest(),
+        current_user=_FakeUser(),
+        csrf_token="",
+        labels=[label],
+        layout="wrap",
+        label_layout_options=LABEL_LAYOUT_OPTIONS,
+        label_field_options=[{"value": "logo", "label": "Logo"}],
+        selected_fields=("barcode", "name"),
+        ids="63",
+        status="",
+    )
+
+    assert 'class="wrap-logo"' not in html
 
 
 def test_wraparound_template_uses_empty_fold_divider_and_fit_class():
