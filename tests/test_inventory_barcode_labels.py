@@ -315,9 +315,10 @@ def test_wraparound_template_uses_larger_logo_and_lower_price_styles():
         status="",
     )
 
-    assert ".wrap-logo { display:block; width:1.08in" in html
-    assert "body.label-layout-wrap-3x1 .wrap-logo { width:.9in" in html
-    assert ".wrap-customer { display:flex; flex-direction:column; justify-content:flex-end" in html
+    assert ".wrap-customer { padding:.055in .08in .025in; display:flex; flex-direction:column; justify-content:flex-end" in html
+    assert "body.label-layout-wrap-3x1 .wrap-customer { padding:.045in .06in .022in; }" in html
+    assert ".wrap-logo { display:block; width:1.18in; max-width:100%; height:.52in" in html
+    assert "body.label-layout-wrap-3x1 .wrap-logo { width:1in; height:.46in; }" in html
     assert ".wrap-price.price-long { font-size:11pt; }" in html
     assert "body.label-layout-wrap-3x1 .wrap-price.price-long { font-size:9pt; }" in html
 
