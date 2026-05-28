@@ -292,6 +292,8 @@
             grid-template-columns: minmax(96px, .75fr) minmax(88px, .6fr) minmax(96px, .7fr) minmax(150px, 1fr) auto;
             min-width: 620px;
         }
+        .category-edit-form { display: grid; grid-template-columns: minmax(132px, 1fr) auto; gap: 6px; align-items: center; margin-top: 8px; max-width: 260px; }
+        .category-edit-form select { min-width: 0; }
         .assistant-preview { margin-top: 12px; border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: #0d0f12; display: none; }
         .assistant-preview.is-visible { display: block; }
         .sample-list { display: grid; gap: 8px; margin-top: 10px; }
@@ -639,6 +641,30 @@
                                     <td data-label="Category">
                                         <strong class="truncate" data-category-label title="{{ row.expense_category_label }}">{{ row.expense_category_label }}</strong>
                                         <div class="mini">{{ row.category_confidence }}{% if row.expense_subcategory %} &middot; {{ row.expense_subcategory }}{% endif %}</div>
+                                        {% if row.row_kind in ["discord_financial", "discord_deal", "cash"] and row.matched_transaction and row.matched_source_message_id %}
+                                        <form method="post" action="/ledger/transactions/{{ row.matched_source_message_id }}/edit-form" class="category-edit-form" data-discord-category-form="{{ row.id }}">
+                                            <input type="hidden" name="selected_account" value="{{ selected.account }}">
+                                            <input type="hidden" name="selected_start" value="{{ selected.start }}">
+                                            <input type="hidden" name="selected_end" value="{{ selected.end }}">
+                                            <input type="hidden" name="selected_status" value="{{ selected.status }}">
+                                            <input type="hidden" name="selected_category" value="{{ selected.category }}">
+                                            <input type="hidden" name="selected_source" value="{{ selected.source }}">
+                                            <input type="hidden" name="selected_action_reason" value="{{ selected.action_reason }}">
+                                            <input type="hidden" name="selected_search" value="{{ selected.search }}">
+                                            <input type="hidden" name="selected_sort" value="{{ selected.sort }}">
+                                            <input type="hidden" name="selected_direction" value="{{ selected.direction }}">
+                                            <input type="hidden" name="selected_include_cash" value="{{ 'true' if selected.include_cash else 'false' }}">
+                                            <input type="hidden" name="entry_kind" value="{{ row.matched_transaction.entry_kind or 'unknown' }}">
+                                            <input type="hidden" name="amount" value="{{ row.matched_transaction.amount if row.matched_transaction.amount is not none else '' }}">
+                                            <input type="hidden" name="payment_method" value="{{ row.matched_transaction.payment_method or 'unknown' }}">
+                                            <select name="expense_category" aria-label="Category for {{ row.description }}">
+                                                {% for choice in category_choices %}
+                                                <option value="{{ choice.value }}" {% if row.expense_category == choice.value %}selected{% endif %}>{{ choice.label }}</option>
+                                                {% endfor %}
+                                            </select>
+                                            <button class="tiny primary" type="submit">Save category</button>
+                                        </form>
+                                        {% endif %}
                                     </td>
                                     <td data-label="Source">
                                         <span class="pill">{{ row.source_label }}</span>

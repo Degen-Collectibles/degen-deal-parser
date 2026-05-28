@@ -58,7 +58,10 @@ DISCORD_LOGGED_CLASSIFICATIONS = {
 DISCORD_MATCH_BLOCKING_EXPENSE_CATEGORIES = {
     "bank_fees",
     "grading_fees",
+    "loan_owner_payments",
+    "loan_proceeds",
     "meals_entertainment",
+    "partner_paybacks",
     "payroll",
     "rent_facilities",
     "shipping_postage",
@@ -100,6 +103,7 @@ EXPENSE_CATEGORY_LABELS = {
     "meals_entertainment": "Meals/entertainment",
     "insurance": "Insurance",
     "loan_interest": "Loan interest",
+    "loan_proceeds": "Loan proceeds",
     "partner_paybacks": "Partner paybacks",
     "loan_owner_payments": "Loans/owner payments",
     "bank_fees": "Bank/finance fees",
@@ -111,7 +115,7 @@ EXPENSE_CATEGORY_LABELS = {
     "uncategorized": "Uncategorized",
 }
 
-NON_OPERATING_EXPENSE_CATEGORIES = {"transfers", "loan_owner_payments", "partner_paybacks"}
+NON_OPERATING_EXPENSE_CATEGORIES = {"transfers", "loan_owner_payments", "loan_proceeds", "partner_paybacks"}
 FINANCE_EXCLUDED_EXPENSE_CATEGORIES = {"cash_inventory_purchases", "transfers"}
 BANK_ACCOUNT_FILTERS = {"all", "checking", "credit_card"}
 BANK_ACCOUNT_FILTER_LABELS = {
@@ -448,6 +452,16 @@ def is_partner_payback_description(description: str) -> bool:
     )
 
 
+def is_partner_7125_transfer_description(text: str) -> bool:
+    normalized = re.sub(r"\s+", " ", (text or "").lower()).strip()
+    return bool(re.search(r"\bonline transfer (?:to|from) (?:chk|checking)\s+\.{0,3}\s*7125\b", normalized))
+
+
+def is_axos_loan_proceeds_description(text: str) -> bool:
+    normalized = re.sub(r"\s+", " ", (text or "").lower()).strip()
+    return bool(re.search(r"\b(?:axos|axis)\s+bank\b|\borig co name:\s*axos\b|\bvia:\s*axos\b", normalized))
+
+
 _BANK_REVIEW_REASONS = {
     "cash_deposit_needs_source": "Cash deposit landed without a clear source in Discord or platform payouts.",
     "direct_customer_payment_needs_log_check": (
@@ -608,6 +622,12 @@ def categorize_bank_payload(payload: dict[str, Any], matched_transaction: Option
     raw_row_json = str(payload.get("raw_row_json") or "")
     chase_category = _raw_row_value(raw_row_json, "Category")
     text = " ".join([description, raw_type, details, chase_category]).lower()
+
+    if is_partner_7125_transfer_description(text):
+        return _category_result("partner_paybacks", "Partner 7125 transfer", "high", "Transfer between Chase and account ending 7125.")
+
+    if amount >= 0 and is_axos_loan_proceeds_description(text):
+        return _category_result("loan_proceeds", "Axos loan proceeds", "high", "Incoming Axos/Axis bank funds are loan proceeds, not revenue.")
 
     if amount < 0 and is_partner_payback_description(description):
         return _category_result("partner_paybacks", "Partner payback", "high", "Payee is Chia Hua Wang, Chia Wang, or Jeffrey Lee.")

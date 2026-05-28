@@ -24,7 +24,7 @@ from .models import (
 
 logger = logging.getLogger(__name__)
 NON_OPERATING_ENTRY_KINDS = {"loan_draw", "loan_repayment", "transfer"}
-NON_OPERATING_EXPENSE_CATEGORIES = {"loan_owner_payments", "partner_paybacks", "transfers"}
+NON_OPERATING_EXPENSE_CATEGORIES = {"loan_owner_payments", "loan_proceeds", "partner_paybacks", "transfers"}
 
 
 def _is_non_operating_transaction(entry_kind: str, expense_category: str) -> bool:

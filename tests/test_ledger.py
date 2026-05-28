@@ -1261,6 +1261,88 @@ def test_ledger_page_links_discord_matches_to_deal_detail():
     assert "Edit transaction" in body
 
 
+def test_ledger_page_exposes_category_editor_for_discord_deal_rows():
+    engine = make_engine()
+    posted_at = datetime(2026, 5, 19, 12, tzinfo=timezone.utc)
+    with Session(engine) as session:
+        session.add(
+            AvailableDiscordChannel(
+                channel_id="offline-purchases",
+                channel_name="jeff-purchases",
+                guild_id="1",
+                guild_name="Degen Guild",
+                category_name="Offline Deals",
+                label="Offline Deals / #jeff-purchases",
+            )
+        )
+        session.add(
+            DiscordMessage(
+                id=1630,
+                discord_message_id="deal-message-1630",
+                channel_id="offline-purchases",
+                channel_name="jeff-purchases",
+                author_name="tester",
+                content="Buy $250 zelle",
+                created_at=posted_at,
+                parse_status=PARSE_PARSED,
+                deal_type="buy",
+                entry_kind="buy",
+                payment_method="zelle",
+                expense_category="inventory",
+                amount=250.0,
+                money_in=0.0,
+                money_out=250.0,
+                needs_review=False,
+            )
+        )
+        session.add(
+            Transaction(
+                id=630,
+                source_message_id=1630,
+                discord_message_id="deal-message-1630",
+                channel_id="offline-purchases",
+                channel_name="jeff-purchases",
+                occurred_at=posted_at,
+                parse_status="parsed",
+                entry_kind="buy",
+                payment_method="zelle",
+                expense_category="inventory",
+                amount=250.0,
+                money_in=0.0,
+                money_out=250.0,
+                source_content="Buy $250 zelle",
+            )
+        )
+        session.commit()
+
+        with patch("app.routers.ledger.require_role_response", return_value=None):
+            response = ledger_page(
+                make_request("/ledger?status=all&source=discord"),
+                account="",
+                start="",
+                end="",
+                status="all",
+                category="",
+                source="discord",
+                action_reason="",
+                search="",
+                sort="posted_at",
+                direction="desc",
+                include_cash=True,
+                session=session,
+            )
+
+    body = response.body.decode("utf-8")
+    assert response.status_code == 200
+    assert 'data-discord-category-form="discord-deal-630"' in body
+    assert 'action="/ledger/transactions/1630/edit-form"' in body
+    assert 'name="entry_kind" value="buy"' in body
+    assert 'name="amount" value="250.0"' in body
+    assert 'name="payment_method" value="zelle"' in body
+    assert 'name="expense_category"' in body
+    assert "Save category" in body
+
+
 def test_ledger_transaction_edit_form_updates_discord_source_transaction():
     from app.routers import ledger as ledger_router
 

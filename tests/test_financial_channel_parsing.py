@@ -420,6 +420,14 @@ def test_loan_principal_is_not_counted_as_sales_or_expense_net() -> None:
         ),
         Transaction(
             occurred_at=occurred_at,
+            entry_kind="sale",
+            amount=10000.0,
+            money_in=10000.0,
+            money_out=0.0,
+            expense_category="loan_proceeds",
+        ),
+        Transaction(
+            occurred_at=occurred_at,
             entry_kind="expense",
             amount=300.0,
             money_in=0.0,
@@ -433,5 +441,5 @@ def test_loan_principal_is_not_counted_as_sales_or_expense_net() -> None:
     assert summary["totals"]["sales"] == 0.0
     assert summary["totals"]["expenses"] == 300.0
     assert summary["totals"]["net"] == -300.0
-    assert summary["totals"]["non_operating_money_in"] == 5000.0
+    assert summary["totals"]["non_operating_money_in"] == 15000.0
     assert summary["totals"]["non_operating_money_out"] == 2500.0

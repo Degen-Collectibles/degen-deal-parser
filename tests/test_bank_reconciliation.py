@@ -81,6 +81,78 @@ def test_partner_payback_rule_overrides_matched_inventory_transaction():
     assert result["expense_category"] == "partner_paybacks"
 
 
+def test_axos_bank_credit_is_loan_proceeds_not_sales_collection():
+    result = categorize_bank_payload(
+        {
+            "amount": 50000.0,
+            "description": "FEDWIRE CREDIT VIA: AXOS BANK/122287251 B/O: JEFFREY LEE",
+            "raw_type": "INCOME_CONTRACTOR",
+            "classification": "credit_needs_review",
+        }
+    )
+
+    assert result["expense_category"] == "loan_proceeds"
+    assert result["category_confidence"] == "high"
+
+
+def test_account_7125_transfer_is_partner_payback_even_when_matched():
+    result = categorize_bank_payload(
+        {
+            "amount": -10000.0,
+            "description": "Online Transfer to CHK ...7125 transaction#: 29278937660 05/19",
+            "raw_type": "TRANSFER_OUT_ACCOUNT_TRANSFER",
+            "classification": "logged_in_discord_strong",
+        },
+        FakeMatchedTransaction(),
+    )
+
+    assert result["expense_category"] == "partner_paybacks"
+    assert result["category_confidence"] == "high"
+
+
+def test_account_7125_rule_does_not_match_unrelated_trace_numbers():
+    result = categorize_bank_payload(
+        {
+            "amount": 240.0,
+            "description": "Zelle payment from TIANCHENG LIN 27871252140",
+            "raw_type": "TRANSFER_IN_TRANSFER_IN_FROM_APPS",
+            "classification": "direct_customer_payment_needs_log_check",
+        }
+    )
+
+    assert result["expense_category"] == "sales_collections"
+
+
+def test_account_7125_transfer_is_blocked_from_discord_inventory_match():
+    bank_rows = [
+        {
+            "posted_at": datetime(2026, 5, 19, 12, tzinfo=timezone.utc),
+            "description": "Online Transfer to CHK ...7125 transaction#: 29278937660 05/19",
+            "raw_type": "TRANSFER_OUT_ACCOUNT_TRANSFER",
+            "amount": -10000.0,
+        }
+    ]
+    discord_buy = Transaction(
+        id=7200,
+        source_message_id=7201,
+        occurred_at=datetime(2026, 5, 19, 12, tzinfo=timezone.utc),
+        parse_status="parsed",
+        entry_kind="buy",
+        payment_method="zelle",
+        expense_category="inventory",
+        amount=10000.0,
+        money_in=0.0,
+        money_out=10000.0,
+        source_content="Buy $10000 zelle",
+    )
+
+    match_bank_rows_to_transactions(bank_rows, [discord_buy])
+
+    assert bank_rows[0]["matched_transaction_id"] is None
+    assert bank_rows[0]["classification"] == "transfer_or_card_payment"
+    assert bank_rows[0]["expense_category"] == "partner_paybacks"
+
+
 def test_check_outflows_are_payroll():
     result = categorize_bank_payload(
         {

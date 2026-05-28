@@ -1517,6 +1517,8 @@ def _normalize_category_from_text(text: str) -> str:
         return "shipping_postage"
     if _contains_any(lowered, ("partner", "payback", "reimburse")):
         return "partner_paybacks"
+    if _contains_any(lowered, ("loan proceeds", "loan draw", "loan deposit", "axos", "axis bank")):
+        return "loan_proceeds"
     if _contains_any(lowered, ("transfer", "credit card payment", "card payment")):
         return "transfers"
     if _contains_any(lowered, ("shopify", "tiktok", "payout", "stripe", "processor")):
