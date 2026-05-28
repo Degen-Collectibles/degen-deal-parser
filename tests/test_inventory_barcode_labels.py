@@ -166,11 +166,20 @@ def test_label_context_marks_price_length_for_wraparound_fit():
         card_name="Blastoise",
         list_price=1200,
     )
+    very_wide = InventoryItem(
+        id=50,
+        barcode="DGN-000050",
+        item_type="single",
+        game="Pokemon",
+        card_name="Trophy Pikachu",
+        list_price=12345.67,
+    )
 
-    compact_label, wide_label = label_context_for_items([compact, wide])
+    compact_label, wide_label, very_wide_label = label_context_for_items([compact, wide, very_wide])
 
     assert compact_label["price_class"] == "price-short"
     assert wide_label["price_class"] == "price-medium"
+    assert very_wide_label["price_class"] == "price-long"
 
 
 def test_parse_label_fields_defaults_and_filters_invalid_values():
@@ -290,6 +299,27 @@ def test_wraparound_template_puts_optional_logo_above_customer_price():
     assert 'src="/static/degen-logo.png"' in customer_section
     assert customer_section.index('class="wrap-logo"') < customer_section.index('class="wrap-price price-short"')
     assert "Logo and price." in html
+
+
+def test_wraparound_template_uses_larger_logo_and_lower_price_styles():
+    html = templates.env.get_template("inventory_labels.html").render(
+        request=_FakeRequest(),
+        current_user=_FakeUser(),
+        csrf_token="",
+        labels=[],
+        layout="wrap-3x1",
+        label_layout_options=LABEL_LAYOUT_OPTIONS,
+        label_field_options=[{"value": "logo", "label": "Logo"}],
+        selected_fields=("logo", "barcode", "name", "condition"),
+        ids="",
+        status="",
+    )
+
+    assert ".wrap-logo { display:block; width:1.08in" in html
+    assert "body.label-layout-wrap-3x1 .wrap-logo { width:.9in" in html
+    assert ".wrap-customer { display:flex; flex-direction:column; justify-content:flex-end" in html
+    assert ".wrap-price.price-long { font-size:11pt; }" in html
+    assert "body.label-layout-wrap-3x1 .wrap-price.price-long { font-size:9pt; }" in html
 
 
 def test_wraparound_template_hides_customer_logo_when_not_selected():
