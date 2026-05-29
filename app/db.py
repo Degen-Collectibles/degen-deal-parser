@@ -1773,11 +1773,9 @@ def managed_session():
             if not sqlite_mode:
                 session.exec(text("SELECT 1"))
             clear_db_failure()
-            yield session
-            return
         except OperationalError as exc:
+            session.close()
             if sqlite_mode and is_sqlite_lock_error(exc) and attempt < attempts:
-                session.close()
                 time.sleep(delay_seconds)
                 delay_seconds *= 2
                 continue
@@ -1787,8 +1785,13 @@ def managed_session():
                 raise
             time.sleep(delay_seconds)
             delay_seconds *= 2
+            continue
+
+        try:
+            yield session
         finally:
             session.close()
+        return
 
 
 def run_write_with_retry(

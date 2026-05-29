@@ -5,6 +5,7 @@ Extracted from app/main.py.
 """
 from __future__ import annotations
 
+from html import escape
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Form, Query, Request
@@ -150,7 +151,8 @@ def admin_logs_page(
         return role_response
 
     allowed_files = {"app": "app.log", "worker": "worker.log"}
-    log_filename = allowed_files.get(file, "app.log")
+    selected_file = file if file in allowed_files else "app"
+    log_filename = allowed_files[selected_file]
     log_path = resolve_runtime_log_path(log_filename)
 
     tail_lines: list[str] = []
@@ -164,9 +166,9 @@ def admin_logs_page(
     else:
         tail_lines = [f"(log file not found: {log_path})"]
 
-    log_content = "\n".join(tail_lines)
+    log_content = escape("\n".join(tail_lines))
     nav_links = " | ".join(
-        f'<a href="/admin/logs?file={k}&lines={lines}" style="{"font-weight:bold" if k == file else ""}">{k}.log</a>'
+        f'<a href="/admin/logs?file={k}&lines={lines}" style="{"font-weight:bold" if k == selected_file else ""}">{k}.log</a>'
         for k in allowed_files
     )
 
@@ -185,10 +187,10 @@ h1 {{ font-size:18px; color:#eee; margin:0 0 8px; }}
 <nav>{nav_links}</nav>
 <div class="controls">
 Showing last {len(tail_lines)} lines &mdash;
-<a href="/admin/logs?file={file}&lines=50">50</a> |
-<a href="/admin/logs?file={file}&lines=200">200</a> |
-<a href="/admin/logs?file={file}&lines=500">500</a> |
-<a href="/admin/logs?file={file}&lines=1000">1000</a>
+<a href="/admin/logs?file={selected_file}&lines=50">50</a> |
+<a href="/admin/logs?file={selected_file}&lines=200">200</a> |
+<a href="/admin/logs?file={selected_file}&lines=500">500</a> |
+<a href="/admin/logs?file={selected_file}&lines=1000">1000</a>
 &mdash; <a href="/status">&larr; Status</a>
 </div>
 <pre>{log_content}</pre>

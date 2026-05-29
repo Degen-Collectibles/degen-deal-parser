@@ -99,6 +99,12 @@ class TestExtractUnlabeledAmount:
         result = extract_unlabeled_amount("bought 13 cases of dbz")
         assert result is None
 
+    def test_ignores_price_after_leading_multiplier_quantity(self) -> None:
+        # "5x 100" needs quantity-aware handling upstream; do not record the
+        # per-unit price as the full transaction total.
+        result = extract_unlabeled_amount("5x 100")
+        assert result is None
+
     def test_million_suffix(self) -> None:
         result = extract_unlabeled_amount("sold for 1.5M")
         assert result == 1500000.0
@@ -121,6 +127,10 @@ class TestExtractPaymentSegments:
     def test_plain_amount_still_works(self) -> None:
         segments = extract_payment_segments("50 cash")
         assert segments == [(50.0, "cash")]
+
+    def test_ignores_payment_amount_after_leading_multiplier_quantity(self) -> None:
+        segments = extract_payment_segments("5x 100 cash")
+        assert segments == []
 
 
 # ---------------------------------------------------------------------------
@@ -210,3 +220,9 @@ class TestParseByRulesEndToEnd:
             assert parsed_amount is None or parsed_amount >= 6000, (
                 f"parse_by_rules produced buggy output for loan text: {result}"
             )
+
+    def test_leading_multiplier_does_not_become_review_amount(self) -> None:
+        result = parse_by_rules("Sell 5x 100 cash")
+
+        if result is not None:
+            assert result.get("parsed_amount") is None

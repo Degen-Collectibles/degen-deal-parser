@@ -572,9 +572,13 @@ def extract_payment_segments(text: str) -> list[tuple[float, str]]:
     for pattern in patterns:
         for match in re.finditer(pattern, lower, re.I):
             if match.group(1).replace(".", "", 1).isdigit():
+                if has_quantity_multiplier_before(lower, match.start(1)):
+                    continue
                 amount = float(match.group(1))
                 method = normalize_payment_method(match.group(2).lower())
             else:
+                if has_quantity_multiplier_before(lower, match.start(2)):
+                    continue
                 method = normalize_payment_method(match.group(1).lower())
                 amount = float(match.group(2))
             start, end = match.span()
@@ -602,10 +606,22 @@ def has_quantity_unit_after(text: str, number_end: int) -> bool:
     return bool(re.match(r"\s*(?:x\s*)?(?:%s)\b" % "|".join(re.escape(unit) for unit in QUANTITY_UNITS), after, re.I))
 
 
+def has_quantity_multiplier_after(text: str, number_end: int) -> bool:
+    lower = normalize_message_part(text).lower()
+    after = lower[number_end:]
+    return bool(re.match(r"\s*x\b", after, re.I))
+
+
 def has_grade_context_before(text: str, number_start: int) -> bool:
     lower = normalize_message_part(text).lower()
     before = lower[max(0, number_start - 12):number_start]
     return any(re.search(rf"\b{re.escape(word)}\s*$", before, re.I) for word in GRADE_WORDS)
+
+
+def has_quantity_multiplier_before(text: str, number_start: int) -> bool:
+    lower = normalize_message_part(text).lower()
+    before = lower[max(0, number_start - 16):number_start]
+    return bool(re.search(r"(?:^|\s)\d+\s*x\s*$", before, re.I))
 
 
 def extract_unlabeled_amount(text: str) -> float | None:
@@ -630,7 +646,9 @@ def extract_unlabeled_amount(text: str) -> float | None:
             continue
         if has_grade_context_before(lower, match.start()):
             continue
-        if re.match(r"x\b", lower[match.end():]):
+        if has_quantity_multiplier_before(lower, match.start()):
+            continue
+        if has_quantity_multiplier_after(lower, match.end()):
             continue
         candidates.append(amount)
 
@@ -1609,7 +1627,10 @@ def parse_by_rules(message_text: str, channel_name: str | None = None) -> Dict[s
                     exc_info=True,
                 )
                 amount = None
-            if amount is not None and has_quantity_unit_after(text, m.end(2)):
+            if amount is not None and (
+                has_quantity_unit_after(text, m.end(2))
+                or has_quantity_multiplier_after(text, m.end(2))
+            ):
                 amount = None
 
         if m.lastindex and m.lastindex >= 3:
