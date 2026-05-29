@@ -29,7 +29,7 @@ LABEL_LAYOUT_OPTIONS = [
 ]
 
 LABEL_FIELD_OPTIONS = [
-    {"value": "logo", "label": "Logo"},
+    {"value": "logo", "label": "Logo (wrap only)"},
     {"value": "barcode", "label": "Barcode"},
     {"value": "name", "label": "Product name"},
     {"value": "set", "label": "Set"},
@@ -83,7 +83,11 @@ def _label_price_class(price_text: str) -> str:
     return "price-long"
 
 
-def parse_label_fields(raw_fields: list[str] | tuple[str, ...] | None) -> tuple[str, ...]:
+def parse_label_fields(
+    raw_fields: list[str] | tuple[str, ...] | None,
+    *,
+    default_to_all: bool = True,
+) -> tuple[str, ...]:
     """Return valid employee-facing label fields in display order."""
     selected: list[str] = []
     for raw in raw_fields or []:
@@ -91,7 +95,9 @@ def parse_label_fields(raw_fields: list[str] | tuple[str, ...] | None) -> tuple[
             field = part.strip().lower()
             if field in _VALID_LABEL_FIELDS and field not in selected:
                 selected.append(field)
-    return tuple(selected) or DEFAULT_LABEL_FIELDS
+    if selected:
+        return tuple(selected)
+    return DEFAULT_LABEL_FIELDS if default_to_all else ()
 
 
 def _label_grade(item: "InventoryItem") -> str:
@@ -182,7 +188,7 @@ def label_context_for_items(items: list, selected_fields: list[str] | tuple[str,
     Each dict contains barcode_value, barcode_svg, and display fields.
     """
     labels = []
-    parsed_fields = parse_label_fields(selected_fields)
+    parsed_fields = parse_label_fields(selected_fields, default_to_all=selected_fields is None)
     for item in items:
         barcode_value = item.barcode
         svg = render_barcode_svg(barcode_value)

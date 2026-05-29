@@ -121,11 +121,14 @@
             grid-template-columns:1.02in .04in 1fr;
         }
         .wrap-customer, .wrap-employee { padding:.08in; min-width:0; }
-        .wrap-customer { padding:.055in .08in .025in; display:flex; flex-direction:column; justify-content:flex-end; align-items:center; gap:.01in; overflow:hidden; }
-        body.label-layout-wrap-3x1 .wrap-customer { padding:.045in .06in .022in; }
+        .wrap-customer { display:flex; flex-direction:column; align-items:center; overflow:hidden; }
+        .wrap-customer.has-logo { padding:.04in .08in .025in; justify-content:flex-end; gap:.01in; }
+        .wrap-customer.no-logo { padding:.08in; justify-content:center; }
+        body.label-layout-wrap-3x1 .wrap-customer.has-logo { padding:.035in .06in .022in; }
+        body.label-layout-wrap-3x1 .wrap-customer.no-logo { padding:.06in; }
         body.label-layout-wrap-3x1 .wrap-employee { padding:.06in; }
-        .wrap-logo { display:block; width:1.28in; max-width:100%; height:.64in; object-fit:contain; object-position:center; filter:grayscale(1) contrast(1.15); }
-        body.label-layout-wrap-3x1 .wrap-logo { width:1.1in; height:.64in; }
+        .wrap-logo { display:block; width:auto; max-width:100%; height:.58in; object-fit:contain; object-position:center; filter:grayscale(1) contrast(1.15); }
+        body.label-layout-wrap-3x1 .wrap-logo { height:.52in; }
         .wrap-price { max-width:100%; font-size:18pt; font-weight:950; line-height:1; color:#000; letter-spacing:0; white-space:nowrap; text-align:center; }
         .wrap-price.price-medium { font-size:16pt; }
         .wrap-price.price-long { font-size:11pt; }
@@ -189,7 +192,11 @@
             }
             .label-barcode svg { max-width:100%; }
             body.label-layout-wrap,
-            body.label-layout-wrap-3x1 { background:#fff; }
+            body.label-layout-wrap-3x1,
+            body.label-layout-wrap .page,
+            body.label-layout-wrap-3x1 .page,
+            body.label-layout-wrap .labels-grid,
+            body.label-layout-wrap-3x1 .labels-grid { background:#fff !important; }
             body.label-layout-wrap .labels-grid {
                 display:grid;
                 grid-template-columns:repeat(2,3.5in);
@@ -293,6 +300,7 @@
                 <div class="config-block">
                     <div class="config-title">Label content</div>
                     <div class="field-options">
+                        <input type="hidden" name="fields_present" value="1">
                         {% for option in label_field_options %}
                         <label class="check-pill">
                             <input type="checkbox" name="fields" value="{{ option.value }}" {% if option.value in selected_fields %}checked{% endif %}>
@@ -313,9 +321,9 @@
         {% for label in labels %}
         {% if layout in ['wrap', 'wrap-3x1'] %}
         <div class="label-card wrap-label-card">
-            <div class="wrap-customer" data-label-section="customer">
+            <div class="wrap-customer {% if 'logo' in selected_fields %}has-logo{% else %}no-logo{% endif %}" data-label-section="customer">
                 {% if 'logo' in selected_fields %}
-                <img class="wrap-logo" src="/static/degen-logo.png" alt="Degen Collectibles">
+                <img class="wrap-logo" src="/static/degen-logo-label.png" alt="Degen Collectibles">
                 {% endif %}
                 <div class="wrap-price {{ label.price_class }}">{{ label.price_text }}</div>
             </div>

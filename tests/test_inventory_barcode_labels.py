@@ -1,3 +1,8 @@
+import re
+from pathlib import Path
+
+import pytest
+
 from app.inventory.barcode import (
     _BARCODE_AVAILABLE,
     DEFAULT_LABEL_FIELDS,
@@ -184,6 +189,7 @@ def test_label_context_marks_price_length_for_wraparound_fit():
 
 def test_parse_label_fields_defaults_and_filters_invalid_values():
     assert parse_label_fields([]) == DEFAULT_LABEL_FIELDS
+    assert parse_label_fields([], default_to_all=False) == ()
     assert parse_label_fields(["name, set", "bogus", "location"]) == ("name", "set", "location")
 
 
@@ -296,12 +302,12 @@ def test_wraparound_template_puts_optional_logo_above_customer_price():
     customer_section = html.split('data-label-section="customer"', 1)[1].split('data-label-section="employee"', 1)[0]
 
     assert 'class="wrap-logo"' in customer_section
-    assert 'src="/static/degen-logo.png"' in customer_section
+    assert 'src="/static/degen-logo-label.png"' in customer_section
     assert customer_section.index('class="wrap-logo"') < customer_section.index('class="wrap-price price-short"')
     assert "Logo and price." in html
 
 
-def test_wraparound_template_uses_larger_logo_and_lower_price_styles():
+def test_wraparound_template_uses_print_safe_logo_and_price_styles():
     html = templates.env.get_template("inventory_labels.html").render(
         request=_FakeRequest(),
         current_user=_FakeUser(),
@@ -315,12 +321,141 @@ def test_wraparound_template_uses_larger_logo_and_lower_price_styles():
         status="",
     )
 
-    assert ".wrap-customer { padding:.055in .08in .025in; display:flex; flex-direction:column; justify-content:flex-end" in html
-    assert "body.label-layout-wrap-3x1 .wrap-customer { padding:.045in .06in .022in; }" in html
-    assert ".wrap-logo { display:block; width:1.28in; max-width:100%; height:.64in" in html
-    assert "body.label-layout-wrap-3x1 .wrap-logo { width:1.1in; height:.64in; }" in html
+    assert ".wrap-customer.has-logo" in html
+    assert ".wrap-customer.no-logo" in html
+    assert ".wrap-logo { display:block; width:auto; max-width:100%; height:.58in" in html
+    assert "body.label-layout-wrap-3x1 .wrap-logo { height:.52in; }" in html
     assert ".wrap-price.price-long { font-size:11pt; }" in html
     assert "body.label-layout-wrap-3x1 .wrap-price.price-long { font-size:9pt; }" in html
+    assert 'name="fields_present" value="1"' in html
+
+
+def test_label_logo_asset_is_print_optimized_full_logo():
+    original = Path("app/static/degen-logo.png")
+    label_logo = Path("app/static/degen-logo-label.png")
+
+    assert label_logo.exists()
+    assert label_logo.stat().st_size < original.stat().st_size / 4
+
+    from PIL import Image
+
+    with Image.open(original) as original_img, Image.open(label_logo) as label_img:
+        assert label_img.width <= 900
+        assert abs((label_img.width / label_img.height) - (original_img.width / original_img.height)) < 0.01
+
+
+def test_wraparound_labels_fit_in_print_media(tmp_path):
+    pytest.importorskip("playwright.sync_api")
+    from playwright.sync_api import Error as PlaywrightError, sync_playwright
+
+    root = Path.cwd()
+    logo_uri = (root / "app" / "static" / "degen-logo-label.png").resolve().as_uri()
+    linear_uri = (root / "app" / "static" / "linear.css").resolve().as_uri()
+    safe_area_uri = (root / "app" / "static" / "safe-area.css").resolve().as_uri()
+
+    def render_html(layout: str) -> Path:
+        items = [
+            InventoryItem(
+                id=70,
+                barcode="DGN-000070",
+                item_type="single",
+                game="Pokemon",
+                card_name="Charizard ex",
+                set_name="151",
+                condition="NM",
+                location="Ungrouped",
+                list_price=10.84,
+            ),
+            InventoryItem(
+                id=71,
+                barcode="DGN-000071",
+                item_type="single",
+                game="Pokemon",
+                card_name="Trophy Pikachu",
+                set_name="Promo",
+                condition="NM",
+                location="Case A",
+                list_price=12345.67,
+            ),
+        ]
+        labels = label_context_for_items(
+            items,
+            selected_fields=("logo", "barcode", "name", "set", "condition", "location"),
+        )
+        html = templates.env.get_template("inventory_labels.html").render(
+            request=_FakeRequest(),
+            current_user=_FakeUser(),
+            csrf_token="",
+            labels=labels,
+            layout=layout,
+            label_layout_options=LABEL_LAYOUT_OPTIONS,
+            label_field_options=[{"value": "logo", "label": "Logo (wrap only)"}],
+            selected_fields=("logo", "barcode", "name", "set", "condition", "location"),
+            ids="70,71",
+            status="",
+        )
+        html = html.replace("/static/degen-logo-label.png", logo_uri)
+        html = re.sub(r'href="/static/linear\.css\?v=[^"]+"', f'href="{linear_uri}"', html)
+        html = re.sub(r'href="/static/safe-area\.css\?v=[^"]+"', f'href="{safe_area_uri}"', html)
+        html_path = tmp_path / f"{layout}.html"
+        html_path.write_text(html, encoding="utf-8")
+        return html_path
+
+    try:
+        pw = sync_playwright().start()
+        browser = pw.chromium.launch(headless=True)
+    except PlaywrightError as exc:
+        pytest.skip(f"playwright chromium is not available: {exc}")
+
+    try:
+        page = browser.new_page(viewport={"width": 1100, "height": 700}, device_scale_factor=2)
+        page.emulate_media(media="print")
+        failures: list[str] = []
+        for layout in ("wrap", "wrap-3x1"):
+            page.goto(render_html(layout).resolve().as_uri(), wait_until="networkidle")
+            rects = page.evaluate(
+                """() => Array.from(document.querySelectorAll('.wrap-label-card')).map((card) => {
+                    const q = (sel) => {
+                        const el = sel === ':scope' ? card : card.querySelector(sel);
+                        if (!el) return null;
+                        const r = el.getBoundingClientRect();
+                        return {top:r.top, right:r.right, bottom:r.bottom, left:r.left, width:r.width, height:r.height};
+                    };
+                    return {
+                        price: card.querySelector('.wrap-price')?.textContent.trim(),
+                        bodyBg: getComputedStyle(document.body).backgroundColor,
+                        card: q(':scope'),
+                        customer: q('.wrap-customer'),
+                        logo: q('.wrap-logo'),
+                        priceBox: q('.wrap-price'),
+                    };
+                })"""
+            )
+            for rect in rects:
+                label = f"{layout} {rect['price']}"
+                customer = rect["customer"]
+                logo = rect["logo"]
+                price = rect["priceBox"]
+                card = rect["card"]
+                eps = 1.0
+                if rect["bodyBg"] != "rgb(255, 255, 255)":
+                    failures.append(f"{label}: print background is {rect['bodyBg']}")
+                if logo["top"] < customer["top"] - eps or logo["bottom"] > customer["bottom"] + eps:
+                    failures.append(f"{label}: logo outside customer cell")
+                if price["top"] < customer["top"] - eps or price["bottom"] > customer["bottom"] + eps:
+                    failures.append(f"{label}: price outside customer cell")
+                if logo["bottom"] > price["top"] + eps:
+                    failures.append(f"{label}: logo overlaps price")
+                if customer["top"] < card["top"] - eps or customer["bottom"] > card["bottom"] + eps:
+                    failures.append(f"{label}: customer cell outside card")
+                min_logo_height = 54 if layout == "wrap" else 48
+                if logo["height"] < min_logo_height:
+                    failures.append(f"{label}: logo rendered too small")
+
+        assert failures == []
+    finally:
+        browser.close()
+        pw.stop()
 
 def test_wraparound_template_hides_customer_logo_when_not_selected():
     item = InventoryItem(
@@ -348,6 +483,7 @@ def test_wraparound_template_hides_customer_logo_when_not_selected():
     )
 
     assert 'class="wrap-logo"' not in html
+    assert 'class="wrap-customer no-logo"' in html
 
 
 def test_wraparound_template_uses_empty_fold_divider_and_fit_class():

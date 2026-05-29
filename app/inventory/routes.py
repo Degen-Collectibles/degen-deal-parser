@@ -3100,7 +3100,11 @@ async def inventory_labels(
             )
         ).all()
 
-    selected_fields = parse_label_fields(request.query_params.getlist("fields"))
+    fields_submitted = "fields_present" in request.query_params or "fields" in request.query_params
+    selected_fields = parse_label_fields(
+        request.query_params.getlist("fields"),
+        default_to_all=not fields_submitted,
+    )
     labels = label_context_for_items(items, selected_fields=selected_fields)
     layout = layout if layout in {option["value"] for option in LABEL_LAYOUT_OPTIONS} else "wrap"
     return _templates.TemplateResponse(
