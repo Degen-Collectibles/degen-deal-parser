@@ -951,7 +951,7 @@
 
         <section class="model-strip" id="finance-model">
             <span class="model-chip">Model: 20% gross product margin</span>
-            <div class="model-copy">Estimated gross profit is product revenue multiplied by 20%. Inventory and grading purchases remain visible as cash deployed, but they are not treated as immediate profit loss.</div>
+            <div class="model-copy">Estimated gross profit is product revenue multiplied by 20%. Inventory purchases remain visible as cash deployed; grading fees are treated as operating expenses.</div>
             <a href="#finance-drilldown-gross-profit" class="quick-link legacy">View model math</a>
         </section>
 
@@ -1091,7 +1091,7 @@
                     <div class="chart-stat-value">{{ bank_expense_data["discord_logged_total_display"] }}</div>
                 </div>
                 <div class="chart-stat">
-                    <div class="chart-stat-label">Inventory/grading</div>
+                    <div class="chart-stat-label">Inventory</div>
                     <div class="chart-stat-value">{{ bank_expense_data["inventory_total_display"] }}</div>
                 </div>
                 <div class="chart-stat">
@@ -1278,7 +1278,7 @@
                         </tbody>
                     </table>
                 </div>
-                <p class="caption">Paid platform orders use product subtotal or tax-excluded subtotal for revenue. Known tax is tracked separately. Discord non-operating cash in is excluded from revenue. Inventory/grading outflows are shown as cash deployed, while operating outflows reduce estimated profit. Platform payout deposits are excluded to avoid counting Shopify/TikTok twice.</p>
+                <p class="caption">Paid platform orders use product subtotal or tax-excluded subtotal for revenue. Known tax is tracked separately. Discord non-operating cash in is excluded from revenue. Inventory outflows are shown as cash deployed, while grading fees and other operating outflows reduce estimated profit. Platform payout deposits are excluded to avoid counting Shopify/TikTok twice.</p>
             </article>
 
             <div class="stack">
@@ -1701,7 +1701,7 @@
                             labels: chartData.bank.daily.labels,
                             datasets: [
                                 {
-                                    label: "Inventory/grading",
+                                    label: "Inventory",
                                     data: chartData.bank.daily.inventory,
                                     backgroundColor: "rgba(245, 158, 11, 0.72)",
                                     borderRadius: 6,

@@ -61,6 +61,7 @@ ALLOWED_CHANNEL_CATEGORIES = {
 }
 AUTO_WATCHED_CHANNEL_CATEGORY = "Show Deals"
 AUTO_WATCHED_FINANCIALS_CATEGORY = "Financials"
+AUTO_WATCHED_OFFLINE_DEALS_CATEGORY = "Offline Deals"
 FINANCIALS_LEDGER_CHANNEL_NAMES = {"financials", "loan", "loans"}
 YEAR_PAST_SHOWS_CATEGORY_RE = re.compile(r"^\d{4}\s+past shows$", re.IGNORECASE)
 # Backfill cancellation is enforced from progress callbacks, so keep this
@@ -75,6 +76,8 @@ TRANSACTION_CHANNEL_NAME_HINTS = (
     "trades",
     "buy",
     "buys",
+    "purchase",
+    "purchases",
     "sell",
     "sells",
     "show",
@@ -82,6 +85,7 @@ TRANSACTION_CHANNEL_NAME_HINTS = (
     "cardshow",
     "expo",
 )
+OFFLINE_PURCHASE_CHANNEL_NAME_HINTS = ("purchase", "purchases")
 IMAGE_ATTACHMENT_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
 
 
@@ -248,6 +252,9 @@ def _should_auto_watch_discord_channel(channel: dict) -> bool:
 
     if category_name == AUTO_WATCHED_CHANNEL_CATEGORY or is_past_shows_category(category_name):
         return looks_like_transaction_channel(channel_name, category_name)
+
+    if category_name == AUTO_WATCHED_OFFLINE_DEALS_CATEGORY:
+        return any(token in channel_name for token in OFFLINE_PURCHASE_CHANNEL_NAME_HINTS)
 
     if category_name == AUTO_WATCHED_FINANCIALS_CATEGORY:
         return channel_name in FINANCIALS_LEDGER_CHANNEL_NAMES

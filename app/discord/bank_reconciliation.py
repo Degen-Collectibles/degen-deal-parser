@@ -1426,7 +1426,7 @@ def build_expense_category_options(rows: list[BankTransaction]) -> list[dict[str
 def _bank_category_group(category: str) -> str:
     if category in FINANCE_EXCLUDED_EXPENSE_CATEGORIES:
         return "non_operating" if category in NON_OPERATING_EXPENSE_CATEGORIES else "cash_movement"
-    if category in {"inventory_purchases", "grading_fees"}:
+    if category == "inventory_purchases":
         return "inventory"
     if category == "partner_paybacks":
         return "partner_paybacks"

@@ -8,6 +8,7 @@ from unittest.mock import patch
 from sqlmodel import Session, SQLModel, create_engine, select
 from starlette.requests import Request
 
+import app.cache as cache_module
 from app.discord.bank_reconciliation import rerun_bank_reconciliation
 from app.ledger import (
     LedgerFilters,
@@ -2329,6 +2330,65 @@ def test_ledger_row_status_form_preserves_existing_review_note_when_note_is_omit
     assert row.review_status == "reviewed"
     assert row.expense_category == "grading_fees"
     assert row.review_note == "Existing reviewer context."
+
+
+def test_ledger_row_status_form_invalidates_report_and_finance_caches():
+    cache_module._cache.clear()
+    cache_module.cache_set("reports:test", {"stale": True})
+    cache_module.cache_set("finance:v4:test", {"stale": True})
+    cache_module.cache_set("other:test", {"keep": True})
+
+    engine = make_engine()
+    posted_at = datetime(2026, 5, 15, 12, tzinfo=timezone.utc)
+
+    try:
+        with Session(engine) as session:
+            bank_import = add_import(session)
+            session.add(
+                BankTransaction(
+                    id=55,
+                    import_id=bank_import.id,
+                    row_index=1,
+                    account_label="Chase Checking",
+                    account_type="checking",
+                    posted_at=posted_at,
+                    description="WWW.PSACARD.COM",
+                    amount=-140.0,
+                    classification="expense_or_purchase_needs_review",
+                    expense_category="uncategorized",
+                )
+            )
+            session.commit()
+
+            with patch("app.routers.ledger.require_role_response", return_value=None):
+                ledger_row_status_form(
+                    make_request(
+                        "/ledger/rows/55/status-form",
+                        method="POST",
+                        headers=[(b"x-requested-with", b"fetch")],
+                    ),
+                    row_id=55,
+                    review_status="reviewed",
+                    classification="",
+                    expense_category="grading_fees",
+                    selected_account="",
+                    selected_start="",
+                    selected_end="",
+                    selected_status="needs_action",
+                    selected_category="",
+                    selected_source="",
+                    selected_search="",
+                    selected_sort="posted_at",
+                    selected_direction="desc",
+                    session=session,
+                )
+    finally:
+        engine.dispose()
+
+    assert cache_module.cache_get("reports:test") is None
+    assert cache_module.cache_get("finance:v4:test") is None
+    assert cache_module.cache_get("other:test") == {"keep": True}
+    cache_module._cache.clear()
 
 
 def test_ledger_row_status_form_updates_review_note_to_stripped_nonblank_note():

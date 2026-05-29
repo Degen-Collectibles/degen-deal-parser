@@ -215,8 +215,8 @@ def test_finance_kpi_drilldowns_include_real_supporting_rows():
                     "description": "PSA grading",
                     "account_label": "Chase Checking",
                     "amount": 40.0,
-                    "category_label": "Inventory",
-                    "group": "inventory",
+                    "category_label": "Grading fees",
+                    "group": "operating",
                     "is_discord_logged": False,
                     "is_non_operating": False,
                 },
@@ -256,12 +256,13 @@ def test_finance_kpi_drilldowns_include_real_supporting_rows():
     assert revenue_sources == {"Discord", "Shopify", "TikTok"}
     assert all("Owner loan" not in row["description"] for row in by_key["revenue"]["supporting_rows"])
     assert "Bought inventory" in inventory_labels
-    assert "PSA grading" in inventory_labels
+    assert "PSA grading" not in inventory_labels
     assert "Already logged buy" not in inventory_labels
+    assert "PSA grading" in operating_labels
     assert "Shipping supplies" in operating_labels
     assert "Software subscription" in operating_labels
     assert tax_sources == {"Shopify", "TikTok"}
-    assert by_key["inventory_spend"]["supporting_row_count"] == 2
+    assert by_key["inventory_spend"]["supporting_row_count"] == 1
 
 
 def test_finance_quality_rows_have_direct_action_links():
@@ -341,9 +342,9 @@ def test_finance_breakdowns_label_discord_and_bank_only_outflows_separately():
     assert "Discord non-operating cash in excluded" in statement_labels
     assert "Estimated product COGS (80%)" in statement_labels
     assert "Estimated gross product profit (20%)" in statement_labels
-    assert "Bank-only inventory/grading outflow" in statement_labels
+    assert "Bank-only inventory outflow" in statement_labels
     assert "Bank-only operating outflow" in statement_labels
-    assert "Bank-only inventory/grading" in spend_labels
+    assert "Bank-only inventory" in spend_labels
     assert "Bank-only operating outflow" in spend_labels
 
 

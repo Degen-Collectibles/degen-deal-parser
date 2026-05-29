@@ -300,8 +300,9 @@ def reports_page(
     )
     summary = discord_summary
     channels = get_channel_filter_choices(session)
+    discord_operating_money_in = discord_operating_money_in_from_totals(discord_summary["totals"])
     report_totals = {
-        "discord_gross": round(float(discord_summary["totals"].get("money_in", 0.0) or 0.0), 2),
+        "discord_gross": discord_operating_money_in,
         "discord_outflow": round(float(discord_summary["totals"].get("money_out", 0.0) or 0.0), 2),
         "discord_net": round(float(discord_summary["totals"].get("net", 0.0) or 0.0), 2),
         "shopify_gross": round(float(shopify_summary["gross_revenue"] or 0.0), 2),
@@ -311,7 +312,7 @@ def reports_page(
         "tiktok_tax": round(float(tiktok_summary["total_tax"] or 0.0), 2),
         "tiktok_net": round(float(tiktok_summary["net_revenue"] or 0.0), 2),
         "combined_revenue": round(
-            float(discord_summary["totals"].get("money_in", 0.0) or 0.0)
+            discord_operating_money_in
             + float(shopify_summary["net_revenue"] or 0.0)
             + float(tiktok_summary["net_revenue"] or 0.0),
             2,

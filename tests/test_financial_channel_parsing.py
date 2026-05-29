@@ -199,6 +199,23 @@ def test_financials_channel_marks_statement_links_as_ignored_evidence_not_transa
     assert "statement" in parsed["parsed_notes"]
 
 
+def test_loans_channel_marks_statement_links_as_ignored_evidence_not_transactions() -> None:
+    parsed = _parse_financial_message(
+        "Loans financial statement\nhttps://1drv.ms/example",
+        channel_name="loans",
+    )
+
+    assert parsed["ignore_message"] is True
+    assert "statement" in parsed["parsed_notes"]
+
+
+def test_loans_channel_ignores_date_markers() -> None:
+    parsed = _parse_financial_message("May 15", channel_name="loans")
+
+    assert parsed["ignore_message"] is True
+    assert "date marker" in parsed["parsed_notes"]
+
+
 def test_financials_channel_ignores_informational_policy_notes_without_ai() -> None:
     parsed = _parse_financial_message(
         "For all sales, assume COGS is 85% less than revenue.",

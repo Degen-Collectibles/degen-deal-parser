@@ -479,6 +479,22 @@ class AvailableDiscordChannelInventoryTests(unittest.TestCase):
             {"Financials / #financials", "Financials / #loans"},
         )
 
+    def test_purchase_channels_are_discoverable_by_name_hint(self):
+        guild = types.SimpleNamespace(id=111, name="Degen Guild")
+        purchase_channel = types.SimpleNamespace(
+            id=7101,
+            name="alex-purchases",
+            created_at=datetime(2026, 5, 20, tzinfo=timezone.utc),
+            last_message_id=None,
+        )
+
+        rows = discord_ingest_module._build_available_discord_channel_rows(
+            [(guild, purchase_channel, "Employees")]
+        )
+
+        self.assertEqual({row["channel_id"] for row in rows}, {"7101"})
+        self.assertEqual(rows[0]["label"], "Employees / #alex-purchases")
+
     def test_year_past_shows_channels_are_discoverable_for_ledger_ingest(self):
         guild = types.SimpleNamespace(id=111, name="Degen Guild")
         show_channel = types.SimpleNamespace(
@@ -579,6 +595,21 @@ class AvailableDiscordChannelPersistenceTests(unittest.TestCase):
 
         self.assertEqual(watched_rows, [])
         self.assertEqual({row.channel_id for row in available_rows}, {"2002", "2003"})
+
+    def test_auto_adds_offline_purchase_channels_as_backfill_ready(self):
+        self._persist([
+            self._channel("7101", category_name="Offline Deals", channel_name="jeff-purchases")
+        ])
+
+        with Session(self.engine) as session:
+            watched = session.exec(select(WatchedChannel)).one()
+            available = session.exec(select(AvailableDiscordChannel)).one()
+
+        self.assertEqual(available.channel_id, "7101")
+        self.assertEqual(watched.channel_id, "7101")
+        self.assertEqual(watched.channel_name, "Offline Deals / #jeff-purchases")
+        self.assertTrue(watched.is_enabled)
+        self.assertTrue(watched.backfill_enabled)
 
     def test_preserves_existing_channel_flags_and_backfill_windows(self):
         after = datetime(2026, 4, 1, tzinfo=timezone.utc)

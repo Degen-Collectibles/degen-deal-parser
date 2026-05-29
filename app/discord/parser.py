@@ -990,8 +990,6 @@ def _looks_like_financial_statement_evidence(text: str) -> bool:
 def _parse_loans_channel_message(message_text: str, image_urls: list[str]) -> Dict[str, Any]:
     text = normalize_message_part(message_text or "")
     lower = _normalize_payment_tokens(text.lower())
-    amount = _extract_financial_channel_amount(text)
-    payment_method = _financial_channel_payment_method(text)
 
     if not text:
         return _financial_review_parse(
@@ -1000,6 +998,15 @@ def _parse_loans_channel_message(message_text: str, image_urls: list[str]) -> Di
             category="loan_owner_payments",
             notes="loans channel attachment needs review" if image_urls else "loans channel blank note needs review",
         )
+
+    if _looks_like_financial_statement_evidence(message_text):
+        return _financial_ignore_parse("ignored loan statement evidence link or summary")
+
+    if looks_like_date_marker(text):
+        return _financial_ignore_parse("ignored loans channel date marker")
+
+    amount = _extract_financial_channel_amount(text)
+    payment_method = _financial_channel_payment_method(text)
 
     if "interest" in lower:
         if amount is None:

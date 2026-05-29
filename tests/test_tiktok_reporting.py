@@ -1508,7 +1508,7 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(summary["daily_totals"][0]["gross"], 35.0)
         self.assertEqual(summary["daily_totals"][0]["net"], 31.5)
 
-    def test_reports_page_combined_revenue_uses_discord_gross_and_separate_outflow(self) -> None:
+    def test_reports_page_combined_revenue_excludes_discord_non_operating_cash_in(self) -> None:
         request = SimpleNamespace(state=SimpleNamespace(current_user=SimpleNamespace(role="viewer")))
         captured: dict[str, object] = {}
 
@@ -1539,7 +1539,12 @@ class TikTokRegressionTests(unittest.TestCase):
                 reports_module,
                 "build_transaction_summary",
                 return_value={
-                    "totals": {"net": 100.0, "money_in": 160.0, "money_out": 60.0},
+                    "totals": {
+                        "net": 100.0,
+                        "money_in": 160.0,
+                        "non_operating_money_in": 100.0,
+                        "money_out": 60.0,
+                    },
                     "expense_categories": [],
                     "channel_net": [],
                 },
@@ -1575,12 +1580,69 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         context = captured["context"]
         self.assertIsInstance(context, dict)
-        self.assertEqual(context["report_totals"]["discord_gross"], 160.0)
+        self.assertEqual(context["report_totals"]["discord_gross"], 60.0)
         self.assertEqual(context["report_totals"]["discord_outflow"], 60.0)
         self.assertEqual(context["report_totals"]["shopify_net"], 20.0)
         self.assertEqual(context["report_totals"]["tiktok_net"], 4.0)
-        self.assertEqual(context["report_totals"]["combined_revenue"], 184.0)
+        self.assertEqual(context["report_totals"]["combined_revenue"], 84.0)
         self.assertTrue(context["show_tiktok_reports"])
+
+    def test_report_period_rows_exclude_discord_non_operating_cash_in(self) -> None:
+        period_start = datetime(2026, 5, 1, tzinfo=timezone.utc)
+        period_end = datetime(2026, 5, 31, tzinfo=timezone.utc)
+
+        with Session(self.engine) as session, patch.object(
+            shared_module, "get_transactions", return_value=[]
+        ), patch.object(
+            shared_module,
+            "build_transaction_summary",
+            return_value={
+                "totals": {
+                    "net": 100.0,
+                    "money_in": 160.0,
+                    "non_operating_money_in": 100.0,
+                    "money_out": 60.0,
+                },
+                "expense_categories": [],
+                "channel_net": [],
+            },
+        ), patch.object(
+            shared_module, "get_shopify_reporting_rows", return_value=[]
+        ), patch.object(
+            shared_module,
+            "build_shopify_reporting_summary",
+            return_value={
+                "gross_revenue": 20.0,
+                "total_tax": 2.0,
+                "net_revenue": 20.0,
+                "tax_unknown_orders": 0,
+            },
+        ), patch.object(
+            shared_module, "get_tiktok_reporting_rows", return_value=[]
+        ), patch.object(
+            shared_module,
+            "build_tiktok_reporting_summary",
+            return_value={
+                "gross_revenue": 5.0,
+                "total_tax": 1.0,
+                "net_revenue": 4.0,
+                "tax_unknown_orders": 0,
+            },
+        ):
+            rows = shared_module.build_report_period_comparison_rows(
+                session,
+                periods=[
+                    {
+                        "key": "mtd",
+                        "label": "May 2026",
+                        "start": period_start,
+                        "end": period_end,
+                    }
+                ],
+            )
+
+        self.assertEqual(rows[0]["discord_gross"], 60.0)
+        self.assertEqual(rows[0]["combined_revenue"], 84.0)
 
     def test_reports_page_uses_shared_tiktok_daily_totals_status_logic(self) -> None:
         request = SimpleNamespace(state=SimpleNamespace(current_user=SimpleNamespace(role="viewer")))

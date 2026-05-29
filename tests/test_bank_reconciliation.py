@@ -306,9 +306,10 @@ def test_finance_bank_data_excludes_cash_withdrawals_from_expenses():
     assert cash_row["excluded_from_finance"] is True
     assert data["gross_outflow_total"] == 580.0
     assert data["bank_only_total"] == 80.0
-    assert data["inventory_total"] == 80.0
+    assert data["inventory_total"] == 0.0
     assert data["operating_total"] == 80.0
-    assert data["daily_rows"][0]["inventory"] == 80.0
+    assert data["daily_rows"][0]["inventory"] == 0.0
+    assert data["daily_rows"][0]["operating"] == 80.0
     assert "cash_inventory_purchases" not in category_keys
 
 

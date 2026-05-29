@@ -388,6 +388,7 @@ def edit_message_form(
             actor_label=reviewer_label,
         )
     session.commit()
+    invalidate_financial_report_caches()
 
     if normalized_review_action in {"save_next", "approve_next"} and next_message_id:
         redirect_target = build_return_url(

@@ -314,6 +314,7 @@ def ledger_transaction_edit_form(
             actor_label=current_user_label(request),
         )
     session.commit()
+    invalidate_financial_report_caches()
 
     return RedirectResponse(
         _ledger_redirect_url(
@@ -390,6 +391,7 @@ def ledger_row_status_form(
                 actor_label=current_user_label(request),
             )
             session.commit()
+            invalidate_financial_report_caches()
             session.refresh(row)
     if row and _wants_json(request):
         return JSONResponse({"ok": True, "row": _ledger_row_json(row)})
@@ -467,6 +469,7 @@ def ledger_row_force_unmatch_form(
             note=(note or "").strip(),
         )
         session.commit()
+        invalidate_financial_report_caches()
     else:
         success = ""
     return RedirectResponse(

@@ -1126,6 +1126,17 @@ def empty_shopify_reporting_summary() -> dict[str, object]:
     return build_shopify_reporting_summary([])
 
 
+def discord_operating_money_in_from_totals(totals: dict[str, object]) -> float:
+    gross_money_in = round(float(totals.get("money_in", 0.0) or 0.0), 2)
+    non_operating_money_in = round(float(totals.get("non_operating_money_in", 0.0) or 0.0), 2)
+    return round(max(gross_money_in - non_operating_money_in, 0.0), 2)
+
+
+def invalidate_financial_report_caches() -> None:
+    cache_invalidate("reports:")
+    cache_invalidate("finance:")
+
+
 def build_report_period_comparison_rows(
     session: Session,
     *,
@@ -1157,7 +1168,7 @@ def build_report_period_comparison_rows(
             end=end if isinstance(end, datetime) else None,
         )
         tiktok_summary = build_tiktok_reporting_summary(tiktok_rows)
-        discord_gross = round(float(discord_summary["totals"].get("money_in", 0.0) or 0.0), 2)
+        discord_gross = discord_operating_money_in_from_totals(discord_summary["totals"])
         discord_outflow = round(float(discord_summary["totals"].get("money_out", 0.0) or 0.0), 2)
         discord_net = round(float(discord_summary["totals"].get("net", 0.0) or 0.0), 2)
         shopify_gross = round(float(shopify_summary["gross_revenue"] or 0.0), 2)
@@ -1652,7 +1663,7 @@ def build_finance_statement_rows(
         ("Estimated product COGS (80%)", "estimated_cogs", "money"),
         ("Estimated gross product profit (20%)", "gross_profit", "money"),
         ("Discord inventory cash out", "discord_inventory_spend", "money"),
-        ("Bank-only inventory/grading outflow", "bank_inventory_spend", "money"),
+        ("Bank-only inventory outflow", "bank_inventory_spend", "money"),
         ("Inventory cash deployed", "inventory_spend", "money"),
         ("Discord operating expenses", "discord_operating_expenses", "money"),
         ("Bank-only operating outflow", "bank_operating_expenses", "money"),
@@ -1690,7 +1701,7 @@ def build_finance_kpi_rows(
         ("Estimated Gross Profit", "gross_profit", "money", "up", "20% gross product margin assumption; inventory purchases are shown separately as cash deployed"),
         ("Estimated Operating Profit", "operating_profit", "money", "up", "Estimated gross profit less Discord and bank-only operating expenses"),
         ("Operating Margin", "operating_margin_pct", "percent", "up", "Estimated operating profit divided by product revenue"),
-        ("Inventory Cash Deployed", "inventory_spend", "money", "down", "Buys, trade cash out, inventory expense rows, and bank-only inventory/grading outflows; not subtracted from estimated profit"),
+        ("Inventory Cash Deployed", "inventory_spend", "money", "down", "Buys, trade cash out, inventory expense rows, and bank-only inventory outflows; not subtracted from estimated profit"),
         ("Tax Collected", "external_tax", "money", "neutral", "Known Shopify and TikTok tax tracked outside revenue"),
     ]
 
@@ -2225,10 +2236,10 @@ def build_finance_kpi_drilldown_rows(
             "key": "inventory_spend",
             "drilldown_id": "finance-drilldown-inventory-spend",
             "title": "Inventory Cash Deployed",
-            "body": "Cash put into inventory, grading, buys, and trades. This is tracked as cash movement and does not reduce estimated profit.",
+            "body": "Cash put into inventory, buys, and trades. Grading fees are treated as operating expenses.",
             "items": [
                 money_item("Discord inventory cash out", "discord_inventory_spend"),
-                money_item("Bank-only inventory/grading", "bank_inventory_spend"),
+                money_item("Bank-only inventory", "bank_inventory_spend"),
                 money_item("Inventory cash deployed", "inventory_spend"),
             ],
             "action_label": "Open bank inventory rows",
@@ -2236,7 +2247,7 @@ def build_finance_kpi_drilldown_rows(
             **_finance_support_metadata(
                 inventory_support_rows,
                 row_limit=row_limit,
-                title="Inventory and grading cash rows",
+                title="Inventory cash rows",
                 empty="No inventory cash deployment rows matched this range.",
             ),
         },
@@ -2290,7 +2301,7 @@ def build_finance_source_mix_rows(statement: dict[str, object]) -> list[dict[str
 def build_finance_spend_mix_rows(statement: dict[str, object]) -> list[dict[str, object]]:
     spend_values = {
         "Discord inventory cash out": float(statement.get("discord_inventory_spend", 0.0) or 0.0),
-        "Bank-only inventory/grading": float(statement.get("bank_inventory_spend", 0.0) or 0.0),
+        "Bank-only inventory": float(statement.get("bank_inventory_spend", 0.0) or 0.0),
         "Discord operating expenses": float(statement.get("discord_operating_expenses", 0.0) or 0.0),
         "Bank-only operating outflow": float(statement.get("bank_operating_expenses", 0.0) or 0.0),
     }
@@ -5638,6 +5649,7 @@ def recompute_financial_fields(session: Session) -> int:
         updated += 1
 
     session.commit()
+    invalidate_financial_report_caches()
     return updated
 
 

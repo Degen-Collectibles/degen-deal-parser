@@ -9,6 +9,7 @@ from unittest.mock import patch
 from sqlmodel import Session, SQLModel, create_engine, select
 from starlette.requests import Request
 
+import app.cache as cache_module
 from app.routers.channels_api import edit_message_form
 import app.routers.messages as messages_module
 from app.routers.messages import messages_table, review_table, reviewer_queue_page
@@ -21,6 +22,7 @@ def make_request(path: str) -> Request:
 
 class TableExpenseCategoryTests(unittest.TestCase):
     def setUp(self) -> None:
+        cache_module._cache.clear()
         self.temp_dir = Path.cwd() / "tests" / ".tmp_table_expense_category" / str(uuid.uuid4())
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         db_path = self.temp_dir / "table_expense_category.db"
@@ -31,6 +33,7 @@ class TableExpenseCategoryTests(unittest.TestCase):
         SQLModel.metadata.create_all(self.engine)
 
     def tearDown(self) -> None:
+        cache_module._cache.clear()
         self.engine.dispose()
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
@@ -289,6 +292,73 @@ class TableExpenseCategoryTests(unittest.TestCase):
         self.assertTrue(compute_manual_financials.called)
         self.assertTrue(save_review_correction.called)
         self.assertTrue(sync_transaction_from_message.called)
+
+    def test_message_financial_edit_invalidates_report_and_finance_caches(self) -> None:
+        cache_module.cache_set("reports:test", {"stale": True})
+        cache_module.cache_set("finance:v4:test", {"stale": True})
+        cache_module.cache_set("other:test", {"keep": True})
+
+        with Session(self.engine) as session, patch("app.routers.channels_api.require_role_response", return_value=None), patch(
+            "app.routers.channels_api.save_review_correction"
+        ), patch("app.routers.channels_api.sync_transaction_from_message"):
+            row = DiscordMessage(
+                discord_message_id="row-cache",
+                channel_id="chan-1",
+                channel_name="deals",
+                author_name="tester",
+                content="sold slab 10 cash",
+                created_at=utcnow(),
+                parse_status=PARSE_PARSED,
+                deal_type="sell",
+                amount=10.0,
+                payment_method="cash",
+                entry_kind="sale",
+                money_in=10.0,
+                money_out=0.0,
+                expense_category="inventory",
+            )
+            session.add(row)
+            session.commit()
+
+            request = make_request("/messages/1/edit-form")
+            request.state.current_user = SimpleNamespace(id=42, username="reviewer", display_name="Reviewer")
+
+            edit_message_form(
+                request,
+                message_id=row.id,
+                return_path="/table",
+                status=None,
+                channel_id=None,
+                filter_expense_category=None,
+                after=None,
+                before=None,
+                sort_by="time",
+                sort_dir="desc",
+                page=1,
+                limit=100,
+                parse_status=PARSE_PARSED,
+                needs_review=None,
+                deal_type="sell",
+                amount="25.00",
+                payment_method="cash",
+                cash_direction=None,
+                category="inventory",
+                entry_kind="sale",
+                expense_category="inventory",
+                confidence=None,
+                notes=None,
+                trade_summary=None,
+                item_names_text=None,
+                items_in_text=None,
+                items_out_text=None,
+                approve_after_save=None,
+                stay_on_detail=None,
+                session=session,
+            )
+
+        self.assertIsNone(cache_module.cache_get("reports:test"))
+        self.assertIsNone(cache_module.cache_get("finance:v4:test"))
+        self.assertEqual(cache_module.cache_get("other:test"), {"keep": True})
 
     def test_message_financial_edit_writes_audit_log(self) -> None:
         with Session(self.engine) as session, patch("app.routers.channels_api.require_role_response", return_value=None), patch(
