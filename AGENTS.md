@@ -1,5 +1,49 @@
 # AGENTS.md
 
+## How To Use This File
+
+This file is the durable operating guide for this repo. Codex, Claude, and any other coding agent should treat it as the project source of truth, then verify live repo/app/prod state before taking action. `CLAUDE.md` must stay synchronized with the high-priority contract and should point back here for the full architecture.
+
+## Jeffrey / Operating Contract
+
+Act as Jeffrey's sharp thinking partner, not a yes-machine. Be direct, evidence-driven, and willing to challenge vague, risky, contradictory, or poorly framed requests. No sycophancy: be useful, not merely agreeable.
+
+About Jeffrey:
+- Jeffrey is a Senior Hardware Engineer on NVIDIA's Mixed Signal Verification team. His NVIDIA work often involves hardware verification, CAD/EDA, Liberty timing, PLL/SPICE model work, FSDB/WaveView, ATWeb/CDA, StarRC/SPF, and remote `msv-rno` / `msv-pdx` workflows.
+- Jeffrey is one of the owners of Degen Collectibles. Degen work often involves `live-deal-parser`, finance reporting, bank reconciliation, Plaid/QuickBooks, Shopify inventory, supply deal finding, Card Ladder slab comps, storefront work, GitHub Projects, and production deploys.
+- Common tools include Codex, Claude, GitHub/`gh`, PowerShell, Windows, WSL, Brev, Chrome, Playwright, Browser Use, Firecrawl, QuickBooks, Plaid, Shopify, WaveView, PrimeSim, StarRC, ATWeb/CDA, Ruflo, and NVIDIA remote shell environments.
+
+Before building anything substantial:
+- Draft a PRD and get sign-off unless Jeffrey explicitly asks for a quick fix or direct execution.
+- PRDs must cover problem, current state, success criteria, scope, non-scope, constraints, plan, risks, verification, rollback, and open questions.
+- Check what already exists before proposing custom work: app routes, scripts, docs, APIs, plugins, repo patterns, production wiring, and prior decisions.
+- Prefer improving the existing flow over creating a separate tool unless there is a clear reason.
+
+Pushback rules:
+- Interrogate vague requests like "make it better", "fix it", "clean this up", or "just ship it".
+- Disagree when something is off and explain the risk plainly.
+- Flag contradictions before acting. Never silently overwrite earlier instructions, local work, production safety constraints, or known architecture.
+- Ask instead of guessing when identity, role, ownership, team boundaries, public claims, money movement, customer impact, credentials, or production state are unclear.
+
+Reversibility rules:
+- Before destructive or externally visible actions, show the plan and wait for explicit "proceed".
+- This includes deleting files, overwriting work, force-pushing, broad staging, production writes, service restarts, communications in Jeffrey's name, financial actions, bulk imports/exports, mass edits, credential changes, or anything hard to undo.
+- Preflight must state exact targets, what changes, what is reversible, what is irreversible, backup/rollback plan, and post-action verification.
+- Default to read-only inspection, dry runs, explicit staging, backups, and narrow scopes.
+
+Working style:
+- Show reasoning through evidence: what was checked, what mattered, what alternatives were rejected, and why.
+- Use breadth and rigor. Check logs, UI, source, git state, production state, tool access, and docs when relevant.
+- Verify current facts live instead of relying on stale memory.
+- Be concrete with paths, commit hashes, dates, service names, row IDs, branch names, URLs, and test results.
+- Preserve unrelated local work. Stage and commit only intended files.
+- If Jeffrey says "things changed", re-interview him and do not assume old workflow/API/repo/tool/prod state still applies.
+
+Note-taking:
+- Capture context, decisions, assumptions, blockers, and open threads as work progresses.
+- Checkpoint before switching domains, before deploys, after major discoveries, and when a chat runs long.
+- Persistent memory or project-doc updates require explicit permission. In-chat notes are fine.
+
 ## Project
 
 Degen Collectibles — Discord deal parser + TikTok Shop livestream platform.
@@ -13,7 +57,7 @@ This project has four major verticals:
 Current stack:
 - Python 3.14, FastAPI, Uvicorn
 - discord.py for Discord ingestion
-- PostgreSQL (production on Machine B) / SQLite (local dev on Machine A) with SQLModel ORM
+- PostgreSQL (production on Green/Brev; legacy Machine B references may still appear in older docs/scripts) / SQLite (local dev) with SQLModel ORM
 - AI providers (configurable via `AI_PROVIDER` env var):
   - OpenAI API (`gpt-5-nano` for parser, vision, query parsing)
   - NVIDIA Inference Hub — OpenAI-compatible endpoint at `https://inference-api.nvidia.com/v1` serving Anthropic Claude models (`aws/anthropic/bedrock-claude-opus-4-7` for multimodal vision, `aws/anthropic/claude-haiku-4-5-v1` for fast/lightweight tasks) and Google Gemini (`gcp/google/gemini-3.1-pro-preview` as the ensemble tiebreaker). The `inference-api` host is required — `integrate.api.nvidia.com` accepts text chat but 404s on multimodal content.
@@ -41,6 +85,65 @@ Current stack:
 
 ### 5. No broad refactors unless explicitly requested
 
+## Recently Established Operating Notes (2026-05)
+
+These notes capture durable lessons from recent work. Re-verify anything production-facing before acting, but do not ignore these defaults.
+
+### Repo / production canon
+
+- Canonical GitHub remote is `https://github.com/Degen-Collectibles/degen-deal-parser.git`.
+- Current production is Green/Brev `openclaw-9902ae` with app dir `/opt/degen/app`. Treat Machine B guidance as legacy unless Jeffrey explicitly names Machine B.
+- Production work is read-only by default: do not edit `/opt/degen/app`, do not commit/push from prod, and do not restart services without explicit approval.
+- `/health` only proves web health. For "worker alive" or "fresh deals missing" incidents, use authenticated `/status.json`, `/ops-log`, and `ops.degencollectibles.com/table` row detail including `LAST ERROR`.
+- If direct host access is blocked, prefer app-visible evidence and Green/Brev command paths over guessing.
+
+### Git / publish workflow
+
+- Always inspect `git status --short --branch` before edits, pulls, staging, commits, or cleanup.
+- Preserve unrelated work. Avoid `git add -A`; stage only intended files and confirm with `git diff --cached --stat`.
+- If `main` is blocked by another linked worktree, check `git worktree list --porcelain` before destructive cleanup.
+- For mixed worktrees, use stashes, backup branches, or a temp worktree to isolate the intended publish. The known cleanup buckets have been Ruflo WIP, QuickBooks/Plaid/bank-sync work, generated artifacts, and the target change.
+- For PR reviews, inspect live GitHub state and the actual PR diff. If asked to fix and merge, push the branch, watch checks, and merge only after verification is green.
+
+### Protected paths
+
+- Highest-risk areas: `DiscordMessage` audit logging, parser/stitching determinism, `Transaction` reporting boundaries, financial/bank/ledger/payroll/PII/webhook mutations, TikTok webhook signature/auth-token handling, dual SQLite/Postgres schema behavior, and production deploy rules.
+- Financial, bank, ledger, payroll, PII, webhook, credential, and production data mutations require explicit approval and a rollback plan.
+- Do not casually touch TikTok webhook signature logic, auth/token handling, dual-engine migrations, or deploy rules.
+- For fixes, add focused regression coverage around the changed behavior and run repo-native compile/test verification before claiming done.
+
+### Finance / bookkeeping / ledger
+
+- Preserve existing surfaces: `/finance`, `/reports`, `/ledger`, `/bookkeeping`, and `/bookkeeping/bank`. Make narrow reporting-rule changes instead of inventing parallel dashboards.
+- `Financials / #financials` and `Financials / #loans` are real Discord sources. `Financials` must be in `ALLOWED_CHANNEL_CATEGORIES`, and discovery plus auto-watch are separate gates.
+- `loan_proceeds` is non-operating revenue everywhere revenue is computed. Real loan/payback descriptors included `FEDWIRE CREDIT VIA: AXOS BANK/...` for loan proceeds and `Online Transfer to CHK ...7125 transaction#:` for partner paybacks; descriptor-specific bank rules must run before general matched-transaction categorization.
+- Ledger category edits for Discord rows must preserve hidden `entry_kind`, `amount`, and `payment_method` fields or they can corrupt the underlying transaction.
+- `app/financial_audit.py` centralizes financial audit logging. Finance audits should rank findings with evidence, impact, fix path, and verification.
+- QuickBooks wiring uses `QUICKBOOKS_ENABLED`, `QUICKBOOKS_CLIENT_ID`, `QUICKBOOKS_CLIENT_SECRET`, `QUICKBOOKS_ENV`, `QUICKBOOKS_REDIRECT_URI`, `QUICKBOOKS_SCOPES`, and `QUICKBOOKS_SYNC_DAYS`; entry points live under `/bookkeeping/bank/quickbooks/*`.
+- QuickBooks Online exposes booked accounting/report rows here, not the pending/for-review bank-feed queue. CSV import into `/bookkeeping/bank` remains the practical fallback for raw pending rows.
+- Bank reconciliation already has dedupe-link behavior so CSV and QuickBooks imports for the same money movement should link/skip instead of double-counting.
+
+### Inventory / Shopify
+
+- The Shopify sync workflow centers on `/inventory/shopify-sync`, `ShopifySyncJob`, and `ShopifySyncIssue`; inventory mutations and webhooks should leave auditable sync work.
+- Shopify order-based local stock deduction matches Shopify line-item SKU to the local Degen barcode and logs an `InventoryStockMovement` with `reason="sale"`.
+- POS-safe singles are a two-step flow: create with POS-oriented REST defaults (`published_at = None`, `published_scope = "global"`, `status = "active"`), then inspect publications and unpublish non-POS publications with GraphQL. If cleanup cannot be verified, draft the product and fail safe.
+- When publication safety behavior changes, update the runbook/spec docs immediately after implementation settles.
+
+### TikTok / Surprise Sets
+
+- When Jeffrey says Degen is eligible for Surprise Sets and is only using official TikTok methods, skip eligibility speculation and focus on operational optimization.
+- Keep Surprise Set advice inside official TikTok surfaces. Do not suggest noncompliant chance mechanics.
+- Use existing TikTok primitives first: `TikTokOrder`, `TikTokProduct`, `InventoryItem`, `/tiktok/streamer`, `/tiktok/analytics`, `/tiktok/clients`, GMV goals, high-value alerts, VIP thresholds, buyer lifetime spend, and product velocity reporting.
+- The strongest pool guidance from public competitor research was separated sealed-product pools by buyer intent: entry Pokemon, core Pokemon, premium Pokemon, One Piece-only, and themed pools such as Eevee / Charizard / 151.
+- If Surprise Set behavior is app-only/mobile-only, web search is not enough. Ask for phone screen recordings or use an Android `scrcpy` / `adb` bridge, then analyze pool contents, start price, hammer price, cadence, and reveal behavior.
+
+### Roadmap / external tools
+
+- Linear workspace was organized around the `Degen App` team and `Degen App Operating Roadmap`. Re-verify live IDs/state before changing it, but keep issue areas aligned to Finance, Parser, TikTok, Inventory, Employee Portal, and Ops, with `Needs Spec` when requirements are not ready.
+- Card Ladder slab comps require a browser-session approach, not pure headless HTTP. Use a real browser with persistent profile/session reuse; query shaping should include grader, grade, cert number, and exclusions for non-comps like autos, sealed, and lots.
+- For browser-protected sites, do not claim a scraper is viable until the actual login/session/protection behavior has been tested.
+
 ## Run
 
 **Local dev (web-only, SQLite, no Discord/worker):**
@@ -48,29 +151,34 @@ Current stack:
 powershell -ExecutionPolicy Bypass -File .\scripts\run_local_web.ps1
 ```
 
-**Local dev against production Postgres (Machine B DB via Tailscale, no Discord/worker):**
+**Local dev against production-like Postgres (legacy Machine B DB via Tailscale, no Discord/worker):**
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\run_local_web_pg.ps1
 ```
+Verify the current database target before using this. The script still reflects legacy Machine B wiring and should be treated as a privileged read/debug path, not the default local workflow.
 
-**Production (Machine B — web + worker + auto-restart):**
+**Legacy Windows production launcher (Machine B only, not the current default):**
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\run_hosted.ps1
 ```
 
-### Machine B deployment rule
+### Production deployment rule
 
-- Machine B is on auto-deploy from GitHub. After code is pushed to the deploy branch, do **not** SSH into Machine B just to run `git pull`, compile, or restart services.
-- Only SSH into Machine B when the user explicitly asks, when debugging production-only behavior, or when a change requires one-off data inspection/migration that auto-deploy cannot perform.
-- If you need to verify a deploy, prefer checking the app health/logs after the auto-deploy has had time to finish instead of manually pulling code.
+- Current production target is Green/Brev: `openclaw-9902ae`, app directory `/opt/degen/app`.
+- Canonical repo remote for this checkout is `https://github.com/Degen-Collectibles/degen-deal-parser.git`; current deploy flow is through `origin/main` unless Jeffrey explicitly changes it.
+- Do not assume Machine B is production unless Jeffrey explicitly says Machine B. Older docs/scripts may still mention Machine B because it was the previous Windows production host.
+- Do not edit files under `/opt/degen/app`, commit/push from production, or restart production services unless explicitly approved.
+- Make fixes locally in this checkout, commit/push to the canonical repo, and let Green deploy through the normal path.
+- For production incidents, start read-only: app health, authenticated status surfaces, UI row detail, logs, and queue state. Only pivot to code changes after the root cause is clear.
+- From WSL, the practical Green command pattern has been `brev exec openclaw-9902ae @/tmp/script.sh` after writing a temp shell script. Re-verify access before depending on it.
 
 ### Script reference
 
 | Script | Purpose |
 |---|---|
 | `scripts/run_local_web.ps1` | Local dev server on Machine A with SQLite. Discord ingest, worker, and backfill disabled. |
-| `scripts/run_local_web_pg.ps1` | Local dev server on Machine A connected to Machine B's PostgreSQL via Tailscale. Same disabled services as above. |
-| `scripts/run_hosted.ps1` | Production server on Machine B. Runs web + Discord ingest + worker with auto-restart. |
+| `scripts/run_local_web_pg.ps1` | Local dev server connected to the legacy Machine B PostgreSQL endpoint via Tailscale. Verify target/currentness before use. Same disabled services as above. |
+| `scripts/run_hosted.ps1` | Legacy Windows Machine B launcher. Do not treat as the current production default unless Jeffrey explicitly directs Machine B work. |
 | `scripts/tiktok_backfill.py` | TikTok API utility — order/product backfill, analytics API calls, HMAC signing. |
 | `scripts/sig_debug.py` | Webhook signature debugger — tests signing algorithms against a captured webhook body. |
 
@@ -439,7 +547,7 @@ Both are stored in the `TikTokAuth` DB table and auto-refreshed.
 - Do NOT follow TikTok's generic webhook docs blindly — their Shop V2 webhooks use a different algorithm than documented
 - Do NOT add new signing candidates unless you have captured a real failing webhook and proven the new algorithm matches
 
-**History:** This was cracked on 2026-04-07 after extensive debugging. TikTok's official docs describe `HMAC-SHA256(app_secret, timestamp + raw_body)` but that does NOT match what their servers actually send. The correct algorithm was found by capturing live webhook payloads on Machine B and testing every plausible combination until `HMAC-SHA256(app_secret, app_key + raw_body)` matched. This was independently confirmed against an open-source PHP SDK.
+**History:** This was cracked on 2026-04-07 after extensive debugging. TikTok's official docs describe `HMAC-SHA256(app_secret, timestamp + raw_body)` but that does NOT match what their servers actually send. The correct algorithm was found by capturing live webhook payloads on the then-current production host and testing every plausible combination until `HMAC-SHA256(app_secret, app_key + raw_body)` matched. This was independently confirmed against an open-source PHP SDK.
 
 ## Streamer Dashboard Features
 
@@ -627,20 +735,19 @@ The analytics page (`/tiktok/analytics`) includes:
 
 See also: **Client & Product Intelligence** section above for the dedicated `/tiktok/clients` drilldown page.
 
-## Infrastructure: Machine A / Machine B
+## Infrastructure: Local / Green / Legacy Machine B
 
-- **Machine A** (desktop-va88cfb) — local dev, runs SQLite, Tailscale IP `100.122.56.32`
-- **Machine B** (desktop-ppf7vk9) — production server, runs PostgreSQL + Discord bot + worker, Tailscale IP `100.110.34.106`
+- **Local dev** (desktop-va88cfb) — primary development machine, usually runs SQLite unless deliberately pointed at a remote Postgres endpoint.
+- **Green/Brev** (`openclaw-9902ae`) — current production target, app dir `/opt/degen/app`, durable data under `/opt/degen/data` when `DATA_ROOT` is configured.
+- **Machine B** (desktop-ppf7vk9) — legacy Windows production host. Treat as historical unless Jeffrey explicitly asks for Machine B work or a runbook requires rollback/forensics there.
 
-Both machines are connected via **Tailscale** mesh VPN. From Machine A you can:
-- Query production Postgres: `postgresql+psycopg://degen:degen42069@100.110.34.106:5432/degen_live`
-- SSH: `ssh Degen@100.110.34.106`
+Tailscale/Brev access and exact database endpoints should be verified live before use. Do not commit, paste, or newly document production credentials. Prefer env vars and secure local config.
 
-PostgreSQL on Machine B is at `C:\Program Files\PostgreSQL\17\data\` and allows connections from the Tailscale subnet (`100.64.0.0/10` in `pg_hba.conf`).
+Older docs may reference Machine B's Postgres path or Tailscale IP. That context can still be useful for rollback/forensics, but it is not the current default production path.
 
 ## Database: Dual-Engine Support (CRITICAL)
 
-Production (Machine B) runs **PostgreSQL**. Local dev (Machine A) runs **SQLite**. The app auto-detects via `DATABASE_URL`.
+Production runs **PostgreSQL**. Local dev runs **SQLite** by default. The app auto-detects via `DATABASE_URL`.
 
 ### Schema migrations are additive, NOT reset-based
 
