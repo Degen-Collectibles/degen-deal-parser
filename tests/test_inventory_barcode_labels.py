@@ -307,6 +307,103 @@ def test_wraparound_template_puts_optional_logo_above_customer_price():
     assert "Logo and price." in html
 
 
+def test_wraparound_template_shows_local_direct_print_action_with_printer_selector():
+    item = InventoryItem(
+        id=64,
+        barcode="DGN-000064",
+        item_type="single",
+        game="Pokemon",
+        card_name="Mew ex",
+        condition="NM",
+        list_price=200.02,
+    )
+    label = label_context_for_items([item])[0]
+
+    html = templates.env.get_template("inventory_labels.html").render(
+        request=_FakeRequest(),
+        current_user=_FakeUser(),
+        csrf_token="csrf-test-token",
+        labels=[label],
+        layout="wrap-3x1",
+        label_layout_options=LABEL_LAYOUT_OPTIONS,
+        label_field_options=[{"value": "logo", "label": "Logo (wrap only)"}],
+        selected_fields=("logo", "barcode", "name", "condition"),
+        ids="64",
+        status="",
+        direct_print_available=True,
+        direct_print_message="",
+        direct_print_printer_name="Brother QL-800",
+        direct_print_printers=["JADENS C10", "Brother QL-800"],
+    )
+
+    assert 'action="/inventory/labels/direct-print"' in html
+    assert "Direct Print" in html
+    assert 'name="printer_name"' in html
+    assert 'value="JADENS C10"' in html
+    assert 'value="Brother QL-800" selected' in html
+    assert 'name="layout" value="wrap-3x1"' in html
+    assert 'name="ids" value="64"' in html
+    assert 'name="fields" value="logo"' in html
+    assert 'name="fields" value="barcode"' in html
+
+
+def test_windows_label_print_payload_includes_selected_printer_and_label_content():
+    from app.inventory.windows_label_print import build_windows_label_print_payload
+
+    item = InventoryItem(
+        id=65,
+        barcode="DGN-000065",
+        item_type="single",
+        game="Pokemon",
+        card_name="Mew ex",
+        set_name="Paldean Fates",
+        condition="NM",
+        location="Case B",
+        list_price=200.02,
+    )
+    label = label_context_for_items([item])[0]
+
+    payload = build_windows_label_print_payload([label], printer_name="Brother QL-800")
+
+    assert payload["printer_name"] == "Brother QL-800"
+    assert payload["paper_width_hundredths"] == 300
+    assert payload["paper_height_hundredths"] == 100
+    assert payload["labels"][0]["price_text"] == "$200.02"
+    assert payload["labels"][0]["barcode_value"] == "DGN-000065"
+    assert payload["labels"][0]["employee_lines"][0]["label"] == "Barcode"
+    assert payload["labels"][0]["employee_lines"][1]["value"] == "Mew ex"
+
+
+def test_windows_label_printer_selection_prefers_requested_then_jadens():
+    from app.inventory.windows_label_print import choose_label_printer
+
+    printers = ["Microsoft Print to PDF", "JADENS C10", "Brother QL-800"]
+
+    assert choose_label_printer("Brother QL-800", printers) == "Brother QL-800"
+    assert choose_label_printer("", printers) == "JADENS C10"
+    assert choose_label_printer("Missing Printer", printers) == "JADENS C10"
+    assert choose_label_printer("", ["Brother QL-800"]) == "Brother QL-800"
+
+
+def test_windows_print_script_keeps_price_on_one_line_and_abbreviates_fields():
+    script = Path("scripts/print_windows_labels.ps1").read_text(encoding="utf-8")
+
+    assert "Draw-ShrinkingText" in script
+    assert "StringFormatFlags]::NoWrap" in script
+    assert "$priceFormat" in script
+    assert '"condition" { "COND" }' in script
+
+
+def test_windows_print_script_lightens_logo_only():
+    script = Path("scripts/print_windows_labels.ps1").read_text(encoding="utf-8")
+
+    assert "Draw-FitImageLightened" in script
+    assert "System.Drawing.Imaging.ColorMatrix" in script
+    assert "$logoLightenMatrix.Matrix40" in script
+    assert "Draw-FitImageLightened -Graphics $g -Image $logoImage" in script
+    assert "Draw-FitImage -Graphics $g -Image $barcodeImage" in script
+
+
 def test_wraparound_template_uses_print_safe_logo_and_price_styles():
     html = templates.env.get_template("inventory_labels.html").render(
         request=_FakeRequest(),
@@ -327,7 +424,14 @@ def test_wraparound_template_uses_print_safe_logo_and_price_styles():
     assert "body.label-layout-wrap-3x1 .wrap-logo { height:.52in; }" in html
     assert ".wrap-price.price-long { font-size:11pt; }" in html
     assert "body.label-layout-wrap-3x1 .wrap-price.price-long { font-size:9pt; }" in html
+    assert "@page { size: 3in 1in; margin:0; }" in html
+    assert "body.label-layout-wrap-3x1 .labels-grid {\n                display:block;" in html
+    assert "body.label-layout-wrap-3x1 .wrap-label-card {\n                width:3in;" in html
+    assert "height:1in;" in html
+    assert "page-break-after:always;" in html
     assert 'name="fields_present" value="1"' in html
+    assert ".mobile-bottom-nav { display:none !important; }" in html
+    assert html.rfind('<div class="no-print">') < html.rfind('<nav class="mobile-bottom-nav"')
 
 
 def test_label_logo_asset_is_print_optimized_full_logo():

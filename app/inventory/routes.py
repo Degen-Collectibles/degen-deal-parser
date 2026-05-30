@@ -11,6 +11,7 @@ import html
 import json
 import logging
 import math
+import os
 import re
 import time
 import uuid
@@ -68,6 +69,12 @@ from .barcode import (
     label_context_for_items,
     parse_label_fields,
     render_barcode_svg,
+)
+from .windows_label_print import (
+    DEFAULT_LABEL_PRINTER_NAME,
+    choose_label_printer,
+    list_windows_label_printers,
+    print_windows_wrap_3x1_labels,
 )
 from .pricing import (
     SLAB_PRICE_SOURCE_OPTIONS,
@@ -514,6 +521,16 @@ def _current_user_label(request: Request) -> Optional[str]:
         or str(getattr(user, "id", ""))
         or None
     )
+
+
+def _is_localhost_request(request: Request) -> bool:
+    host = (request.url.hostname or "").lower()
+    client_host = (request.client.host if request.client else "").lower()
+    return host in {"127.0.0.1", "localhost", "::1"} or client_host in {"127.0.0.1", "localhost", "::1"}
+
+
+def _direct_label_print_available(request: Request, layout: str) -> bool:
+    return layout == "wrap-3x1" and os.name == "nt" and _is_localhost_request(request)
 
 
 def _safe_inventory_return_url(value: str | None, fallback: str) -> str:
@@ -3071,6 +3088,50 @@ async def inventory_scan_page(request: Request, session: Session = Depends(get_s
 # Print labels
 # ---------------------------------------------------------------------------
 
+def _inventory_label_items(session: Session, *, ids: str, status: str) -> list[InventoryItem]:
+    if ids:
+        id_list = [int(x) for x in ids.split(",") if x.strip().isdigit()]
+        if id_list:
+            return session.exec(
+                select(InventoryItem).where(
+                    InventoryItem.id.in_(id_list),
+                    InventoryItem.archived_at == None,  # noqa: E711
+                )
+            ).all()
+    elif status and status in ALL_INVENTORY_STATUSES:
+        return session.exec(
+            select(InventoryItem).where(
+                InventoryItem.status == status,
+                InventoryItem.archived_at == None,  # noqa: E711
+            )
+        ).all()
+    return []
+
+
+def _inventory_label_redirect_url(
+    *,
+    ids: str,
+    status: str,
+    layout: str,
+    fields: tuple[str, ...],
+    printer_name: str = "",
+    direct_print: str = "",
+) -> str:
+    params: list[tuple[str, str]] = [("layout", layout)]
+    if ids:
+        params.append(("ids", ids))
+    if status:
+        params.append(("status", status))
+    params.append(("fields_present", "1"))
+    for field in fields:
+        params.append(("fields", field))
+    if printer_name:
+        params.append(("printer_name", printer_name))
+    if direct_print:
+        params.append(("direct_print", direct_print))
+    return "/inventory/labels?" + urlencode(params)
+
+
 @router.get("/inventory/labels", response_class=HTMLResponse)
 async def inventory_labels(
     request: Request,
@@ -3078,35 +3139,24 @@ async def inventory_labels(
     ids: str = Query(default=""),
     status: str = Query(default=""),
     layout: str = Query(default="wrap"),
+    printer_name: str = Query(default=""),
 ):
     if denial := _require_employee_permission(request, "ops.inventory.view", session):
         return denial
 
-    items: list[InventoryItem] = []
-    if ids:
-        id_list = [int(x) for x in ids.split(",") if x.strip().isdigit()]
-        if id_list:
-            items = session.exec(
-                select(InventoryItem).where(
-                    InventoryItem.id.in_(id_list),
-                    InventoryItem.archived_at == None,  # noqa: E711
-                )
-            ).all()
-    elif status and status in ALL_INVENTORY_STATUSES:
-        items = session.exec(
-            select(InventoryItem).where(
-                InventoryItem.status == status,
-                InventoryItem.archived_at == None,  # noqa: E711
-            )
-        ).all()
-
+    layout = layout if layout in {option["value"] for option in LABEL_LAYOUT_OPTIONS} else "wrap"
+    items = _inventory_label_items(session, ids=ids, status=status)
     fields_submitted = "fields_present" in request.query_params or "fields" in request.query_params
     selected_fields = parse_label_fields(
         request.query_params.getlist("fields"),
         default_to_all=not fields_submitted,
     )
     labels = label_context_for_items(items, selected_fields=selected_fields)
-    layout = layout if layout in {option["value"] for option in LABEL_LAYOUT_OPTIONS} else "wrap"
+    direct_print_available = _direct_label_print_available(request, layout)
+    direct_print_printers = list_windows_label_printers() if direct_print_available else []
+    if direct_print_available and not direct_print_printers:
+        direct_print_printers = [DEFAULT_LABEL_PRINTER_NAME]
+    direct_print_printer_name = choose_label_printer(printer_name, direct_print_printers)
     return _templates.TemplateResponse(
         request,
         "inventory_labels.html",
@@ -3119,8 +3169,70 @@ async def inventory_labels(
             "selected_fields": selected_fields,
             "ids": ids,
             "status": status,
+            "csrf_token": issue_token(request),
+            "direct_print_available": direct_print_available,
+            "direct_print_printers": direct_print_printers,
+            "direct_print_printer_name": direct_print_printer_name,
+            "direct_print_message": request.query_params.get("direct_print", ""),
         },
     )
+
+
+@router.post("/inventory/labels/direct-print")
+async def inventory_labels_direct_print(
+    request: Request,
+    session: Session = Depends(get_session),
+    ids: str = Form(default=""),
+    status: str = Form(default=""),
+    layout: str = Form(default="wrap-3x1"),
+    fields: list[str] = Form(default=[]),
+    printer_name: str = Form(default=DEFAULT_LABEL_PRINTER_NAME),
+):
+    if denial := _require_employee_permission(request, "ops.inventory.view", session):
+        return denial
+
+    layout = layout if layout in {option["value"] for option in LABEL_LAYOUT_OPTIONS} else "wrap-3x1"
+    selected_fields = parse_label_fields(fields, default_to_all=True)
+    printer_options = list_windows_label_printers()
+    if not printer_options:
+        printer_options = [DEFAULT_LABEL_PRINTER_NAME]
+    selected_printer = choose_label_printer(printer_name, printer_options)
+
+    def redirect_with(message: str) -> RedirectResponse:
+        return RedirectResponse(
+            url=_inventory_label_redirect_url(
+                ids=ids,
+                status=status,
+                layout=layout,
+                fields=selected_fields,
+                printer_name=selected_printer,
+                direct_print=message,
+            ),
+            status_code=303,
+        )
+
+    if not _direct_label_print_available(request, layout):
+        return redirect_with("Direct print is only available from localhost on Windows.")
+
+    labels = label_context_for_items(
+        _inventory_label_items(session, ids=ids, status=status),
+        selected_fields=selected_fields,
+    )
+    if not labels:
+        return redirect_with("No labels selected for direct print.")
+
+    try:
+        printed = await asyncio.to_thread(
+            print_windows_wrap_3x1_labels,
+            labels,
+            printer_name=selected_printer,
+        )
+    except Exception as exc:
+        logger.exception("Direct label print failed")
+        return redirect_with(f"Direct print failed: {exc}")
+
+    noun = "label" if printed == 1 else "labels"
+    return redirect_with(f"Sent {printed} {noun} to {selected_printer}.")
 
 
 # ---------------------------------------------------------------------------

@@ -18,6 +18,11 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <title>Print Labels — Inventory</title>
     <style>
+        {% if layout == 'wrap-3x1' %}
+        @page { size: 3in 1in; margin:0; }
+        {% elif layout == 'thermal' %}
+        @page { size: 2.25in 1.25in; margin:0; }
+        {% endif %}
         :root {
     --card: var(--lx-s1);
     --card-strong: var(--lx-s2);
@@ -56,6 +61,10 @@
         .back-link:hover { color:var(--text); }
         .eyebrow { display:inline-flex; align-items:center; padding:5px 10px; border-radius:999px; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.08em; background:var(--lx-s2); color:var(--lx-muted); margin-bottom:10px; }
         .toolbar { display:flex; gap:10px; align-items:center; margin-bottom:18px; flex-wrap:wrap; }
+        .direct-print-form { display:inline-flex; gap:8px; align-items:center; margin:0; flex-wrap:wrap; }
+        .printer-select { display:inline-flex; align-items:center; gap:6px; color:var(--lx-muted); font-size:12px; font-weight:800; }
+        .printer-select select { appearance:none; min-width:180px; max-width:280px; border:1px solid var(--line); border-radius:12px; background:var(--lx-s1); color:var(--text); padding:9px 32px 9px 10px; font:inherit; font-size:12px; font-weight:800; }
+        .direct-print-message { display:inline-flex; align-items:center; margin:0 0 12px; padding:8px 10px; border-radius:12px; background:var(--green-bg); color:#bbf7d0; font-size:13px; font-weight:800; }
         .label-config { display:grid; grid-template-columns:minmax(220px,.8fr) minmax(260px,1.2fr); gap:14px; margin-top:14px; }
         .config-block { border:1px solid var(--line); border-radius:14px; background:rgba(255,255,255,.03); padding:12px; }
         .config-title { margin:0 0 8px; font-size:12px; font-weight:900; color:#fff; text-transform:uppercase; letter-spacing:.08em; }
@@ -174,7 +183,8 @@
 
         /* Print styles */
         @media print {
-            .no-print { display:none !important; }
+            .no-print,
+            .mobile-bottom-nav { display:none !important; }
             body { background: var(--lx-s1); }
             .page { padding:0; max-width:100%; }
             .labels-grid {
@@ -204,10 +214,11 @@
                 padding:.15in;
             }
             body.label-layout-wrap-3x1 .labels-grid {
-                display:grid;
-                grid-template-columns:repeat(2,3in);
-                gap:.12in;
-                padding:.15in;
+                display:block;
+                width:3in;
+                height:auto;
+                gap:0;
+                padding:0;
             }
             body.label-layout-wrap .wrap-label-card,
             body.label-layout-wrap-3x1 .wrap-label-card {
@@ -220,7 +231,18 @@
                 break-inside:avoid;
             }
             body.label-layout-wrap .wrap-label-card { width:3.5in; }
-            body.label-layout-wrap-3x1 .wrap-label-card { width:3in; }
+            body.label-layout-wrap-3x1 .wrap-label-card {
+                width:3in;
+                height:1in;
+                margin:0;
+                border:0;
+                page-break-after:always;
+                break-after:page;
+            }
+            body.label-layout-wrap-3x1 .wrap-label-card:last-child {
+                page-break-after:auto;
+                break-after:auto;
+            }
             body.label-layout-wrap .wrap-price,
             body.label-layout-wrap-3x1 .wrap-price,
             body.label-layout-wrap .label-code,
@@ -269,13 +291,44 @@
             <span class="eyebrow">Inventory</span>
             <h1>Print Labels</h1>
             <p>{{ labels|length }} label{% if labels|length != 1 %}s{% endif %} ready to print. Wraparound labels show price to the customer and item details for employees on the back side.</p>
+            {% if direct_print_message %}
+            <div class="direct-print-message">{{ direct_print_message }}</div>
+            {% endif %}
             <div class="toolbar">
+                {% if direct_print_available %}
+                <form method="post" action="/inventory/labels/direct-print" class="direct-print-form">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <input type="hidden" name="layout" value="{{ layout }}">
+                    <input type="hidden" name="ids" value="{{ ids }}">
+                    <input type="hidden" name="status" value="{{ status }}">
+                    {% for field in selected_fields %}
+                    <input type="hidden" name="fields" value="{{ field }}">
+                    {% endfor %}
+                    {% set selected_printer = direct_print_printer_name|default('JADENS C10') %}
+                    {% set printer_options = direct_print_printers|default([selected_printer]) %}
+                    {% if not printer_options %}
+                    {% set printer_options = [selected_printer] %}
+                    {% endif %}
+                    <label class="printer-select">
+                        <span>Printer</span>
+                        <select name="printer_name">
+                            {% for printer in printer_options %}
+                            <option value="{{ printer }}" {% if printer == selected_printer %}selected{% endif %}>{{ printer }}</option>
+                            {% endfor %}
+                        </select>
+                    </label>
+                    <button type="submit" class="primary-button">Direct Print</button>
+                </form>
+                <button onclick="window.print()" class="secondary-button">Browser Print</button>
+                {% else %}
                 <button onclick="window.print()" class="primary-button">Print Labels</button>
+                {% endif %}
                 <a href="/inventory" class="button secondary-button">Back</a>
             </div>
             <form method="get" action="/inventory/labels" class="label-config">
                 {% if ids %}<input type="hidden" name="ids" value="{{ ids }}">{% endif %}
                 {% if status %}<input type="hidden" name="status" value="{{ status }}">{% endif %}
+                {% if direct_print_printer_name %}<input type="hidden" name="printer_name" value="{{ direct_print_printer_name }}">{% endif %}
                 <div class="config-block">
                     <div class="config-title">Layout</div>
                     <div class="layout-options">
@@ -373,7 +426,9 @@
     </div>
     {% endif %}
 </div>
-    {% include '_mobile_bottom_nav.html' %}
+    <div class="no-print">
+        {% include '_mobile_bottom_nav.html' %}
+    </div>
 {% include "_csrf_bootstrap.html" %}
 </body>
 </html>
