@@ -2928,8 +2928,19 @@ class TikTokRegressionTests(unittest.TestCase):
         now = datetime.now(timezone.utc)
         with Session(self.engine) as session:
             session.add(
+                TikTokAuth(
+                    tiktok_shop_id="main-shop",
+                    shop_cipher="main-cipher",
+                    seller_id="main-seller",
+                    shop_name="Degen Collectibles",
+                )
+            )
+            session.add(
                 TikTokOrder(
                     tiktok_order_id="fresh-public-status-order",
+                    shop_id="main-shop",
+                    shop_cipher="main-cipher",
+                    seller_id="main-seller",
                     order_number="#1002",
                     created_at=now - timedelta(minutes=4),
                     updated_at=now - timedelta(minutes=4),
@@ -2947,7 +2958,11 @@ class TikTokRegressionTests(unittest.TestCase):
                 streamer_module,
                 "_get_live_sessions_list_checked_at",
                 return_value=now,
-            ), patch.object(streamer_module, "_get_live_session_snapshot", return_value={}):
+            ), patch.object(streamer_module, "_get_live_session_snapshot", return_value={}), patch.object(
+                streamer_module.settings,
+                "tiktok_shop_id",
+                "main-shop",
+            ), patch.object(streamer_module.settings, "tiktok_shop_cipher", "main-cipher"):
                 payload = streamer_module._public_tiktok_live_status_payload(session)
 
         main = payload["channels"][0]

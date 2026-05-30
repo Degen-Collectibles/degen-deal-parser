@@ -362,6 +362,8 @@ def _apply_order_activity_fallback(
     stream_context = dict(stream_context or {})
     if not stream_context.get("creator_filter_enabled"):
         return stream_context
+    if stream_context.get("selected_creator") != DEFAULT_STREAM_CREATOR:
+        return stream_context
     if stream_context.get("is_live"):
         return stream_context
 
