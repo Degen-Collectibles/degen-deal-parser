@@ -74,8 +74,11 @@ DEFAULT_STREAM_CREATOR = "degencollectibles"
 CREATOR_ORDER_ATTRIBUTION_TIME_WINDOW = "time_window"
 CREATOR_ORDER_ATTRIBUTION_LIVE_PRODUCTS = "live_products"
 CREATOR_ORDER_ATTRIBUTION_NO_SESSION = "no_session"
+CREATOR_ORDER_ATTRIBUTION_RECENT_ORDERS = "recent_orders"
 STREAM_METRIC_SOURCE_TIKTOK_LIVE_SESSION = "tiktok_live_session"
 STREAM_METRIC_SOURCE_LOCAL_ORDER_ESTIMATE = "local_order_estimate"
+STREAM_METRIC_SOURCE_ORDER_ACTIVITY_FALLBACK = "order_activity_fallback"
+RECENT_ORDER_ACTIVITY_FALLBACK_MINUTES = 30
 _LIVE_PRODUCTS_CACHE_TTL_SECONDS = 10.0
 _live_products_cache: dict[str, Any] = {}
 _live_products_cache_lock = threading.Lock()
@@ -278,6 +281,111 @@ def _build_stream_context(
     }
 
 
+def _coerce_utc_datetime(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _pacific_today_start_utc(now: Optional[datetime] = None) -> datetime:
+    now_utc = _coerce_utc_datetime(now) or datetime.now(timezone.utc)
+    today_pacific = now_utc.astimezone(PACIFIC_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+    return today_pacific.astimezone(timezone.utc)
+
+
+def _session_end_datetime(session_data: Optional[dict[str, Any]]) -> Optional[datetime]:
+    if not session_data:
+        return None
+    try:
+        end_ts = int(session_data.get("end_time") or 0)
+    except (TypeError, ValueError):
+        end_ts = 0
+    if end_ts <= 0:
+        return None
+    return datetime.fromtimestamp(end_ts, tz=timezone.utc)
+
+
+def _latest_known_stream_end(stream_context: Optional[dict[str, Any]]) -> Optional[datetime]:
+    stream_context = stream_context or {}
+    candidates: list[datetime] = []
+    if end_dt := _session_end_datetime(stream_context.get("live_session")):
+        candidates.append(end_dt)
+    for session_data in stream_context.get("sessions") or []:
+        if end_dt := _session_end_datetime(session_data):
+            candidates.append(end_dt)
+    return max(candidates) if candidates else None
+
+
+def _recent_order_activity_fallback_start(
+    stream_context: Optional[dict[str, Any]],
+    now: Optional[datetime] = None,
+) -> datetime:
+    today_start = _pacific_today_start_utc(now)
+    latest_end = _latest_known_stream_end(stream_context)
+    if latest_end and latest_end > today_start:
+        return latest_end
+    return today_start
+
+
+def _has_fresh_creator_order_activity(
+    session: Optional[Session],
+    stream_context: Optional[dict[str, Any]],
+    fallback_start: datetime,
+    *,
+    now: Optional[datetime] = None,
+) -> bool:
+    if session is None:
+        return False
+    stream_context = stream_context or {}
+    selected_creator = stream_context.get("selected_creator") or DEFAULT_STREAM_CREATOR
+    account_scope = _stream_account_scope_for_context(session, stream_context)
+    if selected_creator != DEFAULT_STREAM_CREATOR and not _account_scope_has_identity(account_scope):
+        return False
+
+    now_utc = _coerce_utc_datetime(now) or datetime.now(timezone.utc)
+    recent_cutoff = now_utc - timedelta(minutes=RECENT_ORDER_ACTIVITY_FALLBACK_MINUTES)
+    activity_start = max(_coerce_utc_datetime(fallback_start) or recent_cutoff, recent_cutoff)
+    query = select(TikTokOrder).where(TikTokOrder.created_at >= activity_start)
+    query = _apply_tiktok_account_scope(query, account_scope)
+    rows = session.exec(query.order_by(TikTokOrder.created_at.desc()).limit(50)).all()
+    return any(_is_enriched_order(order) and tiktok_order_is_paid(order) for order in rows)
+
+
+def _apply_order_activity_fallback(
+    session: Optional[Session],
+    stream_context: Optional[dict[str, Any]],
+    *,
+    now: Optional[datetime] = None,
+) -> dict[str, Any]:
+    stream_context = dict(stream_context or {})
+    if not stream_context.get("creator_filter_enabled"):
+        return stream_context
+    if stream_context.get("is_live"):
+        return stream_context
+
+    fallback_start = _recent_order_activity_fallback_start(stream_context, now)
+    if not _has_fresh_creator_order_activity(session, stream_context, fallback_start, now=now):
+        return stream_context
+
+    stream_context.update(
+        {
+            "selected_stream_id": "",
+            "selected_stream_label": "Fresh TikTok order activity",
+            "start": fallback_start,
+            "end": None,
+            "source": STREAM_METRIC_SOURCE_ORDER_ACTIVITY_FALLBACK,
+            "live_session": {},
+            "is_live": True,
+            "creator_order_attribution": CREATOR_ORDER_ATTRIBUTION_RECENT_ORDERS,
+            "creator_order_overlap_handles": [],
+            "order_activity_fallback": True,
+        }
+    )
+    return stream_context
+
+
 def _isoformat_utc(value: Optional[datetime]) -> Optional[str]:
     if value is None:
         return None
@@ -296,16 +404,24 @@ def _timestamp_iso(session_data: dict[str, Any], key: str) -> Optional[str]:
     return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
 
 
-def _public_tiktok_live_status_payload() -> dict[str, Any]:
+def _public_tiktok_live_status_payload(session: Optional[Session] = None) -> dict[str, Any]:
     checked_at = _get_live_sessions_list_checked_at()
     checked_at_text = _isoformat_utc(checked_at)
     channels: list[dict[str, Any]] = []
 
     for choice in STREAM_CREATOR_CHOICES:
-        context = _build_stream_context(choice["id"])
+        context = _apply_order_activity_fallback(session, _build_stream_context(choice["id"]))
         live_session = context.get("live_session") or {}
+        fallback_active = bool(context.get("order_activity_fallback"))
         session_title = str(live_session.get("title") or "").strip() or None
-        is_live = bool(context.get("is_live")) and checked_at is not None
+        if fallback_active:
+            session_title = "Fresh TikTok order activity"
+        is_live = bool(context.get("is_live")) and (checked_at is not None or fallback_active)
+        status_source = (
+            "fresh_orders"
+            if fallback_active
+            else (STREAM_METRIC_SOURCE_TIKTOK_LIVE_SESSION if is_live else "none")
+        )
         channels.append(
             {
                 "id": choice["id"],
@@ -313,6 +429,7 @@ def _public_tiktok_live_status_payload() -> dict[str, Any]:
                 "handle": f"@{choice['handle']}",
                 "url": f"https://www.tiktok.com/@{choice['handle']}",
                 "isLive": is_live,
+                "statusSource": status_source,
                 "title": session_title,
                 "startedAt": _timestamp_iso(live_session, "start_time"),
                 "endedAt": _timestamp_iso(live_session, "end_time"),
@@ -336,9 +453,10 @@ def public_tiktok_live_status_options():
 
 
 @router.get("/public/tiktok/live-status")
-def public_tiktok_live_status():
+def public_tiktok_live_status(session: Optional[Session] = Depends(get_session)):
+    db_session = session if hasattr(session, "exec") else None
     return JSONResponse(
-        _public_tiktok_live_status_payload(),
+        _public_tiktok_live_status_payload(db_session),
         headers=PUBLIC_TIKTOK_LIVE_STATUS_HEADERS,
     )
 
@@ -511,6 +629,7 @@ def _creator_order_rows_are_precise(stream_context: Optional[dict[str, Any]]) ->
     return stream_context.get("creator_order_attribution") in {
         CREATOR_ORDER_ATTRIBUTION_TIME_WINDOW,
         CREATOR_ORDER_ATTRIBUTION_LIVE_PRODUCTS,
+        CREATOR_ORDER_ATTRIBUTION_RECENT_ORDERS,
     }
 
 
@@ -523,6 +642,8 @@ def _creator_order_attribution_message(stream_context: Optional[dict[str, Any]])
         return f"Filtering by TikTok live product attribution{suffix}."
     if attribution == CREATOR_ORDER_ATTRIBUTION_NO_SESSION:
         return "No live session was found for this creator."
+    if attribution == CREATOR_ORDER_ATTRIBUTION_RECENT_ORDERS:
+        return "TikTok live session API has not reported this stream yet; showing fresh TikTok orders since the last known stream ended."
     return ""
 
 
@@ -999,6 +1120,11 @@ def _live_room_id_for_stream(chat_info: dict, stream_context: Optional[dict[str,
 
 def _apply_tiktok_session_metrics(gmv_data: dict[str, Any], stream_context: Optional[dict[str, Any]]) -> dict[str, Any]:
     result = dict(gmv_data)
+    if (stream_context or {}).get("creator_order_attribution") == CREATOR_ORDER_ATTRIBUTION_RECENT_ORDERS:
+        result["stream_metric_source"] = STREAM_METRIC_SOURCE_ORDER_ACTIVITY_FALLBACK
+        result["stream_metric_label"] = "fresh order fallback"
+        result["stream_metric_note"] = "TikTok live session API has not reported this stream yet."
+        return result
     selected_creator = (stream_context or {}).get("selected_creator") or ""
     if selected_creator == DEFAULT_STREAM_CREATOR:
         return result
@@ -1550,7 +1676,10 @@ def tiktok_streamer_page(
     if denial := _require_live_stream(request, session):
         return denial
 
-    stream_context = _build_stream_context(creator, legacy_stream_id=stream)
+    stream_context = _apply_order_activity_fallback(
+        session,
+        _build_stream_context(creator, legacy_stream_id=stream),
+    )
     selected_creator = stream_context.get("selected_creator") or DEFAULT_STREAM_CREATOR
     selected_stream_id = stream_context.get("selected_stream_id") or ""
     current_streamer = get_current_streamer(session) or ""
@@ -1655,7 +1784,10 @@ def tiktok_streamer_poll(
 ):
     if denial := _require_live_stream(request, session):
         return denial
-    stream_context = _build_stream_context(creator, legacy_stream_id=stream)
+    stream_context = _apply_order_activity_fallback(
+        session,
+        _build_stream_context(creator, legacy_stream_id=stream),
+    )
     selected_creator = stream_context.get("selected_creator") or DEFAULT_STREAM_CREATOR
     selected_stream_id = stream_context.get("selected_stream_id") or ""
     created_at_floor = datetime.now(timezone.utc) - timedelta(hours=24)

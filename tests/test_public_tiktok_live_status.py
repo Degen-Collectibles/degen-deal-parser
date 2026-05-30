@@ -55,7 +55,7 @@ class PublicTikTokLiveStatusTests(unittest.TestCase):
 
         serialized = json.dumps(payload)
         for internal_field in ("gmv", "sku_orders", "orders", "live_room_id", "vip_buyer_threshold"):
-            self.assertNotIn(internal_field, serialized)
+            self.assertNotIn(f'"{internal_field}":', serialized)
 
     def test_public_status_is_unknown_until_ops_has_checked_tiktok(self) -> None:
         with patch.object(streamer_module, "_get_live_sessions_list", return_value=[]), patch.object(

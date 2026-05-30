@@ -2832,6 +2832,133 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(payload["stream_metric_label"], "TikTok live attribution")
         self.assertIsNone(payload["stream_metric_note"])
 
+    def test_tiktok_streamer_poll_falls_back_to_fresh_orders_when_live_session_missing(self) -> None:
+        import app.routers.tiktok_streamer as streamer_module
+        from starlette.requests import Request as _Request
+
+        now_ts = int(time.time())
+        stale_session_end = now_ts - 1800
+        fresh_order_time = datetime.fromtimestamp(now_ts - 300, tz=timezone.utc)
+        old_order_time = datetime.fromtimestamp(now_ts - 2700, tz=timezone.utc)
+        with Session(self.engine) as session:
+            session.add(
+                TikTokOrder(
+                    tiktok_order_id="old-session-order",
+                    order_number="#0901",
+                    created_at=old_order_time,
+                    updated_at=old_order_time,
+                    financial_status="paid",
+                    subtotal_price=10.0,
+                    total_price=10.0,
+                    line_items_json=json.dumps([
+                        {"product_id": "old-pack", "product_name": "Old Pack", "quantity": 1, "sale_price": 10.0}
+                    ]),
+                )
+            )
+            session.add(
+                TikTokOrder(
+                    tiktok_order_id="fresh-fallback-order",
+                    order_number="#1001",
+                    created_at=fresh_order_time,
+                    updated_at=fresh_order_time,
+                    financial_status="paid",
+                    subtotal_price=27.0,
+                    total_price=28.56,
+                    line_items_json=json.dumps([
+                        {
+                            "product_id": "surprise-set",
+                            "product_name": "Surprise Set",
+                            "quantity": 1,
+                            "sale_price": 27.0,
+                        }
+                    ]),
+                )
+            )
+            session.commit()
+
+            stream_sessions = [
+                {
+                    "id": "stale-main-live",
+                    "title": "DEGEN FUN WITH SUNA",
+                    "username": "degencollectibles",
+                    "start_time": now_ts - 7200,
+                    "end_time": stale_session_end,
+                    "gmv": 999.0,
+                    "sku_orders": 99,
+                    "items_sold": 99,
+                },
+            ]
+            req = _Request({
+                "type": "http",
+                "method": "GET",
+                "path": "/tiktok/streamer/poll",
+                "headers": [],
+                "scheme": "http",
+                "server": ("testserver", 80),
+            })
+            streamer_module._gmv_cache.clear()
+            with patch("app.routers.tiktok_streamer._require_live_stream", return_value=None), patch.object(
+                streamer_module,
+                "_get_live_sessions_list",
+                return_value=stream_sessions,
+            ):
+                payload = streamer_module.tiktok_streamer_poll(
+                    request=req,
+                    creator="degencollectibles",
+                    stream=None,
+                    since=None,
+                    session=session,
+                )
+
+        self.assertEqual([row["tiktok_order_id"] for row in payload["orders"]], ["fresh-fallback-order"])
+        self.assertEqual(payload["total_count"], 1)
+        self.assertEqual(payload["stream_gmv"], 27.0)
+        self.assertEqual(payload["stream_orders"], 1)
+        self.assertEqual(payload["stream_items"], 1)
+        self.assertTrue(payload["is_live"])
+        self.assertEqual(payload["stream_range_source"], "order_activity_fallback")
+        self.assertEqual(payload["creator_order_attribution"], "recent_orders")
+        self.assertIn("fresh TikTok orders", payload["creator_order_attribution_message"])
+        self.assertIn("fresh order fallback", payload["stream_metric_label"])
+        self.assertIn("TikTok live session API", payload["stream_metric_note"])
+
+    def test_public_tiktok_live_status_uses_fresh_orders_as_activity_fallback(self) -> None:
+        import app.routers.tiktok_streamer as streamer_module
+
+        now = datetime.now(timezone.utc)
+        with Session(self.engine) as session:
+            session.add(
+                TikTokOrder(
+                    tiktok_order_id="fresh-public-status-order",
+                    order_number="#1002",
+                    created_at=now - timedelta(minutes=4),
+                    updated_at=now - timedelta(minutes=4),
+                    financial_status="paid",
+                    subtotal_price=21.0,
+                    total_price=22.0,
+                    line_items_json=json.dumps([
+                        {"product_id": "surprise-set", "product_name": "Surprise Set", "quantity": 1, "sale_price": 21.0}
+                    ]),
+                )
+            )
+            session.commit()
+
+            with patch.object(streamer_module, "_get_live_sessions_list", return_value=[]), patch.object(
+                streamer_module,
+                "_get_live_sessions_list_checked_at",
+                return_value=now,
+            ), patch.object(streamer_module, "_get_live_session_snapshot", return_value={}):
+                payload = streamer_module._public_tiktok_live_status_payload(session)
+
+        main = payload["channels"][0]
+        self.assertTrue(main["isLive"])
+        self.assertEqual(main["statusSource"], "fresh_orders")
+        self.assertEqual(main["title"], "Fresh TikTok order activity")
+        self.assertFalse(payload["channels"][1]["isLive"])
+        serialized = json.dumps(payload)
+        for internal_field in ("gmv", "sku_orders", "orders", "live_room_id", "vip_buyer_threshold"):
+            self.assertNotIn(f'"{internal_field}":', serialized)
+
     def test_tiktok_streamer_poll_hides_order_feed_when_creator_sessions_overlap(self) -> None:
         import app.routers.tiktok_streamer as streamer_module
         from starlette.requests import Request as _Request
