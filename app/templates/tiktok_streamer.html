@@ -461,6 +461,12 @@
         .surprise-set-card {
             min-width: 0; border: 1px solid rgba(255,255,255,.08);
             border-radius: 8px; padding: 10px; background: rgba(0,0,0,.16);
+            color: inherit; text-align: left; cursor: pointer;
+        }
+        button.surprise-set-card { width: 100%; font: inherit; }
+        .surprise-set-card:hover,
+        .surprise-set-card.is-open {
+            border-color: rgba(37,244,238,.28); background: rgba(37,244,238,.045);
         }
         .surprise-set-top {
             display: flex; align-items: flex-start; justify-content: space-between;
@@ -486,6 +492,48 @@
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
         }
         .surprise-set-chip strong { color: var(--tiktok-cyan); font-weight: 800; }
+        .surprise-set-value-grid {
+            display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 6px; margin-top: 9px;
+        }
+        .surprise-set-value-cell {
+            min-width: 0; border: 1px solid rgba(255,255,255,.08);
+            border-radius: 6px; padding: 6px; background: rgba(0,0,0,.14);
+        }
+        .surprise-set-value-label {
+            font-size: 9px; font-weight: 800; color: var(--text-muted);
+            text-transform: uppercase;
+        }
+        .surprise-set-value-number {
+            margin-top: 2px; font-size: 12px; font-weight: 900; color: var(--text);
+        }
+        .surprise-set-value-number.is-positive { color: var(--green); }
+        .surprise-set-value-number.is-negative { color: #f87171; }
+        .surprise-set-breakdown {
+            display: none; margin-top: 10px; padding-top: 9px;
+            border-top: 1px solid rgba(255,255,255,.08);
+        }
+        .surprise-set-card.is-open .surprise-set-breakdown { display: block; }
+        .surprise-set-section-title {
+            margin: 8px 0 5px; font-size: 10px; font-weight: 900;
+            color: var(--text-secondary); text-transform: uppercase;
+        }
+        .surprise-set-row {
+            display: grid; grid-template-columns: minmax(0, 1fr) auto;
+            gap: 8px; padding: 5px 0; border-top: 1px solid rgba(255,255,255,.05);
+        }
+        .surprise-set-row:first-of-type { border-top: 0; }
+        .surprise-set-row-title {
+            min-width: 0; font-size: 11px; font-weight: 800; color: var(--text);
+            overflow-wrap: anywhere;
+        }
+        .surprise-set-row-meta {
+            margin-top: 2px; font-size: 10px; color: var(--text-muted);
+        }
+        .surprise-set-row-value {
+            font-size: 11px; font-weight: 900; color: var(--green); white-space: nowrap;
+        }
+        .surprise-set-row-missing .surprise-set-row-value { color: #fbbf24; }
 
         /* ---- High-Value Toast ---- */
         .toast-high-value {
@@ -2001,6 +2049,7 @@
         var _surpriseSets = [];
         try { _surpriseSets = JSON.parse({{ surprise_sets_json|tojson }}); } catch (e) {}
         var _surpriseSetsScopeLabel = {{ surprise_sets_scope_label|tojson }};
+        var _openSurpriseSetIds = new Set();
         var _knownIds = new Set(_orders.map(function(o) { return o.tiktok_order_id; }));
         var _muted = false;
         var _audioCtx = null;
@@ -2116,6 +2165,77 @@
             return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
         }
 
+        function exactSignedMoney(value) {
+            var n = Number(value || 0);
+            if (n < 0) return '-' + exactMoney(Math.abs(n));
+            if (n > 0) return '+' + exactMoney(n);
+            return exactMoney(0);
+        }
+
+        function surpriseSetId(row, index) {
+            return String(row.id || ((row.start_at || 'set') + '-' + index));
+        }
+
+        function valuationCell(label, value, className) {
+            return '<div class="surprise-set-value-cell">'
+                + '<div class="surprise-set-value-label">' + esc(label) + '</div>'
+                + '<div class="surprise-set-value-number ' + (className || '') + '">' + esc(value) + '</div>'
+                + '</div>';
+        }
+
+        function renderSurpriseSetBreakdownRows(rows, kind) {
+            rows = Array.isArray(rows) ? rows : [];
+            if (!rows.length) {
+                return '<div class="surprise-set-row">'
+                    + '<div><div class="surprise-set-row-title">No ' + esc(kind) + ' detected</div></div>'
+                    + '<div class="surprise-set-row-value">' + exactMoney(0) + '</div>'
+                    + '</div>';
+            }
+            return rows.map(function(item) {
+                var unit = Number(item.unit_value || 0);
+                var qty = Number(item.qty || 0);
+                var status = String(item.status || '').replace(/_/g, ' ');
+                var meta = [];
+                if (qty) meta.push(qty + 'x');
+                if (unit > 0) meta.push(exactMoney(unit) + ' each');
+                if (item.rule === 'bank_floor') meta.push('bank floor');
+                if (item.rule === 'pack_floor') meta.push('pack floor');
+                if (item.source && item.status === 'priced') meta.push(String(item.source));
+                if (item.confidence && item.status === 'priced') meta.push(String(item.confidence) + ' confidence');
+                if (item.matched_title && String(item.matched_title).toLowerCase() !== String(item.title || '').toLowerCase()) {
+                    meta.push('match: ' + item.matched_title);
+                }
+                if (status && status !== 'priced' && status !== 'assumed') meta.push(status);
+                if (!unit && kind === 'chases') meta.push('needs market price');
+                var missingClass = unit > 0 || kind !== 'chases' ? '' : ' surprise-set-row-missing';
+                return '<div class="surprise-set-row' + missingClass + '">'
+                    + '<div>'
+                    + '<div class="surprise-set-row-title">' + esc(item.title || 'Unknown') + '</div>'
+                    + '<div class="surprise-set-row-meta">' + esc(meta.join(' | ')) + '</div>'
+                    + '</div>'
+                    + '<div class="surprise-set-row-value">' + (unit > 0 ? exactMoney(item.total_value || 0) : 'Needs price') + '</div>'
+                    + '</div>';
+            }).join('');
+        }
+
+        function renderSurpriseSetBreakdown(row) {
+            var valuation = row.valuation || {};
+            var floors = valuation.floors || [];
+            var chases = valuation.chases || [];
+            var confidence = valuation.confidence || '';
+            var missing = Number(valuation.unpriced_chase_count || 0);
+            var noteBits = [];
+            if (confidence) noteBits.push('Value confidence: ' + confidence);
+            if (missing) noteBits.push(missing + ' chase' + (missing === 1 ? '' : 's') + ' need price review');
+            return '<div class="surprise-set-breakdown">'
+                + (noteBits.length ? '<div class="surprise-set-row-meta">' + esc(noteBits.join(' | ')) + '</div>' : '')
+                + '<div class="surprise-set-section-title">Floors</div>'
+                + renderSurpriseSetBreakdownRows(floors, 'floors')
+                + '<div class="surprise-set-section-title">Chases</div>'
+                + renderSurpriseSetBreakdownRows(chases, 'chases')
+                + '</div>';
+        }
+
         function renderSurpriseSets(sets, scopeLabel) {
             if (!surpriseSetsWrap || !surpriseSetList) return;
             _surpriseSets = Array.isArray(sets) ? sets : [];
@@ -2131,7 +2251,9 @@
             surpriseSetsWrap.style.display = 'block';
             if (surpriseSetsScope) surpriseSetsScope.textContent = _surpriseSetsScopeLabel;
             if (surpriseSetsTotal) surpriseSetsTotal.textContent = exactMoney(total);
-            surpriseSetList.innerHTML = _surpriseSets.map(function(row) {
+            surpriseSetList.innerHTML = _surpriseSets.map(function(row, index) {
+                var cardId = surpriseSetId(row, index);
+                var isOpen = _openSurpriseSetIds.has(cardId);
                 var itemText = (row.auction_orders || 0) + ' orders · ' + (row.item_count || 0) + ' items';
                 var timeText = (row.date_label ? row.date_label + ' · ' : '')
                     + (row.start_label || '--') + ' - ' + (row.end_label || '--');
@@ -2141,15 +2263,44 @@
                         + ' <strong>' + exactMoney(item.gmv || 0) + '</strong>'
                         + '</span>';
                 }).join('');
-                return '<div class="surprise-set-card">'
+                var valuation = row.valuation || {};
+                var gameValue = Number(row.game_value != null ? row.game_value : valuation.game_value || 0);
+                var spread = Number(row.estimated_spread || 0);
+                var spreadClass = spread >= 0 ? 'is-positive' : 'is-negative';
+                var values = '<div class="surprise-set-value-grid">'
+                    + valuationCell('GMV', exactMoney(row.gmv || 0), 'is-positive')
+                    + valuationCell('Game value', exactMoney(gameValue), '')
+                    + valuationCell('Spread', exactSignedMoney(spread), spreadClass)
+                    + '</div>';
+                return '<button type="button" class="surprise-set-card' + (isOpen ? ' is-open' : '') + '"'
+                    + ' data-set-id="' + escAttr(cardId) + '"'
+                    + ' aria-expanded="' + (isOpen ? 'true' : 'false') + '"'
+                    + ' aria-label="Show breakdown for ' + escAttr(row.name || 'Surprise Set') + '">'
                     + '<div class="surprise-set-top">'
                     + '<div class="surprise-set-name">' + esc(row.name || 'Surprise Set') + '</div>'
                     + '<div class="surprise-set-gmv">' + exactMoney(row.gmv || 0) + '</div>'
                     + '</div>'
                     + '<div class="surprise-set-meta">' + esc(timeText) + '<br>' + esc(itemText) + '</div>'
                     + (chips ? '<div class="surprise-set-items">' + chips + '</div>' : '')
-                    + '</div>';
+                    + values
+                    + renderSurpriseSetBreakdown(row)
+                    + '</button>';
             }).join('');
+        }
+
+        if (surpriseSetList) {
+            surpriseSetList.addEventListener('click', function(event) {
+                var card = event.target.closest('.surprise-set-card');
+                if (!card || !surpriseSetList.contains(card)) return;
+                var id = card.getAttribute('data-set-id') || '';
+                var isOpen = !card.classList.contains('is-open');
+                card.classList.toggle('is-open', isOpen);
+                card.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+                if (id) {
+                    if (isOpen) _openSurpriseSetIds.add(id);
+                    else _openSurpriseSetIds.delete(id);
+                }
+            });
         }
 
         /* ---- Top Sellers render + scroll ---- */

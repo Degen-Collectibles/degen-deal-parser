@@ -6,12 +6,16 @@ Extracted from app/main.py -- all routes under /tiktok/streamer/.
 from __future__ import annotations
 
 import asyncio
+import difflib
+import hashlib
 import json
+import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
+import httpx
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import and_, func, or_
@@ -38,7 +42,14 @@ from ..shared import (  # noqa: F401 - explicit imports for underscore-prefixed 
     _stream_range_source,
 )
 from ..db import get_session, managed_session
-from ..models import TikTokAuth, TikTokOrder
+from ..models import (
+    ITEM_TYPE_SEALED,
+    ITEM_TYPE_SINGLE,
+    ITEM_TYPE_SLAB,
+    InventoryItem,
+    TikTokAuth,
+    TikTokOrder,
+)
 from ..reporting import (
     TIKTOK_PAID_STATUSES,
     classify_tiktok_reporting_status,
@@ -89,6 +100,13 @@ SURPRISE_SET_AUCTION_SKU_TYPE = "UNKNOWN"
 SURPRISE_SET_GAP_MINUTES = 15
 SURPRISE_SET_DOMINANT_TITLE_SHARE = 0.60
 SURPRISE_SET_TOP_ITEMS_LIMIT = 5
+SURPRISE_SET_BANK_UNIT_VALUE = 0.30
+SURPRISE_SET_PACK_FLOOR_UNIT_VALUE = 1.50
+SURPRISE_SET_PACK_FLOOR_MIN_QTY = 5
+SURPRISE_SET_PRICE_CACHE_TTL_SECONDS = 6 * 60 * 60
+SURPRISE_SET_CHASE_NAME_LIMIT = 2
+_surprise_set_price_cache: dict[str, dict[str, Any]] = {}
+_surprise_set_price_cache_lock = threading.Lock()
 PUBLIC_TIKTOK_LIVE_STATUS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, OPTIONS",
@@ -878,6 +896,311 @@ def _surprise_set_date_label(value: datetime) -> str:
     return local_value.strftime("%b %d").replace(" 0", " ")
 
 
+def _surprise_set_value_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _surprise_set_display_norm(value: Any) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", str(value or "").lower())).strip()
+
+
+def _surprise_set_is_bank_floor(title: str) -> bool:
+    key = _surprise_set_value_key(title)
+    if "bangex" in key:
+        return True
+    if len(key) < 4 or len(key) > 16:
+        return False
+    return difflib.SequenceMatcher(None, key, "bangex").ratio() >= 0.75
+
+
+def _surprise_set_is_pack_floor(title: str, qty: int) -> bool:
+    if qty < SURPRISE_SET_PACK_FLOOR_MIN_QTY:
+        return False
+    norm = _surprise_set_display_norm(title)
+    return any(token in norm for token in ("booster pack", "sleeved pack", "sleeve pack", " pack"))
+
+
+def _canonical_surprise_set_price_query(title: str) -> str:
+    query = _surprise_set_display_norm(title)
+    replacements = {
+        "bagn ex": "bang ex",
+        "choas": "chaos",
+        "cahos": "chaos",
+        "synphonia": "symphonia",
+        "masquederade": "masquerade",
+        "reighn": "reign",
+        "heros": "heroes",
+        "lances": "lance's",
+        "gyerados": "gyarados",
+        "gyrados": "gyarados",
+        "latios ex box": "latios ex collection box",
+        "latias ex box": "latias ex collection box",
+    }
+    for wrong, right in replacements.items():
+        query = re.sub(rf"\b{re.escape(wrong)}\b", right, query)
+    query = re.sub(r"\bspc\b", "surprise collection", query)
+    return " ".join(query.split())
+
+
+def _surprise_set_pricing_item_type(title: str) -> str:
+    norm = _surprise_set_display_norm(title)
+    if re.search(r"\b(psa|bgs|cgc|sgc|beckett)\s*\d", norm):
+        return ITEM_TYPE_SLAB
+    if any(
+        token in norm
+        for token in (
+            "booster",
+            "bundle",
+            "box",
+            "collection",
+            "etb",
+            "elite trainer",
+            "sleeved",
+            "tin",
+            "upc",
+        )
+    ):
+        return ITEM_TYPE_SEALED
+    return ITEM_TYPE_SINGLE
+
+
+def _surprise_set_price_cache_key(title: str) -> str:
+    query = _canonical_surprise_set_price_query(title)
+    item_type = _surprise_set_pricing_item_type(title)
+    return f"{item_type}:{query}"
+
+
+def _surprise_set_price_cache_get(cache_key: str) -> Optional[dict[str, Any]]:
+    with _surprise_set_price_cache_lock:
+        cached = _surprise_set_price_cache.get(cache_key)
+        if not cached:
+            return None
+        if time.monotonic() - float(cached.get("at") or 0) > SURPRISE_SET_PRICE_CACHE_TTL_SECONDS:
+            _surprise_set_price_cache.pop(cache_key, None)
+            return None
+        return dict(cached.get("data") or {})
+
+
+def _surprise_set_price_cache_set(cache_key: str, data: dict[str, Any]) -> None:
+    with _surprise_set_price_cache_lock:
+        _surprise_set_price_cache[cache_key] = {"at": time.monotonic(), "data": dict(data)}
+
+
+def _surprise_set_price_result_from_response(title: str, response: Optional[dict[str, Any]]) -> dict[str, Any]:
+    query = _canonical_surprise_set_price_query(title)
+    item_type = _surprise_set_pricing_item_type(title)
+    if not response:
+        return {
+            "title": title,
+            "query": query,
+            "item_type": item_type,
+            "status": "missing",
+            "market_price": None,
+            "matched_title": "",
+            "source": "tcgtracking",
+            "confidence": "missing",
+        }
+
+    raw = response.get("raw") or {}
+    match = raw.get("match") if isinstance(raw.get("match"), dict) else {}
+    product = raw.get("product") if isinstance(raw.get("product"), dict) else {}
+    matched_title = (
+        str(match.get("name") or match.get("clean_name") or "").strip()
+        or str(product.get("clean_name") or product.get("name") or "").strip()
+        or str(response.get("matched_title") or "").strip()
+    )
+    price = response.get("market_price")
+    if price is None:
+        price = response.get("low_price")
+    market_price = _safe_metric_float(price, 0.0)
+    query_norm = _surprise_set_display_norm(query)
+    matched_norm = _surprise_set_display_norm(matched_title)
+    match_ratio = difflib.SequenceMatcher(None, query_norm, matched_norm).ratio() if matched_norm else 0.0
+    if market_price <= 0:
+        status = "missing"
+        confidence = "missing"
+    elif match_ratio >= 0.82:
+        status = "priced"
+        confidence = "high"
+    elif match_ratio >= 0.62:
+        status = "priced"
+        confidence = "medium"
+    else:
+        status = "priced"
+        confidence = "low"
+    return {
+        "title": title,
+        "query": query,
+        "item_type": item_type,
+        "status": status,
+        "market_price": round(market_price, 2) if market_price > 0 else None,
+        "matched_title": matched_title,
+        "source": str(response.get("source") or "tcgtracking"),
+        "confidence": confidence,
+    }
+
+
+async def _fetch_surprise_set_chase_price(title: str) -> dict[str, Any]:
+    query = _canonical_surprise_set_price_query(title)
+    item_type = _surprise_set_pricing_item_type(title)
+    barcode_hash = hashlib.sha1(f"{item_type}:{query}".encode("utf-8")).hexdigest()[:10].upper()
+    item = InventoryItem(
+        barcode=f"SS-{barcode_hash}",
+        item_type=item_type,
+        game="Pokemon",
+        card_name=query,
+        condition="NM" if item_type == ITEM_TYPE_SINGLE else None,
+        quantity=1,
+    )
+    if item_type == ITEM_TYPE_SLAB:
+        company_match = re.search(r"\b(PSA|BGS|CGC|SGC|BECKETT)\b", title.upper())
+        if company_match:
+            item.grading_company = company_match.group(1)
+        if grade_match := re.search(r"\b(?:PSA|BGS|CGC|SGC|BECKETT)\s*(10|9\.5|9|8\.5|8)\b", title.upper()):
+            item.grade = grade_match.group(1)
+
+    try:
+        from ..inventory.pricing import fetch_price_for_item
+        async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
+            response = await fetch_price_for_item(item, client)
+    except Exception:
+        response = None
+    return _surprise_set_price_result_from_response(title, response)
+
+
+def _lookup_surprise_set_chase_prices(titles: list[str]) -> dict[str, dict[str, Any]]:
+    unique_titles = []
+    seen = set()
+    for title in titles:
+        clean = str(title or "").strip()
+        if not clean or clean.lower() in seen:
+            continue
+        unique_titles.append(clean)
+        seen.add(clean.lower())
+
+    out: dict[str, dict[str, Any]] = {}
+    missing: list[str] = []
+    for title in unique_titles:
+        cache_key = _surprise_set_price_cache_key(title)
+        cached = _surprise_set_price_cache_get(cache_key)
+        if cached is not None:
+            out[title] = cached
+        else:
+            missing.append(title)
+
+    if missing:
+        async def _run() -> list[dict[str, Any]]:
+            return await asyncio.gather(*[_fetch_surprise_set_chase_price(title) for title in missing])
+
+        try:
+            fetched = asyncio.run(_run())
+        except RuntimeError:
+            fetched = []
+        for title, result in zip(missing, fetched):
+            cache_key = _surprise_set_price_cache_key(title)
+            _surprise_set_price_cache_set(cache_key, result)
+            out[title] = result
+    for title in missing:
+        out.setdefault(title, _surprise_set_price_result_from_response(title, None))
+    return out
+
+
+def _build_surprise_set_valuation(
+    items: list[dict[str, Any]],
+    *,
+    price_lookup: Optional[Any] = None,
+) -> dict[str, Any]:
+    floors: list[dict[str, Any]] = []
+    chase_items: list[dict[str, Any]] = []
+    for item in items:
+        title = str(item.get("title") or "Unknown").strip() or "Unknown"
+        qty = int(item.get("qty") or 0)
+        if _surprise_set_is_bank_floor(title):
+            unit_value = SURPRISE_SET_BANK_UNIT_VALUE
+            floors.append({
+                "title": title,
+                "qty": qty,
+                "unit_value": unit_value,
+                "total_value": round(qty * unit_value, 2),
+                "rule": "bank_floor",
+                "status": "assumed",
+            })
+        elif _surprise_set_is_pack_floor(title, qty):
+            unit_value = SURPRISE_SET_PACK_FLOOR_UNIT_VALUE
+            floors.append({
+                "title": title,
+                "qty": qty,
+                "unit_value": unit_value,
+                "total_value": round(qty * unit_value, 2),
+                "rule": "pack_floor",
+                "status": "assumed",
+            })
+        else:
+            chase_items.append(item)
+
+    lookup = price_lookup or _lookup_surprise_set_chase_prices
+    price_map = lookup([str(item.get("title") or "") for item in chase_items]) if chase_items else {}
+    chases: list[dict[str, Any]] = []
+    for item in chase_items:
+        title = str(item.get("title") or "Unknown").strip() or "Unknown"
+        qty = int(item.get("qty") or 0)
+        price_row = dict(price_map.get(title) or _surprise_set_price_result_from_response(title, None))
+        unit_value = _safe_metric_float(price_row.get("market_price"), 0.0)
+        chases.append({
+            "title": title,
+            "qty": qty,
+            "unit_value": round(unit_value, 2) if unit_value > 0 else None,
+            "total_value": round(qty * unit_value, 2) if unit_value > 0 else 0.0,
+            "source": price_row.get("source") or "tcgtracking",
+            "matched_title": price_row.get("matched_title") or "",
+            "confidence": price_row.get("confidence") or "missing",
+            "status": price_row.get("status") or "missing",
+            "query": price_row.get("query") or _canonical_surprise_set_price_query(title),
+        })
+
+    floor_value = round(sum(float(row.get("total_value") or 0.0) for row in floors), 2)
+    chase_value = round(sum(float(row.get("total_value") or 0.0) for row in chases), 2)
+    missing_chases = [row for row in chases if row.get("status") != "priced" or not row.get("unit_value")]
+    low_confidence = [row for row in chases if row.get("confidence") in {"low", "missing"}]
+    confidence = "high"
+    if missing_chases:
+        confidence = "partial"
+    elif low_confidence:
+        confidence = "review"
+    return {
+        "game_value": round(floor_value + chase_value, 2),
+        "floor_value": floor_value,
+        "chase_value": chase_value,
+        "floors": sorted(floors, key=lambda row: (float(row.get("total_value") or 0), int(row.get("qty") or 0)), reverse=True),
+        "chases": sorted(chases, key=lambda row: (float(row.get("total_value") or 0), float(row.get("unit_value") or 0)), reverse=True),
+        "unpriced_chase_count": len(missing_chases),
+        "confidence": confidence,
+        "assumptions": {
+            "bank_unit_value": SURPRISE_SET_BANK_UNIT_VALUE,
+            "pack_floor_unit_value": SURPRISE_SET_PACK_FLOOR_UNIT_VALUE,
+        },
+    }
+
+
+def _apply_surprise_set_chase_name(summary: dict[str, Any]) -> None:
+    valuation = summary.get("valuation") or {}
+    chases = [row for row in (valuation.get("chases") or []) if row.get("title")]
+    if not chases:
+        return
+    priced = [row for row in chases if row.get("status") == "priced" and row.get("unit_value")]
+    source_rows = priced or chases
+    source_rows = sorted(
+        source_rows,
+        key=lambda row: (float(row.get("total_value") or 0.0), float(row.get("unit_value") or 0.0)),
+        reverse=True,
+    )
+    titles = [str(row.get("title") or "").strip() for row in source_rows[:SURPRISE_SET_CHASE_NAME_LIMIT]]
+    titles = [title for title in titles if title]
+    if titles:
+        summary["name"] = " / ".join(titles)
+        summary["name_source"] = "highest_value_chases" if priced else "unpriced_chases"
+
+
 def _auction_events_for_order(order: TikTokOrder) -> list[dict[str, Any]]:
     if not tiktok_order_is_paid(order):
         return []
@@ -907,7 +1230,13 @@ def _auction_events_for_order(order: TikTokOrder) -> list[dict[str, Any]]:
     return events
 
 
-def _summarize_surprise_set_events(events: list[dict[str, Any]], index: int) -> dict[str, Any]:
+def _summarize_surprise_set_events(
+    events: list[dict[str, Any]],
+    index: int,
+    *,
+    include_valuation: bool = False,
+    price_lookup: Optional[Any] = None,
+) -> dict[str, Any]:
     start_at = events[0]["created_at"]
     end_at = events[-1]["created_at"]
     total_gmv = round(sum(float(event.get("gmv") or 0.0) for event in events), 2)
@@ -927,9 +1256,9 @@ def _summarize_surprise_set_events(events: list[dict[str, Any]], index: int) -> 
         if event.get("order_key"):
             row["orders"].add(str(event["order_key"]))
 
-    top_items: list[dict[str, Any]] = []
+    all_items: list[dict[str, Any]] = []
     for row in sorted(by_title.values(), key=lambda item: (float(item["gmv"]), int(item["qty"])), reverse=True):
-        top_items.append(
+        all_items.append(
             {
                 "title": row["title"],
                 "gmv": round(float(row["gmv"]), 2),
@@ -937,7 +1266,7 @@ def _summarize_surprise_set_events(events: list[dict[str, Any]], index: int) -> 
                 "orders": len(row["orders"]),
             }
         )
-    top_items = top_items[:SURPRISE_SET_TOP_ITEMS_LIMIT]
+    top_items = all_items[:SURPRISE_SET_TOP_ITEMS_LIMIT]
 
     if not top_items:
         name = f"Surprise Set {index}"
@@ -949,7 +1278,7 @@ def _summarize_surprise_set_events(events: list[dict[str, Any]], index: int) -> 
         name = "Mixed: " + " / ".join(str(item["title"]) for item in top_items[:3])
         name_source = "mixed_auction_titles"
 
-    return {
+    summary = {
         "id": f"{int(start_at.timestamp())}-{index}",
         "name": name,
         "name_source": name_source,
@@ -964,12 +1293,21 @@ def _summarize_surprise_set_events(events: list[dict[str, Any]], index: int) -> 
         "date_label": _surprise_set_date_label(start_at),
         "top_items": top_items,
     }
+    if include_valuation:
+        valuation = _build_surprise_set_valuation(all_items, price_lookup=price_lookup)
+        summary["valuation"] = valuation
+        summary["game_value"] = valuation["game_value"]
+        summary["estimated_spread"] = round(total_gmv - float(valuation["game_value"] or 0.0), 2)
+        _apply_surprise_set_chase_name(summary)
+    return summary
 
 
 def _build_surprise_set_summaries(
     orders: list[TikTokOrder],
     *,
     gap_minutes: int = SURPRISE_SET_GAP_MINUTES,
+    include_valuation: bool = False,
+    price_lookup: Optional[Any] = None,
 ) -> list[dict[str, Any]]:
     gap = timedelta(minutes=max(int(gap_minutes or SURPRISE_SET_GAP_MINUTES), 1))
     events: list[dict[str, Any]] = []
@@ -991,7 +1329,12 @@ def _build_surprise_set_summaries(
         grouped.append(current)
 
     return [
-        _summarize_surprise_set_events(group_events, idx)
+        _summarize_surprise_set_events(
+            group_events,
+            idx,
+            include_valuation=include_valuation,
+            price_lookup=price_lookup,
+        )
         for idx, group_events in enumerate(grouped, start=1)
     ]
 
@@ -1854,7 +2197,7 @@ def _streamer_session_gmv_uncached(session: Session, stream_context: Optional[di
         surprise_set_orders = stream_orders_rows
         surprise_sets_scope_label = "Selected stream" if stream_context.get("creator_filter_enabled") else "Stream window"
 
-    surprise_sets = _build_surprise_set_summaries(surprise_set_orders)
+    surprise_sets = _build_surprise_set_summaries(surprise_set_orders, include_valuation=True)
     result["surprise_sets"] = surprise_sets
     result["surprise_sets_total_gmv"] = round(sum(float(row.get("gmv") or 0.0) for row in surprise_sets), 2)
     result["surprise_sets_scope_label"] = surprise_sets_scope_label

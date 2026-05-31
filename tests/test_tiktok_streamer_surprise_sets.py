@@ -146,6 +146,94 @@ class SurpriseSetGmvTests(unittest.TestCase):
         self.assertEqual(summaries[0]["name"], "Mixed: Gem 5 Booster / Nihil Zero / Gem 4")
         self.assertEqual(summaries[0]["name_source"], "mixed_auction_titles")
 
+    def test_values_floors_and_renames_set_to_highest_value_chases(self) -> None:
+        start = datetime(2026, 5, 31, 12, 0, tzinfo=timezone.utc)
+        orders = [
+            _order(
+                "bank-floor",
+                start,
+                [{"product_name": "BAGN EX !!!!", "sku_type": "UNKNOWN", "sale_price": 1, "quantity": 20}],
+                subtotal_price=20,
+            ),
+            _order(
+                "pack-floor",
+                start + timedelta(minutes=1),
+                [{"product_name": "GEM 5 BOOSTER PACK", "sku_type": "UNKNOWN", "sale_price": 2, "quantity": 8}],
+                subtotal_price=16,
+            ),
+            _order(
+                "chase-1",
+                start + timedelta(minutes=2),
+                [{"product_name": "Charizard ex PSA 9 ENG", "sku_type": "UNKNOWN", "sale_price": 12, "quantity": 1}],
+                subtotal_price=12,
+            ),
+            _order(
+                "chase-2",
+                start + timedelta(minutes=3),
+                [{"product_name": "Venusaur BGS 10", "sku_type": "UNKNOWN", "sale_price": 10, "quantity": 1}],
+                subtotal_price=10,
+            ),
+        ]
+
+        def fake_price_lookup(titles: list[str]) -> dict[str, dict]:
+            return {
+                "Charizard ex PSA 9 ENG": {
+                    "status": "priced",
+                    "market_price": 40.0,
+                    "matched_title": "Charizard ex",
+                    "source": "tcgtracking",
+                    "confidence": "medium",
+                    "query": "charizard ex psa 9 eng",
+                },
+                "Venusaur BGS 10": {
+                    "status": "priced",
+                    "market_price": 120.0,
+                    "matched_title": "Venusaur",
+                    "source": "tcgtracking",
+                    "confidence": "medium",
+                    "query": "venusaur bgs 10",
+                },
+            }
+
+        summaries = streamer_module._build_surprise_set_summaries(
+            orders,
+            include_valuation=True,
+            price_lookup=fake_price_lookup,
+        )
+
+        valuation = summaries[0]["valuation"]
+        self.assertEqual(summaries[0]["name"], "Venusaur BGS 10 / Charizard ex PSA 9 ENG")
+        self.assertEqual(summaries[0]["name_source"], "highest_value_chases")
+        self.assertEqual(valuation["floor_value"], 18.00)
+        self.assertEqual(valuation["chase_value"], 160.00)
+        self.assertEqual(valuation["game_value"], 178.00)
+        self.assertEqual(summaries[0]["estimated_spread"], -120.00)
+        self.assertEqual([row["rule"] for row in valuation["floors"]], ["pack_floor", "bank_floor"])
+        self.assertEqual([row["title"] for row in valuation["chases"]], ["Venusaur BGS 10", "Charizard ex PSA 9 ENG"])
+
+    def test_missing_chase_prices_are_flagged_for_review(self) -> None:
+        start = datetime(2026, 5, 31, 13, 0, tzinfo=timezone.utc)
+        orders = [
+            _order(
+                "missing-chase",
+                start,
+                [{"product_name": "Mystery Typo Chase", "sku_type": "UNKNOWN", "sale_price": 7, "quantity": 1}],
+                subtotal_price=7,
+            ),
+        ]
+
+        summaries = streamer_module._build_surprise_set_summaries(
+            orders,
+            include_valuation=True,
+            price_lookup=lambda titles: {},
+        )
+
+        valuation = summaries[0]["valuation"]
+        self.assertEqual(valuation["game_value"], 0.0)
+        self.assertEqual(valuation["unpriced_chase_count"], 1)
+        self.assertEqual(valuation["confidence"], "partial")
+        self.assertEqual(valuation["chases"][0]["status"], "missing")
+
 
 class StreamerFreshOrderFallbackTests(unittest.TestCase):
     def setUp(self) -> None:
