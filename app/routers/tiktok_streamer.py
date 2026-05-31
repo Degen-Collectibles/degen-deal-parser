@@ -1120,88 +1120,135 @@ def _manual_surprise_set_price_result(title: str, manual_prices: dict[str, dict[
     }
 
 
-def _build_surprise_set_price_editor_rows(
+def _surprise_set_price_editor_chase_row(
+    chase: dict[str, Any],
+    manual_prices: dict[str, dict[str, Any]],
+    *,
+    seen_in_current_sets: bool = True,
+) -> Optional[dict[str, Any]]:
+    title = str(chase.get("title") or "").strip()
+    if not title:
+        return None
+    key = str(chase.get("price_key") or _surprise_set_manual_price_key(title))
+    manual = manual_prices.get(key)
+    qty = _safe_metric_int(chase.get("qty"), 0)
+    unit_value = _safe_metric_float(
+        (manual or {}).get("unit_value") if manual else chase.get("unit_value"),
+        0.0,
+    )
+    return {
+        "key": key,
+        "title": title,
+        "query": (manual or {}).get("query") or chase.get("query") or _canonical_surprise_set_price_query(title),
+        "item_type": _surprise_set_pricing_item_type(title),
+        "qty": qty,
+        "unit_value": round(unit_value, 2) if unit_value > 0 else None,
+        "total_value": round(qty * unit_value, 2) if unit_value > 0 and qty > 0 else 0.0,
+        "source": "manual" if manual else (chase.get("source") or "tcgtracking"),
+        "status": "priced" if manual else (chase.get("status") or "missing"),
+        "confidence": "manual" if manual else (chase.get("confidence") or "missing"),
+        "manual_override": bool(manual),
+        "seen_in_current_sets": seen_in_current_sets,
+        "updated_by": (manual or {}).get("updated_by") or chase.get("updated_by") or "",
+        "updated_at": (manual or {}).get("updated_at") or chase.get("updated_at") or "",
+    }
+
+
+def _build_surprise_set_price_editor_sets(
     surprise_sets: list[dict[str, Any]],
     manual_prices: Optional[dict[str, dict[str, Any]]] = None,
 ) -> list[dict[str, Any]]:
     manual_prices = _normalize_surprise_set_manual_prices(manual_prices or {})
-    rows: list[dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     seen_keys: set[str] = set()
 
-    for surprise_set in surprise_sets or []:
-        valuation = surprise_set.get("valuation") if isinstance(surprise_set, dict) else {}
-        chases = (valuation or {}).get("chases") if isinstance(valuation, dict) else []
-        for chase in chases or []:
+    for index, surprise_set in enumerate(surprise_sets or [], start=1):
+        if not isinstance(surprise_set, dict):
+            continue
+        valuation = dict(surprise_set.get("valuation") or {})
+        floors = [dict(row) for row in (valuation.get("floors") or []) if isinstance(row, dict)]
+        chases: list[dict[str, Any]] = []
+        for chase in valuation.get("chases") or []:
             if not isinstance(chase, dict):
                 continue
-            title = str(chase.get("title") or "").strip()
-            if not title:
+            row = _surprise_set_price_editor_chase_row(chase, manual_prices, seen_in_current_sets=True)
+            if row is None:
                 continue
-            key = str(chase.get("price_key") or _surprise_set_manual_price_key(title))
-            manual = manual_prices.get(key)
-            unit_value = _safe_metric_float(
-                (manual or {}).get("unit_value") if manual else chase.get("unit_value"),
-                0.0,
-            )
-            qty = _safe_metric_int(chase.get("qty"), 0)
-            rows.append(
-                {
-                    "key": key,
-                    "title": title,
-                    "query": (manual or {}).get("query") or chase.get("query") or _canonical_surprise_set_price_query(title),
-                    "item_type": _surprise_set_pricing_item_type(title),
-                    "qty": qty,
-                    "unit_value": round(unit_value, 2) if unit_value > 0 else None,
-                    "total_value": round(qty * unit_value, 2) if unit_value > 0 and qty > 0 else 0.0,
-                    "source": "manual" if manual else (chase.get("source") or "tcgtracking"),
-                    "status": "priced" if manual else (chase.get("status") or "missing"),
-                    "confidence": "manual" if manual else (chase.get("confidence") or "missing"),
-                    "manual_override": bool(manual),
-                    "seen_in_current_sets": True,
-                    "set_name": str(surprise_set.get("name") or ""),
-                    "set_time": " - ".join(
-                        part
-                        for part in (
-                            str(surprise_set.get("start_label") or ""),
-                            str(surprise_set.get("end_label") or ""),
-                        )
-                        if part
-                    ),
-                    "updated_by": (manual or {}).get("updated_by") or chase.get("updated_by") or "",
-                    "updated_at": (manual or {}).get("updated_at") or chase.get("updated_at") or "",
-                }
-            )
-            seen_keys.add(key)
+            chases.append(row)
+            seen_keys.add(row["key"])
 
+        floor_value = round(sum(float(row.get("total_value") or 0.0) for row in floors), 2)
+        chase_value = round(sum(float(row.get("total_value") or 0.0) for row in chases), 2)
+        game_value = round(floor_value + chase_value, 2)
+        total_gmv = _safe_metric_float(surprise_set.get("gmv"), 0.0)
+        edited_set = dict(surprise_set)
+        edited_set["id"] = str(edited_set.get("id") or f"set-{index}")
+        edited_set["valuation"] = {
+            **valuation,
+            "floors": floors,
+            "chases": chases,
+            "floor_value": floor_value,
+            "chase_value": chase_value,
+            "game_value": game_value,
+        }
+        edited_set["game_value"] = game_value
+        edited_set["estimated_spread"] = round(total_gmv - game_value, 2)
+        out.append(edited_set)
+
+    saved_chases: list[dict[str, Any]] = []
     for key, manual in sorted(manual_prices.items(), key=lambda item: str(item[1].get("title") or item[0]).lower()):
         if key in seen_keys:
             continue
         title = str(manual.get("title") or "").strip()
         if not title:
             continue
-        unit_value = _safe_metric_float(manual.get("unit_value"), 0.0)
-        rows.append(
+        row = _surprise_set_price_editor_chase_row(
             {
-                "key": key,
                 "title": title,
-                "query": manual.get("query") or _canonical_surprise_set_price_query(title),
-                "item_type": _surprise_set_pricing_item_type(title),
                 "qty": 0,
-                "unit_value": round(unit_value, 2) if unit_value > 0 else None,
-                "total_value": 0.0,
+                "unit_value": manual.get("unit_value"),
+                "query": manual.get("query"),
+                "price_key": key,
                 "source": "manual",
                 "status": "saved_manual",
                 "confidence": "manual",
-                "manual_override": True,
-                "seen_in_current_sets": False,
-                "set_name": "",
-                "set_time": "",
-                "updated_by": manual.get("updated_by") or "",
-                "updated_at": manual.get("updated_at") or "",
+            },
+            manual_prices,
+            seen_in_current_sets=False,
+        )
+        if row:
+            row["status"] = "saved_manual"
+            saved_chases.append(row)
+
+    if saved_chases:
+        out.append(
+            {
+                "id": "saved-manual-prices",
+                "name": "Saved manual prices",
+                "name_source": "manual_overrides",
+                "gmv": 0.0,
+                "auction_orders": 0,
+                "item_count": 0,
+                "start_label": "",
+                "end_label": "",
+                "date_label": "",
+                "top_items": [],
+                "valuation": {
+                    "floors": [],
+                    "chases": saved_chases,
+                    "floor_value": 0.0,
+                    "chase_value": 0.0,
+                    "game_value": 0.0,
+                    "confidence": "manual",
+                    "unpriced_chase_count": 0,
+                },
+                "game_value": 0.0,
+                "estimated_spread": 0.0,
+                "saved_manual_group": True,
             }
         )
 
-    return rows
+    return out
 
 
 def _surprise_set_price_result_from_response(title: str, response: Optional[dict[str, Any]]) -> dict[str, Any]:
@@ -2818,7 +2865,8 @@ def tiktok_streamer_surprise_set_prices(
     )
     gmv_data = _streamer_session_gmv(session, stream_context=stream_context)
     manual_prices = _load_surprise_set_manual_prices(session)
-    rows = _build_surprise_set_price_editor_rows(gmv_data.get("surprise_sets", []), manual_prices)
+    editor_sets = _build_surprise_set_price_editor_sets(gmv_data.get("surprise_sets", []), manual_prices)
+    chase_count = sum(len((row.get("valuation") or {}).get("chases") or []) for row in editor_sets)
     selected_creator = stream_context.get("selected_creator") or DEFAULT_STREAM_CREATOR
     selected_stream_id = stream_context.get("selected_stream_id") or ""
     return templates.TemplateResponse(
@@ -2827,8 +2875,9 @@ def tiktok_streamer_surprise_set_prices(
         {
             "request": request,
             "title": "Surprise Set Prices",
-            "rows": rows,
-            "rows_json": json.dumps(rows),
+            "sets": editor_sets,
+            "sets_json": json.dumps(editor_sets),
+            "chase_count": chase_count,
             "surprise_sets_scope_label": gmv_data.get("surprise_sets_scope_label") or "Today",
             "surprise_sets_total_gmv": gmv_data.get("surprise_sets_total_gmv", 0.0),
             "selected_creator": selected_creator,

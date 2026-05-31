@@ -294,19 +294,22 @@ class SurpriseSetGmvTests(unittest.TestCase):
         self.assertEqual(chase["source"], "manual")
         self.assertTrue(chase["manual_override"])
 
-    def test_price_editor_rows_merge_current_chases_and_saved_manual_prices(self) -> None:
+    def test_price_editor_sets_merge_current_chases_and_saved_manual_prices(self) -> None:
         current_title = "TWILIGHT MASQUERADE SLEEVED BOOSTER PACK"
         saved_title = "CAHOS RISING ETB"
         current_key = streamer_module._surprise_set_manual_price_key(current_title)
         saved_key = streamer_module._surprise_set_manual_price_key(saved_title)
 
-        rows = streamer_module._build_surprise_set_price_editor_rows(
+        sets = streamer_module._build_surprise_set_price_editor_sets(
             [
                 {
+                    "id": "set-1",
                     "name": "Twilight set",
+                    "gmv": 80.0,
                     "start_label": "12:00 PM",
                     "end_label": "12:12 PM",
                     "valuation": {
+                        "floor_value": 0.0,
                         "chases": [
                             {
                                 "title": current_title,
@@ -329,13 +332,19 @@ class SurpriseSetGmvTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual([row["title"] for row in rows], [current_title, saved_title])
-        self.assertEqual(rows[0]["unit_value"], 7.25)
-        self.assertTrue(rows[0]["manual_override"])
-        self.assertEqual(rows[0]["seen_in_current_sets"], True)
-        self.assertEqual(rows[1]["query"], "chaos rising elite trainer box")
-        self.assertEqual(rows[1]["seen_in_current_sets"], False)
-        self.assertEqual(rows[1]["source"], "manual")
+        self.assertEqual([row["name"] for row in sets], ["Twilight set", "Saved manual prices"])
+        chase = sets[0]["valuation"]["chases"][0]
+        self.assertEqual(chase["title"], current_title)
+        self.assertEqual(chase["unit_value"], 7.25)
+        self.assertEqual(chase["total_value"], 72.50)
+        self.assertTrue(chase["manual_override"])
+        self.assertEqual(chase["seen_in_current_sets"], True)
+        self.assertEqual(sets[0]["game_value"], 72.50)
+        saved_chase = sets[1]["valuation"]["chases"][0]
+        self.assertEqual(saved_chase["title"], saved_title)
+        self.assertEqual(saved_chase["query"], "chaos rising elite trainer box")
+        self.assertEqual(saved_chase["seen_in_current_sets"], False)
+        self.assertEqual(saved_chase["source"], "manual")
 
     def test_price_editor_route_is_registered(self) -> None:
         paths = {route.path for route in streamer_module.router.routes}
