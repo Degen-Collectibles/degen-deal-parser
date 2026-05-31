@@ -1787,6 +1787,7 @@ async def _inventory_sealed_template_context(
     bulk_notes: str = "",
     bulk_received: int = 0,
     bulk_units: int = 0,
+    single_received_qty: int = 0,
 ) -> dict[str, Any]:
     selected_game = _normalize_add_stock_game(game)
     selected_search_type = _normalize_add_stock_search_type(search_type if isinstance(search_type, str) else "sealed")
@@ -1896,6 +1897,7 @@ async def _inventory_sealed_template_context(
         "catalog_error": catalog_error,
         "received_item": received_item,
         "single_received_item": single_received_item,
+        "single_received_qty": max(single_received_qty, 1) if single_received_item else 0,
         "bulk_message": _bulk_received_message(bulk_received, bulk_units),
         "bulk_text": bulk_text,
         "bulk_rows": bulk_rows or [],
@@ -2578,6 +2580,7 @@ async def inventory_list(
     price_review: str = Query(default=""),
     missing_location: str = Query(default=""),
     missing_condition: str = Query(default=""),
+    sort: str = Query(default="recent"),
     edit: str = Query(default=""),
     page: int = Query(default=1, ge=1),
 ):
@@ -2645,12 +2648,19 @@ async def inventory_list(
     offset = (page - 1) * PAGE_SIZE
 
     price_gap_expr = InventoryItem.auto_price - InventoryItem.list_price
-    items = session.exec(
-        query.order_by(
+    sort_value = sort if sort in {"recent", "oldest"} else "recent"
+    order_by_clauses = (
+        (InventoryItem.created_at.asc(), InventoryItem.id.asc())
+        if sort_value == "oldest"
+        else (
             case((price_review_condition, 0), else_=1),
             price_gap_expr.desc(),
             InventoryItem.created_at.desc(),
-        ).offset(offset).limit(PAGE_SIZE)
+            InventoryItem.id.desc(),
+        )
+    )
+    items = session.exec(
+        query.order_by(*order_by_clauses).offset(offset).limit(PAGE_SIZE)
     ).all()
 
     can_manage_inventory = _can_inventory_manage(request, session)
@@ -2730,6 +2740,7 @@ async def inventory_list(
             "price_review_filter": price_review,
             "missing_location_filter": missing_location,
             "missing_condition_filter": missing_condition,
+            "sort_filter": sort_value,
             "edit_mode": edit_mode,
             "edit_mode_url": _inventory_url_with_params(request, {"edit": "1"}),
             "view_mode_url": _inventory_url_with_params(request, {"edit": ""}),
@@ -2794,6 +2805,7 @@ async def inventory_sealed_page(
     single_error: str = Query(default=""),
     bulk_received: int = Query(default=0),
     bulk_units: int = Query(default=0),
+    single_received_qty: int = Query(default=0),
 ):
     if denial := _require_employee_permission(request, "ops.inventory.receive", session):
         return denial
@@ -2814,6 +2826,7 @@ async def inventory_sealed_page(
             single_error=single_error,
             bulk_received=bulk_received,
             bulk_units=bulk_units,
+            single_received_qty=single_received_qty,
         ),
     )
 
@@ -3062,7 +3075,13 @@ async def inventory_singles_receive(
         params = urlencode({"game": selected_game, "search_type": selected_search_type, "q": card_name or "", "single_error": str(exc)})
         return RedirectResponse(f"/inventory/add-stock?{params}", status_code=303)
 
-    params = urlencode({"game": selected_game, "search_type": selected_search_type, "single_received": item.id, "q": item.card_name})
+    params = urlencode({
+        "game": selected_game,
+        "search_type": selected_search_type,
+        "single_received": item.id,
+        "single_received_qty": quantity_value,
+        "q": item.card_name,
+    })
     return RedirectResponse(f"/inventory/add-stock?{params}", status_code=303)
 
 
@@ -3092,12 +3111,14 @@ def _inventory_label_items(session: Session, *, ids: str, status: str) -> list[I
     if ids:
         id_list = [int(x) for x in ids.split(",") if x.strip().isdigit()]
         if id_list:
-            return session.exec(
+            rows = session.exec(
                 select(InventoryItem).where(
                     InventoryItem.id.in_(id_list),
                     InventoryItem.archived_at == None,  # noqa: E711
                 )
             ).all()
+            by_id = {row.id: row for row in rows}
+            return [by_id[item_id] for item_id in id_list if item_id in by_id]
     elif status and status in ALL_INVENTORY_STATUSES:
         return session.exec(
             select(InventoryItem).where(

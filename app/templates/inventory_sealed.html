@@ -51,7 +51,7 @@
         .search-form { display:grid; grid-template-columns:minmax(150px,220px) minmax(150px,210px) minmax(220px,1fr) auto; gap:10px; align-items:end; margin-top:16px; }
         .batch-defaults { margin-top:12px; border:1px solid var(--line); border-radius:14px; background:rgba(255,255,255,.02); padding:11px 12px; }
         .batch-defaults summary { cursor:pointer; color:var(--muted); font-size:13px; font-weight:800; }
-        .batch-default-grid { display:grid; grid-template-columns:1fr 1fr 1.4fr auto; gap:10px; align-items:end; margin-top:12px; }
+        .batch-default-grid { display:grid; grid-template-columns:1fr 1fr 1.4fr auto auto; gap:10px; align-items:end; margin-top:12px; }
         label { display:flex; flex-direction:column; gap:6px; color:var(--muted); font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; }
         input, select, textarea { width:100%; padding:11px 12px; border-radius:12px; border:1px solid var(--line); background:var(--lx-s1); color:var(--text); font:inherit; }
         textarea { min-height:44px; resize:vertical; }
@@ -59,6 +59,15 @@
         .notice { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:14px 16px; border-radius:14px; margin-top:14px; border:1px solid rgba(34,197,94,.32); background:var(--green-bg); color:#dffbea; }
         .error { padding:12px 14px; border-radius:14px; margin-top:14px; border:1px solid rgba(239,68,68,.4); background:rgba(239,68,68,.14); color:#fecaca; font-weight:800; }
         .warning { padding:12px 14px; border-radius:14px; margin-top:14px; border:1px solid rgba(234,179,8,.38); background:var(--yellow-bg); color:#fef3c7; font-weight:800; }
+        .batch-tray { display:grid; gap:12px; }
+        .batch-tray-empty { color:var(--muted); font-size:13px; font-weight:700; padding:14px; border:1px dashed var(--line); border-radius:14px; background:rgba(255,255,255,.02); }
+        .batch-list { display:grid; gap:8px; }
+        .batch-row { display:grid; grid-template-columns:1fr auto; gap:10px; align-items:center; padding:10px 12px; border:1px solid var(--line); border-radius:12px; background:var(--lx-s1); }
+        .batch-row strong { color:#fff; font-size:13px; }
+        .batch-row span { color:var(--muted); font-size:12px; font-weight:700; }
+        .batch-count { display:inline-flex; align-items:center; justify-content:center; min-width:46px; padding:6px 9px; border-radius:999px; background:var(--blue-bg); color:var(--blue); font-weight:900; font-size:12px; }
+        .batch-actions { display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; }
+        .batch-actions .button[aria-disabled="true"] { opacity:.45; pointer-events:none; }
         .single-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(380px,1fr)); gap:12px; margin-top:12px; }
         .single-card { border:1px solid var(--line); border-radius:16px; background:var(--lx-s1); padding:14px; display:grid; gap:12px; }
         .single-main { display:grid; grid-template-columns:74px 1fr; gap:12px; min-width:0; align-items:start; }
@@ -194,6 +203,10 @@
                 <label>Notes
                     <input type="text" id="batch-default-notes" placeholder="Optional">
                 </label>
+                <label class="checkline">
+                    <input type="checkbox" id="batch-default-whole-dollar-prices">
+                    Whole dollar prices
+                </label>
                 <button class="secondary" type="button" id="batch-default-clear">Clear</button>
             </div>
         </details>
@@ -214,11 +227,37 @@
             </div>
             {% if can_view_inventory %}<a class="button secondary" href="/inventory/{{ single_received_item.id }}">Open Item</a>{% endif %}
         </div>
+        <div
+            data-received-single
+            data-id="{{ single_received_item.id }}"
+            data-barcode="{{ single_received_item.barcode }}"
+            data-name="{{ single_received_item.card_name }}"
+            data-set="{{ single_received_item.set_name or '' }}"
+            data-condition="{{ single_received_item.condition or '' }}"
+            data-location="{{ single_received_item.location or '' }}"
+            data-quantity="{{ single_received_qty or 1 }}"
+        ></div>
         {% endif %}
         {% if bulk_message %}<div class="notice"><strong>{{ bulk_message }}</strong></div>{% endif %}
         {% if error %}<div class="error">{{ error }}</div>{% endif %}
         {% if single_error %}<div class="error">{{ single_error }}</div>{% endif %}
         {% if catalog_error %}<div class="warning">{{ catalog_error }}</div>{% endif %}
+    </div>
+
+    <div class="panel batch-tray" id="single-batch-panel">
+        <div class="section-head">
+            <div>
+                <h2>Current Singles Batch</h2>
+                <p>Cards you add here stay in this batch until you print labels or clear it.</p>
+            </div>
+            <span class="count" id="single-batch-summary">0 labels</span>
+        </div>
+        <div id="single-batch-list" class="batch-list"></div>
+        <div id="single-batch-empty" class="batch-tray-empty">Add singles from search results, then print the whole batch at once.</div>
+        <div class="batch-actions">
+            <a id="single-batch-print" class="button primary" href="/inventory/labels?layout=wrap-3x1" aria-disabled="true">Print Batch Labels</a>
+            <button id="single-batch-clear" class="secondary" type="button">Clear Batch</button>
+        </div>
     </div>
 
     {% if has_search and single_results %}
@@ -547,10 +586,126 @@
 <script>
 (function () {
     var defaultsKey = "inventory_add_stock_defaults";
+    var singleBatchKey = "inventory_single_receive_batch";
 
     function money(value) {
         var num = Number(value);
         return Number.isFinite(num) ? "$" + num.toFixed(2) : "-";
+    }
+    function loadSingleBatch() {
+        try {
+            var parsed = JSON.parse(localStorage.getItem(singleBatchKey) || "[]");
+            return Array.isArray(parsed) ? parsed : [];
+        } catch (e) {
+            return [];
+        }
+    }
+    function saveSingleBatch(batch) {
+        localStorage.setItem(singleBatchKey, JSON.stringify(batch || []));
+    }
+    function receivedSingleFromPage() {
+        var node = document.querySelector("[data-received-single]");
+        if (!node) return null;
+        var id = Number(node.getAttribute("data-id") || "");
+        if (!Number.isFinite(id) || id <= 0) return null;
+        var quantity = Number(node.getAttribute("data-quantity") || "1");
+        if (!Number.isFinite(quantity) || quantity < 1) quantity = 1;
+        return {
+            id: id,
+            barcode: node.getAttribute("data-barcode") || "",
+            name: node.getAttribute("data-name") || "Single",
+            set: node.getAttribute("data-set") || "",
+            condition: node.getAttribute("data-condition") || "",
+            location: node.getAttribute("data-location") || "",
+            quantity: Math.floor(quantity),
+            addedAt: new Date().toISOString()
+        };
+    }
+    function addReceivedSingleToBatch() {
+        var received = receivedSingleFromPage();
+        if (!received) return;
+        var batch = loadSingleBatch();
+        var existing = batch.find(function (row) { return Number(row.id) === received.id; });
+        if (existing) {
+            var currentQuantity = Math.max(1, Math.floor(Number(existing.quantity || 1)));
+            existing.quantity = Math.max(currentQuantity, received.quantity);
+            existing.addedAt = received.addedAt;
+            existing.barcode = received.barcode || existing.barcode;
+            existing.name = received.name || existing.name;
+            existing.set = received.set || existing.set;
+            existing.condition = received.condition || existing.condition;
+            existing.location = received.location || existing.location;
+        } else {
+            batch.push(received);
+        }
+        saveSingleBatch(batch);
+    }
+    function batchLabelIds(batch) {
+        var ids = [];
+        batch.forEach(function (row) {
+            var id = Number(row.id);
+            var quantity = Math.max(1, Math.floor(Number(row.quantity || 1)));
+            if (!Number.isFinite(id) || id <= 0) return;
+            for (var i = 0; i < quantity; i++) ids.push(String(id));
+        });
+        return ids;
+    }
+    function batchLabelUrl(batch) {
+        var ids = batchLabelIds(batch);
+        var params = new URLSearchParams();
+        params.set("layout", "wrap-3x1");
+        params.set("ids", ids.join(","));
+        params.set("fields_present", "1");
+        ["logo", "barcode", "name", "set", "condition", "location"].forEach(function (field) {
+            params.append("fields", field);
+        });
+        return "/inventory/labels?" + params.toString();
+    }
+    function renderSingleBatchTray() {
+        var list = document.getElementById("single-batch-list");
+        var empty = document.getElementById("single-batch-empty");
+        var summary = document.getElementById("single-batch-summary");
+        var printLink = document.getElementById("single-batch-print");
+        var clearButton = document.getElementById("single-batch-clear");
+        if (!list || !empty || !summary || !printLink || !clearButton) return;
+        var batch = loadSingleBatch();
+        var labelCount = batchLabelIds(batch).length;
+        list.innerHTML = "";
+        batch.forEach(function (row) {
+            var item = document.createElement("div");
+            item.className = "batch-row";
+            var text = document.createElement("div");
+            var title = document.createElement("strong");
+            title.textContent = row.name || "Single";
+            var meta = document.createElement("span");
+            var parts = [row.barcode, row.set, row.condition, row.location].filter(Boolean);
+            meta.textContent = parts.join(" - ");
+            text.appendChild(title);
+            text.appendChild(document.createElement("br"));
+            text.appendChild(meta);
+            var qty = document.createElement("div");
+            qty.className = "batch-count";
+            qty.textContent = "x" + Math.max(1, Math.floor(Number(row.quantity || 1)));
+            item.appendChild(text);
+            item.appendChild(qty);
+            list.appendChild(item);
+        });
+        empty.style.display = batch.length ? "none" : "block";
+        summary.textContent = labelCount + " label" + (labelCount === 1 ? "" : "s");
+        printLink.href = batch.length ? batchLabelUrl(batch) : "/inventory/labels?layout=wrap-3x1";
+        printLink.setAttribute("aria-disabled", batch.length ? "false" : "true");
+        clearButton.disabled = !batch.length;
+    }
+    function bindSingleBatchTray() {
+        addReceivedSingleToBatch();
+        renderSingleBatchTray();
+        var clearButton = document.getElementById("single-batch-clear");
+        if (clearButton) {
+            clearButton.addEventListener("click", function () {
+                saveSingleBatch([]);
+                renderSingleBatchTray();
+            });
+        }
     }
     function setPriceFromMarket(control, percent) {
         if (!control) return;
@@ -561,7 +716,33 @@
         if (!Number.isFinite(market) || market <= 0) return;
         var markup = Number(percent || 0);
         if (!Number.isFinite(markup) || markup < 0) markup = 0;
-        input.value = (market * (1 + markup / 100)).toFixed(2);
+        input.value = formatPriceValue(market * (1 + markup / 100), wholeDollarPricesEnabled());
+    }
+    function wholeDollarPricesEnabled() {
+        var toggle = document.getElementById("batch-default-whole-dollar-prices");
+        return !!(toggle && toggle.checked);
+    }
+    function formatPriceValue(value, wholeDollar) {
+        var num = Number(value);
+        if (!Number.isFinite(num) || num < 0) return "";
+        if (wholeDollar) return String(Math.ceil(num));
+        return num.toFixed(2);
+    }
+    function applyWholeDollarPrices() {
+        if (!wholeDollarPricesEnabled()) return;
+        document.querySelectorAll("[data-price-input]").forEach(function (input) {
+            var current = Number(input.value || input.dataset.marketPrice || "");
+            if (!Number.isFinite(current) || current < 0) return;
+            input.value = formatPriceValue(current, true);
+        });
+    }
+    function roundWholeDollarPricesInForm(form) {
+        if (!wholeDollarPricesEnabled() || !form) return;
+        form.querySelectorAll('input[name="list_price"]').forEach(function (input) {
+            var current = Number(input.value || "");
+            if (!Number.isFinite(current) || current < 0) return;
+            input.value = formatPriceValue(current, true);
+        });
     }
     function loadDefaults() {
         try { return JSON.parse(localStorage.getItem(defaultsKey) || "{}") || {}; } catch (e) { return {}; }
@@ -597,32 +778,40 @@
         var locationInput = document.getElementById("batch-default-location");
         var sourceInput = document.getElementById("batch-default-source");
         var notesInput = document.getElementById("batch-default-notes");
+        var wholeDollarToggle = document.getElementById("batch-default-whole-dollar-prices");
         var clearButton = document.getElementById("batch-default-clear");
         var defaultsDetails = document.getElementById("batch-defaults");
-        if (!locationInput || !sourceInput || !notesInput) return;
+        if (!locationInput || !sourceInput || !notesInput || !wholeDollarToggle) return;
         var defaults = loadDefaults();
         locationInput.value = defaults.location || "";
         sourceInput.value = defaults.source || "";
         notesInput.value = defaults.notes || "";
-        if (defaultsDetails && (defaults.location || defaults.source || defaults.notes)) {
+        wholeDollarToggle.checked = !!defaults.wholeDollarPrices;
+        if (defaultsDetails && (defaults.location || defaults.source || defaults.notes || defaults.wholeDollarPrices)) {
             defaultsDetails.open = true;
         }
         function persist() {
             saveDefaults({
                 location: locationInput.value.trim(),
                 source: sourceInput.value.trim(),
-                notes: notesInput.value.trim()
+                notes: notesInput.value.trim(),
+                wholeDollarPrices: wholeDollarToggle.checked
             });
             applyReceivingDefaults();
         }
         [locationInput, sourceInput, notesInput].forEach(function (input) {
             input.addEventListener("input", persist);
         });
+        wholeDollarToggle.addEventListener("change", function () {
+            persist();
+            applyWholeDollarPrices();
+        });
         if (clearButton) {
             clearButton.addEventListener("click", function () {
                 locationInput.value = "";
                 sourceInput.value = "";
                 notesInput.value = "";
+                wholeDollarToggle.checked = false;
                 saveDefaults({});
                 document.querySelectorAll('[data-default-managed="1"]').forEach(function (field) {
                     if (field.name === "source" && field.type === "hidden" && field.hasAttribute("data-default-source")) {
@@ -641,6 +830,7 @@
             });
         });
         applyReceivingDefaults();
+        applyWholeDollarPrices();
     }
     function findVariant(variants, name) {
         for (var i = 0; i < variants.length; i++) {
@@ -648,6 +838,7 @@
         }
         return variants[0] || null;
     }
+    bindReceivingDefaults();
     document.querySelectorAll("[data-single-card]").forEach(function (card) {
         var variants = [];
         try { variants = JSON.parse(card.getAttribute("data-variants") || "[]"); } catch (e) { variants = []; }
@@ -674,7 +865,7 @@
                 priceInput.dataset.marketPrice = selectedPrice != null ? Number(selectedPrice).toFixed(2) : "";
                 var control = priceInput.closest("[data-price-control]");
                 if (control) control.setAttribute("data-market-price", priceInput.dataset.marketPrice);
-                priceInput.value = selectedPrice != null ? Number(selectedPrice).toFixed(2) : "";
+                priceInput.value = selectedPrice != null ? formatPriceValue(selectedPrice, wholeDollarPricesEnabled()) : "";
                 card.querySelectorAll("[data-price-percent]").forEach(function (button) {
                     button.disabled = selectedPrice == null;
                 });
@@ -689,7 +880,12 @@
             setPriceFromMarket(button.closest("[data-price-control]"), button.getAttribute("data-price-percent"));
         });
     });
-    bindReceivingDefaults();
+    document.addEventListener("submit", function (event) {
+        var form = event.target;
+        if (!form || !form.matches("form")) return;
+        roundWholeDollarPricesInForm(form);
+    });
+    bindSingleBatchTray();
 })();
 
 document.addEventListener("submit", function (event) {

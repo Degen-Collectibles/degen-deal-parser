@@ -241,6 +241,43 @@ def test_label_layout_options_include_compact_wrap_size():
     assert {"value": "wrap-3x1", "label": '3" x 1" Wraparound'} in LABEL_LAYOUT_OPTIONS
 
 
+def test_inventory_label_items_preserves_id_order_and_duplicates():
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import Session, SQLModel, create_engine
+
+    from app.inventory.routes import _inventory_label_items
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        first = InventoryItem(
+            barcode="DGN-COPY1",
+            item_type="single",
+            game="Pokemon",
+            card_name="First",
+            quantity=1,
+        )
+        second = InventoryItem(
+            barcode="DGN-COPY2",
+            item_type="single",
+            game="Pokemon",
+            card_name="Second",
+            quantity=1,
+        )
+        session.add_all([first, second])
+        session.commit()
+        session.refresh(first)
+        session.refresh(second)
+
+        rows = _inventory_label_items(session, ids=f"{second.id},{first.id},{second.id}", status="")
+
+        assert [row.id for row in rows] == [second.id, first.id, second.id]
+
+
 def test_compact_wrap_layout_renders_wraparound_label_markup():
     item = InventoryItem(
         id=61,

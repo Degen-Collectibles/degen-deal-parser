@@ -73,7 +73,7 @@
         .metric { padding:12px; border:1px solid var(--line); border-radius:14px; background:var(--lx-s1); }
         .metric-value { font-size:22px; line-height:1; font-weight:900; color:#fff; font-variant-numeric:tabular-nums; }
         .metric-label { margin-top:6px; color:var(--lx-muted); font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; }
-        .filters { display:grid; grid-template-columns:minmax(240px,2fr) 1fr 1fr 1fr auto; gap:10px; align-items:end; margin-top:14px; }
+        .filters { display:grid; grid-template-columns:minmax(240px,2fr) 1fr 1fr 1fr 1fr auto; gap:10px; align-items:end; margin-top:14px; }
         .scan-row { display:grid; grid-template-columns:auto minmax(220px,360px) 1fr; gap:10px; align-items:center; }
         .scan-input { flex:1; max-width:320px; padding:11px 14px; border-radius:14px; border:2px solid var(--accent); background: var(--lx-s1); font:inherit; font-size:14px; font-weight:600; }
         .scan-input:focus { outline:none; box-shadow:0 0 0 3px rgba(213,83,56,.2); }
@@ -325,6 +325,12 @@
                     <option value="sealed" {% if type_filter == "sealed" %}selected{% endif %}>Sealed</option>
                 </select>
             </label>
+            <label>Sort
+                <select name="sort">
+                    <option value="recent" {% if sort_filter == "recent" %}selected{% endif %}>Newest Added</option>
+                    <option value="oldest" {% if sort_filter == "oldest" %}selected{% endif %}>Oldest Added</option>
+                </select>
+            </label>
             <label>&nbsp;<button type="submit" class="secondary-button" style="white-space:nowrap;">Filter</button></label>
         </form>
     </div>
@@ -397,6 +403,7 @@
                     <tr>
                         {% if can_manage_inventory %}<th><input id="bulk-select-all" class="bulk-check" type="checkbox" aria-label="Select all"></th>{% endif %}
                         <th>Barcode</th>
+                        <th>Added</th>
                         <th>Card Name</th>
                         <th>Game</th>
                         <th>Type</th>
@@ -416,6 +423,7 @@
                 <tr class="{% if review.needs_review %}price-review-row{% endif %}">
                     {% if can_manage_inventory %}<td><input class="bulk-check" type="checkbox" name="item_id" value="{{ item.id }}" form="bulk-form" aria-label="Select {{ item.card_name }}"></td>{% endif %}
                     <td style="font-family:monospace;font-size:12px;">{{ item.barcode }}</td>
+                    <td style="font-size:12px;color: var(--lx-muted);white-space:nowrap;">{{ item.created_at.strftime("%b %d %H:%M") if item.created_at else "—" }}</td>
                     <td style="font-weight:700;">{{ item.card_name }}</td>
                     <td><span style="font-size:12px;">{{ item.game }}</span></td>
                     <td>
@@ -533,7 +541,7 @@
                     </td>
                 </tr>
                 {% else %}
-                <tr><td colspan="{{ 13 if can_manage_inventory else 11 }}"><div class="empty-state"><strong>No items found.</strong><span>Try a different filter or add stock.</span><a href="/inventory/add-stock" class="button primary-button" style="width:auto;">Add Stock</a></div></td></tr>
+                <tr><td colspan="{{ 14 if can_manage_inventory else 12 }}"><div class="empty-state"><strong>No items found.</strong><span>Try a different filter or add stock.</span><a href="/inventory/add-stock" class="button primary-button" style="width:auto;">Add Stock</a></div></td></tr>
                 {% endfor %}
                 </tbody>
             </table>

@@ -867,6 +867,43 @@ class SealedInventoryTests(unittest.TestCase):
             ).one()
             self.assertEqual(movement.location, "Ungrouped")
 
+    def test_single_receive_redirect_includes_batch_quantity(self) -> None:
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/inventory/singles/receive",
+                "headers": [],
+            }
+        )
+        with Session(self.engine) as session:
+            with patch("app.inventory.routes._require_employee_permission", return_value=None):
+                response = asyncio.run(
+                    inventory_singles_receive(
+                        request=request,
+                        session=session,
+                        game="Pokemon",
+                        card_name="Batch Label Pikachu",
+                        set_name="151",
+                        set_code="sv03.5",
+                        card_number="025/165",
+                        variant="Holofoil",
+                        search_type="cards",
+                        variants_json="[]",
+                        condition="NM",
+                        image_url="",
+                        quantity="3",
+                        unit_cost="",
+                        list_price="",
+                        location="Case A",
+                        source="Manual Lookup",
+                        notes="",
+                    )
+                )
+
+            self.assertEqual(response.status_code, 303)
+            self.assertIn("single_received_qty=3", response.headers["location"])
+
     def test_shopify_pos_sale_decrements_single_quantity_and_logs_movement(self) -> None:
         from app.inventory.shopify_ingest import mark_inventory_sold_from_shopify_order
         from app.models import ShopifySyncJob
@@ -1038,6 +1075,47 @@ class SealedInventoryTests(unittest.TestCase):
             self.assertEqual(issue.shopify_sku, "DGN-NOTFOUND")
             self.assertEqual(issue.status, "open")
             self.assertIn("shop-order-missing", issue.message)
+
+
+def test_add_stock_template_contains_current_batch_tray_hooks() -> None:
+    html = Path("app/templates/inventory_sealed.html").read_text(encoding="utf-8")
+
+    assert "Current Singles Batch" in html
+    assert "inventory_single_receive_batch" in html
+    assert "data-received-single" in html
+    assert "Print Batch Labels" in html
+    assert "layout=wrap-3x1" in html
+
+
+def test_add_stock_batch_print_selects_set_and_condition_by_default() -> None:
+    html = Path("app/templates/inventory_sealed.html").read_text(encoding="utf-8")
+
+    assert '["logo", "barcode", "name", "set", "condition", "location"]' in html
+
+
+def test_add_stock_batch_tray_does_not_increment_same_received_item_on_reload() -> None:
+    html = Path("app/templates/inventory_sealed.html").read_text(encoding="utf-8")
+
+    assert "var currentQuantity = Math.max(1, Math.floor(Number(existing.quantity || 1)));" in html
+    assert "existing.quantity = Math.max(currentQuantity, received.quantity);" in html
+    assert "existing.quantity = Math.max(1, Number(existing.quantity || 0)) + received.quantity;" not in html
+
+
+def test_add_stock_template_has_whole_dollar_price_option() -> None:
+    html = Path("app/templates/inventory_sealed.html").read_text(encoding="utf-8")
+
+    assert "batch-default-whole-dollar-prices" in html
+    assert "wholeDollarPrices" in html
+    assert "function formatPriceValue(value, wholeDollar)" in html
+    assert "Math.ceil(num)" in html
+
+
+def test_add_stock_whole_dollar_price_option_rounds_list_prices_before_submit() -> None:
+    html = Path("app/templates/inventory_sealed.html").read_text(encoding="utf-8")
+
+    assert "function roundWholeDollarPricesInForm(form)" in html
+    assert 'input[name="list_price"]' in html
+    assert "roundWholeDollarPricesInForm(form);" in html
 
 
 if __name__ == "__main__":

@@ -876,6 +876,41 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         self.assertEqual(len(movements), 2)
         self.assertEqual({row.reason for row in movements}, {"bulk_location"})
 
+    def test_inventory_list_shows_added_column_and_supports_oldest_sort(self):
+        self._login_as("manager", user_id=246, username="mgr46")
+        from datetime import datetime, timezone
+
+        from app.models import InventoryItem
+
+        older = InventoryItem(
+            barcode="DGN-OLDADD",
+            item_type="single",
+            game="Pokemon",
+            card_name="Older Added Card",
+            condition="NM",
+            quantity=1,
+            created_at=datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc),
+        )
+        newer = InventoryItem(
+            barcode="DGN-NEWADD",
+            item_type="single",
+            game="Pokemon",
+            card_name="Newer Added Card",
+            condition="NM",
+            quantity=1,
+            created_at=datetime(2026, 5, 2, 12, 0, tzinfo=timezone.utc),
+        )
+        self.session.add_all([newer, older])
+        self.session.commit()
+
+        page = self.client.get("/inventory?sort=oldest", follow_redirects=False)
+
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("<th>Added</th>", page.text)
+        self.assertIn("Newest Added", page.text)
+        self.assertIn("Oldest Added", page.text)
+        self.assertLess(page.text.index("Older Added Card"), page.text.index("Newer Added Card"))
+
     def test_inventory_list_surfaces_tcgplayer_market_gap_first(self):
         self._login_as("manager", user_id=236, username="mgr36")
         from app.models import InventoryItem
