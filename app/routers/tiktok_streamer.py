@@ -83,6 +83,10 @@ _LIVE_PRODUCTS_CACHE_TTL_SECONDS = 10.0
 _live_products_cache: dict[str, Any] = {}
 _live_products_cache_lock = threading.Lock()
 PUBLIC_LIVE_STATUS_STALE_SECONDS = 900
+SURPRISE_SET_AUCTION_SKU_TYPE = "UNKNOWN"
+SURPRISE_SET_GAP_MINUTES = 15
+SURPRISE_SET_DOMINANT_TITLE_SHARE = 0.60
+SURPRISE_SET_TOP_ITEMS_LIMIT = 5
 PUBLIC_TIKTOK_LIVE_STATUS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, OPTIONS",
@@ -739,6 +743,181 @@ def _line_item_unit_price(item: dict[str, Any]) -> float:
 
 def _line_item_image(item: dict[str, Any]) -> Optional[str]:
     return str(item.get("sku_image") or item.get("product_image") or item.get("image_url") or "").strip() or None
+
+
+def _parse_first_order_line_items(order: TikTokOrder) -> list[dict[str, Any]]:
+    for field_name in ("line_items_json", "line_items_summary_json"):
+        raw_text = getattr(order, field_name, "") or ""
+        try:
+            raw_items = json.loads(raw_text) if raw_text else []
+        except (json.JSONDecodeError, TypeError):
+            raw_items = []
+        if isinstance(raw_items, dict):
+            raw_items = [raw_items]
+        if isinstance(raw_items, list):
+            items = [item for item in raw_items if isinstance(item, dict)]
+            if items:
+                return items
+    return []
+
+
+def _line_item_sku_type(item: dict[str, Any]) -> str:
+    return str(item.get("sku_type") or item.get("skuType") or "").strip().upper()
+
+
+def _surprise_set_item_title(item: dict[str, Any]) -> str:
+    for key in (
+        "surprise_set_name",
+        "set_name",
+        "live_product_name",
+        "product_name",
+        "product_title",
+        "title",
+        "item_name",
+        "sku_name",
+    ):
+        title = str(item.get(key) or "").strip()
+        if title:
+            return " ".join(title.split())
+    return "Unknown surprise set"
+
+
+def _surprise_set_order_key(order: TikTokOrder) -> str:
+    return str(order.tiktok_order_id or order.order_number or order.id or "").strip()
+
+
+def _surprise_set_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _surprise_set_time_label(value: datetime) -> str:
+    local_value = _surprise_set_datetime(value).astimezone(PACIFIC_TZ)
+    return local_value.strftime("%I:%M %p").lstrip("0")
+
+
+def _surprise_set_date_label(value: datetime) -> str:
+    local_value = _surprise_set_datetime(value).astimezone(PACIFIC_TZ)
+    return local_value.strftime("%b %d").replace(" 0", " ")
+
+
+def _auction_events_for_order(order: TikTokOrder) -> list[dict[str, Any]]:
+    if not tiktok_order_is_paid(order):
+        return []
+    if not order.created_at:
+        return []
+
+    created_at = _surprise_set_datetime(order.created_at)
+    order_key = _surprise_set_order_key(order)
+    events: list[dict[str, Any]] = []
+    for item in _parse_first_order_line_items(order):
+        if _line_item_sku_type(item) != SURPRISE_SET_AUCTION_SKU_TYPE:
+            continue
+        quantity = _line_item_quantity(item)
+        unit_price = _line_item_unit_price(item)
+        gmv = round(unit_price * quantity, 2)
+        if gmv <= 0:
+            continue
+        events.append(
+            {
+                "created_at": created_at,
+                "order_key": order_key,
+                "title": _surprise_set_item_title(item),
+                "qty": quantity,
+                "gmv": gmv,
+            }
+        )
+    return events
+
+
+def _summarize_surprise_set_events(events: list[dict[str, Any]], index: int) -> dict[str, Any]:
+    start_at = events[0]["created_at"]
+    end_at = events[-1]["created_at"]
+    total_gmv = round(sum(float(event.get("gmv") or 0.0) for event in events), 2)
+    item_count = sum(int(event.get("qty") or 0) for event in events)
+    order_keys = {str(event.get("order_key") or "") for event in events if event.get("order_key")}
+
+    by_title: dict[str, dict[str, Any]] = {}
+    for event in events:
+        title = str(event.get("title") or "Unknown surprise set").strip() or "Unknown surprise set"
+        key = title.lower()
+        row = by_title.setdefault(
+            key,
+            {"title": title, "gmv": 0.0, "qty": 0, "orders": set()},
+        )
+        row["gmv"] = round(float(row["gmv"]) + float(event.get("gmv") or 0.0), 2)
+        row["qty"] = int(row["qty"]) + int(event.get("qty") or 0)
+        if event.get("order_key"):
+            row["orders"].add(str(event["order_key"]))
+
+    top_items: list[dict[str, Any]] = []
+    for row in sorted(by_title.values(), key=lambda item: (float(item["gmv"]), int(item["qty"])), reverse=True):
+        top_items.append(
+            {
+                "title": row["title"],
+                "gmv": round(float(row["gmv"]), 2),
+                "qty": int(row["qty"]),
+                "orders": len(row["orders"]),
+            }
+        )
+    top_items = top_items[:SURPRISE_SET_TOP_ITEMS_LIMIT]
+
+    if not top_items:
+        name = f"Surprise Set {index}"
+        name_source = "empty"
+    elif len(top_items) == 1 or (total_gmv > 0 and float(top_items[0]["gmv"]) / total_gmv >= SURPRISE_SET_DOMINANT_TITLE_SHARE):
+        name = str(top_items[0]["title"])
+        name_source = "auction_product_title"
+    else:
+        name = "Mixed: " + " / ".join(str(item["title"]) for item in top_items[:3])
+        name_source = "mixed_auction_titles"
+
+    return {
+        "id": f"{int(start_at.timestamp())}-{index}",
+        "name": name,
+        "name_source": name_source,
+        "gmv": total_gmv,
+        "auction_orders": len(order_keys),
+        "item_count": item_count,
+        "auction_events": len(events),
+        "start_at": start_at.isoformat(),
+        "end_at": end_at.isoformat(),
+        "start_label": _surprise_set_time_label(start_at),
+        "end_label": _surprise_set_time_label(end_at),
+        "date_label": _surprise_set_date_label(start_at),
+        "top_items": top_items,
+    }
+
+
+def _build_surprise_set_summaries(
+    orders: list[TikTokOrder],
+    *,
+    gap_minutes: int = SURPRISE_SET_GAP_MINUTES,
+) -> list[dict[str, Any]]:
+    gap = timedelta(minutes=max(int(gap_minutes or SURPRISE_SET_GAP_MINUTES), 1))
+    events: list[dict[str, Any]] = []
+    for order in orders:
+        events.extend(_auction_events_for_order(order))
+    events.sort(key=lambda event: event["created_at"])
+
+    grouped: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    previous_at: Optional[datetime] = None
+    for event in events:
+        event_at = event["created_at"]
+        if current and previous_at is not None and event_at - previous_at > gap:
+            grouped.append(current)
+            current = []
+        current.append(event)
+        previous_at = event_at
+    if current:
+        grouped.append(current)
+
+    return [
+        _summarize_surprise_set_events(group_events, idx)
+        for idx, group_events in enumerate(grouped, start=1)
+    ]
 
 
 def _aggregate_product_stats(orders: list[TikTokOrder]) -> list[dict[str, Any]]:
@@ -1475,6 +1654,8 @@ def _streamer_session_gmv_uncached(session: Session, stream_context: Optional[di
         "top_sellers": top_sellers,
         "top_buyers": top_buyers,
     }
+    surprise_set_orders = today_orders
+    surprise_sets_scope_label = "Today"
 
     if stream_context.get("creator_filter_enabled"):
         sr_start = stream_context.get("start")
@@ -1594,6 +1775,13 @@ def _streamer_session_gmv_uncached(session: Session, stream_context: Optional[di
         result["stream_items"] = stream_items
         result["stream_top_sellers"] = stream_top_sellers or _live_product_top_sellers(product_scope)
         result["stream_top_buyers"] = stream_top_buyers
+        surprise_set_orders = stream_orders_rows
+        surprise_sets_scope_label = "Selected stream" if stream_context.get("creator_filter_enabled") else "Stream window"
+
+    surprise_sets = _build_surprise_set_summaries(surprise_set_orders)
+    result["surprise_sets"] = surprise_sets
+    result["surprise_sets_total_gmv"] = round(sum(float(row.get("gmv") or 0.0) for row in surprise_sets), 2)
+    result["surprise_sets_scope_label"] = surprise_sets_scope_label
 
     return _apply_tiktok_session_metrics(result, stream_context)
 
@@ -1752,6 +1940,8 @@ def tiktok_streamer_page(
         "top_buyers_json": json.dumps(gmv_data.get("top_buyers", [])),
         "stream_top_sellers_json": json.dumps(gmv_data.get("stream_top_sellers", [])),
         "stream_top_buyers_json": json.dumps(gmv_data.get("stream_top_buyers", [])),
+        "surprise_sets_json": json.dumps(gmv_data.get("surprise_sets", [])),
+        "surprise_sets_scope_label": gmv_data.get("surprise_sets_scope_label") or "Today",
         "live_analytics_json": json.dumps(live_analytics),
         "stream_data_json": json.dumps(stream_data),
         "stream_sessions_json": json.dumps(stream_context.get("sessions") or []),
@@ -1858,6 +2048,9 @@ def tiktok_streamer_poll(
         "top_buyers": gmv_data.get("top_buyers", []),
         "stream_top_sellers": gmv_data.get("stream_top_sellers", []),
         "stream_top_buyers": gmv_data.get("stream_top_buyers", []),
+        "surprise_sets": gmv_data.get("surprise_sets", []),
+        "surprise_sets_total_gmv": gmv_data.get("surprise_sets_total_gmv", 0.0),
+        "surprise_sets_scope_label": gmv_data.get("surprise_sets_scope_label") or "Today",
         "live_analytics": _get_live_analytics_snapshot(),
         "stream_gmv": gmv_data.get("stream_gmv"),
         "stream_orders": gmv_data.get("stream_orders"),

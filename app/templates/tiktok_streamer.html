@@ -434,6 +434,59 @@
         }
         .velocity-rate strong { color: var(--tiktok-cyan); font-weight: 800; }
 
+        /* ---- Surprise Sets ---- */
+        .surprise-sets {
+            display: none; margin: 14px 0 16px; position: relative; z-index: 1;
+            border: 1px solid var(--border); border-radius: 8px;
+            background: rgba(255,255,255,.025); overflow: hidden;
+        }
+        .surprise-sets-header {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--border);
+        }
+        .surprise-sets-label {
+            font-size: 11px; font-weight: 800; text-transform: uppercase;
+            color: var(--text-muted);
+        }
+        .surprise-sets-scope {
+            margin-top: 2px; font-size: 12px; font-weight: 700; color: var(--text-secondary);
+        }
+        .surprise-sets-total {
+            font-size: 22px; font-weight: 900; color: var(--green); white-space: nowrap;
+        }
+        .surprise-set-list {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+            gap: 8px; padding: 10px;
+        }
+        .surprise-set-card {
+            min-width: 0; border: 1px solid rgba(255,255,255,.08);
+            border-radius: 8px; padding: 10px; background: rgba(0,0,0,.16);
+        }
+        .surprise-set-top {
+            display: flex; align-items: flex-start; justify-content: space-between;
+            gap: 10px;
+        }
+        .surprise-set-name {
+            min-width: 0; font-size: 13px; line-height: 1.25; font-weight: 800;
+            color: var(--text); overflow-wrap: anywhere;
+        }
+        .surprise-set-gmv {
+            flex-shrink: 0; font-size: 15px; font-weight: 900; color: var(--green);
+        }
+        .surprise-set-meta {
+            margin-top: 6px; font-size: 11px; line-height: 1.4; color: var(--text-muted);
+        }
+        .surprise-set-items {
+            display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px;
+        }
+        .surprise-set-chip {
+            max-width: 100%; border: 1px solid rgba(37,244,238,.16);
+            border-radius: 999px; padding: 3px 7px; color: var(--text-secondary);
+            background: rgba(37,244,238,.06); font-size: 10px; font-weight: 700;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .surprise-set-chip strong { color: var(--tiktok-cyan); font-weight: 800; }
+
         /* ---- High-Value Toast ---- */
         .toast-high-value {
             border-color: #fbbf24 !important;
@@ -1745,6 +1798,17 @@
                     </div>
                 </div>
 
+                <div class="surprise-sets" id="surprise-sets">
+                    <div class="surprise-sets-header">
+                        <div>
+                            <div class="surprise-sets-label">Surprise Sets</div>
+                            <div class="surprise-sets-scope" id="surprise-sets-scope">{{ surprise_sets_scope_label }}</div>
+                        </div>
+                        <div class="surprise-sets-total" id="surprise-sets-total">$0.00</div>
+                    </div>
+                    <div class="surprise-set-list" id="surprise-set-list"></div>
+                </div>
+
                 <!-- Post-Stream Summary Overlay -->
                 <div class="summary-overlay" id="summary-overlay">
                     <div class="summary-card" id="summary-card">
@@ -1934,6 +1998,9 @@
         try { _streamTopSellers = JSON.parse({{ stream_top_sellers_json|tojson }}); } catch (e) {}
         var _streamTopBuyers = [];
         try { _streamTopBuyers = JSON.parse({{ stream_top_buyers_json|tojson }}); } catch (e) {}
+        var _surpriseSets = [];
+        try { _surpriseSets = JSON.parse({{ surprise_sets_json|tojson }}); } catch (e) {}
+        var _surpriseSetsScopeLabel = {{ surprise_sets_scope_label|tojson }};
         var _knownIds = new Set(_orders.map(function(o) { return o.tiktok_order_id; }));
         var _muted = false;
         var _audioCtx = null;
@@ -1980,6 +2047,10 @@
         var streamOrdersEl = document.getElementById('stream-orders');
         var streamMetricNoteRow = document.getElementById('stream-metric-note-row');
         var streamMetricNote = document.getElementById('stream-metric-note');
+        var surpriseSetsWrap = document.getElementById('surprise-sets');
+        var surpriseSetsScope = document.getElementById('surprise-sets-scope');
+        var surpriseSetsTotal = document.getElementById('surprise-sets-total');
+        var surpriseSetList = document.getElementById('surprise-set-list');
         var muteToggle = document.getElementById('mute-toggle');
         var muteIcon = document.getElementById('mute-icon');
         var creatorSelect = document.getElementById('creator-select');
@@ -2038,6 +2109,47 @@
             var cleaned = String(name || '').trim();
             if (!cleaned || !/[A-Za-z0-9]/.test(cleaned)) return 'Unknown buyer';
             return cleaned;
+        }
+
+        function exactMoney(value) {
+            var n = Number(value || 0);
+            return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        }
+
+        function renderSurpriseSets(sets, scopeLabel) {
+            if (!surpriseSetsWrap || !surpriseSetList) return;
+            _surpriseSets = Array.isArray(sets) ? sets : [];
+            _surpriseSetsScopeLabel = scopeLabel || _surpriseSetsScopeLabel || 'Today';
+            if (!_surpriseSets.length) {
+                surpriseSetsWrap.style.display = 'none';
+                surpriseSetList.innerHTML = '';
+                return;
+            }
+            var total = _surpriseSets.reduce(function(sum, row) {
+                return sum + Number(row.gmv || 0);
+            }, 0);
+            surpriseSetsWrap.style.display = 'block';
+            if (surpriseSetsScope) surpriseSetsScope.textContent = _surpriseSetsScopeLabel;
+            if (surpriseSetsTotal) surpriseSetsTotal.textContent = exactMoney(total);
+            surpriseSetList.innerHTML = _surpriseSets.map(function(row) {
+                var itemText = (row.auction_orders || 0) + ' orders · ' + (row.item_count || 0) + ' items';
+                var timeText = (row.date_label ? row.date_label + ' · ' : '')
+                    + (row.start_label || '--') + ' - ' + (row.end_label || '--');
+                var chips = (row.top_items || []).slice(0, 3).map(function(item) {
+                    return '<span class="surprise-set-chip">'
+                        + esc(item.title || 'Unknown')
+                        + ' <strong>' + exactMoney(item.gmv || 0) + '</strong>'
+                        + '</span>';
+                }).join('');
+                return '<div class="surprise-set-card">'
+                    + '<div class="surprise-set-top">'
+                    + '<div class="surprise-set-name">' + esc(row.name || 'Surprise Set') + '</div>'
+                    + '<div class="surprise-set-gmv">' + exactMoney(row.gmv || 0) + '</div>'
+                    + '</div>'
+                    + '<div class="surprise-set-meta">' + esc(timeText) + '<br>' + esc(itemText) + '</div>'
+                    + (chips ? '<div class="surprise-set-items">' + chips + '</div>' : '')
+                    + '</div>';
+            }).join('');
         }
 
         /* ---- Top Sellers render + scroll ---- */
@@ -3042,6 +3154,7 @@
             }
         }
         updateLiveBadge(_streamData.is_live);
+        renderSurpriseSets(_surpriseSets, _surpriseSetsScopeLabel);
 
         var streamerBadge = document.getElementById('streamer-name-badge');
         var streamerText = document.getElementById('streamer-name-text');
@@ -3094,6 +3207,7 @@
             if (data.top_buyers) _topBuyers = data.top_buyers;
             if (data.stream_top_sellers) _streamTopSellers = data.stream_top_sellers;
             if (data.stream_top_buyers) _streamTopBuyers = data.stream_top_buyers;
+            if (data.surprise_sets) renderSurpriseSets(data.surprise_sets, data.surprise_sets_scope_label);
             renderLeaderboard();
             if (!hasPreciseCreatorOrders()) {
                 clearVisibleOrders();
