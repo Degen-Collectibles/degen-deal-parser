@@ -454,6 +454,15 @@
         .surprise-sets-total {
             font-size: 22px; font-weight: 900; color: var(--green); white-space: nowrap;
         }
+        .surprise-sets-actions {
+            display: flex; align-items: center; gap: 8px;
+        }
+        .surprise-sets-edit-link {
+            border: 1px solid rgba(37,244,238,.24); border-radius: 6px;
+            padding: 6px 8px; color: var(--tiktok-cyan); background: rgba(37,244,238,.07);
+            text-decoration: none; font-size: 11px; font-weight: 900; white-space: nowrap;
+        }
+        .surprise-sets-edit-link:hover { background: rgba(37,244,238,.13); }
         .surprise-set-list {
             display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
             gap: 8px; padding: 10px;
@@ -1870,7 +1879,10 @@
                             <div class="surprise-sets-label">Surprise Sets</div>
                             <div class="surprise-sets-scope" id="surprise-sets-scope">{{ surprise_sets_scope_label }}</div>
                         </div>
-                        <div class="surprise-sets-total" id="surprise-sets-total">$0.00</div>
+                        <div class="surprise-sets-actions">
+                            <a class="surprise-sets-edit-link" href="{{ surprise_set_price_editor_url }}">Edit prices</a>
+                            <div class="surprise-sets-total" id="surprise-sets-total">$0.00</div>
+                        </div>
                     </div>
                     <div class="surprise-set-list" id="surprise-set-list"></div>
                 </div>

@@ -294,6 +294,54 @@ class SurpriseSetGmvTests(unittest.TestCase):
         self.assertEqual(chase["source"], "manual")
         self.assertTrue(chase["manual_override"])
 
+    def test_price_editor_rows_merge_current_chases_and_saved_manual_prices(self) -> None:
+        current_title = "TWILIGHT MASQUERADE SLEEVED BOOSTER PACK"
+        saved_title = "CAHOS RISING ETB"
+        current_key = streamer_module._surprise_set_manual_price_key(current_title)
+        saved_key = streamer_module._surprise_set_manual_price_key(saved_title)
+
+        rows = streamer_module._build_surprise_set_price_editor_rows(
+            [
+                {
+                    "name": "Twilight set",
+                    "start_label": "12:00 PM",
+                    "end_label": "12:12 PM",
+                    "valuation": {
+                        "chases": [
+                            {
+                                "title": current_title,
+                                "qty": 10,
+                                "unit_value": None,
+                                "total_value": 0.0,
+                                "source": "tcgtracking",
+                                "status": "missing",
+                                "confidence": "missing",
+                                "query": "twilight masquerade sleeved booster pack",
+                                "price_key": current_key,
+                            }
+                        ]
+                    },
+                }
+            ],
+            {
+                current_key: {"title": current_title, "unit_value": 7.25, "query": "twilight masquerade sleeved booster pack"},
+                saved_key: {"title": saved_title, "unit_value": 42.50, "query": "chaos rising elite trainer box"},
+            },
+        )
+
+        self.assertEqual([row["title"] for row in rows], [current_title, saved_title])
+        self.assertEqual(rows[0]["unit_value"], 7.25)
+        self.assertTrue(rows[0]["manual_override"])
+        self.assertEqual(rows[0]["seen_in_current_sets"], True)
+        self.assertEqual(rows[1]["query"], "chaos rising elite trainer box")
+        self.assertEqual(rows[1]["seen_in_current_sets"], False)
+        self.assertEqual(rows[1]["source"], "manual")
+
+    def test_price_editor_route_is_registered(self) -> None:
+        paths = {route.path for route in streamer_module.router.routes}
+
+        self.assertIn("/tiktok/streamer/surprise-set-prices", paths)
+
 
 class StreamerFreshOrderFallbackTests(unittest.TestCase):
     def setUp(self) -> None:

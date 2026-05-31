@@ -14,6 +14,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
+from urllib.parse import urlencode
 
 import httpx
 from fastapi import APIRouter, Depends, Query, Request
@@ -215,6 +216,24 @@ def _creator_options(selected_creator: str) -> list[dict[str, Any]]:
         }
         for choice in STREAM_CREATOR_CHOICES
     ]
+
+
+def _streamer_url(selected_creator: str = "", selected_stream_id: str = "") -> str:
+    params: dict[str, str] = {}
+    if selected_creator and selected_creator != DEFAULT_STREAM_CREATOR:
+        params["creator"] = selected_creator
+    if selected_stream_id:
+        params["stream"] = selected_stream_id
+    return "/tiktok/streamer" + (f"?{urlencode(params)}" if params else "")
+
+
+def _surprise_set_price_editor_url(selected_creator: str = "", selected_stream_id: str = "") -> str:
+    params: dict[str, str] = {}
+    if selected_creator and selected_creator != DEFAULT_STREAM_CREATOR:
+        params["creator"] = selected_creator
+    if selected_stream_id:
+        params["stream"] = selected_stream_id
+    return "/tiktok/streamer/surprise-set-prices" + (f"?{urlencode(params)}" if params else "")
 
 
 def _find_stream_session(stream_id: Optional[str]) -> Optional[dict]:
@@ -1099,6 +1118,90 @@ def _manual_surprise_set_price_result(title: str, manual_prices: dict[str, dict[
         "updated_by": row.get("updated_by") or "",
         "updated_at": row.get("updated_at") or "",
     }
+
+
+def _build_surprise_set_price_editor_rows(
+    surprise_sets: list[dict[str, Any]],
+    manual_prices: Optional[dict[str, dict[str, Any]]] = None,
+) -> list[dict[str, Any]]:
+    manual_prices = _normalize_surprise_set_manual_prices(manual_prices or {})
+    rows: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+
+    for surprise_set in surprise_sets or []:
+        valuation = surprise_set.get("valuation") if isinstance(surprise_set, dict) else {}
+        chases = (valuation or {}).get("chases") if isinstance(valuation, dict) else []
+        for chase in chases or []:
+            if not isinstance(chase, dict):
+                continue
+            title = str(chase.get("title") or "").strip()
+            if not title:
+                continue
+            key = str(chase.get("price_key") or _surprise_set_manual_price_key(title))
+            manual = manual_prices.get(key)
+            unit_value = _safe_metric_float(
+                (manual or {}).get("unit_value") if manual else chase.get("unit_value"),
+                0.0,
+            )
+            qty = _safe_metric_int(chase.get("qty"), 0)
+            rows.append(
+                {
+                    "key": key,
+                    "title": title,
+                    "query": (manual or {}).get("query") or chase.get("query") or _canonical_surprise_set_price_query(title),
+                    "item_type": _surprise_set_pricing_item_type(title),
+                    "qty": qty,
+                    "unit_value": round(unit_value, 2) if unit_value > 0 else None,
+                    "total_value": round(qty * unit_value, 2) if unit_value > 0 and qty > 0 else 0.0,
+                    "source": "manual" if manual else (chase.get("source") or "tcgtracking"),
+                    "status": "priced" if manual else (chase.get("status") or "missing"),
+                    "confidence": "manual" if manual else (chase.get("confidence") or "missing"),
+                    "manual_override": bool(manual),
+                    "seen_in_current_sets": True,
+                    "set_name": str(surprise_set.get("name") or ""),
+                    "set_time": " - ".join(
+                        part
+                        for part in (
+                            str(surprise_set.get("start_label") or ""),
+                            str(surprise_set.get("end_label") or ""),
+                        )
+                        if part
+                    ),
+                    "updated_by": (manual or {}).get("updated_by") or chase.get("updated_by") or "",
+                    "updated_at": (manual or {}).get("updated_at") or chase.get("updated_at") or "",
+                }
+            )
+            seen_keys.add(key)
+
+    for key, manual in sorted(manual_prices.items(), key=lambda item: str(item[1].get("title") or item[0]).lower()):
+        if key in seen_keys:
+            continue
+        title = str(manual.get("title") or "").strip()
+        if not title:
+            continue
+        unit_value = _safe_metric_float(manual.get("unit_value"), 0.0)
+        rows.append(
+            {
+                "key": key,
+                "title": title,
+                "query": manual.get("query") or _canonical_surprise_set_price_query(title),
+                "item_type": _surprise_set_pricing_item_type(title),
+                "qty": 0,
+                "unit_value": round(unit_value, 2) if unit_value > 0 else None,
+                "total_value": 0.0,
+                "source": "manual",
+                "status": "saved_manual",
+                "confidence": "manual",
+                "manual_override": True,
+                "seen_in_current_sets": False,
+                "set_name": "",
+                "set_time": "",
+                "updated_by": manual.get("updated_by") or "",
+                "updated_at": manual.get("updated_at") or "",
+            }
+        )
+
+    return rows
 
 
 def _surprise_set_price_result_from_response(title: str, response: Optional[dict[str, Any]]) -> dict[str, Any]:
@@ -2524,6 +2627,7 @@ def tiktok_streamer_page(
         "creator_order_attribution": stream_context.get("creator_order_attribution"),
         "creator_order_attribution_message": _creator_order_attribution_message(stream_context),
         "live_room_id": live_room_id,
+        "surprise_set_price_editor_url": _surprise_set_price_editor_url(selected_creator, selected_stream_id),
         "gmv_goal": float(_get_app_setting(session, "stream_gmv_goal", "0") or "0"),
         "high_value_threshold": float(_get_app_setting(session, "high_value_threshold", "100") or "100"),
         "vip_buyer_threshold": float(_get_app_setting(session, "vip_buyer_threshold", "5000") or "5000"),
@@ -2696,6 +2800,45 @@ def set_surprise_set_manual_price(request: Request, session: Session = Depends(g
     with _gmv_cache_lock:
         _gmv_cache.clear()
     return {"ok": True, "price": saved}
+
+
+@router.get("/tiktok/streamer/surprise-set-prices", response_class=HTMLResponse)
+def tiktok_streamer_surprise_set_prices(
+    request: Request,
+    creator: Optional[str] = Query(default=None),
+    stream: Optional[str] = Query(default=None),
+    session: Session = Depends(get_session),
+):
+    if denial := _require_live_stream(request, session):
+        return denial
+
+    stream_context = _apply_order_activity_fallback(
+        session,
+        _build_stream_context(creator, legacy_stream_id=stream),
+    )
+    gmv_data = _streamer_session_gmv(session, stream_context=stream_context)
+    manual_prices = _load_surprise_set_manual_prices(session)
+    rows = _build_surprise_set_price_editor_rows(gmv_data.get("surprise_sets", []), manual_prices)
+    selected_creator = stream_context.get("selected_creator") or DEFAULT_STREAM_CREATOR
+    selected_stream_id = stream_context.get("selected_stream_id") or ""
+    return templates.TemplateResponse(
+        request,
+        "tiktok_surprise_set_prices.html",
+        {
+            "request": request,
+            "title": "Surprise Set Prices",
+            "rows": rows,
+            "rows_json": json.dumps(rows),
+            "surprise_sets_scope_label": gmv_data.get("surprise_sets_scope_label") or "Today",
+            "surprise_sets_total_gmv": gmv_data.get("surprise_sets_total_gmv", 0.0),
+            "selected_creator": selected_creator,
+            "selected_creator_label": stream_context.get("selected_creator_label") or "",
+            "selected_stream_id": selected_stream_id,
+            "selected_stream_label": stream_context.get("selected_stream_label") or "",
+            "streamer_url": _streamer_url(selected_creator, selected_stream_id),
+            "current_user": getattr(request.state, "current_user", None),
+        },
+    )
 
 
 @router.get("/tiktok/streamer/config", response_class=HTMLResponse)

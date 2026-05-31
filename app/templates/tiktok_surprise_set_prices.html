@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title }}</title>
+  <style>
+    :root {
+      --bg: #0b0d10;
+      --panel: #14181d;
+      --panel-2: #101418;
+      --border: rgba(255,255,255,.09);
+      --text: #f2f5f7;
+      --muted: #8e9aa6;
+      --cyan: #25f4ee;
+      --green: #41d675;
+      --amber: #fbbf24;
+      --red: #f87171;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg); color: var(--text);
+    }
+    .page {
+      width: min(1180px, calc(100vw - 28px)); margin: 0 auto; padding: 22px 0 42px;
+    }
+    .topbar {
+      display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
+      padding-bottom: 16px; border-bottom: 1px solid var(--border);
+    }
+    h1 { margin: 0; font-size: 22px; line-height: 1.2; }
+    .subline { margin-top: 6px; color: var(--muted); font-size: 13px; }
+    .actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    .btn, button {
+      border: 1px solid rgba(37,244,238,.25); border-radius: 7px; padding: 8px 10px;
+      background: rgba(37,244,238,.08); color: var(--cyan); text-decoration: none;
+      font-size: 12px; font-weight: 900; cursor: pointer;
+    }
+    button:disabled { opacity: .55; cursor: wait; }
+    .summary {
+      display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px;
+      margin: 16px 0;
+    }
+    .metric {
+      border: 1px solid var(--border); background: var(--panel); border-radius: 8px; padding: 12px;
+    }
+    .metric-label { color: var(--muted); font-size: 11px; font-weight: 900; text-transform: uppercase; }
+    .metric-value { margin-top: 3px; font-size: 18px; font-weight: 900; }
+    .editor {
+      border: 1px solid var(--border); border-radius: 8px; background: var(--panel);
+      overflow: hidden;
+    }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 10px 12px; border-top: 1px solid var(--border); vertical-align: top; }
+    th {
+      border-top: 0; color: var(--muted); background: var(--panel-2); font-size: 11px;
+      text-align: left; text-transform: uppercase; letter-spacing: .03em;
+    }
+    .title-cell { min-width: 260px; }
+    .product-title { font-size: 13px; font-weight: 900; line-height: 1.25; overflow-wrap: anywhere; }
+    .meta { margin-top: 4px; color: var(--muted); font-size: 11px; line-height: 1.35; }
+    .tag {
+      display: inline-flex; align-items: center; border: 1px solid var(--border); border-radius: 999px;
+      padding: 2px 7px; color: var(--muted); font-size: 10px; font-weight: 900;
+    }
+    .tag.current { color: var(--green); border-color: rgba(65,214,117,.28); }
+    .tag.saved { color: var(--amber); border-color: rgba(251,191,36,.32); }
+    .money { font-size: 13px; font-weight: 900; color: var(--green); white-space: nowrap; }
+    .muted-money { color: var(--muted); }
+    .price-input {
+      width: 112px; border: 1px solid rgba(255,255,255,.14); border-radius: 7px;
+      background: rgba(0,0,0,.18); color: var(--text); padding: 8px 9px;
+      font-size: 13px; font-weight: 900;
+    }
+    .price-input:focus { outline: none; border-color: rgba(37,244,238,.5); }
+    .row-actions { display: flex; align-items: center; gap: 6px; }
+    .clear-btn { color: var(--red); border-color: rgba(248,113,113,.25); background: rgba(248,113,113,.08); }
+    .status { min-width: 76px; color: var(--muted); font-size: 11px; font-weight: 800; }
+    .empty { padding: 28px; text-align: center; color: var(--muted); }
+    @media (max-width: 760px) {
+      .topbar { display: block; }
+      .actions { justify-content: flex-start; margin-top: 12px; }
+      .summary { grid-template-columns: 1fr; }
+      table, thead, tbody, tr, th, td { display: block; }
+      thead { display: none; }
+      tr { border-top: 1px solid var(--border); padding: 10px 0; }
+      td { border: 0; padding: 6px 12px; }
+      .row-actions { align-items: stretch; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <div class="topbar">
+      <div>
+        <h1>Surprise Set Prices</h1>
+        <div class="subline">{{ surprise_sets_scope_label }}{% if selected_creator_label %} | {{ selected_creator_label }}{% endif %}{% if selected_stream_label %} | {{ selected_stream_label }}{% endif %}</div>
+      </div>
+      <div class="actions">
+        <a class="btn" href="{{ streamer_url }}">Back to streamer</a>
+      </div>
+    </div>
+
+    <section class="summary">
+      <div class="metric">
+        <div class="metric-label">Rows</div>
+        <div class="metric-value" id="row-count">{{ rows|length }}</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Surprise Set GMV</div>
+        <div class="metric-value">${{ "%.2f"|format(surprise_sets_total_gmv or 0) }}</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Refresh</div>
+        <div class="metric-value">Manual</div>
+      </div>
+    </section>
+
+    <section class="editor">
+      {% if rows %}
+      <table>
+        <thead>
+          <tr>
+            <th>Product</th>
+            <th>Type</th>
+            <th>Qty</th>
+            <th>Current</th>
+            <th>Manual Price</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in rows %}
+          <tr data-title="{{ row.title }}" data-key="{{ row.key }}">
+            <td class="title-cell">
+              <div class="product-title">{{ row.title }}</div>
+              <div class="meta">{{ row.query }}</div>
+              {% if row.set_name or row.set_time %}
+              <div class="meta">{{ row.set_name }}{% if row.set_time %} | {{ row.set_time }}{% endif %}</div>
+              {% endif %}
+            </td>
+            <td><span class="tag">{{ row.item_type }}</span></td>
+            <td>{{ row.qty or "-" }}</td>
+            <td>
+              {% if row.unit_value %}
+              <div class="money">${{ "%.2f"|format(row.unit_value) }}</div>
+              {% else %}
+              <div class="money muted-money">Needs price</div>
+              {% endif %}
+              <div class="meta">{{ row.source }} | {{ row.confidence }}</div>
+            </td>
+            <td>
+              <div class="row-actions">
+                <input class="price-input" type="number" min="0" step="0.01" value="{% if row.manual_override and row.unit_value %}{{ "%.2f"|format(row.unit_value) }}{% endif %}" placeholder="{% if row.unit_value %}{{ "%.2f"|format(row.unit_value) }}{% else %}0.00{% endif %}">
+                <button type="button" class="save-btn">Save</button>
+                <button type="button" class="clear-btn">Clear</button>
+              </div>
+            </td>
+            <td>
+              <div class="status">{% if row.seen_in_current_sets %}<span class="tag current">Current</span>{% else %}<span class="tag saved">Saved</span>{% endif %}</div>
+              {% if row.updated_by or row.updated_at %}
+              <div class="meta">{{ row.updated_by }}{% if row.updated_at %} | {{ row.updated_at[:16] }}{% endif %}</div>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <div class="empty">No surprise-set chases or saved manual prices are visible for this stream window.</div>
+      {% endif %}
+    </section>
+  </main>
+
+  <script>
+    function postPrice(row, value, button) {
+      var title = row.getAttribute('data-title') || '';
+      var status = row.querySelector('.status');
+      button.disabled = true;
+      button.textContent = 'Saving';
+      fetch('/tiktok/streamer/surprise-set-price', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: title, unit_price: value })
+      }).then(function(resp) {
+        return resp.json().then(function(data) {
+          if (!resp.ok || !data.ok) throw new Error(data.error || 'Save failed');
+          if (status) status.textContent = value ? 'Saved' : 'Cleared';
+          button.textContent = 'Saved';
+          setTimeout(function() {
+            button.disabled = false;
+            button.textContent = button.classList.contains('clear-btn') ? 'Clear' : 'Save';
+          }, 900);
+        });
+      }).catch(function(err) {
+        if (status) status.textContent = 'Retry';
+        button.disabled = false;
+        button.textContent = 'Retry';
+        console.warn('Manual surprise set price save failed', err);
+      });
+    }
+
+    document.addEventListener('click', function(event) {
+      var save = event.target.closest('.save-btn');
+      var clear = event.target.closest('.clear-btn');
+      if (!save && !clear) return;
+      var row = event.target.closest('tr[data-title]');
+      if (!row) return;
+      var input = row.querySelector('.price-input');
+      if (clear && input) input.value = '';
+      postPrice(row, clear ? '' : (input ? input.value : ''), save || clear);
+    });
+  </script>
+  {% include "_csrf_bootstrap.html" %}
+</body>
+</html>
