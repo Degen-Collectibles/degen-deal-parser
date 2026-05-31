@@ -6,7 +6,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import app.routers.tiktok_streamer as streamer_module
-from app.models import TikTokOrder
+from app.models import AppSetting, TikTokOrder
 from sqlmodel import Session, SQLModel, create_engine
 
 
@@ -158,8 +158,8 @@ class SurpriseSetGmvTests(unittest.TestCase):
             _order(
                 "pack-floor",
                 start + timedelta(minutes=1),
-                [{"product_name": "GEM 5 BOOSTER PACK", "sku_type": "UNKNOWN", "sale_price": 2, "quantity": 8}],
-                subtotal_price=16,
+                [{"product_name": "GEM 5 BOOSTER PACK", "sku_type": "UNKNOWN", "sale_price": 2, "quantity": 20}],
+                subtotal_price=40,
             ),
             _order(
                 "chase-1",
@@ -204,10 +204,10 @@ class SurpriseSetGmvTests(unittest.TestCase):
         valuation = summaries[0]["valuation"]
         self.assertEqual(summaries[0]["name"], "Venusaur BGS 10 / Charizard ex PSA 9 ENG")
         self.assertEqual(summaries[0]["name_source"], "highest_value_chases")
-        self.assertEqual(valuation["floor_value"], 18.00)
+        self.assertEqual(valuation["floor_value"], 36.00)
         self.assertEqual(valuation["chase_value"], 160.00)
-        self.assertEqual(valuation["game_value"], 178.00)
-        self.assertEqual(summaries[0]["estimated_spread"], -120.00)
+        self.assertEqual(valuation["game_value"], 196.00)
+        self.assertEqual(summaries[0]["estimated_spread"], -114.00)
         self.assertEqual([row["rule"] for row in valuation["floors"]], ["pack_floor", "bank_floor"])
         self.assertEqual([row["title"] for row in valuation["chases"]], ["Venusaur BGS 10", "Charizard ex PSA 9 ENG"])
 
@@ -233,6 +233,66 @@ class SurpriseSetGmvTests(unittest.TestCase):
         self.assertEqual(valuation["unpriced_chase_count"], 1)
         self.assertEqual(valuation["confidence"], "partial")
         self.assertEqual(valuation["chases"][0]["status"], "missing")
+
+    def test_ten_packs_are_chases_and_etb_query_expands_for_pricing(self) -> None:
+        self.assertFalse(streamer_module._surprise_set_is_pack_floor("TWILIGHT MASQUERADE SLEEVED BOOSTER PACK", 10))
+        self.assertTrue(streamer_module._surprise_set_is_pack_floor("GEM 5 BOOSTER PACK", 20))
+        self.assertEqual(
+            streamer_module._canonical_surprise_set_price_query("CAHOS RISING ETB"),
+            "chaos rising elite trainer box",
+        )
+        self.assertEqual(
+            streamer_module._surprise_set_pricing_item_type("Twilight masquerade sleeve pack"),
+            streamer_module.ITEM_TYPE_SEALED,
+        )
+
+    def test_manual_chase_price_overrides_market_lookup(self) -> None:
+        start = datetime(2026, 5, 31, 14, 0, tzinfo=timezone.utc)
+        orders = [
+            _order(
+                "ten-pack-chase",
+                start,
+                [
+                    {
+                        "product_name": "TWILIGHT MASQUERADE SLEEVED BOOSTER PACK",
+                        "sku_type": "UNKNOWN",
+                        "sale_price": 8,
+                        "quantity": 10,
+                    }
+                ],
+                subtotal_price=80,
+            ),
+        ]
+        title = "TWILIGHT MASQUERADE SLEEVED BOOSTER PACK"
+        manual_key = streamer_module._surprise_set_manual_price_key(title)
+
+        summaries = streamer_module._build_surprise_set_summaries(
+            orders,
+            include_valuation=True,
+            manual_prices={
+                manual_key: {
+                    "unit_value": 7.25,
+                    "title": title,
+                    "updated_by": "Jeffrey",
+                }
+            },
+            price_lookup=lambda titles: {
+                title: {
+                    "status": "priced",
+                    "market_price": 99.0,
+                    "matched_title": title,
+                    "source": "tcgtracking",
+                    "confidence": "high",
+                }
+            },
+        )
+
+        chase = summaries[0]["valuation"]["chases"][0]
+        self.assertEqual(summaries[0]["valuation"]["floor_value"], 0.0)
+        self.assertEqual(chase["unit_value"], 7.25)
+        self.assertEqual(chase["total_value"], 72.50)
+        self.assertEqual(chase["source"], "manual")
+        self.assertTrue(chase["manual_override"])
 
 
 class StreamerFreshOrderFallbackTests(unittest.TestCase):
@@ -342,6 +402,27 @@ class StreamerFreshOrderFallbackTests(unittest.TestCase):
         finally:
             streamer_module._stream_range.clear()
             streamer_module._stream_range.update(previous_range)
+
+    def test_manual_surprise_set_prices_round_trip_through_app_settings(self) -> None:
+        with Session(self.engine) as session:
+            saved = streamer_module._save_surprise_set_manual_price(
+                session,
+                "CAHOS RISING ETB",
+                42.499,
+                updated_by="Jeffrey",
+            )
+
+            loaded = streamer_module._load_surprise_set_manual_prices(session)
+            row = loaded[saved["key"]]
+
+            self.assertEqual(saved["unit_value"], 42.50)
+            self.assertEqual(row["unit_value"], 42.50)
+            self.assertEqual(row["query"], "chaos rising elite trainer box")
+            self.assertEqual(session.get(AppSetting, streamer_module.SURPRISE_SET_MANUAL_PRICE_SETTING_KEY) is not None, True)
+
+            streamer_module._delete_surprise_set_manual_price(session, "CAHOS RISING ETB")
+
+            self.assertEqual(streamer_module._load_surprise_set_manual_prices(session), {})
 
 
 if __name__ == "__main__":

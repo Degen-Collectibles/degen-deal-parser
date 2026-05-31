@@ -102,9 +102,10 @@ SURPRISE_SET_DOMINANT_TITLE_SHARE = 0.60
 SURPRISE_SET_TOP_ITEMS_LIMIT = 5
 SURPRISE_SET_BANK_UNIT_VALUE = 0.30
 SURPRISE_SET_PACK_FLOOR_UNIT_VALUE = 1.50
-SURPRISE_SET_PACK_FLOOR_MIN_QTY = 5
+SURPRISE_SET_PACK_FLOOR_MIN_QTY = 20
 SURPRISE_SET_PRICE_CACHE_TTL_SECONDS = 6 * 60 * 60
 SURPRISE_SET_CHASE_NAME_LIMIT = 2
+SURPRISE_SET_MANUAL_PRICE_SETTING_KEY = "surprise_set_manual_prices"
 _surprise_set_price_cache: dict[str, dict[str, Any]] = {}
 _surprise_set_price_cache_lock = threading.Lock()
 PUBLIC_TIKTOK_LIVE_STATUS_HEADERS = {
@@ -929,6 +930,7 @@ def _canonical_surprise_set_price_query(title: str) -> str:
         "synphonia": "symphonia",
         "masquederade": "masquerade",
         "reighn": "reign",
+        "etb": "elite trainer box",
         "heros": "heroes",
         "lances": "lance's",
         "gyerados": "gyarados",
@@ -955,6 +957,7 @@ def _surprise_set_pricing_item_type(title: str) -> str:
             "collection",
             "etb",
             "elite trainer",
+            "sleeve",
             "sleeved",
             "tin",
             "upc",
@@ -984,6 +987,118 @@ def _surprise_set_price_cache_get(cache_key: str) -> Optional[dict[str, Any]]:
 def _surprise_set_price_cache_set(cache_key: str, data: dict[str, Any]) -> None:
     with _surprise_set_price_cache_lock:
         _surprise_set_price_cache[cache_key] = {"at": time.monotonic(), "data": dict(data)}
+
+
+def _surprise_set_manual_price_key(title: str) -> str:
+    return _surprise_set_price_cache_key(title)
+
+
+def _normalize_surprise_set_manual_prices(value: Any) -> dict[str, dict[str, Any]]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value or "{}")
+        except (TypeError, ValueError):
+            value = {}
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for key, row in value.items():
+        if not isinstance(row, dict):
+            continue
+        unit_value = _safe_metric_float(row.get("unit_value") or row.get("market_price") or row.get("price"), 0.0)
+        if unit_value <= 0:
+            continue
+        clean_key = str(key or "").strip()
+        title = str(row.get("title") or "").strip()
+        if not clean_key:
+            clean_key = _surprise_set_manual_price_key(title)
+        if not clean_key:
+            continue
+        query = str(row.get("query") or _canonical_surprise_set_price_query(title)).strip()
+        out[clean_key] = {
+            "key": clean_key,
+            "title": title,
+            "query": query,
+            "unit_value": round(unit_value, 2),
+            "updated_at": str(row.get("updated_at") or ""),
+            "updated_by": str(row.get("updated_by") or ""),
+        }
+    return out
+
+
+def _load_surprise_set_manual_prices(session: Session) -> dict[str, dict[str, Any]]:
+    raw = _get_app_setting(session, SURPRISE_SET_MANUAL_PRICE_SETTING_KEY, "{}")
+    return _normalize_surprise_set_manual_prices(raw)
+
+
+def _persist_surprise_set_manual_prices(session: Session, prices: dict[str, dict[str, Any]]) -> None:
+    clean = _normalize_surprise_set_manual_prices(prices)
+    _set_app_setting(
+        session,
+        SURPRISE_SET_MANUAL_PRICE_SETTING_KEY,
+        json.dumps(clean, sort_keys=True, separators=(",", ":")),
+    )
+
+
+def _save_surprise_set_manual_price(
+    session: Session,
+    title: str,
+    unit_value: Any,
+    *,
+    updated_by: str = "",
+) -> dict[str, Any]:
+    clean_title = str(title or "").strip()
+    price = _safe_metric_float(unit_value, -1.0)
+    if not clean_title:
+        raise ValueError("Missing surprise set product title")
+    if price <= 0:
+        raise ValueError("Manual price must be a positive number")
+    key = _surprise_set_manual_price_key(clean_title)
+    prices = _load_surprise_set_manual_prices(session)
+    row = {
+        "key": key,
+        "title": clean_title,
+        "query": _canonical_surprise_set_price_query(clean_title),
+        "unit_value": round(price, 2),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_by": str(updated_by or ""),
+    }
+    prices[key] = row
+    _persist_surprise_set_manual_prices(session, prices)
+    return row
+
+
+def _delete_surprise_set_manual_price(session: Session, title: str) -> None:
+    if not str(title or "").strip():
+        raise ValueError("Missing surprise set product title")
+    key = _surprise_set_manual_price_key(title)
+    prices = _load_surprise_set_manual_prices(session)
+    prices.pop(key, None)
+    _persist_surprise_set_manual_prices(session, prices)
+
+
+def _manual_surprise_set_price_result(title: str, manual_prices: dict[str, dict[str, Any]]) -> Optional[dict[str, Any]]:
+    key = _surprise_set_manual_price_key(title)
+    row = manual_prices.get(key)
+    if not row:
+        return None
+    unit_value = _safe_metric_float(row.get("unit_value"), 0.0)
+    if unit_value <= 0:
+        return None
+    return {
+        "title": title,
+        "query": row.get("query") or _canonical_surprise_set_price_query(title),
+        "item_type": _surprise_set_pricing_item_type(title),
+        "status": "priced",
+        "market_price": round(unit_value, 2),
+        "matched_title": row.get("title") or title,
+        "source": "manual",
+        "confidence": "manual",
+        "manual_override": True,
+        "price_key": key,
+        "updated_by": row.get("updated_by") or "",
+        "updated_at": row.get("updated_at") or "",
+    }
 
 
 def _surprise_set_price_result_from_response(title: str, response: Optional[dict[str, Any]]) -> dict[str, Any]:
@@ -1109,6 +1224,7 @@ def _build_surprise_set_valuation(
     items: list[dict[str, Any]],
     *,
     price_lookup: Optional[Any] = None,
+    manual_prices: Optional[dict[str, dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     floors: list[dict[str, Any]] = []
     chase_items: list[dict[str, Any]] = []
@@ -1138,13 +1254,27 @@ def _build_surprise_set_valuation(
         else:
             chase_items.append(item)
 
+    manual_prices = _normalize_surprise_set_manual_prices(manual_prices or {})
+    manual_price_map: dict[str, dict[str, Any]] = {}
+    lookup_titles: list[str] = []
+    for item in chase_items:
+        title = str(item.get("title") or "").strip()
+        manual_row = _manual_surprise_set_price_result(title, manual_prices)
+        if manual_row:
+            manual_price_map[title] = manual_row
+        else:
+            lookup_titles.append(title)
     lookup = price_lookup or _lookup_surprise_set_chase_prices
-    price_map = lookup([str(item.get("title") or "") for item in chase_items]) if chase_items else {}
+    price_map = lookup(lookup_titles) if lookup_titles else {}
     chases: list[dict[str, Any]] = []
     for item in chase_items:
         title = str(item.get("title") or "Unknown").strip() or "Unknown"
         qty = int(item.get("qty") or 0)
-        price_row = dict(price_map.get(title) or _surprise_set_price_result_from_response(title, None))
+        price_row = dict(
+            manual_price_map.get(title)
+            or price_map.get(title)
+            or _surprise_set_price_result_from_response(title, None)
+        )
         unit_value = _safe_metric_float(price_row.get("market_price"), 0.0)
         chases.append({
             "title": title,
@@ -1156,6 +1286,10 @@ def _build_surprise_set_valuation(
             "confidence": price_row.get("confidence") or "missing",
             "status": price_row.get("status") or "missing",
             "query": price_row.get("query") or _canonical_surprise_set_price_query(title),
+            "price_key": price_row.get("price_key") or _surprise_set_manual_price_key(title),
+            "manual_override": bool(price_row.get("manual_override")),
+            "updated_by": price_row.get("updated_by") or "",
+            "updated_at": price_row.get("updated_at") or "",
         })
 
     floor_value = round(sum(float(row.get("total_value") or 0.0) for row in floors), 2)
@@ -1236,6 +1370,7 @@ def _summarize_surprise_set_events(
     *,
     include_valuation: bool = False,
     price_lookup: Optional[Any] = None,
+    manual_prices: Optional[dict[str, dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     start_at = events[0]["created_at"]
     end_at = events[-1]["created_at"]
@@ -1294,7 +1429,11 @@ def _summarize_surprise_set_events(
         "top_items": top_items,
     }
     if include_valuation:
-        valuation = _build_surprise_set_valuation(all_items, price_lookup=price_lookup)
+        valuation = _build_surprise_set_valuation(
+            all_items,
+            price_lookup=price_lookup,
+            manual_prices=manual_prices,
+        )
         summary["valuation"] = valuation
         summary["game_value"] = valuation["game_value"]
         summary["estimated_spread"] = round(total_gmv - float(valuation["game_value"] or 0.0), 2)
@@ -1308,6 +1447,7 @@ def _build_surprise_set_summaries(
     gap_minutes: int = SURPRISE_SET_GAP_MINUTES,
     include_valuation: bool = False,
     price_lookup: Optional[Any] = None,
+    manual_prices: Optional[dict[str, dict[str, Any]]] = None,
 ) -> list[dict[str, Any]]:
     gap = timedelta(minutes=max(int(gap_minutes or SURPRISE_SET_GAP_MINUTES), 1))
     events: list[dict[str, Any]] = []
@@ -1334,6 +1474,7 @@ def _build_surprise_set_summaries(
             idx,
             include_valuation=include_valuation,
             price_lookup=price_lookup,
+            manual_prices=manual_prices,
         )
         for idx, group_events in enumerate(grouped, start=1)
     ]
@@ -2197,7 +2338,11 @@ def _streamer_session_gmv_uncached(session: Session, stream_context: Optional[di
         surprise_set_orders = stream_orders_rows
         surprise_sets_scope_label = "Selected stream" if stream_context.get("creator_filter_enabled") else "Stream window"
 
-    surprise_sets = _build_surprise_set_summaries(surprise_set_orders, include_valuation=True)
+    surprise_sets = _build_surprise_set_summaries(
+        surprise_set_orders,
+        include_valuation=True,
+        manual_prices=_load_surprise_set_manual_prices(session),
+    )
     result["surprise_sets"] = surprise_sets
     result["surprise_sets_total_gmv"] = round(sum(float(row.get("gmv") or 0.0) for row in surprise_sets), 2)
     result["surprise_sets_scope_label"] = surprise_sets_scope_label
@@ -2525,6 +2670,33 @@ def set_streamer_goal(request: Request, session: Session = Depends(get_session),
     if "vip_presence_timeout_min" in body:
         _set_app_setting(session, "vip_presence_timeout_min", str(max(1.0, float(body["vip_presence_timeout_min"]))))
     return {"ok": True}
+
+
+@router.post("/tiktok/streamer/surprise-set-price")
+def set_surprise_set_manual_price(request: Request, session: Session = Depends(get_session), body: dict = None):
+    if denial := _require_live_stream(request, session):
+        return denial
+    body = body or {}
+    title = str(body.get("title") or "").strip()
+    raw_price = body.get("unit_price")
+    user = getattr(request.state, "current_user", None) or get_request_user(request)
+    updated_by = (
+        str(getattr(user, "display_name", "") or getattr(user, "username", "") or "").strip()
+        if user
+        else ""
+    )
+    try:
+        if raw_price in (None, ""):
+            _delete_surprise_set_manual_price(session, title)
+            saved = None
+        else:
+            saved = _save_surprise_set_manual_price(session, title, raw_price, updated_by=updated_by)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    with _gmv_cache_lock:
+        _gmv_cache.clear()
+    return {"ok": True, "price": saved}
+
 
 @router.get("/tiktok/streamer/config", response_class=HTMLResponse)
 def tiktok_streamer_config(request: Request, session: Session = Depends(get_session)):
