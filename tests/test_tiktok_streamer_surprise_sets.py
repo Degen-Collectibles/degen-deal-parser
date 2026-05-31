@@ -143,5 +143,21 @@ class SurpriseSetGmvTests(unittest.TestCase):
         self.assertEqual(summaries[0]["name_source"], "mixed_auction_titles")
 
 
+class StreamerFreshOrderFallbackTests(unittest.TestCase):
+    def test_fallback_window_uses_recent_activity_across_pacific_midnight(self) -> None:
+        now = datetime(2026, 5, 31, 7, 3, tzinfo=timezone.utc)
+        recent_cutoff = now - timedelta(minutes=streamer_module.RECENT_ORDER_ACTIVITY_FALLBACK_MINUTES)
+        stream_context = {
+            "live_session": {
+                "end_time": int((now - timedelta(minutes=30)).timestamp()),
+            },
+            "sessions": [],
+        }
+
+        fallback_start = streamer_module._recent_order_activity_fallback_start(stream_context, now=now)
+
+        self.assertEqual(fallback_start, recent_cutoff)
+
+
 if __name__ == "__main__":
     unittest.main()

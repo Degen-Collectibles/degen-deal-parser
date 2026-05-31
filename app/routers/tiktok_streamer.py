@@ -326,11 +326,12 @@ def _recent_order_activity_fallback_start(
     stream_context: Optional[dict[str, Any]],
     now: Optional[datetime] = None,
 ) -> datetime:
-    today_start = _pacific_today_start_utc(now)
+    now_utc = _coerce_utc_datetime(now) or datetime.now(timezone.utc)
+    recent_cutoff = now_utc - timedelta(minutes=RECENT_ORDER_ACTIVITY_FALLBACK_MINUTES)
     latest_end = _latest_known_stream_end(stream_context)
-    if latest_end and latest_end > today_start:
-        return latest_end
-    return today_start
+    if latest_end:
+        return max(latest_end, recent_cutoff)
+    return recent_cutoff
 
 
 def _has_fresh_creator_order_activity(
