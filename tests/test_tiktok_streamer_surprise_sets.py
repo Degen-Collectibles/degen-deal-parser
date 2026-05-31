@@ -217,6 +217,44 @@ class StreamerFreshOrderFallbackTests(unittest.TestCase):
         self.assertEqual(recent_cutoff, now - timedelta(minutes=streamer_module.RECENT_ORDER_ACTIVITY_FALLBACK_MINUTES))
         self.assertEqual(fallback_start, current_run_start)
 
+    def test_fresh_order_fallback_uses_persisted_stream_start_when_available(self) -> None:
+        now = datetime(2026, 5, 31, 18, 45, tzinfo=timezone.utc)
+        persisted_start = datetime(2026, 5, 27, 19, 1, 13, tzinfo=timezone.utc)
+        previous_range = dict(streamer_module._stream_range)
+        try:
+            streamer_module._stream_range["start"] = persisted_start
+            streamer_module._stream_range["end"] = datetime(2026, 5, 30, 9, 29, 48, tzinfo=timezone.utc)
+            stream_context = {
+                "selected_creator": streamer_module.DEFAULT_STREAM_CREATOR,
+                "creator_filter_enabled": True,
+                "live_session": {},
+                "sessions": [],
+                "is_live": False,
+            }
+
+            with Session(self.engine) as session:
+                session.add(
+                    _order(
+                        "recent-activity",
+                        now - timedelta(minutes=5),
+                        [{"product_name": "BANG EX !!!", "sku_type": "UNKNOWN", "sale_price": 93, "quantity": 1}],
+                        subtotal_price=93,
+                    )
+                )
+                session.commit()
+
+                fallback_context = streamer_module._apply_order_activity_fallback(
+                    session,
+                    stream_context,
+                    now=now,
+                )
+
+            self.assertEqual(fallback_context["start"], persisted_start)
+            self.assertIsNone(fallback_context["end"])
+        finally:
+            streamer_module._stream_range.clear()
+            streamer_module._stream_range.update(previous_range)
+
 
 if __name__ == "__main__":
     unittest.main()

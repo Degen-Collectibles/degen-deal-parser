@@ -80,6 +80,7 @@ STREAM_METRIC_SOURCE_LOCAL_ORDER_ESTIMATE = "local_order_estimate"
 STREAM_METRIC_SOURCE_ORDER_ACTIVITY_FALLBACK = "order_activity_fallback"
 RECENT_ORDER_ACTIVITY_FALLBACK_MINUTES = 30
 ORDER_ACTIVITY_FALLBACK_LOOKBACK_HOURS = 12
+ORDER_ACTIVITY_FALLBACK_STREAM_RANGE_MAX_DAYS = 7
 _LIVE_PRODUCTS_CACHE_TTL_SECONDS = 10.0
 _live_products_cache: dict[str, Any] = {}
 _live_products_cache_lock = threading.Lock()
@@ -387,6 +388,18 @@ def _infer_order_activity_fallback_start(
     return activity_start
 
 
+def _persisted_stream_range_fallback_start(*, now: Optional[datetime] = None) -> Optional[datetime]:
+    start = _coerce_utc_datetime(_stream_range.get("start"))
+    if start is None:
+        return None
+    now_utc = _coerce_utc_datetime(now) or datetime.now(timezone.utc)
+    if start > now_utc:
+        return None
+    if now_utc - start > timedelta(days=ORDER_ACTIVITY_FALLBACK_STREAM_RANGE_MAX_DAYS):
+        return None
+    return start
+
+
 def _has_fresh_creator_order_activity(
     session: Optional[Session],
     stream_context: Optional[dict[str, Any]],
@@ -428,11 +441,14 @@ def _apply_order_activity_fallback(
     fallback_start = _recent_order_activity_fallback_start(stream_context, now)
     if not _has_fresh_creator_order_activity(session, stream_context, fallback_start, now=now):
         return stream_context
-    fallback_start = _infer_order_activity_fallback_start(
-        session,
-        stream_context,
-        fallback_start,
-        now=now,
+    fallback_start = (
+        _persisted_stream_range_fallback_start(now=now)
+        or _infer_order_activity_fallback_start(
+            session,
+            stream_context,
+            fallback_start,
+            now=now,
+        )
     )
 
     stream_context.update(
