@@ -1,9 +1,13 @@
 import json
+import shutil
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from uuid import uuid4
 
 import app.routers.tiktok_streamer as streamer_module
 from app.models import TikTokOrder
+from sqlmodel import Session, SQLModel, create_engine
 
 
 def _order(
@@ -144,6 +148,19 @@ class SurpriseSetGmvTests(unittest.TestCase):
 
 
 class StreamerFreshOrderFallbackTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = Path.cwd() / "tests" / ".tmp_streamer_surprise_sets" / str(uuid4())
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
+        self.engine = create_engine(
+            f"sqlite:///{(self.temp_dir / 'streamer.db').as_posix()}",
+            connect_args={"check_same_thread": False},
+        )
+        SQLModel.metadata.create_all(self.engine)
+
+    def tearDown(self) -> None:
+        self.engine.dispose()
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
     def test_fallback_window_uses_recent_activity_across_pacific_midnight(self) -> None:
         now = datetime(2026, 5, 31, 7, 3, tzinfo=timezone.utc)
         recent_cutoff = now - timedelta(minutes=streamer_module.RECENT_ORDER_ACTIVITY_FALLBACK_MINUTES)
@@ -157,6 +174,48 @@ class StreamerFreshOrderFallbackTests(unittest.TestCase):
         fallback_start = streamer_module._recent_order_activity_fallback_start(stream_context, now=now)
 
         self.assertEqual(fallback_start, recent_cutoff)
+
+    def test_fallback_start_extends_to_current_continuous_order_activity(self) -> None:
+        now = datetime(2026, 5, 31, 17, 0, tzinfo=timezone.utc)
+        current_run_start = now - timedelta(minutes=50)
+        stale_prior_run = now - timedelta(minutes=95)
+        stream_context = {
+            "selected_creator": streamer_module.DEFAULT_STREAM_CREATOR,
+            "creator_filter_enabled": True,
+            "live_session": {},
+            "sessions": [],
+        }
+
+        with Session(self.engine) as session:
+            for idx, created_at in enumerate(
+                [
+                    stale_prior_run,
+                    current_run_start,
+                    now - timedelta(minutes=20),
+                    now - timedelta(minutes=2),
+                ],
+                start=1,
+            ):
+                session.add(
+                    _order(
+                        f"activity-{idx}",
+                        created_at,
+                        [{"product_name": "BANG EX !!!", "sku_type": "UNKNOWN", "sale_price": 5, "quantity": 1}],
+                        subtotal_price=5,
+                    )
+                )
+            session.commit()
+
+            recent_cutoff = streamer_module._recent_order_activity_fallback_start(stream_context, now=now)
+            fallback_start = streamer_module._infer_order_activity_fallback_start(
+                session,
+                stream_context,
+                recent_cutoff,
+                now=now,
+            )
+
+        self.assertEqual(recent_cutoff, now - timedelta(minutes=streamer_module.RECENT_ORDER_ACTIVITY_FALLBACK_MINUTES))
+        self.assertEqual(fallback_start, current_run_start)
 
 
 if __name__ == "__main__":

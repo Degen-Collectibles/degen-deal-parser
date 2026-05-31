@@ -79,6 +79,7 @@ STREAM_METRIC_SOURCE_TIKTOK_LIVE_SESSION = "tiktok_live_session"
 STREAM_METRIC_SOURCE_LOCAL_ORDER_ESTIMATE = "local_order_estimate"
 STREAM_METRIC_SOURCE_ORDER_ACTIVITY_FALLBACK = "order_activity_fallback"
 RECENT_ORDER_ACTIVITY_FALLBACK_MINUTES = 30
+ORDER_ACTIVITY_FALLBACK_LOOKBACK_HOURS = 12
 _LIVE_PRODUCTS_CACHE_TTL_SECONDS = 10.0
 _live_products_cache: dict[str, Any] = {}
 _live_products_cache_lock = threading.Lock()
@@ -334,6 +335,58 @@ def _recent_order_activity_fallback_start(
     return recent_cutoff
 
 
+def _infer_order_activity_fallback_start(
+    session: Optional[Session],
+    stream_context: Optional[dict[str, Any]],
+    fallback_start: datetime,
+    *,
+    now: Optional[datetime] = None,
+) -> datetime:
+    if session is None:
+        return fallback_start
+
+    stream_context = stream_context or {}
+    now_utc = _coerce_utc_datetime(now) or datetime.now(timezone.utc)
+    fallback_start = _coerce_utc_datetime(fallback_start) or now_utc
+    lookback_start = now_utc - timedelta(hours=ORDER_ACTIVITY_FALLBACK_LOOKBACK_HOURS)
+    latest_end = _latest_known_stream_end(stream_context)
+    if latest_end and latest_end > lookback_start:
+        lookback_start = latest_end
+
+    account_scope = _stream_account_scope_for_context(session, stream_context)
+    query = (
+        select(TikTokOrder)
+        .where(TikTokOrder.created_at >= lookback_start, TikTokOrder.created_at <= now_utc)
+        .order_by(TikTokOrder.created_at.desc())
+    )
+    query = _apply_tiktok_account_scope(query, account_scope)
+    rows = session.exec(query).all()
+    order_times = [
+        _coerce_utc_datetime(order.created_at)
+        for order in rows
+        if _is_enriched_order(order) and tiktok_order_is_paid(order)
+    ]
+    order_times = [ts for ts in order_times if ts is not None]
+    if not order_times:
+        return fallback_start
+
+    order_times.sort(reverse=True)
+    latest_order_at = order_times[0]
+    if latest_order_at < fallback_start:
+        return fallback_start
+
+    gap = timedelta(minutes=RECENT_ORDER_ACTIVITY_FALLBACK_MINUTES)
+    activity_start = latest_order_at
+    previous_at = latest_order_at
+    for order_at in order_times[1:]:
+        if previous_at - order_at > gap:
+            break
+        activity_start = order_at
+        previous_at = order_at
+
+    return activity_start
+
+
 def _has_fresh_creator_order_activity(
     session: Optional[Session],
     stream_context: Optional[dict[str, Any]],
@@ -375,6 +428,12 @@ def _apply_order_activity_fallback(
     fallback_start = _recent_order_activity_fallback_start(stream_context, now)
     if not _has_fresh_creator_order_activity(session, stream_context, fallback_start, now=now):
         return stream_context
+    fallback_start = _infer_order_activity_fallback_start(
+        session,
+        stream_context,
+        fallback_start,
+        now=now,
+    )
 
     stream_context.update(
         {
