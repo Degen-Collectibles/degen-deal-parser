@@ -543,25 +543,6 @@
             font-size: 11px; font-weight: 900; color: var(--green); white-space: nowrap;
         }
         .surprise-set-row-missing .surprise-set-row-value { color: #fbbf24; }
-        .surprise-set-price-editor {
-            grid-column: 1 / -1; display: flex; align-items: center; gap: 6px;
-            margin-top: 4px;
-        }
-        .surprise-set-price-input {
-            min-width: 0; width: 92px; border: 1px solid rgba(255,255,255,.14);
-            border-radius: 6px; padding: 6px 7px; background: rgba(0,0,0,.2);
-            color: var(--text); font-size: 12px; font-weight: 800;
-        }
-        .surprise-set-price-input:focus {
-            outline: none; border-color: rgba(37,244,238,.45);
-        }
-        .surprise-set-price-save {
-            border: 1px solid rgba(37,244,238,.24); border-radius: 6px;
-            padding: 6px 8px; background: rgba(37,244,238,.09);
-            color: var(--tiktok-cyan); font-size: 11px; font-weight: 900; cursor: pointer;
-        }
-        .surprise-set-price-save:disabled { opacity: .55; cursor: wait; }
-
         /* ---- High-Value Toast ---- */
         .toast-high-value {
             border-color: #fbbf24 !important;
@@ -2238,54 +2219,14 @@
                 if (status && status !== 'priced' && status !== 'assumed') meta.push(status);
                 if (!unit && kind === 'chases') meta.push('needs market price');
                 var missingClass = unit > 0 || kind !== 'chases' ? '' : ' surprise-set-row-missing';
-                var editor = '';
-                if (kind === 'chases') {
-                    editor = '<div class="surprise-set-price-editor" data-title="' + escAttr(item.title || '') + '">'
-                        + '<input class="surprise-set-price-input" type="number" min="0" step="0.01"'
-                        + ' value="' + (item.manual_override && unit > 0 ? escAttr(unit.toFixed(2)) : '') + '"'
-                        + ' placeholder="' + (unit > 0 ? escAttr(unit.toFixed(2)) : '0.00') + '"'
-                        + ' aria-label="Manual price for ' + escAttr(item.title || 'chase') + '">'
-                        + '<button type="button" class="surprise-set-price-save">Save</button>'
-                        + '</div>';
-                }
                 return '<div class="surprise-set-row' + missingClass + '">'
                     + '<div>'
                     + '<div class="surprise-set-row-title">' + esc(item.title || 'Unknown') + '</div>'
                     + '<div class="surprise-set-row-meta">' + esc(meta.join(' | ')) + '</div>'
                     + '</div>'
                     + '<div class="surprise-set-row-value">' + (unit > 0 ? exactMoney(item.total_value || 0) : 'Needs price') + '</div>'
-                    + editor
                     + '</div>';
             }).join('');
-        }
-
-        function saveSurpriseSetManualPrice(button) {
-            var editor = button.closest('.surprise-set-price-editor');
-            if (!editor) return;
-            var input = editor.querySelector('.surprise-set-price-input');
-            var title = editor.getAttribute('data-title') || '';
-            var rawValue = input ? input.value : '';
-            button.disabled = true;
-            button.textContent = 'Saving';
-            fetch('/tiktok/streamer/surprise-set-price', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ title: title, unit_price: rawValue }),
-            }).then(function(resp) {
-                return resp.json().then(function(data) {
-                    if (!resp.ok || !data.ok) throw new Error(data.error || 'Save failed');
-                    button.textContent = 'Saved';
-                    pollOrders();
-                    setTimeout(function() {
-                        button.disabled = false;
-                        button.textContent = 'Save';
-                    }, 900);
-                });
-            }).catch(function(err) {
-                button.disabled = false;
-                button.textContent = 'Retry';
-                console.warn('Manual surprise set price save failed', err);
-            });
         }
 
         function renderSurpriseSetBreakdown(row) {
@@ -2361,17 +2302,6 @@
 
         if (surpriseSetList) {
             surpriseSetList.addEventListener('click', function(event) {
-                var saveButton = event.target.closest('.surprise-set-price-save');
-                if (saveButton) {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    saveSurpriseSetManualPrice(saveButton);
-                    return;
-                }
-                if (event.target.closest('.surprise-set-price-editor')) {
-                    event.stopPropagation();
-                    return;
-                }
                 var card = event.target.closest('.surprise-set-card');
                 if (!card || !surpriseSetList.contains(card)) return;
                 var id = card.getAttribute('data-set-id') || '';
@@ -2384,7 +2314,6 @@
                 }
             });
             surpriseSetList.addEventListener('keydown', function(event) {
-                if (event.target.closest('.surprise-set-price-editor')) return;
                 if (event.key !== 'Enter' && event.key !== ' ') return;
                 var card = event.target.closest('.surprise-set-card');
                 if (!card || !surpriseSetList.contains(card)) return;

@@ -9,6 +9,7 @@ import asyncio
 import difflib
 import hashlib
 import json
+import logging
 import re
 import threading
 import time
@@ -58,6 +59,7 @@ from ..reporting import (
 )
 
 router = APIRouter(route_class=CSRFProtectedRoute)
+logger = logging.getLogger(__name__)
 
 
 def _require_live_stream(request: Request, session: Optional[Session] = None):
@@ -926,18 +928,14 @@ def _surprise_set_display_norm(value: Any) -> str:
 
 def _surprise_set_is_bank_floor(title: str) -> bool:
     key = _surprise_set_value_key(title)
-    if "bangex" in key:
-        return True
-    if len(key) < 4 or len(key) > 16:
-        return False
-    return difflib.SequenceMatcher(None, key, "bangex").ratio() >= 0.75
+    return key in {"bangex", "bagnex", "bnagex", "bngaex", "bagngex"}
 
 
 def _surprise_set_is_pack_floor(title: str, qty: int) -> bool:
     if qty < SURPRISE_SET_PACK_FLOOR_MIN_QTY:
         return False
     norm = _surprise_set_display_norm(title)
-    return any(token in norm for token in ("booster pack", "sleeved pack", "sleeve pack", " pack"))
+    return any(token in norm for token in ("booster pack", "sleeved pack", "sleeve pack"))
 
 
 def _canonical_surprise_set_price_query(title: str) -> str:
@@ -952,6 +950,7 @@ def _canonical_surprise_set_price_query(title: str) -> str:
         "etb": "elite trainer box",
         "heros": "heroes",
         "lances": "lance's",
+        "lance s": "lance's",
         "gyerados": "gyarados",
         "gyrados": "gyarados",
         "latios ex box": "latios ex collection box",
@@ -960,6 +959,7 @@ def _canonical_surprise_set_price_query(title: str) -> str:
     for wrong, right in replacements.items():
         query = re.sub(rf"\b{re.escape(wrong)}\b", right, query)
     query = re.sub(r"\bspc\b", "surprise collection", query)
+    query = re.sub(r"\belite trainer box\s+box\b", "elite trainer box", query)
     return " ".join(query.split())
 
 
@@ -1357,9 +1357,15 @@ def _lookup_surprise_set_chase_prices(titles: list[str]) -> dict[str, dict[str, 
         async def _run() -> list[dict[str, Any]]:
             return await asyncio.gather(*[_fetch_surprise_set_chase_price(title) for title in missing])
 
+        lookup_task = _run()
         try:
-            fetched = asyncio.run(_run())
+            fetched = asyncio.run(lookup_task)
         except RuntimeError:
+            lookup_task.close()
+            logger.warning(
+                "Surprise set chase price lookup failed from an active async context; returning missing prices",
+                exc_info=True,
+            )
             fetched = []
         for title, result in zip(missing, fetched):
             cache_key = _surprise_set_price_cache_key(title)
@@ -2825,11 +2831,12 @@ def set_streamer_goal(request: Request, session: Session = Depends(get_session),
 
 @router.post("/tiktok/streamer/surprise-set-price")
 def set_surprise_set_manual_price(request: Request, session: Session = Depends(get_session), body: dict = None):
-    if denial := _require_live_stream(request, session):
+    if denial := require_role_response(request, "reviewer"):
         return denial
     body = body or {}
     title = str(body.get("title") or "").strip()
     raw_price = body.get("unit_price")
+    clear_price = bool(body.get("clear")) or str(body.get("action") or "").strip().lower() in {"clear", "delete"}
     user = getattr(request.state, "current_user", None) or get_request_user(request)
     updated_by = (
         str(getattr(user, "display_name", "") or getattr(user, "username", "") or "").strip()
@@ -2837,9 +2844,13 @@ def set_surprise_set_manual_price(request: Request, session: Session = Depends(g
         else ""
     )
     try:
-        if raw_price in (None, ""):
+        if not title:
+            raise ValueError("Manual price title is required")
+        if clear_price:
             _delete_surprise_set_manual_price(session, title)
             saved = None
+        elif raw_price in (None, ""):
+            saved = _load_surprise_set_manual_prices(session).get(_surprise_set_manual_price_key(title))
         else:
             saved = _save_surprise_set_manual_price(session, title, raw_price, updated_by=updated_by)
     except ValueError as exc:

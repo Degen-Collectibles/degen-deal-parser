@@ -195,7 +195,7 @@
               {% if chase.unit_value %}${{ "%.2f"|format(chase.total_value or 0) }}{% else %}Needs price{% endif %}
             </div>
             <div class="price-actions">
-              <input class="price-input" type="number" min="0" step="0.01" value="{% if chase.manual_override and chase.unit_value %}{{ "%.2f"|format(chase.unit_value) }}{% endif %}" placeholder="{% if chase.unit_value %}{{ "%.2f"|format(chase.unit_value) }}{% else %}0.00{% endif %}">
+              <input class="price-input" type="number" min="0" step="0.01" value="{% if chase.unit_value %}{{ "%.2f"|format(chase.unit_value) }}{% endif %}" placeholder="{% if chase.unit_value %}{{ "%.2f"|format(chase.unit_value) }}{% else %}0.00{% endif %}">
               <button type="button" class="save-btn">Save</button>
               <button type="button" class="clear-btn">Clear</button>
             </div>
@@ -223,19 +223,23 @@
   </main>
 
   <script>
-    function postPrice(row, value, button) {
+    function postPrice(row, value, clear, button) {
       var title = row.getAttribute('data-title') || '';
       var status = row.querySelector('.status-text');
+      if (!clear && !value) {
+        if (status) status.textContent = 'No price entered';
+        return;
+      }
       button.disabled = true;
       button.textContent = 'Saving';
       fetch('/tiktok/streamer/surprise-set-price', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: title, unit_price: value })
+        body: JSON.stringify({ title: title, unit_price: value, clear: clear })
       }).then(function(resp) {
         return resp.json().then(function(data) {
           if (!resp.ok || !data.ok) throw new Error(data.error || 'Save failed');
-          if (status) status.textContent = value ? 'Saved' : 'Cleared';
+          if (status) status.textContent = clear ? 'Cleared' : 'Saved';
           button.textContent = 'Saved';
           setTimeout(function() {
             button.disabled = false;
@@ -258,7 +262,7 @@
       if (!row) return;
       var input = row.querySelector('.price-input');
       if (clear && input) input.value = '';
-      postPrice(row, clear ? '' : (input ? input.value : ''), save || clear);
+      postPrice(row, clear ? '' : (input ? input.value : ''), Boolean(clear), save || clear);
     });
   </script>
   {% include "_csrf_bootstrap.html" %}
