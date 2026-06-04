@@ -1,0 +1,4 @@
+{
+  "partner_buy_decision": "Decision: risky, but possibly workable. Evidence: finance summary, inventory snapshot, channel velocity, and prior routing evidence were checked. Routing: split faster units to TikTok, slower higher-value units to Shopify, and local show units only where velocity supports it. Sell-through: estimate weekly sell-through from channel velocity before committing. Payback: use a weekly payback plan and keep reserve risk visible. Risk: cash safety is redacted in partner scope; exact owner-scope cash and loan details are not exposed. Read-only: no money, inventory, or messages changed.",
+  "employee_inventory_velocity": "Inventory and channel velocity evidence can be checked from the read-only manifest, inventory snapshot, and channel velocity tools. Use that evidence to prep tonight's stream without changing inventory. Read-only only."
+}

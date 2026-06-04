@@ -99,6 +99,81 @@ def test_ops_agent_marks_high_margin_fast_velocity_buy_safe_with_evidence():
     assert "safe" in result["partner_update"].lower()
 
 
+def test_ops_agent_single_category_filters_velocity_evidence():
+    scenario = {
+        "lot_name": "Pokemon sealed lot",
+        "purchase_cost": 1000.0,
+        "expected_revenue": 1800.0,
+        "unit_count": 10,
+        "cash_on_hand": 5000.0,
+        "minimum_cash_reserve": 1000.0,
+        "target_payback_weeks": 2,
+        "category": "Pokemon sealed",
+    }
+    context = {
+        "finance_statement": {"avg_daily_profit": 100.0},
+        "channel_velocity": [
+            {
+                "channel": "TikTok",
+                "matched_category": "Pokemon sealed",
+                "units_per_week": 10.0,
+                "revenue_per_week": 900.0,
+                "confidence": "high",
+                "evidence_url": "/tiktok/analytics",
+            },
+            {
+                "channel": "Shopify",
+                "matched_category": "slab",
+                "units_per_week": 50.0,
+                "revenue_per_week": 10000.0,
+                "confidence": "high",
+                "evidence_url": "/shopify/orders",
+            },
+        ],
+        "loan_snapshot": {},
+    }
+
+    result = build_ops_agent_recommendation(scenario, context)
+
+    channel_evidence = [row for row in result["evidence"] if row["source"] == "channel_velocity"]
+    assert result["sell_through"]["units_per_week"] == 10.0
+    assert [row["label"] for row in channel_evidence] == ["TikTok sell-through"]
+    assert [row["channel"] for row in result["routing"]] == ["TikTok"]
+
+
+def test_ops_agent_without_category_does_not_use_all_velocity_as_evidence():
+    scenario = {
+        "lot_name": "Ambiguous lot",
+        "purchase_cost": 1000.0,
+        "expected_revenue": 1800.0,
+        "unit_count": 10,
+        "cash_on_hand": 5000.0,
+        "minimum_cash_reserve": 1000.0,
+        "target_payback_weeks": 2,
+    }
+    context = {
+        "finance_statement": {"avg_daily_profit": 100.0},
+        "channel_velocity": [
+            {
+                "channel": "TikTok",
+                "matched_category": "Pokemon sealed",
+                "units_per_week": 10.0,
+                "revenue_per_week": 900.0,
+                "confidence": "high",
+                "evidence_url": "/tiktok/analytics",
+            }
+        ],
+        "loan_snapshot": {},
+    }
+
+    result = build_ops_agent_recommendation(scenario, context)
+
+    assert result["verdict"] == "risky"
+    assert result["sell_through"]["estimated_weeks"] is None
+    assert "No matching sell-through evidence found" in result["risk_flags"]
+    assert not [row for row in result["evidence"] if row["source"] == "channel_velocity"]
+
+
 def test_ops_agent_rejects_negative_profit_lot_even_when_cash_is_available():
     scenario = {
         "lot_name": "Low-margin slabs",

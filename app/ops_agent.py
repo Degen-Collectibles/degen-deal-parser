@@ -63,18 +63,36 @@ def _build_unit_economics(scenario: dict[str, Any]) -> dict[str, float]:
     }
 
 
-def _matching_velocity_rows(scenario: dict[str, Any], context: dict[str, Any]) -> list[dict[str, Any]]:
-    categories = {
+def _scenario_category_terms(scenario: dict[str, Any]) -> set[str]:
+    raw_categories = scenario.get("categories") or []
+    if isinstance(raw_categories, str):
+        category_values = [raw_categories]
+    else:
+        category_values = list(raw_categories)
+    category_values.extend(
+        scenario.get(key)
+        for key in ("category", "matched_category", "inventory_category")
+    )
+    return {
         str(category).strip().lower()
-        for category in scenario.get("categories", [])
-        if str(category).strip()
+        for category in category_values
+        if str(category).strip() and str(category).strip().lower() not in {"*", "all"}
     }
+
+
+def _matching_velocity_rows(scenario: dict[str, Any], context: dict[str, Any]) -> list[dict[str, Any]]:
+    categories = _scenario_category_terms(scenario)
+    if not categories:
+        return []
     rows = []
     for row in context.get("channel_velocity", []) or []:
         if not isinstance(row, dict):
             continue
         matched_category = str(row.get("matched_category") or "").strip().lower()
-        if categories and matched_category and matched_category not in categories:
+        if matched_category and not any(
+            category in matched_category or matched_category in category
+            for category in categories
+        ):
             continue
         rows.append(
             {
