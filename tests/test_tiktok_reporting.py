@@ -1026,6 +1026,82 @@ class TikTokRegressionTests(unittest.TestCase):
             ).one()
             self.assertEqual(job.status, "succeeded")
 
+    def test_tiktok_webhook_enrichment_uses_existing_order_shop_credentials_first(self) -> None:
+        @contextmanager
+        def fake_managed_session():
+            with Session(self.engine) as session:
+                yield session
+
+        with Session(self.engine) as session:
+            session.add(
+                TikTokAuth(
+                    tiktok_shop_id="secondary-shop",
+                    shop_cipher="secondary-cipher",
+                    access_token="secondary-token",
+                    refresh_token="secondary-refresh",
+                    seller_name="D.C. LLC",
+                )
+            )
+            session.add(
+                TikTokOrder(
+                    tiktok_order_id="main-webhook-order",
+                    shop_id="main-shop",
+                    shop_cipher="main-cipher",
+                    order_number="main-webhook-order",
+                    created_at=datetime(2026, 4, 1, 8, 0, tzinfo=timezone.utc),
+                    updated_at=datetime(2026, 4, 1, 8, 0, tzinfo=timezone.utc),
+                    source="webhook",
+                    line_items_json="[]",
+                    line_items_summary_json="[]",
+                )
+            )
+            session.commit()
+
+        fetch_calls: list[tuple[str, str, str]] = []
+
+        def fake_fetch_details(*args, **kwargs):
+            fetch_calls.append((kwargs["shop_id"], kwargs["shop_cipher"], kwargs["access_token"]))
+            return [{"order_id": "main-webhook-order", "shop_id": "main-shop"}]
+
+        def fake_order_record(payload, *, shop_id, shop_cipher, source):
+            return {
+                "tiktok_order_id": payload["order_id"],
+                "shop_id": shop_id,
+                "shop_cipher": shop_cipher,
+                "source": source,
+                "line_items_json": "[]",
+                "line_items_summary_json": "[]",
+            }
+
+        with patch.object(shared_module, "managed_session", fake_managed_session), patch.object(
+            shared_module,
+            "_refresh_tiktok_auth_if_needed",
+            return_value=None,
+        ), patch.object(
+            shared_module,
+            "_fetch_tiktok_order_details",
+            side_effect=fake_fetch_details,
+        ), patch.object(
+            shared_module,
+            "_order_record_from_payload",
+            side_effect=fake_order_record,
+        ), patch.object(
+            shared_module,
+            "resolve_tiktok_shop_pull_base_url",
+            return_value="https://open-api.tiktokglobalshop.com",
+        ), patch.object(main_module.settings, "tiktok_app_key", "app-key"), patch.object(
+            main_module.settings, "tiktok_app_secret", "app-secret"
+        ), patch.object(
+            main_module.settings, "tiktok_shop_id", "main-shop"
+        ), patch.object(
+            main_module.settings, "tiktok_shop_cipher", "main-cipher"
+        ), patch.object(
+            main_module.settings, "tiktok_access_token", "main-token"
+        ):
+            shared_module._enrich_tiktok_order_from_api("main-webhook-order", raise_errors=True)
+
+        self.assertEqual(fetch_calls, [("main-shop", "main-cipher", "main-token")])
+
     def test_tiktok_webhook_enrichment_queue_reenqueue_resets_terminal_retry_budget(self) -> None:
         first_seen_at = datetime(2026, 4, 1, 8, 0, tzinfo=timezone.utc)
         second_seen_at = first_seen_at + timedelta(hours=1)
@@ -2197,6 +2273,80 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(state["last_pull"]["status"], "success")
         self.assertEqual(state["last_pull"]["trigger"], "manual")
         self.assertEqual(state["last_pull"]["fetched"], 3)
+
+    def test_run_tiktok_pull_cycle_pulls_configured_env_and_persisted_auth_shops(self) -> None:
+        self._reset_tiktok_state()
+
+        @contextmanager
+        def fake_managed_session():
+            with Session(self.engine) as session:
+                yield session
+
+        with Session(self.engine) as session:
+            session.add(
+                TikTokAuth(
+                    tiktok_shop_id="secondary-shop",
+                    shop_cipher="secondary-cipher",
+                    access_token="secondary-token",
+                    refresh_token="secondary-refresh",
+                    seller_name="D.C. LLC",
+                )
+            )
+            session.commit()
+
+        def fake_pull_tiktok_orders(*args, **kwargs):
+            return SimpleNamespace(
+                fetched=1,
+                inserted=1 if kwargs["shop_id"] == "main-shop" else 0,
+                updated=0 if kwargs["shop_id"] == "main-shop" else 1,
+                failed=0,
+                detail_calls=1,
+            )
+
+        import app.shared as _shared_module
+        with patch.object(_shared_module, "managed_session", side_effect=fake_managed_session), patch.object(
+            _shared_module, "_refresh_tiktok_auth_if_needed", return_value=None
+        ), patch.object(
+            _shared_module, "pull_tiktok_orders", side_effect=fake_pull_tiktok_orders
+        ) as pull_tiktok_orders_mock, patch.object(
+            _shared_module, "resolve_tiktok_shop_pull_base_url", return_value="https://open-api.tiktokglobalshop.com"
+        ), patch.object(main_module.settings, "tiktok_app_key", "app-key"), patch.object(
+            main_module.settings, "tiktok_app_secret", "app-secret"
+        ), patch.object(
+            main_module.settings, "tiktok_shop_id", "main-shop"
+        ), patch.object(
+            main_module.settings, "tiktok_shop_cipher", "main-cipher"
+        ), patch.object(
+            main_module.settings, "tiktok_access_token", "main-token"
+        ), patch.object(
+            main_module.settings, "tiktok_sync_enabled", True
+        ), patch.object(
+            main_module.settings, "tiktok_sync_limit", 25
+        ), patch.object(
+            main_module.settings, "tiktok_sync_lookback_hours", 24.0
+        ):
+            result = _shared_module.run_tiktok_pull_cycle(
+                runtime_name="test_tiktok_runtime",
+                limit=10,
+                trigger="manual",
+            )
+
+        pull_identities = [
+            (call.kwargs["shop_id"], call.kwargs["shop_cipher"], call.kwargs["access_token"])
+            for call in pull_tiktok_orders_mock.call_args_list
+        ]
+        self.assertEqual(
+            pull_identities,
+            [
+                ("main-shop", "main-cipher", "main-token"),
+                ("secondary-shop", "secondary-cipher", "secondary-token"),
+            ],
+        )
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["shops_pulled"], 2)
+        self.assertEqual(result["fetched"], 2)
+        self.assertEqual(result["inserted"], 1)
+        self.assertEqual(result["updated"], 1)
 
     def test_run_tiktok_pull_cycle_retries_after_401_with_refreshed_token(self) -> None:
         self._reset_tiktok_state()

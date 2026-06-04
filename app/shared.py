@@ -3091,6 +3091,90 @@ def _resolve_tiktok_pull_credentials(auth_row: Optional[TikTokAuth]) -> tuple[st
     return shop_id, shop_cipher, access_token
 
 
+def _tiktok_credential_key(shop_id: str, shop_cipher: str) -> tuple[str, str]:
+    clean_shop_id = (shop_id or "").strip()
+    if clean_shop_id and not clean_shop_id.startswith("pending:"):
+        return ("shop_id", clean_shop_id)
+    clean_shop_cipher = (shop_cipher or "").strip()
+    if clean_shop_cipher:
+        return ("shop_cipher", clean_shop_cipher)
+    return ("", "")
+
+
+def _tiktok_pull_credential_sets(session: Session) -> list[dict[str, str]]:
+    """Return deduped TikTok Shop pull credentials from env and persisted auth rows."""
+    credentials: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    env_shop_id = (settings.tiktok_shop_id or "").strip()
+    env_shop_cipher = (settings.tiktok_shop_cipher or "").strip()
+    env_access_token = (settings.tiktok_access_token or "").strip()
+    env_key = _tiktok_credential_key(env_shop_id, env_shop_cipher)
+    auth_rows = list(
+        session.exec(select(TikTokAuth).order_by(TikTokAuth.updated_at.desc(), TikTokAuth.id.desc())).all()
+    )
+    auth_keys = {
+        _tiktok_credential_key((row.tiktok_shop_id or "").strip(), (row.shop_cipher or "").strip())
+        for row in auth_rows
+        if ((row.access_token or "").strip() and _tiktok_credential_key((row.tiktok_shop_id or "").strip(), (row.shop_cipher or "").strip()) != ("", ""))
+    }
+    if env_access_token and env_key != ("", "") and env_key not in auth_keys:
+        credentials.append(
+            {
+                "shop_id": env_shop_id,
+                "shop_cipher": env_shop_cipher,
+                "access_token": env_access_token,
+                "source": "configured_env",
+            }
+        )
+        seen.add(env_key)
+
+    for row in auth_rows:
+        shop_id, shop_cipher, access_token = _resolve_tiktok_pull_credentials(row)
+        key = _tiktok_credential_key(shop_id, shop_cipher)
+        if key == ("", "") or key in seen or not access_token:
+            continue
+        credentials.append(
+            {
+                "shop_id": shop_id,
+                "shop_cipher": shop_cipher,
+                "access_token": access_token,
+                "source": "auth_row",
+            }
+        )
+        seen.add(key)
+
+    return credentials
+
+
+def _tiktok_pull_credentials_for_order(session: Session, order_id: str) -> list[dict[str, str]]:
+    credentials = _tiktok_pull_credential_sets(session)
+    if not credentials:
+        return []
+
+    existing_order = session.exec(
+        select(TikTokOrder).where(TikTokOrder.tiktok_order_id == order_id)
+    ).first()
+    if existing_order is None:
+        return credentials
+
+    order_shop_id = (existing_order.shop_id or "").strip()
+    order_shop_cipher = (existing_order.shop_cipher or "").strip()
+    if not order_shop_id and not order_shop_cipher:
+        return credentials
+
+    def _credential_match_rank(credential: dict[str, str]) -> int:
+        credential_shop_id = (credential.get("shop_id") or "").strip()
+        credential_shop_cipher = (credential.get("shop_cipher") or "").strip()
+        if order_shop_id and credential_shop_id == order_shop_id:
+            return 0
+        if order_shop_cipher and credential_shop_cipher == order_shop_cipher:
+            return 1
+        return 2
+
+    return sorted(credentials, key=_credential_match_rank)
+
+
 def describe_tiktok_sync_status(auth_row: Optional[TikTokAuth], sync_state: dict[str, object]) -> dict[str, object]:
     last_pull = sync_state.get("last_pull")
     pull_status = "idle"
@@ -3254,7 +3338,8 @@ def run_tiktok_pull_cycle(
     try:
       with managed_session() as session:
         auth_row = ensure_tiktok_auth_row(session)
-        if auth_row is None and not ((settings.tiktok_shop_id or "").strip() and (settings.tiktok_access_token or "").strip()):
+        credentials = _tiktok_pull_credential_sets(session)
+        if auth_row is None and not credentials:
             result = {"status": "waiting", "reason": "TikTok auth has not been captured yet", "trigger": trigger}
             update_tiktok_integration_state(
                 is_pull_running=False,
@@ -3267,28 +3352,13 @@ def run_tiktok_pull_cycle(
         refresh_result = _refresh_tiktok_auth_if_needed(session, runtime_name=runtime_name)
         if refresh_result is not None:
             auth_row = ensure_tiktok_auth_row(session)
+            credentials = _tiktok_pull_credential_sets(session)
 
-        shop_id, shop_cipher, access_token = _resolve_tiktok_pull_credentials(auth_row)
-        if not shop_id and not shop_cipher:
+        if not credentials:
             result = {
                 "status": "waiting",
                 "reason": "missing shop identifier",
                 "runtime": runtime_name,
-                "trigger": trigger,
-            }
-            update_tiktok_integration_state(
-                is_pull_running=False,
-                last_pull_finished_at=utcnow(),
-                last_pull_at=utcnow(),
-                last_pull=result,
-            )
-            return result
-        if not access_token:
-            result = {
-                "status": "waiting",
-                "reason": "missing access token",
-                "runtime": runtime_name,
-                "shop_id": shop_id,
                 "trigger": trigger,
             }
             update_tiktok_integration_state(
@@ -3321,48 +3391,65 @@ def run_tiktok_pull_cycle(
             safe_limit: Optional[int] = None
         else:
             safe_limit = max(int(raw_limit), 1)
-        def _run_pull_with_current_credentials(current_access_token: str):
+        def _run_pull_with_current_credentials(credential: dict[str, str]):
             return pull_tiktok_orders(
                 session,
                 base_url=resolve_tiktok_shop_pull_base_url(),
                 app_key=(settings.tiktok_app_key or "").strip(),
                 app_secret=(settings.tiktok_app_secret or "").strip(),
-                access_token=current_access_token,
-                shop_id=shop_id,
-                shop_cipher=shop_cipher,
+                access_token=credential["access_token"],
+                shop_id=credential["shop_id"],
+                shop_cipher=credential["shop_cipher"],
                 since=since_dt,
                 limit=safe_limit,
                 dry_run=False,
                 runtime_name=runtime_name,
             )
 
-        try:
-            summary = _run_pull_with_current_credentials(access_token)
-        except httpx.HTTPStatusError as exc:
-            if exc.response is None or exc.response.status_code != 401:
-                raise
-            refresh_result = _refresh_tiktok_auth_if_needed(
-                session,
-                runtime_name=f"{runtime_name}_401_refresh",
-                force=True,
-            )
-            if refresh_result is None:
-                raise
-            auth_row = ensure_tiktok_auth_row(session)
-            shop_id, shop_cipher, access_token = _resolve_tiktok_pull_credentials(auth_row)
-            summary = _run_pull_with_current_credentials(access_token)
+        totals = {"fetched": 0, "inserted": 0, "updated": 0, "failed": 0, "detail_calls": 0}
+        pulled_shop_ids: list[str] = []
+        for credential in credentials:
+            try:
+                summary = _run_pull_with_current_credentials(credential)
+            except httpx.HTTPStatusError as exc:
+                if exc.response is None or exc.response.status_code != 401:
+                    raise
+                refresh_result = _refresh_tiktok_auth_if_needed(
+                    session,
+                    runtime_name=f"{runtime_name}_401_refresh",
+                    force=True,
+                )
+                if refresh_result is None:
+                    raise
+                refreshed_key = _tiktok_credential_key(credential["shop_id"], credential["shop_cipher"])
+                refreshed_credentials = {
+                    _tiktok_credential_key(item["shop_id"], item["shop_cipher"]): item
+                    for item in _tiktok_pull_credential_sets(session)
+                }
+                credential = refreshed_credentials.get(refreshed_key, credential)
+                summary = _run_pull_with_current_credentials(credential)
+
+            pulled_shop_ids.append(credential["shop_id"] or credential["shop_cipher"])
+            totals["fetched"] += int(summary.fetched)
+            totals["inserted"] += int(summary.inserted)
+            totals["updated"] += int(summary.updated)
+            totals["failed"] += int(summary.failed)
+            totals["detail_calls"] += int(summary.detail_calls)
+
         last_pull = {
             "status": "success",
             "runtime": runtime_name,
-            "shop_id": shop_id or None,
+            "shop_id": pulled_shop_ids[0] if len(pulled_shop_ids) == 1 else None,
+            "shop_ids": pulled_shop_ids,
+            "shops_pulled": len(pulled_shop_ids),
             "trigger": trigger,
             "since": since_dt.isoformat(),
             "limit": safe_limit,
-            "fetched": summary.fetched,
-            "inserted": summary.inserted,
-            "updated": summary.updated,
-            "failed": summary.failed,
-            "detail_calls": summary.detail_calls,
+            "fetched": totals["fetched"],
+            "inserted": totals["inserted"],
+            "updated": totals["updated"],
+            "failed": totals["failed"],
+            "detail_calls": totals["detail_calls"],
         }
         update_tiktok_integration_state(
             is_pull_running=False,
@@ -3562,16 +3649,16 @@ def _enrich_tiktok_order_from_api(order_id: str, *, raise_errors: bool = False) 
 
             refresh_result = _refresh_tiktok_auth_if_needed(session, runtime_name=runtime_name)
             if refresh_result is not None:
-                auth_row = ensure_tiktok_auth_row(session)
+                ensure_tiktok_auth_row(session)
 
-            shop_id, shop_cipher, access_token = _resolve_tiktok_pull_credentials(auth_row)
-            if not access_token or (not shop_id and not shop_cipher):
+            credentials = _tiktok_pull_credentials_for_order(session, order_id)
+            if not credentials:
                 if raise_errors:
                     raise RuntimeError("TikTok order enrichment credentials incomplete")
                 return
 
             def _fetch_details_with_token(
-                sid: str, scipher: str, current_access_token: str
+                credential: dict[str, str]
             ) -> list[Any]:
                 with httpx.Client(timeout=30.0, follow_redirects=True) as client:
                     return _fetch_tiktok_order_details(
@@ -3579,73 +3666,118 @@ def _enrich_tiktok_order_from_api(order_id: str, *, raise_errors: bool = False) 
                         base_url=resolve_tiktok_shop_pull_base_url(),
                         app_key=(settings.tiktok_app_key or "").strip(),
                         app_secret=(settings.tiktok_app_secret or "").strip(),
-                        access_token=current_access_token,
-                        shop_id=sid,
-                        shop_cipher=scipher,
+                        access_token=(credential.get("access_token") or "").strip(),
+                        shop_id=(credential.get("shop_id") or "").strip(),
+                        shop_cipher=(credential.get("shop_cipher") or "").strip(),
                         order_ids=[order_id],
                     )
 
-            try:
-                details = _fetch_details_with_token(shop_id, shop_cipher, access_token)
-            except httpx.HTTPStatusError as exc:
-                if exc.response is None or exc.response.status_code != 401:
-                    raise
-                print(
-                    structured_log_line(
-                        runtime=runtime_name,
-                        action="tiktok.webhook.order_enrich_auth_retry",
-                        success=False,
-                        tiktok_order_id=order_id,
-                        reason="http_401_refresh_and_retry",
-                        error=_safe_tiktok_webhook_enrich_error_text(exc),
+            details: list[Any] = []
+            used_credential: Optional[dict[str, str]] = None
+            for credential in credentials:
+                if not (credential.get("access_token") or "").strip():
+                    continue
+                if not (credential.get("shop_id") or "").strip() and not (credential.get("shop_cipher") or "").strip():
+                    continue
+                try:
+                    details = _fetch_details_with_token(credential)
+                except httpx.HTTPStatusError as exc:
+                    if exc.response is None or exc.response.status_code != 401:
+                        raise
+                    print(
+                        structured_log_line(
+                            runtime=runtime_name,
+                            action="tiktok.webhook.order_enrich_auth_retry",
+                            success=False,
+                            tiktok_order_id=order_id,
+                            reason="http_401_refresh_and_retry",
+                            error=_safe_tiktok_webhook_enrich_error_text(exc),
+                        )
                     )
-                )
-                refresh_result = _refresh_tiktok_auth_if_needed(
-                    session,
-                    runtime_name=f"{runtime_name}_401_refresh",
-                    force=True,
-                )
-                if refresh_result is None:
-                    raise
-                auth_row = ensure_tiktok_auth_row(session)
-                shop_id, shop_cipher, access_token = _resolve_tiktok_pull_credentials(auth_row)
-                if not access_token or (not shop_id and not shop_cipher):
-                    raise
-                details = _fetch_details_with_token(shop_id, shop_cipher, access_token)
-            except RuntimeError as exc:
-                if not _tiktok_webhook_enrich_error_is_retryable_auth(exc):
-                    raise
-                print(
-                    structured_log_line(
-                        runtime=runtime_name,
-                        action="tiktok.webhook.order_enrich_auth_retry",
-                        success=False,
-                        tiktok_order_id=order_id,
-                        reason="tiktok_auth_error_refresh_and_retry",
-                        error=_safe_tiktok_webhook_enrich_error_text(exc),
+                    refresh_result = _refresh_tiktok_auth_if_needed(
+                        session,
+                        runtime_name=f"{runtime_name}_401_refresh",
+                        force=True,
                     )
-                )
-                refresh_result = _refresh_tiktok_auth_if_needed(
-                    session,
-                    runtime_name=f"{runtime_name}_401_refresh",
-                    force=True,
-                )
-                if refresh_result is None:
-                    raise
-                auth_row = ensure_tiktok_auth_row(session)
-                shop_id, shop_cipher, access_token = _resolve_tiktok_pull_credentials(auth_row)
-                if not access_token or (not shop_id and not shop_cipher):
-                    raise
-                details = _fetch_details_with_token(shop_id, shop_cipher, access_token)
+                    if refresh_result is None:
+                        raise
+                    ensure_tiktok_auth_row(session)
+                    refreshed_credentials = _tiktok_pull_credentials_for_order(session, order_id)
+                    credential_key = _tiktok_credential_key(
+                        credential.get("shop_id") or "",
+                        credential.get("shop_cipher") or "",
+                    )
+                    refreshed_credential = next(
+                        (
+                            refreshed
+                            for refreshed in refreshed_credentials
+                            if _tiktok_credential_key(
+                                refreshed.get("shop_id") or "",
+                                refreshed.get("shop_cipher") or "",
+                            )
+                            == credential_key
+                        ),
+                        None,
+                    )
+                    if refreshed_credential is None:
+                        continue
+                    details = _fetch_details_with_token(refreshed_credential)
+                    credential = refreshed_credential
+                except RuntimeError as exc:
+                    if not _tiktok_webhook_enrich_error_is_retryable_auth(exc):
+                        raise
+                    print(
+                        structured_log_line(
+                            runtime=runtime_name,
+                            action="tiktok.webhook.order_enrich_auth_retry",
+                            success=False,
+                            tiktok_order_id=order_id,
+                            reason="tiktok_auth_error_refresh_and_retry",
+                            error=_safe_tiktok_webhook_enrich_error_text(exc),
+                        )
+                    )
+                    refresh_result = _refresh_tiktok_auth_if_needed(
+                        session,
+                        runtime_name=f"{runtime_name}_401_refresh",
+                        force=True,
+                    )
+                    if refresh_result is None:
+                        raise
+                    ensure_tiktok_auth_row(session)
+                    refreshed_credentials = _tiktok_pull_credentials_for_order(session, order_id)
+                    credential_key = _tiktok_credential_key(
+                        credential.get("shop_id") or "",
+                        credential.get("shop_cipher") or "",
+                    )
+                    refreshed_credential = next(
+                        (
+                            refreshed
+                            for refreshed in refreshed_credentials
+                            if _tiktok_credential_key(
+                                refreshed.get("shop_id") or "",
+                                refreshed.get("shop_cipher") or "",
+                            )
+                            == credential_key
+                        ),
+                        None,
+                    )
+                    if refreshed_credential is None:
+                        continue
+                    details = _fetch_details_with_token(refreshed_credential)
+                    credential = refreshed_credential
 
-            if not details:
+                if details:
+                    used_credential = credential
+                    break
+
+            if not details or used_credential is None:
                 if raise_errors:
                     raise RuntimeError("TikTok order details unavailable")
                 return
             record = _order_record_from_payload(
                 details[0],
-                shop_id=shop_id,
-                shop_cipher=shop_cipher,
+                shop_id=(used_credential.get("shop_id") or "").strip(),
+                shop_cipher=(used_credential.get("shop_cipher") or "").strip(),
                 source="webhook_enriched",
             )
             from .tiktok.tiktok_ingest import upsert_tiktok_order
