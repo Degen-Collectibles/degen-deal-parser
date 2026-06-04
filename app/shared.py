@@ -3147,6 +3147,27 @@ def _tiktok_pull_credential_sets(session: Session) -> list[dict[str, str]]:
     return credentials
 
 
+def _tiktok_pull_credential_sets_with_auth_fallback(
+    session: Session,
+    auth_row: Optional[TikTokAuth],
+) -> list[dict[str, str]]:
+    credentials = _tiktok_pull_credential_sets(session)
+    if credentials or auth_row is None:
+        return credentials
+
+    shop_id, shop_cipher, access_token = _resolve_tiktok_pull_credentials(auth_row)
+    if not access_token or (not shop_id and not shop_cipher):
+        return []
+    return [
+        {
+            "shop_id": shop_id,
+            "shop_cipher": shop_cipher,
+            "access_token": access_token,
+            "source": "auth_row_fallback",
+        }
+    ]
+
+
 def _tiktok_pull_credentials_for_order(session: Session, order_id: str) -> list[dict[str, str]]:
     credentials = _tiktok_pull_credential_sets(session)
     if not credentials:
@@ -3338,7 +3359,7 @@ def run_tiktok_pull_cycle(
     try:
       with managed_session() as session:
         auth_row = ensure_tiktok_auth_row(session)
-        credentials = _tiktok_pull_credential_sets(session)
+        credentials = _tiktok_pull_credential_sets_with_auth_fallback(session, auth_row)
         if auth_row is None and not credentials:
             result = {"status": "waiting", "reason": "TikTok auth has not been captured yet", "trigger": trigger}
             update_tiktok_integration_state(
@@ -3352,7 +3373,7 @@ def run_tiktok_pull_cycle(
         refresh_result = _refresh_tiktok_auth_if_needed(session, runtime_name=runtime_name)
         if refresh_result is not None:
             auth_row = ensure_tiktok_auth_row(session)
-            credentials = _tiktok_pull_credential_sets(session)
+            credentials = _tiktok_pull_credential_sets_with_auth_fallback(session, auth_row)
 
         if not credentials:
             result = {
@@ -3421,10 +3442,11 @@ def run_tiktok_pull_cycle(
                 )
                 if refresh_result is None:
                     raise
+                auth_row = ensure_tiktok_auth_row(session)
                 refreshed_key = _tiktok_credential_key(credential["shop_id"], credential["shop_cipher"])
                 refreshed_credentials = {
                     _tiktok_credential_key(item["shop_id"], item["shop_cipher"]): item
-                    for item in _tiktok_pull_credential_sets(session)
+                    for item in _tiktok_pull_credential_sets_with_auth_fallback(session, auth_row)
                 }
                 credential = refreshed_credentials.get(refreshed_key, credential)
                 summary = _run_pull_with_current_credentials(credential)
@@ -3649,9 +3671,11 @@ def _enrich_tiktok_order_from_api(order_id: str, *, raise_errors: bool = False) 
 
             refresh_result = _refresh_tiktok_auth_if_needed(session, runtime_name=runtime_name)
             if refresh_result is not None:
-                ensure_tiktok_auth_row(session)
+                auth_row = ensure_tiktok_auth_row(session)
 
             credentials = _tiktok_pull_credentials_for_order(session, order_id)
+            if not credentials:
+                credentials = _tiktok_pull_credential_sets_with_auth_fallback(session, auth_row)
             if not credentials:
                 if raise_errors:
                     raise RuntimeError("TikTok order enrichment credentials incomplete")
@@ -3701,8 +3725,10 @@ def _enrich_tiktok_order_from_api(order_id: str, *, raise_errors: bool = False) 
                     )
                     if refresh_result is None:
                         raise
-                    ensure_tiktok_auth_row(session)
+                    auth_row = ensure_tiktok_auth_row(session)
                     refreshed_credentials = _tiktok_pull_credentials_for_order(session, order_id)
+                    if not refreshed_credentials:
+                        refreshed_credentials = _tiktok_pull_credential_sets_with_auth_fallback(session, auth_row)
                     credential_key = _tiktok_credential_key(
                         credential.get("shop_id") or "",
                         credential.get("shop_cipher") or "",
@@ -3743,8 +3769,10 @@ def _enrich_tiktok_order_from_api(order_id: str, *, raise_errors: bool = False) 
                     )
                     if refresh_result is None:
                         raise
-                    ensure_tiktok_auth_row(session)
+                    auth_row = ensure_tiktok_auth_row(session)
                     refreshed_credentials = _tiktok_pull_credentials_for_order(session, order_id)
+                    if not refreshed_credentials:
+                        refreshed_credentials = _tiktok_pull_credential_sets_with_auth_fallback(session, auth_row)
                     credential_key = _tiktok_credential_key(
                         credential.get("shop_id") or "",
                         credential.get("shop_cipher") or "",
