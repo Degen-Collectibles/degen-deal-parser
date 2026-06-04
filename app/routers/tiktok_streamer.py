@@ -473,9 +473,10 @@ def _apply_order_activity_fallback(
     stream_context = dict(stream_context or {})
     if not stream_context.get("creator_filter_enabled"):
         return stream_context
-    if stream_context.get("selected_creator") != DEFAULT_STREAM_CREATOR:
-        return stream_context
     if stream_context.get("is_live"):
+        return stream_context
+    account_scope = _stream_account_scope_for_context(session, stream_context)
+    if stream_context.get("selected_creator") != DEFAULT_STREAM_CREATOR and not _account_scope_has_identity(account_scope):
         return stream_context
 
     fallback_start = _recent_order_activity_fallback_start(stream_context, now)

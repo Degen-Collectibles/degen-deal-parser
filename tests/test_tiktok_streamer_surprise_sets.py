@@ -8,7 +8,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 import app.routers.tiktok_streamer as streamer_module
-from app.models import AppSetting, TikTokOrder
+from app.models import AppSetting, TikTokAuth, TikTokOrder
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from sqlmodel import Session, SQLModel, create_engine
 
@@ -21,10 +21,16 @@ def _order(
     financial_status: str = "paid",
     order_status: str = "completed",
     subtotal_price: float = 0.0,
+    shop_id: str | None = None,
+    shop_cipher: str | None = None,
+    seller_id: str | None = None,
 ) -> TikTokOrder:
     return TikTokOrder(
         tiktok_order_id=order_id,
         order_number=order_id,
+        shop_id=shop_id,
+        shop_cipher=shop_cipher,
+        seller_id=seller_id,
         created_at=created_at,
         updated_at=created_at,
         customer_name="Buyer",
@@ -430,6 +436,13 @@ class SurpriseSetGmvTests(unittest.TestCase):
         self.assertIn("surprise_set_price_editor_url", source)
         self.assertNotIn("surprise-set-price-input", source)
 
+    def test_streamer_dashboard_colors_order_actions_by_creator(self) -> None:
+        source = (Path.cwd() / "app" / "templates" / "tiktok_streamer.html").read_text()
+
+        self.assertIn("creatorAccentClass", source)
+        self.assertIn("order-row--secondary", source)
+        self.assertIn("toast--secondary", source)
+
 
 class StreamerFreshOrderFallbackTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -545,6 +558,49 @@ class StreamerFreshOrderFallbackTests(unittest.TestCase):
         finally:
             streamer_module._stream_range.clear()
             streamer_module._stream_range.update(previous_range)
+
+    def test_fresh_order_fallback_marks_known_secondary_creator_live(self) -> None:
+        now = datetime(2026, 6, 4, 20, 15, tzinfo=timezone.utc)
+        stream_context = {
+            "selected_creator": "degenboss0",
+            "creator_filter_enabled": True,
+            "live_session": {},
+            "sessions": [],
+            "is_live": False,
+        }
+
+        with Session(self.engine) as session:
+            session.add(
+                TikTokAuth(
+                    tiktok_shop_id="boss-shop",
+                    shop_cipher="boss-cipher",
+                    seller_id="boss-seller",
+                    shop_name="Degen Boss",
+                    seller_name="degenboss0",
+                )
+            )
+            session.add(
+                _order(
+                    "boss-recent-activity",
+                    now - timedelta(minutes=4),
+                    [{"product_name": "BANG EX !!!", "sku_type": "UNKNOWN", "sale_price": 5, "quantity": 1}],
+                    subtotal_price=5,
+                    shop_id="boss-shop",
+                    shop_cipher="boss-cipher",
+                    seller_id="boss-seller",
+                )
+            )
+            session.commit()
+
+            fallback_context = streamer_module._apply_order_activity_fallback(
+                session,
+                stream_context,
+                now=now,
+            )
+
+        self.assertTrue(fallback_context["is_live"])
+        self.assertEqual(fallback_context["source"], streamer_module.STREAM_METRIC_SOURCE_ORDER_ACTIVITY_FALLBACK)
+        self.assertEqual(fallback_context["creator_order_attribution"], streamer_module.CREATOR_ORDER_ATTRIBUTION_RECENT_ORDERS)
 
     def test_manual_surprise_set_prices_round_trip_through_app_settings(self) -> None:
         with Session(self.engine) as session:

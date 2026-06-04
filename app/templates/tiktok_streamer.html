@@ -32,6 +32,10 @@
             --text-muted: #5d5b66;
             --accent: #fe2c55;
             --accent-glow: rgba(254, 44, 85, .3);
+            --main-action: #a78bfa;
+            --main-action-glow: rgba(167, 139, 250, .22);
+            --secondary-action: #3ecf8e;
+            --secondary-action-glow: rgba(62, 207, 142, .22);
             --tiktok-cyan: #25f4ee;
             --tiktok-pink: #fe2c55;
             --green: #3ecf8e;
@@ -908,6 +912,21 @@
             border-color: var(--green);
             box-shadow: 0 0 18px var(--green-glow), inset 0 0 18px var(--green-glow);
         }
+        .order-row--main.is-new {
+            border-color: var(--main-action);
+            box-shadow: 0 0 20px var(--main-action-glow), inset 0 0 18px var(--main-action-glow);
+        }
+        .order-row--secondary.is-new {
+            border-color: var(--secondary-action);
+            box-shadow: 0 0 20px var(--secondary-action-glow), inset 0 0 18px var(--secondary-action-glow);
+        }
+        .order-row--main .row-qty-badge {
+            background: var(--main-action);
+        }
+        .order-row--secondary .row-qty-badge {
+            background: var(--secondary-action);
+            color: #04140d;
+        }
         .order-row.is-refund {
             border-color: var(--red);
             box-shadow: 0 0 18px var(--red-glow), inset 0 0 18px var(--red-glow);
@@ -1165,6 +1184,16 @@
             transition: opacity .25s, transform .25s;
         }
         .toast.is-leaving { opacity: 0; transform: translateX(50px) scale(.95); }
+        .toast--main {
+            border-color: var(--main-action);
+            box-shadow: 0 12px 40px rgba(0,0,0,.65), 0 0 24px var(--main-action-glow);
+        }
+        .toast--main .toast-label { color: var(--main-action); }
+        .toast--secondary {
+            border-color: var(--secondary-action);
+            box-shadow: 0 12px 40px rgba(0,0,0,.65), 0 0 24px var(--secondary-action-glow);
+        }
+        .toast--secondary .toast-label { color: var(--secondary-action); }
         @keyframes toast-in {
             from { opacity: 0; transform: translateX(50px) scale(.95); }
             to { opacity: 1; transform: translateX(0) scale(1); }
@@ -2171,6 +2200,12 @@
             return cleaned;
         }
 
+        function creatorAccentClass(kind) {
+            var creator = String(_selectedCreator || '').toLowerCase();
+            var suffix = creator && creator !== 'degencollectibles' ? 'secondary' : 'main';
+            return kind + '--' + suffix;
+        }
+
         function exactMoney(value) {
             var n = Number(value || 0);
             return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -2682,6 +2717,7 @@
             var refund = isRefundOrder(order);
 
             var rowClasses = 'order-row';
+            rowClasses += ' ' + creatorAccentClass('order-row');
             if (refund) rowClasses += ' is-refund';
             else if (isNew) rowClasses += ' is-new';
             if (isNew && (uniqueCount > 1 || totalQty > 1)) rowClasses += ' is-expanded';
@@ -2964,7 +3000,7 @@
             var totalQty = mergedItems.reduce(function(s, i) { return s + (i.quantity || 1); }, 0);
             var isMixedOrder = mergedItems.length > 1;
             var el = document.createElement('div');
-            var cls = 'toast';
+            var cls = 'toast ' + creatorAccentClass('toast');
             if (isVip) cls += ' toast-vip';
             else if (highValue) cls += ' toast-high-value';
             el.className = cls;
