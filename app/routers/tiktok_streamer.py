@@ -722,27 +722,29 @@ def _apply_tiktok_account_scope(stmt, account_scope: Optional[dict[str, Any]]):
     if not _account_scope_has_identity(account_scope):
         return stmt
     account_scope = account_scope or {}
-    predicates = []
     shop_ids = sorted(account_scope.get("shop_ids") or [])
     shop_ciphers = sorted(account_scope.get("shop_ciphers") or [])
     seller_ids = sorted(account_scope.get("seller_ids") or [])
     if shop_ids:
-        predicates.append(TikTokOrder.shop_id.in_(shop_ids))
-    if shop_ciphers:
-        predicates.append(TikTokOrder.shop_cipher.in_(shop_ciphers))
-    if seller_ids:
-        predicates.append(TikTokOrder.seller_id.in_(seller_ids))
+        predicate = TikTokOrder.shop_id.in_(shop_ids)
+    elif shop_ciphers:
+        predicate = TikTokOrder.shop_cipher.in_(shop_ciphers)
+    elif seller_ids:
+        predicate = TikTokOrder.seller_id.in_(seller_ids)
+    else:
+        predicate = None
     if account_scope.get("include_unattributed"):
-        predicates.append(
+        unattributed = (
             and_(
                 TikTokOrder.shop_id == None,
                 TikTokOrder.shop_cipher == None,
                 TikTokOrder.seller_id == None,
             )
         )
-    if not predicates:
+        predicate = or_(predicate, unattributed) if predicate is not None else unattributed
+    if predicate is None:
         return stmt
-    return stmt.where(or_(*predicates))
+    return stmt.where(predicate)
 
 
 def _creator_order_rows_are_precise(stream_context: Optional[dict[str, Any]]) -> bool:

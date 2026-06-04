@@ -602,6 +602,73 @@ class StreamerFreshOrderFallbackTests(unittest.TestCase):
         self.assertEqual(fallback_context["source"], streamer_module.STREAM_METRIC_SOURCE_ORDER_ACTIVITY_FALLBACK)
         self.assertEqual(fallback_context["creator_order_attribution"], streamer_module.CREATOR_ORDER_ATTRIBUTION_RECENT_ORDERS)
 
+    def test_shop_id_scope_wins_when_shop_cipher_is_shared_across_creators(self) -> None:
+        now = datetime(2026, 6, 4, 21, 30, tzinfo=timezone.utc)
+        shared_cipher = "shared-shop-cipher"
+        with Session(self.engine) as session:
+            session.add(
+                TikTokAuth(
+                    tiktok_shop_id="boss-shop",
+                    shop_cipher=shared_cipher,
+                    shop_name="Degen Boss",
+                    seller_name="degenboss0",
+                )
+            )
+            session.add(
+                _order(
+                    "main-order",
+                    now - timedelta(minutes=5),
+                    [{"product_name": "Main Pack", "sku_type": "UNKNOWN", "sale_price": 12, "quantity": 1}],
+                    subtotal_price=12,
+                    shop_id="main-shop",
+                    shop_cipher=shared_cipher,
+                )
+            )
+            session.add(
+                _order(
+                    "boss-order",
+                    now - timedelta(minutes=4),
+                    [{"product_name": "Boss Pack", "sku_type": "UNKNOWN", "sale_price": 5, "quantity": 1}],
+                    subtotal_price=5,
+                    shop_id="boss-shop",
+                    shop_cipher=shared_cipher,
+                )
+            )
+            session.commit()
+
+            main_context = {
+                "selected_creator": streamer_module.DEFAULT_STREAM_CREATOR,
+                "creator_filter_enabled": True,
+                "start": now - timedelta(minutes=10),
+                "end": None,
+                "live_session": {},
+            }
+            boss_context = {
+                "selected_creator": "degenboss0",
+                "creator_filter_enabled": True,
+                "start": now - timedelta(minutes=10),
+                "end": None,
+                "live_session": {},
+            }
+            with patch.object(streamer_module.settings, "tiktok_shop_id", "main-shop"), patch.object(
+                streamer_module.settings,
+                "tiktok_shop_cipher",
+                shared_cipher,
+            ):
+                main_orders, _ = streamer_module._load_scoped_stream_orders(
+                    session,
+                    main_context,
+                    now - timedelta(hours=24),
+                )
+                boss_orders, _ = streamer_module._load_scoped_stream_orders(
+                    session,
+                    boss_context,
+                    now - timedelta(hours=24),
+                )
+
+        self.assertEqual([order.tiktok_order_id for order in main_orders], ["main-order"])
+        self.assertEqual([order.tiktok_order_id for order in boss_orders], ["boss-order"])
+
     def test_manual_surprise_set_prices_round_trip_through_app_settings(self) -> None:
         with Session(self.engine) as session:
             saved = streamer_module._save_surprise_set_manual_price(
