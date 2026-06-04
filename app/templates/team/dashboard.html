@@ -22,6 +22,7 @@
       {% for shift in today_shift_rows %}
         <div class="pt-shift-title">{{ shift.label or 'Shift' }}</div>
         <div class="pt-shift-sub">
+          {{ shift.calendar_label|default('Schedule') }} -
           {{ shift.kind|replace('_', ' ')|title }}{% if shift.day_note %} · {{ shift.day_note }}{% endif %}
         </div>
       {% endfor %}
@@ -167,6 +168,7 @@
             <div>
               <div class="pt-list-title">{{ shift.label or 'Shift' }}</div>
               <div class="pt-list-sub">
+                {{ shift.calendar_label|default('Schedule') }} -
                 {{ shift.kind|replace('_', ' ')|title }}{% if shift.day_note %} · {{ shift.day_note }}{% endif %}
               </div>
             </div>

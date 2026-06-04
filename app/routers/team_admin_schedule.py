@@ -31,6 +31,10 @@ from ..db import get_session
 from ..models import (
     AuditLog,
     EmployeeProfile,
+    SCHEDULE_CALENDAR_PACKING,
+    SCHEDULE_CALENDAR_STOREFRONT,
+    SCHEDULE_CALENDARS,
+    STAFF_KIND_PACKING,
     STAFF_KIND_STOREFRONT,
     STAFF_KIND_STREAM,
     STAFF_KINDS,
@@ -78,6 +82,24 @@ def _week_dates(start_monday: date) -> list[date]:
 def _build_cell_key(user_id: int, d: date) -> str:
     """Form-input name for a given (user, date) cell."""
     return f"cell__{user_id}__{d.isoformat()}"
+
+
+def _normalize_schedule_calendar(raw: Optional[str]) -> str:
+    value = (raw or "").strip().lower()
+    return value if value in SCHEDULE_CALENDARS else SCHEDULE_CALENDAR_STOREFRONT
+
+
+def _calendar_label(calendar_kind: str) -> str:
+    if calendar_kind == SCHEDULE_CALENDAR_PACKING:
+        return "Packing"
+    return "Storefront"
+
+
+def _user_can_work_calendar(user: User, calendar_kind: str) -> bool:
+    """Return whether a user belongs in a non-stream schedule picker."""
+    if calendar_kind not in SCHEDULE_CALENDARS:
+        return False
+    return (user.staff_kind or STAFF_KIND_STOREFRONT) != STAFF_KIND_STREAM
 
 
 def _parse_cleared_cell_markers(raw: object) -> set[str]:
@@ -502,6 +524,7 @@ def _grid_context(
     week_days = _week_dates(week_start)
     first_day = week_days[0]
     last_day = week_days[-1]
+    calendar_kind = _normalize_schedule_calendar(staff_kind)
 
     # The Stream grid has a different population contract: it's the
     # read-only projection of the Stream Manager schedule. Every
@@ -516,7 +539,8 @@ def _grid_context(
     roster_user_ids: set[int] = set(
         session.exec(
             select(ScheduleRosterMember.user_id).where(
-                ScheduleRosterMember.week_start == week_start
+                ScheduleRosterMember.week_start == week_start,
+                ScheduleRosterMember.calendar_kind == calendar_kind,
             )
         ).all()
     )
@@ -532,6 +556,7 @@ def _grid_context(
             .where(
                 ShiftEntry.shift_date >= first_day,
                 ShiftEntry.shift_date <= last_day,
+                ShiftEntry.calendar_kind == calendar_kind,
             )
             .order_by(ShiftEntry.sort_order, ShiftEntry.id)
         ).all()
@@ -567,15 +592,12 @@ def _grid_context(
     already_on_grid = {u.id for u in users}
     addable_users = [u for u in schedulable if u.id not in already_on_grid]
 
-    # Optional staff_kind filter splits one roster+shift pool into two
-    # grids: Storefront floor staff vs Stream room staff. Users default
-    # to "storefront" if unset so existing rows render on the
-    # Storefront grid as before.
-    if staff_kind in STAFF_KINDS:
-        def _kind(u: User) -> str:
-            return (u.staff_kind or STAFF_KIND_STOREFRONT)
-        users = [u for u in users if _kind(u) == staff_kind]
-        addable_users = [u for u in addable_users if _kind(u) == staff_kind]
+    # Storefront and Packing are separate calendars, not exclusive
+    # employee types. Anyone schedulable and not stream-only can be
+    # placed on either calendar.
+    addable_users = [
+        u for u in addable_users if _user_can_work_calendar(u, calendar_kind)
+    ]
 
     day_notes = list(
         session.exec(
@@ -600,21 +622,12 @@ def _grid_context(
     prev_roster_ids = list(
         session.exec(
             select(ScheduleRosterMember.user_id).where(
-                ScheduleRosterMember.week_start == prev_week_date
+                ScheduleRosterMember.week_start == prev_week_date,
+                ScheduleRosterMember.calendar_kind == calendar_kind,
             )
         ).all()
     )
-    if staff_kind in STAFF_KINDS and prev_roster_ids:
-        prev_users = session.exec(
-            select(User).where(User.id.in_(prev_roster_ids))  # type: ignore[attr-defined]
-        ).all()
-        prev_roster_count = sum(
-            1
-            for u in prev_users
-            if (u.staff_kind or STAFF_KIND_STOREFRONT) == staff_kind
-        )
-    else:
-        prev_roster_count = len(prev_roster_ids)
+    prev_roster_count = len(prev_roster_ids)
 
     # 7shifts-style totals plus manager-only labor tooling. We only tally
     # WORK / ALL storefront entries for users actually on the grid so time-off
@@ -678,7 +691,11 @@ def _grid_context(
         )
     )
 
-    closure_map = _closure_map_for_range(session, first_day, last_day)
+    closure_map = (
+        _closure_map_for_range(session, first_day, last_day)
+        if calendar_kind == SCHEDULE_CALENDAR_STOREFRONT
+        else {}
+    )
     coverage_gap_days = [
         d
         for d in week_days
@@ -706,7 +723,9 @@ def _grid_context(
         "this_week": this_week,
         "prev_roster_count": prev_roster_count,
         "is_current_week": week_start == _monday_of(clockify_today()),
-        "staff_kind": staff_kind or "",
+        "staff_kind": calendar_kind,
+        "calendar_kind": calendar_kind,
+        "calendar_label": _calendar_label(calendar_kind),
         "flash": flash,
         "user_hours": user_hours,
         "day_hours": day_hours,
@@ -779,6 +798,8 @@ def _stream_grid_context(
         "prev_roster_count": 0,
         "is_current_week": week_start == _monday_of(clockify_today()),
         "staff_kind": STAFF_KIND_STREAM,
+        "calendar_kind": STAFF_KIND_STREAM,
+        "calendar_label": "Stream",
         "flash": flash,
         # Stream grid is a mirror of StreamSchedule, not tracked as
         # ShiftEntry hours. Kept at zero so the shared totals row in the
@@ -855,8 +876,14 @@ def admin_schedule_view(
     storefront_ctx = _grid_context(
         session,
         week_start,
-        staff_kind=STAFF_KIND_STOREFRONT,
+        staff_kind=SCHEDULE_CALENDAR_STOREFRONT,
         flash=flash,
+        include_financials=can_view_labor_financials,
+    )
+    packing_ctx = _grid_context(
+        session,
+        week_start,
+        staff_kind=SCHEDULE_CALENDAR_PACKING,
         include_financials=can_view_labor_financials,
     )
     stream_ctx = _grid_context(
@@ -952,6 +979,7 @@ def admin_schedule_view(
             "build_cell_key": _build_cell_key,
             "build_day_loc_key": _build_day_loc_key,
             "storefront": storefront_ctx,
+            "packing": packing_ctx,
             "stream": stream_ctx,
             # Shared nav/week state (same across both grids).
             "week_start": storefront_ctx["week_start"],
@@ -991,7 +1019,13 @@ def admin_schedule_screenshot(
     storefront_ctx = _grid_context(
         session,
         week_start,
-        staff_kind=STAFF_KIND_STOREFRONT,
+        staff_kind=SCHEDULE_CALENDAR_STOREFRONT,
+        include_financials=False,
+    )
+    packing_ctx = _grid_context(
+        session,
+        week_start,
+        staff_kind=SCHEDULE_CALENDAR_PACKING,
         include_financials=False,
     )
     stream_ctx = _grid_context(
@@ -1008,6 +1042,7 @@ def admin_schedule_screenshot(
             "title": "Schedule (screenshot)",
             "current_user": user,
             "storefront": storefront_ctx,
+            "packing": packing_ctx,
             "stream": stream_ctx,
             "week_start": storefront_ctx["week_start"],
             "week_days": storefront_ctx["week_days"],
@@ -1055,10 +1090,12 @@ async def admin_schedule_save(
     # Stream grid writes into StreamSchedule (same table /stream-manager
     # uses) so edits are bidirectional — whatever an admin edits here
     # shows up in the Stream Manager and vice versa.
-    if (form.get("staff_kind") or "").strip() == STAFF_KIND_STREAM:
+    form_kind = (form.get("staff_kind") or "").strip().lower()
+    if form_kind == STAFF_KIND_STREAM:
         return await _save_stream_shifts(
             request, session, current, form, week_start, week_days
         )
+    calendar_kind = _normalize_schedule_calendar(form_kind)
 
     # Only touch cells for users who are actually on this week's grid
     # — the roster plus anyone with an existing shift that week. We
@@ -1067,7 +1104,8 @@ async def admin_schedule_save(
     roster_user_ids: set[int] = set(
         session.exec(
             select(ScheduleRosterMember.user_id).where(
-                ScheduleRosterMember.week_start == week_start
+                ScheduleRosterMember.week_start == week_start,
+                ScheduleRosterMember.calendar_kind == calendar_kind,
             )
         ).all()
     )
@@ -1077,6 +1115,7 @@ async def admin_schedule_save(
             select(ShiftEntry).where(
                 ShiftEntry.shift_date >= first_day,
                 ShiftEntry.shift_date <= last_day,
+                ShiftEntry.calendar_kind == calendar_kind,
             )
         ).all()
     )
@@ -1206,6 +1245,7 @@ async def admin_schedule_save(
                         ShiftEntry(
                             user_id=uid,
                             shift_date=d,
+                            calendar_kind=calendar_kind,
                             label=spec["label"],
                             kind=spec["kind"],
                             sort_order=i,
@@ -1253,6 +1293,7 @@ async def admin_schedule_save(
                 select(ShiftEntry).where(
                     ShiftEntry.shift_date >= future_start,
                     ShiftEntry.shift_date <= future_end,
+                    ShiftEntry.calendar_kind == calendar_kind,
                 )
             ).all()
         )
@@ -1293,6 +1334,7 @@ async def admin_schedule_save(
                         ShiftEntry(
                             user_id=uid,
                             shift_date=fut,
+                            calendar_kind=calendar_kind,
                             label=spec["label"],
                             kind=spec["kind"],
                             sort_order=i,
@@ -1306,19 +1348,23 @@ async def admin_schedule_save(
     # Per-day location header (e.g. "East Bay Santa Clara" for the weekend).
     # Same non-clobbering rule: empty input on a day with no existing note
     # is a no-op. Emptying a pre-existing note deletes it.
-    existing_notes = list(
-        session.exec(
-            select(ScheduleDayNote).where(
-                ScheduleDayNote.day_date >= first_day,
-                ScheduleDayNote.day_date <= last_day,
-            )
-        ).all()
-    )
+    existing_notes = []
+    if calendar_kind == SCHEDULE_CALENDAR_STOREFRONT:
+        existing_notes = list(
+            session.exec(
+                select(ScheduleDayNote).where(
+                    ScheduleDayNote.day_date >= first_day,
+                    ScheduleDayNote.day_date <= last_day,
+                )
+            ).all()
+        )
     note_map: dict[str, ScheduleDayNote] = {
         n.day_date.isoformat(): n for n in existing_notes
     }
     day_note_changes = 0
     for d in week_days:
+        if calendar_kind != SCHEDULE_CALENDAR_STOREFRONT:
+            break
         key = _build_day_loc_key(d)
         if key not in form:
             continue
@@ -1359,6 +1405,7 @@ async def admin_schedule_save(
                 details_json=json.dumps(
                     {
                         "week_start": week_start.isoformat(),
+                        "calendar_kind": calendar_kind,
                         "cells_added": added,
                         "cells_updated": touched,
                         "cells_cleared": emptied,
@@ -1733,6 +1780,7 @@ async def admin_schedule_generate_from_previous(
 
     form_kind = (form.get("staff_kind") or "").strip().lower()
     staff_kind = form_kind if form_kind in STAFF_KINDS else STAFF_KIND_STOREFRONT
+    calendar_kind = _normalize_schedule_calendar(staff_kind)
 
     now = utcnow()
     added = 0
@@ -1806,7 +1854,8 @@ async def admin_schedule_generate_from_previous(
         roster_ids: set[int] = set(
             session.exec(
                 select(ScheduleRosterMember.user_id).where(
-                    ScheduleRosterMember.week_start == week_start
+                    ScheduleRosterMember.week_start == week_start,
+                    ScheduleRosterMember.calendar_kind == calendar_kind,
                 )
             ).all()
         )
@@ -1815,11 +1864,15 @@ async def admin_schedule_generate_from_previous(
                 select(ShiftEntry).where(
                     ShiftEntry.shift_date >= prev_first,
                     ShiftEntry.shift_date <= prev_last,
+                    ShiftEntry.calendar_kind == calendar_kind,
                 )
             ).all()
         )
         if not prev_entries:
-            return _redirect_back(week_start, "No storefront shifts on the previous week to copy.")
+            return _redirect_back(
+                week_start,
+                f"No {_calendar_label(calendar_kind).lower()} shifts on the previous week to copy.",
+            )
 
         closures_this_week = _closure_map_for_range(session, first_day, last_day)
 
@@ -1828,30 +1881,36 @@ async def admin_schedule_generate_from_previous(
                 select(ShiftEntry).where(
                     ShiftEntry.shift_date >= first_day,
                     ShiftEntry.shift_date <= last_day,
+                    ShiftEntry.calendar_kind == calendar_kind,
                 )
             ).all()
         )
         occupied = {(e.user_id, e.shift_date) for e in existing_this_week}
 
-        # Filter to storefront-kind users (users whose staff_kind is
+        # Stream-only users stay out of non-stream copy targets.
         # either 'storefront' or NULL — the legacy default pre-dating
         # the Stream/Storefront split).
-        from sqlalchemy import or_ as _or
-        kind_user_ids = set(
-            session.exec(
-                select(User.id).where(
-                    _or(
-                        User.staff_kind == STAFF_KIND_STOREFRONT,
-                        User.staff_kind.is_(None),  # type: ignore[attr-defined]
-                    )
-                )
-            ).all()
+        candidate_user_ids = {e.user_id for e in prev_entries} | roster_ids
+        candidates = (
+            {
+                u.id: u
+                for u in session.exec(
+                    select(User).where(User.id.in_(candidate_user_ids))  # type: ignore[attr-defined]
+                ).all()
+                if u.id is not None
+            }
+            if candidate_user_ids
+            else {}
         )
         for entry in prev_entries:
-            if entry.user_id not in kind_user_ids and entry.user_id not in roster_ids:
+            user = candidates.get(entry.user_id)
+            if user is not None and not _user_can_work_calendar(user, calendar_kind):
                 continue
             fut = entry.shift_date + timedelta(days=7)
-            if fut.isoformat() in closures_this_week:
+            if (
+                calendar_kind == SCHEDULE_CALENDAR_STOREFRONT
+                and fut.isoformat() in closures_this_week
+            ):
                 continue
             if (entry.user_id, fut) in occupied:
                 continue
@@ -1859,8 +1918,10 @@ async def admin_schedule_generate_from_previous(
                 ShiftEntry(
                     user_id=entry.user_id,
                     shift_date=fut,
+                    calendar_kind=calendar_kind,
                     label=entry.label,
                     kind=entry.kind,
+                    sort_order=entry.sort_order or 0,
                     created_by_user_id=current.id,
                     created_at=now,
                     updated_at=now,
@@ -1882,6 +1943,7 @@ async def admin_schedule_generate_from_previous(
                 "week_start": week_start.isoformat(),
                 "from_week": prev_start.isoformat(),
                 "staff_kind": staff_kind,
+                "calendar_kind": calendar_kind,
                 "shifts_added": added,
             }),
             ip_address=(request.client.host if request.client else None),
@@ -1891,6 +1953,168 @@ async def admin_schedule_generate_from_previous(
     return _redirect_back(
         week_start,
         f"Generated {added} shift{'s' if added != 1 else ''} from last week.",
+    )
+
+
+@router.post(
+    "/team/admin/schedule/generate-person-from-previous",
+    dependencies=[Depends(require_csrf)],
+)
+async def admin_schedule_generate_person_from_previous(
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    denial, current = _permission_gate(request, session, "admin.schedule.edit")
+    if denial:
+        return denial
+    form = await request.form()
+    week_start = _parse_week_start(form.get("week") or "")
+    week_days = _week_dates(week_start)
+    first_day, last_day = week_days[0], week_days[-1]
+    prev_start = week_start - timedelta(days=7)
+    prev_first = prev_start
+    prev_last = prev_start + timedelta(days=6)
+
+    form_kind = (form.get("staff_kind") or "").strip().lower()
+    if form_kind == STAFF_KIND_STREAM:
+        return _redirect_back(
+            week_start,
+            "Stream person copy is managed from the Stream calendar.",
+        )
+    calendar_kind = _normalize_schedule_calendar(form_kind)
+    try:
+        user_id = int(form.get("user_id") or 0)
+    except (TypeError, ValueError):
+        user_id = 0
+    if user_id <= 0:
+        return _redirect_back(week_start, "Pick an employee to copy.")
+
+    target = session.get(User, user_id)
+    if target is None:
+        return _redirect_back(week_start, "Employee not found.")
+    if not _user_can_work_calendar(target, calendar_kind):
+        return _redirect_back(
+            week_start,
+            f"{target.display_name or target.username} cannot be copied onto the {_calendar_label(calendar_kind)} calendar.",
+        )
+
+    prev_entries = list(
+        session.exec(
+            select(ShiftEntry)
+            .where(
+                ShiftEntry.user_id == user_id,
+                ShiftEntry.shift_date >= prev_first,
+                ShiftEntry.shift_date <= prev_last,
+                ShiftEntry.calendar_kind == calendar_kind,
+            )
+            .order_by(ShiftEntry.shift_date, ShiftEntry.sort_order, ShiftEntry.id)
+        ).all()
+    )
+    if not prev_entries:
+        return _redirect_back(
+            week_start,
+            f"No {_calendar_label(calendar_kind).lower()} shifts for {target.display_name or target.username} last week.",
+        )
+
+    existing_this_week = list(
+        session.exec(
+            select(ShiftEntry).where(
+                ShiftEntry.user_id == user_id,
+                ShiftEntry.shift_date >= first_day,
+                ShiftEntry.shift_date <= last_day,
+                ShiftEntry.calendar_kind == calendar_kind,
+            )
+        ).all()
+    )
+    occupied = {(e.user_id, e.shift_date) for e in existing_this_week}
+    closures_this_week = (
+        _closure_map_for_range(session, first_day, last_day)
+        if calendar_kind == SCHEDULE_CALENDAR_STOREFRONT
+        else {}
+    )
+
+    membership = session.exec(
+        select(ScheduleRosterMember).where(
+            ScheduleRosterMember.week_start == week_start,
+            ScheduleRosterMember.calendar_kind == calendar_kind,
+            ScheduleRosterMember.user_id == user_id,
+        )
+    ).first()
+    now = utcnow()
+    if membership is None:
+        session.add(
+            ScheduleRosterMember(
+                week_start=week_start,
+                calendar_kind=calendar_kind,
+                user_id=user_id,
+                added_by_user_id=current.id,
+                created_at=now,
+            )
+        )
+
+    added = 0
+    for entry in prev_entries:
+        fut = entry.shift_date + timedelta(days=7)
+        if (
+            calendar_kind == SCHEDULE_CALENDAR_STOREFRONT
+            and fut.isoformat() in closures_this_week
+        ):
+            continue
+        if (entry.user_id, fut) in occupied:
+            continue
+        session.add(
+            ShiftEntry(
+                user_id=entry.user_id,
+                shift_date=fut,
+                calendar_kind=calendar_kind,
+                label=entry.label,
+                kind=entry.kind,
+                sort_order=entry.sort_order or 0,
+                created_by_user_id=current.id,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        added += 1
+
+    if added == 0:
+        return _redirect_back(
+            week_start,
+            f"Nothing to copy for {target.display_name or target.username}.",
+        )
+
+    session.add(
+        AuditLog(
+            actor_user_id=current.id,
+            target_user_id=user_id,
+            action="admin.schedule.generate_person_from_previous",
+            resource_key="admin.schedule.edit",
+            details_json=json.dumps(
+                {
+                    "week_start": week_start.isoformat(),
+                    "from_week": prev_start.isoformat(),
+                    "calendar_kind": calendar_kind,
+                    "user_id": user_id,
+                    "shifts_added": added,
+                }
+            ),
+            ip_address=(request.client.host if request.client else None),
+        )
+    )
+    notify_employee(
+        session,
+        user_id=user_id,
+        actor_user_id=current.id,
+        kind="schedule_change",
+        title="Your schedule was updated",
+        body=f"Week of {week_start.strftime('%b %d')} was changed. Open the schedule to review your shifts.",
+        link_path=f"/team/schedule?week={week_start.isoformat()}",
+        request=request,
+    )
+    session.commit()
+    return _redirect_back(
+        week_start,
+        f"Copied {added} {_calendar_label(calendar_kind).lower()} shift{'s' if added != 1 else ''} for {target.display_name or target.username}.",
     )
 
 
@@ -2172,10 +2396,12 @@ async def admin_schedule_roster_add(
         return denial
     form = await request.form()
     week_start = _parse_week_start(form.get("week") or "")
-    if (form.get("staff_kind") or "").strip().lower() == STAFF_KIND_STREAM:
+    form_kind = (form.get("staff_kind") or "").strip().lower()
+    if form_kind == STAFF_KIND_STREAM:
         return _redirect_back(
             week_start, "Stream schedule is managed in the Stream Manager."
         )
+    calendar_kind = _normalize_schedule_calendar(form_kind)
     try:
         user_id = int(form.get("user_id") or 0)
     except (TypeError, ValueError):
@@ -2199,22 +2425,16 @@ async def admin_schedule_roster_add(
             "That employee isn't marked 'on the schedule'. Turn it on from the Employees page first.",
         )
 
-    # Enforce staff_kind match when a grid specifies it. This prevents
-    # a crafted request from adding a Stream user to the Storefront
-    # grid (or vice versa), and gives a clear error if the admin
-    # picks somebody whose Type has since changed.
-    form_kind = (form.get("staff_kind") or "").strip().lower()
-    if form_kind in STAFF_KINDS:
-        user_kind = (target.staff_kind or STAFF_KIND_STOREFRONT)
-        if user_kind != form_kind:
-            return _redirect_back(
-                week_start,
-                f"{target.display_name or target.username} is marked as {user_kind}, not {form_kind}. Change their Type first.",
-            )
+    if not _user_can_work_calendar(target, calendar_kind):
+        return _redirect_back(
+            week_start,
+            f"{target.display_name or target.username} cannot be added to the {_calendar_label(calendar_kind)} calendar.",
+        )
 
     existing = session.exec(
         select(ScheduleRosterMember).where(
             ScheduleRosterMember.week_start == week_start,
+            ScheduleRosterMember.calendar_kind == calendar_kind,
             ScheduleRosterMember.user_id == user_id,
         )
     ).first()
@@ -2226,6 +2446,7 @@ async def admin_schedule_roster_add(
     session.add(
         ScheduleRosterMember(
             week_start=week_start,
+            calendar_kind=calendar_kind,
             user_id=user_id,
             added_by_user_id=current.id,
             created_at=utcnow(),
@@ -2239,6 +2460,7 @@ async def admin_schedule_roster_add(
             details_json=json.dumps(
                 {
                     "week_start": week_start.isoformat(),
+                    "calendar_kind": calendar_kind,
                     "user_id": user_id,
                 }
             ),
@@ -2247,7 +2469,8 @@ async def admin_schedule_roster_add(
     )
     session.commit()
     return _redirect_back(
-        week_start, f"Added {target.display_name or target.username} to this week."
+        week_start,
+        f"Added {target.display_name or target.username} to {_calendar_label(calendar_kind)} this week.",
     )
 
 
@@ -2269,10 +2492,12 @@ async def admin_schedule_roster_remove(
         return denial
     form = await request.form()
     week_start = _parse_week_start(form.get("week") or "")
-    if (form.get("staff_kind") or "").strip().lower() == STAFF_KIND_STREAM:
+    form_kind = (form.get("staff_kind") or "").strip().lower()
+    if form_kind == STAFF_KIND_STREAM:
         return _redirect_back(
             week_start, "Stream schedule is managed in the Stream Manager."
         )
+    calendar_kind = _normalize_schedule_calendar(form_kind)
     try:
         user_id = int(form.get("user_id") or 0)
     except (TypeError, ValueError):
@@ -2286,6 +2511,7 @@ async def admin_schedule_roster_remove(
     membership = session.exec(
         select(ScheduleRosterMember).where(
             ScheduleRosterMember.week_start == week_start,
+            ScheduleRosterMember.calendar_kind == calendar_kind,
             ScheduleRosterMember.user_id == user_id,
         )
     ).first()
@@ -2304,6 +2530,7 @@ async def admin_schedule_roster_remove(
                 ShiftEntry.user_id == user_id,
                 ShiftEntry.shift_date >= week_days[0],
                 ShiftEntry.shift_date <= week_days[-1],
+                ShiftEntry.calendar_kind == calendar_kind,
             )
         ).all()
     )
@@ -2322,6 +2549,7 @@ async def admin_schedule_roster_remove(
             details_json=json.dumps(
                 {
                     "week_start": week_start.isoformat(),
+                    "calendar_kind": calendar_kind,
                     "user_id": user_id,
                     "cells_cleared": cleared,
                 }
@@ -2332,7 +2560,10 @@ async def admin_schedule_roster_remove(
     session.commit()
     name = (target.display_name or target.username) if target else f"#{user_id}"
     tail = f" ({cleared} shift{'s' if cleared != 1 else ''} cleared)" if cleared else ""
-    return _redirect_back(week_start, f"Removed {name} from this week{tail}.")
+    return _redirect_back(
+        week_start,
+        f"Removed {name} from {_calendar_label(calendar_kind)} this week{tail}.",
+    )
 
 
 @router.post(
@@ -2353,35 +2584,38 @@ async def admin_schedule_roster_copy_previous(
         return denial
     form = await request.form()
     week_start = _parse_week_start(form.get("week") or "")
-    if (form.get("staff_kind") or "").strip().lower() == STAFF_KIND_STREAM:
+    form_kind = (form.get("staff_kind") or "").strip().lower()
+    if form_kind == STAFF_KIND_STREAM:
         return _redirect_back(
             week_start, "Stream schedule is managed in the Stream Manager."
         )
+    calendar_kind = _normalize_schedule_calendar(form_kind)
     prev_week = week_start - timedelta(days=7)
-    closed_days = {
-        c.day_date
-        for c in session.exec(
-            select(StoreClosure).where(
-                StoreClosure.day_date >= week_start,
-                StoreClosure.day_date <= week_start + timedelta(days=6),
-            )
-        ).all()
-    }
-
-    form_kind = (form.get("staff_kind") or "").strip().lower()
-    kind_filter = form_kind if form_kind in STAFF_KINDS else None
+    closed_days = set()
+    if calendar_kind == SCHEDULE_CALENDAR_STOREFRONT:
+        closed_days = {
+            c.day_date
+            for c in session.exec(
+                select(StoreClosure).where(
+                    StoreClosure.day_date >= week_start,
+                    StoreClosure.day_date <= week_start + timedelta(days=6),
+                )
+            ).all()
+        }
 
     existing_ids: set[int] = set(
         session.exec(
             select(ScheduleRosterMember.user_id).where(
-                ScheduleRosterMember.week_start == week_start
+                ScheduleRosterMember.week_start == week_start,
+                ScheduleRosterMember.calendar_kind == calendar_kind,
             )
         ).all()
     )
     prev_ids: list[int] = list(
         session.exec(
             select(ScheduleRosterMember.user_id).where(
-                ScheduleRosterMember.week_start == prev_week
+                ScheduleRosterMember.week_start == prev_week,
+                ScheduleRosterMember.calendar_kind == calendar_kind,
             )
         ).all()
     )
@@ -2404,15 +2638,12 @@ async def admin_schedule_roster_copy_previous(
             continue
         if not target.is_schedulable:
             continue
-        # When the copy button was pressed on the Stream grid, only
-        # bring over stream-kind users (and vice versa).
-        if kind_filter is not None:
-            user_kind = (target.staff_kind or STAFF_KIND_STOREFRONT)
-            if user_kind != kind_filter:
-                continue
+        if not _user_can_work_calendar(target, calendar_kind):
+            continue
         session.add(
             ScheduleRosterMember(
                 week_start=week_start,
+                calendar_kind=calendar_kind,
                 user_id=uid,
                 added_by_user_id=current.id,
                 created_at=now,
@@ -2432,6 +2663,7 @@ async def admin_schedule_roster_copy_previous(
                 {
                     "week_start": week_start.isoformat(),
                     "from_week": prev_week.isoformat(),
+                    "calendar_kind": calendar_kind,
                     "users_added": added,
                 }
             ),
@@ -2439,7 +2671,10 @@ async def admin_schedule_roster_copy_previous(
         )
     )
     session.commit()
-    flash = f"Copied {added} employee{'s' if added != 1 else ''} from last week."
+    flash = (
+        f"Copied {added} employee{'s' if added != 1 else ''} from last week "
+        f"to {_calendar_label(calendar_kind)}."
+    )
     if closed_days:
         flash += f" {len(closed_days)} closed day{'s' if len(closed_days) != 1 else ''} stay marked closed."
     return _redirect_back(

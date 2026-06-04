@@ -173,6 +173,7 @@
     .sch-grid-title { margin: 24px 0 10px; font-size: 15px; font-weight: 700; color: var(--pt-text); display:flex; align-items:center; gap:10px; flex-wrap: wrap; }
     .sch-kind-chip { font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 500; }
     .sch-kind-chip.is-storefront { background: rgba(251,146,60,0.18); color: #fdba74; }
+    .sch-kind-chip.is-packing    { background: rgba(45,212,191,0.18); color: #5eead4; }
     .sch-kind-chip.is-stream     { background: rgba(96,165,250,0.18); color: #93c5fd; }
 
     .sch-account-legend {
@@ -249,10 +250,11 @@
 {% endblock %}
 
 {% macro render_grid(ctx, kind_label, kind_slug, include_day_headers) %}
+{% set is_shift_calendar = kind_slug != 'stream' %}
 <div class="sch-grid-title">
     <span>{{ kind_label }} schedule</span>
     <span class="sch-kind-chip is-{{ kind_slug }}">{{ ctx.users|length }} on this week</span>
-    {% if kind_slug == 'storefront' %}
+    {% if is_shift_calendar %}
     <span class="sch-kind-chip" style="background: rgba(148,163,184,0.12); color:#cbd5e1;">
         {{ '%.1f'|format(ctx.grand_hours) }} hrs · {{ ctx.total_shifts }} shifts
     </span>
@@ -296,7 +298,7 @@
                 <th style="text-align:center; min-width:120px;">
                     <div style="font-size:11px; font-weight:500; opacity:0.85;">{{ d.day }} {{ d.strftime('%b') }}</div>
                     <div class="{% if is_today %}sch-today{% endif %}" style="font-size:13px; font-weight:700;">{{ d.strftime('%A') }}</div>
-                    {% if kind_slug == 'storefront' %}
+                    {% if is_shift_calendar %}
                     <div class="sch-dayhrs">{% if dhrs > 0 %}{{ '%.1f'|format(dhrs) }} hrs{% else %}—{% endif %}</div>
                     {% endif %}
                 </th>
@@ -312,7 +314,7 @@
                 <td class="sch-name-col {% if kind_slug == 'stream' %}is-stream{% endif %}">
                     <div>
                         {{ u.display_name or u.username }}{% if is_me %} <span style="color:#fdba74; font-size:10px; margin-left:4px;">(you)</span>{% endif %}
-                        {% if kind_slug == 'storefront' %}
+                        {% if is_shift_calendar %}
                         <span class="sch-name-sub">{% if uhrs > 0 %}{{ '%.1f'|format(uhrs) }} hrs this week{% else %}No shifts{% endif %}</span>
                         {% endif %}
                     </div>
@@ -362,7 +364,7 @@
                 </td>
                 {% endfor %}
                 <td class="sch-total-col">
-                    {% if kind_slug == 'storefront' %}
+                    {% if is_shift_calendar %}
                         {% if uhrs > 0 %}{{ '%.1f'|format(uhrs) }}{% else %}—{% endif %}
                     {% else %}
                         —
@@ -376,7 +378,7 @@
             </td></tr>
             {% endif %}
         </tbody>
-        {% if kind_slug == 'storefront' and ctx.users %}
+        {% if is_shift_calendar and ctx.users %}
         <tfoot>
             <tr class="sch-foot-row">
                 <td class="sch-foot-label">Daily hours</td>
@@ -393,6 +395,22 @@
 {% endmacro %}
 
 {% block content %}
+{% if packing is not defined %}
+{% set packing = {
+    'week_start': storefront.week_start,
+    'week_days': storefront.week_days,
+    'users': [],
+    'entry_map': {},
+    'stream_hint_map': {},
+    'stream_legend': [],
+    'day_note_map': {},
+    'user_hours': {},
+    'day_hours': {},
+    'grand_hours': 0.0,
+    'total_shifts': 0,
+    'people_with_shifts': 0
+} %}
+{% endif %}
 <div class="sch-toolbar">
     <div class="sch-week-btns">
         <a class="pt-btn" href="/team/schedule?week={{ prev_week }}">← Prev week</a>
@@ -408,18 +426,18 @@
 </div>
 
 {# Personal highlight: "my hours this week" — most-employees-look-here-first stat. #}
-{% set my_hours = storefront.user_hours.get(current_user.id, 0.0) %}
+{% set my_hours = storefront.user_hours.get(current_user.id, 0.0) + packing.user_hours.get(current_user.id, 0.0) %}
 <div class="sch-my-summary">
     <div class="sch-my-stat">
         <span class="sch-my-num">{{ '%.1f'|format(my_hours) }}</span>
         <span class="sch-my-lbl">My hours this week</span>
     </div>
     <div class="sch-my-stat">
-        <span class="sch-my-num">{{ '%.1f'|format(storefront.grand_hours) }}</span>
+        <span class="sch-my-num">{{ '%.1f'|format(storefront.grand_hours + packing.grand_hours) }}</span>
         <span class="sch-my-lbl">Team total</span>
     </div>
     <div class="sch-my-stat">
-        <span class="sch-my-num">{{ storefront.people_with_shifts }}</span>
+        <span class="sch-my-num">{{ storefront.people_with_shifts + packing.people_with_shifts }}</span>
         <span class="sch-my-lbl">People working</span>
     </div>
 </div>
@@ -438,6 +456,8 @@
 </p>
 
 {{ render_grid(storefront, 'Storefront', 'storefront', True) }}
+
+{{ render_grid(packing, 'Packing', 'packing', False) }}
 
 {{ render_grid(stream, 'Stream', 'stream', False) }}
 {% endblock %}

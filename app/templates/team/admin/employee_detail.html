@@ -123,9 +123,10 @@
                     {% set current_kind = employee.staff_kind or 'storefront' %}
                     <select name="staff_kind" {% if not can_edit_schedule_roster and not can_edit_profile %}disabled{% endif %} style="padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);">
                         <option value="storefront" {% if current_kind == 'storefront' %}selected{% endif %}>Storefront</option>
+                        <option value="packing" {% if current_kind == 'packing' %}selected{% endif %}>Packing</option>
                         <option value="stream" {% if current_kind == 'stream' %}selected{% endif %}>Stream</option>
                     </select>
-                    <span style="font-size:11px; color:var(--lx-muted); margin-left:8px;">which schedule they can be booked on</span>
+                    <span style="font-size:11px; color:var(--lx-muted); margin-left:8px;">home team; Storefront and Packing calendars are assigned per week</span>
                 </td>
             </tr>
             <tr>

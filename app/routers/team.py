@@ -58,6 +58,8 @@ from ..models import (
     EmployeeProfile,
     InviteToken,
     PasswordResetToken,
+    SCHEDULE_CALENDAR_PACKING,
+    SCHEDULE_CALENDAR_STOREFRONT,
     SHIFT_KIND_ALL,
     SHIFT_KIND_BLANK,
     SHIFT_KIND_OFF,
@@ -1621,6 +1623,14 @@ def _parse_shift_start_minutes(label: str) -> Optional[int]:
     return hour * 60 + minute
 
 
+def _schedule_calendar_label(calendar_kind: str) -> str:
+    if calendar_kind == SCHEDULE_CALENDAR_PACKING:
+        return "Packing"
+    if calendar_kind == SCHEDULE_CALENDAR_STOREFRONT:
+        return "Storefront"
+    return "Schedule"
+
+
 def _today_shifts_for(
     session: Session,
     user: User,
@@ -1659,7 +1669,13 @@ def _today_shifts_for(
             "shift_date": shift.shift_date,
             "label": shift.label,
             "kind": shift.kind,
-            "day_note": day_note,
+            "calendar_kind": shift.calendar_kind,
+            "calendar_label": _schedule_calendar_label(shift.calendar_kind),
+            "day_note": (
+                day_note
+                if shift.calendar_kind == SCHEDULE_CALENDAR_STOREFRONT
+                else None
+            ),
         }
         for shift in shifts
     ]
@@ -1712,7 +1728,13 @@ def _upcoming_shifts_for(
                 "shift_date": shift.shift_date,
                 "label": shift.label,
                 "kind": shift.kind,
-                "day_note": day_note,
+                "calendar_kind": shift.calendar_kind,
+                "calendar_label": _schedule_calendar_label(shift.calendar_kind),
+                "day_note": (
+                    day_note
+                    if shift.calendar_kind == SCHEDULE_CALENDAR_STOREFRONT
+                    else None
+                ),
             }
         )
     return out
@@ -2207,11 +2229,18 @@ def team_schedule(
         _grid_context,
         _parse_week_start,
     )
-    from ..models import STAFF_KIND_STOREFRONT, STAFF_KIND_STREAM
+    from ..models import (
+        SCHEDULE_CALENDAR_PACKING,
+        SCHEDULE_CALENDAR_STOREFRONT,
+        STAFF_KIND_STREAM,
+    )
 
     week_start = _parse_week_start(week)
     storefront_ctx = _grid_context(
-        session, week_start, staff_kind=STAFF_KIND_STOREFRONT
+        session, week_start, staff_kind=SCHEDULE_CALENDAR_STOREFRONT
+    )
+    packing_ctx = _grid_context(
+        session, week_start, staff_kind=SCHEDULE_CALENDAR_PACKING
     )
     stream_ctx = _grid_context(
         session, week_start, staff_kind=STAFF_KIND_STREAM
@@ -2228,6 +2257,7 @@ def team_schedule(
             "build_cell_key": _build_cell_key,
             "build_day_loc_key": _build_day_loc_key,
             "storefront": storefront_ctx,
+            "packing": packing_ctx,
             "stream": stream_ctx,
             "week_start": storefront_ctx["week_start"],
             "week_days": storefront_ctx["week_days"],

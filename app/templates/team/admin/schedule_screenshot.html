@@ -311,6 +311,72 @@
     <p class="ss-empty">No one on the storefront roster this week.</p>
     {% endif %}
 
+    {# ---------- Packing ---------- #}
+    <h2 class="ss-section-title">Packing</h2>
+    {% set pk = packing %}
+    {% if pk.users %}
+        {% for d in pk.week_days %}
+        {% set iso = d.isoformat() %}
+        {% set is_today = (d == today) %}
+        {% set day_rows = [] %}
+        {% for u in pk.users %}
+            {% set entries = pk.entry_map.get((u.id, iso)) or [] %}
+            {% if entries %}
+                {% for e in entries %}
+                    {% set parts = (e.label or '').split(' Â· ') %}
+                    {% set _ = day_rows.append({
+                        'name': u.display_name or u.username,
+                        'kind': e.kind or 'work',
+                        'time': parts[0],
+                        'note': (parts[1:]|join(' Â· ')) if parts|length > 1 else '',
+                    }) %}
+                {% endfor %}
+            {% endif %}
+        {% endfor %}
+        <section class="ss-day {% if is_today %}is-today{% endif %}">
+            <div class="ss-day-head">
+                <div class="ss-day-name">
+                    {{ d.strftime('%A') }}
+                    {% if is_today %}<span class="ss-today-tag">today</span>{% endif %}
+                </div>
+                <div class="ss-day-date">{{ d.strftime('%b') }} {{ d.day }}</div>
+            </div>
+            {% if day_rows %}
+                {% for r in day_rows %}
+                <div class="ss-row">
+                    <span class="ss-pip k-{{ r.kind }}"></span>
+                    <div class="ss-row-body">
+                        <span class="ss-row-name">{{ r.name }}</span>
+                        {% if r.kind == 'off' %}
+                            <span class="ss-row-tag k-off">Off</span>
+                        {% elif r.kind == 'show' %}
+                            <span class="ss-row-tag k-show">Show</span>
+                            {% if r.time %}<span class="ss-row-time">Â· {{ r.time }}</span>{% endif %}
+                        {% elif r.kind == 'request' %}
+                            <span class="ss-row-tag k-request">Time-off req</span>
+                            {% if r.time %}<span class="ss-row-time">Â· {{ r.time }}</span>{% endif %}
+                        {% elif r.kind == 'if_needed' %}
+                            <span class="ss-row-tag k-if_needed">If needed</span>
+                            {% if r.time %}<span class="ss-row-time">Â· {{ r.time }}</span>{% endif %}
+                        {% elif r.kind == 'stream' %}
+                            <span class="ss-row-tag k-stream">Stream</span>
+                            {% if r.time %}<span class="ss-row-time">Â· {{ r.time }}</span>{% endif %}
+                        {% else %}
+                            {% if r.time %}<span class="ss-row-time">{{ r.time }}</span>{% endif %}
+                        {% endif %}
+                        {% if r.note %}<span class="ss-row-note">{{ r.note }}</span>{% endif %}
+                    </div>
+                </div>
+                {% endfor %}
+            {% else %}
+                <div class="ss-empty">No shifts.</div>
+            {% endif %}
+        </section>
+        {% endfor %}
+    {% else %}
+    <p class="ss-empty">No one on the packing roster this week.</p>
+    {% endif %}
+
     {# ---------- Stream ---------- #}
     <h2 class="ss-section-title">Stream</h2>
     {% if stream.users %}

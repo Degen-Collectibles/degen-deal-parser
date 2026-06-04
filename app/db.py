@@ -209,7 +209,11 @@ SQLITE_ADDITIVE_MIGRATIONS = {
         # shift_date). Legacy single-shift rows default to 0. The
         # matching UNIQUE constraint drop for SQLite happens in
         # ensure_sqlite_schema() via a table rebuild.
+        "calendar_kind": "TEXT DEFAULT 'storefront'",
         "sort_order": "INTEGER DEFAULT 0",
+    },
+    "schedule_roster_member": {
+        "calendar_kind": "TEXT DEFAULT 'storefront'",
     },
     "invitetoken": {
         "token_lookup_hmac": "BLOB",
@@ -426,6 +430,10 @@ SQLITE_INDEX_MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS idx_user_staff_kind ON user (staff_kind)",
     "CREATE INDEX IF NOT EXISTS idx_user_session_invalidated_at ON user (session_invalidated_at)",
     "CREATE INDEX IF NOT EXISTS idx_streamers_user_id ON streamers (user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_shift_entry_calendar_kind ON shift_entry (calendar_kind)",
+    "CREATE INDEX IF NOT EXISTS idx_shift_entry_calendar_user_date ON shift_entry (calendar_kind, user_id, shift_date)",
+    "CREATE INDEX IF NOT EXISTS idx_schedule_roster_member_calendar_kind ON schedule_roster_member (calendar_kind)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_schedule_roster_week_calendar_user ON schedule_roster_member (week_start, calendar_kind, user_id)",
     "CREATE INDEX IF NOT EXISTS idx_invitetoken_token_lookup_hmac ON invitetoken (token_lookup_hmac)",
     "CREATE INDEX IF NOT EXISTS idx_invitetoken_target_user_id ON invitetoken (target_user_id)",
     "CREATE INDEX IF NOT EXISTS idx_passwordresettoken_token_lookup_hmac ON passwordresettoken (token_lookup_hmac)",
@@ -637,7 +645,11 @@ POSTGRES_ADDITIVE_MIGRATIONS = {
         # stacking order of shifts that share the same (user_id,
         # shift_date). Legacy single-shift rows default to 0. The
         # matching UNIQUE constraint drop happens in ensure_postgres_schema().
+        "calendar_kind": "TEXT DEFAULT 'storefront'",
         "sort_order": "INTEGER DEFAULT 0",
+    },
+    "schedule_roster_member": {
+        "calendar_kind": "TEXT DEFAULT 'storefront'",
     },
     "invitetoken": {
         "token_lookup_hmac": "BYTEA",
@@ -854,6 +866,10 @@ POSTGRES_INDEX_MIGRATIONS = [
     'CREATE INDEX IF NOT EXISTS idx_user_staff_kind ON "user" (staff_kind)',
     'CREATE INDEX IF NOT EXISTS idx_user_session_invalidated_at ON "user" (session_invalidated_at)',
     "CREATE INDEX IF NOT EXISTS idx_streamers_user_id ON streamers (user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_shift_entry_calendar_kind ON shift_entry (calendar_kind)",
+    "CREATE INDEX IF NOT EXISTS idx_shift_entry_calendar_user_date ON shift_entry (calendar_kind, user_id, shift_date)",
+    "CREATE INDEX IF NOT EXISTS idx_schedule_roster_member_calendar_kind ON schedule_roster_member (calendar_kind)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_schedule_roster_week_calendar_user ON schedule_roster_member (week_start, calendar_kind, user_id)",
     "CREATE INDEX IF NOT EXISTS idx_invitetoken_token_lookup_hmac ON invitetoken (token_lookup_hmac)",
     "CREATE INDEX IF NOT EXISTS idx_invitetoken_target_user_id ON invitetoken (target_user_id)",
     "CREATE INDEX IF NOT EXISTS idx_passwordresettoken_token_lookup_hmac ON passwordresettoken (token_lookup_hmac)",
@@ -1162,6 +1178,7 @@ def _rebuild_shift_entry_without_unique(connection) -> None:
         row[1]
         for row in connection.execute(text("PRAGMA table_info('shift_entry')"))
     ]
+    has_calendar_kind = "calendar_kind" in existing_cols
     has_sort_order = "sort_order" in existing_cols
     # FK checks off for the duration of the rebuild. `PRAGMA
     # foreign_keys` only takes effect when NOT inside a transaction on
@@ -1177,6 +1194,7 @@ def _rebuild_shift_entry_without_unique(connection) -> None:
                     id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER NOT NULL,
                     shift_date DATE NOT NULL,
+                    calendar_kind TEXT NOT NULL DEFAULT 'storefront',
                     label TEXT NOT NULL DEFAULT '',
                     kind TEXT NOT NULL DEFAULT 'blank',
                     notes TEXT NOT NULL DEFAULT '',
@@ -1193,14 +1211,16 @@ def _rebuild_shift_entry_without_unique(connection) -> None:
         # Build the SELECT list so missing columns are substituted with
         # defaults rather than failing the copy.
         copy_cols = (
-            "id, user_id, shift_date, label, kind, notes, "
+            "id, user_id, shift_date, "
+            + ("calendar_kind" if has_calendar_kind else "'storefront'")
+            + ", label, kind, notes, "
             + ("sort_order" if has_sort_order else "0")
             + ", created_by_user_id, created_at, updated_at"
         )
         connection.execute(
             text(
                 "INSERT INTO shift_entry_new "
-                "(id, user_id, shift_date, label, kind, notes, sort_order, "
+                "(id, user_id, shift_date, calendar_kind, label, kind, notes, sort_order, "
                 "created_by_user_id, created_at, updated_at) "
                 f"SELECT {copy_cols} FROM shift_entry"
             )
@@ -1211,8 +1231,10 @@ def _rebuild_shift_entry_without_unique(connection) -> None:
         for stmt in (
             "CREATE INDEX IF NOT EXISTS ix_shift_entry_user_id ON shift_entry(user_id)",
             "CREATE INDEX IF NOT EXISTS ix_shift_entry_shift_date ON shift_entry(shift_date)",
+            "CREATE INDEX IF NOT EXISTS ix_shift_entry_calendar_kind ON shift_entry(calendar_kind)",
             "CREATE INDEX IF NOT EXISTS ix_shift_entry_kind ON shift_entry(kind)",
             "CREATE INDEX IF NOT EXISTS ix_shift_entry_sort_order ON shift_entry(sort_order)",
+            "CREATE INDEX IF NOT EXISTS idx_shift_entry_calendar_user_date ON shift_entry(calendar_kind, user_id, shift_date)",
         ):
             try:
                 connection.execute(text(stmt))
@@ -1223,6 +1245,106 @@ def _rebuild_shift_entry_without_unique(connection) -> None:
             connection.execute(text("PRAGMA foreign_keys = ON"))
         except Exception:
             pass
+
+
+def _migrate_schedule_roster_member_calendar_unique(connection) -> None:
+    """Replace legacy UNIQUE(week_start, user_id) with calendar-scoped unique."""
+    if not sqlite_table_exists(connection, "schedule_roster_member"):
+        return
+    indexes = list(
+        connection.execute(
+            text("PRAGMA index_list('schedule_roster_member')")
+        )
+    )
+    for row in indexes:
+        name = row[1]
+        is_unique = int(row[2]) == 1
+        if not is_unique:
+            continue
+        info = list(
+            connection.execute(text(f"PRAGMA index_info('{name}')"))
+        )
+        cols = {r[2] for r in info}
+        if cols != {"week_start", "user_id"}:
+            continue
+        if name.startswith("sqlite_autoindex_"):
+            _rebuild_schedule_roster_member_with_calendar_unique(connection)
+            return
+        try:
+            connection.execute(text(f'DROP INDEX IF EXISTS "{name}"'))
+        except Exception as exc:
+            print(f"[db] schedule_roster unique-index drop skipped ({name}): {exc}")
+    _ensure_schedule_roster_calendar_indexes(connection)
+
+
+def _rebuild_schedule_roster_member_with_calendar_unique(connection) -> None:
+    """Recreate schedule_roster_member without the old two-column unique."""
+    existing_cols = [
+        row[1]
+        for row in connection.execute(
+            text("PRAGMA table_info('schedule_roster_member')")
+        )
+    ]
+    has_calendar_kind = "calendar_kind" in existing_cols
+    has_created_at = "created_at" in existing_cols
+    connection.execute(text("PRAGMA foreign_keys = OFF"))
+    try:
+        connection.execute(text("DROP TABLE IF EXISTS schedule_roster_member_new"))
+        connection.execute(
+            text(
+                """
+                CREATE TABLE schedule_roster_member_new (
+                    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                    week_start DATE NOT NULL,
+                    calendar_kind TEXT NOT NULL DEFAULT 'storefront',
+                    user_id INTEGER NOT NULL,
+                    added_by_user_id INTEGER NOT NULL,
+                    created_at TIMESTAMP NOT NULL,
+                    FOREIGN KEY (user_id) REFERENCES user(id),
+                    FOREIGN KEY (added_by_user_id) REFERENCES user(id)
+                )
+                """
+            )
+        )
+        copy_cols = (
+            "id, week_start, "
+            + ("calendar_kind" if has_calendar_kind else "'storefront'")
+            + ", user_id, added_by_user_id, "
+            + ("created_at" if has_created_at else "CURRENT_TIMESTAMP")
+        )
+        connection.execute(
+            text(
+                "INSERT INTO schedule_roster_member_new "
+                "(id, week_start, calendar_kind, user_id, added_by_user_id, created_at) "
+                f"SELECT {copy_cols} FROM schedule_roster_member"
+            )
+        )
+        connection.execute(text("DROP TABLE schedule_roster_member"))
+        connection.execute(
+            text(
+                "ALTER TABLE schedule_roster_member_new "
+                "RENAME TO schedule_roster_member"
+            )
+        )
+        _ensure_schedule_roster_calendar_indexes(connection)
+    finally:
+        try:
+            connection.execute(text("PRAGMA foreign_keys = ON"))
+        except Exception:
+            pass
+
+
+def _ensure_schedule_roster_calendar_indexes(connection) -> None:
+    for stmt in (
+        "CREATE INDEX IF NOT EXISTS ix_schedule_roster_member_week_start ON schedule_roster_member(week_start)",
+        "CREATE INDEX IF NOT EXISTS ix_schedule_roster_member_calendar_kind ON schedule_roster_member(calendar_kind)",
+        "CREATE INDEX IF NOT EXISTS ix_schedule_roster_member_user_id ON schedule_roster_member(user_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_schedule_roster_week_calendar_user ON schedule_roster_member(week_start, calendar_kind, user_id)",
+    ):
+        try:
+            connection.execute(text(stmt))
+        except Exception as exc:
+            print(f"[db] schedule_roster index recreate skipped: {exc}")
 
 
 def _quote_sqlite_identifier(identifier: str) -> str:
@@ -1275,6 +1397,7 @@ def ensure_sqlite_schema() -> None:
             connection.execute(text(statement))
         migrate_legacy_sqlite_shopify_orders(connection)
         _migrate_shift_entry_drop_unique(connection)
+        _migrate_schedule_roster_member_calendar_unique(connection)
 
 
 def fixup_transaction_parse_status_aliases() -> None:
@@ -1362,6 +1485,15 @@ def ensure_postgres_schema() -> None:
     _pg_migrate_statement(
         "ALTER TABLE shift_entry DROP CONSTRAINT IF EXISTS uq_shift_entry_user_date",
         "shift_entry.drop_uq_user_date",
+    )
+    _pg_migrate_statement(
+        "ALTER TABLE schedule_roster_member DROP CONSTRAINT IF EXISTS uq_schedule_roster_week_user",
+        "schedule_roster_member.drop_uq_week_user",
+    )
+    _pg_migrate_statement(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_schedule_roster_week_calendar_user "
+        "ON schedule_roster_member (week_start, calendar_kind, user_id)",
+        "schedule_roster_member.unique_week_calendar_user",
     )
     with engine.begin() as connection:
         migrate_legacy_postgres_shopify_orders(connection)

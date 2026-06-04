@@ -683,7 +683,15 @@ class TikTokProduct(SQLModel, table=True):
 
 STAFF_KIND_STOREFRONT = "storefront"
 STAFF_KIND_STREAM = "stream"
-STAFF_KINDS = (STAFF_KIND_STOREFRONT, STAFF_KIND_STREAM)
+STAFF_KIND_PACKING = "packing"
+STAFF_KINDS = (STAFF_KIND_STOREFRONT, STAFF_KIND_STREAM, STAFF_KIND_PACKING)
+
+SCHEDULE_CALENDAR_STOREFRONT = STAFF_KIND_STOREFRONT
+SCHEDULE_CALENDAR_PACKING = STAFF_KIND_PACKING
+SCHEDULE_CALENDARS = (
+    SCHEDULE_CALENDAR_STOREFRONT,
+    SCHEDULE_CALENDAR_PACKING,
+)
 
 
 class User(SQLModel, table=True):
@@ -1402,6 +1410,7 @@ class ShiftEntry(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
     shift_date: date = Field(index=True)
+    calendar_kind: str = Field(default=SCHEDULE_CALENDAR_STOREFRONT, index=True)
     label: str = Field(default="")
     kind: str = Field(default=SHIFT_KIND_BLANK, index=True)
     notes: str = Field(default="")
@@ -1460,9 +1469,9 @@ class ScheduleRosterMember(SQLModel, table=True):
     """Per-week schedule roster.
 
     By default the admin schedule grid shows NO employees — admins add
-    people to each week individually. Membership is tracked per
-    Monday-starting week so rosters can differ week to week (drafts /
-    show-only hires / temps don't appear on weeks they weren't booked).
+    people to each calendar/week individually. Membership is tracked per
+    Monday-starting week and calendar so rosters can differ week to week
+    and a person can be booked on Storefront and Packing in the same week.
 
     Rows in this table are additive: removing someone from the roster
     does NOT delete their historical shifts, it just hides them from
@@ -1472,12 +1481,16 @@ class ScheduleRosterMember(SQLModel, table=True):
     __tablename__ = "schedule_roster_member"
     __table_args__ = (
         UniqueConstraint(
-            "week_start", "user_id", name="uq_schedule_roster_week_user"
+            "week_start",
+            "calendar_kind",
+            "user_id",
+            name="uq_schedule_roster_week_calendar_user",
         ),
     )
 
     id: Optional[int] = Field(default=None, primary_key=True)
     week_start: date = Field(index=True)
+    calendar_kind: str = Field(default=SCHEDULE_CALENDAR_STOREFRONT, index=True)
     user_id: int = Field(foreign_key="user.id", index=True)
     added_by_user_id: int = Field(foreign_key="user.id")
     created_at: datetime = Field(default_factory=utcnow)
