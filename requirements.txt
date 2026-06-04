@@ -6,6 +6,7 @@ uvicorn[standard]
 sqlmodel
 discord.py
 openai
+mcp
 httpx
 pydantic-settings
 python-dotenv

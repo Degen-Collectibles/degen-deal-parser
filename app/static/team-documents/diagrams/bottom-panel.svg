@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="470" viewBox="0 0 920 470" role="img" aria-labelledby="title desc">
+  <title id="title">Bottom Surprise Set panel callouts</title>
+  <desc id="desc">Streamer should tell buyers to tap their own Surprise Set card for available items, sold items, remaining count, timer, and bid.</desc>
+  <defs>
+    <style>
+      .bg { fill: #fffaf4; }
+      .phone { fill: #1d1a17; }
+      .screen { fill: #fff; }
+      .bar { fill: #f4ebe2; stroke: #d8cabe; stroke-width: 2; }
+      .pill { fill: #111; }
+      .muted { fill: #ede4db; }
+      .bid { fill: #ff3d6e; }
+      .call { fill: #ffffff; stroke: #a99683; stroke-width: 2; }
+      .line { stroke: #27211c; stroke-width: 2; fill: none; }
+      text { font-family: Inter, Arial, sans-serif; fill: #1d1a17; }
+      .h { font-size: 26px; font-weight: 800; }
+      .t { font-size: 16px; font-weight: 800; }
+      .s { font-size: 13px; }
+      .white { fill: #fff; }
+      .pink { fill: #fff; font-weight: 800; }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#27211c"/>
+    </marker>
+  </defs>
+  <rect class="bg" width="920" height="470" rx="18"/>
+  <text class="h" x="32" y="44">Tell viewers to tap their own Surprise Set card</text>
+
+  <rect class="phone" x="310" y="76" width="300" height="350" rx="30"/>
+  <rect class="screen" x="330" y="102" width="260" height="298" rx="18"/>
+  <rect class="bar" x="346" y="286" width="228" height="86" rx="16"/>
+  <text class="t" x="362" y="314">Surprise item</text>
+  <text class="s" x="362" y="337">Pokemon Ultra Surprise</text>
+  <text class="t" x="362" y="362">$18.00</text>
+  <rect class="bid" x="470" y="338" width="88" height="28" rx="14"/>
+  <text class="pink" x="488" y="357">Bid</text>
+  <text class="s" x="362" y="386">381/400 left</text>
+
+  <rect class="muted" x="350" y="118" width="220" height="144" rx="14"/>
+  <rect class="pill" x="364" y="136" width="92" height="30" rx="15"/>
+  <text class="white" x="382" y="156">Available</text>
+  <rect class="muted" x="466" y="136" width="68" height="30" rx="15"/>
+  <text class="s" x="485" y="156">Sold</text>
+  <text class="s" x="370" y="190">Hit 1 - 1 left</text>
+  <text class="s" x="370" y="216">Base pack - 305 left</text>
+  <text class="s" x="370" y="242">ETB - 4 left</text>
+
+  <rect class="call" x="44" y="112" width="218" height="74" rx="14"/>
+  <text class="t" x="66" y="143">Available tab</text>
+  <text class="s" x="66" y="166">"Tap your card. See what is live."</text>
+  <path class="line" d="M 262 150 L 363 150" marker-end="url(#arrow)"/>
+
+  <rect class="call" x="44" y="230" width="218" height="74" rx="14"/>
+  <text class="t" x="66" y="261">Sold tab</text>
+  <text class="s" x="66" y="284">"Check what has hit."</text>
+  <path class="line" d="M 262 268 L 471 154" marker-end="url(#arrow)"/>
+
+  <rect class="call" x="658" y="126" width="222" height="74" rx="14"/>
+  <text class="t" x="680" y="157">Remaining count</text>
+  <text class="s" x="680" y="180">"381 out of 400 left."</text>
+  <path class="line" d="M 658 168 L 498 383" marker-end="url(#arrow)"/>
+
+  <rect class="call" x="658" y="256" width="222" height="74" rx="14"/>
+  <text class="t" x="680" y="287">Bid + timer</text>
+  <text class="s" x="680" y="310">"This bid is light."</text>
+  <path class="line" d="M 658 294 L 538 352" marker-end="url(#arrow)"/>
+</svg>

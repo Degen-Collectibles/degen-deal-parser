@@ -111,6 +111,22 @@ LEGACY_POLICIES: tuple[dict, ...] = (
 LEGACY_POLICY_BY_ID = {p["id"]: p for p in LEGACY_POLICIES}
 
 
+TEAM_DOCUMENTS: tuple[dict[str, str], ...] = (
+    {
+        "title": "TikTok Surprise Set Streamer Guide",
+        "description": (
+            "How to build an official TikTok Surprise Set, explain the pool, "
+            "run dollar-start auctions, and keep the stream moving without "
+            "making guarantees."
+        ),
+        "category": "TikTok Live",
+        "updated": "2026-05-29",
+        "href": "/static/team-documents/surprise-set-guide.pdf",
+        "source_href": "/static/team-documents/surprise-set-guide.md",
+    },
+)
+
+
 # ---------------------------------------------------------------------------
 # Gates
 # ---------------------------------------------------------------------------
@@ -724,6 +740,7 @@ def _nav_context(session: Session, user: User) -> dict:
         ("hours", "Hours", "page.hours", "/team/hours"),
         ("announcements", "Announcements", "page.announcements", "/team/announcements"),
         ("notifications", "Notifications", "page.announcements", "/team/notifications"),
+        ("documents", "Documents", "page.documents", "/team/documents"),
         ("schedule", "Schedule", "page.schedule", schedule_href),
         ("time-off", "Time off", "page.timeoff", "/team/timeoff"),
         ("policies", "Policies", "page.policies", "/team/policies"),
@@ -2039,6 +2056,29 @@ async def team_password_change_post(
     return RedirectResponse(
         "/team/profile?flash=Password+updated.",
         status_code=303,
+    )
+
+
+@router.get("/team/documents", response_class=HTMLResponse)
+def team_documents(
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    denial, user = _require_employee(request, session, resource_key="page.documents")
+    if denial:
+        return denial
+    return templates.TemplateResponse(
+        request,
+        "team/documents.html",
+        {
+            "request": request,
+            "title": "Documents",
+            "active": "documents",
+            "current_user": user,
+            "documents": TEAM_DOCUMENTS,
+            "csrf_token": issue_token(request),
+            **_nav_context(session, user),
+        },
     )
 
 

@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="380" viewBox="0 0 920 380" role="img" aria-labelledby="title desc">
+  <title id="title">Recommended Surprise Set pool mix</title>
+  <desc id="desc">A 400 item set should be mostly base packs, with mid outcomes and a visible hit tail.</desc>
+  <defs>
+    <style>
+      .bg { fill: #fffaf4; }
+      .base { fill: #d8f0ff; stroke: #2a617c; stroke-width: 2; }
+      .mid { fill: #ffe8a6; stroke: #7a4d00; stroke-width: 2; }
+      .hit { fill: #ff9a8a; stroke: #8d291c; stroke-width: 2; }
+      .card { fill: #ffffff; stroke: #dccfc1; stroke-width: 2; }
+      text { font-family: Inter, Arial, sans-serif; fill: #1d1a17; }
+      .h { font-size: 26px; font-weight: 800; }
+      .t { font-size: 18px; font-weight: 800; }
+      .s { font-size: 14px; }
+      .n { font-size: 34px; font-weight: 900; }
+      .tiny { font-size: 12px; fill: #675b50; }
+    </style>
+  </defs>
+  <rect class="bg" width="920" height="380" rx="18"/>
+  <text class="h" x="32" y="44">First pool: clear base, visible hit tail</text>
+
+  <rect class="card" x="54" y="84" width="812" height="120" rx="18"/>
+  <rect class="base" x="82" y="116" width="592" height="56" rx="12"/>
+  <rect class="mid" x="674" y="116" width="112" height="56" rx="12"/>
+  <rect class="hit" x="786" y="116" width="52" height="56" rx="12"/>
+  <text class="t" x="296" y="151">BASE 75-82%</text>
+  <text class="t" x="696" y="151">MID</text>
+  <text class="t" x="798" y="151">HIT</text>
+
+  <rect class="card" x="54" y="230" width="248" height="104" rx="16"/>
+  <text class="n" x="82" y="274">300-325</text>
+  <text class="t" x="82" y="301">base items</text>
+  <text class="tiny" x="82" y="322">JP/CN/KR sealed packs</text>
+
+  <rect class="card" x="336" y="230" width="248" height="104" rx="16"/>
+  <text class="n" x="364" y="274">40-60</text>
+  <text class="t" x="364" y="301">mid items</text>
+  <text class="tiny" x="364" y="322">bags, bundles, tins, B&amp;B</text>
+
+  <rect class="card" x="618" y="230" width="248" height="104" rx="16"/>
+  <text class="n" x="646" y="274">20-35</text>
+  <text class="t" x="646" y="301">hits</text>
+  <text class="tiny" x="646" y="322">ETBs, UPCs, PC ETBs, boxes</text>
+</svg>

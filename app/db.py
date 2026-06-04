@@ -1405,6 +1405,7 @@ DEFAULT_ROLE_PERMISSIONS: tuple[tuple[str, str, bool], ...] = tuple(
         ("page.hours", (True, False, True, True, True)),
         ("page.schedule", (True, False, True, True, True)),
         ("page.announcements", (True, True, True, True, True)),
+        ("page.documents", (True, True, True, True, True)),
         ("page.timeoff", (True, True, True, True, True)),
         ("page.supply_requests", (True, False, True, True, True)),
         ("ops.inventory.view", (True, True, True, True, True)),

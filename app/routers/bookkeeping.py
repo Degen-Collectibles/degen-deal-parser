@@ -643,6 +643,7 @@ def bank_plaid_sync_form(
             result = sync_plaid_connection(session, connection_id)
         else:
             result = sync_all_plaid_connections(session)
+        invalidate_financial_report_caches()
         added = int(result.get("added") or 0)
         modified = int(result.get("modified") or 0)
         removed = int(result.get("removed") or 0)
@@ -687,7 +688,9 @@ async def plaid_webhook(
         raise HTTPException(status_code=400, detail="Invalid JSON")
 
     try:
-        return JSONResponse(handle_plaid_webhook(session, payload))
+        result = handle_plaid_webhook(session, payload)
+        invalidate_financial_report_caches()
+        return JSONResponse(result)
     except Exception as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
 
@@ -715,6 +718,7 @@ async def bank_reconciliation_import_form(
             account_label=account_label,
             account_type=account_type,
         )
+        invalidate_financial_report_caches()
         return RedirectResponse(
             url=_bank_redirect_url(
                 import_id=imported.id,
@@ -740,6 +744,7 @@ def bank_reconciliation_rerun_form(
         return denial
     try:
         rerun_bank_reconciliation(session, import_id)
+        invalidate_financial_report_caches()
         return RedirectResponse(
             url=_bank_redirect_url(import_id=import_id, success="Re-ran matching and expense categories"),
             status_code=303,
@@ -760,6 +765,7 @@ def bank_reconciliation_delete_form(
     if denial := require_role_response(request, "admin"):
         return denial
     delete_bank_import(session, import_id)
+    invalidate_financial_report_caches()
     return RedirectResponse(
         url=_bank_redirect_url(success="Deleted bank import"),
         status_code=303,
@@ -801,6 +807,7 @@ def bank_reconciliation_row_status_form(
         row.updated_at = utcnow()
         session.add(row)
         session.commit()
+        invalidate_financial_report_caches()
     return RedirectResponse(
         url=_bank_redirect_url(
             import_id=import_id,

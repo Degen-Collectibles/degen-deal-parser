@@ -1,0 +1,36 @@
+{% extends "team/base.html" %}
+
+{% block header_sub %}
+<div class="pt-h1-sub">Guides and operating references for the team.</div>
+{% endblock %}
+
+{% block content %}
+{% set rows = documents|default([]) %}
+{% if rows %}
+  <div style="display:grid; gap:14px;">
+    {% for doc in rows %}
+      <article class="pt-card" style="display:grid; gap:14px;">
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:14px; flex-wrap:wrap;">
+          <div>
+            <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:7px;">
+              <span class="pt-chip">{{ doc.category }}</span>
+              <span class="pt-card-sub">Updated {{ doc.updated }}</span>
+            </div>
+            <h2 class="pt-card-title" style="font-size:20px; letter-spacing:0; text-transform:none; color:var(--pt-text); margin:0;">
+              {{ doc.title }}
+            </h2>
+            <p class="pt-card-sub" style="max-width:760px; margin:8px 0 0; line-height:1.5;">
+              {{ doc.description }}
+            </p>
+          </div>
+          <a class="pt-btn primary" href="{{ doc.href }}" target="_blank" rel="noopener">Open PDF</a>
+        </div>
+      </article>
+    {% endfor %}
+  </div>
+{% else %}
+  <div class="pt-card">
+    <div class="pt-card-sub">No documents are posted yet.</div>
+  </div>
+{% endif %}
+{% endblock %}

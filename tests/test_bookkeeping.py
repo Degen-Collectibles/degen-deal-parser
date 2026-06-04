@@ -30,7 +30,11 @@ _set_test_env_default("ADMIN_PASSWORD", "bookkeeping-test-admin-password")
 _set_test_env_default("EMPLOYEE_TOKEN_HMAC_KEY", "bookkeeping-test-token-key")
 
 from app.discord.bookkeeping import fetch_google_sheet_export, read_tabular_rows, reconcile_bookkeeping_import
+import app.cache as cache_module
+from app.cache import cache_get, cache_set
 from app.models import (
+    BankStatementImport,
+    BankTransaction,
     BookkeepingEntry,
     BookkeepingImport,
     DiscordMessage,
@@ -323,6 +327,10 @@ class PlaidWebhookVerificationTests(unittest.TestCase):
         app_main.app.dependency_overrides[get_session] = override_get_session
         client = TestClient(app_main.app)
         raw_body = b'{"item_id":"item-1","webhook_code":"DEFAULT_UPDATE"}'
+        cache_module._cache.clear()
+        cache_set("finance:v4:test", {"stale": True})
+        cache_set("reports:test", {"stale": True})
+        cache_set("other:test", {"keep": True})
 
         try:
             with (
@@ -346,6 +354,73 @@ class PlaidWebhookVerificationTests(unittest.TestCase):
         handler.assert_called_once()
         args, _kwargs = handler.call_args
         self.assertEqual(args[1]["item_id"], "item-1")
+        self.assertIsNone(cache_get("finance:v4:test"))
+        self.assertIsNone(cache_get("reports:test"))
+        self.assertEqual(cache_get("other:test"), {"keep": True})
+        cache_module._cache.clear()
+
+    def test_bank_row_status_form_invalidates_finance_caches(self):
+        from app.routers.bookkeeping import bank_reconciliation_row_status_form
+
+        engine = _fresh_engine()
+        cache_module._cache.clear()
+
+        try:
+            with Session(engine) as session:
+                session.add(
+                    BankStatementImport(
+                        id=1,
+                        label="Chase import",
+                        account_label="Chase Checking",
+                    )
+                )
+                session.add(
+                    BankTransaction(
+                        id=101,
+                        import_id=1,
+                        row_index=1,
+                        account_label="Chase Checking",
+                        account_type="checking",
+                        posted_at=_dt(2026, 5, 25),
+                        description="Shipping supplies",
+                        description_stem="SHIPPING SUPPLIES",
+                        amount=-12.34,
+                        classification="expense_or_purchase_needs_review",
+                        expense_category="uncategorized",
+                    )
+                )
+                session.commit()
+
+                cache_set("finance:v4:test", {"stale": True})
+                cache_set("reports:test", {"stale": True})
+                cache_set("other:test", {"keep": True})
+
+                with patch("app.routers.bookkeeping.require_role_response", return_value=None):
+                    response = bank_reconciliation_row_status_form(
+                        request=object(),
+                        row_id=101,
+                        import_id=1,
+                        review_status="reviewed",
+                        classification="",
+                        expense_category="shipping_postage",
+                        note="",
+                        selected_classification="",
+                        selected_expense_category="",
+                        selected_review_status="",
+                        selected_attention="",
+                        selected_expenses_only="true",
+                        selected_search="",
+                        selected_limit="250",
+                        session=session,
+                    )
+
+                self.assertEqual(response.status_code, 303)
+                self.assertIsNone(cache_get("finance:v4:test"))
+                self.assertIsNone(cache_get("reports:test"))
+                self.assertEqual(cache_get("other:test"), {"keep": True})
+        finally:
+            cache_module._cache.clear()
+            engine.dispose()
 
 
 class ReconcileBookkeepingTests(unittest.TestCase):
