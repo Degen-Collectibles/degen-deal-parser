@@ -100,6 +100,7 @@ from .models import (
     TikTokOrder,
     TikTokProduct,
     TikTokSyncState,
+    TikTokCreatorAuth,
     Transaction,
     User,
     WatchedChannel,
@@ -158,9 +159,11 @@ from .tiktok.tiktok_ingest import (
     TikTokIngestError,
     _build_webhook_signature_candidates,
     exchange_tiktok_authorization_code,
+    normalize_tiktok_creator_username,
     parse_tiktok_webhook_headers,
     parse_tiktok_webhook_payload,
     upsert_tiktok_auth_from_callback,
+    upsert_tiktok_creator_auth_from_callback,
     upsert_tiktok_order_from_payload,
 )
 from .tiktok_enrichment_queue import (
@@ -208,6 +211,7 @@ try:
         fetch_stream_performance_per_minutes as _fetch_stream_performance_per_minutes,
         fetch_live_product_performance_list as _fetch_live_product_performance_list,
         TIKTOK_AFFILIATE_ORDER_READ_SCOPE as _TIKTOK_AFFILIATE_ORDER_READ_SCOPE,
+        TIKTOK_CREATOR_AFFILIATE_ORDER_READ_SCOPE as _TIKTOK_CREATOR_AFFILIATE_ORDER_READ_SCOPE,
     )
 except ImportError:
     pull_tiktok_orders = None
@@ -227,6 +231,7 @@ except ImportError:
     _fetch_stream_performance_per_minutes = None
     _fetch_live_product_performance_list = None
     _TIKTOK_AFFILIATE_ORDER_READ_SCOPE = "seller.affiliate_collaboration.read"
+    _TIKTOK_CREATOR_AFFILIATE_ORDER_READ_SCOPE = "creator.affiliate_collaboration.read"
     _product_record_from_payload = None
     _upsert_tiktok_product_row = None
 
@@ -3047,11 +3052,23 @@ def _tiktok_auth_has_affiliate_order_scope(auth_row: Optional[TikTokAuth]) -> bo
     )
 
 
+def _tiktok_creator_auth_has_affiliate_order_scope(auth_row: Optional[TikTokCreatorAuth]) -> bool:
+    return bool(
+        auth_row
+        and _TIKTOK_CREATOR_AFFILIATE_ORDER_READ_SCOPE in _parse_tiktok_scopes(auth_row.scopes_json)
+    )
+
+
 def tiktok_affiliate_order_scope_authorized(session: Optional[Session]) -> bool:
     if session is None:
         return False
     auth_rows = session.exec(select(TikTokAuth).order_by(TikTokAuth.updated_at.desc(), TikTokAuth.id.desc())).all()
-    return any(_tiktok_auth_has_affiliate_order_scope(row) for row in auth_rows)
+    if any(_tiktok_auth_has_affiliate_order_scope(row) for row in auth_rows):
+        return True
+    creator_auth_rows = session.exec(
+        select(TikTokCreatorAuth).order_by(TikTokCreatorAuth.updated_at.desc(), TikTokCreatorAuth.id.desc())
+    ).all()
+    return any(_tiktok_creator_auth_has_affiliate_order_scope(row) for row in creator_auth_rows)
 
 
 def ensure_tiktok_auth_row(session: Session) -> Optional[TikTokAuth]:

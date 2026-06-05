@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, MutableMapping, Optional
@@ -699,6 +700,69 @@ def build_tiktok_auth_record(
     }
 
 
+def normalize_tiktok_creator_username(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text.startswith("@"):
+        text = text[1:]
+    text = re.sub(r"[^a-z0-9_.-]+", "", text)
+    return text[:80]
+
+
+def build_tiktok_creator_auth_record(
+    token_result: TikTokTokenExchangeResult | dict[str, Any],
+    *,
+    creator_username: str,
+    app_key: str,
+    redirect_uri: str = "",
+    source: str = "oauth_callback",
+    received_at: Optional[datetime] = None,
+) -> dict[str, Any]:
+    if isinstance(token_result, dict):
+        token_result = TikTokTokenExchangeResult(
+            access_token=str(_pick_first(token_result, "access_token", "accessToken") or "").strip() or None,
+            refresh_token=str(_pick_first(token_result, "refresh_token", "refreshToken") or "").strip() or None,
+            access_token_expires_at=parse_tiktok_datetime(
+                _pick_first(token_result, "access_token_expires_at", "accessTokenExpiresAt")
+            ),
+            refresh_token_expires_at=parse_tiktok_datetime(
+                _pick_first(token_result, "refresh_token_expires_at", "refreshTokenExpiresAt")
+            ),
+            open_id=str(_pick_first(token_result, "open_id", "openId") or "").strip() or None,
+            raw_payload=token_result,
+        )
+
+    raw_payload = token_result.raw_payload or {}
+    normalized_creator = normalize_tiktok_creator_username(
+        creator_username
+        or _pick_first(raw_payload, "creator_username", "creatorUsername", "user_name", "userName", "seller_name")
+        or token_result.open_id
+    )
+    if not normalized_creator:
+        raise TikTokIngestError("TikTok creator authorization did not include a usable creator username")
+
+    display_name = str(
+        _pick_first(raw_payload, "display_name", "displayName", "creator_name", "creatorName", "seller_name", "user_name")
+        or ""
+    ).strip() or None
+    timestamp = received_at or datetime.now(timezone.utc)
+    return {
+        "creator_username": normalized_creator,
+        "open_id": token_result.open_id,
+        "display_name": display_name,
+        "app_key": app_key,
+        "redirect_uri": redirect_uri,
+        "access_token": token_result.access_token,
+        "refresh_token": token_result.refresh_token,
+        "access_token_expires_at": token_result.access_token_expires_at,
+        "refresh_token_expires_at": token_result.refresh_token_expires_at,
+        "scopes_json": json_dumps(_pick_first(raw_payload, "scopes", "scope", "granted_scopes") or []),
+        "raw_payload": json_dumps(raw_payload),
+        "source": source,
+        "received_at": timestamp,
+        "updated_at": timestamp,
+    }
+
+
 def _resolve_model_fields(model_type: type[Any]) -> set[str]:
     model_fields = getattr(model_type, "model_fields", None)
     if isinstance(model_fields, dict) and model_fields:
@@ -916,6 +980,36 @@ def upsert_tiktok_auth_from_callback(
         session,
         auth_model_type,
         auth_record,
+        dry_run=dry_run,
+    )
+    return status, auth_record
+
+
+def upsert_tiktok_creator_auth_from_callback(
+    session: Session,
+    creator_auth_model_type: type[Any],
+    *,
+    token_result: TikTokTokenExchangeResult | dict[str, Any],
+    creator_username: str,
+    app_key: str,
+    redirect_uri: str = "",
+    source: str = "oauth_callback",
+    received_at: Optional[datetime] = None,
+    dry_run: bool = False,
+) -> tuple[str, dict[str, Any]]:
+    auth_record = build_tiktok_creator_auth_record(
+        token_result,
+        creator_username=creator_username,
+        app_key=app_key,
+        redirect_uri=redirect_uri,
+        source=source,
+        received_at=received_at,
+    )
+    status = upsert_tiktok_auth(
+        session,
+        creator_auth_model_type,
+        auth_record,
+        lookup_field="creator_username",
         dry_run=dry_run,
     )
     return status, auth_record
@@ -1371,12 +1465,14 @@ __all__ = [
     "TikTokTokenExchangeResult",
     "build_tiktok_api_url",
     "build_tiktok_auth_record",
+    "build_tiktok_creator_auth_record",
     "build_tiktok_reconciliation_snapshot",
     "build_tiktok_request_signature",
     "exchange_tiktok_authorization_code",
     "extract_tiktok_api_data",
     "json_dumps",
     "money_to_float",
+    "normalize_tiktok_creator_username",
     "normalize_tiktok_line_items",
     "normalize_tiktok_order_payload",
     "parse_tiktok_datetime",
@@ -1387,6 +1483,7 @@ __all__ = [
     "upsert_model_row",
     "upsert_tiktok_auth",
     "upsert_tiktok_auth_from_callback",
+    "upsert_tiktok_creator_auth_from_callback",
     "upsert_tiktok_order",
     "upsert_tiktok_order_from_payload",
     "upsert_tiktok_product",

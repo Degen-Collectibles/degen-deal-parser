@@ -171,6 +171,38 @@ def tiktok_oauth_shop_start(request: Request, service_id: Optional[str] = None):
     return RedirectResponse(url=auth_url, status_code=302)
 
 
+@router.get("/integrations/tiktok/oauth/creator-shop-start")
+def tiktok_oauth_shop_creator_start(
+    request: Request,
+    creator: str = Query(...),
+    service_id: Optional[str] = None,
+):
+    if denial := require_role_response(request, "admin"):
+        return denial
+    creator_username = normalize_tiktok_creator_username(creator)
+    if not creator_username:
+        raise HTTPException(status_code=400, detail="TikTok creator username is required")
+    app_key = (settings.tiktok_app_key or "").strip()
+    redirect_uri = (settings.tiktok_redirect_uri or "").strip()
+    resolved_service_id = _clean_tiktok_service_id(service_id or settings.tiktok_service_id)
+    if not app_key or (not redirect_uri and not resolved_service_id):
+        raise HTTPException(
+            status_code=400,
+            detail="TikTok app key and either TIKTOK_REDIRECT_URI or TIKTOK_SERVICE_ID must be configured to start Creator Shop OAuth",
+        )
+    state = secrets.token_urlsafe(32)
+    request.session["oauth_state"] = state
+    request.session["tiktok_oauth_kind"] = "shop_creator"
+    request.session["tiktok_oauth_creator_username"] = creator_username
+    auth_url = _build_tiktok_shop_authorize_url(
+        app_key=app_key,
+        redirect_uri=redirect_uri,
+        state=state,
+        service_id=resolved_service_id,
+    )
+    return RedirectResponse(url=auth_url, status_code=302)
+
+
 @router.get("/integrations/tiktok/oauth/creator-start")
 def tiktok_oauth_creator_start(request: Request):
     if denial := require_role_response(request, "admin"):
@@ -202,6 +234,10 @@ def tiktok_oauth_callback(request: Request):
     stored_state = request.session.pop("oauth_state", None)
     if not query_state or not stored_state or query_state != stored_state:
         raise HTTPException(status_code=403, detail="Invalid OAuth state")
+    oauth_kind = str(request.session.pop("tiktok_oauth_kind", "") or "").strip()
+    oauth_creator_username = normalize_tiktok_creator_username(
+        request.session.pop("tiktok_oauth_creator_username", "")
+    )
     runtime_name = f"{settings.runtime_name}_tiktok"
     received_at = utcnow()
     app_key = (query_params.get("app_key") or "").strip()
@@ -273,6 +309,55 @@ def tiktok_oauth_callback(request: Request):
                 app_secret=(settings.tiktok_app_secret or "").strip(),
                 runtime_name=runtime_name,
             )
+            raw_token_payload = getattr(token_result, "raw_payload", None) or {}
+            token_user_type = str(raw_token_payload.get("user_type") or "").strip()
+            is_shop_creator_auth = oauth_kind == "shop_creator" or token_user_type == "1"
+            if is_shop_creator_auth:
+                creator_username = oauth_creator_username or normalize_tiktok_creator_username(
+                    raw_token_payload.get("creator_username")
+                    or raw_token_payload.get("user_name")
+                    or raw_token_payload.get("seller_name")
+                    or getattr(token_result, "open_id", "")
+                )
+
+                def persist_tiktok_creator_auth(session: Session):
+                    status, auth_record = upsert_tiktok_creator_auth_from_callback(
+                        session,
+                        TikTokCreatorAuth,
+                        token_result=token_result,
+                        creator_username=creator_username,
+                        app_key=(settings.tiktok_app_key or "").strip(),
+                        redirect_uri=(settings.tiktok_redirect_uri or "").strip(),
+                        source="creator_oauth_callback",
+                        received_at=received_at,
+                        dry_run=False,
+                    )
+                    return status, auth_record
+
+                auth_status, auth_record = run_write_with_retry(persist_tiktok_creator_auth)
+                callback_summary["auth_status"] = auth_status
+                callback_summary["creator_username"] = auth_record.get("creator_username")
+                callback_summary["user_type"] = token_user_type or "1"
+                update_tiktok_integration_state(
+                    last_authorization_at=received_at,
+                    last_callback=callback_summary,
+                    last_error=None,
+                )
+                request.session["tiktok_callback"] = callback_summary
+                print(
+                    structured_log_line(
+                        runtime=runtime_name,
+                        action="tiktok.creator_shop.callback.received",
+                        success=True,
+                        request_path=str(request.url.path),
+                        query=summarize_tiktok_query_params(query_params),
+                        creator_username=auth_record.get("creator_username"),
+                    )
+                )
+                return RedirectResponse(
+                    url=f"/status?{urlencode({'success': 'TikTok creator authorization captured'})}",
+                    status_code=303,
+                )
 
             def persist_tiktok_auth(session: Session):
                 status, auth_record = upsert_tiktok_auth_from_callback(

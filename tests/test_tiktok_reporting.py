@@ -25,7 +25,7 @@ import app.routers.dashboard as dashboard_module
 import app.routers.tiktok_orders as tiktok_orders_module
 import app.routers.shopify as shopify_module
 import app.shared as shared_module
-from app.models import TikTokAuth, TikTokOrder, TikTokWebhookEnrichmentJob, utcnow
+from app.models import TikTokAuth, TikTokCreatorAuth, TikTokOrder, TikTokWebhookEnrichmentJob, utcnow
 from app.reporting import (
     build_tiktok_reporting_summary,
     classify_tiktok_reporting_status,
@@ -34,8 +34,10 @@ from app.reporting import (
 from scripts.tiktok_backfill import (
     affiliate_order_attribution_from_payload,
     build_tiktok_request,
+    fetch_tiktok_creator_affiliate_orders_page,
     upsert_tiktok_order,
     upsert_tiktok_order_affiliate_attribution,
+    upsert_tiktok_order_creator_affiliate_attribution,
 )
 from app.tiktok.tiktok_ingest import (
     TIKTOK_DEFAULT_API_BASE_URL,
@@ -331,6 +333,97 @@ class TikTokRegressionTests(unittest.TestCase):
 
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertEqual(ctx.exception.detail, "TikTok service_id must be numeric")
+
+    def test_tiktok_shop_creator_oauth_start_records_creator_for_service_callback(self) -> None:
+        request = FakeTikTokRequest("/integrations/tiktok/oauth/creator-shop-start")
+
+        with patch.object(shopify_module, "require_role_response", return_value=None), patch.object(
+            main_module.settings, "tiktok_app_key", "expected-key"
+        ), patch.object(
+            main_module.settings, "tiktok_service_id", "7623804575159174925"
+        ):
+            response = shopify_module.tiktok_oauth_shop_creator_start(
+                request,  # type: ignore[arg-type]
+                creator="degenboss0",
+                service_id=None,
+            )
+
+        self.assertEqual(response.status_code, 302)
+        state = request.session.get("oauth_state")
+        self.assertIsInstance(state, str)
+        self.assertEqual(request.session["tiktok_oauth_kind"], "shop_creator")
+        self.assertEqual(request.session["tiktok_oauth_creator_username"], "degenboss0")
+        parsed = urlparse(response.headers["location"])
+        self.assertEqual(parsed.netloc, "services.tiktokshops.us")
+        params = parse_qs(parsed.query)
+        self.assertEqual(params["service_id"], ["7623804575159174925"])
+        self.assertEqual(params["state"], [state])
+
+    def test_tiktok_callback_persists_shop_creator_token_separately(self) -> None:
+        oauth_state = "creator-shop-state"
+        request = FakeTikTokRequest(
+            "/integrations/tiktok/callback",
+            query_params={
+                "code": "creator-auth-code",
+                "state": oauth_state,
+            },
+        )
+        request.session["oauth_state"] = oauth_state
+        request.session["tiktok_oauth_kind"] = "shop_creator"
+        request.session["tiktok_oauth_creator_username"] = "degenboss0"
+
+        fake_token_result = SimpleNamespace(
+            access_token="creator-access-token",
+            refresh_token="creator-refresh-token",
+            access_token_expires_at=None,
+            refresh_token_expires_at=None,
+            seller_id=None,
+            shop_id=None,
+            shop_cipher=None,
+            open_id="creator-open-id",
+            raw_payload={
+                "user_type": 1,
+                "open_id": "creator-open-id",
+                "seller_name": "Degen Boss",
+                "granted_scopes": ["creator.affiliate_collaboration.read"],
+            },
+        )
+
+        def write_with_test_session(fn):
+            with Session(self.engine) as session:
+                result = fn(session)
+                session.commit()
+                return result
+
+        with patch.object(main_module.settings, "tiktok_app_key", "expected-key"), patch.object(
+            main_module.settings, "tiktok_app_secret", "secret"
+        ), patch.object(
+            main_module.settings,
+            "tiktok_redirect_uri",
+            "https://ops.degencollectibles.com/integrations/tiktok/callback",
+        ), patch.object(
+            shopify_module,
+            "exchange_tiktok_authorization_code",
+            return_value=fake_token_result,
+        ), patch.object(
+            shopify_module,
+            "run_write_with_retry",
+            side_effect=write_with_test_session,
+        ):
+            response = shopify_module.tiktok_oauth_callback(request)  # type: ignore[arg-type]
+
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["location"], "/status?success=TikTok+creator+authorization+captured")
+        with Session(self.engine) as session:
+            seller_auth_count = len(session.exec(select(TikTokAuth)).all())
+            creator_auth = session.exec(
+                select(TikTokCreatorAuth).where(TikTokCreatorAuth.creator_username == "degenboss0")
+            ).one()
+
+        self.assertEqual(seller_auth_count, 0)
+        self.assertEqual(creator_auth.open_id, "creator-open-id")
+        self.assertEqual(creator_auth.access_token, "creator-access-token")
+        self.assertIn("creator.affiliate_collaboration.read", creator_auth.scopes_json)
 
     def test_tiktok_get_detail_requests_sign_empty_body(self) -> None:
         url, body_json, headers = build_tiktok_request(
@@ -871,6 +964,102 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(stored.affiliate_content_type, "LIVE")
         self.assertEqual(stored.affiliate_content_id, "7493990579714164574")
         self.assertIn("NIHIL ZERO PACK", stored.affiliate_attribution_json)
+
+    def test_tiktok_creator_affiliate_order_search_uses_creator_token_without_shop_cipher(self) -> None:
+        captured_requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured_requests.append(request)
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "message": "success",
+                    "data": {
+                        "orders": [
+                            {
+                                "order_id": "577419230985949431",
+                                "product_id": "1729435310697057093",
+                            }
+                        ],
+                        "next_page_token": "next-page",
+                    },
+                },
+            )
+
+        since = datetime(2026, 6, 4, 20, 0, tzinfo=timezone.utc)
+        until = datetime(2026, 6, 4, 21, 0, tzinfo=timezone.utc)
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            payload, orders = fetch_tiktok_creator_affiliate_orders_page(
+                client,
+                base_url="https://open-api.tiktokglobalshop.com",
+                app_key="app-key",
+                app_secret="secret",
+                access_token="creator-access-token",
+                since=since,
+                until=until,
+                page_size=100,
+            )
+
+        self.assertEqual(payload["code"], 0)
+        self.assertEqual(orders[0]["order_id"], "577419230985949431")
+        self.assertEqual(len(captured_requests), 1)
+        parsed = urlparse(str(captured_requests[0].url))
+        self.assertEqual(parsed.path, "/affiliate_creator/202410/orders/search")
+        params = parse_qs(parsed.query)
+        self.assertNotIn("shop_cipher", params)
+        self.assertEqual(params["app_key"], ["app-key"])
+        self.assertEqual(captured_requests[0].headers["x-tts-access-token"], "creator-access-token")
+        self.assertEqual(
+            captured_requests[0].content,
+            b'{"create_time_ge":1780603200,"create_time_lt":1780606800}',
+        )
+
+    def test_tiktok_creator_affiliate_trace_marks_shared_shop_order_with_creator(self) -> None:
+        with Session(self.engine) as session:
+            session.add(
+                TikTokOrder(
+                    tiktok_order_id="577419230985949431",
+                    shop_id="dc-llc-shop",
+                    shop_cipher="shared-shop-cipher",
+                    order_number="577419230985949431",
+                    created_at=datetime(2026, 6, 4, 20, 19, tzinfo=timezone.utc),
+                    updated_at=datetime(2026, 6, 4, 20, 19, tzinfo=timezone.utc),
+                    financial_status="paid",
+                    subtotal_price=4.0,
+                    total_price=4.19,
+                    line_items_json=json.dumps([
+                        {
+                            "product_id": "1729435310697057093",
+                            "product_name": "NIHIL ZERO PACK",
+                            "quantity": 1,
+                            "sale_price": 4.0,
+                        }
+                    ]),
+                )
+            )
+            session.commit()
+
+            result = upsert_tiktok_order_creator_affiliate_attribution(
+                session,
+                {
+                    "order_id": "577419230985949431",
+                    "product_id": "1729435310697057093",
+                    "content_type": "LIVE",
+                    "content_id": "boss-live-123",
+                },
+                creator_username="degenboss0",
+            )
+            session.commit()
+            stored = session.exec(
+                select(TikTokOrder).where(TikTokOrder.tiktok_order_id == "577419230985949431")
+            ).one()
+
+        self.assertEqual(result, "updated")
+        self.assertEqual(stored.affiliate_creator_username, "degenboss0")
+        self.assertEqual(stored.affiliate_content_type, "LIVE")
+        self.assertEqual(stored.affiliate_content_id, "boss-live-123")
+        self.assertIn("1729435310697057093", stored.affiliate_attribution_json)
 
     def test_sqlite_schema_migration_creates_tiktok_webhook_enrichment_queue_table(self) -> None:
         with self.engine.begin() as connection:

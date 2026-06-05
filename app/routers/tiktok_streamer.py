@@ -589,21 +589,35 @@ def _apply_order_activity_fallback(
     if stream_context.get("is_live"):
         return stream_context
     account_scope = _stream_account_scope_for_context(session, stream_context)
-    if stream_context.get("selected_creator") != DEFAULT_STREAM_CREATOR and not _account_scope_has_identity(account_scope):
+    fallback_start = _recent_order_activity_fallback_start(stream_context, now)
+    has_creator_attributed_activity = _has_affiliate_creator_orders(
+        session,
+        {**stream_context, "start": fallback_start, "end": None},
+    )
+    if (
+        stream_context.get("selected_creator") != DEFAULT_STREAM_CREATOR
+        and not _account_scope_has_identity(account_scope)
+        and not has_creator_attributed_activity
+    ):
         return stream_context
 
-    fallback_start = _recent_order_activity_fallback_start(stream_context, now)
-    if not _has_fresh_creator_order_activity(session, stream_context, fallback_start, now=now):
+    if not has_creator_attributed_activity and not _has_fresh_creator_order_activity(
+        session,
+        stream_context,
+        fallback_start,
+        now=now,
+    ):
         return stream_context
-    fallback_start = (
-        _persisted_stream_range_fallback_start(now=now)
-        or _infer_order_activity_fallback_start(
-            session,
-            stream_context,
-            fallback_start,
-            now=now,
+    if not has_creator_attributed_activity or _account_scope_has_identity(account_scope):
+        fallback_start = (
+            _persisted_stream_range_fallback_start(now=now)
+            or _infer_order_activity_fallback_start(
+                session,
+                stream_context,
+                fallback_start,
+                now=now,
+            )
         )
-    )
 
     stream_context.update(
         {
@@ -880,9 +894,9 @@ def _creator_order_attribution_message(stream_context: Optional[dict[str, Any]])
     stream_context = stream_context or {}
     attribution = stream_context.get("creator_order_attribution")
     if attribution == CREATOR_ORDER_ATTRIBUTION_AFFILIATE_ORDERS:
-        return "Filtering by TikTok Seller Center creator attribution."
+        return "Filtering by TikTok creator order attribution."
     if attribution == CREATOR_ORDER_ATTRIBUTION_AFFILIATE_SCOPE_MISSING:
-        return "TikTok creator-order attribution is not authorized yet. Add seller.affiliate_collaboration.read to the TikTok app and reauthorize DC LLC."
+        return "TikTok creator-order attribution is not authorized yet. Authorize seller affiliate orders or each creator's TikTok Shop affiliate orders."
     if attribution == CREATOR_ORDER_ATTRIBUTION_LIVE_PRODUCTS:
         handles = [f"@{h}" for h in stream_context.get("creator_order_overlap_handles") or []]
         suffix = f" ({', '.join(handles)})" if handles else ""

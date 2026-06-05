@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 from sqlmodel import SQLModel, Session, create_engine
 
 from app.tiktok.tiktok_auth_refresh import refresh_tiktok_auth_if_needed
-from app.models import TikTokAuth
+from app.models import TikTokAuth, TikTokCreatorAuth
 
 
 def _utcnow():
@@ -224,6 +224,56 @@ class RefreshTiktokAuthTests(unittest.TestCase):
                         runtime_name="test",
                         resolve_base_url=lambda: "https://example.com",
                     )
+
+    def test_expiring_creator_auth_row_refreshes_after_seller_check(self):
+        fake_result = {
+            "data": {
+                "access_token": "creator-new-token",
+                "refresh_token": "creator-new-refresh",
+                "access_token_expire_in": 86400,
+                "open_id": "creator-open-id",
+            }
+        }
+        refresh_tokens = []
+
+        def fake_refresh_fn(client, *, base_url, app_key, app_secret, refresh_token):
+            refresh_tokens.append(refresh_token)
+            return fake_result
+
+        with Session(self.engine) as session:
+            creator_auth = TikTokCreatorAuth(
+                creator_username="degenboss0",
+                open_id="creator-open-id",
+                app_key="key",
+                access_token="creator-old-token",
+                refresh_token="creator-refresh",
+                access_token_expires_at=_past(5),
+                scopes_json='["creator.affiliate_collaboration.read"]',
+                created_at=_utcnow(),
+                updated_at=_utcnow(),
+                source="creator_oauth_callback",
+            )
+            session.add(creator_auth)
+            session.commit()
+            with patch("app.tiktok.tiktok_auth_refresh._refresh_fn", fake_refresh_fn), \
+                 patch("app.tiktok.tiktok_auth_refresh.settings") as mock_settings:
+                mock_settings.tiktok_app_key = "key"
+                mock_settings.tiktok_app_secret = "secret"
+                mock_settings.tiktok_refresh_token = ""
+                mock_settings.tiktok_redirect_uri = ""
+                mock_settings.tiktok_shop_id = ""
+                result = refresh_tiktok_auth_if_needed(
+                    session,
+                    runtime_name="test",
+                    resolve_base_url=lambda: "https://example.com",
+                )
+            refreshed = session.get(TikTokCreatorAuth, creator_auth.id)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["creator_auth_refreshed"], 1)
+        self.assertEqual(refresh_tokens, ["creator-refresh"])
+        self.assertEqual(refreshed.access_token, "creator-new-token")
+        self.assertEqual(refreshed.refresh_token, "creator-new-refresh")
 
 
 class PeriodicLoopTests(unittest.TestCase):

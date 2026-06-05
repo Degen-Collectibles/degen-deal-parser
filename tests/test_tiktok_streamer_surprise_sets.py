@@ -681,6 +681,38 @@ class StreamerFreshOrderFallbackTests(unittest.TestCase):
             {"boss-order"},
         )
 
+    def test_fresh_order_fallback_marks_secondary_live_from_creator_attributed_shared_order(self) -> None:
+        now = datetime(2026, 6, 4, 22, 15, tzinfo=timezone.utc)
+        with Session(self.engine) as session:
+            session.add(
+                _order(
+                    "boss-attributed-shared-order",
+                    now - timedelta(minutes=3),
+                    [{"product_name": "NIHIL ZERO PACK", "sku_type": "UNKNOWN", "sale_price": 4, "quantity": 1}],
+                    subtotal_price=4,
+                    shop_id="dc-llc-shop",
+                    shop_cipher="shared-shop-cipher",
+                    affiliate_creator_username="degenboss0",
+                )
+            )
+            session.commit()
+
+            fallback_context = streamer_module._apply_order_activity_fallback(
+                session,
+                {
+                    "selected_creator": "degenboss0",
+                    "creator_filter_enabled": True,
+                    "live_session": {},
+                    "sessions": [],
+                    "is_live": False,
+                },
+                now=now,
+            )
+
+        self.assertTrue(fallback_context["is_live"])
+        self.assertEqual(fallback_context["source"], streamer_module.STREAM_METRIC_SOURCE_ORDER_ACTIVITY_FALLBACK)
+        self.assertEqual(fallback_context["creator_order_attribution"], streamer_module.CREATOR_ORDER_ATTRIBUTION_RECENT_ORDERS)
+
     def test_manual_surprise_set_prices_round_trip_through_app_settings(self) -> None:
         with Session(self.engine) as session:
             saved = streamer_module._save_surprise_set_manual_price(

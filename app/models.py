@@ -610,6 +610,27 @@ class TikTokAuth(SQLModel, table=True):
     creator_token_expires_at: Optional[datetime] = Field(default=None)
 
 
+class TikTokCreatorAuth(SQLModel, table=True):
+    __tablename__ = "tiktok_creator_auth"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    creator_username: str = Field(index=True, unique=True)
+    open_id: Optional[str] = Field(default=None, index=True)
+    display_name: Optional[str] = Field(default=None, index=True)
+    app_key: Optional[str] = Field(default=None, index=True)
+    redirect_uri: Optional[str] = None
+    access_token: Optional[str] = None
+    refresh_token: Optional[str] = None
+    access_token_expires_at: Optional[datetime] = Field(default=None, index=True)
+    refresh_token_expires_at: Optional[datetime] = Field(default=None, index=True)
+    scopes_json: str = Field(default="[]")
+    raw_payload: str = Field(default="{}")
+    source: str = Field(default="oauth", index=True)
+    received_at: Optional[datetime] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+    updated_at: datetime = Field(default_factory=utcnow, index=True)
+
+
 class TikTokOrder(SQLModel, table=True):
     __tablename__ = "tiktok_orders"
 

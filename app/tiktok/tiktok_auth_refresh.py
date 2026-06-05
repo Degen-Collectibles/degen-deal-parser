@@ -7,6 +7,7 @@ circular imports.
 
 from __future__ import annotations
 
+import json
 import threading
 from collections.abc import Callable
 from datetime import timedelta, timezone
@@ -16,11 +17,12 @@ import httpx
 from sqlmodel import Session
 
 from ..config import get_settings
-from ..models import TikTokAuth, utcnow
+from ..models import TikTokAuth, TikTokCreatorAuth, utcnow
 from .tiktok_ingest import (
     TIKTOK_DEFAULT_API_BASE_URL,
     TIKTOK_TOKEN_REFRESH_PATH,
     build_tiktok_api_url,
+    upsert_tiktok_creator_auth_from_callback,
     upsert_tiktok_auth_from_callback,
 )
 
@@ -67,6 +69,7 @@ def refresh_tiktok_auth_if_needed(
     try:
         from sqlmodel import select  # local import to keep top-level imports minimal
 
+        result: Optional[dict] = None
         stmt = select(TikTokAuth)
         clean_shop_id = (shop_id or "").strip()
         clean_shop_cipher = (shop_cipher or "").strip()
@@ -77,69 +80,133 @@ def refresh_tiktok_auth_if_needed(
         auth_row: Optional[TikTokAuth] = session.exec(
             stmt.order_by(TikTokAuth.updated_at.desc(), TikTokAuth.id.desc())
         ).first()
-        if auth_row is None:
-            return None
-
-        app_key = (settings.tiktok_app_key or auth_row.app_key or "").strip()
         app_secret = (settings.tiktok_app_secret or "").strip()
-        refresh_token = (auth_row.refresh_token or settings.tiktok_refresh_token or "").strip()
-        if not app_key or not app_secret or not refresh_token:
-            return None
 
-        token_expires_at = auth_row.access_token_expires_at
-        if token_expires_at is not None and token_expires_at.tzinfo is None:
-            token_expires_at = token_expires_at.replace(tzinfo=timezone.utc)
-        should_refresh = (
-            force
-            or not auth_row.access_token
-            or not token_expires_at
-            or token_expires_at <= utcnow() + timedelta(minutes=10)
-        )
-        if not should_refresh:
-            return None
+        if auth_row is not None:
+            app_key = (settings.tiktok_app_key or auth_row.app_key or "").strip()
+            refresh_token = (auth_row.refresh_token or settings.tiktok_refresh_token or "").strip()
+            if app_key and app_secret and refresh_token:
+                token_expires_at = auth_row.access_token_expires_at
+                if token_expires_at is not None and token_expires_at.tzinfo is None:
+                    token_expires_at = token_expires_at.replace(tzinfo=timezone.utc)
+                should_refresh = (
+                    force
+                    or not auth_row.access_token
+                    or not token_expires_at
+                    or token_expires_at <= utcnow() + timedelta(minutes=10)
+                )
+                if should_refresh:
+                    with httpx.Client(timeout=40.0, follow_redirects=True) as client:
+                        refreshed = _refresh_fn(
+                            client,
+                            base_url=resolve_base_url(),
+                            app_key=app_key,
+                            app_secret=app_secret,
+                            refresh_token=refresh_token,
+                        )
 
-        with httpx.Client(timeout=40.0, follow_redirects=True) as client:
-            refreshed = _refresh_fn(
-                client,
-                base_url=resolve_base_url(),
-                app_key=app_key,
-                app_secret=app_secret,
-                refresh_token=refresh_token,
+                    token_data = refreshed
+                    if isinstance(refreshed, dict) and isinstance(refreshed.get("data"), dict):
+                        token_data = refreshed["data"]
+
+                    status, auth_record = upsert_tiktok_auth_from_callback(
+                        session,
+                        TikTokAuth,
+                        token_result=token_data,
+                        app_key=app_key,
+                        redirect_uri=(auth_row.redirect_uri or settings.tiktok_redirect_uri or "").strip(),
+                        fallback_shop_id=(settings.tiktok_shop_id or auth_row.tiktok_shop_id or "").strip(),
+                        source="oauth_refresh",
+                        received_at=utcnow(),
+                        dry_run=False,
+                    )
+
+                    if update_state is not None:
+                        update_state(
+                            is_pull_running=False,
+                            last_pull_started_at=utcnow(),
+                            last_pull_finished_at=utcnow(),
+                            last_error=None,
+                            last_pull_at=utcnow(),
+                            last_pull={
+                                "status": "refresh",
+                                "auth_status": status,
+                                "shop_id": auth_record.get("tiktok_shop_id"),
+                                "runtime": runtime_name,
+                            },
+                        )
+
+                    session.commit()
+                    result = {"status": status, "auth_record": auth_record}
+
+        creator_auth_refreshed = 0
+        if not clean_shop_id and not clean_shop_cipher and app_secret:
+            creator_rows = list(
+                session.exec(
+                    select(TikTokCreatorAuth).order_by(
+                        TikTokCreatorAuth.updated_at.desc(),
+                        TikTokCreatorAuth.id.desc(),
+                    )
+                ).all()
             )
+            for creator_row in creator_rows:
+                creator_app_key = (settings.tiktok_app_key or creator_row.app_key or "").strip()
+                creator_refresh_token = (creator_row.refresh_token or "").strip()
+                if not creator_app_key or not creator_refresh_token:
+                    continue
+                token_expires_at = creator_row.access_token_expires_at
+                if token_expires_at is not None and token_expires_at.tzinfo is None:
+                    token_expires_at = token_expires_at.replace(tzinfo=timezone.utc)
+                should_refresh_creator = (
+                    force
+                    or not creator_row.access_token
+                    or not token_expires_at
+                    or token_expires_at <= utcnow() + timedelta(minutes=10)
+                )
+                if not should_refresh_creator:
+                    continue
 
-        token_data = refreshed
-        if isinstance(refreshed, dict) and isinstance(refreshed.get("data"), dict):
-            token_data = refreshed["data"]
+                with httpx.Client(timeout=40.0, follow_redirects=True) as client:
+                    refreshed = _refresh_fn(
+                        client,
+                        base_url=resolve_base_url(),
+                        app_key=creator_app_key,
+                        app_secret=app_secret,
+                        refresh_token=creator_refresh_token,
+                    )
 
-        status, auth_record = upsert_tiktok_auth_from_callback(
-            session,
-            TikTokAuth,
-            token_result=token_data,
-            app_key=app_key,
-            redirect_uri=(auth_row.redirect_uri or settings.tiktok_redirect_uri or "").strip(),
-            fallback_shop_id=(settings.tiktok_shop_id or auth_row.tiktok_shop_id or "").strip(),
-            source="oauth_refresh",
-            received_at=utcnow(),
-            dry_run=False,
-        )
+                token_data = refreshed
+                if isinstance(refreshed, dict) and isinstance(refreshed.get("data"), dict):
+                    token_data = refreshed["data"]
+                if isinstance(token_data, dict):
+                    token_data = dict(token_data)
+                    token_data.setdefault("open_id", creator_row.open_id)
+                    try:
+                        existing_scopes = json.loads(creator_row.scopes_json or "[]")
+                    except Exception:
+                        existing_scopes = []
+                    token_data.setdefault("granted_scopes", existing_scopes)
 
-        if update_state is not None:
-            update_state(
-                is_pull_running=False,
-                last_pull_started_at=utcnow(),
-                last_pull_finished_at=utcnow(),
-                last_error=None,
-                last_pull_at=utcnow(),
-                last_pull={
-                    "status": "refresh",
-                    "auth_status": status,
-                    "shop_id": auth_record.get("tiktok_shop_id"),
-                    "runtime": runtime_name,
-                },
-            )
+                upsert_tiktok_creator_auth_from_callback(
+                    session,
+                    TikTokCreatorAuth,
+                    token_result=token_data,
+                    creator_username=creator_row.creator_username,
+                    app_key=creator_app_key,
+                    redirect_uri=(creator_row.redirect_uri or settings.tiktok_redirect_uri or "").strip(),
+                    source="creator_oauth_refresh",
+                    received_at=utcnow(),
+                    dry_run=False,
+                )
+                session.commit()
+                creator_auth_refreshed += 1
 
-        session.commit()
-        return {"status": status, "auth_record": auth_record}
+        if creator_auth_refreshed:
+            if result is None:
+                result = {"status": "creator_refresh", "auth_record": None}
+            result["creator_auth_refreshed"] = creator_auth_refreshed
+
+        return result
     finally:
         _tiktok_auth_refresh_lock.release()
 

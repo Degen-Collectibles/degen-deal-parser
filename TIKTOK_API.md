@@ -185,9 +185,22 @@ Returns full order objects with line items, pricing, shipping, and status.
 | Pagination | `page_size` (max 100), `page_token` |
 | Date filter body | `create_time_ge`, `create_time_lt` (epoch seconds) |
 
-This is the Seller Center creator-attribution surface. Standard order search/detail is shop-level and may not include the Seller Center `LIVE: <creator>` tag. Affiliate orders include SKU-level fields such as `creator_username`, `content_type` (`LIVE`, `VIDEO`, etc.), and `content_id`. The streamer dashboard stores these as `TikTokOrder.affiliate_creator_username`, `affiliate_content_type`, `affiliate_content_id`, and `affiliate_attribution_json`.
+This is a seller-side affiliate order surface, not a guaranteed mirror of the Seller Center `LIVE: <creator>` badge for in-house shared-shop livestreams. Standard order search/detail is shop-level and may not include the Seller Center `LIVE: <creator>` tag. Seller affiliate orders can include SKU-level fields such as `creator_username`, `content_type` (`LIVE`, `VIDEO`, etc.), and `content_id`; when present, the streamer dashboard stores these as `TikTokOrder.affiliate_creator_username`, `affiliate_content_type`, `affiliate_content_id`, and `affiliate_attribution_json`.
 
 If TikTok returns `105005 Access denied`, the app/token is missing `seller.affiliate_collaboration.read`; normal order sync should continue, but shared-shop stream splitting will remain paused until the scope is enabled and DC LLC is reauthorized.
+
+### Search Creator Affiliate Orders
+
+| Detail | Value |
+|---|---|
+| Path | `/affiliate_creator/202410/orders/search` |
+| Method | `POST` |
+| Required scope | `creator.affiliate_collaboration.read` |
+| Token type | TikTok Shop Creator token (`user_type=1`) |
+| Pagination | `page_size` (max 100), `page_token` |
+| Date filter body | `create_time_ge`, `create_time_lt` (epoch seconds) |
+
+For one shared seller shop (DC LLC) with multiple creator accounts, authorize each creator account through the TikTok Shop service authorization flow and store it in `TikTokCreatorAuth`. The creator endpoint returns creator-owned order traces. The app joins those order IDs back to the shared `TikTokOrder` rows and writes `affiliate_creator_username`, so the streamer dashboard can split `@degencollectibles` and `@degenboss0` without duplicating GMV.
 
 ### Key Order Fields
 
@@ -535,6 +548,7 @@ Live chat messages are captured via the **TikSync SDK**, a third-party WebSocket
 | `/order/202309/orders/search` | POST | Shop | Search orders |
 | `/order/202309/orders` | GET | Shop | Get order details |
 | `/affiliate_seller/202410/orders/search` | POST | Shop | Search seller affiliate orders with creator attribution |
+| `/affiliate_creator/202410/orders/search` | POST | Creator | Search creator affiliate order traces for shared-shop attribution |
 | `/product/202309/products/search` | POST | Shop | Search products |
 | `/product/202309/products` | GET | Shop | Get product details |
 | `/analytics/202509/shop_lives/overview_performance` | GET | Shop | Daily aggregated live stats (delayed ~2d) |
