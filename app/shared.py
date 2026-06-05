@@ -3429,6 +3429,7 @@ def run_tiktok_pull_cycle(
 
         totals = {"fetched": 0, "inserted": 0, "updated": 0, "failed": 0, "detail_calls": 0}
         pulled_shop_ids: list[str] = []
+        shops_pulled = 0
         for credential in credentials:
             try:
                 summary = _run_pull_with_current_credentials(credential)
@@ -3451,7 +3452,9 @@ def run_tiktok_pull_cycle(
                 credential = refreshed_credentials.get(refreshed_key, credential)
                 summary = _run_pull_with_current_credentials(credential)
 
-            pulled_shop_ids.append(credential["shop_id"] or credential["shop_cipher"])
+            shops_pulled += 1
+            if credential["shop_id"]:
+                pulled_shop_ids.append(credential["shop_id"])
             totals["fetched"] += int(summary.fetched)
             totals["inserted"] += int(summary.inserted)
             totals["updated"] += int(summary.updated)
@@ -3463,7 +3466,7 @@ def run_tiktok_pull_cycle(
             "runtime": runtime_name,
             "shop_id": pulled_shop_ids[0] if len(pulled_shop_ids) == 1 else None,
             "shop_ids": pulled_shop_ids,
-            "shops_pulled": len(pulled_shop_ids),
+            "shops_pulled": shops_pulled,
             "trigger": trigger,
             "since": since_dt.isoformat(),
             "limit": safe_limit,
