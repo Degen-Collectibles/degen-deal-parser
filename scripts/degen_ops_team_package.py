@@ -20,6 +20,7 @@ AUDIENCES = {
     "owner": "Jeffrey / owners",
     "partner": "business partners",
     "employee": "staff / stream operators",
+    "tiktok": "TikTok operators / owners",
 }
 
 GUARDRAILS = [
@@ -152,7 +153,7 @@ def build_team_package(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Render a scoped Degen Ops team access package.")
-    parser.add_argument("--scope", choices=("owner", "partner", "employee"), required=True)
+    parser.add_argument("--scope", choices=("owner", "partner", "employee", "tiktok"), required=True)
     parser.add_argument(
         "--client",
         action="append",

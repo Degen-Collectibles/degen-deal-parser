@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 
 
-SCOPES = {"owner", "partner", "employee"}
+SCOPES = {"owner", "partner", "employee", "tiktok"}
 
 
 def default_python_path(repo_root: Path) -> Path:

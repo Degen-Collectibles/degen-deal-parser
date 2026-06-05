@@ -27,6 +27,23 @@ SCOPE_TOOLS = {
         "get_loan_and_payback_snapshot",
         "evaluate_inventory_buy",
         "generate_partner_update",
+        "get_tiktok_agent_manifest",
+        "get_tiktok_status",
+        "get_tiktok_orders",
+        "get_tiktok_products",
+        "get_tiktok_buyer_insights",
+        "get_tiktok_product_performance",
+        "get_tiktok_live_snapshot",
+    ],
+    "tiktok": [
+        "get_ops_agent_manifest",
+        "get_tiktok_agent_manifest",
+        "get_tiktok_status",
+        "get_tiktok_orders",
+        "get_tiktok_products",
+        "get_tiktok_buyer_insights",
+        "get_tiktok_product_performance",
+        "get_tiktok_live_snapshot",
     ],
     "partner": [
         "get_ops_agent_manifest",
@@ -160,7 +177,7 @@ def _render_markdown(report: dict[str, Any]) -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Verify live Degen Ops read-only data access for one scope.")
-    parser.add_argument("--scope", choices=("owner", "partner", "employee"), required=True)
+    parser.add_argument("--scope", choices=("owner", "partner", "employee", "tiktok"), required=True)
     parser.add_argument("--database-url", default="", help="Temporary database URL override. The value is never printed.")
     parser.add_argument("--database-url-env", default="DEGEN_OPS_READONLY_DATABASE_URL")
     parser.add_argument("--days", type=int, default=90)

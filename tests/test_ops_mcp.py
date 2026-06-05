@@ -1,13 +1,17 @@
 from pathlib import Path
 import subprocess
 import sys
+from datetime import datetime, timezone
 
 import pytest
+from sqlmodel import SQLModel, Session, create_engine
 
+from app.models import TikTokOrder, TikTokProduct
 from app.ops_mcp import (
     DegenOpsMcpHarness,
     DEGEN_OPS_MCP_TOOL_NAMES,
     DEGEN_OPS_SCOPE_TOOL_NAMES,
+    TIKTOK_MCP_TOOL_NAMES,
     _normalize_scope,
     _apply_session_read_only,
     _reset_session_read_only,
@@ -77,6 +81,7 @@ def test_register_degen_ops_tools_exposes_bounded_read_only_tool_names():
     assert "run_sql" not in fake.tools
     assert "execute_sql" not in fake.tools
     assert all("read-only" in (tool["description"] or "").lower() for tool in fake.tools.values())
+    assert set(TIKTOK_MCP_TOOL_NAMES).issubset(fake.tools)
 
 
 def test_degen_ops_mcp_launcher_imports_from_outside_repo(tmp_path):
@@ -106,6 +111,7 @@ def test_register_degen_ops_tools_employee_scope_limits_sensitive_tools():
     assert "get_cash_snapshot" not in fake.tools
     assert "get_loan_and_payback_snapshot" not in fake.tools
     assert "evaluate_inventory_buy" not in fake.tools
+    assert "get_tiktok_orders" not in fake.tools
 
 
 def test_register_degen_ops_tools_partner_scope_excludes_raw_cash_and_loan_tools():
@@ -122,6 +128,21 @@ def test_register_degen_ops_tools_partner_scope_excludes_raw_cash_and_loan_tools
     assert "generate_partner_update" in fake.tools
     assert "get_cash_snapshot" not in fake.tools
     assert "get_loan_and_payback_snapshot" not in fake.tools
+    assert "get_tiktok_orders" not in fake.tools
+
+
+def test_register_degen_ops_tools_tiktok_scope_is_dedicated_read_only_agent():
+    fake = FakeMcp()
+    harness = DegenOpsMcpHarness(session_factory=lambda: FakeSession())
+
+    register_degen_ops_tools(fake, harness=harness, scope="tiktok")
+
+    assert sorted(fake.tools) == sorted(DEGEN_OPS_SCOPE_TOOL_NAMES["tiktok"])
+    assert "get_ops_agent_manifest" in fake.tools
+    assert set(TIKTOK_MCP_TOOL_NAMES).issubset(fake.tools)
+    assert "get_finance_snapshot" not in fake.tools
+    assert "get_cash_snapshot" not in fake.tools
+    assert all("read-only" in (tool["description"] or "").lower() for tool in fake.tools.values())
 
 
 def test_register_degen_ops_tools_uses_env_scope(monkeypatch):
@@ -161,6 +182,89 @@ def test_mcp_manifest_reports_scope_tools_and_read_only_guardrails():
     assert manifest["tools"] == DEGEN_OPS_SCOPE_TOOL_NAMES["employee"]
     assert manifest["read_only"] is True
     assert "No money movement" in manifest["guardrails"]
+
+
+def test_tiktok_agent_manifest_lists_read_endpoints_and_blocks_writes():
+    harness = DegenOpsMcpHarness(session_factory=lambda: FakeSession())
+
+    manifest = harness.get_tiktok_agent_manifest()
+
+    endpoint_ids = {endpoint["id"] for endpoint in manifest["tiktok_api_endpoints"]}
+    assert "order_search" in endpoint_ids
+    assert "product_create" in endpoint_ids
+    assert manifest["read_only"] is True
+    assert any(
+        endpoint["id"] == "product_create"
+        and endpoint["enabled"] is False
+        and endpoint["approval_required"] is True
+        for endpoint in manifest["tiktok_api_endpoints"]
+    )
+    assert "get_tiktok_orders" in manifest["tools"]
+
+
+def test_tiktok_order_snapshot_uses_local_rows_without_raw_payloads():
+    engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(
+            TikTokOrder(
+                tiktok_order_id="tt-1",
+                order_number="order-1",
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+                customer_name="Buyer One",
+                customer_email="buyer@example.com",
+                total_price=110.0,
+                subtotal_price=100.0,
+                total_tax=10.0,
+                financial_status="PAID",
+                fulfillment_status="AWAITING_SHIPMENT",
+                order_status="AWAITING_SHIPMENT",
+                currency="USD",
+                line_items_json='[{"product_name":"Pokemon Pack","quantity":2,"sale_price":50}]',
+                raw_payload='{"secret":"do not leak"}',
+            )
+        )
+        session.commit()
+
+        harness = DegenOpsMcpHarness(session_factory=lambda: session)
+        result = harness.get_tiktok_orders(days=30, limit=10)
+
+    assert result["read_only"] is True
+    assert result["summary"]["paid_orders"] == 1
+    assert result["orders"][0]["tiktok_order_id"] == "tt-1"
+    assert result["orders"][0]["customer_name"] == "Buyer One"
+    assert "customer_email" not in result["orders"][0]
+    assert "raw_payload" not in result["orders"][0]
+
+
+def test_tiktok_product_snapshot_uses_local_rows_without_raw_payloads():
+    engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(
+            TikTokProduct(
+                tiktok_product_id="prod-1",
+                title="Charizard Surprise Set",
+                status="ACTIVATE",
+                audit_status="APPROVED",
+                category_id="cat-1",
+                category_name="Trading Cards",
+                main_image_url="https://example.com/image.jpg",
+                skus_json='[{"sku_id":"sku-1","seller_sku":"DGN-1","price":25,"inventory":4}]',
+                raw_payload='{"secret":"do not leak"}',
+            )
+        )
+        session.commit()
+
+        harness = DegenOpsMcpHarness(session_factory=lambda: session)
+        result = harness.get_tiktok_products(limit=10, status="ACTIVATE")
+
+    assert result["read_only"] is True
+    assert result["summary"]["total"] == 1
+    assert result["products"][0]["tiktok_product_id"] == "prod-1"
+    assert result["products"][0]["sku_count"] == 1
+    assert "raw_payload" not in result["products"][0]
 
 
 def test_mcp_harness_evaluate_inventory_buy_uses_context_and_returns_evidence(monkeypatch):

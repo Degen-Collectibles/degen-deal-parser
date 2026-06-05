@@ -25,6 +25,23 @@ EXPECTED_TOOLS_BY_SCOPE = {
         "get_loan_and_payback_snapshot",
         "evaluate_inventory_buy",
         "generate_partner_update",
+        "get_tiktok_agent_manifest",
+        "get_tiktok_status",
+        "get_tiktok_orders",
+        "get_tiktok_products",
+        "get_tiktok_buyer_insights",
+        "get_tiktok_product_performance",
+        "get_tiktok_live_snapshot",
+    },
+    "tiktok": {
+        "get_ops_agent_manifest",
+        "get_tiktok_agent_manifest",
+        "get_tiktok_status",
+        "get_tiktok_orders",
+        "get_tiktok_products",
+        "get_tiktok_buyer_insights",
+        "get_tiktok_product_performance",
+        "get_tiktok_live_snapshot",
     },
     "partner": {
         "get_ops_agent_manifest",
@@ -186,7 +203,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--scope",
-        choices=("owner", "partner", "employee"),
+        choices=("owner", "partner", "employee", "tiktok"),
         default="",
         help="Only test configured servers with this DEGEN_OPS_MCP_SCOPE.",
     )

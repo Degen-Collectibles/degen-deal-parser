@@ -22,7 +22,10 @@ def test_scope_audit_confirms_employee_boundary_and_partner_owner_tools():
     assert "evaluate_inventory_buy" in audit["scopes"]["partner"]["tools"]
     assert "get_cash_snapshot" not in audit["scopes"]["partner"]["tools"]
     assert "get_loan_and_payback_snapshot" not in audit["scopes"]["partner"]["tools"]
-    assert audit["scopes"]["owner"]["tool_count"] == 8
+    assert audit["scopes"]["owner"]["tool_count"] == 15
+    assert audit["scopes"]["tiktok"]["tool_count"] == 8
+    assert "get_tiktok_orders" in audit["scopes"]["tiktok"]["tools"]
+    assert "get_cash_snapshot" not in audit["scopes"]["tiktok"]["tools"]
 
 
 def test_scope_audit_checks_generated_employee_package_is_secret_free():

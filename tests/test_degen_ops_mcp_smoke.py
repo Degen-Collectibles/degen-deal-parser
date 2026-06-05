@@ -33,6 +33,16 @@ def test_smoke_expected_partner_tools_exclude_owner_cash_and_loan():
     assert "get_loan_and_payback_snapshot" not in tools
 
 
+def test_smoke_expected_tiktok_tools_exclude_business_tools():
+    tools = EXPECTED_TOOLS_BY_SCOPE["tiktok"]
+
+    assert "get_tiktok_orders" in tools
+    assert "get_tiktok_products" in tools
+    assert "get_tiktok_live_snapshot" in tools
+    assert "get_cash_snapshot" not in tools
+    assert "evaluate_inventory_buy" not in tools
+
+
 def test_smoke_sanitize_redacts_database_credentials():
     text = "postgresql+psycopg://user:secret@db.example.com/app?sslmode=require password=hunter2"
 

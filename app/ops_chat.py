@@ -12,7 +12,8 @@ Use tools for current facts. Lead with the decision, then cite evidence.
 Never claim that money, inventory, customer messages, partner messages, or production data changed.
 If the current scope lacks a needed tool, say what cannot be answered from this scope.
 Partner scope can evaluate buys but does not expose raw cash balances, account balances, reserve-gap dollars, or owner loan/payback totals.
-In partner scope, describe cash as redacted cash-safety status from evaluate_inventory_buy, not exact cash position."""
+In partner scope, describe cash as redacted cash-safety status from evaluate_inventory_buy, not exact cash position.
+TikTok scope is a read-only TikTok operator: use TikTok tools for synced orders, products, buyer/product performance, live status, and endpoint coverage; do not claim product, token, webhook, inventory, or pricing mutations happened."""
 
 
 TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
@@ -121,6 +122,93 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             },
         },
     },
+    "get_tiktok_agent_manifest": {
+        "type": "function",
+        "function": {
+            "name": "get_tiktok_agent_manifest",
+            "description": "Read-only TikTok agent manifest with callable tools and blocked write endpoints.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    "get_tiktok_status": {
+        "type": "function",
+        "function": {
+            "name": "get_tiktok_status",
+            "description": "Read-only TikTok integration status, sync status, webhook, and enrichment queue snapshot.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    "get_tiktok_orders": {
+        "type": "function",
+        "function": {
+            "name": "get_tiktok_orders",
+            "description": "Read-only TikTok order snapshot from local synced/enriched order rows.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days": {"type": "integer", "minimum": 1, "default": 7},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 250, "default": 50},
+                    "status": {"type": "string", "default": ""},
+                    "search": {"type": "string", "default": ""},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    "get_tiktok_products": {
+        "type": "function",
+        "function": {
+            "name": "get_tiktok_products",
+            "description": "Read-only TikTok product snapshot from local synced product rows.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 250, "default": 50},
+                    "status": {"type": "string", "default": ""},
+                    "search": {"type": "string", "default": ""},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    "get_tiktok_buyer_insights": {
+        "type": "function",
+        "function": {
+            "name": "get_tiktok_buyer_insights",
+            "description": "Read-only TikTok buyer intelligence from existing local reporting helpers.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days": {"type": "integer", "minimum": 1, "default": 90},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 250, "default": 50},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    "get_tiktok_product_performance": {
+        "type": "function",
+        "function": {
+            "name": "get_tiktok_product_performance",
+            "description": "Read-only TikTok product performance from existing local reporting helpers.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days": {"type": "integer", "minimum": 1, "default": 30},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 250, "default": 50},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    "get_tiktok_live_snapshot": {
+        "type": "function",
+        "function": {
+            "name": "get_tiktok_live_snapshot",
+            "description": "Read-only TikTok live-session, live analytics, and public-status cache snapshot.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
 }
 
 
@@ -194,6 +282,35 @@ class DegenOpsChatToolRunner:
                 days=payload.get("days", 90),
                 audience_scope=self.scope,
             )
+        if name == "get_tiktok_agent_manifest":
+            return self.harness.get_tiktok_agent_manifest()
+        if name == "get_tiktok_status":
+            return self.harness.get_tiktok_status()
+        if name == "get_tiktok_orders":
+            return self.harness.get_tiktok_orders(
+                days=payload.get("days", 7),
+                limit=payload.get("limit", 50),
+                status=payload.get("status", ""),
+                search=payload.get("search", ""),
+            )
+        if name == "get_tiktok_products":
+            return self.harness.get_tiktok_products(
+                limit=payload.get("limit", 50),
+                status=payload.get("status", ""),
+                search=payload.get("search", ""),
+            )
+        if name == "get_tiktok_buyer_insights":
+            return self.harness.get_tiktok_buyer_insights(
+                days=payload.get("days", 90),
+                limit=payload.get("limit", 50),
+            )
+        if name == "get_tiktok_product_performance":
+            return self.harness.get_tiktok_product_performance(
+                days=payload.get("days", 30),
+                limit=payload.get("limit", 50),
+            )
+        if name == "get_tiktok_live_snapshot":
+            return self.harness.get_tiktok_live_snapshot()
         return {"error": f"Unsupported Degen Ops tool {name!r}.", "read_only": True}
 
 

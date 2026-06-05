@@ -38,6 +38,27 @@ class FakeHarness:
     def generate_partner_update(self, scenario, days=90, audience_scope="owner"):
         return {"partner_update": "Weekly business update", "audience_scope": audience_scope, "read_only": True}
 
+    def get_tiktok_agent_manifest(self):
+        return {"name": "degen-tiktok-readonly", "tools": ["get_tiktok_orders"], "read_only": True}
+
+    def get_tiktok_status(self):
+        return {"status": {"status_label": "Ready"}, "read_only": True}
+
+    def get_tiktok_orders(self, days=7, limit=50, status="", search=""):
+        return {"orders": [], "range": {"days": days, "limit": limit}, "read_only": True}
+
+    def get_tiktok_products(self, limit=50, status="", search=""):
+        return {"products": [], "filters": {"limit": limit}, "read_only": True}
+
+    def get_tiktok_buyer_insights(self, days=90, limit=50):
+        return {"buyers": [], "range": {"days": days, "limit": limit}, "read_only": True}
+
+    def get_tiktok_product_performance(self, days=30, limit=50):
+        return {"products": [], "range": {"days": days, "limit": limit}, "read_only": True}
+
+    def get_tiktok_live_snapshot(self):
+        return {"live_session": {}, "live_analytics": {}, "read_only": True}
+
 
 class FailingHarness(FakeHarness):
     def get_inventory_snapshot(self):
@@ -118,6 +139,24 @@ def test_chat_tool_schemas_follow_partner_scope_without_owner_cash_tools():
     assert "get_loan_and_payback_snapshot" not in names
 
 
+def test_chat_tool_schemas_follow_tiktok_scope_without_business_tools():
+    schemas = tool_schemas_for_scope("tiktok")
+    names = {schema["function"]["name"] for schema in schemas}
+
+    assert names == {
+        "get_ops_agent_manifest",
+        "get_tiktok_agent_manifest",
+        "get_tiktok_status",
+        "get_tiktok_orders",
+        "get_tiktok_products",
+        "get_tiktok_buyer_insights",
+        "get_tiktok_product_performance",
+        "get_tiktok_live_snapshot",
+    }
+    assert "get_cash_snapshot" not in names
+    assert "evaluate_inventory_buy" not in names
+
+
 def test_chat_runner_refuses_out_of_scope_tool():
     runner = DegenOpsChatToolRunner(scope="employee", harness=FakeHarness())
 
@@ -133,6 +172,15 @@ def test_chat_runner_passes_scope_to_buy_evaluation():
     result = runner.call_tool("evaluate_inventory_buy", {"scenario": {"lot_name": "Test"}})
 
     assert result["audience_scope"] == "partner"
+
+
+def test_chat_runner_dispatches_tiktok_orders_with_filters():
+    runner = DegenOpsChatToolRunner(scope="tiktok", harness=FakeHarness())
+
+    result = runner.call_tool("get_tiktok_orders", {"days": 14, "limit": 5, "status": "PAID", "search": "charizard"})
+
+    assert result["range"] == {"days": 14, "limit": 5}
+    assert result["read_only"] is True
 
 
 def test_run_chat_turn_executes_read_only_tool_and_returns_final_answer():
@@ -209,6 +257,22 @@ def test_preflight_report_lists_scope_tools_without_model_call():
         "get_inventory_snapshot",
         "get_ops_agent_manifest",
     ]
+
+
+def test_preflight_report_supports_tiktok_scope_without_business_tools():
+    report = build_preflight_report(
+        scope="tiktok",
+        provider="nvidia",
+        model="aws/anthropic/claude-haiku-4-5-v1",
+        api_key_configured=True,
+        runner=DegenOpsChatToolRunner(scope="tiktok", harness=FakeHarness()),
+        read_check=True,
+    )
+
+    assert report["ok"] is True
+    assert report["scope"] == "tiktok"
+    assert "get_tiktok_orders" in report["tools"]
+    assert "get_cash_snapshot" not in report["tools"]
 
 
 def test_preflight_report_read_check_exercises_partner_workflow_without_owner_cash_tools():

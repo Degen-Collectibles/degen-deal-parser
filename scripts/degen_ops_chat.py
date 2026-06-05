@@ -16,7 +16,7 @@ if str(REPO_ROOT) not in sys.path:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Chat with the read-only Degen Ops Agent.")
-    parser.add_argument("--scope", choices=("owner", "partner", "employee"), default="employee")
+    parser.add_argument("--scope", choices=("owner", "partner", "employee", "tiktok"), default="employee")
     parser.add_argument("--prompt", default="", help="Run one prompt and exit instead of opening interactive chat.")
     parser.add_argument("--model", default="", help="Override the repo-configured fast model.")
     parser.add_argument("--preflight", action="store_true", help="Check scope, model config, and tools without an LLM call.")
