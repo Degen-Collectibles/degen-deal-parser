@@ -1102,6 +1102,103 @@ class TikTokRegressionTests(unittest.TestCase):
 
         self.assertEqual(fetch_calls, [("main-shop", "main-cipher", "main-token")])
 
+    def test_tiktok_webhook_enrichment_falls_through_stale_env_token_to_oauth_row(self) -> None:
+        @contextmanager
+        def fake_managed_session():
+            with Session(self.engine) as session:
+                yield session
+
+        with Session(self.engine) as session:
+            session.add(
+                TikTokAuth(
+                    tiktok_shop_id="oauth-open-id",
+                    access_token="fresh-oauth-token",
+                    refresh_token="fresh-refresh-token",
+                    seller_name="D.C. LLC",
+                )
+            )
+            session.add(
+                TikTokOrder(
+                    tiktok_order_id="shared-shop-webhook-order",
+                    shop_id="7495987383262087496",
+                    order_number="shared-shop-webhook-order",
+                    created_at=datetime(2026, 6, 5, 3, 45, tzinfo=timezone.utc),
+                    updated_at=datetime(2026, 6, 5, 3, 45, tzinfo=timezone.utc),
+                    source="webhook",
+                    line_items_json="[]",
+                    line_items_summary_json="[]",
+                )
+            )
+            session.commit()
+
+        fetch_calls: list[tuple[str, str, str]] = []
+
+        def fake_fetch_details(*args, **kwargs):
+            fetch_calls.append((kwargs["shop_id"], kwargs["shop_cipher"], kwargs["access_token"]))
+            if kwargs["access_token"] == "stale-env-token":
+                request = httpx.Request("GET", "https://open-api.tiktokglobalshop.com/order/202309/orders")
+                response = httpx.Response(401, request=request)
+                raise httpx.HTTPStatusError("expired", request=request, response=response)
+            return [{"order_id": "shared-shop-webhook-order"}]
+
+        def fake_order_record(payload, *, shop_id, shop_cipher, source):
+            return {
+                "tiktok_order_id": payload["order_id"],
+                "shop_id": shop_id,
+                "shop_cipher": shop_cipher,
+                "order_number": payload["order_id"],
+                "source": source,
+                "subtotal_price": 11.0,
+                "total_price": 12.0,
+                "line_items_json": json.dumps([
+                    {"product_id": "p-main", "product_name": "Main Pack", "quantity": 1, "sale_price": 11.0}
+                ]),
+                "line_items_summary_json": "[]",
+            }
+
+        with patch.object(shared_module, "managed_session", fake_managed_session), patch.object(
+            shared_module,
+            "_refresh_tiktok_auth_if_needed",
+            return_value=None,
+        ), patch.object(
+            shared_module,
+            "_fetch_tiktok_order_details",
+            side_effect=fake_fetch_details,
+        ), patch.object(
+            shared_module,
+            "_order_record_from_payload",
+            side_effect=fake_order_record,
+        ), patch.object(
+            shared_module,
+            "resolve_tiktok_shop_pull_base_url",
+            return_value="https://open-api.tiktokglobalshop.com",
+        ), patch.object(main_module.settings, "tiktok_app_key", "app-key"), patch.object(
+            main_module.settings, "tiktok_app_secret", "app-secret"
+        ), patch.object(
+            main_module.settings, "tiktok_shop_id", "7495987383262087496"
+        ), patch.object(
+            main_module.settings, "tiktok_shop_cipher", "shared-shop-cipher"
+        ), patch.object(
+            main_module.settings, "tiktok_access_token", "stale-env-token"
+        ):
+            shared_module._enrich_tiktok_order_from_api("shared-shop-webhook-order", raise_errors=True)
+
+        self.assertEqual(
+            fetch_calls,
+            [
+                ("7495987383262087496", "shared-shop-cipher", "stale-env-token"),
+                ("oauth-open-id", "shared-shop-cipher", "fresh-oauth-token"),
+            ],
+        )
+        with Session(self.engine) as session:
+            order = session.exec(
+                select(TikTokOrder).where(TikTokOrder.tiktok_order_id == "shared-shop-webhook-order")
+            ).one()
+            self.assertEqual(order.source, "webhook_enriched")
+            self.assertEqual(order.shop_id, "7495987383262087496")
+            self.assertEqual(order.shop_cipher, "shared-shop-cipher")
+            self.assertEqual(order.subtotal_price, 11.0)
+
     def test_tiktok_webhook_enrichment_queue_reenqueue_resets_terminal_retry_budget(self) -> None:
         first_seen_at = datetime(2026, 4, 1, 8, 0, tzinfo=timezone.utc)
         second_seen_at = first_seen_at + timedelta(hours=1)
@@ -2348,6 +2445,79 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(result["inserted"], 1)
         self.assertEqual(result["updated"], 1)
 
+    def test_run_tiktok_pull_cycle_falls_through_stale_env_token_to_oauth_row(self) -> None:
+        self._reset_tiktok_state()
+
+        @contextmanager
+        def fake_managed_session():
+            with Session(self.engine) as session:
+                yield session
+
+        with Session(self.engine) as session:
+            session.add(
+                TikTokAuth(
+                    tiktok_shop_id="oauth-open-id",
+                    access_token="fresh-oauth-token",
+                    refresh_token="fresh-refresh-token",
+                    seller_name="D.C. LLC",
+                )
+            )
+            session.commit()
+
+        fake_summary = SimpleNamespace(
+            fetched=6,
+            inserted=1,
+            updated=5,
+            failed=0,
+            detail_calls=6,
+        )
+        pull_tokens: list[str] = []
+
+        def fake_pull_tiktok_orders(*args, **kwargs):
+            pull_tokens.append(kwargs["access_token"])
+            if kwargs["access_token"] == "stale-env-token":
+                request = httpx.Request(
+                    "POST",
+                    "https://open-api.tiktokglobalshop.com/order/202309/orders/search",
+                )
+                response = httpx.Response(401, request=request)
+                raise httpx.HTTPStatusError("expired", request=request, response=response)
+            return fake_summary
+
+        import app.shared as _shared_module
+        with patch.object(_shared_module, "managed_session", side_effect=fake_managed_session), patch.object(
+            _shared_module, "_refresh_tiktok_auth_if_needed", return_value=None
+        ), patch.object(
+            _shared_module, "pull_tiktok_orders", side_effect=fake_pull_tiktok_orders
+        ), patch.object(
+            _shared_module, "resolve_tiktok_shop_pull_base_url", return_value="https://open-api.tiktokglobalshop.com"
+        ), patch.object(main_module.settings, "tiktok_app_key", "app-key"), patch.object(
+            main_module.settings, "tiktok_app_secret", "app-secret"
+        ), patch.object(
+            main_module.settings, "tiktok_shop_id", "7495987383262087496"
+        ), patch.object(
+            main_module.settings, "tiktok_shop_cipher", "shared-shop-cipher"
+        ), patch.object(
+            main_module.settings, "tiktok_access_token", "stale-env-token"
+        ), patch.object(
+            main_module.settings, "tiktok_sync_enabled", True
+        ), patch.object(
+            main_module.settings, "tiktok_sync_limit", 25
+        ), patch.object(
+            main_module.settings, "tiktok_sync_lookback_hours", 24.0
+        ):
+            result = _shared_module.run_tiktok_pull_cycle(
+                runtime_name="test_tiktok_runtime",
+                limit=10,
+                trigger="manual",
+            )
+
+        self.assertEqual(pull_tokens, ["stale-env-token", "fresh-oauth-token"])
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["shops_pulled"], 1)
+        self.assertEqual(result["fetched"], 6)
+        self.assertEqual(result["updated"], 5)
+
     def test_run_tiktok_pull_cycle_retries_after_401_with_refreshed_token(self) -> None:
         self._reset_tiktok_state()
 
@@ -2643,7 +2813,7 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(second_payload["orders"], [])
         self.assertEqual(second_payload["latest_updated_at"], refund_updated.isoformat())
 
-    def test_tiktok_streamer_poll_scopes_overlapping_accounts_by_shop_identity(self) -> None:
+    def test_tiktok_streamer_poll_scopes_overlapping_shared_shop_by_live_product_identity(self) -> None:
         import app.routers.tiktok_streamer as streamer_module
         from starlette.requests import Request as _Request
 
@@ -2664,8 +2834,8 @@ class TikTokRegressionTests(unittest.TestCase):
             session.add(
                 TikTokOrder(
                     tiktok_order_id="main-account-order",
-                    shop_id="main-shop",
-                    shop_cipher="main-cipher",
+                    shop_id="7495987383262087496",
+                    shop_cipher="shared-shop-cipher",
                     order_number="#1001",
                     created_at=order_time,
                     updated_at=order_time,
@@ -2681,8 +2851,8 @@ class TikTokRegressionTests(unittest.TestCase):
             session.add(
                 TikTokOrder(
                     tiktok_order_id="boss-account-order",
-                    shop_id="boss-shop",
-                    shop_cipher="boss-cipher",
+                    shop_id="7495987383262087496",
+                    shop_cipher="shared-shop-cipher",
                     order_number="#2001",
                     created_at=order_time + timedelta(seconds=1),
                     updated_at=order_time + timedelta(seconds=1),
@@ -2702,8 +2872,8 @@ class TikTokRegressionTests(unittest.TestCase):
                     "id": "main-live",
                     "title": "Main live",
                     "username": "degencollectibles",
-                    "shop_id": "main-shop",
-                    "shop_cipher": "main-cipher",
+                    "shop_id": "oauth-open-id",
+                    "shop_cipher": "shared-shop-cipher",
                     "start_time": main_start,
                     "end_time": 0,
                     "gmv": 0.0,
@@ -2714,8 +2884,8 @@ class TikTokRegressionTests(unittest.TestCase):
                     "id": "boss-live",
                     "title": "Boss live",
                     "username": "degenboss0",
-                    "shop_id": "boss-shop",
-                    "shop_cipher": "boss-cipher",
+                    "shop_id": "oauth-open-id",
+                    "shop_cipher": "shared-shop-cipher",
                     "start_time": boss_start,
                     "end_time": 0,
                     "gmv": 0.0,
@@ -2732,13 +2902,28 @@ class TikTokRegressionTests(unittest.TestCase):
                 "server": ("testserver", 80),
             })
             streamer_module._gmv_cache.clear()
-            empty_live_products = {
-                "available": False,
-                "products": [],
-                "product_ids": set(),
-                "exclude_product_ids": set(),
-                "source": "",
-            }
+
+            def fake_live_product_scope(stream_context):
+                if stream_context.get("selected_stream_id") == "main-live":
+                    return {
+                        "available": True,
+                        "products": [{"id": "p-main", "name": "Main Pack", "direct_gmv": 80.0, "items_sold": 1}],
+                        "product_ids": {"p-main"},
+                        "selected_product_ids": {"p-main"},
+                        "selected_products": [{"id": "p-main", "name": "Main Pack", "direct_gmv": 80.0, "items_sold": 1}],
+                        "exclude_product_ids": set(),
+                        "source": "test_live_products",
+                    }
+                return {
+                    "available": True,
+                    "products": [{"id": "p-boss", "name": "Boss Pack", "direct_gmv": 35.0, "items_sold": 1}],
+                    "product_ids": {"p-boss"},
+                    "selected_product_ids": {"p-boss"},
+                    "selected_products": [{"id": "p-boss", "name": "Boss Pack", "direct_gmv": 35.0, "items_sold": 1}],
+                    "exclude_product_ids": set(),
+                    "source": "test_live_products",
+                }
+
             with patch("app.routers.tiktok_streamer._require_live_stream", return_value=None), patch.object(
                 streamer_module,
                 "_get_live_sessions_list",
@@ -2746,7 +2931,7 @@ class TikTokRegressionTests(unittest.TestCase):
             ), patch.object(
                 streamer_module,
                 "_fetch_live_product_scope",
-                return_value=empty_live_products,
+                side_effect=fake_live_product_scope,
             ):
                 main_payload = streamer_module.tiktok_streamer_poll(
                     request=req,
@@ -2767,14 +2952,14 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(main_payload["total_count"], 1)
         self.assertEqual(main_payload["stream_gmv"], 80.0)
         self.assertEqual(main_payload["stream_top_buyers"][0]["name"], "Main Buyer")
-        self.assertEqual([row["name"] for row in main_payload["top_buyers"]], ["Main Buyer"])
+        self.assertEqual({row["name"] for row in main_payload["top_buyers"]}, {"Main Buyer", "Boss Buyer"})
         self.assertEqual(sum(point["count"] for point in main_payload["order_velocity"]), 1)
 
         self.assertEqual([row["tiktok_order_id"] for row in boss_payload["orders"]], ["boss-account-order"])
         self.assertEqual(boss_payload["total_count"], 1)
         self.assertEqual(boss_payload["stream_gmv"], 35.0)
         self.assertEqual(boss_payload["stream_top_buyers"][0]["name"], "Boss Buyer")
-        self.assertEqual([row["name"] for row in boss_payload["top_buyers"]], ["Boss Buyer"])
+        self.assertEqual({row["name"] for row in boss_payload["top_buyers"]}, {"Main Buyer", "Boss Buyer"})
         self.assertEqual(sum(point["count"] for point in boss_payload["order_velocity"]), 1)
 
     def test_tiktok_streamer_poll_keeps_refund_updates_visible(self) -> None:

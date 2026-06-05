@@ -602,7 +602,7 @@ class StreamerFreshOrderFallbackTests(unittest.TestCase):
         self.assertEqual(fallback_context["source"], streamer_module.STREAM_METRIC_SOURCE_ORDER_ACTIVITY_FALLBACK)
         self.assertEqual(fallback_context["creator_order_attribution"], streamer_module.CREATOR_ORDER_ATTRIBUTION_RECENT_ORDERS)
 
-    def test_shop_id_scope_wins_when_shop_cipher_is_shared_across_creators(self) -> None:
+    def test_shop_cipher_scope_keeps_shared_shop_alias_orders_visible(self) -> None:
         now = datetime(2026, 6, 4, 21, 30, tzinfo=timezone.utc)
         shared_cipher = "shared-shop-cipher"
         with Session(self.engine) as session:
@@ -666,8 +666,14 @@ class StreamerFreshOrderFallbackTests(unittest.TestCase):
                     now - timedelta(hours=24),
                 )
 
-        self.assertEqual([order.tiktok_order_id for order in main_orders], ["main-order"])
-        self.assertEqual([order.tiktok_order_id for order in boss_orders], ["boss-order"])
+        self.assertEqual(
+            {order.tiktok_order_id for order in main_orders},
+            {"main-order", "boss-order"},
+        )
+        self.assertEqual(
+            {order.tiktok_order_id for order in boss_orders},
+            {"main-order", "boss-order"},
+        )
 
     def test_manual_surprise_set_prices_round_trip_through_app_settings(self) -> None:
         with Session(self.engine) as session:

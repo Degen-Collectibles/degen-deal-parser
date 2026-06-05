@@ -3434,6 +3434,7 @@ def run_tiktok_pull_cycle(
         totals = {"fetched": 0, "inserted": 0, "updated": 0, "failed": 0, "detail_calls": 0}
         pulled_shop_ids: list[str] = []
         shops_pulled = 0
+        last_credential_error: Optional[BaseException] = None
         for credential in credentials:
             try:
                 summary = _run_pull_with_current_credentials(credential)
@@ -3448,7 +3449,8 @@ def run_tiktok_pull_cycle(
                     shop_cipher=credential["shop_cipher"],
                 )
                 if refresh_result is None:
-                    raise
+                    last_credential_error = exc
+                    continue
                 auth_row = ensure_tiktok_auth_row(session)
                 refreshed_key = _tiktok_credential_key(credential["shop_id"], credential["shop_cipher"])
                 refreshed_credentials = {
@@ -3466,6 +3468,9 @@ def run_tiktok_pull_cycle(
             totals["updated"] += int(summary.updated)
             totals["failed"] += int(summary.failed)
             totals["detail_calls"] += int(summary.detail_calls)
+
+        if shops_pulled == 0 and last_credential_error is not None:
+            raise last_credential_error
 
         last_pull = {
             "status": "success",
@@ -3689,6 +3694,9 @@ def _enrich_tiktok_order_from_api(order_id: str, *, raise_errors: bool = False) 
                 if raise_errors:
                     raise RuntimeError("TikTok order enrichment credentials incomplete")
                 return
+            existing_order = session.exec(
+                select(TikTokOrder).where(TikTokOrder.tiktok_order_id == order_id)
+            ).first()
 
             def _fetch_details_with_token(
                 credential: dict[str, str]
@@ -3735,7 +3743,7 @@ def _enrich_tiktok_order_from_api(order_id: str, *, raise_errors: bool = False) 
                         shop_cipher=credential.get("shop_cipher") or "",
                     )
                     if refresh_result is None:
-                        raise
+                        continue
                     auth_row = ensure_tiktok_auth_row(session)
                     refreshed_credentials = _tiktok_pull_credentials_for_order(session, order_id)
                     if not refreshed_credentials:
@@ -3758,7 +3766,12 @@ def _enrich_tiktok_order_from_api(order_id: str, *, raise_errors: bool = False) 
                     )
                     if refreshed_credential is None:
                         continue
-                    details = _fetch_details_with_token(refreshed_credential)
+                    try:
+                        details = _fetch_details_with_token(refreshed_credential)
+                    except (httpx.HTTPStatusError, RuntimeError) as retry_exc:
+                        if _tiktok_webhook_enrich_error_is_retryable_auth(retry_exc):
+                            continue
+                        raise
                     credential = refreshed_credential
                 except RuntimeError as exc:
                     if not _tiktok_webhook_enrich_error_is_retryable_auth(exc):
@@ -3781,7 +3794,7 @@ def _enrich_tiktok_order_from_api(order_id: str, *, raise_errors: bool = False) 
                         shop_cipher=credential.get("shop_cipher") or "",
                     )
                     if refresh_result is None:
-                        raise
+                        continue
                     auth_row = ensure_tiktok_auth_row(session)
                     refreshed_credentials = _tiktok_pull_credentials_for_order(session, order_id)
                     if not refreshed_credentials:
@@ -3804,7 +3817,12 @@ def _enrich_tiktok_order_from_api(order_id: str, *, raise_errors: bool = False) 
                     )
                     if refreshed_credential is None:
                         continue
-                    details = _fetch_details_with_token(refreshed_credential)
+                    try:
+                        details = _fetch_details_with_token(refreshed_credential)
+                    except (httpx.HTTPStatusError, RuntimeError) as retry_exc:
+                        if _tiktok_webhook_enrich_error_is_retryable_auth(retry_exc):
+                            continue
+                        raise
                     credential = refreshed_credential
 
                 if details:
@@ -3815,12 +3833,27 @@ def _enrich_tiktok_order_from_api(order_id: str, *, raise_errors: bool = False) 
                 if raise_errors:
                     raise RuntimeError("TikTok order details unavailable")
                 return
+            record_shop_id = (
+                (existing_order.shop_id if existing_order else "")
+                or used_credential.get("shop_id")
+                or ""
+            ).strip()
+            record_shop_cipher = (
+                (existing_order.shop_cipher if existing_order else "")
+                or used_credential.get("shop_cipher")
+                or ""
+            ).strip()
             record = _order_record_from_payload(
                 details[0],
-                shop_id=(used_credential.get("shop_id") or "").strip(),
-                shop_cipher=(used_credential.get("shop_cipher") or "").strip(),
+                shop_id=record_shop_id,
+                shop_cipher=record_shop_cipher,
                 source="webhook_enriched",
             )
+            if existing_order is not None:
+                if (existing_order.shop_id or "").strip():
+                    record["shop_id"] = existing_order.shop_id
+                if (existing_order.shop_cipher or "").strip():
+                    record["shop_cipher"] = existing_order.shop_cipher
             from .tiktok.tiktok_ingest import upsert_tiktok_order
             upsert_tiktok_order(session, TikTokOrder, record)
             _enrich_delay = 0.4

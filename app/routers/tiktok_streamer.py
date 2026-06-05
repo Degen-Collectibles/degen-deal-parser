@@ -725,14 +725,18 @@ def _apply_tiktok_account_scope(stmt, account_scope: Optional[dict[str, Any]]):
     shop_ids = sorted(account_scope.get("shop_ids") or [])
     shop_ciphers = sorted(account_scope.get("shop_ciphers") or [])
     seller_ids = sorted(account_scope.get("seller_ids") or [])
+    predicates = []
     if shop_ids:
-        predicate = TikTokOrder.shop_id.in_(shop_ids)
-    elif shop_ciphers:
-        predicate = TikTokOrder.shop_cipher.in_(shop_ciphers)
-    elif seller_ids:
-        predicate = TikTokOrder.seller_id.in_(seller_ids)
-    else:
-        predicate = None
+        predicates.append(TikTokOrder.shop_id.in_(shop_ids))
+    if shop_ciphers:
+        predicates.append(TikTokOrder.shop_cipher.in_(shop_ciphers))
+    if seller_ids:
+        predicates.append(TikTokOrder.seller_id.in_(seller_ids))
+    predicate = (
+        or_(*predicates)
+        if len(predicates) > 1
+        else (predicates[0] if predicates else None)
+    )
     if account_scope.get("include_unattributed"):
         unattributed = (
             and_(
