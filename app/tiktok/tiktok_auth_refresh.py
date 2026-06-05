@@ -41,6 +41,8 @@ def refresh_tiktok_auth_if_needed(
     *,
     runtime_name: str,
     force: bool = False,
+    shop_id: Optional[str] = None,
+    shop_cipher: Optional[str] = None,
     resolve_base_url: Callable[[], str],
     update_state: Optional[Callable[..., None]] = None,
 ) -> Optional[dict]:
@@ -65,8 +67,15 @@ def refresh_tiktok_auth_if_needed(
     try:
         from sqlmodel import select  # local import to keep top-level imports minimal
 
+        stmt = select(TikTokAuth)
+        clean_shop_id = (shop_id or "").strip()
+        clean_shop_cipher = (shop_cipher or "").strip()
+        if clean_shop_id and not clean_shop_id.startswith("pending:"):
+            stmt = stmt.where(TikTokAuth.tiktok_shop_id == clean_shop_id)
+        elif clean_shop_cipher:
+            stmt = stmt.where(TikTokAuth.shop_cipher == clean_shop_cipher)
         auth_row: Optional[TikTokAuth] = session.exec(
-            select(TikTokAuth).order_by(TikTokAuth.updated_at.desc(), TikTokAuth.id.desc())
+            stmt.order_by(TikTokAuth.updated_at.desc(), TikTokAuth.id.desc())
         ).first()
         if auth_row is None:
             return None

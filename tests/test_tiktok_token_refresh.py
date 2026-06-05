@@ -120,6 +120,60 @@ class RefreshTiktokAuthTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["status"], "inserted")
 
+    def test_forced_refresh_targets_matching_shop_not_latest_row(self):
+        fake_result = {
+            "data": {
+                "access_token": "main-new-token",
+                "refresh_token": "main-new-refresh",
+                "access_token_expire_in": 86400,
+            }
+        }
+        refresh_tokens = []
+
+        def fake_refresh_fn(client, *, base_url, app_key, app_secret, refresh_token):
+            refresh_tokens.append(refresh_token)
+            return fake_result
+
+        with Session(self.engine) as session:
+            self._seed_auth(
+                session,
+                access_token="main-stale-token",
+                refresh_token="main-refresh",
+                access_token_expires_at=_past(5),
+            )
+            secondary = TikTokAuth(
+                app_key="key",
+                tiktok_shop_id="secondary-shop",
+                shop_cipher="secondary-cipher",
+                access_token="secondary-token",
+                refresh_token="secondary-refresh",
+                access_token_expires_at=_future(60),
+                created_at=_utcnow(),
+                updated_at=_utcnow() + timedelta(minutes=1),
+                source="oauth",
+            )
+            session.add(secondary)
+            session.commit()
+            with patch("app.tiktok.tiktok_auth_refresh._refresh_fn", fake_refresh_fn), \
+                 patch("app.tiktok.tiktok_auth_refresh.settings") as mock_settings, \
+                 patch("app.tiktok.tiktok_auth_refresh.upsert_tiktok_auth_from_callback",
+                       return_value=("updated", {"tiktok_shop_id": "shop-1"})):
+                mock_settings.tiktok_app_key = "key"
+                mock_settings.tiktok_app_secret = "secret"
+                mock_settings.tiktok_refresh_token = ""
+                mock_settings.tiktok_redirect_uri = ""
+                mock_settings.tiktok_shop_id = ""
+                result = refresh_tiktok_auth_if_needed(
+                    session,
+                    runtime_name="test",
+                    force=True,
+                    shop_id="shop-1",
+                    resolve_base_url=lambda: "https://example.com",
+                )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(refresh_tokens, ["main-refresh"])
+
     def test_update_state_called_when_provided(self):
         fake_result = {"data": {"access_token": "t", "refresh_token": "r", "access_token_expire_in": 3600}}
 

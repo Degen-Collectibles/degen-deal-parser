@@ -3318,11 +3318,15 @@ def _refresh_tiktok_auth_if_needed(
     *,
     runtime_name: str,
     force: bool = False,
+    shop_id: Optional[str] = None,
+    shop_cipher: Optional[str] = None,
 ) -> Optional[dict[str, object]]:
     return _refresh_tiktok_auth_fn(
         session,
         runtime_name=runtime_name,
         force=force,
+        shop_id=shop_id,
+        shop_cipher=shop_cipher,
         resolve_base_url=resolve_tiktok_shop_pull_base_url,
         update_state=update_tiktok_integration_state,
     )
@@ -3440,6 +3444,8 @@ def run_tiktok_pull_cycle(
                     session,
                     runtime_name=f"{runtime_name}_401_refresh",
                     force=True,
+                    shop_id=credential["shop_id"],
+                    shop_cipher=credential["shop_cipher"],
                 )
                 if refresh_result is None:
                     raise
@@ -3725,6 +3731,8 @@ def _enrich_tiktok_order_from_api(order_id: str, *, raise_errors: bool = False) 
                         session,
                         runtime_name=f"{runtime_name}_401_refresh",
                         force=True,
+                        shop_id=credential.get("shop_id") or "",
+                        shop_cipher=credential.get("shop_cipher") or "",
                     )
                     if refresh_result is None:
                         raise
@@ -3769,6 +3777,8 @@ def _enrich_tiktok_order_from_api(order_id: str, *, raise_errors: bool = False) 
                         session,
                         runtime_name=f"{runtime_name}_401_refresh",
                         force=True,
+                        shop_id=credential.get("shop_id") or "",
+                        shop_cipher=credential.get("shop_cipher") or "",
                     )
                     if refresh_result is None:
                         raise

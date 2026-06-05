@@ -2387,9 +2387,18 @@ class TikTokRegressionTests(unittest.TestCase):
                 raise httpx.HTTPStatusError("expired", request=request, response=response)
             return fake_summary
 
-        def fake_refresh(session: Session, *, runtime_name: str, force: bool = False):
+        def fake_refresh(
+            session: Session,
+            *,
+            runtime_name: str,
+            force: bool = False,
+            shop_id: str = "",
+            shop_cipher: str = "",
+        ):
             if not force:
                 return None
+            self.assertEqual(shop_id, "7495987383262087496")
+            self.assertEqual(shop_cipher, "cipher-1")
             auth_row = session.exec(select(TikTokAuth).where(TikTokAuth.tiktok_shop_id == "7495987383262087496")).first()
             self.assertIsNotNone(auth_row)
             auth_row.access_token = "fresh-token"
