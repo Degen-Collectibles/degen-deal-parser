@@ -419,6 +419,13 @@
         margin-top: 4px;
     }
     .sch-row-copy-btn:hover { background: rgba(59,130,246,0.22); }
+    .sch-row-copy-btn.is-packing-copy {
+        background: rgba(20,184,166,0.12);
+        border-color: rgba(45,212,191,0.36);
+        color: #99f6e4;
+        margin-left: 4px;
+    }
+    .sch-row-copy-btn.is-packing-copy:hover { background: rgba(20,184,166,0.22); }
 
     .sch-account-legend {
         display: flex;
@@ -1268,6 +1275,14 @@
                                             title="Copy only {{ u.display_name or u.username }}'s {{ kind_label|lower }} shifts from last week">
                                         Copy last week
                                     </button>
+                                    {% if kind_slug == 'storefront' %}
+                                    <button class="sch-row-copy-btn is-packing-copy"
+                                            type="submit"
+                                            form="sch-copy-storefront-to-packing-{{ u.id }}"
+                                            title="Copy {{ u.display_name or u.username }}'s Storefront shifts this week onto Packing without overwriting existing Packing days">
+                                        Copy to Packing
+                                    </button>
+                                    {% endif %}
                                     {% endif %}
                                     {% endif %}
                                 </div>
@@ -1503,6 +1518,13 @@
         <input type="hidden" name="week" value="{{ ctx.week_start_iso }}"/>
         <input type="hidden" name="user_id" value="{{ u.id }}"/>
         <input type="hidden" name="staff_kind" value="{{ kind_slug }}"/>
+    </form>
+    {% endif %}
+    {% if kind_slug == 'storefront' %}
+    <form id="sch-copy-storefront-to-packing-{{ u.id }}" method="post" action="/team/admin/schedule/copy-person-storefront-to-packing" style="display:none;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
+        <input type="hidden" name="week" value="{{ ctx.week_start_iso }}"/>
+        <input type="hidden" name="user_id" value="{{ u.id }}"/>
     </form>
     {% endif %}
     {% endfor %}

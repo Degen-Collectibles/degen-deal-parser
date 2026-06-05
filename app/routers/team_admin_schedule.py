@@ -2118,6 +2118,146 @@ async def admin_schedule_generate_person_from_previous(
     )
 
 
+@router.post(
+    "/team/admin/schedule/copy-person-storefront-to-packing",
+    dependencies=[Depends(require_csrf)],
+)
+async def admin_schedule_copy_person_storefront_to_packing(
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    denial, current = _permission_gate(request, session, "admin.schedule.edit")
+    if denial:
+        return denial
+    form = await request.form()
+    week_start = _parse_week_start(form.get("week") or "")
+    week_days = _week_dates(week_start)
+    first_day, last_day = week_days[0], week_days[-1]
+    try:
+        user_id = int(form.get("user_id") or 0)
+    except (TypeError, ValueError):
+        user_id = 0
+    if user_id <= 0:
+        return _redirect_back(week_start, "Pick an employee to copy.")
+
+    target = session.get(User, user_id)
+    if target is None:
+        return _redirect_back(week_start, "Employee not found.")
+    if not _user_can_work_calendar(target, SCHEDULE_CALENDAR_PACKING):
+        return _redirect_back(
+            week_start,
+            f"{target.display_name or target.username} cannot be copied onto the Packing calendar.",
+        )
+
+    source_entries = list(
+        session.exec(
+            select(ShiftEntry)
+            .where(
+                ShiftEntry.user_id == user_id,
+                ShiftEntry.shift_date >= first_day,
+                ShiftEntry.shift_date <= last_day,
+                ShiftEntry.calendar_kind == SCHEDULE_CALENDAR_STOREFRONT,
+            )
+            .order_by(ShiftEntry.shift_date, ShiftEntry.sort_order, ShiftEntry.id)
+        ).all()
+    )
+    if not source_entries:
+        return _redirect_back(
+            week_start,
+            f"No storefront shifts for {target.display_name or target.username} this week.",
+        )
+
+    existing_packing = list(
+        session.exec(
+            select(ShiftEntry).where(
+                ShiftEntry.user_id == user_id,
+                ShiftEntry.shift_date >= first_day,
+                ShiftEntry.shift_date <= last_day,
+                ShiftEntry.calendar_kind == SCHEDULE_CALENDAR_PACKING,
+            )
+        ).all()
+    )
+    occupied_packing_dates = {entry.shift_date for entry in existing_packing}
+
+    membership = session.exec(
+        select(ScheduleRosterMember).where(
+            ScheduleRosterMember.week_start == week_start,
+            ScheduleRosterMember.calendar_kind == SCHEDULE_CALENDAR_PACKING,
+            ScheduleRosterMember.user_id == user_id,
+        )
+    ).first()
+    now = utcnow()
+    if membership is None:
+        session.add(
+            ScheduleRosterMember(
+                week_start=week_start,
+                calendar_kind=SCHEDULE_CALENDAR_PACKING,
+                user_id=user_id,
+                added_by_user_id=current.id,
+                created_at=now,
+            )
+        )
+
+    added = 0
+    for entry in source_entries:
+        if entry.shift_date in occupied_packing_dates:
+            continue
+        session.add(
+            ShiftEntry(
+                user_id=entry.user_id,
+                shift_date=entry.shift_date,
+                calendar_kind=SCHEDULE_CALENDAR_PACKING,
+                label=entry.label,
+                kind=entry.kind,
+                sort_order=entry.sort_order or 0,
+                created_by_user_id=current.id,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        added += 1
+
+    if added == 0:
+        return _redirect_back(
+            week_start,
+            f"Nothing to copy for {target.display_name or target.username}; Packing already has shifts on those days.",
+        )
+
+    session.add(
+        AuditLog(
+            actor_user_id=current.id,
+            target_user_id=user_id,
+            action="admin.schedule.copy_person_storefront_to_packing",
+            resource_key="admin.schedule.edit",
+            details_json=json.dumps(
+                {
+                    "week_start": week_start.isoformat(),
+                    "from_calendar": SCHEDULE_CALENDAR_STOREFRONT,
+                    "to_calendar": SCHEDULE_CALENDAR_PACKING,
+                    "user_id": user_id,
+                    "shifts_added": added,
+                }
+            ),
+            ip_address=(request.client.host if request.client else None),
+        )
+    )
+    notify_employee(
+        session,
+        user_id=user_id,
+        actor_user_id=current.id,
+        kind="schedule_change",
+        title="Your schedule was updated",
+        body=f"Week of {week_start.strftime('%b %d')} was changed. Open the schedule to review your shifts.",
+        link_path=f"/team/schedule?week={week_start.isoformat()}",
+        request=request,
+    )
+    session.commit()
+    return _redirect_back(
+        week_start,
+        f"Copied {added} shift{'s' if added != 1 else ''} from Storefront to Packing for {target.display_name or target.username}.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Holidays / store-closed days
 #

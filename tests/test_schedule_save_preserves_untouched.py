@@ -325,3 +325,72 @@ def test_copy_previous_week_for_one_person_targets_one_calendar(session: Session
     ]
     assert [row.sort_order for row in packing_rows] == [0, 1]
     assert storefront_rows == []
+
+
+def test_copy_one_person_storefront_week_to_packing_skips_existing_packing_cells(
+    session: Session,
+):
+    admin = _seed_user(session, 999, role="admin")
+    employee = _seed_user(session, 5)
+    _seed_roster(session, employee.id, calendar_kind="storefront", admin_id=admin.id)
+
+    _seed_shift(
+        session,
+        employee.id,
+        WEEK,
+        "10 AM - 2 PM",
+        calendar_kind="storefront",
+        sort_order=0,
+    )
+    _seed_shift(
+        session,
+        employee.id,
+        WEEK + timedelta(days=1),
+        "11 AM - 3 PM",
+        calendar_kind="storefront",
+        sort_order=0,
+    )
+    _seed_shift(
+        session,
+        employee.id,
+        WEEK + timedelta(days=1),
+        "existing packing",
+        calendar_kind="packing",
+        sort_order=0,
+    )
+
+    from app.models import ScheduleRosterMember
+    from app.routers import team_admin_schedule as schedule
+
+    request = _FakeRequest(
+        {
+            "week": WEEK.isoformat(),
+            "user_id": str(employee.id),
+        },
+        admin,
+    )
+    with patch.object(schedule, "_permission_gate", return_value=(None, admin)):
+        response = asyncio.run(
+            schedule.admin_schedule_copy_person_storefront_to_packing(
+                request, session
+            )
+        )
+
+    assert response.status_code == 303
+    storefront_monday = _entries(
+        session, employee.id, WEEK, calendar_kind="storefront"
+    )
+    packing_monday = _entries(session, employee.id, WEEK, calendar_kind="packing")
+    packing_tuesday = _entries(
+        session, employee.id, WEEK + timedelta(days=1), calendar_kind="packing"
+    )
+    assert [row.label for row in storefront_monday] == ["10 AM - 2 PM"]
+    assert [row.label for row in packing_monday] == ["10 AM - 2 PM"]
+    assert [row.label for row in packing_tuesday] == ["existing packing"]
+    assert session.exec(
+        select(ScheduleRosterMember).where(
+            ScheduleRosterMember.week_start == WEEK,
+            ScheduleRosterMember.calendar_kind == "packing",
+            ScheduleRosterMember.user_id == employee.id,
+        )
+    ).first()
