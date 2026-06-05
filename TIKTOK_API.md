@@ -34,6 +34,7 @@ Used for: orders, products, shop-level analytics, webhooks.
 | HTTP method | `GET` with query params |
 | Grant type (initial) | `authorized_code` |
 | Grant type (refresh) | `refresh_token` |
+| Service authorization URL | `https://services.tiktokshops.us/open/authorize?service_id=<TIKTOK_SERVICE_ID>` |
 
 **Token exchange query params:**
 
@@ -79,6 +80,7 @@ grant_type=refresh_token
 - Once exchanged, the token is stored in the `TikTokAuth` database table. The app uses DB-stored tokens at runtime, not `.env` values (those are fallbacks only).
 - After initial OAuth, the app auto-refreshes tokens in a background loop (`tiktok_token_refresh_interval_minutes`, default 30 min).
 - You do NOT need to re-authorize after restarting the app — tokens persist in the database.
+- Do not click a copied TikTok service authorization URL directly when reauthorizing through this app. Start from `/integrations/tiktok/oauth/start` so the app can generate and store an OAuth `state`; raw callbacks without that session state are rejected as `Invalid OAuth state`.
 
 ### 2. Creator Token
 
@@ -454,6 +456,7 @@ Live chat messages are captured via the **TikSync SDK**, a third-party WebSocket
 | `TIKTOK_APP_KEY` | TikTok Partner Center app key |
 | `TIKTOK_APP_SECRET` | TikTok Partner Center app secret |
 | `TIKTOK_REDIRECT_URI` | OAuth callback URL (e.g., `https://yourapp.com/integrations/tiktok/callback`) |
+| `TIKTOK_SERVICE_ID` | Optional TikTok service authorization ID. When set, `/integrations/tiktok/oauth/start` uses the newer service authorization URL and appends the app-generated `state`. |
 
 ### Optional / auto-populated
 

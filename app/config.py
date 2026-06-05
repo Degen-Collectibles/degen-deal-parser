@@ -247,6 +247,7 @@ class Settings(BaseSettings):
     tiktok_app_key: str = Field(default="", alias="TIKTOK_APP_KEY")
     tiktok_app_secret: str = Field(default="", alias="TIKTOK_APP_SECRET")
     tiktok_redirect_uri: str = Field(default="", alias="TIKTOK_REDIRECT_URI")
+    tiktok_service_id: str = Field(default="", alias="TIKTOK_SERVICE_ID")
     tiktok_shop_id: str = Field(default="", alias="TIKTOK_SHOP_ID")
     tiktok_shop_cipher: str = Field(default="", alias="TIKTOK_SHOP_CIPHER")
     tiktok_access_token: str = Field(default="", alias="TIKTOK_ACCESS_TOKEN")

@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
 
 import httpx
@@ -287,6 +288,49 @@ class TikTokRegressionTests(unittest.TestCase):
             )
 
         self.assertIn("Invalid refresh token", str(ctx.exception))
+
+    def test_tiktok_shop_oauth_start_wraps_service_authorization_link_with_session_state(self) -> None:
+        request = FakeTikTokRequest("/integrations/tiktok/oauth/start")
+
+        with patch.object(shopify_module, "require_role_response", return_value=None), patch.object(
+            main_module.settings, "tiktok_app_key", "expected-key"
+        ), patch.object(
+            main_module.settings, "tiktok_redirect_uri", "https://ops.degencollectibles.com/integrations/tiktok/callback"
+        ), patch.object(
+            main_module.settings, "tiktok_service_id", ""
+        ):
+            response = shopify_module.tiktok_oauth_shop_start(
+                request,  # type: ignore[arg-type]
+                service_id="7623804575159174925",
+            )
+
+        self.assertEqual(response.status_code, 302)
+        state = request.session.get("oauth_state")
+        self.assertIsInstance(state, str)
+        parsed = urlparse(response.headers["location"])
+        self.assertEqual(parsed.scheme, "https")
+        self.assertEqual(parsed.netloc, "services.tiktokshops.us")
+        self.assertEqual(parsed.path, "/open/authorize")
+        params = parse_qs(parsed.query)
+        self.assertEqual(params["service_id"], ["7623804575159174925"])
+        self.assertEqual(params["state"], [state])
+
+    def test_tiktok_shop_oauth_start_rejects_invalid_service_id(self) -> None:
+        request = FakeTikTokRequest("/integrations/tiktok/oauth/start")
+
+        with patch.object(shopify_module, "require_role_response", return_value=None), patch.object(
+            main_module.settings, "tiktok_app_key", "expected-key"
+        ), patch.object(
+            main_module.settings, "tiktok_redirect_uri", "https://ops.degencollectibles.com/integrations/tiktok/callback"
+        ):
+            with self.assertRaises(HTTPException) as ctx:
+                shopify_module.tiktok_oauth_shop_start(
+                    request,  # type: ignore[arg-type]
+                    service_id="https://services.tiktokshops.us/open/authorize?service_id=7623804575159174925",
+                )
+
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertEqual(ctx.exception.detail, "TikTok service_id must be numeric")
 
     def test_tiktok_get_detail_requests_sign_empty_body(self) -> None:
         url, body_json, headers = build_tiktok_request(

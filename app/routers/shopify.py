@@ -25,6 +25,7 @@ from ..db import get_session
 router = APIRouter(route_class=CSRFProtectedRoute)
 
 TIKTOK_SHOP_OAUTH_AUTHORIZE_URL = "https://auth.tiktok-shops.com/oauth/authorize"
+TIKTOK_SHOP_SERVICE_AUTHORIZE_URL = "https://services.tiktokshops.us/open/authorize"
 TIKTOK_CREATOR_OAUTH_AUTHORIZE_URL = "https://www.tiktok.com/v2/auth/authorize/"
 TIKTOK_CREATOR_OAUTH_SCOPE = "data.analytics.public.read"
 
@@ -42,6 +43,28 @@ def _tiktok_creator_redirect_uri() -> str:
     if base:
         return f"{base}/integrations/tiktok/creator-callback"
     return ""
+
+
+def _clean_tiktok_service_id(value: Optional[str]) -> str:
+    service_id = str(value or "").strip()
+    if not service_id:
+        return ""
+    if not service_id.isdigit():
+        raise HTTPException(status_code=400, detail="TikTok service_id must be numeric")
+    return service_id
+
+
+def _build_tiktok_shop_authorize_url(
+    *,
+    app_key: str,
+    redirect_uri: str,
+    state: str,
+    service_id: str = "",
+) -> str:
+    resolved_service_id = _clean_tiktok_service_id(service_id or settings.tiktok_service_id)
+    if resolved_service_id:
+        return f"{TIKTOK_SHOP_SERVICE_AUTHORIZE_URL}?{urlencode({'service_id': resolved_service_id, 'state': state})}"
+    return f"{TIKTOK_SHOP_OAUTH_AUTHORIZE_URL}?{urlencode({'app_key': app_key, 'redirect_uri': redirect_uri, 'state': state})}"
 
 
 @router.post("/webhooks/shopify/orders")
@@ -126,19 +149,25 @@ async def shopify_orders_webhook(request: Request):
 
 
 @router.get("/integrations/tiktok/oauth/start")
-def tiktok_oauth_shop_start(request: Request):
+def tiktok_oauth_shop_start(request: Request, service_id: Optional[str] = None):
     if denial := require_role_response(request, "admin"):
         return denial
     app_key = (settings.tiktok_app_key or "").strip()
     redirect_uri = (settings.tiktok_redirect_uri or "").strip()
-    if not app_key or not redirect_uri:
+    resolved_service_id = _clean_tiktok_service_id(service_id or settings.tiktok_service_id)
+    if not app_key or (not redirect_uri and not resolved_service_id):
         raise HTTPException(
             status_code=400,
-            detail="TikTok app key and TIKTOK_REDIRECT_URI must be configured to start Shop OAuth",
+            detail="TikTok app key and either TIKTOK_REDIRECT_URI or TIKTOK_SERVICE_ID must be configured to start Shop OAuth",
         )
     state = secrets.token_urlsafe(32)
     request.session["oauth_state"] = state
-    auth_url = f"{TIKTOK_SHOP_OAUTH_AUTHORIZE_URL}?{urlencode({'app_key': app_key, 'redirect_uri': redirect_uri, 'state': state})}"
+    auth_url = _build_tiktok_shop_authorize_url(
+        app_key=app_key,
+        redirect_uri=redirect_uri,
+        state=state,
+        service_id=resolved_service_id,
+    )
     return RedirectResponse(url=auth_url, status_code=302)
 
 
