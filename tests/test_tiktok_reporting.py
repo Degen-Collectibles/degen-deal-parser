@@ -35,6 +35,7 @@ from scripts.tiktok_backfill import (
     affiliate_order_attribution_from_payload,
     build_tiktok_request,
     fetch_tiktok_creator_affiliate_orders_page,
+    request_json,
     upsert_tiktok_order,
     upsert_tiktok_order_affiliate_attribution,
     upsert_tiktok_order_creator_affiliate_attribution,
@@ -425,6 +426,60 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(creator_auth.access_token, "creator-access-token")
         self.assertIn("creator.affiliate_collaboration.read", creator_auth.scopes_json)
 
+    def test_tiktok_shop_creator_callback_rejects_seller_token(self) -> None:
+        oauth_state = "creator-shop-state"
+        request = FakeTikTokRequest(
+            "/integrations/tiktok/callback",
+            query_params={
+                "code": "seller-auth-code",
+                "state": oauth_state,
+            },
+        )
+        request.session["oauth_state"] = oauth_state
+        request.session["tiktok_oauth_kind"] = "shop_creator"
+        request.session["tiktok_oauth_creator_username"] = "degenboss0"
+
+        fake_token_result = SimpleNamespace(
+            access_token="seller-access-token",
+            refresh_token="seller-refresh-token",
+            access_token_expires_at=None,
+            refresh_token_expires_at=None,
+            seller_id=None,
+            shop_id="dc-llc-shop",
+            shop_cipher="dc-llc-cipher",
+            open_id="seller-open-id",
+            raw_payload={
+                "user_type": 0,
+                "open_id": "seller-open-id",
+                "seller_name": "D.C. LLC",
+                "granted_scopes": ["seller.affiliate_collaboration.read"],
+            },
+        )
+
+        with patch.object(main_module.settings, "tiktok_app_key", "expected-key"), patch.object(
+            main_module.settings, "tiktok_app_secret", "secret"
+        ), patch.object(
+            shopify_module,
+            "exchange_tiktok_authorization_code",
+            return_value=fake_token_result,
+        ), patch.object(
+            shopify_module,
+            "run_write_with_retry",
+        ) as run_write_with_retry_mock, patch.object(
+            shopify_module, "update_tiktok_integration_state"
+        ) as update_tiktok_integration_state_mock:
+            response = shopify_module.tiktok_oauth_callback(request)  # type: ignore[arg-type]
+
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(
+            response.headers["location"],
+            "/status?error=TikTok+creator+authorization+returned+a+seller+token",
+        )
+        run_write_with_retry_mock.assert_not_called()
+        update_tiktok_integration_state_mock.assert_called_once()
+        with Session(self.engine) as session:
+            self.assertEqual(len(session.exec(select(TikTokCreatorAuth)).all()), 0)
+
     def test_tiktok_get_detail_requests_sign_empty_body(self) -> None:
         url, body_json, headers = build_tiktok_request(
             base_url="https://open-api.tiktokglobalshop.com",
@@ -456,6 +511,23 @@ class TikTokRegressionTests(unittest.TestCase):
         )
 
         self.assertEqual(body_json, '{"create_time_ge":123}')
+
+    def test_tiktok_request_json_redacts_access_token_from_http_error(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                401,
+                json={"code": 105001, "message": "access token is invalid"},
+                request=request,
+            )
+
+        url = "https://open-api.tiktokglobalshop.com/order/202309/orders/search?access_token=TTP_secret_token&app_key=app-key"
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            with self.assertRaises(httpx.HTTPStatusError) as ctx:
+                request_json(client, method="POST", url=url, raw_body="{}")
+
+        error_text = str(ctx.exception)
+        self.assertNotIn("TTP_secret_token", error_text)
+        self.assertIn("access_token=REDACTED", error_text)
 
     def test_tiktok_callback_success_exchanges_code_with_shop_auth_endpoint(self) -> None:
         oauth_state = "test-oauth-state"

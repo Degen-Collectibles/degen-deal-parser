@@ -10,7 +10,7 @@ import hashlib
 import json
 import secrets
 import threading
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import urlencode, urlparse, urlunparse
 
 from fastapi import APIRouter, Depends, Form, Query, Request
@@ -65,6 +65,18 @@ def _build_tiktok_shop_authorize_url(
     if resolved_service_id:
         return f"{TIKTOK_SHOP_SERVICE_AUTHORIZE_URL}?{urlencode({'service_id': resolved_service_id, 'state': state})}"
     return f"{TIKTOK_SHOP_OAUTH_AUTHORIZE_URL}?{urlencode({'app_key': app_key, 'redirect_uri': redirect_uri, 'state': state})}"
+
+
+def _tiktok_scope_set(value: Any) -> set[str]:
+    if isinstance(value, dict):
+        value = value.get("granted_scopes") or value.get("scopes") or value.get("scope") or []
+    if isinstance(value, str):
+        raw_scopes = value.replace(",", " ").split()
+    elif isinstance(value, list):
+        raw_scopes = [str(item or "") for item in value]
+    else:
+        raw_scopes = []
+    return {scope.strip() for scope in raw_scopes if scope and scope.strip()}
 
 
 @router.post("/webhooks/shopify/orders")
@@ -312,7 +324,58 @@ def tiktok_oauth_callback(request: Request):
             raw_token_payload = getattr(token_result, "raw_payload", None) or {}
             token_user_type = str(raw_token_payload.get("user_type") or "").strip()
             is_shop_creator_auth = oauth_kind == "shop_creator" or token_user_type == "1"
+            if oauth_kind == "shop_creator" and token_user_type != "1":
+                callback_summary["exchange_error"] = "TikTok creator authorization returned a seller token"
+                callback_summary["user_type"] = token_user_type or "unknown"
+                callback_summary["creator_username"] = oauth_creator_username
+                callback_summary["granted_scopes"] = sorted(_tiktok_scope_set(raw_token_payload))
+                update_tiktok_integration_state(
+                    last_error=callback_summary["exchange_error"],
+                    last_callback=callback_summary,
+                )
+                request.session["tiktok_callback"] = callback_summary
+                print(
+                    structured_log_line(
+                        runtime=runtime_name,
+                        action="tiktok.creator_shop.callback.wrong_user_type",
+                        success=False,
+                        request_path=str(request.url.path),
+                        query=summarize_tiktok_query_params(query_params),
+                        creator_username=oauth_creator_username,
+                        user_type=token_user_type or "unknown",
+                    )
+                )
+                return RedirectResponse(
+                    url="/status?error=TikTok+creator+authorization+returned+a+seller+token",
+                    status_code=303,
+                )
             if is_shop_creator_auth:
+                raw_scopes = _tiktok_scope_set(raw_token_payload)
+                if "creator.affiliate_collaboration.read" not in raw_scopes:
+                    callback_summary["exchange_error"] = "TikTok creator authorization is missing creator affiliate scope"
+                    callback_summary["user_type"] = token_user_type or "1"
+                    callback_summary["creator_username"] = oauth_creator_username
+                    callback_summary["granted_scopes"] = sorted(raw_scopes)
+                    update_tiktok_integration_state(
+                        last_error=callback_summary["exchange_error"],
+                        last_callback=callback_summary,
+                    )
+                    request.session["tiktok_callback"] = callback_summary
+                    print(
+                        structured_log_line(
+                            runtime=runtime_name,
+                            action="tiktok.creator_shop.callback.scope_missing",
+                            success=False,
+                            request_path=str(request.url.path),
+                            query=summarize_tiktok_query_params(query_params),
+                            creator_username=oauth_creator_username,
+                            user_type=token_user_type or "1",
+                        )
+                    )
+                    return RedirectResponse(
+                        url="/status?error=TikTok+creator+authorization+missing+creator+affiliate+scope",
+                        status_code=303,
+                    )
                 creator_username = oauth_creator_username or normalize_tiktok_creator_username(
                     raw_token_payload.get("creator_username")
                     or raw_token_payload.get("user_name")

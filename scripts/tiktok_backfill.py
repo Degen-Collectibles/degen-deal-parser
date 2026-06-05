@@ -444,7 +444,13 @@ def request_json(
                     f"[tiktok_backfill] HTTP {response.status_code} response body: {body_text}",
                     file=sys.stderr,
                 )
-            response.raise_for_status()
+                safe_url = redact_http_log_text(str(response.request.url), max_len=500)
+                safe_request = httpx.Request(response.request.method, safe_url)
+                raise httpx.HTTPStatusError(
+                    f"HTTP {response.status_code} response for url '{safe_url}'",
+                    request=safe_request,
+                    response=response,
+                )
             payload = response.json()
             if not isinstance(payload, dict):
                 raise RuntimeError(f"Unexpected TikTok response payload type: {type(payload).__name__}")
