@@ -207,6 +207,7 @@ try:
         fetch_overview_performance_daily as _fetch_overview_performance_daily,
         fetch_stream_performance_per_minutes as _fetch_stream_performance_per_minutes,
         fetch_live_product_performance_list as _fetch_live_product_performance_list,
+        TIKTOK_AFFILIATE_ORDER_READ_SCOPE as _TIKTOK_AFFILIATE_ORDER_READ_SCOPE,
     )
 except ImportError:
     pull_tiktok_orders = None
@@ -225,6 +226,7 @@ except ImportError:
     _fetch_overview_performance_daily = None
     _fetch_stream_performance_per_minutes = None
     _fetch_live_product_performance_list = None
+    _TIKTOK_AFFILIATE_ORDER_READ_SCOPE = "seller.affiliate_collaboration.read"
     _product_record_from_payload = None
     _upsert_tiktok_product_row = None
 
@@ -3022,6 +3024,36 @@ def get_latest_tiktok_auth_row(session: Session) -> Optional[TikTokAuth]:
     return session.exec(stmt).first()
 
 
+def _parse_tiktok_scopes(scopes_json: Any) -> set[str]:
+    if not scopes_json:
+        return set()
+    try:
+        parsed = json.loads(scopes_json) if isinstance(scopes_json, str) else scopes_json
+    except Exception:
+        parsed = scopes_json
+    if isinstance(parsed, str):
+        raw_scopes = parsed.replace(",", " ").split()
+    elif isinstance(parsed, list):
+        raw_scopes = [str(item or "") for item in parsed]
+    else:
+        raw_scopes = []
+    return {scope.strip() for scope in raw_scopes if scope and scope.strip()}
+
+
+def _tiktok_auth_has_affiliate_order_scope(auth_row: Optional[TikTokAuth]) -> bool:
+    return bool(
+        auth_row
+        and _TIKTOK_AFFILIATE_ORDER_READ_SCOPE in _parse_tiktok_scopes(auth_row.scopes_json)
+    )
+
+
+def tiktok_affiliate_order_scope_authorized(session: Optional[Session]) -> bool:
+    if session is None:
+        return False
+    auth_rows = session.exec(select(TikTokAuth).order_by(TikTokAuth.updated_at.desc(), TikTokAuth.id.desc())).all()
+    return any(_tiktok_auth_has_affiliate_order_scope(row) for row in auth_rows)
+
+
 def ensure_tiktok_auth_row(session: Session) -> Optional[TikTokAuth]:
     auth_row = get_latest_tiktok_auth_row(session)
     configured_shop_id = (settings.tiktok_shop_id or "").strip()
@@ -3394,6 +3426,7 @@ def run_tiktok_pull_cycle(
             )
             return result
 
+        affiliate_attribution_enabled = tiktok_affiliate_order_scope_authorized(session)
         since_dt = parse_report_datetime(since)
         if since_dt is None:
             since_dt = utcnow() - timedelta(hours=max(float(lookback_hours or settings.tiktok_sync_lookback_hours or 0.0), 1.0))
@@ -3428,10 +3461,21 @@ def run_tiktok_pull_cycle(
                 since=since_dt,
                 limit=safe_limit,
                 dry_run=False,
+                affiliate_attribution=affiliate_attribution_enabled,
                 runtime_name=runtime_name,
             )
 
-        totals = {"fetched": 0, "inserted": 0, "updated": 0, "failed": 0, "detail_calls": 0}
+        totals = {
+            "fetched": 0,
+            "inserted": 0,
+            "updated": 0,
+            "failed": 0,
+            "detail_calls": 0,
+            "affiliate_attributed": 0,
+            "affiliate_missing": 0,
+            "affiliate_failed": 0,
+            "affiliate_scope_missing": 0,
+        }
         pulled_shop_ids: list[str] = []
         shops_pulled = 0
         last_credential_error: Optional[BaseException] = None
@@ -3468,6 +3512,11 @@ def run_tiktok_pull_cycle(
             totals["updated"] += int(summary.updated)
             totals["failed"] += int(summary.failed)
             totals["detail_calls"] += int(summary.detail_calls)
+            totals["affiliate_attributed"] += int(getattr(summary, "affiliate_attributed", 0) or 0)
+            totals["affiliate_missing"] += int(getattr(summary, "affiliate_missing", 0) or 0)
+            totals["affiliate_failed"] += int(getattr(summary, "affiliate_failed", 0) or 0)
+            if getattr(summary, "affiliate_scope_missing", False):
+                totals["affiliate_scope_missing"] += 1
 
         if shops_pulled == 0 and last_credential_error is not None:
             raise last_credential_error
@@ -3486,6 +3535,11 @@ def run_tiktok_pull_cycle(
             "updated": totals["updated"],
             "failed": totals["failed"],
             "detail_calls": totals["detail_calls"],
+            "affiliate_order_scope_authorized": affiliate_attribution_enabled,
+            "affiliate_attributed": totals["affiliate_attributed"],
+            "affiliate_missing": totals["affiliate_missing"],
+            "affiliate_failed": totals["affiliate_failed"],
+            "affiliate_scope_missing": bool(totals["affiliate_scope_missing"]) or not affiliate_attribution_enabled,
         }
         update_tiktok_integration_state(
             is_pull_running=False,

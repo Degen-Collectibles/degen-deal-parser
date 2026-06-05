@@ -30,7 +30,12 @@ from app.reporting import (
     classify_tiktok_reporting_status,
     get_tiktok_reporting_rows,
 )
-from scripts.tiktok_backfill import build_tiktok_request, upsert_tiktok_order
+from scripts.tiktok_backfill import (
+    affiliate_order_attribution_from_payload,
+    build_tiktok_request,
+    upsert_tiktok_order,
+    upsert_tiktok_order_affiliate_attribution,
+)
 from app.tiktok.tiktok_ingest import (
     TIKTOK_DEFAULT_API_BASE_URL,
     TIKTOK_SHOP_AUTH_BASE_URL,
@@ -688,6 +693,13 @@ class TikTokRegressionTests(unittest.TestCase):
                 "tax_amount": "1.5",
                 "financial_status": "paid",
                 "shipping_status": "shipped",
+                "skus": [
+                    {
+                        "creator_username": "degenboss0",
+                        "content_type": "LIVE",
+                        "content_id": "live-123",
+                    }
+                ],
                 "sku_list": [
                     {"product_name": "Charizard", "quantity": 2, "price": "5.00"},
                     {"sku_name": "Pikachu", "qty": 1, "sale_price": "2.50"},
@@ -702,6 +714,9 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(normalized["order_number"], "#1001")
         self.assertEqual(normalized["total_price"], 12.5)
         self.assertEqual(json.loads(normalized["line_items_summary_json"])[0]["title"], "Charizard")
+        self.assertEqual(normalized["affiliate_creator_username"], "degenboss0")
+        self.assertEqual(normalized["affiliate_content_type"], "LIVE")
+        self.assertEqual(normalized["affiliate_content_id"], "live-123")
         self.assertEqual(snapshot["line_item_count"], 2)
         self.assertEqual(snapshot["customer_name"], "Casey")
 
@@ -767,6 +782,51 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(stored.total_price, 15.0)
         self.assertEqual(json.loads(stored.line_items_summary_json)[0]["unit_price"], 15.0)
         self.assertEqual(record["tiktok_order_id"], "tt-1")
+
+    def test_tiktok_affiliate_order_payload_updates_creator_attribution(self) -> None:
+        with Session(self.engine) as session:
+            session.add(
+                TikTokOrder(
+                    tiktok_order_id="577419230985949431",
+                    order_number="577419230985949431",
+                    created_at=datetime(2026, 6, 4, 20, 19, tzinfo=timezone.utc),
+                    updated_at=datetime(2026, 6, 4, 20, 19, tzinfo=timezone.utc),
+                    financial_status="paid",
+                    subtotal_price=4.0,
+                    total_price=4.19,
+                )
+            )
+            session.commit()
+
+            payload = {
+                "id": "577419230985949431",
+                "status": "PROCESSING",
+                "create_time": 1780604364,
+                "skus": [
+                    {
+                        "creator_username": "degenboss0",
+                        "content_type": "LIVE",
+                        "content_id": "7493990579714164574",
+                        "product_name": "NIHIL ZERO PACK",
+                        "product_id": "1729435310697057093",
+                        "quantity": 1,
+                    }
+                ],
+            }
+
+            attribution = affiliate_order_attribution_from_payload(payload)
+            result = upsert_tiktok_order_affiliate_attribution(session, payload)
+            session.commit()
+            stored = session.exec(
+                select(TikTokOrder).where(TikTokOrder.tiktok_order_id == "577419230985949431")
+            ).one()
+
+        self.assertEqual(attribution["affiliate_creator_username"], "degenboss0")
+        self.assertEqual(result, "updated")
+        self.assertEqual(stored.affiliate_creator_username, "degenboss0")
+        self.assertEqual(stored.affiliate_content_type, "LIVE")
+        self.assertEqual(stored.affiliate_content_id, "7493990579714164574")
+        self.assertIn("NIHIL ZERO PACK", stored.affiliate_attribution_json)
 
     def test_sqlite_schema_migration_creates_tiktok_webhook_enrichment_queue_table(self) -> None:
         with self.engine.begin() as connection:
@@ -2832,6 +2892,14 @@ class TikTokRegressionTests(unittest.TestCase):
         order_time = max(now_utc - timedelta(minutes=5), today_start_utc)
         with Session(self.engine) as session:
             session.add(
+                TikTokAuth(
+                    tiktok_shop_id="oauth-open-id",
+                    shop_cipher="shared-shop-cipher",
+                    access_token="token",
+                    scopes_json=json.dumps(["seller.affiliate_collaboration.read"]),
+                )
+            )
+            session.add(
                 TikTokOrder(
                     tiktok_order_id="main-account-order",
                     shop_id="7495987383262087496",
@@ -2961,6 +3029,113 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(boss_payload["stream_top_buyers"][0]["name"], "Boss Buyer")
         self.assertEqual({row["name"] for row in boss_payload["top_buyers"]}, {"Main Buyer", "Boss Buyer"})
         self.assertEqual(sum(point["count"] for point in boss_payload["order_velocity"]), 1)
+
+    def test_tiktok_streamer_poll_prefers_affiliate_creator_for_shared_shop_same_sku(self) -> None:
+        import app.routers.tiktok_streamer as streamer_module
+        from starlette.requests import Request as _Request
+
+        now_utc = datetime.now(timezone.utc)
+        now_ts = int(now_utc.timestamp())
+        main_start = now_ts - 1800
+        boss_start = now_ts - 1700
+        order_time = now_utc - timedelta(minutes=4)
+        with Session(self.engine) as session:
+            session.add(
+                TikTokAuth(
+                    tiktok_shop_id="oauth-open-id",
+                    shop_cipher="shared-shop-cipher",
+                    access_token="token",
+                    scopes_json=json.dumps(["seller.order.info", "seller.affiliate_collaboration.read"]),
+                )
+            )
+            for order_id, creator, subtotal in (
+                ("main-affiliate-order", "degencollectibles", 14.99),
+                ("boss-affiliate-order", "degenboss0", 4.0),
+            ):
+                session.add(
+                    TikTokOrder(
+                        tiktok_order_id=order_id,
+                        shop_id="oauth-open-id",
+                        shop_cipher="shared-shop-cipher",
+                        order_number=order_id,
+                        created_at=order_time,
+                        updated_at=order_time,
+                        customer_name="Buyer",
+                        financial_status="paid",
+                        subtotal_price=subtotal,
+                        total_price=subtotal,
+                        affiliate_creator_username=creator,
+                        affiliate_content_type="LIVE",
+                        affiliate_content_id=f"{creator}-live",
+                        line_items_json=json.dumps([
+                            {
+                                "product_id": "shared-surprise-set",
+                                "product_name": "NIHIL ZERO PACK",
+                                "quantity": 1,
+                                "sale_price": subtotal,
+                                "sku_type": "UNKNOWN",
+                            }
+                        ]),
+                    )
+                )
+            session.commit()
+
+            stream_sessions = [
+                {
+                    "id": "main-live",
+                    "title": "Main live",
+                    "username": "degencollectibles",
+                    "shop_id": "oauth-open-id",
+                    "shop_cipher": "shared-shop-cipher",
+                    "start_time": main_start,
+                    "end_time": 0,
+                },
+                {
+                    "id": "boss-live",
+                    "title": "Boss live",
+                    "username": "degenboss0",
+                    "shop_id": "oauth-open-id",
+                    "shop_cipher": "shared-shop-cipher",
+                    "start_time": boss_start,
+                    "end_time": 0,
+                },
+            ]
+            req = _Request({
+                "type": "http",
+                "method": "GET",
+                "path": "/tiktok/streamer/poll",
+                "headers": [],
+                "scheme": "http",
+                "server": ("testserver", 80),
+            })
+            streamer_module._gmv_cache.clear()
+            with patch("app.routers.tiktok_streamer._require_live_stream", return_value=None), patch.object(
+                streamer_module,
+                "_get_live_sessions_list",
+                return_value=stream_sessions,
+            ):
+                main_payload = streamer_module.tiktok_streamer_poll(
+                    request=req,
+                    creator="degencollectibles",
+                    stream=None,
+                    since=None,
+                    session=session,
+                )
+                boss_payload = streamer_module.tiktok_streamer_poll(
+                    request=req,
+                    creator="degenboss0",
+                    stream=None,
+                    since=None,
+                    session=session,
+                )
+
+        self.assertEqual([row["tiktok_order_id"] for row in main_payload["orders"]], ["main-affiliate-order"])
+        self.assertEqual([row["tiktok_order_id"] for row in boss_payload["orders"]], ["boss-affiliate-order"])
+        self.assertEqual(main_payload["creator_order_attribution"], "affiliate_orders")
+        self.assertEqual(boss_payload["creator_order_attribution"], "affiliate_orders")
+        self.assertEqual(main_payload["stream_gmv"], 14.99)
+        self.assertEqual(boss_payload["stream_gmv"], 4.0)
+        self.assertNotEqual(main_payload["surprise_sets_total_gmv"], boss_payload["surprise_sets_total_gmv"])
 
     def test_tiktok_streamer_poll_keeps_refund_updates_visible(self) -> None:
         import app.routers.tiktok_streamer as streamer_module
@@ -3330,6 +3505,14 @@ class TikTokRegressionTests(unittest.TestCase):
         overlap_order_time = datetime.fromtimestamp(now_ts - 300, tz=timezone.utc)
         with Session(self.engine) as session:
             session.add(
+                TikTokAuth(
+                    tiktok_shop_id="oauth-open-id",
+                    shop_cipher="shared-shop-cipher",
+                    access_token="token",
+                    scopes_json=json.dumps(["seller.affiliate_collaboration.read"]),
+                )
+            )
+            session.add(
                 TikTokOrder(
                     tiktok_order_id="main-overlap-order",
                     order_number="#1001",
@@ -3424,7 +3607,7 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(payload["creator_order_attribution"], "live_products")
         self.assertIn("live product attribution", payload["creator_order_attribution_message"])
 
-    def test_tiktok_streamer_poll_excludes_inferred_secondary_products_for_main_creator(self) -> None:
+    def test_tiktok_streamer_poll_pauses_overlap_when_attribution_is_unavailable(self) -> None:
         import app.routers.tiktok_streamer as streamer_module
         from starlette.requests import Request as _Request
 
@@ -3434,6 +3617,14 @@ class TikTokRegressionTests(unittest.TestCase):
         main_order_time = datetime.fromtimestamp(now_ts - 180, tz=timezone.utc)
         boss_order_time = datetime.fromtimestamp(now_ts - 120, tz=timezone.utc)
         with Session(self.engine) as session:
+            session.add(
+                TikTokAuth(
+                    tiktok_shop_id="oauth-open-id",
+                    shop_cipher="shared-shop-cipher",
+                    access_token="token",
+                    scopes_json=json.dumps(["seller.affiliate_collaboration.read"]),
+                )
+            )
             session.add(
                 TikTokOrder(
                     tiktok_order_id="main-product-order",
@@ -3565,18 +3756,11 @@ class TikTokRegressionTests(unittest.TestCase):
                     session=session,
                 )
 
-        self.assertEqual(
-            {row["tiktok_order_id"] for row in payload["orders"]},
-            {
-                "main-product-order",
-                "main-overlap-order-0",
-                "main-overlap-order-1",
-                "main-overlap-order-2",
-                "main-overlap-order-3",
-            },
-        )
-        self.assertEqual(payload["total_count"], 5)
-        self.assertEqual(payload["stream_top_sellers"][0]["title"], "Main Pack")
+        self.assertEqual(payload["orders"], [])
+        self.assertEqual(payload["total_count"], 0)
+        self.assertEqual(payload["stream_gmv"], 0.0)
+        self.assertEqual(payload["stream_orders"], 0)
+        self.assertEqual(payload["stream_items"], 0)
 
     def test_tiktok_streamer_poll_uses_live_product_ids_for_main_creator(self) -> None:
         import app.routers.tiktok_streamer as streamer_module
@@ -3587,6 +3771,14 @@ class TikTokRegressionTests(unittest.TestCase):
         boss_start = now_ts - 1800
         order_time = datetime.fromtimestamp(now_ts - 120, tz=timezone.utc)
         with Session(self.engine) as session:
+            session.add(
+                TikTokAuth(
+                    tiktok_shop_id="oauth-open-id",
+                    shop_cipher="shared-shop-cipher",
+                    access_token="token",
+                    scopes_json=json.dumps(["seller.affiliate_collaboration.read"]),
+                )
+            )
             for idx in range(2):
                 session.add(
                     TikTokOrder(
@@ -3844,7 +4036,18 @@ class TikTokRegressionTests(unittest.TestCase):
             }
 
         self.assertTrue({"tiktok_shop_id", "access_token", "refresh_token", "scopes_json"}.issubset(auth_columns))
-        self.assertTrue({"tiktok_order_id", "shop_id", "line_items_summary_json", "order_status"}.issubset(order_columns))
+        self.assertTrue(
+            {
+                "tiktok_order_id",
+                "shop_id",
+                "line_items_summary_json",
+                "order_status",
+                "affiliate_creator_username",
+                "affiliate_content_type",
+                "affiliate_content_id",
+                "affiliate_attribution_json",
+            }.issubset(order_columns)
+        )
 
 
 if __name__ == "__main__":

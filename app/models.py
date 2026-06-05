@@ -631,6 +631,10 @@ class TikTokOrder(SQLModel, table=True):
     fulfillment_status: Optional[str] = Field(default=None, index=True)
     order_status: Optional[str] = Field(default=None, index=True)
     currency: Optional[str] = Field(default=None, index=True)
+    affiliate_creator_username: Optional[str] = Field(default=None, index=True)
+    affiliate_content_type: Optional[str] = Field(default=None, index=True)
+    affiliate_content_id: Optional[str] = Field(default=None, index=True)
+    affiliate_attribution_json: str = "{}"
     line_items_json: str = "[]"
     line_items_summary_json: str = "[]"
     raw_payload: str = "{}"

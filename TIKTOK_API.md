@@ -173,6 +173,20 @@ Base URL: `https://open-api.tiktokglobalshop.com`
 
 Returns full order objects with line items, pricing, shipping, and status.
 
+### Search Seller Affiliate Orders
+
+| Detail | Value |
+|---|---|
+| Path | `/affiliate_seller/202410/orders/search` |
+| Method | `POST` |
+| Required scope | `seller.affiliate_collaboration.read` |
+| Pagination | `page_size` (max 100), `page_token` |
+| Date filter body | `create_time_ge`, `create_time_lt` (epoch seconds) |
+
+This is the Seller Center creator-attribution surface. Standard order search/detail is shop-level and may not include the Seller Center `LIVE: <creator>` tag. Affiliate orders include SKU-level fields such as `creator_username`, `content_type` (`LIVE`, `VIDEO`, etc.), and `content_id`. The streamer dashboard stores these as `TikTokOrder.affiliate_creator_username`, `affiliate_content_type`, `affiliate_content_id`, and `affiliate_attribution_json`.
+
+If TikTok returns `105005 Access denied`, the app/token is missing `seller.affiliate_collaboration.read`; normal order sync should continue, but shared-shop stream splitting will remain paused until the scope is enabled and DC LLC is reauthorized.
+
 ### Key Order Fields
 
 | Field | Description |
@@ -517,6 +531,7 @@ Live chat messages are captured via the **TikSync SDK**, a third-party WebSocket
 | `/v2/oauth/token/` | POST | — | Exchange/refresh Creator token |
 | `/order/202309/orders/search` | POST | Shop | Search orders |
 | `/order/202309/orders` | GET | Shop | Get order details |
+| `/affiliate_seller/202410/orders/search` | POST | Shop | Search seller affiliate orders with creator attribution |
 | `/product/202309/products/search` | POST | Shop | Search products |
 | `/product/202309/products` | GET | Shop | Get product details |
 | `/analytics/202509/shop_lives/overview_performance` | GET | Shop | Daily aggregated live stats (delayed ~2d) |

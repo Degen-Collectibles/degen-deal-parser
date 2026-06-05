@@ -47,6 +47,8 @@ SHOP_TOKEN_REFRESH_PATH = TIKTOK_SHOP_TOKEN_REFRESH_PATH
 TIKTOK_API_VERSION = "202309"
 ORDER_SEARCH_PATH = f"/order/{TIKTOK_API_VERSION}/orders/search"
 ORDER_DETAIL_PATH = f"/order/{TIKTOK_API_VERSION}/orders"
+AFFILIATE_SELLER_ORDER_SEARCH_PATH = "/affiliate_seller/202410/orders/search"
+TIKTOK_AFFILIATE_ORDER_READ_SCOPE = "seller.affiliate_collaboration.read"
 PRODUCT_SEARCH_PATH = f"/product/{TIKTOK_API_VERSION}/products/search"
 PRODUCT_CREATE_PATH = f"/product/{TIKTOK_API_VERSION}/products"
 PRODUCT_DETAIL_PATH = f"/product/{TIKTOK_API_VERSION}/products"
@@ -71,6 +73,10 @@ class TikTokPullSummary:
     failed: int = 0
     detail_calls: int = 0
     auth_updated: int = 0
+    affiliate_attributed: int = 0
+    affiliate_missing: int = 0
+    affiliate_failed: int = 0
+    affiliate_scope_missing: bool = False
 
 
 def parse_args() -> argparse.Namespace:
@@ -362,6 +368,20 @@ def raise_for_tiktok_error(payload: Any, *, path: str) -> None:
     raise RuntimeError(f"{path}: {code} {message}")
 
 
+def tiktok_affiliate_order_error_is_scope_missing(exc: BaseException) -> bool:
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    text = str(exc).lower()
+    if status_code in (401, 403):
+        return True
+    return (
+        "105005" in text
+        or "access denied" in text
+        or "required access scope" in text
+        or "not authorized to access the endpoint" in text
+    )
+
+
 def redact_http_log_text(text: str, max_len: int = 500) -> str:
     """Truncate and redact tokens from text logged on HTTP errors."""
     if not text:
@@ -484,6 +504,77 @@ def _first_present(payload: dict[str, Any], keys: tuple[str, ...]) -> Optional[A
     return None
 
 
+def _clean_affiliate_creator_username(value: Any) -> Optional[str]:
+    text = str(value or "").strip().lstrip("@").lower()
+    return text or None
+
+
+def _unique_nonempty(values: list[Any], *, transform=str) -> list[str]:
+    seen: set[str] = set()
+    results: list[str] = []
+    for value in values:
+        if value in (None, ""):
+            continue
+        text = transform(value)
+        if text in (None, ""):
+            continue
+        text = str(text).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        results.append(text)
+    return results
+
+
+def _affiliate_sku_list(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    skus = payload.get("skus") or payload.get("sku_list") or payload.get("line_items") or []
+    if isinstance(skus, dict):
+        return [skus]
+    if not isinstance(skus, list):
+        return []
+    return [item for item in skus if isinstance(item, dict)]
+
+
+def affiliate_order_attribution_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    order_id = str(
+        _first_present(payload, ("id", "order_id", "orderId", "order_no", "order_number"))
+        or ""
+    ).strip()
+    if not order_id:
+        return {}
+
+    skus = _affiliate_sku_list(payload)
+    creators = _unique_nonempty(
+        [sku.get("creator_username") or sku.get("creator_name") for sku in skus],
+        transform=lambda value: _clean_affiliate_creator_username(value) or "",
+    )
+    content_types = _unique_nonempty(
+        [sku.get("content_type") for sku in skus],
+        transform=lambda value: str(value or "").strip().upper(),
+    )
+    content_ids = _unique_nonempty([sku.get("content_id") for sku in skus])
+    attribution_types = _unique_nonempty([sku.get("attribution_type") for sku in skus])
+
+    if not (creators or content_types or content_ids or attribution_types):
+        return {}
+
+    return {
+        "tiktok_order_id": order_id,
+        "affiliate_creator_username": creators[0] if creators else None,
+        "affiliate_content_type": content_types[0] if content_types else None,
+        "affiliate_content_id": content_ids[0] if content_ids else None,
+        "affiliate_attribution_json": json_dumps(
+            {
+                "creator_usernames": creators,
+                "content_types": content_types,
+                "content_ids": content_ids,
+                "attribution_types": attribution_types,
+                "order": payload,
+            }
+        ),
+    }
+
+
 _TIKTOK_CREATED_AT_ALIASES = ("create_time", "created_time", "created_at", "order_create_time")
 
 
@@ -540,6 +631,7 @@ def order_record_from_payload(
         or []
     )
     normalized_line_items = normalize_tiktok_line_items(line_items)
+    affiliate_attribution = affiliate_order_attribution_from_payload(payload)
 
     return {
         "tiktok_order_id": order_id,
@@ -569,6 +661,10 @@ def order_record_from_payload(
         ).strip(),
         "fulfillment_status": str(_first_present(payload, ("fulfillment_status", "shipping_status")) or "").strip() or None,
         "order_status": str(_first_present(payload, ("order_status", "status")) or "").strip() or None,
+        "affiliate_creator_username": affiliate_attribution.get("affiliate_creator_username"),
+        "affiliate_content_type": affiliate_attribution.get("affiliate_content_type"),
+        "affiliate_content_id": affiliate_attribution.get("affiliate_content_id"),
+        "affiliate_attribution_json": affiliate_attribution.get("affiliate_attribution_json") or "{}",
         "line_items_json": json_dumps(line_items),
         "line_items_summary_json": json_dumps(normalized_line_items),
         "raw_payload": json_dumps(payload),
@@ -636,6 +732,10 @@ _TIKTOK_ENRICHABLE_FIELDS = (
     "subtotal_price",
     "total_tax",
     "subtotal_ex_tax",
+    "affiliate_creator_username",
+    "affiliate_content_type",
+    "affiliate_content_id",
+    "affiliate_attribution_json",
     "line_items_json",
     "line_items_summary_json",
 )
@@ -652,6 +752,10 @@ _TIKTOK_PAYLOAD_FIELD_ALIASES = {
     "financial_status": ("payment_status", "financial_status", "pay_status"),
     "fulfillment_status": ("fulfillment_status", "shipping_status"),
     "order_status": ("order_status", "status"),
+    "affiliate_creator_username": ("affiliate_creator_username", "creator_username", "creator_name", "skus"),
+    "affiliate_content_type": ("affiliate_content_type", "content_type", "skus"),
+    "affiliate_content_id": ("affiliate_content_id", "content_id", "skus"),
+    "affiliate_attribution_json": ("affiliate_attribution_json", "skus"),
     "total_price": ("total_amount", "payment_amount", "pay_amount", "total_price", "actual_amount", "order_amount"),
     "subtotal_price": ("subtotal_price", "goods_amount", "item_amount", "sub_total"),
     "total_tax": ("tax_amount", "total_tax", "tax", "vat_amount"),
@@ -840,6 +944,86 @@ def fetch_tiktok_order_details(
         if isinstance(candidate, list):
             return [item for item in candidate if isinstance(item, dict)]
     return []
+
+
+def fetch_tiktok_seller_affiliate_orders_page(
+    client: httpx.Client,
+    *,
+    base_url: str,
+    app_key: str,
+    app_secret: str,
+    access_token: str,
+    shop_cipher: str,
+    since: Optional[datetime],
+    until: Optional[datetime],
+    page_size: int = 100,
+    cursor: Optional[str] = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    extra_query: dict[str, Any] = {
+        "page_size": str(max(1, min(page_size, 100))),
+    }
+    if cursor:
+        extra_query["page_token"] = cursor
+    body: dict[str, Any] = {}
+    if since:
+        body["create_time_ge"] = to_epoch_seconds(since)
+    if until:
+        body["create_time_lt"] = to_epoch_seconds(until)
+
+    url, body_json, headers = build_tiktok_request(
+        base_url=base_url,
+        path=AFFILIATE_SELLER_ORDER_SEARCH_PATH,
+        app_key=app_key,
+        app_secret=app_secret,
+        shop_id="",
+        shop_cipher=shop_cipher,
+        access_token=access_token,
+        body=body,
+        extra_query=extra_query,
+        api_version="",
+    )
+    payload = request_json(client, method="POST", url=url, raw_body=body_json, extra_headers=headers)
+    raise_for_tiktok_error(payload, path=AFFILIATE_SELLER_ORDER_SEARCH_PATH)
+    data = extract_tiktok_data(payload)
+    orders = data.get("orders") if isinstance(data, dict) else []
+    if not isinstance(orders, list):
+        orders = extract_first_order_list(payload)
+    return payload, [item for item in orders if isinstance(item, dict)]
+
+
+def upsert_tiktok_order_affiliate_attribution(
+    session: Session,
+    payload: dict[str, Any],
+    *,
+    dry_run: bool = False,
+) -> str:
+    attribution = affiliate_order_attribution_from_payload(payload)
+    order_id = str(attribution.get("tiktok_order_id") or "").strip()
+    if not order_id:
+        return "skipped"
+    existing = session.exec(
+        select(TikTokOrder).where(TikTokOrder.tiktok_order_id == order_id)
+    ).first()
+    if existing is None:
+        return "missing"
+    changed = False
+    for field_name in (
+        "affiliate_creator_username",
+        "affiliate_content_type",
+        "affiliate_content_id",
+        "affiliate_attribution_json",
+    ):
+        value = attribution.get(field_name)
+        if field_name == "affiliate_attribution_json":
+            value = value or "{}"
+        if value in (None, ""):
+            continue
+        if getattr(existing, field_name, None) != value:
+            setattr(existing, field_name, value)
+            changed = True
+    if changed and not dry_run:
+        session.add(existing)
+    return "updated" if changed else "unchanged"
 
 
 def _try_live_core_stats(
@@ -1930,6 +2114,96 @@ def fetch_tiktok_product_detail(
     return extract_tiktok_data(payload)
 
 
+def backfill_tiktok_order_affiliate_attributions(
+    session: Session,
+    *,
+    base_url: str,
+    app_key: str,
+    app_secret: str,
+    access_token: str,
+    shop_cipher: str,
+    since: Optional[datetime],
+    until: Optional[datetime],
+    dry_run: bool = False,
+    runtime_name: str = "tiktok_backfill",
+) -> TikTokPullSummary:
+    summary = TikTokPullSummary()
+    if not shop_cipher:
+        return summary
+
+    cursor: Optional[str] = None
+    with httpx.Client(timeout=40.0, follow_redirects=True) as client:
+        while True:
+            try:
+                payload, affiliate_orders = fetch_tiktok_seller_affiliate_orders_page(
+                    client,
+                    base_url=base_url,
+                    app_key=app_key,
+                    app_secret=app_secret,
+                    access_token=access_token,
+                    shop_cipher=shop_cipher,
+                    since=since,
+                    until=until,
+                    page_size=100,
+                    cursor=cursor,
+                )
+            except Exception as exc:
+                if tiktok_affiliate_order_error_is_scope_missing(exc):
+                    summary.affiliate_scope_missing = True
+                    print(
+                        structured_tiktok_log_line(
+                            runtime=runtime_name,
+                            action="tiktok.affiliate_orders.scope_missing",
+                            success=False,
+                            error=str(exc)[:500],
+                        )
+                    )
+                    return summary
+                summary.affiliate_failed += 1
+                print(
+                    structured_tiktok_log_line(
+                        runtime=runtime_name,
+                        action="tiktok.affiliate_orders.failed",
+                        success=False,
+                        error=str(exc)[:500],
+                    )
+                )
+                return summary
+
+            for affiliate_order in affiliate_orders:
+                result = upsert_tiktok_order_affiliate_attribution(
+                    session,
+                    affiliate_order,
+                    dry_run=dry_run,
+                )
+                if result in ("updated", "unchanged"):
+                    summary.affiliate_attributed += 1
+                elif result == "missing":
+                    summary.affiliate_missing += 1
+
+            if not dry_run and affiliate_orders:
+                _commit_retry_delay = 0.4
+                for _commit_attempt in range(4):
+                    try:
+                        session.commit()
+                        break
+                    except Exception as _commit_exc:
+                        if is_sqlite_lock_error(_commit_exc) and _commit_attempt < 3:
+                            time.sleep(_commit_retry_delay)
+                            _commit_retry_delay *= 2
+                            continue
+                        raise
+            elif dry_run and session.in_transaction():
+                session.rollback()
+
+            cursor = extract_next_cursor(payload)
+            if not cursor:
+                break
+            time.sleep(0.5)
+
+    return summary
+
+
 def backfill_tiktok_orders(
     session: Session,
     *,
@@ -1942,6 +2216,7 @@ def backfill_tiktok_orders(
     since: Optional[datetime] = None,
     limit: Optional[int] = None,
     dry_run: bool = False,
+    affiliate_attribution: bool = True,
     runtime_name: str = "tiktok_backfill",
 ) -> TikTokPullSummary:
     summary = TikTokPullSummary()
@@ -2086,6 +2361,24 @@ def backfill_tiktok_orders(
             if not cursor:
                 break
             time.sleep(0.5)
+
+    if affiliate_attribution:
+        affiliate_summary = backfill_tiktok_order_affiliate_attributions(
+            session,
+            base_url=base_url,
+            app_key=app_key,
+            app_secret=app_secret,
+            access_token=access_token,
+            shop_cipher=shop_cipher,
+            since=since,
+            until=until,
+            dry_run=dry_run,
+            runtime_name=runtime_name,
+        )
+        summary.affiliate_attributed += affiliate_summary.affiliate_attributed
+        summary.affiliate_missing += affiliate_summary.affiliate_missing
+        summary.affiliate_failed += affiliate_summary.affiliate_failed
+        summary.affiliate_scope_missing = affiliate_summary.affiliate_scope_missing
 
     return summary
 
@@ -2257,6 +2550,10 @@ def main() -> int:
         f"updated={summary.updated}, "
         f"failed={summary.failed}, "
         f"detail_calls={summary.detail_calls}, "
+        f"affiliate_attributed={summary.affiliate_attributed}, "
+        f"affiliate_missing={summary.affiliate_missing}, "
+        f"affiliate_failed={summary.affiliate_failed}, "
+        f"affiliate_scope_missing={summary.affiliate_scope_missing}, "
         f"dry_run={args.dry_run}"
     )
     return 0

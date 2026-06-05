@@ -86,6 +86,8 @@ STREAM_CREATOR_CHOICES: tuple[dict[str, str], ...] = (
 )
 DEFAULT_STREAM_CREATOR = "degencollectibles"
 CREATOR_ORDER_ATTRIBUTION_TIME_WINDOW = "time_window"
+CREATOR_ORDER_ATTRIBUTION_AFFILIATE_ORDERS = "affiliate_orders"
+CREATOR_ORDER_ATTRIBUTION_AFFILIATE_SCOPE_MISSING = "affiliate_scope_missing"
 CREATOR_ORDER_ATTRIBUTION_LIVE_PRODUCTS = "live_products"
 CREATOR_ORDER_ATTRIBUTION_NO_SESSION = "no_session"
 CREATOR_ORDER_ATTRIBUTION_RECENT_ORDERS = "recent_orders"
@@ -327,6 +329,111 @@ def _build_stream_context(
     }
 
 
+def _order_affiliate_creator(order: TikTokOrder) -> str:
+    return _normalize_creator(getattr(order, "affiliate_creator_username", None))
+
+
+def _order_matches_affiliate_creator(order: TikTokOrder, selected_creator: str) -> bool:
+    creator = _normalize_creator(selected_creator)
+    if not creator:
+        return True
+    if _order_affiliate_creator(order) == creator:
+        return True
+    raw = getattr(order, "affiliate_attribution_json", "") or ""
+    if not raw or raw == "{}":
+        return False
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return False
+    candidates = data.get("creator_usernames") or []
+    if isinstance(candidates, str):
+        candidates = [candidates]
+    if not isinstance(candidates, list):
+        return False
+    return any(_normalize_creator(candidate) == creator for candidate in candidates)
+
+
+def _filter_orders_to_affiliate_creator(
+    orders: list[TikTokOrder],
+    stream_context: Optional[dict[str, Any]],
+) -> list[TikTokOrder]:
+    stream_context = stream_context or {}
+    if stream_context.get("creator_order_attribution") == CREATOR_ORDER_ATTRIBUTION_AFFILIATE_SCOPE_MISSING:
+        return []
+    if not stream_context.get("creator_filter_enabled"):
+        return orders
+    selected_creator = _normalize_creator(stream_context.get("selected_creator"))
+    if not selected_creator:
+        return orders
+    attributed_orders = [order for order in orders if _order_affiliate_creator(order)]
+    if not attributed_orders:
+        return orders
+    return [order for order in orders if _order_matches_affiliate_creator(order, selected_creator)]
+
+
+def _has_affiliate_creator_orders(
+    session: Optional[Session],
+    stream_context: Optional[dict[str, Any]],
+    *,
+    fallback_start: Optional[datetime] = None,
+) -> bool:
+    if session is None:
+        return False
+    stream_context = stream_context or {}
+    selected_creator = _normalize_creator(stream_context.get("selected_creator"))
+    if not selected_creator:
+        return False
+    start = _coerce_utc_datetime(stream_context.get("start")) or _coerce_utc_datetime(fallback_start)
+    end = _coerce_utc_datetime(stream_context.get("end"))
+    query = select(TikTokOrder).where(TikTokOrder.affiliate_creator_username == selected_creator)
+    if start is not None:
+        query = query.where(TikTokOrder.created_at >= start)
+    if end is not None:
+        query = query.where(TikTokOrder.created_at <= end)
+    rows = session.exec(query.order_by(TikTokOrder.created_at.desc()).limit(25)).all()
+    return any(_is_enriched_order(order) and tiktok_order_is_paid(order) for order in rows)
+
+
+def _finalize_creator_order_attribution(
+    session: Optional[Session],
+    stream_context: Optional[dict[str, Any]],
+) -> dict[str, Any]:
+    context = dict(stream_context or {})
+    if not context.get("creator_filter_enabled"):
+        return context
+    affiliate_scope_authorized = tiktok_affiliate_order_scope_authorized(session)
+    context["affiliate_order_scope_authorized"] = affiliate_scope_authorized
+    if _has_affiliate_creator_orders(session, context):
+        context["creator_order_attribution"] = CREATOR_ORDER_ATTRIBUTION_AFFILIATE_ORDERS
+        context["creator_order_overlap_handles"] = []
+        return context
+    selected_creator = _normalize_creator(context.get("selected_creator"))
+    attribution = context.get("creator_order_attribution")
+    if (
+        not affiliate_scope_authorized
+        and (
+            attribution == CREATOR_ORDER_ATTRIBUTION_LIVE_PRODUCTS
+            or (selected_creator != DEFAULT_STREAM_CREATOR and attribution == CREATOR_ORDER_ATTRIBUTION_NO_SESSION)
+        )
+    ):
+        context["creator_order_attribution"] = CREATOR_ORDER_ATTRIBUTION_AFFILIATE_SCOPE_MISSING
+    return context
+
+
+def _build_effective_stream_context(
+    session: Optional[Session],
+    selected_creator: Optional[str] = None,
+    legacy_stream_id: Optional[str] = None,
+) -> dict[str, Any]:
+    context = _finalize_creator_order_attribution(
+        session,
+        _build_stream_context(selected_creator, legacy_stream_id=legacy_stream_id),
+    )
+    context = _apply_order_activity_fallback(session, context)
+    return _finalize_creator_order_attribution(session, context)
+
+
 def _coerce_utc_datetime(value: Optional[datetime]) -> Optional[datetime]:
     if value is None:
         return None
@@ -451,13 +558,19 @@ def _has_fresh_creator_order_activity(
         return False
     stream_context = stream_context or {}
     selected_creator = stream_context.get("selected_creator") or DEFAULT_STREAM_CREATOR
-    account_scope = _stream_account_scope_for_context(session, stream_context)
-    if selected_creator != DEFAULT_STREAM_CREATOR and not _account_scope_has_identity(account_scope):
-        return False
 
     now_utc = _coerce_utc_datetime(now) or datetime.now(timezone.utc)
     recent_cutoff = now_utc - timedelta(minutes=RECENT_ORDER_ACTIVITY_FALLBACK_MINUTES)
     activity_start = max(_coerce_utc_datetime(fallback_start) or recent_cutoff, recent_cutoff)
+    if _has_affiliate_creator_orders(
+        session,
+        {**stream_context, "start": activity_start, "end": None},
+    ):
+        return True
+
+    account_scope = _stream_account_scope_for_context(session, stream_context)
+    if selected_creator != DEFAULT_STREAM_CREATOR and not _account_scope_has_identity(account_scope):
+        return False
     query = select(TikTokOrder).where(TikTokOrder.created_at >= activity_start)
     query = _apply_tiktok_account_scope(query, account_scope)
     rows = session.exec(query.order_by(TikTokOrder.created_at.desc()).limit(50)).all()
@@ -533,7 +646,7 @@ def _public_tiktok_live_status_payload(session: Optional[Session] = None) -> dic
     channels: list[dict[str, Any]] = []
 
     for choice in STREAM_CREATOR_CHOICES:
-        context = _apply_order_activity_fallback(session, _build_stream_context(choice["id"]))
+        context = _build_effective_stream_context(session, choice["id"])
         live_session = context.get("live_session") or {}
         fallback_active = bool(context.get("order_activity_fallback"))
         session_title = str(live_session.get("title") or "").strip() or None
@@ -757,6 +870,7 @@ def _creator_order_rows_are_precise(stream_context: Optional[dict[str, Any]]) ->
         return True
     return stream_context.get("creator_order_attribution") in {
         CREATOR_ORDER_ATTRIBUTION_TIME_WINDOW,
+        CREATOR_ORDER_ATTRIBUTION_AFFILIATE_ORDERS,
         CREATOR_ORDER_ATTRIBUTION_LIVE_PRODUCTS,
         CREATOR_ORDER_ATTRIBUTION_RECENT_ORDERS,
     }
@@ -765,6 +879,10 @@ def _creator_order_rows_are_precise(stream_context: Optional[dict[str, Any]]) ->
 def _creator_order_attribution_message(stream_context: Optional[dict[str, Any]]) -> str:
     stream_context = stream_context or {}
     attribution = stream_context.get("creator_order_attribution")
+    if attribution == CREATOR_ORDER_ATTRIBUTION_AFFILIATE_ORDERS:
+        return "Filtering by TikTok Seller Center creator attribution."
+    if attribution == CREATOR_ORDER_ATTRIBUTION_AFFILIATE_SCOPE_MISSING:
+        return "TikTok creator-order attribution is not authorized yet. Add seller.affiliate_collaboration.read to the TikTok app and reauthorize DC LLC."
     if attribution == CREATOR_ORDER_ATTRIBUTION_LIVE_PRODUCTS:
         handles = [f"@{h}" for h in stream_context.get("creator_order_overlap_handles") or []]
         suffix = f" ({', '.join(handles)})" if handles else ""
@@ -1873,6 +1991,21 @@ def _filter_orders_to_live_products(
             "source": "",
         }
     scope = product_scope or _fetch_live_product_scope(stream_context)
+    if (
+        stream_context
+        and stream_context.get("creator_order_overlap_handles")
+        and not scope.get("product_ids")
+        and not scope.get("exclude_product_ids")
+        and not scope.get("source")
+    ):
+        return [], {
+            **scope,
+            "available": False,
+            "products": [],
+            "product_ids": set(),
+            "exclude_product_ids": set(),
+            "source": "overlap_attribution_unavailable",
+        }
     if not scope.get("product_ids") and not scope.get("exclude_product_ids") and db_session is not None:
         scope = _infer_live_product_scope(db_session, stream_context)
     selected_creator = (stream_context or {}).get("selected_creator") or ""
@@ -1994,6 +2127,7 @@ def _load_scoped_stream_orders(
         if _is_enriched_order(order)
         and (tiktok_order_is_paid(order) or (include_refund_updates and _is_refund_update_order(order)))
     ]
+    orders = _filter_orders_to_affiliate_creator(orders, stream_context)
     return _filter_orders_to_live_products(orders, stream_context, db_session=session)
 
 
@@ -2263,6 +2397,7 @@ def _streamer_session_gmv_uncached(session: Session, stream_context: Optional[di
     today_query = select(TikTokOrder).where(TikTokOrder.created_at >= today_start_utc)
     today_query = _apply_tiktok_account_scope(today_query, account_scope)
     today_orders = session.exec(today_query).all()
+    today_orders = _filter_orders_to_affiliate_creator(today_orders, stream_context)
 
     gmv = 0.0
     paid_count = 0
@@ -2401,6 +2536,7 @@ def _streamer_session_gmv_uncached(session: Session, stream_context: Optional[di
             q = q.where(TikTokOrder.created_at <= sr_end)
         q = _apply_tiktok_account_scope(q, account_scope)
         stream_orders_rows = session.exec(q).all()
+        stream_orders_rows = _filter_orders_to_affiliate_creator(stream_orders_rows, stream_context)
         product_scope = None
         if _should_use_live_product_scope(stream_context):
             stream_orders_rows, product_scope = _filter_orders_to_live_products(
@@ -2534,6 +2670,7 @@ def _compute_order_velocity(session: Session, stream_context: Optional[dict[str,
     )
     orders_query = _apply_tiktok_account_scope(orders_query, account_scope)
     scoped_orders = session.exec(orders_query).all()
+    scoped_orders = _filter_orders_to_affiliate_creator(scoped_orders, stream_context)
     if _should_use_live_product_scope(stream_context):
         scoped_orders, _scope = _filter_orders_to_live_products(
             scoped_orders,
@@ -2593,10 +2730,7 @@ def tiktok_streamer_page(
     if denial := _require_live_stream(request, session):
         return denial
 
-    stream_context = _apply_order_activity_fallback(
-        session,
-        _build_stream_context(creator, legacy_stream_id=stream),
-    )
+    stream_context = _build_effective_stream_context(session, creator, legacy_stream_id=stream)
     selected_creator = stream_context.get("selected_creator") or DEFAULT_STREAM_CREATOR
     selected_stream_id = stream_context.get("selected_stream_id") or ""
     current_streamer = get_current_streamer(session) or ""
@@ -2704,10 +2838,7 @@ def tiktok_streamer_poll(
 ):
     if denial := _require_live_stream(request, session):
         return denial
-    stream_context = _apply_order_activity_fallback(
-        session,
-        _build_stream_context(creator, legacy_stream_id=stream),
-    )
+    stream_context = _build_effective_stream_context(session, creator, legacy_stream_id=stream)
     selected_creator = stream_context.get("selected_creator") or DEFAULT_STREAM_CREATOR
     selected_stream_id = stream_context.get("selected_stream_id") or ""
     created_at_floor = datetime.now(timezone.utc) - timedelta(hours=24)
@@ -2877,10 +3008,7 @@ def tiktok_streamer_surprise_set_prices(
     if denial := _require_live_stream(request, session):
         return denial
 
-    stream_context = _apply_order_activity_fallback(
-        session,
-        _build_stream_context(creator, legacy_stream_id=stream),
-    )
+    stream_context = _build_effective_stream_context(session, creator, legacy_stream_id=stream)
     gmv_data = _streamer_session_gmv(session, stream_context=stream_context)
     manual_prices = _load_surprise_set_manual_prices(session)
     editor_sets = _build_surprise_set_price_editor_sets(gmv_data.get("surprise_sets", []), manual_prices)

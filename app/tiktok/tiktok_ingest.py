@@ -384,6 +384,66 @@ def normalize_tiktok_line_items(value: Any) -> list[dict[str, Any]]:
     return items
 
 
+def _clean_tiktok_creator_username(value: Any) -> Optional[str]:
+    text = str(value or "").strip().lstrip("@").lower()
+    return text or None
+
+
+def _tiktok_affiliate_sku_list(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    skus = payload.get("skus") or payload.get("sku_list") or payload.get("line_items") or []
+    if isinstance(skus, dict):
+        return [skus]
+    if not isinstance(skus, list):
+        return []
+    return [item for item in skus if isinstance(item, dict)]
+
+
+def _first_unique_text(values: list[Any], *, normalize: Callable[[Any], Optional[str]] | None = None) -> Optional[str]:
+    for value in values:
+        text = normalize(value) if normalize else str(value or "").strip()
+        if text:
+            return text
+    return None
+
+
+def _extract_tiktok_affiliate_attribution(payload: dict[str, Any]) -> dict[str, Any]:
+    skus = _tiktok_affiliate_sku_list(payload)
+    creator = (
+        _clean_tiktok_creator_username(
+            _pick_first(payload, "affiliate_creator_username", "creator_username", "creator_name")
+        )
+        or _first_unique_text(
+            [sku.get("creator_username") or sku.get("creator_name") for sku in skus],
+            normalize=_clean_tiktok_creator_username,
+        )
+    )
+    content_type = str(
+        _pick_first(payload, "affiliate_content_type", "content_type")
+        or _first_unique_text([sku.get("content_type") for sku in skus])
+        or ""
+    ).strip().upper() or None
+    content_id = str(
+        _pick_first(payload, "affiliate_content_id", "content_id")
+        or _first_unique_text([sku.get("content_id") for sku in skus])
+        or ""
+    ).strip() or None
+    if not (creator or content_type or content_id):
+        return {}
+    return {
+        "affiliate_creator_username": creator,
+        "affiliate_content_type": content_type,
+        "affiliate_content_id": content_id,
+        "affiliate_attribution_json": json_dumps(
+            {
+                "creator_username": creator,
+                "content_type": content_type,
+                "content_id": content_id,
+                "source": "order_payload",
+            }
+        ),
+    }
+
+
 def _extract_tiktok_order_payload(raw_payload: Any) -> dict[str, Any]:
     payload = _safe_json_obj(raw_payload)
     if not payload:
@@ -520,6 +580,7 @@ def normalize_tiktok_order_payload(
         or ""
     ).strip() or None
     customer_email = str(_pick_first(payload, "buyer_email", "email", "contact_email") or "").strip() or None
+    affiliate_attribution = _extract_tiktok_affiliate_attribution(payload)
 
     return {
         "tiktok_order_id": str(order_id).strip(),
@@ -544,6 +605,10 @@ def normalize_tiktok_order_payload(
         "shop_cipher": str(_pick_first(payload, "shop_cipher", "shopCipher") or "").strip() or None,
         "seller_id": str(_pick_first(payload, "seller_id", "sellerId") or "").strip() or None,
         "currency": str(_pick_first(payload, "currency", "currency_code") or "").strip() or None,
+        "affiliate_creator_username": affiliate_attribution.get("affiliate_creator_username"),
+        "affiliate_content_type": affiliate_attribution.get("affiliate_content_type"),
+        "affiliate_content_id": affiliate_attribution.get("affiliate_content_id"),
+        "affiliate_attribution_json": affiliate_attribution.get("affiliate_attribution_json") or "{}",
     }
 
 
@@ -715,6 +780,10 @@ _TIKTOK_ORDER_ENRICHABLE_FIELDS = (
     "subtotal_price",
     "total_tax",
     "subtotal_ex_tax",
+    "affiliate_creator_username",
+    "affiliate_content_type",
+    "affiliate_content_id",
+    "affiliate_attribution_json",
     "line_items_json",
     "line_items_summary_json",
 )
@@ -740,6 +809,10 @@ _TIKTOK_ORDER_PAYLOAD_FIELD_ALIASES = {
     "financial_status": ("financial_status", "payment_status", "pay_status"),
     "fulfillment_status": ("fulfillment_status", "shipping_status", "logistics_status", "package_status"),
     "order_status": ("order_status", "status"),
+    "affiliate_creator_username": ("affiliate_creator_username", "creator_username", "creator_name", "skus"),
+    "affiliate_content_type": ("affiliate_content_type", "content_type", "skus"),
+    "affiliate_content_id": ("affiliate_content_id", "content_id", "skus"),
+    "affiliate_attribution_json": ("affiliate_attribution_json", "skus"),
     "total_price": ("total_price", "pay_amount", "total_amount", "order_amount", "payment_amount"),
     "subtotal_price": ("subtotal_price", "sub_total", "original_amount", "items_amount"),
     "total_tax": ("tax_amount", "total_tax", "vat_amount"),

@@ -24,6 +24,7 @@ def _order(
     shop_id: str | None = None,
     shop_cipher: str | None = None,
     seller_id: str | None = None,
+    affiliate_creator_username: str | None = None,
 ) -> TikTokOrder:
     return TikTokOrder(
         tiktok_order_id=order_id,
@@ -38,6 +39,7 @@ def _order(
         total_price=subtotal_price,
         financial_status=financial_status,
         order_status=order_status,
+        affiliate_creator_username=affiliate_creator_username,
         line_items_json=json.dumps(items),
         line_items_summary_json=json.dumps(
             [{"title": item.get("product_name"), "quantity": item.get("quantity", 1)} for item in items]
@@ -602,7 +604,7 @@ class StreamerFreshOrderFallbackTests(unittest.TestCase):
         self.assertEqual(fallback_context["source"], streamer_module.STREAM_METRIC_SOURCE_ORDER_ACTIVITY_FALLBACK)
         self.assertEqual(fallback_context["creator_order_attribution"], streamer_module.CREATOR_ORDER_ATTRIBUTION_RECENT_ORDERS)
 
-    def test_shop_cipher_scope_keeps_shared_shop_alias_orders_visible(self) -> None:
+    def test_affiliate_creator_scope_splits_shared_shop_alias_orders(self) -> None:
         now = datetime(2026, 6, 4, 21, 30, tzinfo=timezone.utc)
         shared_cipher = "shared-shop-cipher"
         with Session(self.engine) as session:
@@ -622,6 +624,7 @@ class StreamerFreshOrderFallbackTests(unittest.TestCase):
                     subtotal_price=12,
                     shop_id="main-shop",
                     shop_cipher=shared_cipher,
+                    affiliate_creator_username="degencollectibles",
                 )
             )
             session.add(
@@ -632,6 +635,7 @@ class StreamerFreshOrderFallbackTests(unittest.TestCase):
                     subtotal_price=5,
                     shop_id="boss-shop",
                     shop_cipher=shared_cipher,
+                    affiliate_creator_username="degenboss0",
                 )
             )
             session.commit()
@@ -642,6 +646,7 @@ class StreamerFreshOrderFallbackTests(unittest.TestCase):
                 "start": now - timedelta(minutes=10),
                 "end": None,
                 "live_session": {},
+                "creator_order_attribution": streamer_module.CREATOR_ORDER_ATTRIBUTION_AFFILIATE_ORDERS,
             }
             boss_context = {
                 "selected_creator": "degenboss0",
@@ -649,6 +654,7 @@ class StreamerFreshOrderFallbackTests(unittest.TestCase):
                 "start": now - timedelta(minutes=10),
                 "end": None,
                 "live_session": {},
+                "creator_order_attribution": streamer_module.CREATOR_ORDER_ATTRIBUTION_AFFILIATE_ORDERS,
             }
             with patch.object(streamer_module.settings, "tiktok_shop_id", "main-shop"), patch.object(
                 streamer_module.settings,
@@ -668,11 +674,11 @@ class StreamerFreshOrderFallbackTests(unittest.TestCase):
 
         self.assertEqual(
             {order.tiktok_order_id for order in main_orders},
-            {"main-order", "boss-order"},
+            {"main-order"},
         )
         self.assertEqual(
             {order.tiktok_order_id for order in boss_orders},
-            {"main-order", "boss-order"},
+            {"boss-order"},
         )
 
     def test_manual_surprise_set_prices_round_trip_through_app_settings(self) -> None:
