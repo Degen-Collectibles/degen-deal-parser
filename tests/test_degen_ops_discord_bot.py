@@ -4,12 +4,17 @@ from pathlib import Path
 from scripts.degen_ops_discord_bot import (
     BotConfig,
     PromptRateLimiter,
+    build_partner_setup_plan,
     ensure_database_url_from_readonly_env,
+    format_partner_setup_draft,
     load_config_from_env,
+    matches_partner_setup_confirmation,
+    parse_partner_setup_command,
     sanitize_for_log,
     should_respond,
     split_discord_message,
     strip_bot_mention,
+    update_env_allowlist,
 )
 
 
@@ -18,15 +23,120 @@ def _config(**overrides):
         "token": "token",
         "allowed_channel_ids": {"123"},
         "allowed_user_ids": {"42"},
+        "owner_user_ids": {"42"},
         "allow_any_user_in_channel": False,
         "model": "aws/anthropic/claude-haiku-4-5-v1",
         "max_prompt_chars": 100,
         "rate_limit_per_minute": 2,
         "audit_log_path": Path("logs/test.jsonl"),
+        "config_env_path": None,
         "dry_run": True,
     }
     base.update(overrides)
     return BotConfig(**base)
+
+
+def test_parse_partner_setup_command_extracts_name_and_user_id():
+    command = parse_partner_setup_command("setup partner Andrew user_id=206237952412483584")
+
+    assert command is not None
+    assert command.partner_name == "Andrew"
+    assert command.partner_user_id == "206237952412483584"
+    assert command.channel_slug == "andrew"
+
+
+def test_partner_setup_draft_requires_owner_and_confirmation():
+    config = _config(owner_user_ids={"42"})
+    command = parse_partner_setup_command("setup partner Andrew user_id=206237952412483584")
+
+    allowed, reason, plan = build_partner_setup_plan(
+        author_id="42",
+        command=command,
+        config=config,
+        guild_id="999",
+        requester_user_id="42",
+    )
+
+    assert allowed is True
+    assert reason == "ok"
+    assert plan is not None
+    assert plan.confirmation_phrase == "CONFIRM SETUP ANDREW"
+    assert plan.category_name == "Degen Ops Partners"
+    assert plan.channel_name == "degen-ops-andrew"
+
+
+def test_partner_setup_rejects_non_owner():
+    config = _config(owner_user_ids={"42"})
+    command = parse_partner_setup_command("setup partner Andrew user_id=206237952412483584")
+
+    allowed, reason, plan = build_partner_setup_plan(
+        author_id="99",
+        command=command,
+        config=config,
+        guild_id="999",
+        requester_user_id="99",
+    )
+
+    assert allowed is False
+    assert reason == "owner_only"
+    assert plan is None
+
+
+def test_partner_setup_draft_lists_private_channel_actions():
+    command = parse_partner_setup_command("setup partner Andrew user_id=206237952412483584")
+    _allowed, _reason, plan = build_partner_setup_plan(
+        author_id="42",
+        command=command,
+        config=_config(owner_user_ids={"42"}),
+        guild_id="999",
+        requester_user_id="42",
+    )
+
+    draft = format_partner_setup_draft(plan)
+
+    assert "#degen-ops-andrew" in draft
+    assert "Degen Ops Partners" in draft
+    assert "206237952412483584" in draft
+    assert "CONFIRM SETUP ANDREW" in draft
+
+
+def test_partner_setup_confirmation_must_match_exact_plan_phrase():
+    command = parse_partner_setup_command("setup partner Andrew user_id=206237952412483584")
+    _allowed, _reason, plan = build_partner_setup_plan(
+        author_id="42",
+        command=command,
+        config=_config(owner_user_ids={"42"}),
+        guild_id="999",
+        requester_user_id="42",
+    )
+
+    assert matches_partner_setup_confirmation("CONFIRM SETUP ANDREW", plan) is True
+    assert matches_partner_setup_confirmation("confirm setup andrew", plan) is False
+    assert matches_partner_setup_confirmation("CONFIRM SETUP BRIAN", plan) is False
+
+
+def test_update_env_allowlist_updates_only_allowed_channel_and_user_lines(tmp_path):
+    env_path = tmp_path / "bot.env"
+    env_path.write_text(
+        "\n".join(
+            [
+                "DEGEN_OPS_DISCORD_BOT_TOKEN=do-not-touch",
+                "DEGEN_OPS_DISCORD_ALLOWED_CHANNEL_IDS=111,222",
+                "DEGEN_OPS_DISCORD_ALLOWED_USER_IDS=42",
+                "OTHER=value",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    update_env_allowlist(env_path, channel_ids={"222", "333"}, user_ids={"42", "99"})
+
+    text = env_path.read_text(encoding="utf-8")
+    assert "DEGEN_OPS_DISCORD_BOT_TOKEN=do-not-touch" in text
+    assert "DEGEN_OPS_DISCORD_ALLOWED_CHANNEL_IDS=111,222,333" in text
+    assert "DEGEN_OPS_DISCORD_ALLOWED_USER_IDS=42,99" in text
+    assert "OTHER=value" in text
 
 
 def test_should_respond_only_in_allowed_channel_for_allowed_user():
