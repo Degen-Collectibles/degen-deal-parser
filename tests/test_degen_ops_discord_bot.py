@@ -1,8 +1,11 @@
+import os
 from pathlib import Path
 
 from scripts.degen_ops_discord_bot import (
     BotConfig,
     PromptRateLimiter,
+    ensure_database_url_from_readonly_env,
+    load_config_from_env,
     sanitize_for_log,
     should_respond,
     split_discord_message,
@@ -105,3 +108,31 @@ def test_sanitize_for_log_redacts_common_secret_shapes():
     assert "keyval" not in text
     assert "sk-abcd" in text
     assert "123456" not in text
+
+
+def test_load_config_dry_run_allows_missing_token(monkeypatch):
+    monkeypatch.setenv("DEGEN_OPS_DISCORD_ALLOWED_CHANNEL_IDS", "123")
+    monkeypatch.setenv("DEGEN_OPS_DISCORD_ALLOWED_USER_IDS", "42")
+    monkeypatch.delenv("DEGEN_OPS_DISCORD_BOT_TOKEN", raising=False)
+
+    config = load_config_from_env(dry_run=True)
+
+    assert config.dry_run is True
+    assert config.allowed_channel_ids == {"123"}
+    assert config.allowed_user_ids == {"42"}
+
+
+def test_database_url_falls_back_to_readonly_env(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("DEGEN_OPS_READONLY_DATABASE_URL", "postgresql://readonly/db")
+
+    assert ensure_database_url_from_readonly_env() is True
+    assert os.environ["DATABASE_URL"] == "postgresql://readonly/db"
+
+
+def test_database_url_fallback_does_not_override_existing(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://existing/db")
+    monkeypatch.setenv("DEGEN_OPS_READONLY_DATABASE_URL", "postgresql://readonly/db")
+
+    assert ensure_database_url_from_readonly_env() is False
+    assert os.environ["DATABASE_URL"] == "postgresql://existing/db"

@@ -112,6 +112,13 @@ def load_config_from_env(*, dry_run: bool = False) -> BotConfig:
     )
 
 
+def ensure_database_url_from_readonly_env() -> bool:
+    if not os.getenv("DATABASE_URL") and os.getenv("DEGEN_OPS_READONLY_DATABASE_URL"):
+        os.environ["DATABASE_URL"] = os.environ["DEGEN_OPS_READONLY_DATABASE_URL"]
+        return True
+    return False
+
+
 def build_system_prompt() -> str:
     from app.ops_chat import DEGEN_OPS_CHAT_SYSTEM_PROMPT
 
@@ -269,6 +276,7 @@ def main() -> int:
     args = parse_args()
     os.environ["LOG_TO_FILE"] = "false"
     os.environ["DEGEN_OPS_MCP_SCOPE"] = PARTNER_SCOPE
+    ensure_database_url_from_readonly_env()
     config = load_config_from_env(dry_run=args.dry_run_config)
     if args.dry_run_config:
         print(
