@@ -908,6 +908,21 @@ def _creator_order_attribution_message(stream_context: Optional[dict[str, Any]])
     return ""
 
 
+def _creator_feed_without_order_signal(stream_context: Optional[dict[str, Any]]) -> bool:
+    stream_context = stream_context or {}
+    if not stream_context.get("creator_filter_enabled"):
+        return False
+    selected_creator = _normalize_creator(stream_context.get("selected_creator"))
+    if not selected_creator or selected_creator == DEFAULT_STREAM_CREATOR:
+        return False
+    if _coerce_utc_datetime(stream_context.get("start")) is not None:
+        return False
+    return stream_context.get("creator_order_attribution") in {
+        CREATOR_ORDER_ATTRIBUTION_NO_SESSION,
+        CREATOR_ORDER_ATTRIBUTION_AFFILIATE_SCOPE_MISSING,
+    }
+
+
 def _parse_order_line_items(order: TikTokOrder) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for field_name in ("line_items_json", "line_items_summary_json"):
@@ -2399,6 +2414,17 @@ def _streamer_session_gmv(session: Session, stream_context: Optional[dict[str, A
 def _streamer_session_gmv_uncached(session: Session, stream_context: Optional[dict[str, Any]] = None) -> dict:
     """Calculate today's GMV and top sellers for the streamer dashboard (Pacific time)."""
     stream_context = stream_context or {}
+    if _creator_feed_without_order_signal(stream_context):
+        return {
+            "session_gmv": 0.0,
+            "session_orders": 0,
+            "session_total_orders": 0,
+            "top_sellers": [],
+            "top_buyers": [],
+            "surprise_sets": [],
+            "surprise_sets_total_gmv": 0.0,
+            "surprise_sets_scope_label": "Selected stream",
+        }
     account_scope = (
         _stream_account_scope_for_context(session, stream_context)
         if stream_context.get("creator_filter_enabled")

@@ -444,6 +444,16 @@ class SurpriseSetGmvTests(unittest.TestCase):
         self.assertIn("creatorAccentClass", source)
         self.assertIn("order-row--secondary", source)
         self.assertIn("toast--secondary", source)
+        self.assertIn(".toast--main .toast-img-placeholder", source)
+        self.assertIn(".toast--secondary .toast-img-placeholder", source)
+
+    def test_streamer_dashboard_initial_order_badge_allows_recent_order_fallback(self) -> None:
+        source = (Path.cwd() / "app" / "templates" / "tiktok_streamer.html").read_text()
+
+        self.assertIn(
+            "creator_order_attribution not in ['time_window', 'affiliate_orders', 'live_products', 'recent_orders']",
+            source,
+        )
 
 
 class StreamerFreshOrderFallbackTests(unittest.TestCase):

@@ -4067,6 +4067,87 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(payload["stream_orders"], 0)
         self.assertEqual(payload["stream_items"], 0)
 
+    def test_tiktok_streamer_poll_does_not_share_today_gmv_when_secondary_has_no_session(self) -> None:
+        import app.routers.tiktok_streamer as streamer_module
+        from starlette.requests import Request as _Request
+
+        now_ts = int(time.time())
+        main_start = now_ts - 3600
+        order_time = datetime.fromtimestamp(now_ts - 120, tz=timezone.utc)
+        with Session(self.engine) as session:
+            session.add(
+                TikTokAuth(
+                    tiktok_shop_id="dc-llc-shop",
+                    shop_cipher="shared-shop-cipher",
+                    access_token="token",
+                    seller_name="D.C. LLC",
+                    scopes_json=json.dumps(["seller.order.info", "seller.affiliate_collaboration.read"]),
+                )
+            )
+            session.add(
+                TikTokOrder(
+                    tiktok_order_id="main-visible-order",
+                    order_number="#1001",
+                    shop_id="dc-llc-shop",
+                    shop_cipher="shared-shop-cipher",
+                    created_at=order_time,
+                    updated_at=order_time,
+                    financial_status="paid",
+                    subtotal_price=120.0,
+                    total_price=120.0,
+                    line_items_json=json.dumps([
+                        {"product_id": "p-main", "product_name": "Main Pack", "quantity": 1, "sale_price": 120.0}
+                    ]),
+                )
+            )
+            session.commit()
+
+            stream_sessions = [
+                {
+                    "id": "main-live",
+                    "title": "Main live",
+                    "username": "degencollectibles",
+                    "start_time": main_start,
+                    "end_time": 0,
+                    "gmv": 120.0,
+                    "sku_orders": 1,
+                    "items_sold": 1,
+                },
+            ]
+            req = _Request({
+                "type": "http",
+                "method": "GET",
+                "path": "/tiktok/streamer/poll",
+                "headers": [],
+                "scheme": "http",
+                "server": ("testserver", 80),
+            })
+            streamer_module._gmv_cache.clear()
+            with patch("app.routers.tiktok_streamer._require_live_stream", return_value=None), patch.object(
+                streamer_module,
+                "_get_live_sessions_list",
+                return_value=stream_sessions,
+            ), patch.object(streamer_module.settings, "tiktok_shop_id", "dc-llc-shop"), patch.object(
+                streamer_module.settings,
+                "tiktok_shop_cipher",
+                "shared-shop-cipher",
+            ):
+                payload = streamer_module.tiktok_streamer_poll(
+                    request=req,
+                    creator="degenboss0",
+                    stream=None,
+                    since=None,
+                    session=session,
+                )
+
+        self.assertEqual(payload["orders"], [])
+        self.assertEqual(payload["total_count"], 0)
+        self.assertEqual(payload["session_gmv"], 0.0)
+        self.assertEqual(payload["session_orders"], 0)
+        self.assertEqual(payload["session_total_orders"], 0)
+        self.assertIsNone(payload["stream_gmv"])
+        self.assertEqual(payload["creator_order_attribution"], "no_session")
+
     def test_tiktok_streamer_poll_uses_live_product_ids_for_main_creator(self) -> None:
         import app.routers.tiktok_streamer as streamer_module
         from starlette.requests import Request as _Request
