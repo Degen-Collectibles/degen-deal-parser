@@ -272,6 +272,27 @@
         .pill.force_unmatched { color: #bfdbfe; background: rgba(96,165,250,.12); border-color: rgba(96,165,250,.34); }
         .pill.ignored { color: #cbd5e1; background: rgba(148,163,184,.12); border-color: rgba(148,163,184,.34); }
         .pill.cash { color: #bae6fd; background: rgba(14,165,233,.12); border-color: rgba(14,165,233,.34); }
+        .event-label { color: #fff; font-weight: 900; }
+        .evidence-stack { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+        .evidence-chip {
+            display: inline-flex;
+            align-items: center;
+            width: fit-content;
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            padding: 3px 7px;
+            color: #fff;
+            background: rgba(255,255,255,.04);
+            font-size: 10px;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: .04em;
+            white-space: nowrap;
+        }
+        .evidence-chip.bank { color: #dbeafe; border-color: rgba(96,165,250,.34); background: rgba(96,165,250,.1); }
+        .evidence-chip.discord { color: #ddd6fe; border-color: rgba(139,92,246,.34); background: rgba(139,92,246,.1); }
+        .evidence-chip.shopify, .evidence-chip.tiktok, .evidence-chip.processor, .evidence-chip.paypal { color: #bbf7d0; border-color: rgba(34,197,94,.34); background: rgba(34,197,94,.1); }
+        .evidence-chip.cash { color: #bae6fd; border-color: rgba(14,165,233,.34); background: rgba(14,165,233,.1); }
         .reason-chip {
             display: inline-flex;
             align-items: center;
@@ -405,12 +426,13 @@
 
         <section class="hero">
             <div class="eyebrow">Unified Ledger</div>
-            <h1>Money Review Grid</h1>
-            <p>Bank rows are the counted ledger. Discord, Shopify, and TikTok stay attached as context so review decisions are fast and auditable.</p>
+            <h1>Money Events</h1>
+            <p>Cash movement and deal evidence live in one grid. Platform payouts show cash timing; paid Shopify and TikTok orders drive product revenue in Finance.</p>
             <div class="hero-actions">
                 <a class="button" href="/bookkeeping/bank">Bank Reconciliation</a>
                 <a class="button" href="/finance">Finance</a>
-                <a class="button primary" href="/ledger/export.csv?account={{ selected.account|urlencode }}&start={{ selected.start|urlencode }}&end={{ selected.end|urlencode }}&status={{ selected.status|urlencode }}&category={{ selected.category|urlencode }}&source={{ selected.source|urlencode }}&action_reason={{ selected.action_reason|urlencode }}&search={{ selected.search|urlencode }}&sort={{ selected.sort|urlencode }}&direction={{ selected.direction|urlencode }}&include_cash={{ 'true' if selected.include_cash else 'false' }}">Export CSV</a>
+                <a class="button primary" href="/ledger/export.xlsx?account={{ selected.account|urlencode }}&start={{ selected.start|urlencode }}&end={{ selected.end|urlencode }}&status={{ selected.status|urlencode }}&category={{ selected.category|urlencode }}&source={{ selected.source|urlencode }}&action_reason={{ selected.action_reason|urlencode }}&search={{ selected.search|urlencode }}&sort={{ selected.sort|urlencode }}&direction={{ selected.direction|urlencode }}&include_cash={{ 'true' if selected.include_cash else 'false' }}">Export Excel</a>
+                <a class="button" href="/ledger/export.csv?account={{ selected.account|urlencode }}&start={{ selected.start|urlencode }}&end={{ selected.end|urlencode }}&status={{ selected.status|urlencode }}&category={{ selected.category|urlencode }}&source={{ selected.source|urlencode }}&action_reason={{ selected.action_reason|urlencode }}&search={{ selected.search|urlencode }}&sort={{ selected.sort|urlencode }}&direction={{ selected.direction|urlencode }}&include_cash={{ 'true' if selected.include_cash else 'false' }}">Export CSV</a>
             </div>
         </section>
 
@@ -418,9 +440,9 @@
         {% if error %}<div class="flash error">{{ error }}</div>{% endif %}
 
         <section class="metric-grid">
-            <div class="metric"><div class="metric-label">Bank Inflow</div><div class="metric-value">{{ summary.bank_inflow_display }}</div></div>
-            <div class="metric"><div class="metric-label">Bank Outflow</div><div class="metric-value">{{ summary.bank_outflow_display }}</div></div>
-            <div class="metric"><div class="metric-label">Bank Net</div><div class="metric-value">{{ summary.bank_net_display }}</div></div>
+            <div class="metric"><div class="metric-label">Bank Cash In</div><div class="metric-value">{{ summary.bank_inflow_display }}</div></div>
+            <div class="metric"><div class="metric-label">Bank Cash Out</div><div class="metric-value">{{ summary.bank_outflow_display }}</div></div>
+            <div class="metric"><div class="metric-label">Bank Cash Net</div><div class="metric-value">{{ summary.bank_net_display }}</div></div>
             <div class="metric"><div class="metric-label">Needs Action</div><div class="metric-value">{{ summary.needs_action_count }}</div></div>
             <div class="metric"><div class="metric-label">Unbanked Cash</div><div class="metric-value">{{ summary.unbanked_cash_display }}</div></div>
         </section>
@@ -500,7 +522,7 @@
                         {% endfor %}
                         <button class="quick-chip" type="button" id="ledger-tools-toggle">Tools</button>
                     </div>
-                    <p class="mini">Needs action means rows that still need a category, match/source check, or review before they are ready.</p>
+                    <p class="mini">Needs action means rows that still need a category, match/evidence check, or review before they are ready.</p>
                     <form method="get" action="/ledger" class="filters">
                         <label>Account
                             <select name="account">
@@ -532,9 +554,9 @@
                                 {% endfor %}
                             </select>
                         </label>
-                        <label>Source
+                        <label>Evidence
                             <select name="source">
-                                <option value="">All sources</option>
+                                <option value="">All evidence</option>
                                 {% for choice in source_choices %}
                                 <option value="{{ choice.value }}" {% if selected.source == choice.value %}selected{% endif %}>{{ choice.label }}</option>
                                 {% endfor %}
@@ -559,7 +581,7 @@
                         </label>
                         <label>Sort
                             <select name="sort">
-                                {% for value, label in [("posted_at", "Date"), ("amount", "Amount"), ("status", "Status"), ("category", "Category"), ("source", "Source"), ("account", "Account")] %}
+                                {% for value, label in [("posted_at", "Date"), ("amount", "Amount"), ("status", "Status"), ("category", "Category"), ("source", "Evidence"), ("account", "Cash / Log")] %}
                                 <option value="{{ value }}" {% if selected.sort == value %}selected{% endif %}>{{ label }}</option>
                                 {% endfor %}
                             </select>
@@ -614,60 +636,40 @@
                                     <th><input type="checkbox" aria-label="Select all visible rows"></th>
                                     <th>Status</th>
                                     <th>Date</th>
-                                    <th>Account</th>
+                                    <th>Cash / Log</th>
                                     <th>Amount</th>
                                     <th>Category</th>
-                                    <th>Source</th>
+                                    <th>Evidence</th>
                                     <th>Description</th>
-                                    <th>Match / Context</th>
+                                    <th>Link / Context</th>
                                     <th>Review</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 {% for row in rows %}
                                 <tr class="ledger-row" data-ledger-row-id="{{ row.id }}">
-                                    <td data-label="Select">{% if row.row_kind == "bank" %}<input class="row-select" type="checkbox" name="row_id" value="{{ row.id }}" aria-label="Select row {{ row.id }}">{% endif %}</td>
+                                    <td data-label="Select">{% if row.row_kind == "bank" or (row.row_kind in ["discord_financial", "discord_deal", "cash"] and row.matched_transaction and row.matched_source_message_id) %}<input class="row-select" type="checkbox" name="row_id" value="{{ row.id }}" aria-label="Select row {{ row.id }}">{% endif %}</td>
                                     <td data-label="Status">
                                         <span class="pill {{ row.ledger_status }}" data-status-pill>{{ row.ledger_status_label }}</span>
                                         <span class="reason-chip" data-action-reason title="{{ row.action_reason_label }}" {% if not row.action_reason_label %}style="display: none;"{% endif %}>{{ row.action_reason_label }}</span>
                                         {% if row.confidence == "low" %}<div class="mini confidence-line">LOW</div>{% endif %}
                                     </td>
                                     <td data-label="Date">{{ row.posted_at_display }}</td>
-                                    <td data-label="Account">
+                                    <td data-label="Cash / Log">
                                         <strong class="truncate" title="{{ row.account_label }}">{{ row.account_label }}</strong>
-                                        <div class="mini">{{ row.account_type }}</div>
+                                        <div class="mini"><span class="event-label">{{ row.event_label }}</span>{% if row.account_type %} &middot; {{ row.account_type }}{% endif %}</div>
                                     </td>
                                     <td data-label="Amount" class="amount">{{ row.amount_display }}</td>
                                     <td data-label="Category">
                                         <strong class="truncate" data-category-label title="{{ row.expense_category_label }}">{{ row.expense_category_label }}</strong>
                                         <div class="mini">{{ row.category_confidence }}{% if row.expense_subcategory %} &middot; {{ row.expense_subcategory }}{% endif %}</div>
-                                        {% if row.row_kind in ["discord_financial", "discord_deal", "cash"] and row.matched_transaction and row.matched_source_message_id %}
-                                        <form method="post" action="/ledger/transactions/{{ row.matched_source_message_id }}/edit-form" class="category-edit-form" data-discord-category-form="{{ row.id }}">
-                                            <input type="hidden" name="selected_account" value="{{ selected.account }}">
-                                            <input type="hidden" name="selected_start" value="{{ selected.start }}">
-                                            <input type="hidden" name="selected_end" value="{{ selected.end }}">
-                                            <input type="hidden" name="selected_status" value="{{ selected.status }}">
-                                            <input type="hidden" name="selected_category" value="{{ selected.category }}">
-                                            <input type="hidden" name="selected_source" value="{{ selected.source }}">
-                                            <input type="hidden" name="selected_action_reason" value="{{ selected.action_reason }}">
-                                            <input type="hidden" name="selected_search" value="{{ selected.search }}">
-                                            <input type="hidden" name="selected_sort" value="{{ selected.sort }}">
-                                            <input type="hidden" name="selected_direction" value="{{ selected.direction }}">
-                                            <input type="hidden" name="selected_include_cash" value="{{ 'true' if selected.include_cash else 'false' }}">
-                                            <input type="hidden" name="entry_kind" value="{{ row.matched_transaction.entry_kind or 'unknown' }}">
-                                            <input type="hidden" name="amount" value="{{ row.matched_transaction.amount if row.matched_transaction.amount is not none else '' }}">
-                                            <input type="hidden" name="payment_method" value="{{ row.matched_transaction.payment_method or 'unknown' }}">
-                                            <select name="expense_category" aria-label="Category for {{ row.description }}">
-                                                {% for choice in category_choices %}
-                                                <option value="{{ choice.value }}" {% if row.expense_category == choice.value %}selected{% endif %}>{{ choice.label }}</option>
-                                                {% endfor %}
-                                            </select>
-                                            <button class="tiny primary" type="submit">Save category</button>
-                                        </form>
-                                        {% endif %}
                                     </td>
-                                    <td data-label="Source">
-                                        <span class="pill">{{ row.source_label }}</span>
+                                    <td data-label="Evidence">
+                                        <div class="evidence-stack">
+                                            {% for chip in row.evidence_chips %}
+                                            <span class="evidence-chip {{ chip.kind }}">{{ chip.label }}</span>
+                                            {% endfor %}
+                                        </div>
                                         {% if row.payment_rail %}<div class="mini">{{ row.payment_rail }}</div>{% endif %}
                                     </td>
                                     <td data-label="Description" class="desc" title="{{ row.description }}">
@@ -680,7 +682,7 @@
                                             {% if row.match_override_note %}<div class="mini">Override: {{ row.match_override_note }}</div>{% endif %}
                                         </div>
                                     </td>
-                                    <td data-label="Match">
+                                    <td data-label="Link">
                                         {% set match_url = row.matched_transaction.detail_url if row.matched_transaction else "" %}
                                         {% if row.row_kind == "cash" %}
                                         {% if match_url %}
@@ -688,21 +690,21 @@
                                         {% else %}
                                         <strong class="truncate">Discord cash deal</strong>
                                         {% endif %}
-                                        <div class="mini match-extra">Shown in-grid; not counted in bank totals.</div>
+                                        <div class="mini match-extra">{{ row.accounting_note }}</div>
                                         {% elif row.row_kind == "discord_financial" %}
                                         {% if match_url %}
                                         <a class="deal-link truncate" href="{{ match_url }}">Discord financial log</a>
                                         {% else %}
                                         <strong class="truncate">Discord financial log</strong>
                                         {% endif %}
-                                        <div class="mini match-extra">Shown in-grid; not counted in bank totals.</div>
+                                        <div class="mini match-extra">{{ row.accounting_note }}</div>
                                         {% elif row.row_kind == "discord_deal" %}
                                         {% if match_url %}
                                         <a class="deal-link truncate" href="{{ match_url }}">Discord deal log</a>
                                         {% else %}
                                         <strong class="truncate">Discord deal log</strong>
                                         {% endif %}
-                                        <div class="mini match-extra">Shown in-grid; not counted in bank totals.</div>
+                                        <div class="mini match-extra">{{ row.accounting_note }}</div>
                                         {% elif row.matched_transaction %}
                                         {% if match_url %}
                                         <a class="deal-link truncate" href="{{ match_url }}">{{ row.matched_transaction.entry_kind or "Discord" }}</a>
@@ -711,11 +713,12 @@
                                         {% endif %}
                                         <div class="mini match-extra">{{ row.matched_transaction.occurred_at_display }} · {{ row.matched_transaction.payment_method }}</div>
                                         <div class="mini match-extra">{{ row.matched_transaction.source_content }}</div>
+                                        <div class="mini match-extra">{{ row.accounting_note }}</div>
                                         {% elif row.source in ["shopify", "tiktok", "processor", "paypal"] %}
                                         <strong class="truncate">{{ row.source_label }} payout</strong>
-                                        <div class="mini match-extra">Orders stay as context until payout/deposit reconciliation is expanded.</div>
+                                        <div class="mini match-extra">{{ row.accounting_note or "Cash settlement; Finance revenue uses paid order rows." }}</div>
                                         {% else %}
-                                        <span class="muted">No attached transaction</span>
+                                        <span class="muted">No attached log/evidence</span>
                                         {% endif %}
                                         {% if row.match_reason %}<div class="mini match-extra">{{ row.match_reason }}</div>{% endif %}
                                         {% if row.row_kind == "bank" %}
@@ -773,7 +776,7 @@
                                         </form>
                                         {% elif row.matched_transaction and row.matched_source_message_id %}
                                         <span class="mini">{{ "Discord row" if row.row_kind in ["discord_financial", "discord_deal"] else "Cash row" }}</span>
-                                        <form method="post" action="/ledger/transactions/{{ row.matched_source_message_id }}/edit-form" class="inline-form transaction-edit-form">
+                                        <form method="post" action="/ledger/transactions/{{ row.matched_source_message_id }}/edit-form" class="inline-form transaction-edit-form" data-row-edit-form data-ledger-transaction-form="{{ row.id }}">
                                             <input type="hidden" name="selected_account" value="{{ selected.account }}">
                                             <input type="hidden" name="selected_start" value="{{ selected.start }}">
                                             <input type="hidden" name="selected_end" value="{{ selected.end }}">
@@ -1025,13 +1028,13 @@
             if (!row || !payload || !payload.row) return;
             var data = payload.row;
             var pill = row.querySelector("[data-status-pill]");
-            if (pill) {
+            if (pill && data.ledger_status) {
                 statusClasses.forEach(function (name) { pill.classList.remove(name); });
                 pill.classList.add(data.ledger_status);
                 pill.textContent = data.ledger_status_label;
             }
             var reason = row.querySelector("[data-action-reason]");
-            if (reason) {
+            if (reason && Object.prototype.hasOwnProperty.call(data, "action_reason_label")) {
                 reason.textContent = data.action_reason_label || "";
                 reason.setAttribute("title", data.action_reason_label || "");
                 reason.style.display = data.action_reason_label ? "inline-flex" : "none";
@@ -1042,9 +1045,9 @@
                 category.setAttribute("title", data.expense_category_label);
             }
             var statusSelect = row.querySelector('select[name="review_status"]');
-            if (statusSelect) statusSelect.value = data.review_status;
+            if (statusSelect && data.review_status) statusSelect.value = data.review_status;
             var categorySelect = row.querySelector('select[name="expense_category"]');
-            if (categorySelect) categorySelect.value = data.expense_category;
+            if (categorySelect && data.expense_category) categorySelect.value = data.expense_category;
         }
 
         function submitRowForm(form) {
@@ -1143,8 +1146,18 @@
                     var row = box.closest("tr[data-ledger-row-id]");
                     var form = row && row.querySelector("[data-row-edit-form]");
                     if (!form) return Promise.resolve();
-                    if (status) form.querySelector('select[name="review_status"]').value = status;
-                    if (category) form.querySelector('select[name="expense_category"]').value = category;
+                    var statusSelect = form.querySelector('select[name="review_status"]');
+                    var categorySelect = form.querySelector('select[name="expense_category"]');
+                    var shouldSubmit = false;
+                    if (status && statusSelect) {
+                        statusSelect.value = status;
+                        shouldSubmit = true;
+                    }
+                    if (category && categorySelect) {
+                        categorySelect.value = category;
+                        shouldSubmit = true;
+                    }
+                    if (!shouldSubmit) return Promise.resolve();
                     return submitRowForm(form);
                 })).then(function () {
                     checked.forEach(function (box) { box.checked = false; });

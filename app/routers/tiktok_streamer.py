@@ -354,10 +354,40 @@ def _order_matches_affiliate_creator(order: TikTokOrder, selected_creator: str) 
     return any(_normalize_creator(candidate) == creator for candidate in candidates)
 
 
+def _order_created_within(
+    order: TikTokOrder,
+    start: Optional[datetime],
+    end: Optional[datetime],
+) -> bool:
+    created = _coerce_utc_datetime(getattr(order, "created_at", None))
+    if created is None:
+        return False
+    if start is not None and created < start:
+        return False
+    if end is not None and created > end:
+        return False
+    return True
+
+
 def _filter_orders_to_affiliate_creator(
     orders: list[TikTokOrder],
     stream_context: Optional[dict[str, Any]],
 ) -> list[TikTokOrder]:
+    """Split a shared-shop order list to the selected creator, honestly.
+
+    TikTok does not expose per-creator order attribution for DC LLC's in-house
+    shared-shop livestreams (``affiliate_creator_username`` is never populated in
+    production), so we must never duplicate GMV across both creators nor present
+    a deceptive false-zero. Resolution order:
+
+    1. Authoritative TikTok creator attribution, if ever present, always wins.
+    2. If overlapping shared-shop lives require attribution but TikTok scope is
+       missing, return nothing instead of duplicating the same orders.
+    3. Otherwise, if this creator's live window is known, return a clearly-labeled
+       estimate by order time (the UI marks it non-authoritative).
+    4. Otherwise (idle, no window): the MAIN creator maps to the whole DC LLC shop;
+       the SECONDARY creator has no honest per-creator view, so return nothing.
+    """
     stream_context = stream_context or {}
     if stream_context.get("creator_order_attribution") == CREATOR_ORDER_ATTRIBUTION_AFFILIATE_SCOPE_MISSING:
         return []
@@ -367,9 +397,15 @@ def _filter_orders_to_affiliate_creator(
     if not selected_creator:
         return orders
     attributed_orders = [order for order in orders if _order_affiliate_creator(order)]
-    if not attributed_orders:
+    if attributed_orders:
+        return [order for order in orders if _order_matches_affiliate_creator(order, selected_creator)]
+    start = _coerce_utc_datetime(stream_context.get("start"))
+    end = _coerce_utc_datetime(stream_context.get("end"))
+    if start is not None:
+        return [order for order in orders if _order_created_within(order, start, end)]
+    if selected_creator == DEFAULT_STREAM_CREATOR:
         return orders
-    return [order for order in orders if _order_matches_affiliate_creator(order, selected_creator)]
+    return []
 
 
 def _has_affiliate_creator_orders(
@@ -893,16 +929,37 @@ def _creator_order_rows_are_precise(stream_context: Optional[dict[str, Any]]) ->
 def _creator_order_attribution_message(stream_context: Optional[dict[str, Any]]) -> str:
     stream_context = stream_context or {}
     attribution = stream_context.get("creator_order_attribution")
+    selected_creator = _normalize_creator(stream_context.get("selected_creator"))
+    is_main_creator = bool(selected_creator) and selected_creator == DEFAULT_STREAM_CREATOR
     if attribution == CREATOR_ORDER_ATTRIBUTION_AFFILIATE_ORDERS:
         return "Filtering by TikTok creator order attribution."
     if attribution == CREATOR_ORDER_ATTRIBUTION_AFFILIATE_SCOPE_MISSING:
-        return "TikTok creator-order attribution is not authorized yet. Authorize seller affiliate orders or each creator's TikTok Shop affiliate orders."
+        return (
+            "TikTok does not expose per-creator order attribution for this shared shop; "
+            "this overlapping feed is paused instead of duplicating orders."
+        )
     if attribution == CREATOR_ORDER_ATTRIBUTION_LIVE_PRODUCTS:
         handles = [f"@{h}" for h in stream_context.get("creator_order_overlap_handles") or []]
-        suffix = f" ({', '.join(handles)})" if handles else ""
-        return f"Filtering by TikTok live product attribution{suffix}."
+        suffix = f" (overlapping with {', '.join(handles)})" if handles else ""
+        return (
+            "Estimated from the live products shown in this window"
+            f"{suffix} — by product, not TikTok order attribution."
+        )
+    if attribution == CREATOR_ORDER_ATTRIBUTION_TIME_WINDOW:
+        return (
+            "Estimated from this creator's live window (by order time) — "
+            "TikTok does not expose per-creator order attribution."
+        )
     if attribution == CREATOR_ORDER_ATTRIBUTION_NO_SESSION:
-        return "No live session was found for this creator."
+        if is_main_creator:
+            return (
+                "Showing the whole DC LLC shop — TikTok does not expose per-creator "
+                "order attribution, and no live window is active."
+            )
+        return (
+            "No active live window for this creator. Per-creator orders aren't available "
+            "from TikTok; start a live to see a window estimate."
+        )
     if attribution == CREATOR_ORDER_ATTRIBUTION_RECENT_ORDERS:
         return "TikTok live session API has not reported this stream yet; showing fresh TikTok orders since the last known stream ended."
     return ""

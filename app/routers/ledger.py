@@ -1,19 +1,22 @@
 """
 Unified ledger routes.
 
-Bank rows are the counted money source. Discord, Shopify, and TikTok are
-supporting context that help reviewers decide what to do with each row.
+Bank rows are cash movements. Discord logs are deal evidence, while Shopify
+and TikTok payout rows explain cash timing; paid order rows drive finance
+revenue.
 """
 from __future__ import annotations
 
 import csv
 import json
 import logging
-from io import StringIO
+from io import BytesIO, StringIO
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, Form, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
 from sqlmodel import Session
 
 from ..csrf import CSRFProtectedRoute
@@ -22,7 +25,9 @@ from ..discord.corrections import save_review_correction, snapshot_message_parse
 from ..financial_audit import record_financial_audit
 from ..ledger import (
     LEDGER_ACTION_REASON_LABELS,
+    LEDGER_AGENT_MAX_LIMIT,
     LEDGER_STATUS_LABELS,
+    LedgerFilters,
     apply_ledger_automation,
     apply_ledger_rule,
     build_ledger_page_data,
@@ -35,7 +40,6 @@ from ..ledger import (
     ledger_filters_from_values,
     ledger_source_for_bank_row,
     ledger_status_for_bank_row,
-    LEDGER_AGENT_MAX_LIMIT,
     preview_ledger_automation,
     preview_ledger_review_agent,
     preview_ledger_rule,
@@ -46,6 +50,78 @@ from ..shared import *  # noqa: F401,F403 -- templates, auth helpers, user label
 
 router = APIRouter(route_class=CSRFProtectedRoute)
 logger = logging.getLogger(__name__)
+
+LEDGER_EXPORT_COLUMNS = [
+    "row_id",
+    "row_kind",
+    "posted_at",
+    "account",
+    "amount",
+    "ledger_status",
+    "source",
+    "category",
+    "classification",
+    "description",
+    "matched_transaction_id",
+    "match_reason",
+    "review_status",
+    "review_note",
+]
+
+
+def _ledger_export_filters(
+    *,
+    account: str,
+    start: str,
+    end: str,
+    status: str,
+    category: str,
+    source: str,
+    action_reason: str,
+    search: str,
+    sort: str,
+    direction: str,
+    include_cash: bool,
+) -> LedgerFilters:
+    filters = ledger_filters_from_values(
+        account=account,
+        start=start,
+        end=end,
+        status=status,
+        category=category,
+        source=source,
+        action_reason=action_reason,
+        search=search,
+        sort=sort,
+        direction=direction,
+        include_cash=include_cash,
+        limit=1000,
+    )
+    filters.limit = 1_000_000
+    return filters
+
+
+def _ledger_export_rows(session: Session, filters: LedgerFilters) -> list[list[object]]:
+    data = build_ledger_page_data(session, filters)
+    return [
+        [
+            row["id"],
+            row.get("row_kind", "bank"),
+            row["posted_at_display"],
+            row["account_label"],
+            row["amount"],
+            row["ledger_status"],
+            row["source"],
+            row["expense_category"],
+            row["classification"],
+            row["description"],
+            row.get("matched_transaction_id"),
+            row.get("match_reason"),
+            row.get("review_status"),
+            row.get("review_note"),
+        ]
+        for row in data["rows"]
+    ]
 
 
 def _deal_type_for_ledger_entry_kind(entry_kind: str) -> str | None:
@@ -126,6 +202,16 @@ def _ledger_row_json(row: BankTransaction) -> dict[str, object]:
         "review_status": row.review_status or "open",
         "review_note": row.review_note or "",
         "category_confidence": row.category_confidence or "",
+    }
+
+
+def _ledger_transaction_json(row: DiscordMessage) -> dict[str, object]:
+    category = row.expense_category or row.category or "uncategorized"
+    return {
+        "id": row.id,
+        "source": "discord",
+        "expense_category": category,
+        "expense_category_label": expense_category_label(category),
     }
 
 
@@ -226,6 +312,8 @@ def ledger_transaction_edit_form(
 
     row = session.get(DiscordMessage, source_message_id)
     if not row:
+        if _wants_json(request):
+            return JSONResponse({"ok": False, "error": f"Discord message {source_message_id} was not found."}, status_code=404)
         return RedirectResponse(
             _ledger_redirect_url(
                 account=selected_account,
@@ -247,6 +335,8 @@ def ledger_transaction_edit_form(
     try:
         parsed_amount = parse_optional_float(amount)
     except ValueError:
+        if _wants_json(request):
+            return JSONResponse({"ok": False, "error": "Amount must be a valid number."}, status_code=400)
         return RedirectResponse(
             _ledger_redirect_url(
                 account=selected_account,
@@ -315,6 +405,9 @@ def ledger_transaction_edit_form(
         )
     session.commit()
     invalidate_financial_report_caches()
+
+    if _wants_json(request):
+        return JSONResponse({"ok": True, "row": _ledger_transaction_json(row)})
 
     return RedirectResponse(
         _ledger_redirect_url(
@@ -893,7 +986,7 @@ def ledger_export_csv(
 ):
     if denial := require_role_response(request, "reviewer"):
         return denial
-    filters = ledger_filters_from_values(
+    filters = _ledger_export_filters(
         account=account,
         start=start,
         end=end,
@@ -905,51 +998,91 @@ def ledger_export_csv(
         sort=sort,
         direction=direction,
         include_cash=include_cash,
-        limit=1000,
     )
-    filters.limit = 1_000_000
-    data = build_ledger_page_data(session, filters)
+    rows = _ledger_export_rows(session, filters)
     output = StringIO()
     writer = csv.writer(output)
-    writer.writerow(
-        [
-            "row_id",
-            "row_kind",
-            "posted_at",
-            "account",
-            "amount",
-            "ledger_status",
-            "source",
-            "category",
-            "classification",
-            "description",
-            "matched_transaction_id",
-            "match_reason",
-            "review_status",
-            "review_note",
-        ]
-    )
-    for row in data["rows"]:
-        writer.writerow(
-            [
-                row["id"],
-                row.get("row_kind", "bank"),
-                row["posted_at_display"],
-                row["account_label"],
-                row["amount"],
-                row["ledger_status"],
-                row["source"],
-                row["expense_category"],
-                row["classification"],
-                row["description"],
-                row.get("matched_transaction_id"),
-                row.get("match_reason"),
-                row.get("review_status"),
-                row.get("review_note"),
-            ]
-        )
+    writer.writerow(LEDGER_EXPORT_COLUMNS)
+    writer.writerows(rows)
     return Response(
         content=output.getvalue(),
         media_type="text/csv",
         headers={"Content-Disposition": 'attachment; filename="ledger-export.csv"'},
+    )
+
+
+@router.get("/ledger/export.xlsx")
+def ledger_export_xlsx(
+    request: Request,
+    account: str = Query(default=""),
+    start: str = Query(default=""),
+    end: str = Query(default=""),
+    status: str = Query(default="all"),
+    category: str = Query(default=""),
+    source: str = Query(default=""),
+    action_reason: str = Query(default=""),
+    search: str = Query(default=""),
+    sort: str = Query(default="posted_at"),
+    direction: str = Query(default="desc"),
+    include_cash: bool = Query(default=True),
+    session: Session = Depends(get_session),
+):
+    if denial := require_role_response(request, "reviewer"):
+        return denial
+    filters = _ledger_export_filters(
+        account=account,
+        start=start,
+        end=end,
+        status=status,
+        category=category,
+        source=source,
+        action_reason=action_reason,
+        search=search,
+        sort=sort,
+        direction=direction,
+        include_cash=include_cash,
+    )
+    rows = _ledger_export_rows(session, filters)
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Ledger"
+    sheet.append(LEDGER_EXPORT_COLUMNS)
+    for row in rows:
+        sheet.append(row)
+
+    header_fill = PatternFill(fill_type="solid", fgColor="111827")
+    header_font = Font(bold=True, color="FFFFFF")
+    for cell in sheet[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center")
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = f"A1:N{max(sheet.max_row, 1)}"
+    sheet.column_dimensions["A"].width = 16
+    sheet.column_dimensions["B"].width = 18
+    sheet.column_dimensions["C"].width = 14
+    sheet.column_dimensions["D"].width = 22
+    sheet.column_dimensions["E"].width = 14
+    sheet.column_dimensions["F"].width = 18
+    sheet.column_dimensions["G"].width = 14
+    sheet.column_dimensions["H"].width = 24
+    sheet.column_dimensions["I"].width = 30
+    sheet.column_dimensions["J"].width = 56
+    sheet.column_dimensions["K"].width = 22
+    sheet.column_dimensions["L"].width = 44
+    sheet.column_dimensions["M"].width = 16
+    sheet.column_dimensions["N"].width = 44
+    for row in sheet.iter_rows(min_row=2):
+        row[4].number_format = '$#,##0.00;-$#,##0.00'
+        row[9].alignment = Alignment(wrap_text=True, vertical="top")
+        row[11].alignment = Alignment(wrap_text=True, vertical="top")
+        row[13].alignment = Alignment(wrap_text=True, vertical="top")
+
+    output = BytesIO()
+    workbook.save(output)
+    return Response(
+        content=output.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="ledger-export.xlsx"'},
     )

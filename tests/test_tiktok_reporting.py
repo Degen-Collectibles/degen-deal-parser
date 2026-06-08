@@ -3910,7 +3910,7 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertIsNone(payload["stream_metric_source"])
         self.assertEqual(payload["tiktok_gmv"], 43100.0)
         self.assertEqual(payload["creator_order_attribution"], "live_products")
-        self.assertIn("live product attribution", payload["creator_order_attribution_message"])
+        self.assertIn("Estimated from the live products", payload["creator_order_attribution_message"])
 
     def test_tiktok_streamer_poll_pauses_overlap_when_attribution_is_unavailable(self) -> None:
         import app.routers.tiktok_streamer as streamer_module
@@ -4066,6 +4066,101 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(payload["stream_gmv"], 0.0)
         self.assertEqual(payload["stream_orders"], 0)
         self.assertEqual(payload["stream_items"], 0)
+
+    def test_tiktok_streamer_poll_pauses_both_overlap_feeds_when_affiliate_scope_missing(self) -> None:
+        import app.routers.tiktok_streamer as streamer_module
+        from starlette.requests import Request as _Request
+
+        now_ts = int(time.time())
+        main_start = now_ts - 3600
+        boss_start = now_ts - 1800
+        order_time = datetime.fromtimestamp(now_ts - 120, tz=timezone.utc)
+        with Session(self.engine) as session:
+            for order_id, product_name, subtotal in (
+                ("shared-main-order", "Main Pack", 12.0),
+                ("shared-boss-order", "Boss Pack", 1.0),
+            ):
+                session.add(
+                    TikTokOrder(
+                        tiktok_order_id=order_id,
+                        order_number=f"#{order_id}",
+                        created_at=order_time,
+                        updated_at=order_time,
+                        financial_status="paid",
+                        subtotal_price=subtotal,
+                        total_price=subtotal,
+                        line_items_json=json.dumps([
+                            {
+                                "product_id": order_id,
+                                "product_name": product_name,
+                                "quantity": 1,
+                                "sale_price": subtotal,
+                            }
+                        ]),
+                    )
+                )
+            session.commit()
+
+            stream_sessions = [
+                {
+                    "id": "main-live",
+                    "title": "Main live",
+                    "username": "degencollectibles",
+                    "start_time": main_start,
+                    "end_time": 0,
+                    "gmv": 12.0,
+                    "sku_orders": 1,
+                    "items_sold": 1,
+                },
+                {
+                    "id": "boss-live",
+                    "title": "Boss live",
+                    "username": "degenboss0",
+                    "start_time": boss_start,
+                    "end_time": 0,
+                    "gmv": 1.0,
+                    "sku_orders": 1,
+                    "items_sold": 1,
+                },
+            ]
+            req = _Request({
+                "type": "http",
+                "method": "GET",
+                "path": "/tiktok/streamer/poll",
+                "headers": [],
+                "scheme": "http",
+                "server": ("testserver", 80),
+            })
+            streamer_module._gmv_cache.clear()
+            with patch("app.routers.tiktok_streamer._require_live_stream", return_value=None), patch.object(
+                streamer_module,
+                "_get_live_sessions_list",
+                return_value=stream_sessions,
+            ):
+                main_payload = streamer_module.tiktok_streamer_poll(
+                    request=req,
+                    creator="degencollectibles",
+                    stream=None,
+                    since=None,
+                    session=session,
+                )
+                streamer_module._gmv_cache.clear()
+                boss_payload = streamer_module.tiktok_streamer_poll(
+                    request=req,
+                    creator="degenboss0",
+                    stream=None,
+                    since=None,
+                    session=session,
+                )
+
+        self.assertEqual(main_payload["creator_order_attribution"], "affiliate_scope_missing")
+        self.assertEqual(boss_payload["creator_order_attribution"], "affiliate_scope_missing")
+        self.assertEqual(main_payload["orders"], [])
+        self.assertEqual(boss_payload["orders"], [])
+        self.assertEqual(main_payload["total_count"], 0)
+        self.assertEqual(boss_payload["total_count"], 0)
+        self.assertEqual(main_payload["session_gmv"], 0.0)
+        self.assertEqual(boss_payload["session_gmv"], 0.0)
 
     def test_tiktok_streamer_poll_does_not_share_today_gmv_when_secondary_has_no_session(self) -> None:
         import app.routers.tiktok_streamer as streamer_module

@@ -1239,6 +1239,7 @@
         .empty-state-icon { font-size: 56px; margin-bottom: 14px; }
         .empty-state-text { font-size: 18px; font-weight: 800; }
         .empty-state-sub { font-size: 13px; margin-top: 6px; color: var(--text-muted); }
+        .creator-attribution-note { font-size: 12px; line-height: 1.4; margin: 0 0 10px; padding: 7px 10px; border-radius: 8px; color: var(--text-muted); background: rgba(255, 196, 0, 0.08); border: 1px solid rgba(255, 196, 0, 0.25); }
 
         /* ============ Chat Panel ============ */
         .chat-header {
@@ -1955,6 +1956,8 @@
 
                 <div class="toast-container" id="toast-container"></div>
 
+                <div class="creator-attribution-note" id="creator-attribution-note" style="display:{% if creator_order_attribution_message %}block{% else %}none{% endif %};">{{ creator_order_attribution_message }}</div>
+
                 <div class="orders-list" id="orders-list"></div>
 
                 <div class="empty-state" id="empty-state" style="display:none;">
@@ -2133,6 +2136,14 @@
         /* ---- DOM refs ---- */
         var list = document.getElementById('orders-list');
         var emptyState = document.getElementById('empty-state');
+        var attributionNote = document.getElementById('creator-attribution-note');
+
+        function updateAttributionNote() {
+            if (!attributionNote) return;
+            var msg = _creatorFilterEnabled ? (_creatorOrderAttributionMessage || '') : '';
+            attributionNote.textContent = msg;
+            attributionNote.style.display = msg ? 'block' : 'none';
+        }
         var toastContainer = document.getElementById('toast-container');
         var countEl = document.getElementById('order-count');
         var countUnitEl = document.getElementById('order-count-unit');
@@ -2870,6 +2881,7 @@
 
         function renderAll() {
             setEmptyStateMessage();
+            updateAttributionNote();
             if (!hasPreciseCreatorOrders() || _orders.length === 0) {
                 list.style.display = 'none';
                 emptyState.style.display = '';
@@ -3418,6 +3430,7 @@
             if (data.creator_filter_enabled != null) _creatorFilterEnabled = !!data.creator_filter_enabled;
             if (data.creator_order_attribution != null) _creatorOrderAttribution = data.creator_order_attribution;
             if (data.creator_order_attribution_message != null) _creatorOrderAttributionMessage = data.creator_order_attribution_message;
+            updateAttributionNote();
             updateOrderCountBadge(data.total_count);
             if (data.top_sellers) _topSellers = data.top_sellers;
             if (data.top_buyers) _topBuyers = data.top_buyers;

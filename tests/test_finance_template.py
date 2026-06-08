@@ -22,10 +22,12 @@ def test_finance_hero_uses_estimated_margin_owner_language():
 def test_finance_surfaces_readiness_before_kpis():
     template = _template_text()
 
+    command_index = template.index('class="finance-command-center"')
     readiness_index = template.index('class="finance-readiness"')
     kpi_index = template.index('class="kpi-grid"')
 
-    assert readiness_index < kpi_index
+    assert command_index < readiness_index < kpi_index
+    assert '<details class="finance-readiness"' in template
     assert "Data confidence" in template
     assert "Open ledger cleanup" in template
 
@@ -39,6 +41,20 @@ def test_finance_hero_uses_named_kpi_context():
 
     assert "kpi_rows[2]" not in template
     assert "finance_hero_kpi" in template
+    assert "executive_kpi_rows" in template
+
+
+def test_finance_has_compact_executive_focus_before_detailed_sections():
+    template = _template_text()
+
+    focus_index = template.index('class="executive-focus-grid"')
+    detail_kpi_index = template.index('id="finance-detail-kpis"')
+    chart_index = template.index('class="chart-grid"')
+
+    assert focus_index < detail_kpi_index < chart_index
+    assert "Owner Snapshot" in template
+    assert "Details below" in template
+    assert template.count('class="metric-card"') == 1
 
 
 def test_finance_kpi_rows_expose_stable_keys():

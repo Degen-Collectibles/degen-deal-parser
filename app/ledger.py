@@ -315,6 +315,56 @@ def _discord_deal_detail_url(source_message_id: Optional[int]) -> str:
     return f"/deals/{source_message_id}?{urlencode({'return_path': '/ledger'})}"
 
 
+def _evidence_chip(label: str, kind: str) -> dict[str, str]:
+    return {"label": label, "kind": kind}
+
+
+def _bank_row_event_label(source: str) -> str:
+    if source in {"shopify", "tiktok", "processor", "paypal"}:
+        return "Cash settlement"
+    return "Cash movement"
+
+
+def _bank_row_evidence_chips(
+    row: BankTransaction,
+    source: str,
+    matched: Optional[Transaction],
+) -> list[dict[str, str]]:
+    chips = [_evidence_chip("Bank", "bank")]
+    matched_platform = (row.matched_platform or "").strip().lower()
+    if matched or matched_platform == "discord" or source == "discord":
+        chips.append(_evidence_chip("Discord log", "discord"))
+    elif source in {"shopify", "tiktok"}:
+        chips.append(_evidence_chip(f"{LEDGER_SOURCE_LABELS[source]} payout", source))
+    elif source == "paypal":
+        chips.append(_evidence_chip("PayPal payout", "paypal"))
+    elif source == "processor":
+        chips.append(_evidence_chip("Processor payout", "processor"))
+    return chips
+
+
+def _bank_row_accounting_note(
+    row: BankTransaction,
+    source: str,
+    matched: Optional[Transaction],
+) -> str:
+    if source in {"shopify", "tiktok"}:
+        label = LEDGER_SOURCE_LABELS[source]
+        return (
+            f"Cash settlement; Finance revenue uses paid {label} order rows "
+            "so this payout is not counted again as product revenue."
+        )
+    if source in {"processor", "paypal"}:
+        label = LEDGER_SOURCE_LABELS[source]
+        return (
+            f"Cash settlement; Finance revenue uses paid order rows, not this {label} deposit, "
+            "as product revenue."
+        )
+    if matched or (row.matched_platform or "").strip().lower() == "discord":
+        return "One money event: bank cash movement matched to the Discord deal log."
+    return "Bank cash movement awaiting matching evidence or review."
+
+
 def _bank_row_view(row: BankTransaction, matched: Optional[Transaction] = None) -> dict[str, Any]:
     source = ledger_source_for_bank_row(row)
     status = ledger_status_for_bank_row(row)
@@ -354,6 +404,9 @@ def _bank_row_view(row: BankTransaction, matched: Optional[Transaction] = None) 
         "action_reason_label": LEDGER_ACTION_REASON_LABELS.get(action_reason, ""),
         "source": source,
         "source_label": LEDGER_SOURCE_LABELS.get(source, source.title()),
+        "event_label": _bank_row_event_label(source),
+        "evidence_chips": _bank_row_evidence_chips(row, source, matched),
+        "accounting_note": _bank_row_accounting_note(row, source, matched),
         "payment_rail": _payment_rail_for_text(" ".join([row.description or "", row.details or "", row.raw_row_json or ""])),
         "matched_transaction": {
             "id": matched.id,
@@ -496,6 +549,9 @@ def _discord_financial_row_view(tx: Transaction) -> dict[str, Any]:
         "action_reason_label": LEDGER_ACTION_REASON_LABELS.get(action_reason, ""),
         "source": "discord",
         "source_label": LEDGER_SOURCE_LABELS["discord"],
+        "event_label": "Deal log",
+        "evidence_chips": [_evidence_chip("Discord log", "discord")],
+        "accounting_note": "Deal log only; match it to a bank cash movement when applicable.",
         "payment_rail": payment_rail,
         "matched_transaction": {
             "id": tx.id,
@@ -552,6 +608,9 @@ def _discord_deal_row_view(tx: Transaction) -> dict[str, Any]:
         "action_reason_label": LEDGER_ACTION_REASON_LABELS.get(action_reason, ""),
         "source": "discord",
         "source_label": LEDGER_SOURCE_LABELS["discord"],
+        "event_label": "Deal log",
+        "evidence_chips": [_evidence_chip("Discord log", "discord")],
+        "accounting_note": "Deal log only; match it to a bank cash movement when applicable.",
         "payment_rail": payment_rail,
         "matched_transaction": {
             "id": tx.id,
@@ -605,6 +664,9 @@ def _cash_row_view(tx: Transaction) -> dict[str, Any]:
         "action_reason_label": LEDGER_ACTION_REASON_LABELS["cash_only"],
         "source": "cash",
         "source_label": "Cash",
+        "event_label": "Cash deal",
+        "evidence_chips": [_evidence_chip("Cash", "cash"), _evidence_chip("Discord log", "discord")],
+        "accounting_note": "Cash deal outside bank cash totals.",
         "payment_rail": "cash",
         "matched_transaction": {
             "id": tx.id,
@@ -1400,7 +1462,7 @@ def build_ledger_quick_chips(selected: LedgerFilters) -> list[dict[str, Any]]:
             status="needs_action",
             source="",
             action_reason="",
-            title="Rows that still need a category, match/source check, or review before they are ready.",
+            title="Rows that still need a category, match/evidence check, or review before they are ready.",
             active=selected.status == "needs_action" and not selected.action_reason,
         ),
         chip("Log check", status="needs_action", source="", action_reason="needs_log_check", active=selected.action_reason == "needs_log_check"),
@@ -1626,7 +1688,8 @@ def draft_ledger_rule_with_ai(instruction: str) -> dict[str, Any]:
         "amount_max, account_type, payment_rail, classification, category, provider. "
         "Allowed action keys: category, classification, review_status, match_override_status, note. "
         "review_status must be open, reviewed, or ignored. match_override_status can be force_unmatched or clear. "
-        "Bank rows are the counted money source; Discord, Shopify, and TikTok are context only."
+        "Bank rows are cash movement; Discord logs are deal evidence. "
+        "Shopify and TikTok payout rows affect cash timing, while paid order rows drive finance revenue."
     )
     try:
         response = get_ai_client().with_options(timeout=20).chat.completions.create(

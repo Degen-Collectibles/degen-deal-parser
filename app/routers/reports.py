@@ -432,6 +432,11 @@ def finance_page(
         "tone": "neutral",
         "delta_display": "$0",
     }
+    executive_kpi_rows = [
+        row
+        for key in ("revenue", "inventory_spend", "operating_margin_pct")
+        if (row := kpi_by_key.get(key)) is not None
+    ]
     quick_windows = [
         {
             "label": FINANCE_WINDOW_LABELS[window_key],
@@ -478,6 +483,7 @@ def finance_page(
             "prior_statement": prior_statement,
             "kpi_rows": kpi_rows,
             "finance_hero_kpi": finance_hero_kpi,
+            "executive_kpi_rows": executive_kpi_rows,
             "kpi_drilldown_rows": build_finance_kpi_drilldown_rows(
                 current_statement,
                 range_data=range_data,

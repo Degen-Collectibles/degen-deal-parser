@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import shutil
 import asyncio
 import uuid
@@ -39,6 +39,7 @@ from scripts import cardladder_cli
 
 
 def test_card_ladder_payload_sales_drive_slab_market_price():
+    today = inventory_pricing.utcnow().date()
     result = _card_ladder_result_from_payload(
         "charizard expedition 40 psa 10",
         {
@@ -46,11 +47,11 @@ def test_card_ladder_payload_sales_drive_slab_market_price():
                 {
                     "title": "2002 Pokemon Expedition #40 Charizard PSA 10",
                     "soldPrice": "$1,000.00",
-                    "soldDate": "2026-05-08",
+                    "soldDate": today.isoformat(),
                     "platform": "eBay",
                 },
-                {"title": "Charizard PSA 10", "price": "$1,100.00", "date": "2026-05-01"},
-                {"title": "Charizard PSA 10", "price": "$1,300.00", "date": "2026-04-20"},
+                {"title": "Charizard PSA 10", "price": "$1,100.00", "date": (today - timedelta(days=7)).isoformat()},
+                {"title": "Charizard PSA 10", "price": "$1,300.00", "date": (today - timedelta(days=14)).isoformat()},
             ]
         },
         sales_url="https://app.cardladder.com/sales-history?q=test",

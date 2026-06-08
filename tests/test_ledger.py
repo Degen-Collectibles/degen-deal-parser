@@ -1,10 +1,12 @@
 import json
+from io import BytesIO
 from inspect import signature
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from openpyxl import load_workbook
 from sqlmodel import Session, SQLModel, create_engine, select
 from starlette.requests import Request
 
@@ -30,6 +32,7 @@ from app.routers.ledger import (
     ledger_agent_run_form,
     ledger_automation_apply_form,
     ledger_export_csv,
+    ledger_export_xlsx,
     ledger_page,
     ledger_row_force_unmatch_form,
     ledger_row_status_form,
@@ -200,6 +203,78 @@ def test_ledger_builder_counts_bank_rows_and_separates_unbanked_cash():
     assert "cash-503" not in {row["id"] for row in with_cash["rows"]}
     assert "cash-501" not in {row["id"] for row in needs_action_with_cash["rows"]}
     assert with_cash["summary"]["bank_net_total"] == 70.0
+
+
+def test_ledger_builder_labels_money_events_with_combined_evidence():
+    engine = make_engine()
+    posted_at = datetime(2026, 5, 15, 12, tzinfo=timezone.utc)
+
+    with Session(engine) as session:
+        bank_import = add_import(session)
+        session.add(
+            Transaction(
+                id=610,
+                source_message_id=1610,
+                occurred_at=posted_at,
+                parse_status="parsed",
+                entry_kind="buy",
+                payment_method="zelle",
+                expense_category="inventory",
+                amount=250.0,
+                money_in=0.0,
+                money_out=250.0,
+                source_content="buy inventory 250 zelle",
+            )
+        )
+        session.add(
+            BankTransaction(
+                id=61,
+                import_id=bank_import.id,
+                row_index=1,
+                account_label="Chase Checking",
+                account_type="checking",
+                posted_at=posted_at,
+                description="ZELLE PAYMENT TO CARD SELLER",
+                amount=-250.0,
+                classification="logged_in_discord_strong",
+                confidence="high",
+                expense_category="inventory_purchases",
+                matched_transaction_id=610,
+                matched_source_message_id=1610,
+                matched_platform="discord",
+            )
+        )
+        session.add(
+            BankTransaction(
+                id=62,
+                import_id=bank_import.id,
+                row_index=2,
+                account_label="Chase Checking",
+                account_type="checking",
+                posted_at=posted_at,
+                description="SHOPIFY PAYOUT 123",
+                amount=600.0,
+                classification="shopify_payout",
+                confidence="high",
+                expense_category="platform_payouts",
+                matched_platform="shopify",
+            )
+        )
+        session.commit()
+
+        data = build_ledger_page_data(session, LedgerFilters(status="all"))
+
+    rows_by_id = {row["id"]: row for row in data["rows"]}
+    matched_row = rows_by_id[61]
+    payout_row = rows_by_id[62]
+
+    assert matched_row["event_label"] == "Cash movement"
+    assert [chip["label"] for chip in matched_row["evidence_chips"]] == ["Bank", "Discord log"]
+    assert "bank cash movement matched to the Discord deal log" in matched_row["accounting_note"]
+
+    assert payout_row["event_label"] == "Cash settlement"
+    assert [chip["label"] for chip in payout_row["evidence_chips"]] == ["Bank", "Shopify payout"]
+    assert "Finance revenue uses paid Shopify order rows" in payout_row["accounting_note"]
 
 
 def test_ledger_dedupes_relinked_plaid_account_rows_but_keeps_repeated_charges():
@@ -1032,6 +1107,95 @@ def test_ledger_export_handles_cash_rows():
     assert "buy inventory 90 cash" in body
 
 
+def test_ledger_export_xlsx_downloads_excel_with_editable_ledger_rows():
+    engine = make_engine()
+    posted_at = datetime(2026, 5, 15, 12, tzinfo=timezone.utc)
+
+    with Session(engine) as session:
+        bank_import = add_import(session)
+        session.add(
+            BankTransaction(
+                id=13,
+                import_id=bank_import.id,
+                row_index=1,
+                account_label="Chase Checking",
+                account_type="checking",
+                posted_at=posted_at,
+                description="ATM cash deposit",
+                amount=200.0,
+                classification="cash_deposit_needs_source",
+                expense_category="cash_deposits",
+                review_note="Needs owner source.",
+            )
+        )
+        session.add(
+            Transaction(
+                id=504,
+                source_message_id=1504,
+                occurred_at=posted_at,
+                parse_status="parsed",
+                entry_kind="buy",
+                payment_method="cash",
+                expense_category="inventory",
+                amount=90.0,
+                money_in=0.0,
+                money_out=90.0,
+                source_content="buy inventory 90 cash",
+            )
+        )
+        session.commit()
+
+        with patch("app.routers.ledger.require_role_response", return_value=None):
+            response = ledger_export_xlsx(
+                make_request("/ledger/export.xlsx?status=all&include_cash=true"),
+                account="",
+                start="",
+                end="",
+                status="all",
+                category="",
+                source="",
+                action_reason="",
+                search="",
+                sort="posted_at",
+                direction="desc",
+                include_cash=True,
+                session=session,
+            )
+
+    assert response.status_code == 200
+    assert response.media_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    assert 'filename="ledger-export.xlsx"' in response.headers["Content-Disposition"]
+
+    workbook = load_workbook(BytesIO(response.body))
+    sheet = workbook["Ledger"]
+    headers = [cell.value for cell in sheet[1]]
+    assert headers == [
+        "row_id",
+        "row_kind",
+        "posted_at",
+        "account",
+        "amount",
+        "ledger_status",
+        "source",
+        "category",
+        "classification",
+        "description",
+        "matched_transaction_id",
+        "match_reason",
+        "review_status",
+        "review_note",
+    ]
+    values_by_row_id = {sheet.cell(row=row_index, column=1).value: row_index for row_index in range(2, sheet.max_row + 1)}
+    bank_row = values_by_row_id[13]
+    cash_row = values_by_row_id["cash-504"]
+    assert sheet.cell(row=bank_row, column=10).value == "ATM cash deposit"
+    assert sheet.cell(row=bank_row, column=14).value == "Needs owner source."
+    assert sheet.cell(row=cash_row, column=2).value == "cash"
+    assert sheet.cell(row=cash_row, column=10).value == "buy inventory 90 cash"
+    assert sheet.freeze_panes == "A2"
+    assert sheet.auto_filter.ref == f"A1:N{sheet.max_row}"
+
+
 def test_ledger_includes_non_cash_discord_financial_channel_rows():
     engine = make_engine()
     posted_at = datetime(2026, 5, 19, 12, tzinfo=timezone.utc)
@@ -1262,7 +1426,7 @@ def test_ledger_page_links_discord_matches_to_deal_detail():
     assert "Edit transaction" in body
 
 
-def test_ledger_page_exposes_category_editor_for_discord_deal_rows():
+def test_ledger_page_exposes_bulk_selectable_discord_deal_rows():
     engine = make_engine()
     posted_at = datetime(2026, 5, 19, 12, tzinfo=timezone.utc)
     with Session(engine) as session:
@@ -1335,13 +1499,100 @@ def test_ledger_page_exposes_category_editor_for_discord_deal_rows():
 
     body = response.body.decode("utf-8")
     assert response.status_code == 200
-    assert 'data-discord-category-form="discord-deal-630"' in body
+    assert 'class="row-select" type="checkbox" name="row_id" value="discord-deal-630"' in body
+    assert 'data-row-edit-form data-ledger-transaction-form="discord-deal-630"' in body
     assert 'action="/ledger/transactions/1630/edit-form"' in body
-    assert 'name="entry_kind" value="buy"' in body
+    assert 'name="entry_kind"' in body
+    assert '<option value="buy" selected>Buy</option>' in body
     assert 'name="amount" value="250.0"' in body
-    assert 'name="payment_method" value="zelle"' in body
+    assert 'name="payment_method"' in body
+    assert '<option value="zelle" selected>Zelle</option>' in body
     assert 'name="expense_category"' in body
-    assert "Save category" in body
+    assert 'data-discord-category-form="discord-deal-630"' not in body
+    assert "Save category" not in body
+
+
+def test_ledger_transaction_edit_form_can_return_json_for_in_place_updates():
+    from app.routers import ledger as ledger_router
+
+    edit_form = getattr(ledger_router, "ledger_transaction_edit_form", None)
+    assert edit_form is not None
+
+    engine = make_engine()
+    occurred_at = datetime(2026, 5, 19, 12, tzinfo=timezone.utc)
+    with Session(engine) as session:
+        message = DiscordMessage(
+            id=1803,
+            discord_message_id="cash-row-message",
+            channel_id="offline-cash-channel",
+            channel_name="offline-cash",
+            author_name="tester",
+            content="Bought singles 90 cash",
+            created_at=occurred_at,
+            parse_status=PARSE_PARSED,
+            deal_type="buy",
+            entry_kind="buy",
+            payment_method="cash",
+            amount=90.0,
+            money_in=0.0,
+            money_out=90.0,
+            expense_category="inventory",
+            needs_review=False,
+        )
+        session.add(message)
+        session.add(
+            Transaction(
+                id=1804,
+                source_message_id=1803,
+                occurred_at=occurred_at,
+                parse_status="parsed",
+                entry_kind="buy",
+                payment_method="cash",
+                expense_category="inventory",
+                amount=90.0,
+                money_in=0.0,
+                money_out=90.0,
+                source_content="Bought singles 90 cash",
+            )
+        )
+        session.commit()
+
+        with patch("app.routers.ledger.require_role_response", return_value=None):
+            response = edit_form(
+                make_request(
+                    "/ledger/transactions/1803/edit-form",
+                    method="POST",
+                    headers=[(b"x-requested-with", b"fetch")],
+                ),
+                source_message_id=1803,
+                entry_kind="buy",
+                amount="90",
+                payment_method="cash",
+                expense_category="inventory_purchases",
+                notes="",
+                selected_account="",
+                selected_start="",
+                selected_end="",
+                selected_status="all",
+                selected_category="",
+                selected_source="cash",
+                selected_action_reason="",
+                selected_search="",
+                selected_sort="posted_at",
+                selected_direction="desc",
+                selected_include_cash="true",
+                session=session,
+            )
+        message = session.get(DiscordMessage, 1803)
+        transaction = session.exec(select(Transaction).where(Transaction.source_message_id == 1803)).one()
+
+    payload = json.loads(response.body)
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["row"]["expense_category"] == "inventory_purchases"
+    assert payload["row"]["expense_category_label"] == "Inventory purchases"
+    assert message.expense_category == "inventory_purchases"
+    assert transaction.expense_category == "inventory_purchases"
 
 
 def test_ledger_transaction_edit_form_updates_discord_source_transaction():
@@ -1473,6 +1724,52 @@ def test_ledger_export_includes_all_matching_rows_not_just_first_page():
 
     body = response.body.decode("utf-8")
     assert body.count("SUPPLIES ROW") == 1005
+
+
+def test_ledger_export_xlsx_includes_all_matching_rows_not_just_first_page():
+    engine = make_engine()
+    posted_at = datetime(2026, 5, 15, 12, tzinfo=timezone.utc)
+    with Session(engine) as session:
+        bank_import = add_import(session)
+        for idx in range(1005):
+            session.add(
+                BankTransaction(
+                    id=3000 + idx,
+                    import_id=bank_import.id,
+                    row_index=idx + 1,
+                    account_label="Chase Checking",
+                    account_type="checking",
+                    posted_at=posted_at,
+                    description=f"SUPPLIES ROW {idx}",
+                    amount=-1.0,
+                    classification="expense_or_purchase_needs_review",
+                    expense_category="supplies_packaging",
+                )
+            )
+        session.commit()
+
+        with patch("app.routers.ledger.require_role_response", return_value=None):
+            response = ledger_export_xlsx(
+                make_request("/ledger/export.xlsx?status=all&include_cash=false"),
+                account="",
+                start="",
+                end="",
+                status="all",
+                category="",
+                source="",
+                action_reason="",
+                search="",
+                sort="posted_at",
+                direction="desc",
+                include_cash=False,
+                session=session,
+            )
+
+    workbook = load_workbook(BytesIO(response.body), read_only=True)
+    sheet = workbook["Ledger"]
+    descriptions = [row[9] for row in sheet.iter_rows(min_row=2, values_only=True)]
+    assert len(descriptions) == 1005
+    assert descriptions.count("SUPPLIES ROW 1004") == 1
 
 
 def test_ledger_force_unmatch_writes_financial_audit_log():
@@ -1967,6 +2264,8 @@ def test_ledger_route_renders_default_needs_action_grid():
     assert "Ledger Assistant" in body
     assert 'href="/ledger?status=all&amp;sort=posted_at&amp;direction=desc&amp;include_cash=true"' in body
     assert "All transactions" in body
+    assert 'href="/ledger/export.xlsx?' in body
+    assert "Export Excel" in body
     assert 'href="/ledger?status=needs_action&amp;action_reason=needs_match_check&amp;sort=posted_at&amp;direction=desc&amp;include_cash=false"' in body
     assert 'name="action_reason"' in body
     assert 'action="/ledger/agent/preview-form"' in body
@@ -2047,6 +2346,17 @@ def test_ledger_template_uses_dense_full_width_review_surface():
     assert "data-action-reason" in source
     assert "document.addEventListener(\"keydown\"" in source
     assert "focusSearch" in source
+
+
+def test_ledger_template_presents_unified_money_event_language():
+    source = open("app/templates/ledger.html", encoding="utf-8").read()
+
+    assert "Money Events" in source
+    assert "Cash / Log" in source
+    assert 'data-label="Evidence"' in source
+    assert "row.evidence_chips" in source
+    assert "Finance revenue uses paid order rows" in source
+    assert "orders stay as context" not in source.lower()
 
 
 def test_ledger_template_has_mobile_card_layout_and_page_scroll():

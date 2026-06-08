@@ -798,5 +798,128 @@ class StreamerFreshOrderFallbackTests(unittest.TestCase):
         require_role.assert_called_once_with(request, "reviewer")
 
 
+class SharedShopCreatorAttributionTests(unittest.TestCase):
+    """One shared TikTok shop (DC LLC) feeding two creator handles.
+
+    TikTok exposes no per-creator order attribution for in-house lives
+    (affiliate_creator_username is never populated in production), so the
+    streamer dashboard must:
+      (a) never duplicate GMV across both creator dashboards,
+      (b) never present a deceptive false-zero,
+      (c) show a clearly-labeled live-window estimate when a creator's live
+          window is known (heuristic by order time, not TikTok attribution),
+      (d) show the whole DC LLC shop for the MAIN creator when idle, and
+      (e) show a neutral empty state for the SECONDARY creator when idle.
+    """
+
+    WINDOW_START = datetime(2026, 6, 8, 1, 0, tzinfo=timezone.utc)
+    WINDOW_END = datetime(2026, 6, 8, 3, 0, tzinfo=timezone.utc)
+
+    def _unattributed(self, order_id: str, created_at: datetime) -> TikTokOrder:
+        return _order(order_id, created_at, [], subtotal_price=10.0)
+
+    def test_live_window_estimate_narrows_unattributed_orders_to_creator_window(self) -> None:
+        in_window = self._unattributed("in", datetime(2026, 6, 8, 2, 0, tzinfo=timezone.utc))
+        before = self._unattributed("before", datetime(2026, 6, 8, 0, 30, tzinfo=timezone.utc))
+        after = self._unattributed("after", datetime(2026, 6, 8, 3, 30, tzinfo=timezone.utc))
+        ctx = {
+            "selected_creator": "degenboss0",
+            "creator_filter_enabled": True,
+            "start": self.WINDOW_START,
+            "end": self.WINDOW_END,
+            "creator_order_attribution": streamer_module.CREATOR_ORDER_ATTRIBUTION_TIME_WINDOW,
+        }
+        result = streamer_module._filter_orders_to_affiliate_creator([in_window, before, after], ctx)
+        self.assertEqual({o.tiktok_order_id for o in result}, {"in"})
+
+    def test_live_window_estimate_includes_orders_through_open_ended_window(self) -> None:
+        in_window = self._unattributed("in", datetime(2026, 6, 8, 2, 0, tzinfo=timezone.utc))
+        before = self._unattributed("before", datetime(2026, 6, 8, 0, 30, tzinfo=timezone.utc))
+        ctx = {
+            "selected_creator": "degenboss0",
+            "creator_filter_enabled": True,
+            "start": self.WINDOW_START,
+            "end": None,  # still live
+            "creator_order_attribution": streamer_module.CREATOR_ORDER_ATTRIBUTION_TIME_WINDOW,
+        }
+        result = streamer_module._filter_orders_to_affiliate_creator([in_window, before], ctx)
+        self.assertEqual({o.tiktok_order_id for o in result}, {"in"})
+
+    def test_secondary_creator_without_live_window_returns_empty_not_duplicate(self) -> None:
+        orders = [
+            self._unattributed("a", datetime(2026, 6, 8, 2, 0, tzinfo=timezone.utc)),
+            self._unattributed("b", datetime(2026, 6, 8, 2, 5, tzinfo=timezone.utc)),
+        ]
+        ctx = {
+            "selected_creator": "degenboss0",
+            "creator_filter_enabled": True,
+            "start": None,
+            "end": None,
+            "creator_order_attribution": streamer_module.CREATOR_ORDER_ATTRIBUTION_NO_SESSION,
+        }
+        self.assertEqual(streamer_module._filter_orders_to_affiliate_creator(orders, ctx), [])
+
+    def test_main_creator_without_live_window_returns_whole_shop(self) -> None:
+        orders = [
+            self._unattributed("a", datetime(2026, 6, 8, 2, 0, tzinfo=timezone.utc)),
+            self._unattributed("b", datetime(2026, 6, 8, 2, 5, tzinfo=timezone.utc)),
+        ]
+        ctx = {
+            "selected_creator": streamer_module.DEFAULT_STREAM_CREATOR,
+            "creator_filter_enabled": True,
+            "start": None,
+            "end": None,
+            "creator_order_attribution": streamer_module.CREATOR_ORDER_ATTRIBUTION_NO_SESSION,
+        }
+        result = streamer_module._filter_orders_to_affiliate_creator(orders, ctx)
+        self.assertEqual({o.tiktok_order_id for o in result}, {"a", "b"})
+
+    def test_authoritative_attribution_overrides_window_estimate(self) -> None:
+        boss = _order(
+            "boss-in", datetime(2026, 6, 8, 2, 0, tzinfo=timezone.utc), [],
+            subtotal_price=10.0, affiliate_creator_username="degenboss0",
+        )
+        main = _order(
+            "main-in", datetime(2026, 6, 8, 2, 0, tzinfo=timezone.utc), [],
+            subtotal_price=10.0, affiliate_creator_username="degencollectibles",
+        )
+        ctx = {
+            "selected_creator": "degenboss0",
+            "creator_filter_enabled": True,
+            "start": self.WINDOW_START,
+            "end": self.WINDOW_END,
+            "creator_order_attribution": streamer_module.CREATOR_ORDER_ATTRIBUTION_AFFILIATE_ORDERS,
+        }
+        result = streamer_module._filter_orders_to_affiliate_creator([boss, main], ctx)
+        self.assertEqual({o.tiktok_order_id for o in result}, {"boss-in"})
+
+    def test_attribution_message_for_live_window_is_labeled_non_authoritative_estimate(self) -> None:
+        ctx = {
+            "selected_creator": "degenboss0",
+            "creator_order_attribution": streamer_module.CREATOR_ORDER_ATTRIBUTION_TIME_WINDOW,
+        }
+        msg = streamer_module._creator_order_attribution_message(ctx).lower()
+        self.assertIn("estimate", msg)
+        self.assertIn("not", msg)
+        self.assertIn("tiktok", msg)
+
+    def test_attribution_message_for_main_idle_states_whole_shop(self) -> None:
+        ctx = {
+            "selected_creator": streamer_module.DEFAULT_STREAM_CREATOR,
+            "creator_order_attribution": streamer_module.CREATOR_ORDER_ATTRIBUTION_NO_SESSION,
+        }
+        msg = streamer_module._creator_order_attribution_message(ctx).lower()
+        self.assertIn("whole", msg)
+        self.assertIn("shop", msg)
+
+    def test_attribution_message_for_secondary_idle_states_attribution_unavailable(self) -> None:
+        ctx = {
+            "selected_creator": "degenboss0",
+            "creator_order_attribution": streamer_module.CREATOR_ORDER_ATTRIBUTION_NO_SESSION,
+        }
+        msg = streamer_module._creator_order_attribution_message(ctx).lower()
+        self.assertIn("available", msg)
+
+
 if __name__ == "__main__":
     unittest.main()

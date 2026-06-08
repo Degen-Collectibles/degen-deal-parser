@@ -55,7 +55,10 @@
             margin: 0 auto;
             padding: 28px 28px 60px;
         }
-        .hero,
+        .finance-command-center,
+        .command-main,
+        .command-profit,
+        .focus-card,
         .panel,
         .finance-readiness,
         .metric-card {
@@ -70,7 +73,9 @@
             from { opacity: 0; transform: translateY(18px) scale(.985); }
             to { opacity: 1; transform: translateY(0) scale(1); }
         }
-        .hero,
+        .command-main,
+        .command-profit,
+        .focus-card,
         .panel,
         .finance-readiness,
         .metric-card {
@@ -78,15 +83,23 @@
             background: var(--panel);
             box-shadow: var(--shadow);
         }
-        .hero {
+        .finance-command-center {
             display: grid;
-            grid-template-columns: 1.2fr .8fr;
-            gap: 24px;
-            padding: 34px;
-            border-radius: 24px;
-            margin-bottom: 18px;
-            background: var(--lx-s1);
-            border: 1px solid var(--lx-br);
+            grid-template-columns: minmax(0, 1.05fr) minmax(320px, .95fr);
+            gap: 12px;
+            margin-bottom: 14px;
+        }
+        .command-main,
+        .command-profit,
+        .focus-card {
+            border-radius: 8px;
+            min-width: 0;
+        }
+        .command-main {
+            padding: 20px;
+            display: grid;
+            align-content: space-between;
+            gap: 16px;
         }
         .eyebrow,
         .chip,
@@ -108,26 +121,26 @@
             color: var(--accent);
             width: fit-content;
         }
-        .hero h1,
+        .finance-command-center h1,
         .section-title,
         .metric-value,
         .hero-value {
             letter-spacing: 0;
         }
-        .hero h1 {
-            margin: 16px 0 10px;
-            font-size: clamp(34px, 4vw, 52px);
-            line-height: .88;
+        .finance-command-center h1 {
+            margin: 12px 0 8px;
+            font-size: clamp(30px, 3vw, 40px);
+            line-height: 1;
             max-width: 760px;
             font-weight: 800;
             color: #ffffff;
         }
-        .hero-copy p {
+        .command-main p {
             max-width: 780px;
             margin: 0;
             color: var(--muted-strong);
-            font-size: 16px;
-            line-height: 1.7;
+            font-size: 14px;
+            line-height: 1.55;
         }
         .hero-meta,
         .quick-row,
@@ -137,7 +150,7 @@
             flex-wrap: wrap;
             align-items: center;
         }
-        .hero-meta { margin-top: 18px; }
+        .hero-meta { margin-top: 0; }
         .chip,
         .tag {
             padding: 8px 12px;
@@ -145,9 +158,8 @@
             background: var(--lx-s2);
             border: 1px solid var(--line);
         }
-        .hero-stat {
-            border-radius: 28px;
-            padding: 26px;
+        .command-profit {
+            padding: 20px;
             align-self: stretch;
             display: flex;
             flex-direction: column;
@@ -163,10 +175,10 @@
             text-transform: uppercase;
         }
         .hero-value {
-            margin: 10px 0 8px;
-            font-size: clamp(32px, 4vw, 44px);
+            margin: 8px 0 8px;
+            font-size: clamp(30px, 3.2vw, 42px);
             font-weight: 700;
-            line-height: .9;
+            line-height: 1;
             color: #ffffff;
         }
         .hero-subline,
@@ -178,10 +190,10 @@
         .trend {
             font-size: 13px;
             font-weight: 700;
-            margin-top: 16px;
+            margin-top: 12px;
             width: fit-content;
-            padding: 10px 12px;
-            border-radius: 14px;
+            padding: 8px 10px;
+            border-radius: 8px;
             border: 1px solid var(--line);
             background: var(--lx-s2);
         }
@@ -193,6 +205,45 @@
             border-radius: var(--radius-lg);
             margin-bottom: 18px;
             min-width: 0;
+        }
+        .executive-focus-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 10px;
+        }
+        .focus-card {
+            padding: 14px;
+            background: var(--lx-s1);
+        }
+        .focus-label {
+            color: var(--muted);
+            font-size: 10px;
+            font-weight: 800;
+            letter-spacing: .08em;
+            text-transform: uppercase;
+        }
+        .focus-value {
+            margin-top: 8px;
+            color: #fff;
+            font-size: clamp(20px, 3vw, 28px);
+            font-weight: 800;
+            font-variant-numeric: tabular-nums;
+            overflow-wrap: anywhere;
+        }
+        .focus-delta {
+            margin-top: 8px;
+            font-size: 12px;
+            font-weight: 700;
+        }
+        .focus-delta.positive { color: #8eedb0; }
+        .focus-delta.negative { color: #ffb4a8; }
+        .focus-delta.neutral { color: #cfd7df; }
+        .command-actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            align-items: center;
+            margin-top: 10px;
         }
         .toolbar {
             display: grid;
@@ -262,19 +313,25 @@
             border-color: var(--lx-br);
         }
         .finance-readiness {
-            display: grid;
-            grid-template-columns: minmax(240px, .9fr) minmax(0, 1.7fr) auto;
-            gap: 16px;
-            align-items: center;
-            padding: 20px 22px;
-            border-radius: var(--radius-lg);
-            margin-bottom: 20px;
+            border-radius: 8px;
+            margin-bottom: 14px;
+            overflow: hidden;
         }
+        .finance-readiness summary {
+            display: grid;
+            grid-template-columns: minmax(180px, .8fr) minmax(0, 1.4fr) auto;
+            gap: 14px;
+            align-items: center;
+            padding: 14px 16px;
+            cursor: pointer;
+            list-style: none;
+        }
+        .finance-readiness summary::-webkit-details-marker { display: none; }
         .readiness-summary h2 {
             margin: 0;
             color: #fff;
-            font-size: 24px;
-            line-height: 1.05;
+            font-size: 18px;
+            line-height: 1.1;
         }
         .readiness-summary p {
             margin: 8px 0 0;
@@ -286,6 +343,7 @@
             display: grid;
             grid-template-columns: repeat(4, minmax(0, 1fr));
             gap: 10px;
+            padding: 0 16px 16px;
         }
         .readiness-card {
             min-width: 0;
@@ -330,9 +388,10 @@
         }
         .readiness-actions {
             display: flex;
-            flex-direction: column;
+            flex-direction: row;
             gap: 10px;
             align-items: stretch;
+            padding: 0 16px 16px;
         }
         .readiness-actions .quick-link {
             justify-content: center;
@@ -819,13 +878,15 @@
             line-height: 1.7;
         }
         @media (max-width: 1280px) {
-            .finance-readiness { grid-template-columns: 1fr; }
+            .finance-command-center,
+            .finance-readiness summary {
+                grid-template-columns: 1fr;
+            }
             .chart-grid,
             .content-grid,
             .data-grid,
             .expense-overview-grid,
-            .toolbar,
-            .hero {
+            .toolbar {
                 grid-template-columns: 1fr;
             }
             .model-strip {
@@ -846,12 +907,14 @@
                 margin-right: -14px;
                 width: calc(100% + 28px);
             }
-            .hero,
+            .command-main,
+            .command-profit,
+            .focus-card,
             .panel,
             .finance-readiness,
-            .metric-card { border-radius: 22px; }
-            .hero { padding: 24px; }
-            .hero h1 { font-size: 38px; }
+            .metric-card { border-radius: 8px; }
+            .finance-command-center h1 { font-size: 34px; }
+            .executive-focus-grid { grid-template-columns: 1fr; }
             .kpi-grid { grid-template-columns: 1fr; }
             .readiness-grid { grid-template-columns: 1fr 1fr; }
             .chart-stat-row { grid-template-columns: 1fr 1fr; }
@@ -879,11 +942,13 @@
     <div class="page">
         {% include "_linear_sidebar.html" %}
 
-        <section class="hero">
-            <div class="hero-copy">
-                <div class="eyebrow">Finance</div>
-                <h1>Finance Dashboard</h1>
-                <p>Owner finance check-in across Discord, Shopify, TikTok, and bank context. Paid product revenue uses a 20% gross product margin assumption; inventory purchases are shown as cash deployed, not as immediate profit loss.</p>
+        <section class="finance-command-center">
+            <div class="command-main">
+                <div>
+                    <div class="eyebrow">Finance</div>
+                    <h1>Finance Dashboard</h1>
+                    <p>Owner Snapshot for the selected range: estimated profit, product revenue, inventory cash deployed, and cleanup status.</p>
+                </div>
                 <div class="hero-meta">
                     <span class="chip">{{ range_data["window_label"] }}</span>
                     <span class="chip">{{ range_data["label"] }}</span>
@@ -891,7 +956,7 @@
                     <span class="chip">Updated {{ range_data["as_of_label"] }} PT</span>
                 </div>
             </div>
-            <div class="hero-stat">
+            <div class="command-profit">
                 <div>
                     <div class="hero-label">Estimated Operating Profit</div>
                     <div class="hero-value">{{ current_statement["operating_profit_display"] }}</div>
@@ -903,14 +968,32 @@
                     Average daily estimated profit {{ current_statement["avg_daily_profit_display"] }}.
                 </div>
             </div>
+            <div class="executive-focus-grid">
+                {% for row in executive_kpi_rows %}
+                <a class="focus-card" href="{{ row['drilldown_href'] }}">
+                    <div class="focus-label">{{ row["label"] }}</div>
+                    <div class="focus-value">{{ row["value_display"] }}</div>
+                    <div class="focus-delta {{ row['tone'] }}">{{ row["delta_display"] }} vs {{ range_data["previous_label"] }}</div>
+                </a>
+                {% endfor %}
+            </div>
+            <div class="command-actions">
+                <a href="/ledger?status=needs_action&sort=amount&direction=asc&include_cash=false" class="quick-link">Open ledger cleanup</a>
+                <a href="#finance-model" class="quick-link legacy">Assumptions</a>
+                <a href="#finance-detail-kpis" class="quick-link legacy">Details below</a>
+            </div>
         </section>
 
-        <section class="finance-readiness">
-            <div class="readiness-summary">
-                <p class="section-kicker">Read first</p>
-                <h2>Data confidence</h2>
-                <p>Use these checks before trusting the headline number for taxes or owner decisions.</p>
-            </div>
+        <details class="finance-readiness">
+            <summary>
+                <div class="readiness-summary">
+                    <p class="section-kicker">Coverage</p>
+                    <h2>Data confidence</h2>
+                    <p>{{ quality_rows[1]["value"] }} Discord rows, {{ quality_rows[1]["detail"] }}.</p>
+                </div>
+                <div class="readiness-detail">Tax/export confidence checks for the selected range.</div>
+                <span class="quick-link legacy">Show checks</span>
+            </summary>
             <div class="readiness-grid">
                 {% for row in quality_rows %}
                 {% if row["action_url"] %}<a class="readiness-card" href="{{ row['action_url'] }}">{% else %}<div class="readiness-card">{% endif %}
@@ -925,7 +1008,7 @@
                 <a href="/ledger?status=needs_action&sort=amount&direction=asc&include_cash=false" class="quick-link">Open ledger cleanup</a>
                 <a href="#data-quality" class="quick-link legacy">View data quality</a>
             </div>
-        </section>
+        </details>
 
         <section class="panel toolbar" id="finance-range-controls">
             <form method="get" action="/finance" class="filters">
@@ -955,7 +1038,7 @@
             <a href="#finance-drilldown-gross-profit" class="quick-link legacy">View model math</a>
         </section>
 
-        <section class="kpi-grid">
+        <section class="kpi-grid" id="finance-detail-kpis">
             {% for row in kpi_rows %}
             <article class="metric-card">
                 <div class="metric-label">{{ row["label"] }}</div>
