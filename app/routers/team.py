@@ -77,6 +77,7 @@ from ..models import (
 from ..team.pii import PIIDecryptError, decrypt_pii, encrypt_pii
 from ..rate_limit import rate_limited_or_429
 from ..shared import app_home_for_role, templates
+from ..team.email import email_address_fingerprint, mask_email_address, send_email
 from ..team.sms import mask_sms_phone, normalize_sms_phone, send_sms, sms_phone_fingerprint
 from ..team.team_notifications import (
     EMPLOYEE_NOTIFICATION_ACTION,
@@ -220,6 +221,35 @@ def _password_reset_sms_body(reset_url: str) -> str:
     )
 
 
+def _password_reset_email_subject() -> str:
+    return "Reset your Degen Team password"
+
+
+def _password_reset_email_body(user: User, reset_url: str) -> str:
+    display_name = (user.display_name or user.username or "there").strip()
+    return (
+        f"Hi {display_name},\n\n"
+        "Use this link to reset your Degen Team password:\n"
+        f"{reset_url}\n\n"
+        "This link expires in 60 minutes. If you did not request a password reset, "
+        "you can ignore this email.\n"
+    )
+
+
+def _email_provider_can_deliver() -> bool:
+    provider = (getattr(get_settings(), "password_reset_email_provider", "dry_run") or "dry_run").strip().lower()
+    return provider not in {
+        "",
+        "dryrun",
+        "dry_run",
+        "log",
+        "console",
+        "disabled",
+        "off",
+        "none",
+    }
+
+
 def _sms_provider_can_deliver() -> bool:
     provider = (get_settings().sms_provider or "dry_run").strip().lower()
     return provider not in {
@@ -293,6 +323,77 @@ def _queue_password_reset_request(
             ip_address=(request.client.host if request.client else None),
         )
     )
+
+
+def _try_send_password_reset_email(
+    session: Session,
+    *,
+    request: Request,
+    user: User,
+    probe_hash: str,
+) -> bool:
+    if not _email_provider_can_deliver():
+        return False
+    profile = session.get(EmployeeProfile, user.id)
+    if profile is None or not profile.email_ciphertext:
+        return False
+    try:
+        email_plain = decrypt_pii(profile.email_ciphertext) or ""
+    except (PIIDecryptError, ValueError):
+        return False
+    to_email = email_plain.strip().lower()
+    if "@" not in to_email or to_email.startswith("@") or to_email.endswith("@"):
+        return False
+
+    raw_token = generate_password_reset_token(
+        session,
+        user_id=user.id,
+        issued_by_user_id=user.id,
+    )
+    reset_url = _password_reset_url(request, raw_token)
+    result = send_email(
+        to_email=to_email,
+        subject=_password_reset_email_subject(),
+        body=_password_reset_email_body(user, reset_url),
+        settings=get_settings(),
+    )
+    token_revoked = False
+    if not (result.success and not result.dry_run):
+        token_row = _find_token_row(session, PasswordResetToken, raw_token)
+        if token_row is not None and token_row.used_at is None:
+            token_row.used_at = utcnow()
+            session.add(token_row)
+            token_revoked = True
+    details = {
+        "provider": result.provider,
+        "status": result.status,
+        "dry_run": result.dry_run,
+        "success": result.success and not result.dry_run,
+        "token_revoked": token_revoked,
+        "email": mask_email_address(to_email),
+        "email_fingerprint": email_address_fingerprint(to_email),
+        "identifier_hash": probe_hash,
+    }
+    if result.message_id:
+        details["message_id"] = result.message_id
+    if result.error:
+        details["error"] = result.error[:240]
+    session.add(
+        AuditLog(
+            actor_user_id=user.id,
+            target_user_id=user.id,
+            action=(
+                "password.reset_email_sent"
+                if result.success and not result.dry_run
+                else "password.reset_email_failed"
+            ),
+            details_json=json.dumps(details, sort_keys=True),
+            ip_address=(request.client.host if request.client else None),
+        )
+    )
+    if result.success and not result.dry_run:
+        return True
+    return False
 
 
 def _try_send_password_reset_sms(
@@ -643,7 +744,7 @@ async def team_password_forgot_post(
     matched_user = _find_password_reset_user(session, probe)
     delivered = False
     if matched_user is not None:
-        delivered = _try_send_password_reset_sms(
+        delivered = _try_send_password_reset_email(
             session,
             request=request,
             user=matched_user,
@@ -655,7 +756,7 @@ async def team_password_forgot_post(
                 request=request,
                 user=matched_user,
                 probe_hash=probe_hash,
-                reason="manager_action_required",
+                reason="email_delivery_unavailable",
             )
     session.add(
         AuditLog(
@@ -674,7 +775,7 @@ async def team_password_forgot_post(
     )
     session.commit()
     return RedirectResponse(
-        "/team/password/forgot?flash=If+that+account+exists%2C+we%27ll+send+a+reset+link+or+put+it+in+the+admin+reset+queue.",
+        "/team/password/forgot?flash=If+that+account+exists%2C+we%27ll+email+a+reset+link+or+put+it+in+the+admin+reset+queue.",
         status_code=303,
     )
 

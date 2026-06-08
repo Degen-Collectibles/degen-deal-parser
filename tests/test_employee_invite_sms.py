@@ -209,7 +209,7 @@ class EmployeeInviteSmsTests(unittest.TestCase):
         self.assertIn("Text invite", html)
 
 
-class PasswordResetSmsTests(unittest.TestCase):
+class PasswordResetEmailTests(unittest.TestCase):
     def setUp(self):
         from app import config as cfg
         from app import rate_limit
@@ -241,12 +241,28 @@ class PasswordResetSmsTests(unittest.TestCase):
             sms_twilio_auth_token="test-token",
             sms_twilio_messaging_service_sid="",
             sms_timeout_seconds=1,
+            password_reset_email_provider="smtp",
+            password_reset_email_from="team@example.test",
+            password_reset_email_from_name="Degen Team",
+            password_reset_smtp_host="smtp.example.test",
+            password_reset_smtp_port=587,
+            password_reset_smtp_username="smtp-user",
+            password_reset_smtp_password="smtp-pass",
+            password_reset_smtp_starttls=True,
+            password_reset_smtp_ssl=False,
+            password_reset_email_timeout_seconds=1,
         )
 
-    def _active_employee_with_phone(self, username: str, phone: str):
+    def _active_employee_with_contact(
+        self,
+        username: str,
+        *,
+        email: str = "reset@example.com",
+        phone: str = "(555) 867-5309",
+    ):
         from app.auth import hash_password
         from app.models import EmployeeProfile, User
-        from app.team.pii import encrypt_pii
+        from app.team.pii import email_lookup_hash, encrypt_pii
 
         password_hash, salt = hash_password("OldPassword1!")
         employee = User(
@@ -260,31 +276,35 @@ class PasswordResetSmsTests(unittest.TestCase):
         self.session.add(employee)
         self.session.commit()
         self.session.refresh(employee)
-        self.session.add(
-            EmployeeProfile(
-                user_id=employee.id,
-                phone_enc=encrypt_pii(phone),
-            )
-        )
+        profile = EmployeeProfile(user_id=employee.id)
+        if phone:
+            profile.phone_enc = encrypt_pii(phone)
+        if email:
+            profile.email_ciphertext = encrypt_pii(email)
+            profile.email_lookup_hash = email_lookup_hash(email)
+        self.session.add(profile)
         self.session.commit()
         return employee
 
-    def test_forgot_password_texts_reset_link_without_manager_queue(self):
+    def test_forgot_password_emails_reset_link_without_manager_queue(self):
         from app.models import AuditLog, PasswordResetToken
         from app.routers import team as mod
-        from app.team.sms import SmsSendResult
+        from app.team.email import EmailSendResult
 
-        employee = self._active_employee_with_phone("sms-reset-ok", "(555) 867-5309")
+        employee = self._active_employee_with_contact("email-reset-ok")
         sent: dict[str, str] = {}
 
-        def fake_send_sms(*, to_phone, body, settings=None):
-            sent["to_phone"] = to_phone
+        def fake_send_email(*, to_email, subject, body, settings=None):
+            sent["to_email"] = to_email
+            sent["subject"] = subject
             sent["body"] = body
-            return SmsSendResult(provider="twilio", status="queued", message_id="SM123")
+            return EmailSendResult(provider="smtp", status="sent", message_id="MSG123")
 
         with patch.object(mod, "get_settings", return_value=self._settings()), patch.object(
-            mod, "send_sms", side_effect=fake_send_sms
-        ):
+            mod, "send_email", side_effect=fake_send_email, create=True
+        ), patch.object(
+            mod, "send_sms"
+        ) as send_sms:
             response = asyncio.run(
                 mod.team_password_forgot_post(
                     self._request(),
@@ -293,8 +313,10 @@ class PasswordResetSmsTests(unittest.TestCase):
                 )
             )
 
+        send_sms.assert_not_called()
         self.assertEqual(response.status_code, 303)
-        self.assertEqual(sent["to_phone"], "+15558675309")
+        self.assertEqual(sent["to_email"], "reset@example.com")
+        self.assertEqual(sent["subject"], "Reset your Degen Team password")
         self.assertIn("https://team.example.test/team/password/reset/", sent["body"])
 
         tokens = list(
@@ -311,29 +333,32 @@ class PasswordResetSmsTests(unittest.TestCase):
             ).all()
         )
         actions = {row.action for row in audit_rows}
-        self.assertIn("password.reset_sms_sent", actions)
+        self.assertIn("password.reset_email_sent", actions)
         self.assertNotIn("password.reset_manager_request", actions)
         details_blob = "\n".join(row.details_json for row in audit_rows)
         self.assertNotIn("/team/password/reset/", details_blob)
-        self.assertNotIn("5558675309", details_blob)
+        self.assertNotIn("reset@example.com", details_blob)
+        self.assertIn("r***@example.com", details_blob)
 
-    def test_failed_reset_text_revokes_undelivered_token_and_queues_manager(self):
+    def test_failed_reset_email_revokes_undelivered_token_and_queues_manager(self):
         from app.models import AuditLog, PasswordResetToken
         from app.routers import team as mod
-        from app.team.sms import SmsSendResult
+        from app.team.email import EmailSendResult
 
-        employee = self._active_employee_with_phone("sms-reset-fail", "(555) 867-5309")
+        employee = self._active_employee_with_contact("email-reset-fail")
 
-        def fake_send_sms(*, to_phone, body, settings=None):
-            return SmsSendResult(
-                provider="twilio",
-                status="http_400",
-                error="The destination number is blocked.",
+        def fake_send_email(*, to_email, subject, body, settings=None):
+            return EmailSendResult(
+                provider="smtp",
+                status="smtp_error",
+                error="Mailbox unavailable",
             )
 
         with patch.object(mod, "get_settings", return_value=self._settings()), patch.object(
-            mod, "send_sms", side_effect=fake_send_sms
-        ):
+            mod, "send_email", side_effect=fake_send_email, create=True
+        ), patch.object(
+            mod, "send_sms"
+        ) as send_sms:
             response = asyncio.run(
                 mod.team_password_forgot_post(
                     self._request(),
@@ -342,6 +367,7 @@ class PasswordResetSmsTests(unittest.TestCase):
                 )
             )
 
+        send_sms.assert_not_called()
         self.assertEqual(response.status_code, 303)
         tokens = list(
             self.session.exec(
@@ -357,8 +383,93 @@ class PasswordResetSmsTests(unittest.TestCase):
             ).all()
         )
         actions = {row.action for row in audit_rows}
-        self.assertIn("password.reset_sms_failed", actions)
+        self.assertIn("password.reset_email_failed", actions)
         self.assertIn("password.reset_manager_request", actions)
+        details_blob = "\n".join(row.details_json for row in audit_rows)
+        self.assertNotIn("/team/password/reset/", details_blob)
+        self.assertNotIn("reset@example.com", details_blob)
+
+    def test_forgot_password_does_not_fall_back_to_sms_when_email_unavailable(self):
+        from app.models import AuditLog, PasswordResetToken
+        from app.routers import team as mod
+
+        employee = self._active_employee_with_contact(
+            "email-reset-no-email",
+            email="",
+            phone="(555) 867-5309",
+        )
+
+        with patch.object(mod, "get_settings", return_value=self._settings()), patch.object(
+            mod, "send_sms"
+        ) as send_sms:
+            response = asyncio.run(
+                mod.team_password_forgot_post(
+                    self._request(),
+                    identifier=employee.username,
+                    session=self.session,
+                )
+            )
+
+        send_sms.assert_not_called()
+        self.assertEqual(response.status_code, 303)
+        tokens = list(
+            self.session.exec(
+                select(PasswordResetToken).where(PasswordResetToken.user_id == employee.id)
+            ).all()
+        )
+        self.assertEqual(tokens, [])
+        manager_request = self.session.exec(
+            select(AuditLog).where(
+                AuditLog.target_user_id == employee.id,
+                AuditLog.action == "password.reset_manager_request",
+            )
+        ).first()
+        self.assertIsNotNone(manager_request)
+
+    def test_legacy_sms_reset_helper_still_revokes_failed_sms_token(self):
+        from app.models import AuditLog, PasswordResetToken
+        from app.routers import team as mod
+        from app.team.sms import SmsSendResult
+
+        employee = self._active_employee_with_contact(
+            "sms-helper-fail",
+            email="",
+            phone="(555) 867-5309",
+        )
+
+        def fake_send_sms(*, to_phone, body, settings=None):
+            return SmsSendResult(
+                provider="twilio",
+                status="http_400",
+                error="The destination number is blocked.",
+            )
+
+        with patch.object(mod, "get_settings", return_value=self._settings()), patch.object(
+            mod, "send_sms", side_effect=fake_send_sms
+        ):
+            delivered = mod._try_send_password_reset_sms(
+                self.session,
+                request=self._request(),
+                user=employee,
+                probe_hash="probe-hash",
+            )
+
+        self.assertFalse(delivered)
+        tokens = list(
+            self.session.exec(
+                select(PasswordResetToken).where(PasswordResetToken.user_id == employee.id)
+            ).all()
+        )
+        self.assertEqual(len(tokens), 1)
+        self.assertIsNotNone(tokens[0].used_at)
+
+        audit_rows = list(
+            self.session.exec(
+                select(AuditLog).where(AuditLog.target_user_id == employee.id)
+            ).all()
+        )
+        actions = {row.action for row in audit_rows}
+        self.assertIn("password.reset_sms_failed", actions)
         details_blob = "\n".join(row.details_json for row in audit_rows)
         self.assertNotIn("/team/password/reset/", details_blob)
         self.assertNotIn("5558675309", details_blob)

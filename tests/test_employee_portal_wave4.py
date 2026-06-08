@@ -791,6 +791,34 @@ class ResetPasswordTests(unittest.TestCase, _W4Harness):
         self.assertEqual(rows[0]["user"].username, "emp700")
         self.assertIn("/team/admin/employees/{{ employee.id }}/reset-password", template)
 
+    def test_admin_reset_request_queue_closes_after_reset_email_sent(self):
+        from app.models import AuditLog
+        from app.routers.team_admin import _pending_password_reset_request_rows
+
+        self._login(role="admin", user_id=302, username="adm-reset-email-queue")
+        emp = self._seed_employee(user_id=702, username="emp702")
+        self.session.add(
+            AuditLog(
+                target_user_id=emp.id,
+                action="password.reset_manager_request",
+                resource_key="admin.employees.reset_password",
+                details_json=json.dumps({"source": "http_forgot"}),
+            )
+        )
+        self.session.commit()
+        self.session.add(
+            AuditLog(
+                target_user_id=emp.id,
+                action="password.reset_email_sent",
+                details_json=json.dumps({"provider": "smtp", "status": "sent"}),
+            )
+        )
+        self.session.commit()
+
+        rows = _pending_password_reset_request_rows(self.session)
+
+        self.assertEqual(rows, [])
+
     def test_admin_reset_shows_link_once_and_audits(self):
         from app.models import AuditLog
         self._login(role="admin", user_id=301, username="adm5")

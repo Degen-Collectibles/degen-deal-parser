@@ -342,6 +342,7 @@ def _pending_password_reset_request_rows(
         "password.reset_manager_request",
         "password.reset_issued",
         "password.reset_consumed",
+        "password.reset_email_sent",
         "password.reset_sms_sent",
     )
     logs = list(

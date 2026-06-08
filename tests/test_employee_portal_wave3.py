@@ -136,7 +136,7 @@ class TeamLoginTests(unittest.TestCase, _PortalHarness):
         self.assertEqual(r.status_code, 200)
         self.assertIn("Sign in", r.text)
         self.assertIn("Forgot your password?", r.text)
-        self.assertIn("Text me login help", r.text)
+        self.assertIn("Email me login help", r.text)
         self.assertIn('action="/team/password/forgot"', r.text)
 
     def test_login_wrong_creds_redirects_with_error(self):
