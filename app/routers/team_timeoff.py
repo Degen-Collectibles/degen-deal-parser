@@ -21,6 +21,7 @@ from ..db import get_session
 from ..models import AuditLog, TimeOffRequest
 from ..rate_limit import rate_limited_or_429
 from ..shared import templates
+from ..team.team_notifications import notify_manager_admins
 from .team import _nav_context, _require_employee
 
 router = APIRouter()
@@ -150,6 +151,21 @@ async def team_timeoff_post(
             ),
             ip_address=(request.client.host if request.client else None),
         )
+    )
+    notify_manager_admins(
+        session,
+        actor_user_id=user.id,
+        resource_key="admin.timeoff.view",
+        kind="timeoff_submitted",
+        title="New time-off request",
+        body=(
+            f"{user.display_name or user.username} requested "
+            f"{parsed_start.isoformat()} to {parsed_end.isoformat()}."
+        ),
+        link_path="/team/admin/timeoff",
+        request=request,
+        exclude_user_ids=[user.id] if user.id is not None else None,
+        send_text=False,
     )
     session.commit()
     return _timeoff_redirect("Time-off request submitted.")

@@ -78,10 +78,16 @@ from ..team.pii import PIIDecryptError, decrypt_pii, encrypt_pii
 from ..rate_limit import rate_limited_or_429
 from ..shared import app_home_for_role, templates
 from ..team.sms import mask_sms_phone, normalize_sms_phone, send_sms, sms_phone_fingerprint
-from ..team.team_notifications import EMPLOYEE_NOTIFICATION_ACTION
+from ..team.team_notifications import (
+    EMPLOYEE_NOTIFICATION_ACTION,
+    notify_manager_admins,
+)
 from ..tiktok.tiktok_alerts import alert_supply_request
 
 router = APIRouter()
+
+
+MANAGER_ADMIN_DASHBOARD_ROLES = {"admin", "manager"}
 
 
 LEGACY_POLICIES: tuple[dict, ...] = (
@@ -837,7 +843,14 @@ def team_dashboard(
     widgets = perms.allowed_widgets_for(session, user)
     settings = get_settings()
     clockify_ready = clockify_is_configured(settings)
-    show_supply_queue_count = has_permission(session, user, "admin.supply.view")
+    show_supply_queue_count = (
+        user.role in MANAGER_ADMIN_DASHBOARD_ROLES
+        and has_permission(session, user, "admin.supply.view")
+    )
+    show_timeoff_queue_count = (
+        user.role in MANAGER_ADMIN_DASHBOARD_ROLES
+        and has_permission(session, user, "admin.timeoff.view")
+    )
     dashboard_context: dict[str, Any] = {
         "request": request,
         "title": "Dashboard",
@@ -846,6 +859,7 @@ def team_dashboard(
         "widgets": widgets,
         "clockify_ready": clockify_ready,
         "show_supply_queue_count": show_supply_queue_count,
+        "show_timeoff_queue_count": show_timeoff_queue_count,
     }
     if show_supply_queue_count:
         dashboard_context["supply_queue_count"] = int(
@@ -853,6 +867,14 @@ def team_dashboard(
                 select(func.count())
                 .select_from(SupplyRequest)
                 .where(SupplyRequest.status.in_(("pending", "submitted")))
+            ).one()
+        )
+    if show_timeoff_queue_count:
+        dashboard_context["timeoff_queue_count"] = int(
+            session.exec(
+                select(func.count())
+                .select_from(TimeOffRequest)
+                .where(TimeOffRequest.status == "submitted")
             ).one()
         )
     today = _portal_today(settings=settings)
@@ -2341,6 +2363,22 @@ async def team_supply_post(
         status="submitted",
     )
     session.add(row)
+    session.flush()
+    notify_manager_admins(
+        session,
+        actor_user_id=user.id,
+        resource_key="admin.supply.view",
+        kind="supply_submitted",
+        title="New supply request",
+        body=(
+            f"{user.display_name or user.username} requested {row.title}"
+            f" ({row.urgency} urgency)."
+        ),
+        link_path="/team/admin/supply",
+        request=request,
+        exclude_user_ids=[user.id] if user.id is not None else None,
+        send_text=False,
+    )
     session.commit()
     session.refresh(row)
     alert_supply_request(

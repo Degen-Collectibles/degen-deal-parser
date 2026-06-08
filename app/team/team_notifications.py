@@ -22,6 +22,7 @@ from .sms import (
 )
 
 EMPLOYEE_NOTIFICATION_ACTION = "employee.notification"
+MANAGER_ADMIN_ROLES = {"admin", "manager"}
 
 
 def _client_ip(request: Optional[Request]) -> Optional[str]:
@@ -135,6 +136,56 @@ def notify_active_employees(
         if user.id is None or user.id in excluded:
             continue
         if user.role not in {"employee", "viewer", "manager", "reviewer", "admin"}:
+            continue
+        notify_employee(
+            session,
+            user_id=user.id,
+            actor_user_id=actor_user_id,
+            kind=kind,
+            title=title,
+            body=body,
+            link_path=link_path,
+            request=request,
+            send_text=send_text,
+        )
+        count += 1
+    return count
+
+
+def notify_manager_admins(
+    session: Session,
+    *,
+    actor_user_id: Optional[int],
+    resource_key: str,
+    kind: str,
+    title: str,
+    body: str,
+    link_path: str = "/team/",
+    request: Optional[Request] = None,
+    exclude_user_ids: Optional[Iterable[int]] = None,
+    send_text: bool = False,
+) -> int:
+    """Create portal notifications for active managers/admins with access.
+
+    Submission alerts are dashboard/browser notifications, not SMS blasts by
+    default. The resource gate keeps custom permission changes authoritative
+    while the role floor enforces manager/admin-only visibility.
+    """
+    from ..auth import has_permission
+
+    excluded = set(exclude_user_ids or [])
+    users = session.exec(
+        select(User)
+        .where(User.is_active == True)  # noqa: E712
+        .where(User.role.in_(tuple(sorted(MANAGER_ADMIN_ROLES))))
+    ).all()
+    count = 0
+    for user in users:
+        if user.id is None or user.id in excluded:
+            continue
+        if user.role not in MANAGER_ADMIN_ROLES:
+            continue
+        if not has_permission(session, user, resource_key):
             continue
         notify_employee(
             session,

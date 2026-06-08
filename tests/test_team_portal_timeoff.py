@@ -6,7 +6,9 @@ TestClient route hangs in this sandbox.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import re
 import unittest
 from datetime import date, timedelta
 from types import SimpleNamespace
@@ -128,34 +130,40 @@ class TeamTimeOffTests(unittest.TestCase):
         )
 
     def _approve(self, actor, request_id: int, *, notes: str = ""):
+        from app.csrf import issue_token
         from app.routers import team_admin_timeoff
 
         request = _FakeRequest(
             actor,
             path=f"/team/admin/timeoff/{request_id}/approve",
         )
+        csrf_token = issue_token(request)
         return asyncio.run(
             team_admin_timeoff.admin_timeoff_approve(
                 request,
                 request_id,
-                notes,
-                self.session,
+                decision_notes=notes,
+                csrf_token=csrf_token,
+                session=self.session,
             )
         )
 
     def _deny(self, actor, request_id: int, *, notes: str = ""):
+        from app.csrf import issue_token
         from app.routers import team_admin_timeoff
 
         request = _FakeRequest(
             actor,
             path=f"/team/admin/timeoff/{request_id}/deny",
         )
+        csrf_token = issue_token(request)
         return asyncio.run(
             team_admin_timeoff.admin_timeoff_deny(
                 request,
                 request_id,
-                notes,
-                self.session,
+                decision_notes=notes,
+                csrf_token=csrf_token,
+                session=self.session,
             )
         )
 
@@ -231,6 +239,30 @@ class TeamTimeOffTests(unittest.TestCase):
             select(AuditLog).where(AuditLog.action == "timeoff.submitted")
         ).one()
         self.assertEqual(audit.actor_user_id, user.id)
+
+    def test_submit_notifies_manager_and_admin_dashboards_only(self):
+        from app.models import AuditLog
+        from app.team.team_notifications import EMPLOYEE_NOTIFICATION_ACTION
+
+        employee = self._seed_user(31, username="emp_timeoff_submit")
+        manager = self._seed_user(32, role="manager", username="mgr_timeoff")
+        admin = self._seed_user(33, role="admin", username="adm_timeoff")
+        reviewer = self._seed_user(34, role="reviewer", username="rev_timeoff")
+        start = date.today() + timedelta(days=12)
+
+        self._submit(employee, start=start, end=start + timedelta(days=1), reason="Trip")
+
+        rows = self.session.exec(
+            select(AuditLog).where(AuditLog.action == EMPLOYEE_NOTIFICATION_ACTION)
+        ).all()
+        self.assertEqual({row.target_user_id for row in rows}, {manager.id, admin.id})
+        payloads = [json.loads(row.details_json) for row in rows]
+        self.assertTrue(all(payload["kind"] == "timeoff_submitted" for payload in payloads))
+        self.assertTrue(
+            all(payload["link_path"] == "/team/admin/timeoff" for payload in payloads)
+        )
+        self.assertNotIn(employee.id, {row.target_user_id for row in rows})
+        self.assertNotIn(reviewer.id, {row.target_user_id for row in rows})
 
     def test_timeoff_form_explains_manager_review_flow(self):
         user = self._seed_user(20, username="emp_timeoff_help")
@@ -345,6 +377,57 @@ class TeamTimeOffTests(unittest.TestCase):
         self.assertTrue(
             any(dep.call is require_csrf for dep in route.dependant.dependencies)
         )
+
+    def test_admin_approve_with_invalid_csrf_returns_queue_error(self):
+        from app import shared
+        from app.db import get_session as real_get_session
+        import app.main as app_main
+        from app.models import TimeOffRequest
+        from fastapi.testclient import TestClient
+
+        employee = self._seed_user(31)
+        admin = self._seed_user(32, role="admin", username="admin32")
+        row = self._seed_request(employee)
+        current = SimpleNamespace(
+            id=admin.id,
+            username=admin.username,
+            display_name=admin.display_name,
+            role=admin.role,
+            is_active=admin.is_active,
+        )
+
+        def override_session():
+            session = Session(self.engine)
+            try:
+                yield session
+            finally:
+                session.close()
+
+        app_main.app.dependency_overrides[real_get_session] = override_session
+        try:
+            with patch.object(shared, "get_request_user", return_value=current), patch.object(
+                app_main, "get_request_user", return_value=current
+            ):
+                client = TestClient(app_main.app)
+                page = client.get("/team/admin/timeoff", follow_redirects=False)
+                self.assertEqual(page.status_code, 200)
+                self.assertIsNotNone(
+                    re.search(r'name="csrf_token" value="[^"]+"', page.text)
+                )
+
+                response = client.post(
+                    f"/team/admin/timeoff/{row.id}/approve",
+                    data={"csrf_token": "expired-or-invalid", "decision_notes": "ok"},
+                    follow_redirects=False,
+                )
+        finally:
+            app_main.app.dependency_overrides.pop(real_get_session, None)
+
+        self.assertEqual(response.status_code, 303)
+        self.assertIn("error=", response.headers["location"])
+        self.session.expire_all()
+        refreshed = self.session.get(TimeOffRequest, row.id)
+        self.assertEqual(refreshed.status, "submitted")
 
     def test_admin_sees_all_requests_default(self):
         employee = self._seed_user(6)

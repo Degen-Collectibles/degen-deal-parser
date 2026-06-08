@@ -268,6 +268,75 @@ class PortalAuditTop5Tests(unittest.TestCase):
         self.assertIn(">2<", html)
         self.assertIn("Pending requests", html)
 
+    def test_dashboard_shows_timeoff_queue_count_for_manager(self):
+        from datetime import date
+
+        from app.models import TimeOffRequest
+        from app.shared import templates
+
+        employee = self._user(21, role="employee", username="timeoff-employee")
+        manager = self._user(22, role="manager", username="timeoff-manager")
+        self.session.add_all(
+            [
+                TimeOffRequest(
+                    submitted_by_user_id=employee.id,
+                    start_date=date(2026, 7, 1),
+                    end_date=date(2026, 7, 1),
+                    status="submitted",
+                ),
+                TimeOffRequest(
+                    submitted_by_user_id=employee.id,
+                    start_date=date(2026, 7, 2),
+                    end_date=date(2026, 7, 2),
+                    status="approved",
+                ),
+            ]
+        )
+        self.session.commit()
+
+        context = self._dashboard_context(manager)
+
+        self.assertTrue(context["show_timeoff_queue_count"])
+        self.assertEqual(context["timeoff_queue_count"], 1)
+        html = templates.env.get_template("team/dashboard.html").render(context)
+        self.assertIn("Time-off queue", html)
+        self.assertIn(">1<", html)
+
+    def test_dashboard_hides_queue_counts_for_reviewer_role(self):
+        from datetime import date
+
+        from app.models import SupplyRequest, TimeOffRequest
+        from app.shared import templates
+
+        employee = self._user(23, role="employee", username="queue-employee")
+        reviewer = self._user(24, role="reviewer", username="queue-reviewer")
+        self.session.add_all(
+            [
+                SupplyRequest(
+                    submitted_by_user_id=employee.id,
+                    title="Sleeves",
+                    status="submitted",
+                ),
+                TimeOffRequest(
+                    submitted_by_user_id=employee.id,
+                    start_date=date(2026, 7, 3),
+                    end_date=date(2026, 7, 3),
+                    status="submitted",
+                ),
+            ]
+        )
+        self.session.commit()
+
+        context = self._dashboard_context(reviewer)
+
+        self.assertFalse(context["show_supply_queue_count"])
+        self.assertFalse(context["show_timeoff_queue_count"])
+        self.assertNotIn("supply_queue_count", context)
+        self.assertNotIn("timeoff_queue_count", context)
+        html = templates.env.get_template("team/dashboard.html").render(context)
+        self.assertNotIn('<div class="pt-widget-label">Supply queue</div>', html)
+        self.assertNotIn('<div class="pt-widget-label">Time-off queue</div>', html)
+
     def test_team_admin_home_counts_use_aggregate_queries(self):
         from app.routers import team_admin
 

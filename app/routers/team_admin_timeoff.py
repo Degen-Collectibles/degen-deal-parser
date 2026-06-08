@@ -16,7 +16,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import update
 from sqlmodel import Session, func, select
 
-from ..csrf import issue_token, require_csrf
+from ..csrf import issue_token, verify_token
 from ..db import get_session
 from ..models import (
     AuditLog,
@@ -44,6 +44,19 @@ def _queue_redirect(
     return RedirectResponse(
         f"/team/admin/timeoff?{key}={quote_plus(message)}",
         status_code=303,
+    )
+
+
+def _csrf_queue_redirect_if_invalid(
+    request: Request,
+    csrf_token: str,
+) -> Optional[RedirectResponse]:
+    submitted = request.headers.get("x-csrf-token") or csrf_token
+    if verify_token(request, submitted):
+        return None
+    return _queue_redirect(
+        "Session expired. Please refresh and try again.",
+        error=True,
     )
 
 
@@ -258,16 +271,16 @@ def _transition_timeoff(
     return None
 
 
-@router.post(
-    "/team/admin/timeoff/{request_id}/approve",
-    dependencies=[Depends(require_csrf)],
-)
+@router.post("/team/admin/timeoff/{request_id}/approve")
 async def admin_timeoff_approve(
     request: Request,
     request_id: int,
     decision_notes: str = Form(default=""),
+    csrf_token: str = Form(default=""),
     session: Session = Depends(get_session),
 ):
+    if csrf_redirect := _csrf_queue_redirect_if_invalid(request, csrf_token):
+        return csrf_redirect
     denial, current = _permission_gate(request, session, "admin.timeoff.approve")
     if denial:
         return denial
@@ -287,16 +300,16 @@ async def admin_timeoff_approve(
     return _queue_redirect("Approved.")
 
 
-@router.post(
-    "/team/admin/timeoff/{request_id}/deny",
-    dependencies=[Depends(require_csrf)],
-)
+@router.post("/team/admin/timeoff/{request_id}/deny")
 async def admin_timeoff_deny(
     request: Request,
     request_id: int,
     decision_notes: str = Form(default=""),
+    csrf_token: str = Form(default=""),
     session: Session = Depends(get_session),
 ):
+    if csrf_redirect := _csrf_queue_redirect_if_invalid(request, csrf_token):
+        return csrf_redirect
     denial, current = _permission_gate(request, session, "admin.timeoff.approve")
     if denial:
         return denial

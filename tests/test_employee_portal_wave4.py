@@ -1,6 +1,7 @@
 """Wave 4 — admin employee mgmt, invites, supply queue, PII reveal."""
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import os
@@ -978,6 +979,52 @@ class SupplyQueueTests(unittest.TestCase, _W4Harness):
         self.session.commit()
         self.session.refresh(row)
         return row.id
+
+    def test_submit_notifies_manager_and_admin_dashboards_only(self):
+        from app.models import AuditLog
+        from app.routers import team
+        from app.team.team_notifications import EMPLOYEE_NOTIFICATION_ACTION
+
+        employee = self._seed_employee(user_id=620, username="supply_submitter")
+        manager = self._seed_employee(
+            user_id=621,
+            username="supply_manager",
+            role="manager",
+        )
+        admin = self._seed_employee(user_id=622, username="supply_admin", role="admin")
+        reviewer = self._seed_employee(
+            user_id=623,
+            username="supply_reviewer",
+            role="reviewer",
+        )
+        request = SimpleNamespace(
+            state=SimpleNamespace(current_user=employee),
+            client=SimpleNamespace(host="testclient"),
+        )
+
+        with patch.object(team, "alert_supply_request"):
+            response = asyncio.run(
+                team.team_supply_post(
+                    request,
+                    title="Bubble mailers",
+                    description="running low",
+                    urgency="high",
+                    session=self.session,
+                )
+            )
+
+        self.assertEqual(response.status_code, 303)
+        rows = self.session.exec(
+            select(AuditLog).where(AuditLog.action == EMPLOYEE_NOTIFICATION_ACTION)
+        ).all()
+        self.assertEqual({row.target_user_id for row in rows}, {manager.id, admin.id})
+        payloads = [json.loads(row.details_json) for row in rows]
+        self.assertTrue(all(payload["kind"] == "supply_submitted" for payload in payloads))
+        self.assertTrue(
+            all(payload["link_path"] == "/team/admin/supply" for payload in payloads)
+        )
+        self.assertNotIn(employee.id, {row.target_user_id for row in rows})
+        self.assertNotIn(reviewer.id, {row.target_user_id for row in rows})
 
     def test_manager_sees_pending(self):
         self._login(role="manager", user_id=601, username="mgr_s")

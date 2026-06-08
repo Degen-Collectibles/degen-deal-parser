@@ -121,6 +121,14 @@
     <div class="pt-widget-sub">Pending requests</div>
   </a>
   {% endif %}
+
+  {% if show_timeoff_queue_count|default(false) %}
+  <a class="pt-widget" href="/team/admin/timeoff?status=submitted" style="display:block;">
+    <div class="pt-widget-label">Time-off queue</div>
+    <div class="pt-widget-value">{{ timeoff_queue_count }}</div>
+    <div class="pt-widget-sub">Pending requests</div>
+  </a>
+  {% endif %}
 </section>
 
 <section class="pt-dashboard-lower">
