@@ -929,7 +929,14 @@ class AdminScheduleSaveTests(unittest.TestCase, _W47Harness):
         self.session.commit()
         return rows
 
-    def _roster(self, emps, week_start: date, *, admin_id: int = 500) -> None:
+    def _roster(
+        self,
+        emps,
+        week_start: date,
+        *,
+        admin_id: int = 500,
+        calendar_kind: str = "storefront",
+    ) -> None:
         """Put the given employees on the roster for the given week.
 
         The grid is empty by default now — admins add people per week —
@@ -942,6 +949,7 @@ class AdminScheduleSaveTests(unittest.TestCase, _W47Harness):
             self.session.add(
                 ScheduleRosterMember(
                     week_start=week_start,
+                    calendar_kind=calendar_kind,
                     user_id=u.id,
                     added_by_user_id=admin_id,
                 )
@@ -1209,6 +1217,128 @@ class AdminScheduleSaveTests(unittest.TestCase, _W47Harness):
         self.assertIn(r.status_code, (302, 303))
         self.assertIn("Copied+1+employee", r.headers["location"])
         self.assertIn("1+closed+day+stay+marked+closed", r.headers["location"])
+
+    def test_schedule_view_auto_carries_previous_roster_names_without_shifts(self):
+        from app.models import (
+            SCHEDULE_CALENDAR_PACKING,
+            SCHEDULE_CALENDAR_STOREFRONT,
+            ScheduleRosterMember,
+            ShiftEntry,
+            classify_shift_label,
+        )
+
+        admin = self._login_as("admin")
+        emps = self._active_employees()
+        monday = self._monday_of_this_week()
+        prev_monday = monday - timedelta(days=7)
+        prev_tuesday = prev_monday + timedelta(days=1)
+
+        self._roster(
+            [emps[0]],
+            prev_monday,
+            admin_id=admin.id,
+            calendar_kind=SCHEDULE_CALENDAR_STOREFRONT,
+        )
+        self._roster(
+            [emps[2]],
+            prev_monday,
+            admin_id=admin.id,
+            calendar_kind=SCHEDULE_CALENDAR_PACKING,
+        )
+        self.session.add(
+            ShiftEntry(
+                user_id=emps[0].id,
+                shift_date=prev_tuesday,
+                calendar_kind=SCHEDULE_CALENDAR_STOREFRONT,
+                label="10:00 AM - 6:00 PM",
+                kind=classify_shift_label("10:00 AM - 6:00 PM"),
+                created_by_user_id=admin.id,
+            )
+        )
+        self.session.add(
+            ShiftEntry(
+                user_id=emps[2].id,
+                shift_date=prev_tuesday,
+                calendar_kind=SCHEDULE_CALENDAR_PACKING,
+                label="11:00 AM - 7:00 PM",
+                kind=classify_shift_label("11:00 AM - 7:00 PM"),
+                created_by_user_id=admin.id,
+            )
+        )
+        self.session.commit()
+
+        page = self.client.get(
+            f"/team/admin/schedule?week={monday.isoformat()}&edit=1"
+        )
+        self.assertEqual(page.status_code, 200)
+
+        self.session.expire_all()
+        target_rows = list(
+            self.session.exec(
+                select(ScheduleRosterMember).where(
+                    ScheduleRosterMember.week_start == monday
+                )
+            ).all()
+        )
+        by_calendar = {
+            row.calendar_kind: row.user_id
+            for row in target_rows
+            if row.calendar_kind
+            in {SCHEDULE_CALENDAR_STOREFRONT, SCHEDULE_CALENDAR_PACKING}
+        }
+        self.assertEqual(
+            by_calendar,
+            {
+                SCHEDULE_CALENDAR_STOREFRONT: emps[0].id,
+                SCHEDULE_CALENDAR_PACKING: emps[2].id,
+            },
+        )
+        copied_shifts = list(
+            self.session.exec(
+                select(ShiftEntry).where(ShiftEntry.shift_date >= monday)
+            ).all()
+        )
+        self.assertEqual(copied_shifts, [])
+
+        self.assertIn(f'id="sch-remove-storefront-{emps[0].id}"', page.text)
+        self.assertIn(f'id="sch-remove-packing-{emps[2].id}"', page.text)
+        self.assertIn('action="/team/admin/schedule/roster/copy-previous"', page.text)
+        self.assertIn('action="/team/admin/schedule/generate-from-previous"', page.text)
+        self.assertIn(
+            f'id="sch-copy-person-storefront-{emps[0].id}"',
+            page.text,
+        )
+        self.assertIn(f'id="sch-copy-person-packing-{emps[2].id}"', page.text)
+
+    def test_schedule_view_does_not_auto_carry_when_target_roster_exists(self):
+        from app.models import ScheduleRosterMember
+
+        admin = self._login_as("admin")
+        emps = self._active_employees()
+        monday = self._monday_of_this_week()
+        prev_monday = monday - timedelta(days=7)
+
+        self._roster([emps[0], emps[2]], prev_monday, admin_id=admin.id)
+        self._roster([emps[1]], monday, admin_id=admin.id)
+
+        page = self.client.get(
+            f"/team/admin/schedule?week={monday.isoformat()}&edit=1"
+        )
+        self.assertEqual(page.status_code, 200)
+
+        self.session.expire_all()
+        current_roster = {
+            row.user_id
+            for row in self.session.exec(
+                select(ScheduleRosterMember).where(
+                    ScheduleRosterMember.week_start == monday
+                )
+            ).all()
+        }
+        self.assertEqual(current_roster, {emps[1].id})
+        self.assertIn(f'id="sch-remove-storefront-{emps[1].id}"', page.text)
+        self.assertNotIn(f'id="sch-remove-storefront-{emps[0].id}"', page.text)
+        self.assertNotIn(f'id="sch-remove-storefront-{emps[2].id}"', page.text)
 
     def test_generate_from_previous_skips_closed_days_and_reports_partial_copy(self):
         from app.models import ShiftEntry, StoreClosure, classify_shift_label

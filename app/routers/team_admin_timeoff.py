@@ -7,7 +7,7 @@ ShiftEntry rows and never edits or deletes existing schedule entries.
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+from datetime import date, timedelta
 from typing import Optional
 from urllib.parse import quote_plus
 
@@ -20,6 +20,10 @@ from ..csrf import issue_token, verify_token
 from ..db import get_session
 from ..models import (
     AuditLog,
+    SCHEDULE_CALENDAR_PACKING,
+    SCHEDULE_CALENDAR_STOREFRONT,
+    SCHEDULE_CALENDARS,
+    ScheduleRosterMember,
     SHIFT_KIND_REQUEST,
     ShiftEntry,
     TimeOffRequest,
@@ -33,6 +37,10 @@ from .team_admin import _permission_gate
 router = APIRouter()
 
 VALID_STATUSES = ("submitted", "approved", "denied")
+
+
+def _monday_of(d: date) -> date:
+    return d - timedelta(days=d.weekday())
 
 
 def _queue_redirect(
@@ -130,6 +138,42 @@ def admin_timeoff_list(
     )
 
 
+def _timeoff_calendar_kinds_for_day(
+    session: Session,
+    *,
+    user_id: int,
+    shift_date: date,
+) -> list[str]:
+    """Pick the schedule calendar(s) where this approved PTO should show."""
+    week_start = _monday_of(shift_date)
+    week_end = week_start + timedelta(days=6)
+    scheduled_kinds: set[str] = set(
+        session.exec(
+            select(ScheduleRosterMember.calendar_kind).where(
+                ScheduleRosterMember.user_id == user_id,
+                ScheduleRosterMember.week_start == week_start,
+            )
+        ).all()
+    )
+    scheduled_kinds.update(
+        session.exec(
+            select(ShiftEntry.calendar_kind).where(
+                ShiftEntry.user_id == user_id,
+                ShiftEntry.shift_date >= week_start,
+                ShiftEntry.shift_date <= week_end,
+            )
+        ).all()
+    )
+    ordered = [kind for kind in SCHEDULE_CALENDARS if kind in scheduled_kinds]
+    if ordered:
+        return ordered
+
+    target = session.get(User, user_id)
+    if target is not None and target.staff_kind == SCHEDULE_CALENDAR_PACKING:
+        return [SCHEDULE_CALENDAR_PACKING]
+    return [SCHEDULE_CALENDAR_STOREFRONT]
+
+
 def _ensure_timeoff_shift_entries(
     session: Session,
     *,
@@ -140,40 +184,48 @@ def _ensure_timeoff_shift_entries(
     created = 0
     day = row.start_date
     while day <= row.end_date:
-        existing_request_entry = session.exec(
-            select(ShiftEntry)
-            .where(ShiftEntry.user_id == row.submitted_by_user_id)
-            .where(ShiftEntry.shift_date == day)
-            .where(ShiftEntry.kind == SHIFT_KIND_REQUEST)
-            .where(ShiftEntry.notes == note)
-        ).first()
-        if existing_request_entry is not None:
-            day += timedelta(days=1)
-            continue
-
-        entries_for_day = list(
-            session.exec(
+        calendar_kinds = _timeoff_calendar_kinds_for_day(
+            session,
+            user_id=row.submitted_by_user_id,
+            shift_date=day,
+        )
+        for calendar_kind in calendar_kinds:
+            existing_request_entry = session.exec(
                 select(ShiftEntry)
                 .where(ShiftEntry.user_id == row.submitted_by_user_id)
                 .where(ShiftEntry.shift_date == day)
-            ).all()
-        )
-        if entries_for_day:
-            sort_order = max(entry.sort_order for entry in entries_for_day) + 1
-        else:
-            sort_order = 0
-        session.add(
-            ShiftEntry(
-                user_id=row.submitted_by_user_id,
-                shift_date=day,
-                label="Time off",
-                kind=SHIFT_KIND_REQUEST,
-                notes=note,
-                created_by_user_id=actor.id,
-                sort_order=sort_order,
+                .where(ShiftEntry.calendar_kind == calendar_kind)
+                .where(ShiftEntry.kind == SHIFT_KIND_REQUEST)
+                .where(ShiftEntry.notes == note)
+            ).first()
+            if existing_request_entry is not None:
+                continue
+
+            entries_for_day = list(
+                session.exec(
+                    select(ShiftEntry)
+                    .where(ShiftEntry.user_id == row.submitted_by_user_id)
+                    .where(ShiftEntry.shift_date == day)
+                    .where(ShiftEntry.calendar_kind == calendar_kind)
+                ).all()
             )
-        )
-        created += 1
+            if entries_for_day:
+                sort_order = max(entry.sort_order for entry in entries_for_day) + 1
+            else:
+                sort_order = 0
+            session.add(
+                ShiftEntry(
+                    user_id=row.submitted_by_user_id,
+                    shift_date=day,
+                    calendar_kind=calendar_kind,
+                    label="Time off",
+                    kind=SHIFT_KIND_REQUEST,
+                    notes=note,
+                    created_by_user_id=actor.id,
+                    sort_order=sort_order,
+                )
+            )
+            created += 1
         day += timedelta(days=1)
     return created
 

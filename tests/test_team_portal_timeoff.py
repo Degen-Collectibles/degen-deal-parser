@@ -656,6 +656,68 @@ class TeamTimeOffTests(unittest.TestCase):
         self.assertNotIn(start - timedelta(days=1), shift_dates)
         self.assertNotIn(start + timedelta(days=3), shift_dates)
 
+    def test_approval_timeoff_appears_on_admin_schedule_grid(self):
+        from app.models import SHIFT_KIND_REQUEST
+        from app.routers.team_admin_schedule import _grid_context, _monday_of
+
+        employee = self._seed_user(
+            220,
+            username="pto_employee",
+            display_name="PTO Employee",
+        )
+        admin = self._seed_user(221, role="admin", username="pto_admin")
+        start = date.today() + timedelta(days=45)
+        row = self._seed_request(employee, start=start, end=start)
+
+        self._approve(admin, row.id)
+
+        context = _grid_context(self.session, _monday_of(start))
+        self.assertIn(employee.id, {user.id for user in context["users"]})
+        entries = context["entry_map"].get((employee.id, start.isoformat()), [])
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].label, "Time off")
+        self.assertEqual(entries[0].kind, SHIFT_KIND_REQUEST)
+
+    def test_approval_timeoff_appears_on_rostered_packing_schedule_grid(self):
+        from app.models import (
+            SCHEDULE_CALENDAR_PACKING,
+            SHIFT_KIND_REQUEST,
+            ScheduleRosterMember,
+        )
+        from app.routers.team_admin_schedule import _grid_context, _monday_of
+
+        employee = self._seed_user(
+            222,
+            username="packing_pto_employee",
+            display_name="Packing PTO",
+        )
+        admin = self._seed_user(223, role="admin", username="packing_pto_admin")
+        start = date.today() + timedelta(days=46)
+        week_start = _monday_of(start)
+        self.session.add(
+            ScheduleRosterMember(
+                week_start=week_start,
+                calendar_kind=SCHEDULE_CALENDAR_PACKING,
+                user_id=employee.id,
+                added_by_user_id=admin.id,
+            )
+        )
+        self.session.commit()
+        row = self._seed_request(employee, start=start, end=start)
+
+        self._approve(admin, row.id)
+
+        context = _grid_context(
+            self.session,
+            week_start,
+            staff_kind=SCHEDULE_CALENDAR_PACKING,
+        )
+        entries = context["entry_map"].get((employee.id, start.isoformat()), [])
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].label, "Time off")
+        self.assertEqual(entries[0].kind, SHIFT_KIND_REQUEST)
+        self.assertEqual(entries[0].calendar_kind, SCHEDULE_CALENDAR_PACKING)
+
     def test_employee_cannot_approve(self):
         from app.models import TimeOffRequest
 

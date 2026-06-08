@@ -102,6 +102,114 @@ def _user_can_work_calendar(user: User, calendar_kind: str) -> bool:
     return (user.staff_kind or STAFF_KIND_STOREFRONT) != STAFF_KIND_STREAM
 
 
+def _copy_roster_names_from_previous_week(
+    session: Session,
+    *,
+    week_start: date,
+    calendar_kind: str,
+    added_by_user_id: Optional[int],
+    only_when_empty: bool = False,
+) -> int:
+    """Copy roster names from the prior week without copying any shifts."""
+    if added_by_user_id is None:
+        return 0
+    calendar_kind = _normalize_schedule_calendar(calendar_kind)
+    existing_ids: set[int] = set(
+        session.exec(
+            select(ScheduleRosterMember.user_id).where(
+                ScheduleRosterMember.week_start == week_start,
+                ScheduleRosterMember.calendar_kind == calendar_kind,
+            )
+        ).all()
+    )
+    if only_when_empty and existing_ids:
+        return 0
+
+    prev_week = week_start - timedelta(days=7)
+    prev_ids_raw = list(
+        session.exec(
+            select(ScheduleRosterMember.user_id).where(
+                ScheduleRosterMember.week_start == prev_week,
+                ScheduleRosterMember.calendar_kind == calendar_kind,
+            )
+        ).all()
+    )
+    if not prev_ids_raw:
+        return 0
+
+    prev_ids: list[int] = []
+    seen_prev_ids: set[int] = set()
+    for uid in prev_ids_raw:
+        if uid in seen_prev_ids:
+            continue
+        seen_prev_ids.add(uid)
+        prev_ids.append(uid)
+
+    added = 0
+    now = utcnow()
+    for uid in prev_ids:
+        if uid in existing_ids:
+            continue
+        target = session.get(User, uid)
+        if target is None:
+            continue
+        is_draft = (not target.is_active) and (target.password_hash or "") == ""
+        if not (target.is_active or is_draft):
+            continue
+        if not target.is_schedulable:
+            continue
+        if not _user_can_work_calendar(target, calendar_kind):
+            continue
+        session.add(
+            ScheduleRosterMember(
+                week_start=week_start,
+                calendar_kind=calendar_kind,
+                user_id=uid,
+                added_by_user_id=added_by_user_id,
+                created_at=now,
+            )
+        )
+        existing_ids.add(uid)
+        added += 1
+    return added
+
+
+def _auto_carry_roster_names_from_previous_week(
+    session: Session,
+    *,
+    week_start: date,
+    calendar_kind: str,
+    actor_user_id: Optional[int],
+    request: Optional[Request],
+) -> int:
+    added = _copy_roster_names_from_previous_week(
+        session,
+        week_start=week_start,
+        calendar_kind=calendar_kind,
+        added_by_user_id=actor_user_id,
+        only_when_empty=True,
+    )
+    if added <= 0:
+        return 0
+    session.add(
+        AuditLog(
+            actor_user_id=actor_user_id,
+            action="admin.schedule.roster_autocarry_previous",
+            resource_key="admin.schedule.edit",
+            details_json=json.dumps(
+                {
+                    "week_start": week_start.isoformat(),
+                    "from_week": (week_start - timedelta(days=7)).isoformat(),
+                    "calendar_kind": _normalize_schedule_calendar(calendar_kind),
+                    "users_added": added,
+                }
+            ),
+            ip_address=(request.client.host if request and request.client else None),
+        )
+    )
+    return added
+
+
 def _parse_cleared_cell_markers(raw: object) -> set[str]:
     """Return explicit storefront clear markers from the form payload."""
     if raw is None:
@@ -873,6 +981,21 @@ def admin_schedule_view(
         user,
         "admin.labor_financials.view",
     )
+    if can_edit_schedule_roster:
+        carried_names = 0
+        for calendar_kind in (
+            SCHEDULE_CALENDAR_STOREFRONT,
+            SCHEDULE_CALENDAR_PACKING,
+        ):
+            carried_names += _auto_carry_roster_names_from_previous_week(
+                session,
+                week_start=week_start,
+                calendar_kind=calendar_kind,
+                actor_user_id=user.id,
+                request=request,
+            )
+        if carried_names:
+            session.commit()
     storefront_ctx = _grid_context(
         session,
         week_start,
