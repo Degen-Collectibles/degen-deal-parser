@@ -321,6 +321,18 @@ class Settings(BaseSettings):
     password_reset_smtp_starttls: bool = Field(default=True, alias="PASSWORD_RESET_SMTP_STARTTLS")
     password_reset_smtp_ssl: bool = Field(default=False, alias="PASSWORD_RESET_SMTP_SSL")
     password_reset_email_timeout_seconds: float = Field(default=10.0, alias="PASSWORD_RESET_EMAIL_TIMEOUT_SECONDS")
+    team_request_alert_email_enabled: bool = Field(default=True, alias="TEAM_REQUEST_ALERT_EMAIL_ENABLED")
+    team_request_alert_email_to: str = Field(
+        default="degencollectiblesllc@gmail.com",
+        alias="TEAM_REQUEST_ALERT_EMAIL_TO",
+    )
+    team_request_alert_timeout_seconds: float = Field(default=10.0, alias="TEAM_REQUEST_ALERT_TIMEOUT_SECONDS")
+    team_supply_discord_enabled: bool = Field(default=True, alias="TEAM_SUPPLY_DISCORD_ENABLED")
+    team_supply_discord_channel_id: str = Field(
+        default="1373938191593246801",
+        alias="TEAM_SUPPLY_DISCORD_CHANNEL_ID",
+    )
+    team_supply_discord_bot_token: str = Field(default="", alias="TEAM_SUPPLY_DISCORD_BOT_TOKEN")
     trust_x_forwarded_for: bool = Field(default=False, alias="TRUST_X_FORWARDED_FOR")
     trusted_proxy_ips: str = Field(default="127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16", alias="TRUSTED_PROXY_IPS")
     clockify_api_key: str = Field(default="", alias="CLOCKIFY_API_KEY")

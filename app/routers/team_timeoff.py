@@ -21,6 +21,7 @@ from ..db import get_session
 from ..models import AuditLog, TimeOffRequest
 from ..rate_limit import rate_limited_or_429
 from ..shared import templates
+from ..team.request_alerts import send_timeoff_request_alert
 from ..team.team_notifications import notify_manager_admins
 from .team import _nav_context, _require_employee
 
@@ -168,4 +169,12 @@ async def team_timeoff_post(
         send_text=False,
     )
     session.commit()
+    send_timeoff_request_alert(
+        request_id=row.id,
+        employee_name=user.display_name or user.username,
+        employee_username=user.username,
+        start_date=parsed_start.isoformat(),
+        end_date=parsed_end.isoformat(),
+        reason=row.reason,
+    )
     return _timeoff_redirect("Time-off request submitted.")

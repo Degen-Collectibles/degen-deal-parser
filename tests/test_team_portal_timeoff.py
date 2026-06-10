@@ -221,12 +221,14 @@ class TeamTimeOffTests(unittest.TestCase):
 
     def test_submit_valid_request(self):
         from app.models import AuditLog, TimeOffRequest
+        from app.routers import team_timeoff
 
         user = self._seed_user(1, username="emp1")
         start = date.today() + timedelta(days=10)
         end = start + timedelta(days=2)
 
-        response = self._submit(user, start=start, end=end, reason="  vacation  ")
+        with patch.object(team_timeoff, "send_timeoff_request_alert") as alert_mock:
+            response = self._submit(user, start=start, end=end, reason="  vacation  ")
 
         self.assertEqual(response.status_code, 303)
         row = self.session.exec(select(TimeOffRequest)).one()
@@ -239,6 +241,14 @@ class TeamTimeOffTests(unittest.TestCase):
             select(AuditLog).where(AuditLog.action == "timeoff.submitted")
         ).one()
         self.assertEqual(audit.actor_user_id, user.id)
+        alert_mock.assert_called_once_with(
+            request_id=row.id,
+            employee_name="emp1",
+            employee_username="emp1",
+            start_date=start.isoformat(),
+            end_date=end.isoformat(),
+            reason="vacation",
+        )
 
     def test_submit_notifies_manager_and_admin_dashboards_only(self):
         from app.models import AuditLog

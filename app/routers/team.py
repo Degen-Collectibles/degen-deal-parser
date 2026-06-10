@@ -83,6 +83,7 @@ from ..team.team_notifications import (
     EMPLOYEE_NOTIFICATION_ACTION,
     notify_manager_admins,
 )
+from ..team.request_alerts import send_supply_request_alert
 from ..tiktok.tiktok_alerts import alert_supply_request
 
 router = APIRouter()
@@ -2483,6 +2484,14 @@ async def team_supply_post(
     session.commit()
     session.refresh(row)
     alert_supply_request(
+        request_id=row.id,
+        employee_name=user.display_name or user.username,
+        employee_username=user.username,
+        title=row.title,
+        description=row.description,
+        urgency=row.urgency,
+    )
+    send_supply_request_alert(
         request_id=row.id,
         employee_name=user.display_name or user.username,
         employee_username=user.username,
