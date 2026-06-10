@@ -1,5 +1,6 @@
+import csv
 import json
-from io import BytesIO
+from io import BytesIO, StringIO
 from inspect import signature
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1196,6 +1197,74 @@ def test_ledger_export_xlsx_downloads_excel_with_editable_ledger_rows():
     assert sheet.auto_filter.ref == f"A1:N{sheet.max_row}"
 
 
+def test_ledger_exports_escape_formula_like_text_cells():
+    engine = make_engine()
+    posted_at = datetime(2026, 5, 15, 12, tzinfo=timezone.utc)
+    with Session(engine) as session:
+        bank_import = add_import(session)
+        session.add(
+            BankTransaction(
+                id=14,
+                import_id=bank_import.id,
+                row_index=1,
+                account_label="Chase Checking",
+                account_type="checking",
+                posted_at=posted_at,
+                description='=HYPERLINK("http://evil.test","x")',
+                amount=-200.0,
+                classification="expense_or_purchase_needs_review",
+                expense_category="supplies_packaging",
+                match_reason="+SUM(1,2)",
+                review_note="@cmd",
+            )
+        )
+        session.commit()
+
+        with patch("app.routers.ledger.require_role_response", return_value=None):
+            csv_response = ledger_export_csv(
+                make_request("/ledger/export.csv?status=all&include_cash=false"),
+                account="",
+                start="",
+                end="",
+                status="all",
+                category="",
+                source="",
+                action_reason="",
+                search="",
+                sort="posted_at",
+                direction="desc",
+                include_cash=False,
+                session=session,
+            )
+            xlsx_response = ledger_export_xlsx(
+                make_request("/ledger/export.xlsx?status=all&include_cash=false"),
+                account="",
+                start="",
+                end="",
+                status="all",
+                category="",
+                source="",
+                action_reason="",
+                search="",
+                sort="posted_at",
+                direction="desc",
+                include_cash=False,
+                session=session,
+            )
+
+    exported_row = next(csv.DictReader(StringIO(csv_response.body.decode("utf-8"))))
+    assert exported_row["description"].startswith("'=")
+    assert exported_row["match_reason"].startswith("'+")
+    assert exported_row["review_note"].startswith("'@")
+
+    workbook = load_workbook(BytesIO(xlsx_response.body), data_only=False)
+    sheet = workbook["Ledger"]
+    assert sheet.cell(row=2, column=10).value.startswith("'=")
+    assert sheet.cell(row=2, column=10).data_type != "f"
+    assert sheet.cell(row=2, column=12).value.startswith("'+")
+    assert sheet.cell(row=2, column=14).value.startswith("'@")
+
+
 def test_ledger_includes_non_cash_discord_financial_channel_rows():
     engine = make_engine()
     posted_at = datetime(2026, 5, 19, 12, tzinfo=timezone.utc)
@@ -1592,6 +1661,84 @@ def test_ledger_transaction_edit_form_can_return_json_for_in_place_updates():
     assert payload["row"]["expense_category"] == "inventory_purchases"
     assert payload["row"]["expense_category_label"] == "Inventory purchases"
     assert message.expense_category == "inventory_purchases"
+    assert transaction.expense_category == "inventory_purchases"
+
+
+def test_ledger_transaction_edit_form_preserves_missing_financial_fields_on_partial_post():
+    from app.routers import ledger as ledger_router
+
+    edit_form = getattr(ledger_router, "ledger_transaction_edit_form", None)
+    assert edit_form is not None
+
+    engine = make_engine()
+    occurred_at = datetime(2026, 5, 19, 12, tzinfo=timezone.utc)
+    with Session(engine) as session:
+        message = DiscordMessage(
+            id=1805,
+            discord_message_id="cash-row-message-partial",
+            channel_id="offline-cash-channel",
+            channel_name="offline-cash",
+            author_name="tester",
+            content="Bought singles 90 cash",
+            created_at=occurred_at,
+            parse_status=PARSE_PARSED,
+            deal_type="buy",
+            entry_kind="buy",
+            payment_method="cash",
+            amount=90.0,
+            money_in=0.0,
+            money_out=90.0,
+            expense_category="inventory",
+            needs_review=False,
+        )
+        session.add(message)
+        session.add(
+            Transaction(
+                id=1806,
+                source_message_id=1805,
+                occurred_at=occurred_at,
+                parse_status="parsed",
+                entry_kind="buy",
+                payment_method="cash",
+                expense_category="inventory",
+                amount=90.0,
+                money_in=0.0,
+                money_out=90.0,
+                source_content="Bought singles 90 cash",
+            )
+        )
+        session.commit()
+
+        with patch("app.routers.ledger.require_role_response", return_value=None):
+            response = edit_form(
+                make_request(
+                    "/ledger/transactions/1805/edit-form",
+                    method="POST",
+                    headers=[(b"x-requested-with", b"fetch")],
+                ),
+                source_message_id=1805,
+                entry_kind=None,
+                amount=None,
+                payment_method=None,
+                expense_category="inventory_purchases",
+                notes=None,
+                selected_source="cash",
+                session=session,
+            )
+        message = session.get(DiscordMessage, 1805)
+        transaction = session.exec(select(Transaction).where(Transaction.source_message_id == 1805)).one()
+
+    payload = json.loads(response.body)
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert message.entry_kind == "buy"
+    assert message.amount == 90.0
+    assert message.payment_method == "cash"
+    assert message.money_out == 90.0
+    assert message.expense_category == "inventory_purchases"
+    assert transaction.entry_kind == "buy"
+    assert transaction.amount == 90.0
+    assert transaction.payment_method == "cash"
     assert transaction.expense_category == "inventory_purchases"
 
 

@@ -3325,14 +3325,16 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(main_payload["total_count"], 1)
         self.assertEqual(main_payload["stream_gmv"], 80.0)
         self.assertEqual(main_payload["stream_top_buyers"][0]["name"], "Main Buyer")
-        self.assertEqual({row["name"] for row in main_payload["top_buyers"]}, {"Main Buyer", "Boss Buyer"})
+        self.assertEqual(main_payload["session_gmv"], 80.0)
+        self.assertEqual({row["name"] for row in main_payload["top_buyers"]}, {"Main Buyer"})
         self.assertEqual(sum(point["count"] for point in main_payload["order_velocity"]), 1)
 
         self.assertEqual([row["tiktok_order_id"] for row in boss_payload["orders"]], ["boss-account-order"])
         self.assertEqual(boss_payload["total_count"], 1)
         self.assertEqual(boss_payload["stream_gmv"], 35.0)
         self.assertEqual(boss_payload["stream_top_buyers"][0]["name"], "Boss Buyer")
-        self.assertEqual({row["name"] for row in boss_payload["top_buyers"]}, {"Main Buyer", "Boss Buyer"})
+        self.assertEqual(boss_payload["session_gmv"], 35.0)
+        self.assertEqual({row["name"] for row in boss_payload["top_buyers"]}, {"Boss Buyer"})
         self.assertEqual(sum(point["count"] for point in boss_payload["order_velocity"]), 1)
 
     def test_tiktok_streamer_poll_prefers_affiliate_creator_for_shared_shop_same_sku(self) -> None:
@@ -4404,6 +4406,9 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(payload["stream_gmv"], 100.0)
         self.assertEqual(payload["stream_orders"], 2)
         self.assertEqual(payload["stream_items"], 2)
+        self.assertEqual(payload["session_gmv"], 100.0)
+        self.assertEqual(payload["session_orders"], 2)
+        self.assertEqual(payload["session_total_orders"], 4)
         self.assertEqual(payload["tiktok_gmv"], 999.0)
         self.assertIsNone(payload["stream_metric_source"])
 

@@ -68,6 +68,21 @@ LEDGER_EXPORT_COLUMNS = [
     "review_note",
 ]
 
+SPREADSHEET_FORMULA_PREFIXES = ("=", "+", "-", "@")
+
+
+def _escape_spreadsheet_text(value: object) -> object:
+    if not isinstance(value, str):
+        return value
+    stripped = value.lstrip()
+    if stripped and stripped[0] in SPREADSHEET_FORMULA_PREFIXES:
+        return f"'{value}"
+    return value
+
+
+def _sanitize_ledger_export_row(row: list[object]) -> list[object]:
+    return [_escape_spreadsheet_text(value) for value in row]
+
 
 def _ledger_export_filters(
     *,
@@ -289,11 +304,11 @@ def ledger_page(
 def ledger_transaction_edit_form(
     request: Request,
     source_message_id: int,
-    entry_kind: str = Form(default="unknown"),
-    amount: str = Form(default=""),
-    payment_method: str = Form(default="unknown"),
-    expense_category: str = Form(default="uncategorized"),
-    notes: str = Form(default=""),
+    entry_kind: str | None = Form(default=None),
+    amount: str | None = Form(default=None),
+    payment_method: str | None = Form(default=None),
+    expense_category: str | None = Form(default=None),
+    notes: str | None = Form(default=None),
     selected_account: str = Form(default=""),
     selected_start: str = Form(default=""),
     selected_end: str = Form(default=""),
@@ -333,7 +348,7 @@ def ledger_transaction_edit_form(
         )
 
     try:
-        parsed_amount = parse_optional_float(amount)
+        parsed_amount = parse_optional_float(amount) if amount is not None else row.amount
     except ValueError:
         if _wants_json(request):
             return JSONResponse({"ok": False, "error": "Amount must be a valid number."}, status_code=400)
@@ -355,10 +370,14 @@ def ledger_transaction_edit_form(
             status_code=303,
         )
 
-    normalized_entry_kind = (entry_kind or "unknown").strip().lower() or "unknown"
+    normalized_entry_kind = ((entry_kind if entry_kind is not None else row.entry_kind) or "unknown").strip().lower() or "unknown"
     normalized_amount = round(abs(float(parsed_amount or 0.0)), 2)
-    normalized_payment_method = (payment_method or "unknown").strip().lower() or "unknown"
-    normalized_expense_category = (expense_category or "uncategorized").strip() or "uncategorized"
+    normalized_payment_method = (
+        (payment_method if payment_method is not None else row.payment_method) or "unknown"
+    ).strip().lower() or "unknown"
+    normalized_expense_category = (
+        (expense_category if expense_category is not None else row.expense_category) or "uncategorized"
+    ).strip() or "uncategorized"
     money_in, money_out = _money_for_ledger_entry(normalized_entry_kind, normalized_amount)
     incomplete = (
         parsed_amount is None
@@ -1003,7 +1022,7 @@ def ledger_export_csv(
     output = StringIO()
     writer = csv.writer(output)
     writer.writerow(LEDGER_EXPORT_COLUMNS)
-    writer.writerows(rows)
+    writer.writerows(_sanitize_ledger_export_row(row) for row in rows)
     return Response(
         content=output.getvalue(),
         media_type="text/csv",
@@ -1049,7 +1068,7 @@ def ledger_export_xlsx(
     sheet.title = "Ledger"
     sheet.append(LEDGER_EXPORT_COLUMNS)
     for row in rows:
-        sheet.append(row)
+        sheet.append(_sanitize_ledger_export_row(row))
 
     header_fill = PatternFill(fill_type="solid", fgColor="111827")
     header_font = Font(bold=True, color="FFFFFF")

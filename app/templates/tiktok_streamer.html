@@ -1782,7 +1782,7 @@
                         </span>
                         <span class="badge" style="color:var(--green);" id="order-count-badge" title="Orders currently loaded for the selected creator feed">
                             <span class="order-count-prefix" id="order-count-prefix">Feed</span>
-                            <span id="order-count">{% if creator_order_attribution not in ['time_window', 'affiliate_orders', 'live_products', 'recent_orders'] %}paused{% else %}{{ total_count }}{% endif %}</span> <span id="order-count-unit">{% if creator_order_attribution not in ['time_window', 'affiliate_orders', 'live_products', 'recent_orders'] %}{% else %}orders{% endif %}</span>
+                            <span id="order-count">{% if creator_order_attribution not in ['time_window', 'affiliate_orders', 'live_products', 'recent_orders'] and not (creator_order_attribution == 'no_session' and selected_creator == 'degencollectibles') %}paused{% else %}{{ total_count }}{% endif %}</span> <span id="order-count-unit">{% if creator_order_attribution not in ['time_window', 'affiliate_orders', 'live_products', 'recent_orders'] and not (creator_order_attribution == 'no_session' and selected_creator == 'degencollectibles') %}{% else %}orders{% endif %}</span>
                         </span>
                         <span class="badge badge-mute" id="mute-toggle" title="Toggle sound">
                             <span id="mute-icon">&#x1F50A;</span>
@@ -2819,7 +2819,7 @@
         }
 
         function hasPreciseCreatorOrders() {
-            return !_creatorFilterEnabled || _creatorOrderAttribution === 'time_window' || _creatorOrderAttribution === 'affiliate_orders' || _creatorOrderAttribution === 'live_products' || _creatorOrderAttribution === 'recent_orders';
+            return !_creatorFilterEnabled || _creatorOrderAttribution === 'time_window' || _creatorOrderAttribution === 'affiliate_orders' || _creatorOrderAttribution === 'live_products' || _creatorOrderAttribution === 'recent_orders' || (_creatorOrderAttribution === 'no_session' && _selectedCreator === 'degencollectibles');
         }
 
         function setEmptyStateMessage() {

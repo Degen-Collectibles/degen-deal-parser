@@ -443,9 +443,7 @@ Run the full suite:
 .\.venv\Scripts\python.exe -m pytest --tb=short -q
 ```
 
-Expected baseline: 826 passed, 8 failed (the 8 `test_schedule_mobile.py` failures are sandbox-only and do not run in production — they are the only acceptable pre-existing failures).
-
-If any test outside `test_schedule_mobile.py` is failing, fix it before committing.
+Expected baseline: the full suite should pass with no known acceptable failures. If any test is failing, verify the current cause and fix or document it before committing.
 
 Compile check (fast sanity pass before running the full suite):
 
@@ -491,8 +489,8 @@ Everything is working:
 | File | Role |
 |---|---|
 | `scripts/tiktok_backfill.py` | API signing, order/product fetching, all analytics API calls |
-| `app/tiktok_ingest.py` | OAuth token exchange, webhook parsing, order normalization |
-| `app/tiktok_auth_refresh.py` | Background token refresh logic |
+| `app/tiktok/tiktok_ingest.py` | OAuth token exchange, webhook parsing, order normalization |
+| `app/tiktok/tiktok_auth_refresh.py` | Background token refresh logic |
 | `app/tiktok_live_chat.py` | TikSync WebSocket for live chat + room ID capture |
 | `app/models.py` | `TikTokOrder`, `TikTokAuth`, `TikTokProduct`, `AppSetting`, `InventoryItem`, `StreamAccount` models |
 | `app/reporting.py` | TikTok order reporting/summary functions, buyer insights, product performance |
@@ -536,8 +534,8 @@ Both are stored in the `TikTokAuth` DB table and auto-refreshed.
 - **Signature arrives** in the `Authorization` or `X-TT-Signature` header (NOT the `Tiktok-Signature: t=...,s=...` header described in generic TikTok docs)
 
 **Files involved (DO NOT refactor the signing logic in these):**
-- `app/tiktok_ingest.py` — `_build_webhook_signature_candidates()`, `verify_tiktok_webhook_signature()`, `parse_tiktok_webhook_headers()`
-- `app/main.py` — `tiktok_orders_webhook()` handler at `POST /webhooks/tiktok/orders`
+- `app/tiktok/tiktok_ingest.py` — `_build_webhook_signature_candidates()`, `verify_tiktok_webhook_signature()`, `parse_tiktok_webhook_headers()`
+- `app/routers/tiktok_orders.py` — `tiktok_orders_webhook()` handler at `POST /webhooks/tiktok/orders`
 
 **What NOT to do:**
 - Do NOT change the HMAC algorithm or the order of `app_key + raw_body`

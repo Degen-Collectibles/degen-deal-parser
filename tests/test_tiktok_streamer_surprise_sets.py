@@ -893,6 +893,27 @@ class SharedShopCreatorAttributionTests(unittest.TestCase):
         result = streamer_module._filter_orders_to_affiliate_creator([boss, main], ctx)
         self.assertEqual({o.tiktok_order_id for o in result}, {"boss-in"})
 
+    def test_external_affiliate_order_does_not_zero_unattributed_live_window_orders(self) -> None:
+        in_window = self._unattributed("in-house", datetime(2026, 6, 8, 2, 0, tzinfo=timezone.utc))
+        external = _order(
+            "outside-affiliate",
+            datetime(2026, 6, 8, 2, 5, tzinfo=timezone.utc),
+            [],
+            subtotal_price=10.0,
+            affiliate_creator_username="outsidecreator",
+        )
+        ctx = {
+            "selected_creator": "degenboss0",
+            "creator_filter_enabled": True,
+            "start": self.WINDOW_START,
+            "end": self.WINDOW_END,
+            "creator_order_attribution": streamer_module.CREATOR_ORDER_ATTRIBUTION_TIME_WINDOW,
+        }
+
+        result = streamer_module._filter_orders_to_affiliate_creator([external, in_window], ctx)
+
+        self.assertEqual({o.tiktok_order_id for o in result}, {"in-house"})
+
     def test_attribution_message_for_live_window_is_labeled_non_authoritative_estimate(self) -> None:
         ctx = {
             "selected_creator": "degenboss0",

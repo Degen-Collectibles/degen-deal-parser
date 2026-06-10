@@ -333,6 +333,27 @@ def _order_affiliate_creator(order: TikTokOrder) -> str:
     return _normalize_creator(getattr(order, "affiliate_creator_username", None))
 
 
+def _order_has_affiliate_creator_signal(order: TikTokOrder) -> bool:
+    if str(getattr(order, "affiliate_creator_username", "") or "").strip():
+        return True
+    raw = getattr(order, "affiliate_attribution_json", "") or ""
+    if not raw or raw == "{}":
+        return False
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    creator = (
+        data.get("affiliate_creator_username")
+        or data.get("creator_username")
+        or data.get("creator_handle")
+        or data.get("username")
+    )
+    return bool(str(creator or "").strip())
+
+
 def _order_matches_affiliate_creator(order: TikTokOrder, selected_creator: str) -> bool:
     creator = _normalize_creator(selected_creator)
     if not creator:
@@ -396,13 +417,20 @@ def _filter_orders_to_affiliate_creator(
     selected_creator = _normalize_creator(stream_context.get("selected_creator"))
     if not selected_creator:
         return orders
-    attributed_orders = [order for order in orders if _order_affiliate_creator(order)]
-    if attributed_orders:
+    if stream_context.get("creator_order_attribution") == CREATOR_ORDER_ATTRIBUTION_AFFILIATE_ORDERS:
         return [order for order in orders if _order_matches_affiliate_creator(order, selected_creator)]
     start = _coerce_utc_datetime(stream_context.get("start"))
     end = _coerce_utc_datetime(stream_context.get("end"))
     if start is not None:
-        return [order for order in orders if _order_created_within(order, start, end)]
+        return [
+            order
+            for order in orders
+            if _order_created_within(order, start, end)
+            and (
+                not _order_has_affiliate_creator_signal(order)
+                or _order_matches_affiliate_creator(order, selected_creator)
+            )
+        ]
     if selected_creator == DEFAULT_STREAM_CREATOR:
         return orders
     return []
@@ -918,7 +946,11 @@ def _creator_order_rows_are_precise(stream_context: Optional[dict[str, Any]]) ->
     stream_context = stream_context or {}
     if not stream_context.get("creator_filter_enabled"):
         return True
-    return stream_context.get("creator_order_attribution") in {
+    attribution = stream_context.get("creator_order_attribution")
+    selected_creator = _normalize_creator(stream_context.get("selected_creator"))
+    if attribution == CREATOR_ORDER_ATTRIBUTION_NO_SESSION:
+        return selected_creator == DEFAULT_STREAM_CREATOR
+    return attribution in {
         CREATOR_ORDER_ATTRIBUTION_TIME_WINDOW,
         CREATOR_ORDER_ATTRIBUTION_AFFILIATE_ORDERS,
         CREATOR_ORDER_ATTRIBUTION_LIVE_PRODUCTS,
@@ -2495,6 +2527,12 @@ def _streamer_session_gmv_uncached(session: Session, stream_context: Optional[di
     today_query = _apply_tiktok_account_scope(today_query, account_scope)
     today_orders = session.exec(today_query).all()
     today_orders = _filter_orders_to_affiliate_creator(today_orders, stream_context)
+    if _should_use_live_product_scope(stream_context):
+        today_orders, _today_product_scope = _filter_orders_to_live_products(
+            today_orders,
+            stream_context,
+            db_session=session,
+        )
 
     gmv = 0.0
     paid_count = 0

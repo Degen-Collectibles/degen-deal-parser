@@ -20,6 +20,7 @@ data/v2_pending_scans/
 data/v2_training_scans/
 
 logs/
+outputs/
 
 .pytest_cache/
 .mypy_cache/
