@@ -340,6 +340,49 @@ class PasswordResetEmailTests(unittest.TestCase):
         self.assertNotIn("reset@example.com", details_blob)
         self.assertIn("r***@example.com", details_blob)
 
+    def test_forgot_password_does_not_email_reset_link_without_public_base_url(self):
+        from app.models import AuditLog, PasswordResetToken
+        from app.routers import team as mod
+        from app.team.email import EmailSendResult
+
+        employee = self._active_employee_with_contact("email-reset-no-base-url")
+        settings = self._settings()
+        settings.public_base_url = ""
+
+        def fake_send_email(*, to_email, subject, body, settings=None):
+            return EmailSendResult(provider="smtp", status="sent", message_id="MSG123")
+
+        with patch.object(mod, "get_settings", return_value=settings), patch.object(
+            mod, "send_email", side_effect=fake_send_email, create=True
+        ) as send_email, patch.object(
+            mod, "send_sms"
+        ) as send_sms:
+            response = asyncio.run(
+                mod.team_password_forgot_post(
+                    self._request(),
+                    identifier=employee.username,
+                    session=self.session,
+                )
+            )
+
+        send_email.assert_not_called()
+        send_sms.assert_not_called()
+        self.assertEqual(response.status_code, 303)
+        tokens = list(
+            self.session.exec(
+                select(PasswordResetToken).where(PasswordResetToken.user_id == employee.id)
+            ).all()
+        )
+        self.assertEqual(tokens, [])
+
+        manager_request = self.session.exec(
+            select(AuditLog).where(
+                AuditLog.target_user_id == employee.id,
+                AuditLog.action == "password.reset_manager_request",
+            )
+        ).one()
+        self.assertIn("missing_public_base_url", manager_request.details_json)
+
     def test_failed_reset_email_revokes_undelivered_token_and_queues_manager(self):
         from app.models import AuditLog, PasswordResetToken
         from app.routers import team as mod

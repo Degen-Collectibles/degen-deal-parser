@@ -203,11 +203,13 @@ def _session_invalidated_session_value(user: User) -> Optional[str]:
     return invalidated_at.isoformat() if invalidated_at is not None else None
 
 
-def _public_base_url(request: Request) -> str:
+def _configured_public_base_url() -> str:
     configured = (get_settings().public_base_url or "").strip().rstrip("/")
-    if configured:
-        return configured
-    return f"{request.url.scheme}://{request.url.netloc}"
+    return configured
+
+
+def _public_base_url(request: Request) -> str:
+    return _configured_public_base_url()
 
 
 def _password_reset_url(request: Request, raw_token: str) -> str:
@@ -745,19 +747,23 @@ async def team_password_forgot_post(
     matched_user = _find_password_reset_user(session, probe)
     delivered = False
     if matched_user is not None:
-        delivered = _try_send_password_reset_email(
-            session,
-            request=request,
-            user=matched_user,
-            probe_hash=probe_hash,
-        )
+        queue_reason = "email_delivery_unavailable"
+        if not _configured_public_base_url():
+            queue_reason = "missing_public_base_url"
+        else:
+            delivered = _try_send_password_reset_email(
+                session,
+                request=request,
+                user=matched_user,
+                probe_hash=probe_hash,
+            )
         if not delivered:
             _queue_password_reset_request(
                 session,
                 request=request,
                 user=matched_user,
                 probe_hash=probe_hash,
-                reason="email_delivery_unavailable",
+                reason=queue_reason,
             )
     session.add(
         AuditLog(

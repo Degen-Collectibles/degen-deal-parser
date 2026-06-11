@@ -1782,7 +1782,7 @@
                         </span>
                         <span class="badge" style="color:var(--green);" id="order-count-badge" title="Orders currently loaded for the selected creator feed">
                             <span class="order-count-prefix" id="order-count-prefix">Feed</span>
-                            <span id="order-count">{% if creator_order_attribution not in ['time_window', 'affiliate_orders', 'live_products', 'recent_orders'] and not (creator_order_attribution == 'no_session' and selected_creator == 'degencollectibles') %}paused{% else %}{{ total_count }}{% endif %}</span> <span id="order-count-unit">{% if creator_order_attribution not in ['time_window', 'affiliate_orders', 'live_products', 'recent_orders'] and not (creator_order_attribution == 'no_session' and selected_creator == 'degencollectibles') %}{% else %}orders{% endif %}</span>
+                            <span id="order-count">{% if not creator_order_rows_precise %}paused{% else %}{{ total_count }}{% endif %}</span> <span id="order-count-unit">{% if not creator_order_rows_precise %}{% else %}orders{% endif %}</span>
                         </span>
                         <span class="badge badge-mute" id="mute-toggle" title="Toggle sound">
                             <span id="mute-icon">&#x1F50A;</span>
@@ -2121,6 +2121,7 @@
         var _creatorFilterEnabled = {{ creator_filter_enabled|tojson }};
         var _creatorOrderAttribution = {{ creator_order_attribution|tojson }};
         var _creatorOrderAttributionMessage = {{ creator_order_attribution_message|tojson }};
+        var _creatorOrderRowsPrecise = {{ creator_order_rows_precise|tojson }};
         var _lbMode = _creatorFilterEnabled ? 'stream' : 'today';
         var _wasLive = _streamData.is_live || false;
         var _summaryDismissed = false;
@@ -2819,7 +2820,7 @@
         }
 
         function hasPreciseCreatorOrders() {
-            return !_creatorFilterEnabled || _creatorOrderAttribution === 'time_window' || _creatorOrderAttribution === 'affiliate_orders' || _creatorOrderAttribution === 'live_products' || _creatorOrderAttribution === 'recent_orders' || (_creatorOrderAttribution === 'no_session' && _selectedCreator === 'degencollectibles');
+            return !!_creatorOrderRowsPrecise;
         }
 
         function setEmptyStateMessage() {
@@ -3430,6 +3431,7 @@
             if (data.creator_filter_enabled != null) _creatorFilterEnabled = !!data.creator_filter_enabled;
             if (data.creator_order_attribution != null) _creatorOrderAttribution = data.creator_order_attribution;
             if (data.creator_order_attribution_message != null) _creatorOrderAttributionMessage = data.creator_order_attribution_message;
+            if (data.creator_order_rows_precise != null) _creatorOrderRowsPrecise = !!data.creator_order_rows_precise;
             updateAttributionNote();
             updateOrderCountBadge(data.total_count);
             if (data.top_sellers) _topSellers = data.top_sellers;

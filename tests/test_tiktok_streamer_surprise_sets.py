@@ -450,10 +450,15 @@ class SurpriseSetGmvTests(unittest.TestCase):
     def test_streamer_dashboard_initial_order_badge_allows_recent_order_fallback(self) -> None:
         source = (Path.cwd() / "app" / "templates" / "tiktok_streamer.html").read_text()
 
-        self.assertIn(
-            "creator_order_attribution not in ['time_window', 'affiliate_orders', 'live_products', 'recent_orders']",
-            source,
-        )
+        self.assertIn("creator_order_rows_precise", source)
+        self.assertIn("_creatorOrderRowsPrecise", source)
+
+    def test_streamer_dashboard_uses_server_precision_flag_for_creator_order_rows(self) -> None:
+        source = (Path.cwd() / "app" / "templates" / "tiktok_streamer.html").read_text()
+
+        self.assertIn("creator_order_rows_precise", source)
+        self.assertIn("_creatorOrderRowsPrecise", source)
+        self.assertNotIn("_selectedCreator === 'degencollectibles'", source)
 
 
 class StreamerFreshOrderFallbackTests(unittest.TestCase):

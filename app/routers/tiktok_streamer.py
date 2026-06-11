@@ -2893,6 +2893,7 @@ def tiktok_streamer_page(
 
     total_count = len(scoped_orders)
     gmv_data = _streamer_session_gmv(session, stream_context=stream_context)
+    creator_order_rows_precise = _creator_order_rows_are_precise(stream_context)
 
     chat_info = get_chat_status()
     live_room_id = _live_room_id_for_stream(chat_info, stream_context)
@@ -2916,6 +2917,7 @@ def tiktok_streamer_page(
         "creator_filter_enabled": stream_context.get("creator_filter_enabled"),
         "creator_order_attribution": stream_context.get("creator_order_attribution"),
         "creator_order_attribution_message": _creator_order_attribution_message(stream_context),
+        "creator_order_rows_precise": creator_order_rows_precise,
         "stream_metric_source": gmv_data.get("stream_metric_source"),
         "stream_metric_label": gmv_data.get("stream_metric_label"),
         "stream_metric_note": gmv_data.get("stream_metric_note"),
@@ -2955,6 +2957,7 @@ def tiktok_streamer_page(
         "creator_filter_enabled": stream_context.get("creator_filter_enabled"),
         "creator_order_attribution": stream_context.get("creator_order_attribution"),
         "creator_order_attribution_message": _creator_order_attribution_message(stream_context),
+        "creator_order_rows_precise": creator_order_rows_precise,
         "live_room_id": live_room_id,
         "surprise_set_price_editor_url": _surprise_set_price_editor_url(selected_creator, selected_stream_id),
         "gmv_goal": float(_get_app_setting(session, "stream_gmv_goal", "0") or "0"),
@@ -3023,6 +3026,7 @@ def tiktok_streamer_poll(
         latest_updated_at_text = latest_updated_at.isoformat()
 
     total_count = len(scoped_orders)
+    creator_order_rows_precise = _creator_order_rows_are_precise(stream_context)
 
     gmv_data = _streamer_session_gmv(session, stream_context=stream_context)
     live_session = stream_context.get("live_session") or {}
@@ -3073,6 +3077,7 @@ def tiktok_streamer_poll(
         "creator_filter_enabled": stream_context.get("creator_filter_enabled"),
         "creator_order_attribution": stream_context.get("creator_order_attribution"),
         "creator_order_attribution_message": _creator_order_attribution_message(stream_context),
+        "creator_order_rows_precise": creator_order_rows_precise,
     }
 
 @router.get("/tiktok/streamer/goal")

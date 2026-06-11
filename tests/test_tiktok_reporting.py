@@ -3912,6 +3912,7 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertIsNone(payload["stream_metric_source"])
         self.assertEqual(payload["tiktok_gmv"], 43100.0)
         self.assertEqual(payload["creator_order_attribution"], "live_products")
+        self.assertTrue(payload["creator_order_rows_precise"])
         self.assertIn("Estimated from the live products", payload["creator_order_attribution_message"])
 
     def test_tiktok_streamer_poll_pauses_overlap_when_attribution_is_unavailable(self) -> None:
@@ -4157,6 +4158,8 @@ class TikTokRegressionTests(unittest.TestCase):
 
         self.assertEqual(main_payload["creator_order_attribution"], "affiliate_scope_missing")
         self.assertEqual(boss_payload["creator_order_attribution"], "affiliate_scope_missing")
+        self.assertFalse(main_payload["creator_order_rows_precise"])
+        self.assertFalse(boss_payload["creator_order_rows_precise"])
         self.assertEqual(main_payload["orders"], [])
         self.assertEqual(boss_payload["orders"], [])
         self.assertEqual(main_payload["total_count"], 0)
@@ -4244,6 +4247,7 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(payload["session_total_orders"], 0)
         self.assertIsNone(payload["stream_gmv"])
         self.assertEqual(payload["creator_order_attribution"], "no_session")
+        self.assertFalse(payload["creator_order_rows_precise"])
 
     def test_tiktok_streamer_poll_uses_live_product_ids_for_main_creator(self) -> None:
         import app.routers.tiktok_streamer as streamer_module

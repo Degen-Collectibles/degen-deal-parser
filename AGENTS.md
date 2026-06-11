@@ -335,9 +335,9 @@ Inventory agent:
 - `app/templates/inventory*.html` — 8+ inventory templates including `inventory_scan_pokemon.html` (Degen Eye scanner)
 
 TikTok / Streamer agent:
-- `app/tiktok_ingest.py`
+- `app/tiktok/tiktok_ingest.py`
 - `app/tiktok_auth_refresh.py`
-- `app/tiktok_live_chat.py`
+- `app/tiktok/tiktok_live_chat.py`
 - `scripts/tiktok_backfill.py`
 - `app/templates/tiktok_streamer.html`
 - `app/templates/tiktok_analytics.html`
@@ -491,7 +491,7 @@ Everything is working:
 | `scripts/tiktok_backfill.py` | API signing, order/product fetching, all analytics API calls |
 | `app/tiktok/tiktok_ingest.py` | OAuth token exchange, webhook parsing, order normalization |
 | `app/tiktok/tiktok_auth_refresh.py` | Background token refresh logic |
-| `app/tiktok_live_chat.py` | TikSync WebSocket for live chat + room ID capture |
+| `app/tiktok/tiktok_live_chat.py` | TikSync WebSocket for live chat + room ID capture |
 | `app/models.py` | `TikTokOrder`, `TikTokAuth`, `TikTokProduct`, `AppSetting`, `InventoryItem`, `StreamAccount` models |
 | `app/reporting.py` | TikTok order reporting/summary functions, buyer insights, product performance |
 | `app/routers/tiktok_streamer.py` | Streamer dashboard routes, poll, goal, config |
@@ -524,7 +524,7 @@ Both are stored in the `TikTokAuth` DB table and auto-refreshed.
 
 ### TikTok Webhook Signature — DO NOT MODIFY
 
-**The webhook signature verification algorithm in `app/tiktok_ingest.py` is correct and must not be changed.** It was reverse-engineered from live production traffic and confirmed working. TikTok's own documentation is wrong/incomplete about this.
+**The webhook signature verification algorithm in `app/tiktok/tiktok_ingest.py` is correct and must not be changed.** It was reverse-engineered from live production traffic and confirmed working. TikTok's own documentation is wrong/incomplete about this.
 
 **The proven algorithm:** `HMAC-SHA256(app_secret, app_key + raw_body)`
 

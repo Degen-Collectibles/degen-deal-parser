@@ -456,7 +456,7 @@ Live chat messages are captured via the **TikSync SDK**, a third-party WebSocket
 - Viewer count updates
 - Captures `live_room_id` from the WebSocket connection (needed for `live_core_stats`)
 
-**Implementation:** See `app/tiktok_live_chat.py`.
+**Implementation:** See `app/tiktok/tiktok_live_chat.py`.
 
 ---
 
@@ -562,10 +562,10 @@ Live chat messages are captured via the **TikSync SDK**, a third-party WebSocket
 
 | File | Responsibility |
 |---|---|
-| `app/tiktok_ingest.py` | OAuth token exchange, webhook parsing, order normalization |
+| `app/tiktok/tiktok_ingest.py` | OAuth token exchange, webhook parsing, order normalization |
 | `scripts/tiktok_backfill.py` | API request signing, order/product fetching, all analytics API calls |
-| `app/main.py` | FastAPI routes, background pollers, streamer dashboard, analytics page |
+| `app/main.py` plus `app/routers/tiktok_*.py` | FastAPI app wiring, background pollers, streamer dashboard, analytics page |
 | `app/models.py` | `TikTokAuth`, `TikTokOrder`, `TikTokProduct`, `AppSetting` models |
 | `app/config.py` | Environment variable definitions |
-| `app/tiktok_live_chat.py` | TikSync WebSocket for live chat + room ID capture |
+| `app/tiktok/tiktok_live_chat.py` | TikSync WebSocket for live chat + room ID capture |
 | `app/db.py` | Database init, migrations, SQLite locking helpers |
