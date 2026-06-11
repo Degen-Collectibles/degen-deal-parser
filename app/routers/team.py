@@ -78,7 +78,6 @@ from ..team.pii import PIIDecryptError, decrypt_pii, encrypt_pii
 from ..rate_limit import rate_limited_or_429
 from ..shared import app_home_for_role, templates
 from ..team.email import email_address_fingerprint, mask_email_address, send_email
-from ..team.sms import mask_sms_phone, normalize_sms_phone, send_sms, sms_phone_fingerprint
 from ..team.team_notifications import (
     EMPLOYEE_NOTIFICATION_ACTION,
     notify_manager_admins,
@@ -88,7 +87,6 @@ from ..team.request_alerts import (
     send_password_reset_manager_request_alert,
     send_supply_request_alert,
 )
-from ..tiktok.tiktok_alerts import alert_supply_request
 
 router = APIRouter()
 
@@ -220,14 +218,6 @@ def _password_reset_url(request: Request, raw_token: str) -> str:
     return f"{_public_base_url(request)}/team/password/reset/{raw_token}"
 
 
-def _password_reset_sms_body(reset_url: str) -> str:
-    return (
-        "Degen Team password reset: "
-        f"{reset_url}\n"
-        "Expires in 60 minutes. Ignore this if you did not request it."
-    )
-
-
 def _password_reset_email_subject() -> str:
     return "Reset your Degen Team password"
 
@@ -245,20 +235,6 @@ def _password_reset_email_body(user: User, reset_url: str) -> str:
 
 def _email_provider_can_deliver() -> bool:
     provider = (getattr(get_settings(), "password_reset_email_provider", "dry_run") or "dry_run").strip().lower()
-    return provider not in {
-        "",
-        "dryrun",
-        "dry_run",
-        "log",
-        "console",
-        "disabled",
-        "off",
-        "none",
-    }
-
-
-def _sms_provider_can_deliver() -> bool:
-    provider = (get_settings().sms_provider or "dry_run").strip().lower()
     return provider not in {
         "",
         "dryrun",
@@ -393,74 +369,6 @@ def _try_send_password_reset_email(
                 "password.reset_email_sent"
                 if result.success and not result.dry_run
                 else "password.reset_email_failed"
-            ),
-            details_json=json.dumps(details, sort_keys=True),
-            ip_address=(request.client.host if request.client else None),
-        )
-    )
-    if result.success and not result.dry_run:
-        return True
-    return False
-
-
-def _try_send_password_reset_sms(
-    session: Session,
-    *,
-    request: Request,
-    user: User,
-    probe_hash: str,
-) -> bool:
-    if not _sms_provider_can_deliver():
-        return False
-    profile = session.get(EmployeeProfile, user.id)
-    if profile is None or not profile.phone_enc:
-        return False
-    try:
-        phone_plain = decrypt_pii(profile.phone_enc) or ""
-    except (PIIDecryptError, ValueError):
-        return False
-    to_phone = normalize_sms_phone(phone_plain)
-    if not to_phone:
-        return False
-    raw_token = generate_password_reset_token(
-        session,
-        user_id=user.id,
-        issued_by_user_id=user.id,
-    )
-    result = send_sms(
-        to_phone=to_phone,
-        body=_password_reset_sms_body(_password_reset_url(request, raw_token)),
-        settings=get_settings(),
-    )
-    token_revoked = False
-    if not (result.success and not result.dry_run):
-        token_row = _find_token_row(session, PasswordResetToken, raw_token)
-        if token_row is not None and token_row.used_at is None:
-            token_row.used_at = utcnow()
-            session.add(token_row)
-            token_revoked = True
-    details = {
-        "provider": result.provider,
-        "status": result.status,
-        "dry_run": result.dry_run,
-        "success": result.success and not result.dry_run,
-        "token_revoked": token_revoked,
-        "phone": mask_sms_phone(to_phone),
-        "phone_fingerprint": sms_phone_fingerprint(to_phone),
-        "identifier_hash": probe_hash,
-    }
-    if result.message_id:
-        details["message_id"] = result.message_id
-    if result.error:
-        details["error"] = result.error[:240]
-    session.add(
-        AuditLog(
-            actor_user_id=user.id,
-            target_user_id=user.id,
-            action=(
-                "password.reset_sms_sent"
-                if result.success and not result.dry_run
-                else "password.reset_sms_failed"
             ),
             details_json=json.dumps(details, sort_keys=True),
             ip_address=(request.client.host if request.client else None),
@@ -988,7 +896,7 @@ def team_dashboard(
             session.exec(
                 select(func.count())
                 .select_from(SupplyRequest)
-                .where(SupplyRequest.status.in_(("pending", "submitted")))
+                .where(SupplyRequest.status == "submitted")
             ).one()
         )
     if show_timeoff_queue_count:
@@ -2563,14 +2471,6 @@ async def team_supply_post(
     )
     session.commit()
     session.refresh(row)
-    alert_supply_request(
-        request_id=row.id,
-        employee_name=user.display_name or user.username,
-        employee_username=user.username,
-        title=row.title,
-        description=row.description,
-        urgency=row.urgency,
-    )
     send_supply_request_alert(
         request_id=row.id,
         employee_name=user.display_name or user.username,

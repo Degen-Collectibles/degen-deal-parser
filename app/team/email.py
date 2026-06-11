@@ -1,7 +1,6 @@
 """Small email sending adapter for employee portal password reset links."""
 from __future__ import annotations
 
-import hashlib
 import smtplib
 from dataclasses import dataclass
 from email.message import EmailMessage
@@ -9,6 +8,7 @@ from email.utils import formataddr
 from typing import Optional
 
 from ..config import Settings, get_settings
+from .fingerprints import keyed_fingerprint
 
 
 @dataclass(frozen=True)
@@ -36,7 +36,12 @@ def mask_email_address(email_address: str) -> str:
 
 def email_address_fingerprint(email_address: str) -> str:
     normalized = (email_address or "").strip().lower()
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+    return keyed_fingerprint(
+        normalized,
+        namespace="email",
+        length=16,
+        settings=get_settings(),
+    )
 
 
 def send_email(

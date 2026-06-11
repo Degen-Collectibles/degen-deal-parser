@@ -1,7 +1,6 @@
 """Small SMS sending adapter for employee portal invite links."""
 from __future__ import annotations
 
-import hashlib
 import re
 from dataclasses import dataclass
 from typing import Optional
@@ -9,6 +8,7 @@ from typing import Optional
 import httpx
 
 from ..config import Settings, get_settings
+from .fingerprints import keyed_fingerprint
 
 
 class SmsSendError(RuntimeError):
@@ -55,7 +55,12 @@ def mask_sms_phone(e164_phone: str) -> str:
 
 def sms_phone_fingerprint(e164_phone: str) -> str:
     normalized = re.sub(r"\D", "", e164_phone or "")
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+    return keyed_fingerprint(
+        normalized,
+        namespace="phone",
+        length=16,
+        settings=get_settings(),
+    )
 
 
 def send_sms(

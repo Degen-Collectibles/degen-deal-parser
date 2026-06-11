@@ -634,7 +634,7 @@ class AdminPIIEditTests(unittest.TestCase, _W47Harness):
         self.assertIn("fingerprints", details)
         self.assertEqual(details["fingerprints"]["email"]["len"], len("jane@example.com"))
         self.assertTrue(details["fingerprints"]["address"]["present"])
-        self.assertEqual(len(details["fingerprints"]["email"]["sha256_12"]), 12)
+        self.assertEqual(len(details["fingerprints"]["email"]["hmac_sha256_12"]), 12)
 
 
 # ---------------------------------------------------------------------------

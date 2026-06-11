@@ -50,6 +50,28 @@ os.environ.setdefault("EMPLOYEE_TOKEN_HMAC_KEY", "pytest-token-hmac-key-" + "x" 
 os.environ["TEAM_REQUEST_ALERT_EMAIL_ENABLED"] = "false"
 os.environ["TEAM_SUPPLY_DISCORD_ENABLED"] = "false"
 
+# Notification providers and provider credentials must be forced inert for
+# pytest even when the developer shell or repo-root .env contains live values.
+os.environ["SMS_PROVIDER"] = "dry_run"
+os.environ["PASSWORD_RESET_EMAIL_PROVIDER"] = "dry_run"
+for _external_notification_key in (
+    "TWILIO_ACCOUNT_SID",
+    "TWILIO_AUTH_TOKEN",
+    "TWILIO_MESSAGING_SERVICE_SID",
+    "SMS_FROM_NUMBER",
+    "PASSWORD_RESET_SMTP_HOST",
+    "PASSWORD_RESET_SMTP_USERNAME",
+    "PASSWORD_RESET_SMTP_PASSWORD",
+    "PASSWORD_RESET_EMAIL_FROM",
+    "DISCORD_BOT_TOKEN",
+    "TEAM_SUPPLY_DISCORD_BOT_TOKEN",
+    "DEGEN_OPS_DISCORD_BOT_TOKEN",
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_ALERT_CHAT_ID",
+    "TELEGRAM_ALERT_TOPIC_ID",
+):
+    os.environ[_external_notification_key] = ""
+
 # TikTok auth tests must not need real Partner Center credentials. These are
 # inert test values; production routes still reject missing/invalid runtime
 # config when OAuth is actually used.

@@ -142,7 +142,7 @@ def _transition(
         "status_changed_at": now,
         "updated_at": now,
     }
-    if new_status != "submitted":
+    if new_status in {"approved", "ordered"}:
         values["approved_by_user_id"] = actor.id
     if notes:
         values["notes"] = notes[:2000]

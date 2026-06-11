@@ -107,7 +107,7 @@ class EmployeeInviteSmsTests(unittest.TestCase):
         from app.routers import team_admin_employees as mod
         from app.team.sms import SmsSendResult
 
-        draft = self._draft_with_phone("(555) 867-5309")
+        draft = self._draft_with_phone("(555) 010-0123")
         sent: dict[str, str] = {}
 
         def fake_send_sms(*, to_phone, body, settings=None):
@@ -127,7 +127,7 @@ class EmployeeInviteSmsTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(sent["to_phone"], "+15558675309")
+        self.assertEqual(sent["to_phone"], "+15550100123")
         self.assertIn("https://team.example.test/team/invite/accept/", sent["body"])
 
         invites = list(
@@ -148,14 +148,14 @@ class EmployeeInviteSmsTests(unittest.TestCase):
         self.assertIn("invite.text_dry_run", actions)
         details_blob = "\n".join(row.details_json for row in audit_rows)
         self.assertNotIn("https://team.example.test/team/invite/accept/", details_blob)
-        self.assertNotIn("5558675309", details_blob)
-        self.assertIn("***-***-5309", details_blob)
+        self.assertNotIn("5550100123", details_blob)
+        self.assertIn("***-***-0123", details_blob)
 
         text_audit = next(row for row in audit_rows if row.action == "invite.text_dry_run")
         details = json.loads(text_audit.details_json)
         self.assertTrue(details["dry_run"])
         self.assertTrue(details["success"])
-        self.assertEqual(details["phone"], "***-***-5309")
+        self.assertEqual(details["phone"], "***-***-0123")
         self.assertIn("phone_fingerprint", details)
 
     def test_text_invite_rejects_invalid_phone_without_issuing_token(self):
@@ -194,7 +194,7 @@ class EmployeeInviteSmsTests(unittest.TestCase):
     def test_employee_list_exposes_text_invite_for_drafts_with_phone(self):
         from app.routers.team_admin_employees import admin_employees_list
 
-        draft = self._draft_with_phone("555-867-5309")
+        draft = self._draft_with_phone("555-010-0123")
         response = admin_employees_list(
             self._request(),
             q=None,
@@ -258,7 +258,7 @@ class PasswordResetEmailTests(unittest.TestCase):
         username: str,
         *,
         email: str = "reset@example.com",
-        phone: str = "(555) 867-5309",
+        phone: str = "(555) 010-0123",
     ):
         from app.auth import hash_password
         from app.models import EmployeeProfile, User
@@ -300,11 +300,10 @@ class PasswordResetEmailTests(unittest.TestCase):
             sent["body"] = body
             return EmailSendResult(provider="smtp", status="sent", message_id="MSG123")
 
+        self.assertFalse(hasattr(mod, "send_sms"))
         with patch.object(mod, "get_settings", return_value=self._settings()), patch.object(
             mod, "send_email", side_effect=fake_send_email, create=True
         ), patch.object(
-            mod, "send_sms"
-        ) as send_sms, patch.object(
             mod, "send_password_reset_manager_request_alert"
         ) as alert_mock:
             response = asyncio.run(
@@ -315,7 +314,6 @@ class PasswordResetEmailTests(unittest.TestCase):
                 )
             )
 
-        send_sms.assert_not_called()
         alert_mock.assert_not_called()
         self.assertEqual(response.status_code, 303)
         self.assertEqual(sent["to_email"], "reset@example.com")
@@ -355,11 +353,10 @@ class PasswordResetEmailTests(unittest.TestCase):
         def fake_send_email(*, to_email, subject, body, settings=None):
             return EmailSendResult(provider="smtp", status="sent", message_id="MSG123")
 
+        self.assertFalse(hasattr(mod, "send_sms"))
         with patch.object(mod, "get_settings", return_value=settings), patch.object(
             mod, "send_email", side_effect=fake_send_email, create=True
-        ) as send_email, patch.object(
-            mod, "send_sms"
-        ) as send_sms:
+        ) as send_email:
             response = asyncio.run(
                 mod.team_password_forgot_post(
                     self._request(),
@@ -369,7 +366,6 @@ class PasswordResetEmailTests(unittest.TestCase):
             )
 
         send_email.assert_not_called()
-        send_sms.assert_not_called()
         self.assertEqual(response.status_code, 303)
         tokens = list(
             self.session.exec(
@@ -400,11 +396,10 @@ class PasswordResetEmailTests(unittest.TestCase):
                 error="Mailbox unavailable",
             )
 
+        self.assertFalse(hasattr(mod, "send_sms"))
         with patch.object(mod, "get_settings", return_value=self._settings()), patch.object(
             mod, "send_email", side_effect=fake_send_email, create=True
         ), patch.object(
-            mod, "send_sms"
-        ) as send_sms, patch.object(
             mod, "send_password_reset_manager_request_alert"
         ) as alert_mock:
             response = asyncio.run(
@@ -415,7 +410,6 @@ class PasswordResetEmailTests(unittest.TestCase):
                 )
             )
 
-        send_sms.assert_not_called()
         self.assertEqual(response.status_code, 303)
         tokens = list(
             self.session.exec(
@@ -453,12 +447,11 @@ class PasswordResetEmailTests(unittest.TestCase):
         employee = self._active_employee_with_contact(
             "email-reset-no-email",
             email="",
-            phone="(555) 867-5309",
+            phone="(555) 010-0123",
         )
 
-        with patch.object(mod, "get_settings", return_value=self._settings()), patch.object(
-            mod, "send_sms"
-        ) as send_sms:
+        self.assertFalse(hasattr(mod, "send_sms"))
+        with patch.object(mod, "get_settings", return_value=self._settings()):
             response = asyncio.run(
                 mod.team_password_forgot_post(
                     self._request(),
@@ -467,7 +460,6 @@ class PasswordResetEmailTests(unittest.TestCase):
                 )
             )
 
-        send_sms.assert_not_called()
         self.assertEqual(response.status_code, 303)
         tokens = list(
             self.session.exec(
@@ -482,55 +474,6 @@ class PasswordResetEmailTests(unittest.TestCase):
             )
         ).first()
         self.assertIsNotNone(manager_request)
-
-    def test_legacy_sms_reset_helper_still_revokes_failed_sms_token(self):
-        from app.models import AuditLog, PasswordResetToken
-        from app.routers import team as mod
-        from app.team.sms import SmsSendResult
-
-        employee = self._active_employee_with_contact(
-            "sms-helper-fail",
-            email="",
-            phone="(555) 867-5309",
-        )
-
-        def fake_send_sms(*, to_phone, body, settings=None):
-            return SmsSendResult(
-                provider="twilio",
-                status="http_400",
-                error="The destination number is blocked.",
-            )
-
-        with patch.object(mod, "get_settings", return_value=self._settings()), patch.object(
-            mod, "send_sms", side_effect=fake_send_sms
-        ):
-            delivered = mod._try_send_password_reset_sms(
-                self.session,
-                request=self._request(),
-                user=employee,
-                probe_hash="probe-hash",
-            )
-
-        self.assertFalse(delivered)
-        tokens = list(
-            self.session.exec(
-                select(PasswordResetToken).where(PasswordResetToken.user_id == employee.id)
-            ).all()
-        )
-        self.assertEqual(len(tokens), 1)
-        self.assertIsNotNone(tokens[0].used_at)
-
-        audit_rows = list(
-            self.session.exec(
-                select(AuditLog).where(AuditLog.target_user_id == employee.id)
-            ).all()
-        )
-        actions = {row.action for row in audit_rows}
-        self.assertIn("password.reset_sms_failed", actions)
-        details_blob = "\n".join(row.details_json for row in audit_rows)
-        self.assertNotIn("/team/password/reset/", details_blob)
-        self.assertNotIn("5558675309", details_blob)
-
 
 if __name__ == "__main__":
     unittest.main()

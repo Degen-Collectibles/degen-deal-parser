@@ -51,11 +51,6 @@ RESOURCE_KEYS: List[str] = [
     # Actions
     "action.timeoff.submit",
     "action.supply_request.submit",
-    "action.supply_request.approve",
-    "action.pii.reveal",
-    "action.password.reset_issued",
-    "action.employee.terminate",
-    "action.employee.purge",
     # Admin meta (gate the permissions matrix itself)
     "admin.permissions.view",
     "admin.permissions.edit",
@@ -121,11 +116,6 @@ _LABEL_OVERRIDES: Dict[str, str] = {
     "widget.dashboard.supply_queue_count": "Supply queue count",
     "action.timeoff.submit": "Submit time-off request",
     "action.supply_request.submit": "Submit supply request",
-    "action.supply_request.approve": "Approve supply request",
-    "action.pii.reveal": "Reveal employee PII",
-    "action.password.reset_issued": "Issue password reset",
-    "action.employee.terminate": "Terminate employee",
-    "action.employee.purge": "Purge employee (PII erase)",
     "admin.permissions.view": "View permissions matrix",
     "admin.permissions.edit": "Edit permissions matrix",
     "admin.employee_roster.edit": "Admin - Edit schedule roster fields",

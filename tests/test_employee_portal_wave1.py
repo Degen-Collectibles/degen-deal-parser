@@ -188,11 +188,11 @@ class AuthTokenAndPermissionTests(unittest.TestCase):
         emp = User(username="e", password_hash="x", role="employee", is_active=True)
         self.session.add(emp)
         self.session.add(RolePermission(role="employee", resource_key="page.dashboard", is_allowed=True))
-        self.session.add(RolePermission(role="employee", resource_key="action.pii.reveal", is_allowed=False))
+        self.session.add(RolePermission(role="employee", resource_key="admin.employees.reveal_pii", is_allowed=False))
         self.session.commit()
 
         self.assertTrue(has_permission(self.session, emp, "page.dashboard"))
-        self.assertFalse(has_permission(self.session, emp, "action.pii.reveal"))
+        self.assertFalse(has_permission(self.session, emp, "admin.employees.reveal_pii"))
 
     def test_has_permission_falls_back_to_admin_when_no_row(self):
         from app.auth import has_permission

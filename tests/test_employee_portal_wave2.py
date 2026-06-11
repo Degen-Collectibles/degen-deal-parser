@@ -85,7 +85,7 @@ class PermissionsMatrixTests(unittest.TestCase):
             perms.set_permission(
                 self.session,
                 role="employee",
-                resource_key="action.pii.reveal",
+                resource_key="admin.employees.reveal_pii",
                 is_allowed=True,
                 actor_user_id=None,
             )
@@ -145,7 +145,10 @@ class PermissionsMatrixTests(unittest.TestCase):
         from app import permissions as perms
 
         self.assertEqual(perms.resource_label("page.dashboard"), "Dashboard page")
-        self.assertEqual(perms.resource_label("action.pii.reveal"), "Reveal employee PII")
+        self.assertEqual(
+            perms.resource_label("admin.employees.reveal_pii"),
+            "Admin · Reveal employee PII (audited)",
+        )
 
 
 class RouteGatingTests(unittest.TestCase):

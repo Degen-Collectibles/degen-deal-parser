@@ -15,6 +15,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlmodel import Session, select
 
 from ..auth import generate_invite_token
+from ..config import get_settings
 from ..csrf import issue_token, require_csrf
 from ..db import get_session
 from ..models import AuditLog, InviteToken, User, utcnow
@@ -29,6 +30,11 @@ ROLES = ("employee", "viewer", "manager", "reviewer", "admin")
 
 def _base_url(request: Request) -> str:
     return f"{request.url.scheme}://{request.url.netloc}"
+
+
+def _public_base_url(request: Request) -> str:
+    configured = (get_settings().public_base_url or "").strip().rstrip("/")
+    return configured or _base_url(request)
 
 
 def _as_utc_aware(dt: Optional[datetime]) -> Optional[datetime]:
@@ -155,7 +161,7 @@ async def admin_invites_issue(
         )
     )
     session.commit()
-    invite_url = f"{_base_url(request)}/team/invite/accept/{raw}"
+    invite_url = f"{_public_base_url(request)}/team/invite/accept/{raw}"
     return templates.TemplateResponse(
         request,
         "team/admin/invite_issued.html",

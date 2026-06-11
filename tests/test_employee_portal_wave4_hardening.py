@@ -134,7 +134,7 @@ class _Harness:
         self.session.add(u)
         p = EmployeeProfile(
             user_id=user_id,
-            phone_enc=encrypt_pii("555-867-5309"),
+            phone_enc=encrypt_pii("555-010-0123"),
             legal_name_enc=encrypt_pii("Jane Q Test"),
             hire_date=date(2024, 1, 15),
         )

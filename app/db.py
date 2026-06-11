@@ -1627,11 +1627,6 @@ DEFAULT_ROLE_PERMISSIONS: tuple[tuple[str, str, bool], ...] = tuple(
         ("widget.dashboard.supply_queue_count", (False, False, True, True, True)),
         ("action.timeoff.submit", (True, True, True, True, True)),
         ("action.supply_request.submit", (True, False, True, True, True)),
-        ("action.supply_request.approve", (False, False, True, True, True)),
-        ("action.pii.reveal", (False, False, False, False, True)),
-        ("action.password.reset_issued", (False, False, False, False, True)),
-        ("action.employee.terminate", (False, False, False, False, True)),
-        ("action.employee.purge", (False, False, False, False, True)),
         ("admin.permissions.view", (False, False, False, False, True)),
         ("admin.permissions.edit", (False, False, False, False, True)),
         # Wave 4 — employee management, invites, supply queue
@@ -1722,6 +1717,20 @@ def seed_employee_portal_defaults(session: Session) -> None:
     from .models import DashboardWidget, RolePermission
 
     now = _dt.now(_tz.utc)
+    legacy_decoy_keys = (
+        "action.supply_request.approve",
+        "action.pii.reveal",
+        "action.password.reset_issued",
+        "action.employee.terminate",
+        "action.employee.purge",
+    )
+    removed_any = False
+    for row in session.exec(
+        _select(RolePermission).where(RolePermission.resource_key.in_(legacy_decoy_keys))
+    ).all():
+        session.delete(row)
+        removed_any = True
+
     existing_perms = {
         (row.role, row.resource_key)
         for row in session.exec(_select(RolePermission)).all()
@@ -1749,7 +1758,7 @@ def seed_employee_portal_defaults(session: Session) -> None:
         session.add(DashboardWidget(created_at=now, **spec))
         added_any = True
 
-    if added_any:
+    if added_any or removed_any:
         session.commit()
 
     # Wave 4.5 MAJ-1: older deployments seeded reviewer=False for the two

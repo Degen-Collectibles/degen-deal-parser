@@ -124,7 +124,7 @@ class _W4Harness:
         self.session.add(u)
         p = EmployeeProfile(
             user_id=user_id,
-            phone_enc=encrypt_pii("555-867-5309"),
+            phone_enc=encrypt_pii("555-010-0123"),
             address_enc=encrypt_pii(json.dumps({"street": "1 Main St", "city": "Town", "state": "CA", "zip": "90210"})),
             legal_name_enc=encrypt_pii("Jane Q Test"),
             hire_date=date(2024, 1, 15),
@@ -190,7 +190,7 @@ class DetailAndRevealTests(unittest.TestCase, _W4Harness):
         emp = self._seed_employee(user_id=601, username="emp601")
         r = self.client.get(f"/team/admin/employees/{emp.id}")
         self.assertEqual(r.status_code, 200)
-        self.assertNotIn("555-867-5309", r.text)
+        self.assertNotIn("555-010-0123", r.text)
         self.assertNotIn("1 Main St", r.text)
         self.assertIn("Redacted", r.text)
 
@@ -205,7 +205,7 @@ class DetailAndRevealTests(unittest.TestCase, _W4Harness):
             follow_redirects=False,
         )
         self.assertEqual(r.status_code, 200)
-        self.assertIn("555-867-5309", r.text)
+        self.assertIn("555-010-0123", r.text)
         # Audit row present.
         rows = list(self.session.exec(
             select(AuditLog).where(AuditLog.action == "pii.reveal")
@@ -254,7 +254,7 @@ class DetailAndRevealTests(unittest.TestCase, _W4Harness):
         self.assertEqual(r.status_code, 403)
         self.session.expire_all()
         profile = self.session.get(EmployeeProfile, emp.id)
-        self.assertEqual(decrypt_pii(profile.phone_enc), "555-867-5309")
+        self.assertEqual(decrypt_pii(profile.phone_enc), "555-010-0123")
         rows = list(self.session.exec(
             select(AuditLog).where(AuditLog.action == "admin.pii_update")
         ).all())
@@ -275,7 +275,7 @@ class DetailAndRevealTests(unittest.TestCase, _W4Harness):
         self.assertEqual(r.status_code, 403)
         self.session.expire_all()
         profile = self.session.get(EmployeeProfile, emp.id)
-        self.assertEqual(decrypt_pii(profile.phone_enc), "555-867-5309")
+        self.assertEqual(decrypt_pii(profile.phone_enc), "555-010-0123")
         self.assertEqual(decrypt_pii(profile.legal_name_enc), "Jane Q Test")
         rows = list(self.session.exec(
             select(AuditLog).where(AuditLog.action == "admin.pii_update")
@@ -312,9 +312,9 @@ class DetailAndRevealTests(unittest.TestCase, _W4Harness):
         self.assertNotIn("444-222-1111", row.details_json)
         self.assertNotIn("new607@example.com", row.details_json)
         self.assertNotIn("77 Broadway", row.details_json)
-        self.assertRegex(details["fingerprints"]["phone"]["sha256_12"], r"^[0-9a-f]{12}$")
-        self.assertRegex(details["fingerprints"]["email"]["sha256_12"], r"^[0-9a-f]{12}$")
-        self.assertRegex(details["fingerprints"]["address"]["sha256_12"], r"^[0-9a-f]{12}$")
+        self.assertRegex(details["fingerprints"]["phone"]["hmac_sha256_12"], r"^[0-9a-f]{12}$")
+        self.assertRegex(details["fingerprints"]["email"]["hmac_sha256_12"], r"^[0-9a-f]{12}$")
+        self.assertRegex(details["fingerprints"]["address"]["hmac_sha256_12"], r"^[0-9a-f]{12}$")
 
 
 class AdminProfileUpdateHardeningTests(unittest.TestCase, _W4Harness):
@@ -1030,9 +1030,7 @@ class SupplyQueueTests(unittest.TestCase, _W4Harness):
             client=SimpleNamespace(host="testclient"),
         )
 
-        with patch.object(team, "alert_supply_request"), patch.object(
-            team, "send_supply_request_alert"
-        ) as external_alert:
+        with patch.object(team, "send_supply_request_alert") as external_alert:
             response = asyncio.run(
                 team.team_supply_post(
                     request,

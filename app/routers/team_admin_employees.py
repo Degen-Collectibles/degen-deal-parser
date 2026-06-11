@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import hashlib
 import json
 import logging
 from calendar import monthrange
@@ -48,6 +47,7 @@ from ..models import (
     User,
     utcnow,
 )
+from ..team.fingerprints import keyed_fingerprint
 from ..team.pii import decrypt_pii, email_lookup_hash, encrypt_pii
 from ..rate_limit import rate_limited_or_429
 from ..shared import templates
@@ -528,10 +528,6 @@ def _audit_then_commit(session: Session, row: AuditLog) -> None:
     session.add(row)
     session.flush()
     session.commit()
-
-
-def _pii_fingerprint(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
 
 
 def _revoke_employee_tokens(
@@ -2090,8 +2086,12 @@ async def admin_employee_pii_update(
 
     def _field_fingerprint(label: str, value: str) -> dict[str, object]:
         cleaned = (value or "").strip().lower()
-        digest = hashlib.sha256(f"{label}:{cleaned}".encode("utf-8")).hexdigest()
-        return {"present": bool(cleaned), "len": len(cleaned), "sha256_12": digest[:12]}
+        digest = keyed_fingerprint(
+            cleaned,
+            namespace=f"admin_profile:{label}",
+            length=12,
+        )
+        return {"present": bool(cleaned), "len": len(cleaned), "hmac_sha256_12": digest}
 
     field_fingerprints: dict[str, str] = {}
 
@@ -2107,7 +2107,7 @@ async def admin_employee_pii_update(
         if v != current_val:
             setattr(profile, attr, encrypt_pii(v))
             changed.append(label)
-            field_fingerprints[label] = _field_fingerprint(label, v)["sha256_12"]
+            field_fingerprints[label] = _field_fingerprint(label, v)["hmac_sha256_12"]
 
     _overwrite_if_set("legal_name_enc", legal_name, "legal_name")
     _overwrite_if_set("phone_enc", phone, "phone")
@@ -2136,7 +2136,7 @@ async def admin_employee_pii_update(
             profile.email_ciphertext = encrypt_pii(new_email)
             profile.email_lookup_hash = new_hash
             changed.append("email")
-            field_fingerprints["email"] = _field_fingerprint("email", new_email)["sha256_12"]
+            field_fingerprints["email"] = _field_fingerprint("email", new_email)["hmac_sha256_12"]
 
     new_address = {
         "street": (address_street or "").strip(),
@@ -2153,7 +2153,7 @@ async def admin_employee_pii_update(
             changed.append("address")
             field_fingerprints["address"] = _field_fingerprint(
                 "address", json.dumps(new_address, sort_keys=True)
-            )["sha256_12"]
+            )["hmac_sha256_12"]
 
     if changed:
         profile.updated_at = now
@@ -2230,7 +2230,7 @@ async def admin_employee_reset_password(
     raw = generate_password_reset_token(
         session, user_id=employee.id, issued_by_user_id=current.id
     )
-    reset_url = f"{_base_url(request)}/team/password/reset/{raw}"
+    reset_url = f"{_public_base_url(request)}/team/password/reset/{raw}"
     return templates.TemplateResponse(
         request,
         "team/admin/employee_reset.html",

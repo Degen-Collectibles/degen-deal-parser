@@ -659,10 +659,7 @@ class SupplyAndPoliciesTests(unittest.TestCase, _PortalHarness):
     def test_supply_post_with_csrf_creates_row(self):
         uid = self._seed_employee(user_id=41, username="emp_sc")
         csrf = self._csrf()
-        with (
-            patch("app.routers.team.alert_supply_request") as alert_mock,
-            patch("app.routers.team.send_supply_request_alert") as external_alert_mock,
-        ):
+        with patch("app.routers.team.send_supply_request_alert") as external_alert_mock:
             r = self.client.post(
                 "/team/supply",
                 data={"title": "printer ink", "description": "black cartridge", "urgency": "high", "csrf_token": csrf},
@@ -676,14 +673,6 @@ class SupplyAndPoliciesTests(unittest.TestCase, _PortalHarness):
         ).all()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].title, "printer ink")
-        alert_mock.assert_called_once_with(
-            request_id=rows[0].id,
-            employee_name="emp_sc",
-            employee_username="emp_sc",
-            title="printer ink",
-            description="black cartridge",
-            urgency="high",
-        )
         external_alert_mock.assert_called_once_with(
             request_id=rows[0].id,
             employee_name="emp_sc",

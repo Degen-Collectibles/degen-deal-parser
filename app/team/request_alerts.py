@@ -94,6 +94,8 @@ def _send_alert_email(
         )
     if result.error:
         print(f"[team_request_alerts] email alert failed: {result.status} {result.error[:160]}")
+    elif result.dry_run:
+        print(f"[team_request_alerts] email alert skipped: {result.status}")
     return result
 
 

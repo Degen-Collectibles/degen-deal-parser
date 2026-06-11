@@ -262,10 +262,10 @@ class PortalAuditTop5Tests(unittest.TestCase):
         context = self._dashboard_context(admin)
 
         self.assertTrue(context["show_supply_queue_count"])
-        self.assertEqual(context["supply_queue_count"], 2)
+        self.assertEqual(context["supply_queue_count"], 1)
         html = templates.env.get_template("team/dashboard.html").render(context)
         self.assertIn("Supply queue", html)
-        self.assertIn(">2<", html)
+        self.assertIn(">1<", html)
         self.assertIn("Pending requests", html)
 
     def test_dashboard_shows_timeoff_queue_count_for_manager(self):
