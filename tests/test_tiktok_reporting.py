@@ -24,8 +24,9 @@ import app.routers.reports as reports_module
 import app.routers.dashboard as dashboard_module
 import app.routers.tiktok_orders as tiktok_orders_module
 import app.routers.shopify as shopify_module
+import app.routers.tiktok_streamer as streamer_module
 import app.shared as shared_module
-from app.models import TikTokAuth, TikTokCreatorAuth, TikTokOrder, TikTokWebhookEnrichmentJob, utcnow
+from app.models import AppSetting, TikTokAuth, TikTokCreatorAuth, TikTokOrder, TikTokWebhookEnrichmentJob, utcnow
 from app.reporting import (
     build_tiktok_reporting_summary,
     classify_tiktok_reporting_status,
@@ -33,6 +34,7 @@ from app.reporting import (
 )
 from scripts.tiktok_backfill import (
     affiliate_order_attribution_from_payload,
+    backfill_tiktok_creator_affiliate_attributions,
     build_tiktok_request,
     fetch_tiktok_creator_affiliate_orders_page,
     request_json,
@@ -1132,6 +1134,183 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(stored.affiliate_content_type, "LIVE")
         self.assertEqual(stored.affiliate_content_id, "boss-live-123")
         self.assertIn("1729435310697057093", stored.affiliate_attribution_json)
+
+    def test_tiktok_creator_affiliate_backfill_reports_per_creator_telemetry(self) -> None:
+        with Session(self.engine) as session:
+            session.add(
+                TikTokOrder(
+                    tiktok_order_id="creator-trace-order",
+                    shop_id="dc-llc-shop",
+                    shop_cipher="shared-shop-cipher",
+                    order_number="creator-trace-order",
+                    created_at=datetime(2026, 6, 4, 20, 19, tzinfo=timezone.utc),
+                    updated_at=datetime(2026, 6, 4, 20, 19, tzinfo=timezone.utc),
+                    financial_status="paid",
+                    subtotal_price=8.0,
+                    total_price=8.0,
+                    line_items_json=json.dumps([
+                        {"product_id": "trace-product", "product_name": "Trace Product", "quantity": 1}
+                    ]),
+                )
+            )
+            session.add(
+                TikTokCreatorAuth(
+                    creator_username="degencollectibles",
+                    app_key="app-key",
+                    access_token="creator-access-token",
+                    refresh_token="creator-refresh-token",
+                    access_token_expires_at=datetime(2026, 6, 5, tzinfo=timezone.utc),
+                    refresh_token_expires_at=datetime(2026, 12, 1, tzinfo=timezone.utc),
+                    scopes_json=json.dumps(["creator.affiliate_collaboration.read"]),
+                    updated_at=datetime(2026, 6, 4, 20, 0, tzinfo=timezone.utc),
+                )
+            )
+            session.add(
+                TikTokCreatorAuth(
+                    creator_username="degenboss0",
+                    app_key="app-key",
+                    access_token="boss-access-token",
+                    refresh_token="boss-refresh-token",
+                    access_token_expires_at=datetime(2026, 6, 5, tzinfo=timezone.utc),
+                    refresh_token_expires_at=datetime(2026, 12, 1, tzinfo=timezone.utc),
+                    scopes_json=json.dumps(["data.analytics.public.read"]),
+                    updated_at=datetime(2026, 6, 4, 19, 0, tzinfo=timezone.utc),
+                )
+            )
+            session.commit()
+
+            def fake_fetch_page(*args, **kwargs):
+                return (
+                    {"code": 0, "data": {"orders": []}},
+                    [
+                        {
+                            "order_id": "creator-trace-order",
+                            "product_id": "trace-product",
+                            "content_type": "LIVE",
+                            "content_id": "main-live",
+                        }
+                    ],
+                )
+
+            telemetry: dict[str, dict[str, object]] = {}
+
+            def capture_telemetry(creator_handle: str, summary) -> None:
+                telemetry[creator_handle] = {
+                    "attributed": summary.affiliate_attributed,
+                    "missing": summary.affiliate_missing,
+                    "failed": summary.affiliate_failed,
+                    "scope_missing": summary.affiliate_scope_missing,
+                    "last_error": summary.last_error,
+                }
+
+            with patch("scripts.tiktok_backfill.fetch_tiktok_creator_affiliate_orders_page", side_effect=fake_fetch_page):
+                summary = backfill_tiktok_creator_affiliate_attributions(
+                    session,
+                    base_url="https://open-api.tiktokglobalshop.com",
+                    app_key="app-key",
+                    app_secret="secret",
+                    since=datetime(2026, 6, 4, tzinfo=timezone.utc),
+                    until=datetime(2026, 6, 5, tzinfo=timezone.utc),
+                    telemetry_callback=capture_telemetry,
+                )
+
+        self.assertEqual(summary.affiliate_attributed, 1)
+        self.assertTrue(summary.affiliate_scope_missing)
+        self.assertEqual(telemetry["degencollectibles"]["attributed"], 1)
+        self.assertFalse(telemetry["degencollectibles"]["scope_missing"])
+        self.assertEqual(telemetry["degenboss0"]["attributed"], 0)
+        self.assertTrue(telemetry["degenboss0"]["scope_missing"])
+
+    def test_status_snapshot_includes_viewer_safe_creator_attribution(self) -> None:
+        with Session(self.engine) as session:
+            session.add(
+                TikTokCreatorAuth(
+                    creator_username="degenboss0",
+                    display_name="Boss",
+                    app_key="app-key",
+                    access_token="creator-access-token-secret",
+                    refresh_token="creator-refresh-token-secret",
+                    access_token_expires_at=utcnow() + timedelta(hours=6),
+                    refresh_token_expires_at=utcnow() + timedelta(days=30),
+                    scopes_json=json.dumps(["creator.affiliate_collaboration.read"]),
+                    raw_payload=json.dumps({"access_token": "raw-secret-token"}),
+                    updated_at=utcnow(),
+                )
+            )
+            session.add(
+                AppSetting(
+                    key="tiktok_creator_trace_status",
+                    value=json.dumps(
+                        {
+                            "degenboss0": {
+                                "last_trace_pull_at": "2026-06-10T20:00:00+00:00",
+                                "affiliate_attributed": 8,
+                                "affiliate_missing": 1,
+                                "affiliate_failed": 0,
+                                "affiliate_scope_missing": False,
+                                "last_error": "scope failed with creator-access-token-secret",
+                            }
+                        }
+                    ),
+                )
+            )
+            session.add(
+                TikTokOrder(
+                    tiktok_order_id="attributed-order",
+                    order_number="attributed-order",
+                    created_at=utcnow(),
+                    updated_at=utcnow(),
+                    financial_status="paid",
+                    subtotal_price=10.0,
+                    total_price=10.0,
+                    affiliate_creator_username="degenboss0",
+                )
+            )
+            session.commit()
+
+            snapshot = shared_module.build_status_snapshot(session)
+            admin_status = shared_module.build_tiktok_creator_attribution_status(
+                session,
+                include_admin_details=True,
+            )
+
+        creator_status = snapshot["tiktok_creator_attribution"]
+        self.assertTrue(creator_status["affiliate_order_scope_authorized"])
+        self.assertEqual(creator_status["creators"][0]["handle"], "degenboss0")
+        self.assertTrue(creator_status["creators"][0]["scope_ok"])
+        self.assertEqual(creator_status["creators"][0]["last_trace_attributed_count"], 8)
+        self.assertEqual(
+            set(creator_status["creators"][0].keys()),
+            {
+                "handle",
+                "scope_ok",
+                "access_expired",
+                "refresh_expired",
+                "last_trace_pull_at",
+                "last_trace_attributed_count",
+            },
+        )
+        serialized = json.dumps(creator_status)
+        self.assertNotIn("creator-access-token-secret", serialized)
+        self.assertNotIn("creator-refresh-token-secret", serialized)
+        self.assertNotIn("raw-secret-token", serialized)
+        self.assertNotIn("scope failed", serialized)
+        self.assertNotIn("scopes_json", serialized)
+        admin_serialized = json.dumps(admin_status)
+        self.assertNotIn("creator-access-token-secret", admin_serialized)
+        self.assertIn("[REDACTED]", admin_serialized)
+
+    def test_streamer_config_renders_creator_attribution_empty_state(self) -> None:
+        request = SimpleNamespace(state=SimpleNamespace(current_user=SimpleNamespace(role="admin")))
+        with Session(self.engine) as session:
+            with patch.object(streamer_module, "require_role_response", return_value=None):
+                response = streamer_module.tiktok_streamer_config(request, session)
+
+        html = response.body.decode("utf-8")
+        self.assertIn("Creator Attribution", html)
+        self.assertIn("No creator authorizations", html)
+        self.assertIn("/docs/ops/tiktok-creator-attribution-runbook.md", html)
+        self.assertIn("/integrations/tiktok/oauth/creator-shop-start?creator=degenboss0", html)
 
     def test_sqlite_schema_migration_creates_tiktok_webhook_enrichment_queue_table(self) -> None:
         with self.engine.begin() as connection:

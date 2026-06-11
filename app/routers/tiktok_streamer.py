@@ -14,6 +14,7 @@ import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from html import escape
 from typing import Any, Optional
 from urllib.parse import urlencode
 
@@ -60,6 +61,85 @@ from ..reporting import (
 
 router = APIRouter(route_class=CSRFProtectedRoute)
 logger = logging.getLogger(__name__)
+
+
+def _creator_attribution_badge(label: str, tone: str) -> str:
+    colors = {
+        "ok": ("rgba(34,197,94,.14)", "#4ade80"),
+        "warn": ("rgba(234,179,8,.14)", "#facc15"),
+        "bad": ("rgba(239,68,68,.14)", "#f87171"),
+        "muted": ("rgba(148,163,184,.14)", "#94a3b8"),
+    }
+    bg, fg = colors.get(tone, colors["muted"])
+    return (
+        f'<span style="display:inline-block;padding:3px 7px;border-radius:6px;'
+        f'background:{bg};color:{fg};font-size:10px;font-weight:700;'
+        f'text-transform:uppercase;letter-spacing:.06em;">{escape(label)}</span>'
+    )
+
+
+def _render_creator_attribution_panel(session: Session) -> str:
+    status = build_tiktok_creator_attribution_status(session, include_admin_details=True)
+    creators = list(status.get("creators") or [])
+    default_links = "".join(
+        '<a href="{url}" style="display:inline-block;margin:6px 8px 0 0;padding:8px 10px;'
+        'border-radius:8px;background:#1f2937;color:#e5e7eb;text-decoration:none;font-size:12px;">'
+        "{label}</a>".format(
+            url=escape(str(url), quote=True),
+            label=escape("Authorize " + str(url).rsplit("=", 1)[-1]),
+        )
+        for url in (status.get("default_creator_oauth_urls") or [])
+    )
+    shop_badge = _creator_attribution_badge(
+        "seller scope ok" if status.get("shop_scope_ok") else "seller scope missing",
+        "ok" if status.get("shop_scope_ok") else "warn",
+    )
+    if not creators:
+        rows_html = (
+            '<div class="auto-row"><strong>No creator authorizations</strong></div>'
+            '<div class="auto-row">Use a supervised TikTok browser session for each creator, then verify rows here.</div>'
+        )
+    else:
+        row_parts: list[str] = []
+        for creator in creators:
+            handle = str(creator.get("handle") or "")
+            scope_badge = _creator_attribution_badge(
+                "scope ok" if creator.get("scope_ok") else "scope missing",
+                "ok" if creator.get("scope_ok") else "bad",
+            )
+            refresh_badge = _creator_attribution_badge(
+                "refresh expired" if creator.get("refresh_expired") else "refresh ok",
+                "bad" if creator.get("refresh_expired") else "ok",
+            )
+            trace_badge = _creator_attribution_badge(
+                "trace failed" if int(creator.get("last_trace_failed_count") or 0) else "trace ready",
+                "bad" if int(creator.get("last_trace_failed_count") or 0) else "muted",
+            )
+            last_error = escape(str(creator.get("last_error") or ""))
+            error_html = f'<div class="auto-row" style="color:#fca5a5;">{last_error}</div>' if last_error else ""
+            row_parts.append(
+                '<div style="border-top:1px solid #2a2a2a;padding-top:10px;margin-top:10px;">'
+                f'<div class="auto-row"><strong>@{escape(handle)}</strong> {scope_badge} {refresh_badge} {trace_badge}</div>'
+                f'<div class="auto-row">Last trace: <strong>{escape(str(creator.get("last_trace_pull_at") or "none yet"))}</strong></div>'
+                f'<div class="auto-row">Trace result: <strong>{int(creator.get("last_trace_attributed_count") or 0)}</strong> attributed, '
+                f'<strong>{int(creator.get("last_trace_missing_count") or 0)}</strong> missing, '
+                f'<strong>{int(creator.get("last_trace_failed_count") or 0)}</strong> failed</div>'
+                f'<div class="auto-row">Attributed orders, 7d: <strong>{int(creator.get("attributed_orders_7d") or 0)}</strong></div>'
+                f'{error_html}'
+                '</div>'
+            )
+        rows_html = "".join(row_parts)
+    return (
+        '<div class="auto-card">'
+        '<h3>Creator Attribution</h3>'
+        f'<div class="auto-row">Shop affiliate scope: {shop_badge}</div>'
+        f'{rows_html}'
+        '<div class="auto-row" style="margin-top:12px;">'
+        f'<a href="{escape(str(status.get("runbook_url") or ""), quote=True)}">Creator attribution runbook</a>'
+        '</div>'
+        f'<div>{default_links}</div>'
+        '</div>'
+    )
 
 
 def _require_live_stream(request: Request, session: Optional[Session] = None):
@@ -3204,6 +3284,8 @@ def tiktok_streamer_config(request: Request, session: Session = Depends(get_sess
     else:
         auto_end_str = ""
 
+    creator_attribution_panel = _render_creator_attribution_panel(session)
+
     html = f"""<!DOCTYPE html>
 <html><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -3280,6 +3362,8 @@ def tiktok_streamer_config(request: Request, session: Session = Depends(get_sess
     <button style="background:#6366f1;color:#fff;" onclick="saveGoalSettings()">Save Goal Settings</button>
   </div>
   <div class="status" id="goal-status"></div>
+  <hr>
+  {creator_attribution_panel}
   <p style="margin-top:24px;font-size:12px;text-align:center;">
     <a href="/tiktok/streamer">&larr; Back to Streamer Dashboard</a>
   </p>
