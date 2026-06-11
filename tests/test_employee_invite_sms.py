@@ -304,7 +304,9 @@ class PasswordResetEmailTests(unittest.TestCase):
             mod, "send_email", side_effect=fake_send_email, create=True
         ), patch.object(
             mod, "send_sms"
-        ) as send_sms:
+        ) as send_sms, patch.object(
+            mod, "send_password_reset_manager_request_alert"
+        ) as alert_mock:
             response = asyncio.run(
                 mod.team_password_forgot_post(
                     self._request(),
@@ -314,6 +316,7 @@ class PasswordResetEmailTests(unittest.TestCase):
             )
 
         send_sms.assert_not_called()
+        alert_mock.assert_not_called()
         self.assertEqual(response.status_code, 303)
         self.assertEqual(sent["to_email"], "reset@example.com")
         self.assertEqual(sent["subject"], "Reset your Degen Team password")
@@ -358,7 +361,9 @@ class PasswordResetEmailTests(unittest.TestCase):
             mod, "send_email", side_effect=fake_send_email, create=True
         ), patch.object(
             mod, "send_sms"
-        ) as send_sms:
+        ) as send_sms, patch.object(
+            mod, "send_password_reset_manager_request_alert"
+        ) as alert_mock:
             response = asyncio.run(
                 mod.team_password_forgot_post(
                     self._request(),
@@ -385,6 +390,15 @@ class PasswordResetEmailTests(unittest.TestCase):
         actions = {row.action for row in audit_rows}
         self.assertIn("password.reset_email_failed", actions)
         self.assertIn("password.reset_manager_request", actions)
+        manager_request = next(
+            row for row in audit_rows if row.action == "password.reset_manager_request"
+        )
+        alert_mock.assert_called_once_with(
+            request_id=manager_request.id,
+            employee_name=employee.display_name or employee.username,
+            employee_username=employee.username,
+            reason="email_delivery_unavailable",
+        )
         details_blob = "\n".join(row.details_json for row in audit_rows)
         self.assertNotIn("/team/password/reset/", details_blob)
         self.assertNotIn("reset@example.com", details_blob)

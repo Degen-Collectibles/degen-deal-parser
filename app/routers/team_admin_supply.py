@@ -18,6 +18,7 @@ from ..csrf import issue_token, require_csrf
 from ..db import get_session
 from ..models import AuditLog, SupplyRequest, User, utcnow
 from ..shared import templates
+from ..team.request_alerts import send_supply_ordered_alert
 from ..team.supply_deals import (
     get_cached_supply_deals,
     refresh_supply_deal_cache,
@@ -242,6 +243,8 @@ async def admin_supply_mark_ordered(
     denial, current = _permission_gate(request, session, "admin.supply.approve")
     if denial:
         return denial
+    row = session.get(SupplyRequest, request_id)
+    alert_title = row.title if row is not None else ""
     err = _transition(
         session,
         request_id=request_id,
@@ -252,6 +255,10 @@ async def admin_supply_mark_ordered(
     )
     if err:
         return err
+    send_supply_ordered_alert(
+        request_id=request_id,
+        title=alert_title,
+    )
     return RedirectResponse(
         "/team/admin/supply?flash=Marked+ordered.", status_code=303
     )

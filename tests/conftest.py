@@ -44,6 +44,12 @@ os.environ["DATABASE_URL"] = f"sqlite:///{_TEST_DB.as_posix()}"
 os.environ.setdefault("EMPLOYEE_EMAIL_HASH_SALT", "pytest-email-salt")
 os.environ.setdefault("EMPLOYEE_TOKEN_HMAC_KEY", "pytest-token-hmac-key-" + "x" * 24)
 
+# External team request alerts must never leak out of pytest. Individual
+# request-alert unit tests pass explicit Settings objects and mocked transports
+# when they need to exercise email/Discord formatting.
+os.environ["TEAM_REQUEST_ALERT_EMAIL_ENABLED"] = "false"
+os.environ["TEAM_SUPPLY_DISCORD_ENABLED"] = "false"
+
 # TikTok auth tests must not need real Partner Center credentials. These are
 # inert test values; production routes still reject missing/invalid runtime
 # config when OAuth is actually used.
