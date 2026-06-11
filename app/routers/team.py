@@ -83,7 +83,11 @@ from ..team.team_notifications import (
     EMPLOYEE_NOTIFICATION_ACTION,
     notify_manager_admins,
 )
-from ..team.request_alerts import send_supply_request_alert
+from ..team.request_alerts import (
+    send_help_request_alert,
+    send_password_reset_manager_request_alert,
+    send_supply_request_alert,
+)
 from ..tiktok.tiktok_alerts import alert_supply_request
 
 router = APIRouter()
@@ -309,23 +313,23 @@ def _queue_password_reset_request(
     user: User,
     probe_hash: str,
     reason: str,
-) -> None:
-    session.add(
-        AuditLog(
-            target_user_id=user.id,
-            action="password.reset_manager_request",
-            resource_key="admin.employees.reset_password",
-            details_json=json.dumps(
-                {
-                    "source": "http_forgot",
-                    "identifier_hash": probe_hash,
-                    "reason": reason,
-                },
-                sort_keys=True,
-            ),
-            ip_address=(request.client.host if request.client else None),
-        )
+) -> AuditLog:
+    row = AuditLog(
+        target_user_id=user.id,
+        action="password.reset_manager_request",
+        resource_key="admin.employees.reset_password",
+        details_json=json.dumps(
+            {
+                "source": "http_forgot",
+                "identifier_hash": probe_hash,
+                "reason": reason,
+            },
+            sort_keys=True,
+        ),
+        ip_address=(request.client.host if request.client else None),
     )
+    session.add(row)
+    return row
 
 
 def _try_send_password_reset_email(
@@ -746,6 +750,7 @@ async def team_password_forgot_post(
             return limited
     matched_user = _find_password_reset_user(session, probe)
     delivered = False
+    manager_reset_alert: Optional[dict[str, Any]] = None
     if matched_user is not None:
         queue_reason = "email_delivery_unavailable"
         if not _configured_public_base_url():
@@ -758,13 +763,20 @@ async def team_password_forgot_post(
                 probe_hash=probe_hash,
             )
         if not delivered:
-            _queue_password_reset_request(
+            reset_request = _queue_password_reset_request(
                 session,
                 request=request,
                 user=matched_user,
                 probe_hash=probe_hash,
                 reason=queue_reason,
             )
+            session.flush()
+            manager_reset_alert = {
+                "request_id": reset_request.id,
+                "employee_name": matched_user.display_name or matched_user.username,
+                "employee_username": matched_user.username,
+                "reason": "email_delivery_unavailable",
+            }
     session.add(
         AuditLog(
             action="password.reset_requested",
@@ -781,6 +793,8 @@ async def team_password_forgot_post(
         )
     )
     session.commit()
+    if manager_reset_alert is not None:
+        send_password_reset_manager_request_alert(**manager_reset_alert)
     return RedirectResponse(
         "/team/password/forgot?flash=If+that+account+exists%2C+we%27ll+email+a+reset+link+or+put+it+in+the+admin+reset+queue.",
         status_code=303,
@@ -1647,6 +1661,9 @@ def team_notifications(
 @router.get("/team/help", response_class=HTMLResponse)
 def team_help(
     request: Request,
+    flash: Optional[str] = Query(default=None),
+    error: Optional[str] = Query(default=None),
+    page: Optional[str] = Query(default=None),
     session: Session = Depends(get_session),
 ):
     denial, user = _require_employee(request, session, resource_key="page.dashboard")
@@ -1660,10 +1677,67 @@ def team_help(
             "title": "Ask for Help",
             "active": "",
             "current_user": user,
+            "flash": flash,
+            "error": error,
+            "help_page_path": _safe_next(page) or "/team/help",
             "csrf_token": issue_token(request),
             **_nav_context(session, user),
         },
     )
+
+
+@router.post("/team/help", dependencies=[Depends(require_csrf)])
+async def team_help_post(
+    request: Request,
+    message: str = Form(default=""),
+    page_path: str = Form(default="/team/help"),
+    session: Session = Depends(get_session),
+):
+    denial, user = _require_employee(request, session, resource_key="page.dashboard")
+    if denial:
+        return denial
+    if limited := rate_limited_or_429(
+        request,
+        key_prefix=f"team:help:{user.id}",
+        max_requests=5,
+        window_seconds=3600.0,
+    ):
+        return limited
+
+    clean_message = (message or "").strip()[:2000]
+    if not clean_message:
+        return RedirectResponse(
+            "/team/help?error=Tell+us+what+you+need+help+with.",
+            status_code=303,
+        )
+    clean_page = _safe_next(page_path) or "/team/help"
+    row = AuditLog(
+        actor_user_id=user.id,
+        target_user_id=user.id,
+        action="help.requested",
+        resource_key="page.dashboard",
+        details_json=json.dumps(
+            {
+                "source": "team_help",
+                "message": clean_message,
+                "page_path": clean_page,
+            },
+            sort_keys=True,
+        ),
+        ip_address=(request.client.host if request.client else None),
+    )
+    session.add(row)
+    session.flush()
+    alert_context = {
+        "request_id": row.id,
+        "employee_name": user.display_name or user.username,
+        "employee_username": user.username,
+        "message": clean_message,
+        "page_path": clean_page,
+    }
+    session.commit()
+    send_help_request_alert(**alert_context)
+    return RedirectResponse("/team/help?flash=Help+request+sent.", status_code=303)
 
 
 @router.get("/team/help/tutorial", response_class=HTMLResponse)

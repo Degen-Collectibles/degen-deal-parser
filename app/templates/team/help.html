@@ -5,7 +5,16 @@
 {% block content %}
 <div class="pt-card pt-help-card">
   <div class="pt-card-title">Ask for help</div>
-  <div class="pt-card-sub">Tell your manager which page you're on and what you were trying to do. These shortcuts cover the stuff that comes up most.</div>
+  <div class="pt-card-sub">Tell your manager which page you're on and what you were trying to do.</div>
+  <form method="post" action="/team/help" style="margin:14px 0 18px;">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="page_path" value="{{ help_page_path|default('/team/help') }}">
+    <div class="pt-field">
+      <label class="pt-field-label" for="help-message">What do you need?</label>
+      <textarea class="pt-textarea" id="help-message" name="message" rows="4" maxlength="2000" required placeholder="I need help with..."></textarea>
+    </div>
+    <button class="pt-btn primary" type="submit">Send help request</button>
+  </form>
   <div class="pt-help-grid">
     <a class="pt-help-tile" href="/team/hours">
       <strong>Hours or pay looks wrong</strong>
@@ -83,7 +92,7 @@
 
 <div class="pt-card">
   <div class="pt-card-title">Copy a message</div>
-  <div class="pt-copy-box" id="pt-help-copy">Hey, I need help with the employee portal. Page: {{ request.url.path }}. What I'm trying to do:</div>
+  <div class="pt-copy-box" id="pt-help-copy">Hey, I need help with the employee portal. Page: {{ help_page_path|default(request.url.path) }}. What I'm trying to do:</div>
   <button class="pt-btn" id="pt-copy-help" type="button">Copy message</button>
 </div>
 

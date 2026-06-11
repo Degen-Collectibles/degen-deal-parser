@@ -1,4 +1,4 @@
-"""External alerts for employee supply and time-off requests."""
+"""External alerts for employee portal requests."""
 from __future__ import annotations
 
 import os
@@ -213,6 +213,33 @@ def send_supply_request_alert(
     return RequestAlertResult(email=email_result, discord=discord_result)
 
 
+def send_supply_ordered_alert(
+    *,
+    request_id: Optional[int],
+    title: str = "",
+    settings: Optional[Settings] = None,
+) -> RequestAlertResult:
+    settings = settings or get_settings()
+    title_text = _clean(title or "supplies", limit=180)
+    queue_url = _absolute_url("/team/admin/supply", settings)
+    request_line = f"Request ID: {request_id}" if request_id is not None else "Request ID: pending"
+    discord_content = "\n".join(
+        part
+        for part in (
+            "**Supply Ordered**",
+            f"Someone requested {title_text}, and we ordered it.",
+            request_line,
+            f"Queue: {queue_url}",
+        )
+        if part != ""
+    )
+    discord_result = _send_discord_message(content=discord_content, settings=settings)
+    return RequestAlertResult(
+        email=_email_disabled_result(),
+        discord=discord_result,
+    )
+
+
 def send_timeoff_request_alert(
     *,
     request_id: Optional[int],
@@ -241,6 +268,75 @@ def send_timeoff_request_alert(
             f"Reason: {reason_text}" if reason_text else "",
             request_line,
             f"Open queue: {queue_url}",
+        )
+        if part != ""
+    )
+    email_result = _send_alert_email(subject=subject, body=body, settings=settings)
+    return RequestAlertResult(
+        email=email_result,
+        discord=DiscordSendResult(status="not_requested"),
+    )
+
+
+def send_password_reset_manager_request_alert(
+    *,
+    request_id: Optional[int],
+    employee_name: str = "",
+    employee_username: str = "",
+    reason: str = "",
+    settings: Optional[Settings] = None,
+) -> RequestAlertResult:
+    settings = settings or get_settings()
+    employee = _display_employee(employee_name, employee_username)
+    reason_text = _clean(reason or "manual_reset_needed", limit=240)
+    queue_url = _absolute_url("/team/admin/password-reset-requests", settings)
+    request_line = f"Request ID: {request_id}" if request_id is not None else "Request ID: pending"
+    subject = f"[Degen] Password reset help needed - {employee}"
+    body = "\n".join(
+        part
+        for part in (
+            "Password reset help needed",
+            "",
+            f"Employee: {employee}",
+            f"Reason: {reason_text}",
+            request_line,
+            f"Open queue: {queue_url}",
+        )
+        if part != ""
+    )
+    email_result = _send_alert_email(subject=subject, body=body, settings=settings)
+    return RequestAlertResult(
+        email=email_result,
+        discord=DiscordSendResult(status="not_requested"),
+    )
+
+
+def send_help_request_alert(
+    *,
+    request_id: Optional[int],
+    employee_name: str = "",
+    employee_username: str = "",
+    message: str = "",
+    page_path: str = "",
+    settings: Optional[Settings] = None,
+) -> RequestAlertResult:
+    settings = settings or get_settings()
+    employee = _display_employee(employee_name, employee_username)
+    message_text = _clean(message, limit=2000)
+    page_text = _clean(page_path or "/team/help", limit=240) or "/team/help"
+    page_url = _absolute_url(page_text, settings)
+    request_line = f"Request ID: {request_id}" if request_id is not None else "Request ID: pending"
+    subject = f"[Degen] Help request - {employee}"
+    body = "\n".join(
+        part
+        for part in (
+            "New employee help request",
+            "",
+            f"Employee: {employee}",
+            f"Page: {page_text}",
+            f"Message: {message_text}" if message_text else "",
+            request_line,
+            f"Open page: {page_url}",
         )
         if part != ""
     )

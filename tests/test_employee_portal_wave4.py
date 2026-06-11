@@ -1030,7 +1030,9 @@ class SupplyQueueTests(unittest.TestCase, _W4Harness):
             client=SimpleNamespace(host="testclient"),
         )
 
-        with patch.object(team, "alert_supply_request"):
+        with patch.object(team, "alert_supply_request"), patch.object(
+            team, "send_supply_request_alert"
+        ) as external_alert:
             response = asyncio.run(
                 team.team_supply_post(
                     request,
@@ -1041,6 +1043,7 @@ class SupplyQueueTests(unittest.TestCase, _W4Harness):
                 )
             )
 
+        external_alert.assert_called_once()
         self.assertEqual(response.status_code, 303)
         rows = self.session.exec(
             select(AuditLog).where(AuditLog.action == EMPLOYEE_NOTIFICATION_ACTION)
@@ -1110,6 +1113,31 @@ class SupplyQueueTests(unittest.TestCase, _W4Harness):
         row2 = self.session.get(SupplyRequest, r2)
         self.assertEqual(row2.status, "denied")
         self.assertIn("not budgeted", row2.notes)
+
+    def test_mark_ordered_posts_need_supplies_update(self):
+        from app.models import SupplyRequest
+
+        self._login(role="admin", user_id=605, username="adm_ordered")
+        rid = self._seed_request(submitted_by=605, title="Bubble mailers")
+        row = self.session.get(SupplyRequest, rid)
+        row.status = "approved"
+        self.session.add(row)
+        self.session.commit()
+        csrf = self._csrf()
+        with patch(
+            "app.routers.team_admin_supply.send_supply_ordered_alert"
+        ) as ordered_alert:
+            response = self.client.post(
+                f"/team/admin/supply/{rid}/mark-ordered",
+                data={"csrf_token": csrf},
+                follow_redirects=False,
+            )
+
+        self.assertEqual(response.status_code, 303)
+        ordered_alert.assert_called_once_with(
+            request_id=rid,
+            title="Bubble mailers",
+        )
 
     def test_manager_cannot_terminate(self):
         self._login(role="manager", user_id=604, username="mgr_t")

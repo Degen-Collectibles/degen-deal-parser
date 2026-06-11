@@ -784,6 +784,37 @@ class SupplyAndPoliciesTests(unittest.TestCase, _PortalHarness):
         self.assertIn("Employee portal tour", page.text)
         self.assertIn("/team/help/tutorial", page.text)
 
+    def test_help_post_emails_manager_and_writes_audit(self):
+        uid = self._seed_employee(user_id=50, username="emp_needs_help")
+        csrf = self._csrf()
+        with patch("app.routers.team.send_help_request_alert") as alert_mock:
+            response = self.client.post(
+                "/team/help",
+                data={
+                    "message": "I cannot see today's schedule.",
+                    "page_path": "/team/schedule",
+                    "csrf_token": csrf,
+                },
+                follow_redirects=False,
+            )
+
+        self.assertEqual(response.status_code, 303)
+        from app.models import AuditLog
+
+        row = self.session.exec(
+            select(AuditLog).where(AuditLog.action == "help.requested")
+        ).one()
+        self.assertEqual(row.actor_user_id, uid)
+        self.assertEqual(row.target_user_id, uid)
+        self.assertIn("today's schedule", row.details_json)
+        alert_mock.assert_called_once_with(
+            request_id=row.id,
+            employee_name="emp_needs_help",
+            employee_username="emp_needs_help",
+            message="I cannot see today's schedule.",
+            page_path="/team/schedule",
+        )
+
     def test_help_tutorial_page_includes_employee_portal_map(self):
         self._seed_employee(user_id=46, username="emp_help_tour")
 

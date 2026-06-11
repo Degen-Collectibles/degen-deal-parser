@@ -168,7 +168,7 @@
                 {% block header_sub %}{% endblock %}
             </div>
             <div class="pt-header-right">
-                <a class="pt-help-link" href="/team/help">Ask for help</a>
+                <a class="pt-help-link" href="/team/help?page={{ request.url.path|urlencode }}">Ask for help</a>
                 <div class="pt-now" id="pt-now" aria-live="polite"></div>
                 {% if current_user %}<span class="pt-chip">Signed in</span>{% endif %}
             </div>
