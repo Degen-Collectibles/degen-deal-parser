@@ -205,6 +205,23 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             },
         },
     },
+    "get_market_trend_lookup": {
+        "type": "function",
+        "function": {
+            "name": "get_market_trend_lookup",
+            "description": "Read-only market trend lookup comparing recent TikTok sale prices and stored price history.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Card, sealed product, barcode, SKU, or product keyword."},
+                    "days": {"type": "integer", "minimum": 1, "default": 7},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        },
+    },
     "get_tiktok_buyer_insights": {
         "type": "function",
         "function": {
@@ -343,6 +360,12 @@ class DegenOpsChatToolRunner:
             return self.harness.get_price_lookup(
                 query=payload.get("query", ""),
                 days=payload.get("days", 30),
+                limit=payload.get("limit", 10),
+            )
+        if name == "get_market_trend_lookup":
+            return self.harness.get_market_trend_lookup(
+                query=payload.get("query", ""),
+                days=payload.get("days", 7),
                 limit=payload.get("limit", 10),
             )
         if name == "get_tiktok_buyer_insights":

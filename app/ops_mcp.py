@@ -45,6 +45,7 @@ TIKTOK_MCP_TOOL_NAMES = [
     "get_tiktok_products",
     "get_tiktok_product_sales",
     "get_price_lookup",
+    "get_market_trend_lookup",
     "get_tiktok_buyer_insights",
     "get_tiktok_product_performance",
     "get_tiktok_live_snapshot",
@@ -68,6 +69,7 @@ DEGEN_OPS_SCOPE_TOOL_NAMES = {
         "get_channel_velocity",
         "get_tiktok_product_sales",
         "get_price_lookup",
+        "get_market_trend_lookup",
         "evaluate_inventory_buy",
         "generate_partner_update",
     ],
@@ -77,6 +79,7 @@ DEGEN_OPS_SCOPE_TOOL_NAMES = {
         "get_channel_velocity",
         "get_tiktok_product_sales",
         "get_price_lookup",
+        "get_market_trend_lookup",
     ],
 }
 
@@ -490,6 +493,24 @@ def _inventory_effective_price(item: InventoryItem) -> tuple[float | None, str]:
     if item.auto_price is not None:
         return _money(item.auto_price), "auto_price"
     return None, "missing"
+
+
+def _trend_direction(current: float | None, previous: float | None, *, threshold_pct: float = 3.0) -> str:
+    if current is None or previous is None or previous <= 0:
+        return "unknown"
+    delta_pct = ((current - previous) / previous) * 100.0
+    if delta_pct >= threshold_pct:
+        return "up"
+    if delta_pct <= -threshold_pct:
+        return "down"
+    return "flat"
+
+
+def _trend_delta(current: float | None, previous: float | None) -> dict[str, Any]:
+    if current is None or previous is None or previous <= 0:
+        return {"delta": None, "delta_pct": None}
+    delta = _money(current - previous)
+    return {"delta": delta, "delta_pct": round((delta / previous) * 100.0, 1)}
 
 
 def _iso(value: Any) -> str | None:
@@ -973,6 +994,139 @@ class DegenOpsMcpHarness:
             "read_only": True,
         }
 
+    def _tiktok_product_sales_between(
+        self,
+        *,
+        query: str,
+        start: datetime,
+        end: datetime,
+    ) -> dict[str, Any]:
+        quantity = 0
+        revenue = 0.0
+        order_ids: set[str] = set()
+        line_items = 0
+        with self._session() as session:
+            rows = session.exec(
+                select(TikTokOrder)
+                .where(TikTokOrder.created_at >= start)
+                .where(TikTokOrder.created_at < end)
+            ).all()
+        for order in rows:
+            status = str(order.financial_status or order.order_status or "").strip().lower()
+            if status not in {"paid", "completed", "awaiting_shipment", "awaiting_collection", "delivered"}:
+                continue
+            order_id = str(order.tiktok_order_id or order.order_number or order.id or "")
+            for raw_item in parse_line_items(order):
+                item = normalize_item(raw_item)
+                if not _match_product_query(query, item):
+                    continue
+                qty = _safe_int(item.get("qty"), 1)
+                unit_price = _money(item.get("price"))
+                quantity += qty
+                revenue = _money(revenue + unit_price * qty)
+                order_ids.add(order_id)
+                line_items += 1
+        avg_price = _money(revenue / quantity) if quantity else None
+        return {
+            "start": _iso(start),
+            "end": _iso(end),
+            "quantity": quantity,
+            "revenue": revenue,
+            "avg_price": avg_price,
+            "order_count": len(order_ids),
+            "line_items": line_items,
+        }
+
+    def get_market_trend_lookup(self, query: str, days: int = 7, limit: int = 10) -> dict[str, Any]:
+        safe_days = max(_safe_int(days, 7), 1)
+        clean_query = str(query or "").strip()
+        now = datetime.now(timezone.utc)
+        current_start = now - timedelta(days=safe_days)
+        previous_start = now - timedelta(days=safe_days * 2)
+        current_window = self._tiktok_product_sales_between(query=clean_query, start=current_start, end=now)
+        previous_window = self._tiktok_product_sales_between(query=clean_query, start=previous_start, end=current_start)
+        tiktok_direction = _trend_direction(current_window.get("avg_price"), previous_window.get("avg_price"))
+        tiktok_delta = _trend_delta(current_window.get("avg_price"), previous_window.get("avg_price"))
+
+        price_history_points: list[dict[str, Any]] = []
+        with self._session() as session:
+            inventory_rows = session.exec(
+                select(InventoryItem)
+                .where(InventoryItem.archived_at == None)  # noqa: E711
+                .order_by(InventoryItem.updated_at.desc().nullslast(), InventoryItem.created_at.desc())
+                .limit(500)
+            ).all()
+            matched_items = [item for item in inventory_rows if _inventory_item_matches_query(item, clean_query)]
+            matched_item_ids = [item.id for item in matched_items if item.id is not None]
+            if matched_item_ids:
+                history_rows = session.exec(
+                    select(PriceHistory)
+                    .where(PriceHistory.item_id.in_(matched_item_ids))
+                    .order_by(PriceHistory.fetched_at.asc())
+                    .limit(250)
+                ).all()
+                for row in history_rows:
+                    price = _money(row.market_price)
+                    if price <= 0:
+                        continue
+                    price_history_points.append(
+                        {
+                            "item_id": row.item_id,
+                            "source": row.source,
+                            "market_price": price,
+                            "low_price": _money(row.low_price) if row.low_price is not None else None,
+                            "high_price": _money(row.high_price) if row.high_price is not None else None,
+                            "fetched_at": _iso(row.fetched_at),
+                        }
+                    )
+
+        first_history = price_history_points[0] if price_history_points else None
+        latest_history = price_history_points[-1] if price_history_points else None
+        history_previous = first_history.get("market_price") if first_history else None
+        history_current = latest_history.get("market_price") if latest_history else None
+        history_direction = _trend_direction(history_current, history_previous)
+        history_delta = _trend_delta(history_current, history_previous)
+
+        direction = tiktok_direction if tiktok_direction != "unknown" else history_direction
+        data_gaps = []
+        if tiktok_direction == "unknown":
+            data_gaps.append(f"No recent TikTok comparison windows matched query={clean_query!r}.")
+        if history_direction == "unknown":
+            data_gaps.append(f"No stored price-history trend matched query={clean_query!r}.")
+        if not clean_query:
+            data_gaps.append("Missing query; provide a product/card keyword.")
+
+        return {
+            "summary": {
+                "query": clean_query,
+                "trend_direction": direction,
+                "tiktok_direction": tiktok_direction,
+                "price_history_direction": history_direction,
+            },
+            "tiktok_trend": {
+                "window_days": safe_days,
+                "current_window": current_window,
+                "previous_window": previous_window,
+                **tiktok_delta,
+                "direction": tiktok_direction,
+            },
+            "price_history_trend": {
+                "direction": history_direction,
+                "first_market_price": history_previous,
+                "latest_market_price": history_current,
+                **history_delta,
+                "points": price_history_points[: _bounded_limit(limit, default=10, maximum=50)],
+            },
+            "range": {"days": safe_days},
+            "data_gaps": data_gaps,
+            "evidence": [
+                {"source": "tiktok_orders.line_items", "url": "/tiktok/orders"},
+                {"source": "price_history", "url": "/inventory"},
+                {"source": "inventory_items", "url": "/inventory"},
+            ],
+            "read_only": True,
+        }
+
     def get_tiktok_live_snapshot(self) -> dict[str, Any]:
         from .shared import _get_live_analytics_snapshot, _get_live_session_snapshot, _get_live_sessions_list
 
@@ -1169,6 +1323,11 @@ def register_degen_ops_tools(
         @mcp.tool(description="Read-only price lookup from stored inventory prices, price history, and recent TikTok sale prices.")
         def get_price_lookup(query: str, days: int = 30, limit: int = 10) -> dict[str, Any]:
             return ops.get_price_lookup(query=query, days=days, limit=limit)
+
+    if should_register("get_market_trend_lookup"):
+        @mcp.tool(description="Read-only market trend lookup comparing recent TikTok sale prices and stored price history.")
+        def get_market_trend_lookup(query: str, days: int = 7, limit: int = 10) -> dict[str, Any]:
+            return ops.get_market_trend_lookup(query=query, days=days, limit=limit)
 
     if should_register("get_tiktok_buyer_insights"):
         @mcp.tool(description="Read-only TikTok buyer intelligence from existing local reporting helpers.")

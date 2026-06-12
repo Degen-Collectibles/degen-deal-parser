@@ -15,18 +15,20 @@ def test_scope_audit_confirms_employee_boundary_and_partner_owner_tools():
     assert audit["scopes"]["employee"]["tools"] == [
         "get_channel_velocity",
         "get_inventory_snapshot",
+        "get_market_trend_lookup",
         "get_ops_agent_manifest",
         "get_price_lookup",
         "get_tiktok_product_sales",
     ]
     assert audit["scopes"]["employee"]["forbidden_tools_present"] == []
-    assert audit["scopes"]["partner"]["tool_count"] == 8
+    assert audit["scopes"]["partner"]["tool_count"] == 9
     assert "evaluate_inventory_buy" in audit["scopes"]["partner"]["tools"]
     assert "get_cash_snapshot" not in audit["scopes"]["partner"]["tools"]
     assert "get_loan_and_payback_snapshot" not in audit["scopes"]["partner"]["tools"]
-    assert audit["scopes"]["owner"]["tool_count"] == 17
-    assert audit["scopes"]["tiktok"]["tool_count"] == 10
+    assert audit["scopes"]["owner"]["tool_count"] == 18
+    assert audit["scopes"]["tiktok"]["tool_count"] == 11
     assert "get_tiktok_orders" in audit["scopes"]["tiktok"]["tools"]
+    assert "get_market_trend_lookup" in audit["scopes"]["tiktok"]["tools"]
     assert "get_price_lookup" in audit["scopes"]["tiktok"]["tools"]
     assert "get_tiktok_product_sales" in audit["scopes"]["tiktok"]["tools"]
     assert "get_cash_snapshot" not in audit["scopes"]["tiktok"]["tools"]

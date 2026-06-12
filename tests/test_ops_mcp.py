@@ -476,6 +476,86 @@ def test_price_lookup_reports_data_gap_when_no_price_sources_match():
     assert "No recent TikTok sale price matched query='missing card'." in result["data_gaps"]
 
 
+def test_market_trend_lookup_compares_recent_and_previous_tiktok_windows_with_price_history():
+    engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine)
+    now = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        item = InventoryItem(
+            barcode="DGN-151002",
+            item_type="sealed",
+            game="Pokemon",
+            card_name="Scarlet & Violet 151 Booster Pack",
+            set_name="Scarlet & Violet 151",
+            quantity=4,
+            auto_price=32.0,
+            last_priced_at=now,
+        )
+        session.add(item)
+        session.commit()
+        session.add_all(
+            [
+                PriceHistory(
+                    item_id=item.id,
+                    source="tcgtracking",
+                    market_price=24.0,
+                    fetched_at=now - timedelta(days=14),
+                ),
+                PriceHistory(
+                    item_id=item.id,
+                    source="tcgtracking",
+                    market_price=32.0,
+                    fetched_at=now - timedelta(days=1),
+                ),
+                TikTokOrder(
+                    tiktok_order_id="tt-current",
+                    order_number="order-current",
+                    created_at=now - timedelta(days=2),
+                    updated_at=now - timedelta(days=2),
+                    subtotal_price=64.0,
+                    financial_status="paid",
+                    line_items_summary_json=json.dumps(
+                        [{"title": "Pokemon Scarlet & Violet 151 Booster Pack", "quantity": 2, "unit_price": 32.0}]
+                    ),
+                ),
+                TikTokOrder(
+                    tiktok_order_id="tt-previous",
+                    order_number="order-previous",
+                    created_at=now - timedelta(days=10),
+                    updated_at=now - timedelta(days=10),
+                    subtotal_price=48.0,
+                    financial_status="paid",
+                    line_items_summary_json=json.dumps(
+                        [{"title": "Pokemon Scarlet & Violet 151 Booster Pack", "quantity": 2, "unit_price": 24.0}]
+                    ),
+                ),
+            ]
+        )
+        session.commit()
+
+        harness = DegenOpsMcpHarness(session_factory=lambda: session)
+        result = harness.get_market_trend_lookup(query="151 booster pack", days=7)
+
+    assert result["read_only"] is True
+    assert result["summary"]["trend_direction"] == "up"
+    assert result["tiktok_trend"]["current_window"]["avg_price"] == 32.0
+    assert result["tiktok_trend"]["previous_window"]["avg_price"] == 24.0
+    assert result["price_history_trend"]["direction"] == "up"
+    assert result["price_history_trend"]["latest_market_price"] == 32.0
+
+
+def test_market_trend_lookup_reports_data_gap_without_comparison_points():
+    engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        harness = DegenOpsMcpHarness(session_factory=lambda: session)
+        result = harness.get_market_trend_lookup(query="missing card", days=7)
+
+    assert result["summary"]["trend_direction"] == "unknown"
+    assert "No recent TikTok comparison windows matched query='missing card'." in result["data_gaps"]
+    assert "No stored price-history trend matched query='missing card'." in result["data_gaps"]
+
+
 def test_mcp_harness_evaluate_inventory_buy_uses_context_and_returns_evidence(monkeypatch):
     context = {
         "finance_statement": {
