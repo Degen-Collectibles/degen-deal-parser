@@ -3,13 +3,18 @@ from pathlib import Path
 
 from scripts.degen_ops_discord_bot import (
     BotConfig,
+    DiscordScopeConfig,
     PromptRateLimiter,
+    build_system_prompt,
+    determine_message_scope,
     build_partner_setup_plan,
     ensure_database_url_from_readonly_env,
     format_partner_setup_draft,
     load_config_from_env,
     matches_partner_setup_confirmation,
     parse_partner_setup_command,
+    parse_scope_config,
+    resolve_discord_scope,
     sanitize_for_log,
     should_respond,
     split_discord_message,
@@ -25,6 +30,7 @@ def _config(**overrides):
         "allowed_user_ids": {"42"},
         "owner_user_ids": {"42"},
         "allow_any_user_in_channel": False,
+        "scope_config": DiscordScopeConfig(),
         "model": "aws/anthropic/claude-haiku-4-5-v1",
         "max_prompt_chars": 100,
         "rate_limit_per_minute": 2,
@@ -34,6 +40,96 @@ def _config(**overrides):
     }
     base.update(overrides)
     return BotConfig(**base)
+
+
+def test_parse_scope_config_from_json_maps_users_and_channels():
+    config = parse_scope_config(
+        '{"users":{"42":"owner","99":"partner"},"channels":{"111":"owner","222":"partner"}}'
+    )
+
+    assert config.user_scopes == {"42": "owner", "99": "partner"}
+    assert config.channel_scopes == {"111": "owner", "222": "partner"}
+
+
+def test_scope_resolution_uses_channel_maximum_and_denies_unknowns():
+    scope_config = DiscordScopeConfig(
+        user_scopes={"42": "owner", "99": "partner"},
+        channel_scopes={"111": "owner", "222": "partner"},
+    )
+
+    assert resolve_discord_scope("42", "111", scope_config) == ("owner", "ok")
+    assert resolve_discord_scope("42", "222", scope_config) == ("partner", "ok")
+    assert resolve_discord_scope("99", "111", scope_config) == ("partner", "ok")
+    assert resolve_discord_scope("99", "333", scope_config) == (None, "channel_not_mapped")
+    assert resolve_discord_scope("77", "111", scope_config) == (None, "user_not_mapped")
+
+
+def test_should_respond_accepts_scoped_user_without_legacy_allowed_user_list():
+    config = _config(
+        allowed_channel_ids=set(),
+        allowed_user_ids=set(),
+        scope_config=DiscordScopeConfig(
+            user_scopes={"42": "owner"},
+            channel_scopes={"111": "owner"},
+        ),
+    )
+
+    ok, reason = should_respond(
+        author_is_bot=False,
+        channel_id="111",
+        author_id="42",
+        content="!ops whoami",
+        config=config,
+    )
+
+    assert ok is True
+    assert reason == "ok"
+
+
+def test_should_respond_denies_unknown_scoped_channel():
+    config = _config(
+        allowed_channel_ids=set(),
+        allowed_user_ids=set(),
+        scope_config=DiscordScopeConfig(
+            user_scopes={"42": "owner"},
+            channel_scopes={"111": "owner"},
+        ),
+    )
+
+    ok, reason = should_respond(
+        author_is_bot=False,
+        channel_id="999",
+        author_id="42",
+        content="hello",
+        config=config,
+    )
+
+    assert ok is False
+    assert reason == "channel_not_mapped"
+
+
+def test_build_system_prompt_mentions_resolved_scope():
+    owner_prompt = build_system_prompt("owner")
+    partner_prompt = build_system_prompt("partner")
+
+    assert "Use owner scope only." in owner_prompt
+    assert "Use partner scope only." in partner_prompt
+    assert "private #degen-ops-bot Discord channel" not in owner_prompt
+
+
+def test_determine_message_scope_defaults_legacy_allowed_channels_to_partner():
+    assert determine_message_scope("42", "123", _config()) == ("partner", "legacy_partner")
+
+
+def test_determine_message_scope_uses_explicit_map_when_configured():
+    config = _config(
+        scope_config=DiscordScopeConfig(
+            user_scopes={"42": "owner"},
+            channel_scopes={"111": "owner"},
+        )
+    )
+
+    assert determine_message_scope("42", "111", config) == ("owner", "ok")
 
 
 def test_parse_partner_setup_command_extracts_name_and_user_id():
@@ -230,6 +326,21 @@ def test_load_config_dry_run_allows_missing_token(monkeypatch):
     assert config.dry_run is True
     assert config.allowed_channel_ids == {"123"}
     assert config.allowed_user_ids == {"42"}
+
+
+def test_load_config_accepts_scope_map_without_legacy_allowlists(monkeypatch):
+    monkeypatch.setenv(
+        "DEGEN_OPS_DISCORD_ROLE_MAP",
+        '{"users":{"42":"owner"},"channels":{"111":"owner"}}',
+    )
+    monkeypatch.delenv("DEGEN_OPS_DISCORD_ALLOWED_CHANNEL_IDS", raising=False)
+    monkeypatch.delenv("DEGEN_OPS_DISCORD_ALLOWED_USER_IDS", raising=False)
+    monkeypatch.delenv("DEGEN_OPS_DISCORD_BOT_TOKEN", raising=False)
+
+    config = load_config_from_env(dry_run=True)
+
+    assert config.scope_config.user_scopes == {"42": "owner"}
+    assert config.scope_config.channel_scopes == {"111": "owner"}
 
 
 def test_database_url_falls_back_to_readonly_env(monkeypatch):

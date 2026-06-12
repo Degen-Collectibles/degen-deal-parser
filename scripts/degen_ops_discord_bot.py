@@ -22,6 +22,14 @@ MAX_DISCORD_MESSAGE_CHARS = 1900
 DEFAULT_MAX_PROMPT_CHARS = 4000
 DEFAULT_RATE_LIMIT_PER_MINUTE = 6
 PARTNER_SCOPE = "partner"
+OWNER_SCOPE = "owner"
+SCOPE_RANKS = {
+    "employee": 0,
+    "manager": 1,
+    "partner": 2,
+    "tiktok": 2,
+    "owner": 3,
+}
 
 
 def _csv_set(value: str) -> set[str]:
@@ -30,6 +38,13 @@ def _csv_set(value: str) -> set[str]:
 
 def _truthy(value: str) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _normalize_discord_scope(value: Any) -> str:
+    scope = str(value or "").strip().lower()
+    if scope not in SCOPE_RANKS:
+        raise ValueError(f"Unsupported Discord scope: {value!r}")
+    return scope
 
 
 def sanitize_for_log(value: Any) -> str:
@@ -67,12 +82,22 @@ def split_discord_message(text: str, *, limit: int = MAX_DISCORD_MESSAGE_CHARS) 
 
 
 @dataclass(frozen=True)
+class DiscordScopeConfig:
+    user_scopes: dict[str, str] | None = None
+    channel_scopes: dict[str, str] | None = None
+
+    def has_mappings(self) -> bool:
+        return bool(self.user_scopes or self.channel_scopes)
+
+
+@dataclass(frozen=True)
 class BotConfig:
     token: str
     allowed_channel_ids: set[str]
     allowed_user_ids: set[str]
     owner_user_ids: set[str]
     allow_any_user_in_channel: bool
+    scope_config: DiscordScopeConfig
     model: str
     max_prompt_chars: int
     rate_limit_per_minute: int
@@ -111,13 +136,14 @@ def load_config_from_env(*, dry_run: bool = False) -> BotConfig:
     audit_path = Path(os.getenv("DEGEN_OPS_DISCORD_AUDIT_LOG", "logs/degen_ops_discord_bot.jsonl"))
     config_env_path_value = os.getenv("DEGEN_OPS_DISCORD_CONFIG_ENV_FILE", "").strip()
     config_env_path = Path(config_env_path_value) if config_env_path_value else None
+    scope_config = load_scope_config_from_env()
 
     missing = []
     if not token and not dry_run:
         missing.append("DEGEN_OPS_DISCORD_BOT_TOKEN")
-    if not allowed_channel_ids:
+    if not allowed_channel_ids and not scope_config.has_mappings():
         missing.append("DEGEN_OPS_DISCORD_ALLOWED_CHANNEL_IDS")
-    if not allowed_user_ids and not allow_any:
+    if not allowed_user_ids and not allow_any and not scope_config.has_mappings():
         missing.append("DEGEN_OPS_DISCORD_ALLOWED_USER_IDS or DEGEN_OPS_DISCORD_ALLOW_ANY_USER_IN_CHANNEL=true")
     if missing:
         raise RuntimeError("Missing required Degen Ops Discord bot config: " + ", ".join(missing))
@@ -128,6 +154,7 @@ def load_config_from_env(*, dry_run: bool = False) -> BotConfig:
         allowed_user_ids=allowed_user_ids,
         owner_user_ids=owner_user_ids,
         allow_any_user_in_channel=allow_any,
+        scope_config=scope_config,
         model=model,
         max_prompt_chars=max_prompt_chars,
         rate_limit_per_minute=rate_limit,
@@ -142,6 +169,60 @@ def ensure_database_url_from_readonly_env() -> bool:
         os.environ["DATABASE_URL"] = os.environ["DEGEN_OPS_READONLY_DATABASE_URL"]
         return True
     return False
+
+
+def parse_scope_config(value: str) -> DiscordScopeConfig:
+    raw = str(value or "").strip()
+    if not raw:
+        return DiscordScopeConfig(user_scopes={}, channel_scopes={})
+    loaded = json.loads(raw)
+    if not isinstance(loaded, dict):
+        raise ValueError("Discord scope config must be a JSON object.")
+
+    users = loaded.get("users", {})
+    channels = loaded.get("channels", {})
+    if not isinstance(users, dict) or not isinstance(channels, dict):
+        raise ValueError("Discord scope config requires object fields: users, channels.")
+    return DiscordScopeConfig(
+        user_scopes={str(key): _normalize_discord_scope(value) for key, value in users.items()},
+        channel_scopes={str(key): _normalize_discord_scope(value) for key, value in channels.items()},
+    )
+
+
+def load_scope_config_from_env() -> DiscordScopeConfig:
+    file_path = os.getenv("DEGEN_OPS_DISCORD_SCOPE_MAP_FILE", "").strip()
+    if file_path:
+        return parse_scope_config(Path(file_path).read_text(encoding="utf-8"))
+    return parse_scope_config(os.getenv("DEGEN_OPS_DISCORD_ROLE_MAP", ""))
+
+
+def resolve_discord_scope(
+    author_id: str,
+    channel_id: str,
+    scope_config: DiscordScopeConfig,
+) -> tuple[str | None, str]:
+    user_scopes = scope_config.user_scopes or {}
+    channel_scopes = scope_config.channel_scopes or {}
+    user_scope = user_scopes.get(str(author_id))
+    if not user_scope:
+        return None, "user_not_mapped"
+    channel_scope = channel_scopes.get(str(channel_id))
+    if not channel_scope:
+        return None, "channel_not_mapped"
+    user_rank = SCOPE_RANKS[user_scope]
+    channel_rank = SCOPE_RANKS[channel_scope]
+    effective = user_scope if user_rank <= channel_rank else channel_scope
+    return effective, "ok"
+
+
+def determine_message_scope(author_id: str, channel_id: str, config: BotConfig) -> tuple[str | None, str]:
+    if config.scope_config.has_mappings():
+        return resolve_discord_scope(author_id, channel_id, config.scope_config)
+    if channel_id in config.allowed_channel_ids and (
+        config.allow_any_user_in_channel or author_id in config.allowed_user_ids
+    ):
+        return PARTNER_SCOPE, "legacy_partner"
+    return None, "not_authorized"
 
 
 def _slugify_channel_name(value: str) -> str:
@@ -308,17 +389,20 @@ async def apply_partner_setup(guild: Any, bot_member: Any, plan: PartnerSetupPla
     return channel
 
 
-def build_system_prompt() -> str:
+def build_system_prompt(scope: str = PARTNER_SCOPE) -> str:
     from app.ops_chat import DEGEN_OPS_CHAT_SYSTEM_PROMPT
 
+    normalized_scope = _normalize_discord_scope(scope)
+    audience = "Degen owners" if normalized_scope == OWNER_SCOPE else f"Degen {normalized_scope} users"
     return (
         DEGEN_OPS_CHAT_SYSTEM_PROMPT
         + "\n\n"
-        "You are answering inside the private #degen-ops-bot Discord channel for Degen partners. "
-        "Use partner scope only. Be concise but evidence-backed. "
+        f"You are answering inside Discord for {audience}. "
+        f"Use {normalized_scope} scope only. Be concise but evidence-backed. "
         "For buy questions, answer with: verdict, sell-through, routing, weekly payback/budget plan, risks, evidence. "
-        "Refuse requests to move money, change inventory/listings, send messages, reveal raw owner cash/bank/account "
-        "balances, or reveal owner loan/payback totals. End action-taking refusals by saying the bot is read-only."
+        "Refuse requests to move money, change inventory/listings, or send messages. "
+        "For non-owner scopes, refuse to reveal raw owner cash/bank/account balances or owner loan/payback totals. "
+        "End action-taking refusals by saying the bot is read-only."
     )
 
 
@@ -355,23 +439,29 @@ def should_respond(
 ) -> tuple[bool, str]:
     if author_is_bot:
         return False, "bot_author"
-    if channel_id not in config.allowed_channel_ids:
-        return False, "channel_not_allowed"
     if not content.strip():
         return False, "empty_message"
+    if config.scope_config.has_mappings():
+        scope, reason = resolve_discord_scope(author_id, channel_id, config.scope_config)
+        if not scope:
+            return False, reason
+    elif channel_id not in config.allowed_channel_ids:
+        return False, "channel_not_allowed"
     if not config.allow_any_user_in_channel and author_id not in config.allowed_user_ids:
-        return False, "user_not_allowed"
+        if not config.scope_config.has_mappings():
+            return False, "user_not_allowed"
     if len(content) > config.max_prompt_chars:
         return False, "prompt_too_long"
     return True, "ok"
 
 
-async def answer_prompt(prompt: str, *, model: str) -> str:
+async def answer_prompt(prompt: str, *, model: str, scope: str = PARTNER_SCOPE) -> str:
     from app.ai_client import get_ai_client, get_fast_model
     from app.ops_chat import DegenOpsChatToolRunner, initial_chat_messages, run_chat_turn
 
-    runner = DegenOpsChatToolRunner(scope=PARTNER_SCOPE)
-    messages = initial_chat_messages(build_system_prompt())
+    normalized_scope = _normalize_discord_scope(scope)
+    runner = DegenOpsChatToolRunner(scope=normalized_scope)
+    messages = initial_chat_messages(build_system_prompt(normalized_scope))
     messages.append({"role": "user", "content": prompt})
     answer, _history = await asyncio.to_thread(
         run_chat_turn,
@@ -425,15 +515,28 @@ async def run_bot(config: BotConfig) -> None:
             await message.reply("Rate limit hit. Give me a minute, then try again.", mention_author=False)
             return
 
+        resolved_scope, scope_reason = determine_message_scope(author_id, channel_id, config)
+        if not resolved_scope:
+            return
+
         pending_key = f"{channel_id}:{author_id}"
         audit_base = {
             "at": datetime.now(timezone.utc).isoformat(),
             "channel_id": channel_id,
             "author_id": author_id,
             "message_id": str(getattr(message, "id", "")),
-            "scope": PARTNER_SCOPE,
+            "scope": resolved_scope,
+            "scope_reason": scope_reason,
             "read_only": True,
         }
+
+        if prompt.strip() == "!ops whoami":
+            await message.reply(
+                f"You are authorized as `{resolved_scope}` in this channel.",
+                mention_author=False,
+            )
+            append_audit_event(config.audit_log_path, {**audit_base, "event": "whoami"})
+            return
 
         setup_command = parse_partner_setup_command(prompt)
         if setup_command is not None:
@@ -493,7 +596,7 @@ async def run_bot(config: BotConfig) -> None:
 
         async with message.channel.typing():
             try:
-                answer = await answer_prompt(prompt, model=config.model)
+                answer = await answer_prompt(prompt, model=config.model, scope=resolved_scope)
             except Exception as exc:
                 append_audit_event(config.audit_log_path, {**audit_base, "event": "error", "error": sanitize_for_log(exc)})
                 await message.reply(
