@@ -1064,6 +1064,20 @@ def list_bookkeeping_imports(session: Session) -> list[BookkeepingImport]:
     ).all()
 
 
+def format_detected_bookkeeping_post_content(content: str, sheet_url: str = "") -> str:
+    text = content or ""
+    if sheet_url:
+        text = text.replace(f"<{sheet_url}>", " ")
+        text = text.replace(sheet_url, " ")
+    text = re.sub(r"<https?://[^>]+>", " ", text)
+    text = re.sub(r"https?://\S+", " ", text)
+    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+    text = re.sub(r"__([^_]+)__", r"\1", text)
+    text = re.sub(r"[`*_~]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text or "Google Sheet bookkeeping post"
+
+
 def list_detected_bookkeeping_posts(session: Session, limit: int = 20) -> list[dict[str, Any]]:
     rows = session.exec(
         select(DiscordMessage)
@@ -1082,6 +1096,7 @@ def list_detected_bookkeeping_posts(session: Session, limit: int = 20) -> list[d
                 "channel_name": row.channel_name or "",
                 "author_name": row.author_name or "",
                 "content": row.content or "",
+                "display_content": format_detected_bookkeeping_post_content(row.content or "", sheet_url),
                 "sheet_url": sheet_url,
                 "import_id": existing_import.id if existing_import else None,
             }

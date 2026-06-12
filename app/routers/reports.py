@@ -325,6 +325,7 @@ def reports_page(
         {
             "request": request,
             "title": "Reports",
+            "current_user": getattr(request.state, "current_user", None),
             "channels": channels,
             "selected_start": start or "",
             "selected_end": end or "",

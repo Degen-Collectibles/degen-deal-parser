@@ -273,3 +273,39 @@ def login_form(
 def logout(request: Request):
     request.session.clear()
     return RedirectResponse(url="/team/login?flash=You+have+been+signed+out.", status_code=303)
+
+
+@router.get("/logout", response_class=HTMLResponse)
+def logout_confirm(request: Request):
+    return HTMLResponse(
+        """<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sign out - Degen</title>
+    <link rel="stylesheet" href="/static/linear.css?v=1776749171">
+    <style>
+        body { min-height:100vh; display:grid; place-items:center; padding:24px; }
+        .logout-card { width:min(420px,100%); border:1px solid var(--lx-br); border-radius:12px; background:var(--lx-s1); padding:22px; box-shadow:0 24px 60px rgba(0,0,0,.32); }
+        h1 { margin:0 0 8px; font-size:24px; letter-spacing:0; }
+        p { margin:0 0 18px; color:var(--lx-muted); line-height:1.5; }
+        .actions { display:flex; gap:10px; flex-wrap:wrap; }
+        .button { display:inline-flex; align-items:center; justify-content:center; min-height:38px; padding:0 13px; border-radius:8px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text); font-weight:700; text-decoration:none; cursor:pointer; }
+        .primary-button { background:var(--lx-red); border-color:var(--lx-red); color:#fff; }
+    </style>
+</head>
+<body>
+    <main class="logout-card">
+        <h1>Sign out?</h1>
+        <p>Use the button below to end this session. Opening this page did not sign you out.</p>
+        <div class="actions">
+            <form method="post" action="/logout">
+                <button type="submit" class="button primary-button">Sign out</button>
+            </form>
+            <a class="button" href="/dashboard">Stay signed in</a>
+        </div>
+    </main>
+</body>
+</html>"""
+    )

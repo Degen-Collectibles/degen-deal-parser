@@ -238,7 +238,7 @@
                     <div class="post-card">
                         <strong>{{ post["created_at"]|pacific_datetime }} | {{ post["channel_name"] }}</strong>
                         <div class="small">{{ post["author_name"] }}</div>
-                        <div style="margin:8px 0;">{{ post["content"] }}</div>
+                        <div style="margin:8px 0;">{{ post["display_content"] or post["content"] }}</div>
                         <div class="actions">
                             {% if post["sheet_url"] %}<a href="{{ post['sheet_url'] }}" target="_blank" rel="noopener noreferrer" class="button secondary-button" style="width:auto;">Open Sheet Link</a>{% endif %}
                             {% if post["action_links"]["open_row"] %}<a href="{{ post['action_links']['open_row'] }}" class="button secondary-button" style="width:auto;">Open Row</a>{% endif %}

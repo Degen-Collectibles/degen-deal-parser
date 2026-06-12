@@ -82,7 +82,7 @@
         .summary-grid { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:12px; }
         .metric { background: var(--lx-s1); border:1px solid var(--line); border-radius:18px; padding:14px; min-height:92px; }
         .metric-label { color: var(--lx-muted); font-size:11px; text-transform:uppercase; letter-spacing:.08em; margin-bottom:8px; font-weight:800; }
-        .metric-value { font-size:28px; font-weight:800; letter-spacing:-.04em; color:#ffffff; font-variant-numeric: tabular-nums; }
+        .metric-value { font-size:clamp(20px, 1.75rem, 28px); font-weight:800; letter-spacing:0; line-height:1.08; color:#ffffff; font-variant-numeric: tabular-nums; overflow-wrap:anywhere; word-break:break-word; }
         .chart-grid { display:grid; grid-template-columns:1.3fr 1fr; gap:18px; }
         .bar-list { display:flex; flex-direction:column; gap:10px; }
         .bar-row { display:grid; grid-template-columns:150px 1fr 96px; gap:10px; align-items:center; }

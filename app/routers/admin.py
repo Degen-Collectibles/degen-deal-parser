@@ -19,6 +19,11 @@ from ..db import get_session
 router = APIRouter(route_class=CSRFProtectedRoute)
 
 
+@router.get("/admin/home")
+def admin_home_alias():
+    return RedirectResponse(url="/admin", status_code=301)
+
+
 @router.get("/admin", response_class=HTMLResponse)
 def admin_home_page(
     request: Request,

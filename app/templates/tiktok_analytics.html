@@ -387,7 +387,11 @@
     }
     function fmtDuration(h) {
         if (!h || h <= 0) return '--';
-        if (h >= 24) return Math.floor(h / 24) + 'd ' + Math.round(h % 24) + 'h';
+        var roundedHours = Math.round(h);
+        if (roundedHours >= 24) {
+            if (roundedHours % 24 === 0) return Math.floor(roundedHours / 24) + 'd';
+            return Math.floor(roundedHours / 24) + 'd ' + (roundedHours % 24) + 'h';
+        }
         if (h >= 1) return h.toFixed(1) + 'h';
         return Math.round(h * 60) + 'm';
     }
@@ -919,7 +923,7 @@
             ['Orders', (d.orders || 0).toString(), deltaPill(d.orders, other ? other.orders : null)],
             ['Items', (d.items || 0).toString(), deltaPill(d.items, other ? other.items : null)],
             ['Customers', (d.customers || 0).toString(), deltaPill(d.customers, other ? other.customers : null)],
-            ['Duration', d.duration_hours ? d.duration_hours + 'h' : '--', ''],
+            ['Duration', d.duration_hours ? fmtDuration(d.duration_hours) : '--', ''],
             ['AOV', d.aov ? fmtGmv(d.aov) : '--', deltaPill(d.aov, other ? other.aov : null)],
             ['$/hr', d.revenue_per_hour ? fmtGmv(d.revenue_per_hour) : '--', deltaPill(d.revenue_per_hour, other ? other.revenue_per_hour : null)],
         ];

@@ -73,7 +73,7 @@
         .financial-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }
         .metric { background: var(--lx-s1); border:1px solid var(--lx-br); border-radius:14px; padding:14px; min-height:92px; transition: transform 0.2s ease, box-shadow 0.2s ease; }
         .metric-label { color:var(--lx-muted); font-size:11px; text-transform:uppercase; letter-spacing:.08em; margin-bottom:8px; font-weight:600; }
-        .metric-value { font-size:28px; font-weight:700; letter-spacing:-.03em; color:var(--lx-text); font-variant-numeric: tabular-nums; }
+        .metric-value { font-size:clamp(20px, 1.75rem, 28px); font-weight:700; letter-spacing:0; line-height:1.08; color:var(--lx-text); font-variant-numeric: tabular-nums; overflow-wrap:anywhere; word-break:break-word; }
         .metric-sub, .helper, .muted, .subtle { font-size:12px; line-height:1.5; }
         .progress-track, .chart-track { overflow:hidden; border-radius:999px; background: var(--lx-s2); }
         .progress-track { height:12px; border:1px solid var(--lx-br); }
@@ -420,6 +420,8 @@
         .channel-result-button.is-selected { border-color:rgba(34,197,94,.45); background:rgba(34,197,94,.12); color:#4ade80; }
         .channel-picker-results { flex-direction:column; align-items:stretch; max-height:260px; overflow:auto; }
         .review-rail { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:12px; margin-bottom:14px; }
+        .review-shortcuts-rail { grid-template-columns:minmax(280px,.9fr) minmax(320px,1.1fr); align-items:stretch; }
+        .review-shortcut-actions { align-content:flex-start; align-self:stretch; justify-content:flex-start; }
         .review-note { padding:12px 14px; border:1px solid var(--lx-br); border-radius:12px; background: var(--lx-s1); color: var(--lx-text); }
         .review-note strong { display:block; margin-bottom:4px; }
         .review-note a { color: var(--lx-red); font-weight:600; }
@@ -720,12 +722,12 @@
                     </div>
                     {% endif %}
                     {% if is_review_page and review_shortcuts %}
-                    <div class="review-rail">
+                    <div class="review-rail review-shortcuts-rail">
                         <div class="review-note">
                             <strong>Jump To The Next Problem Row</strong>
                             <div class="section-subtle">Use these shortcuts to move through failed, image-linked, grouped, and bookkeeping-mismatch rows on this page.</div>
                         </div>
-                        <div class="inline-actions">
+                        <div class="inline-actions review-shortcut-actions">
                             {% for shortcut in review_shortcuts %}
                             <button type="button" class="toggle-pill shortcut-focus-button{% if shortcut.enabled %} is-active{% endif %}" data-shortcut-key="{{ shortcut['key'] }}" {% if not shortcut.enabled %}disabled{% endif %}>{{ shortcut["label"] }} ({{ shortcut["count"] }})</button>
                             {% endfor %}
@@ -886,9 +888,9 @@
                                     <td class="author-col">{{ row["author"] or "" }}</td>
                                     <td class="image-col">
                                         {% if row["first_image_url"] %}
-                                        <a href="{{ row['first_image_url'] }}" target="_blank" rel="noopener noreferrer"><img class="thumb" src="{{ row['first_thumb_url'] or row['first_image_url'] }}" alt="attachment image" loading="lazy"></a>
+                                        <a href="{{ row['first_image_url'] }}" target="_blank" rel="noopener noreferrer"><img class="thumb" src="{{ row['first_thumb_url'] or row['first_image_url'] }}" alt="attachment image" loading="lazy" decoding="async"></a>
                                         {% elif row["nearby_image"] %}
-                                        <a href="{{ row['nearby_image']['image_url'] }}" target="_blank" rel="noopener noreferrer"><img class="thumb" src="{{ row['nearby_image']['image_url'] }}" alt="nearby attachment candidate" style="border-style:dashed;" loading="lazy"></a>
+                                        <a href="{{ row['nearby_image']['image_url'] }}" target="_blank" rel="noopener noreferrer"><img class="thumb" src="{{ row['nearby_image']['image_url'] }}" alt="nearby attachment candidate" style="border-style:dashed;" loading="lazy" decoding="async"></a>
                                         <div class="subtle" style="margin-top:4px;">nearby</div>
                                         {% else %}
                                         <span class="subtle">-</span>
@@ -1052,7 +1054,7 @@
                                 {% if row["needs_review"] %}<span class="meta-pill danger">review</span>{% endif %}
                             </div>
                             {% if row["first_image_url"] %}
-                            <div class="mobile-thumb-row"><a href="{{ row['first_image_url'] }}" target="_blank" rel="noopener noreferrer"><img class="thumb" src="{{ row['first_thumb_url'] or row['first_image_url'] }}" alt="attachment image" loading="lazy"></a><span class="subtle">Attachment available</span></div>
+                            <div class="mobile-thumb-row"><a href="{{ row['first_image_url'] }}" target="_blank" rel="noopener noreferrer"><img class="thumb" src="{{ row['first_thumb_url'] or row['first_image_url'] }}" alt="attachment image" loading="lazy" decoding="async"></a><span class="subtle">Attachment available</span></div>
                             {% endif %}
                             <div class="mobile-card-message">{{ row["message"] or "(image-only message)" }}</div>
                             <div class="mobile-card-money">

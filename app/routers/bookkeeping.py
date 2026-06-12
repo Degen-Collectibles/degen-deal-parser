@@ -972,6 +972,7 @@ def bookkeeping_page(
         {
             "request": request,
             "title": "Bookkeeping Reconciliation",
+            "current_user": getattr(request.state, "current_user", None),
             "imports": imports,
             "selected_import": selected_import,
             "reconciliation": reconciliation,

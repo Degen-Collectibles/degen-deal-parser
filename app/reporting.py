@@ -1107,7 +1107,9 @@ def match_catalog(item: dict, catalog: dict[str, dict]) -> dict | None:
 
 def _buyer_key(order: TikTokOrder) -> tuple[str, str]:
     """Return (buyer_key, display_name) from an order."""
-    name = (order.customer_name or "").strip() or "Guest"
+    name = (order.customer_name or "").strip()
+    if not name or name in {"-", "--", "—"}:
+        return "unknown-buyer", "Unknown buyer"
     return name.lower(), name
 
 

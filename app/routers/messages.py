@@ -660,6 +660,7 @@ def messages_table(
         {
             "request": request,
             "title": "Messages Table",
+            "current_user": getattr(request.state, "current_user", None),
             "return_path": "/table",
             "is_review_page": False,
             "rows": items,
@@ -778,6 +779,7 @@ def review_table(
         {
             "request": request,
             "title": "Review Queue",
+            "current_user": getattr(request.state, "current_user", None),
             "return_path": "/review-table",
             "is_review_page": True,
             "rows": items,

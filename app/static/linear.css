@@ -222,6 +222,17 @@ a { color: inherit; text-decoration: none; }
     overflow: hidden;
     text-overflow: ellipsis;
 }
+.linear-sidebar-signout-form {
+    margin: 0;
+}
+.linear-sidebar-signout {
+    width: 100%;
+    border: 0;
+    background: transparent;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
 
 .linear-sidebar-foot {
     flex: 0 0 auto;

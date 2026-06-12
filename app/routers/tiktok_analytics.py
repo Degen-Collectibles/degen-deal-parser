@@ -544,7 +544,9 @@ def tiktok_clients_page(request: Request):
     if redirect:
         return redirect
     return templates.TemplateResponse(request, "tiktok_clients.html", {
+        "request": request,
         "title": "Client & Product Intelligence",
+        "current_user": getattr(request.state, "current_user", None),
     })
 
 
