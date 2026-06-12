@@ -14,7 +14,7 @@ from sqlmodel import Session, func, select
 from .db import Session as DbSession
 from .db import database_url
 from .db import engine
-from .models import TikTokOrder, TikTokProduct
+from .models import InventoryItem, PriceHistory, TikTokOrder, TikTokProduct
 from .ops_agent import READ_ONLY_GUARDRAILS, build_ops_agent_context, build_ops_agent_recommendation
 from .reporting import (
     build_tiktok_buyer_insights,
@@ -44,6 +44,7 @@ TIKTOK_MCP_TOOL_NAMES = [
     "get_tiktok_orders",
     "get_tiktok_products",
     "get_tiktok_product_sales",
+    "get_price_lookup",
     "get_tiktok_buyer_insights",
     "get_tiktok_product_performance",
     "get_tiktok_live_snapshot",
@@ -66,6 +67,7 @@ DEGEN_OPS_SCOPE_TOOL_NAMES = {
         "get_inventory_snapshot",
         "get_channel_velocity",
         "get_tiktok_product_sales",
+        "get_price_lookup",
         "evaluate_inventory_buy",
         "generate_partner_update",
     ],
@@ -74,6 +76,7 @@ DEGEN_OPS_SCOPE_TOOL_NAMES = {
         "get_inventory_snapshot",
         "get_channel_velocity",
         "get_tiktok_product_sales",
+        "get_price_lookup",
     ],
 }
 
@@ -448,6 +451,45 @@ def _match_product_query(product_query: str, item: dict[str, Any]) -> bool:
     haystack = " ".join(str(item.get(key) or "") for key in ("title", "seller_sku", "sku_name")).lower()
     haystack_terms = set(_query_terms(haystack))
     return all(term in haystack_terms or term in haystack for term in terms)
+
+
+def _inventory_query_text(item: InventoryItem) -> str:
+    return " ".join(
+        str(value or "")
+        for value in (
+            item.barcode,
+            item.item_type,
+            item.game,
+            item.card_name,
+            item.set_name,
+            item.set_code,
+            item.card_number,
+            item.variant,
+            item.sealed_product_kind,
+            item.upc,
+            item.condition,
+            item.grading_company,
+            item.grade,
+            item.cert_number,
+        )
+    )
+
+
+def _inventory_item_matches_query(item: InventoryItem, query: str) -> bool:
+    terms = _query_terms(query)
+    if not terms:
+        return False
+    haystack = _inventory_query_text(item).lower()
+    haystack_terms = set(_query_terms(haystack))
+    return all(term in haystack_terms or term in haystack for term in terms)
+
+
+def _inventory_effective_price(item: InventoryItem) -> tuple[float | None, str]:
+    if item.list_price is not None:
+        return _money(item.list_price), "list_price"
+    if item.auto_price is not None:
+        return _money(item.auto_price), "auto_price"
+    return None, "missing"
 
 
 def _iso(value: Any) -> str | None:
@@ -828,6 +870,109 @@ class DegenOpsMcpHarness:
             "read_only": True,
         }
 
+    def get_price_lookup(self, query: str, days: int = 30, limit: int = 10) -> dict[str, Any]:
+        safe_days = max(_safe_int(days, 30), 1)
+        safe_limit = _bounded_limit(limit, default=10, maximum=50)
+        clean_query = str(query or "").strip()
+        inventory_matches: list[dict[str, Any]] = []
+
+        with self._session() as session:
+            inventory_rows = session.exec(
+                select(InventoryItem)
+                .where(InventoryItem.archived_at == None)  # noqa: E711
+                .order_by(InventoryItem.updated_at.desc().nullslast(), InventoryItem.created_at.desc())
+                .limit(500)
+            ).all()
+            matched_items = [item for item in inventory_rows if _inventory_item_matches_query(item, clean_query)]
+            for item in matched_items[:safe_limit]:
+                effective, source = _inventory_effective_price(item)
+                latest_history = session.exec(
+                    select(PriceHistory)
+                    .where(PriceHistory.item_id == item.id)
+                    .order_by(PriceHistory.fetched_at.desc())
+                    .limit(1)
+                ).first()
+                inventory_matches.append(
+                    {
+                        "item_id": item.id,
+                        "barcode": item.barcode,
+                        "item_type": item.item_type,
+                        "game": item.game,
+                        "name": item.card_name,
+                        "set_name": item.set_name,
+                        "card_number": item.card_number,
+                        "variant": item.variant,
+                        "condition": item.condition,
+                        "quantity": item.quantity,
+                        "status": item.status,
+                        "effective_price": effective,
+                        "effective_price_source": source,
+                        "list_price": _money(item.list_price) if item.list_price is not None else None,
+                        "auto_price": _money(item.auto_price) if item.auto_price is not None else None,
+                        "cost_basis": _money(item.cost_basis) if item.cost_basis is not None else None,
+                        "last_priced_at": _iso(item.last_priced_at),
+                        "latest_price_history": (
+                            {
+                                "source": latest_history.source,
+                                "market_price": _money(latest_history.market_price),
+                                "low_price": _money(latest_history.low_price),
+                                "high_price": _money(latest_history.high_price),
+                                "fetched_at": _iso(latest_history.fetched_at),
+                            }
+                            if latest_history
+                            else None
+                        ),
+                        "evidence_url": f"/inventory/{item.id}" if item.id else "/inventory",
+                    }
+                )
+
+        recent_sales = self.get_tiktok_product_sales(product_query=clean_query, days=safe_days, limit=safe_limit)
+        sale_summary = recent_sales.get("summary") or {}
+        recent_avg_sale_price = None
+        matched_quantity = _safe_int(sale_summary.get("matched_quantity"), 0)
+        matched_revenue = _money(sale_summary.get("matched_revenue"))
+        if matched_quantity:
+            recent_avg_sale_price = _money(matched_revenue / matched_quantity)
+
+        inventory_price = next(
+            (row["effective_price"] for row in inventory_matches if row.get("effective_price") is not None),
+            None,
+        )
+        recommended_price = inventory_price if inventory_price is not None else recent_avg_sale_price
+        recommended_source = "inventory_effective_price" if inventory_price is not None else (
+            "recent_tiktok_avg_sale_price" if recent_avg_sale_price is not None else "missing"
+        )
+
+        data_gaps = []
+        if clean_query and not inventory_matches:
+            data_gaps.append(f"No stored inventory price matched query={clean_query!r}.")
+        if matched_quantity == 0:
+            data_gaps.append(f"No recent TikTok sale price matched query={clean_query!r}.")
+        if not clean_query:
+            data_gaps.append("Missing query; provide a card, sealed product, barcode, SKU, or product keyword.")
+
+        return {
+            "summary": {
+                "query": clean_query,
+                "recommended_price": recommended_price,
+                "recommended_price_source": recommended_source,
+                "inventory_match_count": len(inventory_matches),
+                "recent_tiktok_avg_sale_price": recent_avg_sale_price,
+                "recent_tiktok_quantity": matched_quantity,
+                "recent_tiktok_revenue": matched_revenue,
+            },
+            "inventory_matches": inventory_matches,
+            "recent_tiktok_sales": recent_sales,
+            "range": {"days": safe_days, "limit": safe_limit},
+            "data_gaps": data_gaps,
+            "evidence": [
+                {"source": "inventory_items", "url": "/inventory", "rows_scanned_limit": 500},
+                {"source": "price_history", "url": "/inventory"},
+                {"source": "tiktok_orders.line_items", "url": "/tiktok/orders"},
+            ],
+            "read_only": True,
+        }
+
     def get_tiktok_live_snapshot(self) -> dict[str, Any]:
         from .shared import _get_live_analytics_snapshot, _get_live_session_snapshot, _get_live_sessions_list
 
@@ -1019,6 +1164,11 @@ def register_degen_ops_tools(
         @mcp.tool(description="Read-only TikTok product sales by product title, SKU, or keyword from local paid order line items.")
         def get_tiktok_product_sales(product_query: str, days: int = 7, limit: int = 25) -> dict[str, Any]:
             return ops.get_tiktok_product_sales(product_query=product_query, days=days, limit=limit)
+
+    if should_register("get_price_lookup"):
+        @mcp.tool(description="Read-only price lookup from stored inventory prices, price history, and recent TikTok sale prices.")
+        def get_price_lookup(query: str, days: int = 30, limit: int = 10) -> dict[str, Any]:
+            return ops.get_price_lookup(query=query, days=days, limit=limit)
 
     if should_register("get_tiktok_buyer_insights"):
         @mcp.tool(description="Read-only TikTok buyer intelligence from existing local reporting helpers.")

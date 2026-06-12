@@ -7,7 +7,7 @@ import json
 import pytest
 from sqlmodel import SQLModel, Session, create_engine
 
-from app.models import TikTokOrder, TikTokProduct
+from app.models import InventoryItem, PriceHistory, TikTokOrder, TikTokProduct
 from app.ops_mcp import (
     DegenOpsMcpHarness,
     DEGEN_OPS_MCP_TOOL_NAMES,
@@ -405,6 +405,75 @@ def test_tiktok_product_sales_does_not_match_short_query_terms_inside_numeric_id
 
     assert result["summary"]["matched_quantity"] == 0
     assert result["matches"] == []
+
+
+def test_price_lookup_returns_inventory_price_history_and_recent_tiktok_sales():
+    engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine)
+    now = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        item = InventoryItem(
+            barcode="DGN-151001",
+            item_type="sealed",
+            game="Pokemon",
+            card_name="Scarlet & Violet 151 Booster Pack",
+            set_name="Scarlet & Violet 151",
+            sealed_product_kind="booster_pack",
+            quantity=12,
+            auto_price=28.0,
+            list_price=29.99,
+            cost_basis=18.0,
+            last_priced_at=now - timedelta(hours=2),
+        )
+        session.add(item)
+        session.commit()
+        session.add(
+            PriceHistory(
+                item_id=item.id,
+                source="tcgtracking",
+                market_price=28.0,
+                low_price=25.0,
+                high_price=32.0,
+                fetched_at=now - timedelta(hours=2),
+            )
+        )
+        session.add(
+            TikTokOrder(
+                tiktok_order_id="tt-151-price",
+                order_number="order-151-price",
+                created_at=now - timedelta(days=1),
+                updated_at=now - timedelta(days=1),
+                subtotal_price=59.98,
+                financial_status="paid",
+                line_items_summary_json=json.dumps(
+                    [{"title": "Pokemon Scarlet & Violet 151 Booster Pack", "quantity": 2, "unit_price": 29.99}]
+                ),
+            )
+        )
+        session.commit()
+
+        harness = DegenOpsMcpHarness(session_factory=lambda: session)
+        result = harness.get_price_lookup(query="151 booster pack", days=7)
+
+    assert result["read_only"] is True
+    assert result["summary"]["recommended_price"] == 29.99
+    assert result["inventory_matches"][0]["barcode"] == "DGN-151001"
+    assert result["inventory_matches"][0]["effective_price"] == 29.99
+    assert result["inventory_matches"][0]["latest_price_history"]["source"] == "tcgtracking"
+    assert result["recent_tiktok_sales"]["summary"]["matched_quantity"] == 2
+    assert result["evidence"][0]["source"] == "inventory_items"
+
+
+def test_price_lookup_reports_data_gap_when_no_price_sources_match():
+    engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        harness = DegenOpsMcpHarness(session_factory=lambda: session)
+        result = harness.get_price_lookup(query="missing card", days=7)
+
+    assert result["summary"]["recommended_price"] is None
+    assert "No stored inventory price matched query='missing card'." in result["data_gaps"]
+    assert "No recent TikTok sale price matched query='missing card'." in result["data_gaps"]
 
 
 def test_mcp_harness_evaluate_inventory_buy_uses_context_and_returns_evidence(monkeypatch):
