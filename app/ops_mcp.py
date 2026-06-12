@@ -5,6 +5,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import json
 import os
+import re
 from typing import Any, Callable, Iterator
 
 from sqlalchemy import text
@@ -20,6 +21,9 @@ from .reporting import (
     build_tiktok_product_performance,
     build_tiktok_reporting_summary,
     get_tiktok_order_rows,
+    load_paid_tiktok_orders,
+    normalize_item,
+    parse_line_items,
 )
 
 
@@ -39,6 +43,7 @@ TIKTOK_MCP_TOOL_NAMES = [
     "get_tiktok_status",
     "get_tiktok_orders",
     "get_tiktok_products",
+    "get_tiktok_product_sales",
     "get_tiktok_buyer_insights",
     "get_tiktok_product_performance",
     "get_tiktok_live_snapshot",
@@ -60,6 +65,7 @@ DEGEN_OPS_SCOPE_TOOL_NAMES = {
         "get_finance_snapshot",
         "get_inventory_snapshot",
         "get_channel_velocity",
+        "get_tiktok_product_sales",
         "evaluate_inventory_buy",
         "generate_partner_update",
     ],
@@ -67,6 +73,7 @@ DEGEN_OPS_SCOPE_TOOL_NAMES = {
         "get_ops_agent_manifest",
         "get_inventory_snapshot",
         "get_channel_velocity",
+        "get_tiktok_product_sales",
     ],
 }
 
@@ -416,6 +423,28 @@ def _safe_json_list(value: Any) -> list[dict[str, Any]]:
     return [item for item in loaded if isinstance(item, dict)]
 
 
+def _query_terms(value: str) -> list[str]:
+    terms = re.findall(r"[a-z0-9]+", str(value or "").lower())
+    normalized = []
+    for term in terms:
+        if len(term) > 3 and term.endswith("s"):
+            term = term[:-1]
+        normalized.append(term)
+    return normalized
+
+
+def _match_product_query(product_query: str, item: dict[str, Any]) -> bool:
+    terms = _query_terms(product_query)
+    if not terms:
+        return False
+    haystack = " ".join(
+        str(item.get(key) or "")
+        for key in ("title", "product_id", "sku_id", "seller_sku", "sku_name")
+    ).lower()
+    haystack_terms = set(_query_terms(haystack))
+    return all(term in haystack_terms or term in haystack for term in terms)
+
+
 def _iso(value: Any) -> str | None:
     return value.isoformat() if hasattr(value, "isoformat") else None
 
@@ -694,6 +723,106 @@ class DegenOpsMcpHarness:
             "read_only": True,
         }
 
+    def get_tiktok_product_sales(self, product_query: str, days: int = 7, limit: int = 25) -> dict[str, Any]:
+        safe_days = max(_safe_int(days, 7), 1)
+        safe_limit = _bounded_limit(limit, default=25, maximum=100)
+        query = str(product_query or "").strip()
+        matches: list[dict[str, Any]] = []
+        candidates: dict[str, dict[str, Any]] = {}
+        matched_order_ids: set[str] = set()
+        total_quantity = 0
+        total_revenue = 0.0
+
+        with self._session() as session:
+            orders = load_paid_tiktok_orders(session, days=safe_days)
+
+        for order in orders:
+            order_id = str(order.tiktok_order_id or order.order_number or order.id or "")
+            for raw_item in parse_line_items(order):
+                item = normalize_item(raw_item)
+                title = str(item.get("title") or "Unknown")
+                quantity = _safe_int(item.get("qty"), 1)
+                unit_price = _money(item.get("price"))
+                revenue = _money(unit_price * quantity)
+
+                candidate = candidates.setdefault(
+                    title.lower(),
+                    {
+                        "title": title,
+                        "quantity": 0,
+                        "revenue": 0.0,
+                        "order_count": 0,
+                        "order_ids": set(),
+                    },
+                )
+                candidate["quantity"] += quantity
+                candidate["revenue"] = _money(candidate["revenue"] + revenue)
+                candidate["order_ids"].add(order_id)
+                candidate["order_count"] = len(candidate["order_ids"])
+
+                if not _match_product_query(query, item):
+                    continue
+
+                total_quantity += quantity
+                total_revenue = _money(total_revenue + revenue)
+                matched_order_ids.add(order_id)
+                matches.append(
+                    {
+                        "title": title,
+                        "quantity": quantity,
+                        "unit_price": unit_price,
+                        "revenue": revenue,
+                        "order_id": order_id,
+                        "order_number": order.order_number,
+                        "created_at": _iso(order.created_at),
+                        "product_id": item.get("product_id") or "",
+                        "sku_id": item.get("sku_id") or "",
+                    }
+                )
+
+        matches.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+        candidate_rows = []
+        for row in candidates.values():
+            candidate_rows.append(
+                {
+                    "title": row["title"],
+                    "quantity": row["quantity"],
+                    "revenue": _money(row["revenue"]),
+                    "order_count": row["order_count"],
+                }
+            )
+        candidate_rows.sort(key=lambda row: (row["quantity"], row["revenue"]), reverse=True)
+
+        data_gaps = []
+        if query and not matches:
+            data_gaps.append(f"No TikTok line items matched product_query={query!r}.")
+        elif not query:
+            data_gaps.append("Missing product_query; provide a product title, SKU, or keyword.")
+
+        return {
+            "summary": {
+                "product_query": query,
+                "matched_quantity": total_quantity,
+                "matched_order_count": len(matched_order_ids),
+                "matched_revenue": _money(total_revenue),
+                "matched_line_items": len(matches),
+                "paid_orders_scanned": len(orders),
+            },
+            "matches": matches[:safe_limit],
+            "candidates": candidate_rows[:safe_limit],
+            "range": {"days": safe_days, "limit": safe_limit},
+            "data_gaps": data_gaps,
+            "evidence": [
+                {
+                    "source": "tiktok_orders.line_items",
+                    "url": "/tiktok/orders",
+                    "status_filter": "paid-like local TikTok orders",
+                    "row_count": len(orders),
+                }
+            ],
+            "read_only": True,
+        }
+
     def get_tiktok_live_snapshot(self) -> dict[str, Any]:
         from .shared import _get_live_analytics_snapshot, _get_live_session_snapshot, _get_live_sessions_list
 
@@ -880,6 +1009,11 @@ def register_degen_ops_tools(
         @mcp.tool(description="Read-only TikTok product snapshot from local synced product rows.")
         def get_tiktok_products(limit: int = 50, status: str = "", search: str = "") -> dict[str, Any]:
             return ops.get_tiktok_products(limit=limit, status=status, search=search)
+
+    if should_register("get_tiktok_product_sales"):
+        @mcp.tool(description="Read-only TikTok product sales by product title, SKU, or keyword from local paid order line items.")
+        def get_tiktok_product_sales(product_query: str, days: int = 7, limit: int = 25) -> dict[str, Any]:
+            return ops.get_tiktok_product_sales(product_query=product_query, days=days, limit=limit)
 
     if should_register("get_tiktok_buyer_insights"):
         @mcp.tool(description="Read-only TikTok buyer intelligence from existing local reporting helpers.")

@@ -50,6 +50,13 @@ class FakeHarness:
     def get_tiktok_products(self, limit=50, status="", search=""):
         return {"products": [], "filters": {"limit": limit}, "read_only": True}
 
+    def get_tiktok_product_sales(self, product_query="", days=7, limit=25):
+        return {
+            "summary": {"product_query": product_query, "matched_quantity": 3},
+            "range": {"days": days, "limit": limit},
+            "read_only": True,
+        }
+
     def get_tiktok_buyer_insights(self, days=90, limit=50):
         return {"buyers": [], "range": {"days": days, "limit": limit}, "read_only": True}
 
@@ -112,6 +119,7 @@ def test_chat_tool_schemas_follow_employee_scope():
         "get_ops_agent_manifest",
         "get_inventory_snapshot",
         "get_channel_velocity",
+        "get_tiktok_product_sales",
     }
     assert "get_cash_snapshot" not in names
     assert "evaluate_inventory_buy" not in names
@@ -132,6 +140,7 @@ def test_chat_tool_schemas_follow_partner_scope_without_owner_cash_tools():
         "get_finance_snapshot",
         "get_inventory_snapshot",
         "get_channel_velocity",
+        "get_tiktok_product_sales",
         "evaluate_inventory_buy",
         "generate_partner_update",
     }
@@ -149,6 +158,7 @@ def test_chat_tool_schemas_follow_tiktok_scope_without_business_tools():
         "get_tiktok_status",
         "get_tiktok_orders",
         "get_tiktok_products",
+        "get_tiktok_product_sales",
         "get_tiktok_buyer_insights",
         "get_tiktok_product_performance",
         "get_tiktok_live_snapshot",
@@ -180,6 +190,16 @@ def test_chat_runner_dispatches_tiktok_orders_with_filters():
     result = runner.call_tool("get_tiktok_orders", {"days": 14, "limit": 5, "status": "PAID", "search": "charizard"})
 
     assert result["range"] == {"days": 14, "limit": 5}
+    assert result["read_only"] is True
+
+
+def test_chat_runner_dispatches_tiktok_product_sales():
+    runner = DegenOpsChatToolRunner(scope="employee", harness=FakeHarness())
+
+    result = runner.call_tool("get_tiktok_product_sales", {"product_query": "151 packs", "days": 7, "limit": 10})
+
+    assert result["summary"]["product_query"] == "151 packs"
+    assert result["range"] == {"days": 7, "limit": 10}
     assert result["read_only"] is True
 
 
@@ -256,6 +276,7 @@ def test_preflight_report_lists_scope_tools_without_model_call():
         "get_channel_velocity",
         "get_inventory_snapshot",
         "get_ops_agent_manifest",
+        "get_tiktok_product_sales",
     ]
 
 
@@ -295,6 +316,7 @@ def test_preflight_report_read_check_exercises_partner_workflow_without_owner_ca
         "get_finance_snapshot",
         "get_inventory_snapshot",
         "get_ops_agent_manifest",
+        "get_tiktok_product_sales",
     ]
     assert "get_cash_snapshot" not in checked_tools
     assert "get_loan_and_payback_snapshot" not in checked_tools

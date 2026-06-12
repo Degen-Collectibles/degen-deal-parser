@@ -171,6 +171,23 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             },
         },
     },
+    "get_tiktok_product_sales": {
+        "type": "function",
+        "function": {
+            "name": "get_tiktok_product_sales",
+            "description": "Read-only TikTok product sales by product title, SKU, or keyword from local paid order line items.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "product_query": {"type": "string", "description": "Product title, SKU, or keyword such as '151 packs'."},
+                    "days": {"type": "integer", "minimum": 1, "default": 7},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 25},
+                },
+                "required": ["product_query"],
+                "additionalProperties": False,
+            },
+        },
+    },
     "get_tiktok_buyer_insights": {
         "type": "function",
         "function": {
@@ -298,6 +315,12 @@ class DegenOpsChatToolRunner:
                 limit=payload.get("limit", 50),
                 status=payload.get("status", ""),
                 search=payload.get("search", ""),
+            )
+        if name == "get_tiktok_product_sales":
+            return self.harness.get_tiktok_product_sales(
+                product_query=payload.get("product_query", ""),
+                days=payload.get("days", 7),
+                limit=payload.get("limit", 25),
             )
         if name == "get_tiktok_buyer_insights":
             return self.harness.get_tiktok_buyer_insights(

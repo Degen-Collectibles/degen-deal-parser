@@ -1,7 +1,8 @@
 from pathlib import Path
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import json
 
 import pytest
 from sqlmodel import SQLModel, Session, create_engine
@@ -265,6 +266,110 @@ def test_tiktok_product_snapshot_uses_local_rows_without_raw_payloads():
     assert result["products"][0]["tiktok_product_id"] == "prod-1"
     assert result["products"][0]["sku_count"] == 1
     assert "raw_payload" not in result["products"][0]
+
+
+def test_tiktok_product_sales_matches_query_and_counts_paid_recent_line_items():
+    engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine)
+    now = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                TikTokOrder(
+                    tiktok_order_id="tt-151-a",
+                    order_number="order-151-a",
+                    created_at=now - timedelta(days=2),
+                    updated_at=now - timedelta(days=2),
+                    subtotal_price=40.0,
+                    financial_status="paid",
+                    line_items_summary_json=json.dumps(
+                        [
+                            {
+                                "title": "Pokemon 151 Booster Pack",
+                                "quantity": 3,
+                                "unit_price": 8.0,
+                                "sku_id": "sku-151",
+                            },
+                            {"title": "Obsidian Flames Pack", "quantity": 1, "unit_price": 6.0},
+                        ]
+                    ),
+                ),
+                TikTokOrder(
+                    tiktok_order_id="tt-151-b",
+                    order_number="order-151-b",
+                    created_at=now - timedelta(days=5),
+                    updated_at=now - timedelta(days=5),
+                    subtotal_price=16.0,
+                    financial_status="PAID",
+                    line_items_summary_json=json.dumps(
+                        [{"title": "Pokemon 151 Booster Packs", "quantity": 2, "unit_price": 8.0}]
+                    ),
+                ),
+                TikTokOrder(
+                    tiktok_order_id="tt-pending",
+                    order_number="order-pending",
+                    created_at=now - timedelta(days=1),
+                    updated_at=now - timedelta(days=1),
+                    subtotal_price=80.0,
+                    financial_status="pending",
+                    line_items_summary_json=json.dumps(
+                        [{"title": "Pokemon 151 Booster Pack", "quantity": 10, "unit_price": 8.0}]
+                    ),
+                ),
+                TikTokOrder(
+                    tiktok_order_id="tt-old",
+                    order_number="order-old",
+                    created_at=now - timedelta(days=20),
+                    updated_at=now - timedelta(days=20),
+                    subtotal_price=8.0,
+                    financial_status="paid",
+                    line_items_summary_json=json.dumps(
+                        [{"title": "Pokemon 151 Booster Pack", "quantity": 1, "unit_price": 8.0}]
+                    ),
+                ),
+            ]
+        )
+        session.commit()
+
+        harness = DegenOpsMcpHarness(session_factory=lambda: session)
+        result = harness.get_tiktok_product_sales(product_query="151 packs", days=7)
+
+    assert result["read_only"] is True
+    assert result["summary"]["matched_quantity"] == 5
+    assert result["summary"]["matched_order_count"] == 2
+    assert result["summary"]["matched_revenue"] == 40.0
+    assert result["matches"][0]["title"] == "Pokemon 151 Booster Pack"
+    assert result["matches"][0]["quantity"] == 3
+    assert result["range"]["days"] == 7
+    assert result["evidence"][0]["source"] == "tiktok_orders.line_items"
+
+
+def test_tiktok_product_sales_returns_candidates_when_no_match():
+    engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine)
+    now = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        session.add(
+            TikTokOrder(
+                tiktok_order_id="tt-candidate",
+                order_number="order-candidate",
+                created_at=now - timedelta(days=1),
+                updated_at=now - timedelta(days=1),
+                subtotal_price=12.0,
+                financial_status="paid",
+                line_items_summary_json=json.dumps(
+                    [{"title": "Pokemon 151 Booster Pack", "quantity": 1, "unit_price": 12.0}]
+                ),
+            )
+        )
+        session.commit()
+
+        harness = DegenOpsMcpHarness(session_factory=lambda: session)
+        result = harness.get_tiktok_product_sales(product_query="lorcana", days=7)
+
+    assert result["summary"]["matched_quantity"] == 0
+    assert result["data_gaps"] == ["No TikTok line items matched product_query='lorcana'."]
+    assert result["candidates"][0]["title"] == "Pokemon 151 Booster Pack"
 
 
 def test_mcp_harness_evaluate_inventory_buy_uses_context_and_returns_evidence(monkeypatch):
