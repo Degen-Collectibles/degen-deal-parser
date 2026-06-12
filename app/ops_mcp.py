@@ -434,13 +434,18 @@ def _query_terms(value: str) -> list[str]:
 
 
 def _match_product_query(product_query: str, item: dict[str, Any]) -> bool:
+    raw_query = str(product_query or "").strip()
     terms = _query_terms(product_query)
     if not terms:
         return False
-    haystack = " ".join(
+    exact_id_values = {
         str(item.get(key) or "")
-        for key in ("title", "product_id", "sku_id", "seller_sku", "sku_name")
-    ).lower()
+        for key in ("product_id", "sku_id")
+        if str(item.get(key) or "")
+    }
+    if raw_query.isdigit() and len(raw_query) >= 8 and raw_query in exact_id_values:
+        return True
+    haystack = " ".join(str(item.get(key) or "") for key in ("title", "seller_sku", "sku_name")).lower()
     haystack_terms = set(_query_terms(haystack))
     return all(term in haystack_terms or term in haystack for term in terms)
 

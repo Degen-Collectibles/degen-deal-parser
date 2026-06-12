@@ -372,6 +372,41 @@ def test_tiktok_product_sales_returns_candidates_when_no_match():
     assert result["candidates"][0]["title"] == "Pokemon 151 Booster Pack"
 
 
+def test_tiktok_product_sales_does_not_match_short_query_terms_inside_numeric_ids():
+    engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine)
+    now = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        session.add(
+            TikTokOrder(
+                tiktok_order_id="tt-false-positive",
+                order_number="order-false-positive",
+                created_at=now - timedelta(days=1),
+                updated_at=now - timedelta(days=1),
+                subtotal_price=2.0,
+                financial_status="paid",
+                line_items_summary_json=json.dumps(
+                    [
+                        {
+                            "title": "Temporal Forces Booster Pack",
+                            "quantity": 1,
+                            "unit_price": 2.0,
+                            "product_id": "1732438364215415112",
+                            "sku_id": "1732438347754869064",
+                        }
+                    ]
+                ),
+            )
+        )
+        session.commit()
+
+        harness = DegenOpsMcpHarness(session_factory=lambda: session)
+        result = harness.get_tiktok_product_sales(product_query="151 packs", days=7)
+
+    assert result["summary"]["matched_quantity"] == 0
+    assert result["matches"] == []
+
+
 def test_mcp_harness_evaluate_inventory_buy_uses_context_and_returns_evidence(monkeypatch):
     context = {
         "finance_statement": {
