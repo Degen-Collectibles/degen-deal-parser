@@ -11,6 +11,7 @@ You are a read-only business operator and CFO-style decision partner.
 Use tools for current facts. Lead with the decision, then cite evidence.
 Never claim that money, inventory, customer messages, partner messages, or production data changed.
 If the current scope lacks a needed tool, say what cannot be answered from this scope.
+Web search is read-only public search-result lookup only. Use it for outside facts and market context, cite result URLs, and do not treat web snippets as Degen internal records.
 Partner scope can evaluate buys but does not expose raw cash balances, account balances, reserve-gap dollars, or owner loan/payback totals.
 In partner scope, describe cash as redacted cash-safety status from evaluate_inventory_buy, not exact cash position.
 TikTok scope is a read-only TikTok operator: use TikTok tools for synced orders, products, buyer/product performance, live status, and endpoint coverage; do not claim product, token, webhook, inventory, or pricing mutations happened."""
@@ -23,6 +24,21 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "name": "get_ops_agent_manifest",
             "description": "Read-only manifest listing Degen Ops MCP scope, exposed tools, and guardrails.",
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    "get_ops_memory": {
+        "type": "function",
+        "function": {
+            "name": "get_ops_memory",
+            "description": "Read-only scoped Degen Ops memory lookup for preferences, assumptions, and operating notes.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "default": ""},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+                },
+                "additionalProperties": False,
+            },
         },
     },
     "get_finance_snapshot": {
@@ -68,6 +84,34 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             },
         },
     },
+    "get_sales_summary": {
+        "type": "function",
+        "function": {
+            "name": "get_sales_summary",
+            "description": "Read-only cross-channel sales summary for TikTok, Shopify, and Discord store sales.",
+            "parameters": {
+                "type": "object",
+                "properties": {"days": {"type": "integer", "minimum": 1, "default": 7}},
+                "additionalProperties": False,
+            },
+        },
+    },
+    "get_discord_sales_summary": {
+        "type": "function",
+        "function": {
+            "name": "get_discord_sales_summary",
+            "description": "Read-only Discord/show sales summary filtered by product keyword, category, or channel text.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "product_query": {"type": "string", "default": ""},
+                    "days": {"type": "integer", "minimum": 1, "default": 7},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 25},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
     "get_loan_and_payback_snapshot": {
         "type": "function",
         "function": {
@@ -76,6 +120,65 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "parameters": {
                 "type": "object",
                 "properties": {"days": {"type": "integer", "minimum": 1, "default": 90}},
+                "additionalProperties": False,
+            },
+        },
+    },
+    "get_employee_clock_status": {
+        "type": "function",
+        "function": {
+            "name": "get_employee_clock_status",
+            "description": "Owner-only read-only employee clock-in/out status from cached Clockify rows.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "person_query": {
+                        "type": "string",
+                        "default": "",
+                        "description": "Employee display name, username, or Clockify ID. Leave blank for recent employees.",
+                    },
+                    "days": {"type": "integer", "minimum": 1, "default": 1},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    "get_employee_ops_status": {
+        "type": "function",
+        "function": {
+            "name": "get_employee_ops_status",
+            "description": "Owner-only read-only employee ops request status from supply, buylist, and time-off queues.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "person_query": {
+                        "type": "string",
+                        "default": "",
+                        "description": "Employee display name or username. Leave blank for all active employees with recent items.",
+                    },
+                    "days": {"type": "integer", "minimum": 1, "default": 30},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    "propose_ops_memory": {
+        "type": "function",
+        "function": {
+            "name": "propose_ops_memory",
+            "description": "Owner-only read-only draft for a Degen Ops memory change; does not persist memory.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string"},
+                    "value": {"type": "string"},
+                    "scope": {"type": "string", "enum": ["public", "employee", "partner", "tiktok", "owner"], "default": "owner"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "default": []},
+                    "proposed_by": {"type": "string", "default": ""},
+                },
+                "required": ["key", "value"],
                 "additionalProperties": False,
             },
         },
@@ -118,6 +221,18 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                     "days": {"type": "integer", "minimum": 1, "default": 90},
                 },
                 "required": ["scenario"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "generate_weekly_partner_update_draft": {
+        "type": "function",
+        "function": {
+            "name": "generate_weekly_partner_update_draft",
+            "description": "Read-only weekly partner update draft from current finance, sales, and inventory snapshots; does not post.",
+            "parameters": {
+                "type": "object",
+                "properties": {"days": {"type": "integer", "minimum": 1, "default": 7}},
                 "additionalProperties": False,
             },
         },
@@ -188,6 +303,63 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             },
         },
     },
+    "get_tiktok_top_products": {
+        "type": "function",
+        "function": {
+            "name": "get_tiktok_top_products",
+            "description": "Read-only top TikTok products by paid local order line-item quantity or revenue.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days": {"type": "integer", "minimum": 1, "default": 7},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 10},
+                    "sort_by": {
+                        "type": "string",
+                        "enum": ["quantity", "revenue"],
+                        "default": "quantity",
+                    },
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    "get_shopify_product_sales": {
+        "type": "function",
+        "function": {
+            "name": "get_shopify_product_sales",
+            "description": "Read-only Shopify product sales by product title, SKU, or keyword from local paid order line items.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "product_query": {"type": "string", "description": "Product title, SKU, or keyword such as '151 packs'."},
+                    "days": {"type": "integer", "minimum": 1, "default": 7},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 25},
+                },
+                "required": ["product_query"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "get_shopify_top_products": {
+        "type": "function",
+        "function": {
+            "name": "get_shopify_top_products",
+            "description": "Read-only top Shopify products by paid local order line-item quantity or revenue.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days": {"type": "integer", "minimum": 1, "default": 7},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 10},
+                    "sort_by": {
+                        "type": "string",
+                        "enum": ["quantity", "revenue"],
+                        "default": "quantity",
+                    },
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
     "get_price_lookup": {
         "type": "function",
         "function": {
@@ -216,6 +388,28 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                     "query": {"type": "string", "description": "Card, sealed product, barcode, SKU, or product keyword."},
                     "days": {"type": "integer", "minimum": 1, "default": 7},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "get_web_search": {
+        "type": "function",
+        "function": {
+            "name": "get_web_search",
+            "description": "Read-only public web search returning cited search results without fetching result pages.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Public web search query."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5},
+                    "freshness": {
+                        "type": "string",
+                        "enum": ["", "day", "week", "month", "year"],
+                        "default": "",
+                        "description": "Optional recency filter when the provider supports it.",
+                    },
                 },
                 "required": ["query"],
                 "additionalProperties": False,
@@ -308,6 +502,12 @@ class DegenOpsChatToolRunner:
                 scope=self.scope,
                 tools=DEGEN_OPS_SCOPE_TOOL_NAMES[self.scope],
             )
+        if name == "get_ops_memory":
+            return self.harness.get_ops_memory(
+                query=payload.get("query", ""),
+                limit=payload.get("limit", 20),
+                audience_scope=self.scope,
+            )
         if name == "get_finance_snapshot":
             return self.harness.get_finance_snapshot(days=payload.get("days", 90))
         if name == "get_cash_snapshot":
@@ -319,8 +519,36 @@ class DegenOpsChatToolRunner:
                 days=payload.get("days", 90),
                 category=payload.get("category", ""),
             )
+        if name == "get_sales_summary":
+            return self.harness.get_sales_summary(days=payload.get("days", 7))
+        if name == "get_discord_sales_summary":
+            return self.harness.get_discord_sales_summary(
+                product_query=payload.get("product_query", ""),
+                days=payload.get("days", 7),
+                limit=payload.get("limit", 25),
+            )
         if name == "get_loan_and_payback_snapshot":
             return self.harness.get_loan_and_payback_snapshot(days=payload.get("days", 90))
+        if name == "get_employee_clock_status":
+            return self.harness.get_employee_clock_status(
+                person_query=payload.get("person_query", ""),
+                days=payload.get("days", 1),
+                limit=payload.get("limit", 20),
+            )
+        if name == "get_employee_ops_status":
+            return self.harness.get_employee_ops_status(
+                person_query=payload.get("person_query", ""),
+                days=payload.get("days", 30),
+                limit=payload.get("limit", 50),
+            )
+        if name == "propose_ops_memory":
+            return self.harness.propose_ops_memory(
+                key=payload.get("key", ""),
+                value=payload.get("value", ""),
+                scope=payload.get("scope", "owner"),
+                tags=payload.get("tags") if isinstance(payload.get("tags"), list) else [],
+                proposed_by=payload.get("proposed_by", ""),
+            )
         if name == "evaluate_inventory_buy":
             return self.harness.evaluate_inventory_buy(
                 scenario=payload.get("scenario") or {},
@@ -331,6 +559,11 @@ class DegenOpsChatToolRunner:
             return self.harness.generate_partner_update(
                 scenario=payload.get("scenario") or {},
                 days=payload.get("days", 90),
+                audience_scope=self.scope,
+            )
+        if name == "generate_weekly_partner_update_draft":
+            return self.harness.generate_weekly_partner_update_draft(
+                days=payload.get("days", 7),
                 audience_scope=self.scope,
             )
         if name == "get_tiktok_agent_manifest":
@@ -356,6 +589,24 @@ class DegenOpsChatToolRunner:
                 days=payload.get("days", 7),
                 limit=payload.get("limit", 25),
             )
+        if name == "get_tiktok_top_products":
+            return self.harness.get_tiktok_top_products(
+                days=payload.get("days", 7),
+                limit=payload.get("limit", 10),
+                sort_by=payload.get("sort_by", "quantity"),
+            )
+        if name == "get_shopify_product_sales":
+            return self.harness.get_shopify_product_sales(
+                product_query=payload.get("product_query", ""),
+                days=payload.get("days", 7),
+                limit=payload.get("limit", 25),
+            )
+        if name == "get_shopify_top_products":
+            return self.harness.get_shopify_top_products(
+                days=payload.get("days", 7),
+                limit=payload.get("limit", 10),
+                sort_by=payload.get("sort_by", "quantity"),
+            )
         if name == "get_price_lookup":
             return self.harness.get_price_lookup(
                 query=payload.get("query", ""),
@@ -367,6 +618,12 @@ class DegenOpsChatToolRunner:
                 query=payload.get("query", ""),
                 days=payload.get("days", 7),
                 limit=payload.get("limit", 10),
+            )
+        if name == "get_web_search":
+            return self.harness.get_web_search(
+                query=payload.get("query", ""),
+                limit=payload.get("limit", 5),
+                freshness=payload.get("freshness", ""),
             )
         if name == "get_tiktok_buyer_insights":
             return self.harness.get_tiktok_buyer_insights(

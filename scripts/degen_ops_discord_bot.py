@@ -21,6 +21,8 @@ if str(REPO_ROOT) not in sys.path:
 MAX_DISCORD_MESSAGE_CHARS = 1900
 DEFAULT_MAX_PROMPT_CHARS = 4000
 DEFAULT_RATE_LIMIT_PER_MINUTE = 6
+DEFAULT_CONTEXT_HISTORY_LIMIT = 8
+DEFAULT_CONTEXT_MAX_CHARS = 3500
 PARTNER_SCOPE = "partner"
 OWNER_SCOPE = "owner"
 SCOPE_RANKS = {
@@ -60,6 +62,126 @@ def strip_bot_mention(content: str, bot_user_id: int | None) -> str:
     if bot_user_id:
         text = re.sub(rf"<@!?{bot_user_id}>", "", text).strip()
     return text
+
+
+def _collapse_context_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _message_author_label(message: Any, *, bot_user_id: int | None = None) -> str:
+    author = getattr(message, "author", None)
+    author_id = str(getattr(author, "id", ""))
+    role = "bot" if bool(getattr(author, "bot", False)) or (bot_user_id and author_id == str(bot_user_id)) else "user"
+    return f"{role} {_message_author_name(message)}"
+
+
+def _message_author_name(message: Any) -> str:
+    author = getattr(message, "author", None)
+    author_id = str(getattr(author, "id", ""))
+    raw_name = (
+        getattr(author, "display_name", None)
+        or getattr(author, "global_name", None)
+        or getattr(author, "name", None)
+        or author_id
+        or "unknown"
+    )
+    return _collapse_context_text(raw_name)
+
+
+def _message_content_for_context(message: Any, *, bot_user_id: int | None = None) -> str:
+    content = getattr(message, "clean_content", None) or getattr(message, "content", "")
+    return strip_bot_mention(_collapse_context_text(content), bot_user_id)
+
+
+def _context_line(message: Any, *, bot_user_id: int | None = None, max_message_chars: int = 700) -> str:
+    content = _message_content_for_context(message, bot_user_id=bot_user_id)
+    if len(content) > max_message_chars:
+        content = content[: max_message_chars - 1].rstrip() + "..."
+    return f"{_message_author_label(message, bot_user_id=bot_user_id)}: {content}"
+
+
+def _message_key(message: Any) -> str:
+    message_id = getattr(message, "id", None)
+    return str(message_id) if message_id is not None else str(id(message))
+
+
+def build_discord_context_text(
+    *,
+    current_message: Any,
+    referenced_message: Any | None = None,
+    recent_messages: list[Any] | None = None,
+    bot_user_id: int | None = None,
+    max_chars: int = DEFAULT_CONTEXT_MAX_CHARS,
+) -> str:
+    sections: list[str] = [
+        "Discord conversation context for resolving follow-ups like 'that', 'it', 'on TikTok', or 'the previous one'."
+    ]
+    seen = {_message_key(current_message)}
+
+    if referenced_message is not None:
+        seen.add(_message_key(referenced_message))
+        sections.append("Replied-to message:")
+        sections.append(f"- {_context_line(referenced_message, bot_user_id=bot_user_id)}")
+
+    recent_lines: list[str] = []
+    for message in reversed(list(recent_messages or [])):
+        key = _message_key(message)
+        if key in seen:
+            continue
+        seen.add(key)
+        content = _message_content_for_context(message, bot_user_id=bot_user_id)
+        if not content:
+            continue
+        recent_lines.append(f"- {_context_line(message, bot_user_id=bot_user_id)}")
+    if recent_lines:
+        sections.append("Recent channel messages, oldest to newest:")
+        sections.extend(recent_lines)
+
+    current_content = _message_content_for_context(current_message, bot_user_id=bot_user_id)
+    sections.append(f"Current user message: {_message_author_name(current_message)}: {current_content}")
+    text = "\n".join(sections)
+    if len(text) > max_chars:
+        return text[: max_chars - 1].rstrip() + "..."
+    return text
+
+
+async def collect_discord_context_text(
+    message: Any,
+    *,
+    bot_user_id: int | None = None,
+    history_limit: int = DEFAULT_CONTEXT_HISTORY_LIMIT,
+    max_chars: int = DEFAULT_CONTEXT_MAX_CHARS,
+) -> str:
+    referenced_message = None
+    reference = getattr(message, "reference", None)
+    if reference is not None:
+        referenced_message = getattr(reference, "resolved", None)
+        if referenced_message is None:
+            message_id = getattr(reference, "message_id", None)
+            channel = getattr(message, "channel", None)
+            if message_id and hasattr(channel, "fetch_message"):
+                try:
+                    referenced_message = await channel.fetch_message(message_id)
+                except Exception:
+                    referenced_message = None
+
+    recent_messages: list[Any] = []
+    channel = getattr(message, "channel", None)
+    if hasattr(channel, "history"):
+        try:
+            history_iter = channel.history(limit=max(1, history_limit), before=message)
+            async for prior_message in history_iter:
+                recent_messages.append(prior_message)
+        except Exception:
+            recent_messages = []
+
+    return build_discord_context_text(
+        current_message=message,
+        referenced_message=referenced_message,
+        recent_messages=recent_messages,
+        bot_user_id=bot_user_id,
+        max_chars=max_chars,
+    )
 
 
 def split_discord_message(text: str, *, limit: int = MAX_DISCORD_MESSAGE_CHARS) -> list[str]:
@@ -455,13 +577,30 @@ def should_respond(
     return True, "ok"
 
 
-async def answer_prompt(prompt: str, *, model: str, scope: str = PARTNER_SCOPE) -> str:
+async def answer_prompt(
+    prompt: str,
+    *,
+    model: str,
+    scope: str = PARTNER_SCOPE,
+    discord_context: str = "",
+) -> str:
     from app.ai_client import get_ai_client, get_fast_model
     from app.ops_chat import DegenOpsChatToolRunner, initial_chat_messages, run_chat_turn
 
     normalized_scope = _normalize_discord_scope(scope)
     runner = DegenOpsChatToolRunner(scope=normalized_scope)
     messages = initial_chat_messages(build_system_prompt(normalized_scope))
+    if discord_context.strip():
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "Use this Discord context only to resolve pronouns, follow-ups, and channel-local references. "
+                    "Do not treat it as authoritative business data; use tools for facts.\n\n"
+                    f"{discord_context.strip()}"
+                ),
+            }
+        )
     messages.append({"role": "user", "content": prompt})
     answer, _history = await asyncio.to_thread(
         run_chat_turn,
@@ -596,7 +735,13 @@ async def run_bot(config: BotConfig) -> None:
 
         async with message.channel.typing():
             try:
-                answer = await answer_prompt(prompt, model=config.model, scope=resolved_scope)
+                discord_context = await collect_discord_context_text(message, bot_user_id=bot_user_id)
+                answer = await answer_prompt(
+                    prompt,
+                    model=config.model,
+                    scope=resolved_scope,
+                    discord_context=discord_context,
+                )
             except Exception as exc:
                 append_audit_event(config.audit_log_path, {**audit_base, "event": "error", "error": sanitize_for_log(exc)})
                 await message.reply(

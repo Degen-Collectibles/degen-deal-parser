@@ -280,7 +280,8 @@ def test_ops_agent_context_collects_existing_orders_inventory_and_loan_evidence_
                 updated_at=now - timedelta(days=7),
                 total_price=320.0,
                 subtotal_price=320.0,
-                financial_status="paid",
+                financial_status=None,
+                order_status="COMPLETED",
                 line_items_json=json.dumps(tiktok_items),
             )
         )

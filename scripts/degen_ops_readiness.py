@@ -28,6 +28,8 @@ REQUIRED_ARTIFACTS = [
     "scripts/degen_ops_mcp_smoke.py",
     "scripts/degen_ops_mcp_config.py",
     "scripts/degen_ops_answer_eval.py",
+    "scripts/degen_ops_prompt_coverage.py",
+    "scripts/degen_ops_deploy_preflight.py",
     "scripts/degen_ops_change_manifest.py",
     "scripts/degen_ops_chat.py",
     "scripts/degen_ops_readiness.py",

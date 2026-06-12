@@ -16,7 +16,10 @@ from scripts.degen_ops_readiness import REQUIRED_ARTIFACTS
 
 
 EXTRA_INTENDED_PATHS = {
+    "app/models.py",
+    "docs/ops/degen-ops-bot-improvement-plan.md",
     "requirements.txt",
+    "scripts/degen_ops_discord_bot.py",
     "tests/test_ops_agent.py",
     "tests/test_ops_mcp.py",
 }

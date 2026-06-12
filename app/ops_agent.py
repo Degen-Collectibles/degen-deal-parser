@@ -9,6 +9,7 @@ from sqlmodel import Session, func, select
 
 from .discord.bank_reconciliation import dedupe_bank_rows_for_reporting
 from .models import BankTransaction, InventoryItem, ShopifyOrder, TikTokOrder, Transaction
+from .reporting import tiktok_order_is_paid
 from .shared import build_finance_range_snapshot
 
 
@@ -424,7 +425,7 @@ def _build_channel_velocity(session: Session, *, start: datetime, end: datetime,
         .where(TikTokOrder.created_at <= end)
     ).all()
     for order in tiktok_rows:
-        if str(order.financial_status or "").strip().lower() != "paid":
+        if not tiktok_order_is_paid(order):
             continue
         for item in _load_line_items(order.line_items_json):
             if isinstance(item, dict):

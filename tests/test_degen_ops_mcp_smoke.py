@@ -13,11 +13,16 @@ from scripts.degen_ops_mcp_smoke import (
 def test_smoke_expected_employee_tools_exclude_finance_and_cash():
     tools = EXPECTED_TOOLS_BY_SCOPE["employee"]
 
-    assert tools == {
-        "get_ops_agent_manifest",
-        "get_inventory_snapshot",
-        "get_channel_velocity",
-    }
+    assert "get_ops_agent_manifest" in tools
+    assert "get_inventory_snapshot" in tools
+    assert "get_channel_velocity" in tools
+    assert "get_sales_summary" in tools
+    assert "get_discord_sales_summary" in tools
+    assert "get_tiktok_product_sales" in tools
+    assert "get_shopify_product_sales" in tools
+    assert "get_price_lookup" in tools
+    assert "get_market_trend_lookup" in tools
+    assert "get_web_search" in tools
     assert "get_cash_snapshot" not in tools
     assert "get_loan_and_payback_snapshot" not in tools
     assert "evaluate_inventory_buy" not in tools
@@ -29,6 +34,10 @@ def test_smoke_expected_partner_tools_exclude_owner_cash_and_loan():
     assert "get_finance_snapshot" in tools
     assert "evaluate_inventory_buy" in tools
     assert "generate_partner_update" in tools
+    assert "generate_weekly_partner_update_draft" in tools
+    assert "get_discord_sales_summary" in tools
+    assert "get_price_lookup" in tools
+    assert "get_market_trend_lookup" in tools
     assert "get_cash_snapshot" not in tools
     assert "get_loan_and_payback_snapshot" not in tools
 
@@ -39,6 +48,10 @@ def test_smoke_expected_tiktok_tools_exclude_business_tools():
     assert "get_tiktok_orders" in tools
     assert "get_tiktok_products" in tools
     assert "get_tiktok_live_snapshot" in tools
+    assert "get_tiktok_product_sales" in tools
+    assert "get_tiktok_top_products" in tools
+    assert "get_price_lookup" in tools
+    assert "get_market_trend_lookup" in tools
     assert "get_cash_snapshot" not in tools
     assert "evaluate_inventory_buy" not in tools
 

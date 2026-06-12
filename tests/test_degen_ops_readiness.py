@@ -14,14 +14,24 @@ def test_readiness_report_confirms_scoped_read_only_code_and_flags_live_data_dec
     assert "partner_scope_finance_visibility" not in report["required_decisions"]
     assert report["scopes"]["employee"]["tools"] == [
         "get_channel_velocity",
+        "get_discord_sales_summary",
         "get_inventory_snapshot",
+        "get_market_trend_lookup",
         "get_ops_agent_manifest",
+        "get_ops_memory",
+        "get_price_lookup",
+        "get_sales_summary",
+        "get_shopify_product_sales",
+        "get_shopify_top_products",
+        "get_tiktok_product_sales",
+        "get_tiktok_top_products",
+        "get_web_search",
     ]
     assert "get_cash_snapshot" not in report["scopes"]["employee"]["tools"]
     assert "evaluate_inventory_buy" not in report["scopes"]["employee"]["tools"]
-    assert report["scopes"]["owner"]["tool_count"] == 15
-    assert report["scopes"]["partner"]["tool_count"] == 6
-    assert report["scopes"]["tiktok"]["tool_count"] == 8
+    assert report["scopes"]["owner"]["tool_count"] == 29
+    assert report["scopes"]["partner"]["tool_count"] == 17
+    assert report["scopes"]["tiktok"]["tool_count"] == 14
     assert "get_tiktok_orders" in report["scopes"]["tiktok"]["tools"]
     assert "get_cash_snapshot" not in report["scopes"]["tiktok"]["tools"]
     assert "evaluate_inventory_buy" in report["scopes"]["partner"]["tools"]
@@ -41,6 +51,8 @@ def test_readiness_report_requires_expected_docs_and_scripts():
     assert artifacts["app/ops_chat.py"] is True
     assert artifacts["scripts/degen_ops_chat.py"] is True
     assert artifacts["scripts/degen_ops_change_manifest.py"] is True
+    assert artifacts["scripts/degen_ops_prompt_coverage.py"] is True
+    assert artifacts["scripts/degen_ops_deploy_preflight.py"] is True
     assert artifacts["scripts/degen_ops_completion_audit.py"] is True
     assert artifacts["scripts/degen_ops_mcp_smoke.py"] is True
     assert artifacts["scripts/degen_ops_live_data.py"] is True

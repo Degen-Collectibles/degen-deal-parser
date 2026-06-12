@@ -10,8 +10,15 @@ def test_change_manifest_separates_intended_ops_files_from_unrelated_changes():
         changed_paths=[
             "app/ops_mcp.py",
             "app/ops_chat.py",
+            "app/models.py",
+            "scripts/degen_ops_discord_bot.py",
             "scripts/degen_ops_answer_eval.py",
+            "scripts/degen_ops_prompt_coverage.py",
+            "scripts/degen_ops_deploy_preflight.py",
             "tests/test_degen_ops_answer_eval.py",
+            "tests/test_degen_ops_prompt_coverage.py",
+            "tests/test_degen_ops_deploy_preflight.py",
+            "docs/ops/degen-ops-bot-improvement-plan.md",
             "docs/ops/degen-ops-team-rollout-prd.md",
             "requirements.txt",
             "app/routers/team.py",
@@ -22,12 +29,19 @@ def test_change_manifest_separates_intended_ops_files_from_unrelated_changes():
 
     assert manifest["safe_to_stage_intended_only"] is True
     assert manifest["intended_files"] == [
+        "app/models.py",
         "app/ops_chat.py",
         "app/ops_mcp.py",
+        "docs/ops/degen-ops-bot-improvement-plan.md",
         "docs/ops/degen-ops-team-rollout-prd.md",
         "requirements.txt",
         "scripts/degen_ops_answer_eval.py",
+        "scripts/degen_ops_deploy_preflight.py",
+        "scripts/degen_ops_discord_bot.py",
+        "scripts/degen_ops_prompt_coverage.py",
         "tests/test_degen_ops_answer_eval.py",
+        "tests/test_degen_ops_deploy_preflight.py",
+        "tests/test_degen_ops_prompt_coverage.py",
     ]
     assert manifest["unrelated_files"] == [
         "app/routers/team.py",
@@ -43,9 +57,14 @@ def test_intended_path_set_includes_required_ops_artifacts_and_not_outputs():
     paths = intended_path_set()
 
     assert "app/ops_mcp.py" in paths
+    assert "app/models.py" in paths
+    assert "scripts/degen_ops_discord_bot.py" in paths
+    assert "scripts/degen_ops_prompt_coverage.py" in paths
+    assert "scripts/degen_ops_deploy_preflight.py" in paths
     assert "scripts/degen_ops_change_manifest.py" in paths
     assert "scripts/degen_ops_readiness.py" in paths
     assert "tests/test_ops_mcp.py" in paths
+    assert "docs/ops/degen-ops-bot-improvement-plan.md" in paths
     assert "docs/ops/degen-ops-hermes-mcp-pilot.md" in paths
     assert "outputs/generated.log" not in paths
     assert "app/routers/team.py" not in paths

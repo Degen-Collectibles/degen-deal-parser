@@ -22,9 +22,13 @@ def test_launch_checklist_keeps_partner_scope_redacted_and_secret_free():
     checklist = build_launch_checklist(audience="partner", client="hermes")
     rendered = str(checklist)
 
-    assert checklist["scope"]["tool_count"] == 6
+    assert checklist["scope"]["tool_count"] == 17
     assert "evaluate_inventory_buy" in checklist["scope"]["tools"]
     assert "generate_partner_update" in checklist["scope"]["tools"]
+    assert "generate_weekly_partner_update_draft" in checklist["scope"]["tools"]
+    assert "get_price_lookup" in checklist["scope"]["tools"]
+    assert "get_market_trend_lookup" in checklist["scope"]["tools"]
+    assert "get_web_search" in checklist["scope"]["tools"]
     assert "get_cash_snapshot" not in checklist["scope"]["tools"]
     assert "get_loan_and_payback_snapshot" not in checklist["scope"]["tools"]
     assert checklist["scope"]["owner_only_tools_hidden"] == [
@@ -57,11 +61,21 @@ def test_launch_checklist_after_approval_commands_are_green_bash_commands():
 def test_launch_checklist_employee_scope_stays_employee_but_buy_demo_uses_partner_redaction():
     checklist = build_launch_checklist(audience="employee", client="hermes")
 
-    assert checklist["scope"]["tool_count"] == 3
+    assert checklist["scope"]["tool_count"] == 13
     assert checklist["scope"]["tools"] == [
         "get_channel_velocity",
+        "get_discord_sales_summary",
         "get_inventory_snapshot",
+        "get_market_trend_lookup",
         "get_ops_agent_manifest",
+        "get_ops_memory",
+        "get_price_lookup",
+        "get_sales_summary",
+        "get_shopify_product_sales",
+        "get_shopify_top_products",
+        "get_tiktok_product_sales",
+        "get_tiktok_top_products",
+        "get_web_search",
     ]
     assert any("scripts/degen_ops_live_data.py --scope employee" in command for command in checklist["after_approval_green_commands"])
     assert any("scripts/degen_ops_pilot_demo.py --scope partner" in command for command in checklist["after_approval_green_commands"])

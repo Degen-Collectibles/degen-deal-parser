@@ -1168,6 +1168,22 @@ class AppSetting(SQLModel, table=True):
     value: str = Field(default="")
 
 
+class OpsBotMemory(SQLModel, table=True):
+    __tablename__ = "ops_bot_memory"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    scope: str = Field(default="owner", index=True)
+    key: str = Field(index=True)
+    value: str
+    tags_json: str = "[]"
+    source: str = Field(default="manual", index=True)
+    is_active: bool = Field(default=True, index=True)
+    created_by: Optional[str] = Field(default=None, index=True)
+    updated_by: Optional[str] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+    updated_at: datetime = Field(default_factory=utcnow, index=True)
+
+
 # ---------------------------------------------------------------------------
 # Inventory
 # ---------------------------------------------------------------------------

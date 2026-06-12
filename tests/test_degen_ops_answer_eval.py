@@ -23,14 +23,55 @@ Use that evidence to prep tonight's stream without changing inventory.
 Read-only only.
 """
 
+GOOD_TIKTOK_151_ANSWER = """
+TikTok 151 sales: use get_tiktok_product_sales with product_query 151 packs and a 7-day range.
+Evidence: TikTok paid order line items, matched quantity, matched revenue, order count, and data gaps.
+Read-only: no products, orders, inventory, or messages changed.
+"""
+
+
+GOOD_PRICE_TREND_ANSWER = """
+Price and market trend: use get_price_lookup and get_market_trend_lookup.
+Evidence: inventory price, price history, TikTok sales, Shopify sales, Discord/show sales, and public web search URLs when external context is needed.
+Trend: call out whether the cross-channel trend is up, down, flat, or unknown.
+Read-only.
+"""
+
+
+GOOD_EMPLOYEE_CLOCK_ANSWER = """
+Employee clock status: owner-only get_employee_clock_status can answer whether Alex is clocked in or clocked out.
+Evidence: cached Clockify time entries and the date range checked.
+If the scope is not owner, say the tool is unavailable. Read-only.
+"""
+
+
+GOOD_FINANCE_TODAY_ANSWER = """
+Today finance: clarify revenue versus profit if the user says made today.
+Evidence: finance snapshot and sales summary by channel. In partner scope, cash balance and loan details stay redacted.
+Read-only; no money movement.
+"""
+
+
+GOOD_WEEKLY_UPDATE_ANSWER = """
+Weekly partner update: generate a draft using finance snapshot, sales summary, and inventory snapshot.
+Evidence: revenue, operating profit, channel sales, inventory count, and data gaps.
+Approval required before posting; no partner message was sent. Read-only.
+"""
+
+
+GOOD_ANSWERS = {
+    "partner_buy_decision": GOOD_PARTNER_ANSWER,
+    "employee_inventory_velocity": GOOD_EMPLOYEE_ANSWER,
+    "tiktok_151_sales": GOOD_TIKTOK_151_ANSWER,
+    "price_and_market_trend": GOOD_PRICE_TREND_ANSWER,
+    "owner_employee_clock_status": GOOD_EMPLOYEE_CLOCK_ANSWER,
+    "finance_today": GOOD_FINANCE_TODAY_ANSWER,
+    "weekly_partner_update_draft": GOOD_WEEKLY_UPDATE_ANSWER,
+}
+
 
 def test_answer_eval_accepts_partner_buy_answer_with_evidence_and_redaction():
-    report = build_answer_eval_report(
-        answers={
-            "partner_buy_decision": GOOD_PARTNER_ANSWER,
-            "employee_inventory_velocity": GOOD_EMPLOYEE_ANSWER,
-        }
-    )
+    report = build_answer_eval_report(answers=GOOD_ANSWERS)
 
     assert report["ok"] is True
     partner = next(case for case in report["cases"] if case["id"] == "partner_buy_decision")
@@ -55,6 +96,7 @@ def test_answer_eval_rejects_partner_answer_that_leaks_cash_or_claims_action():
 def test_answer_eval_rejects_employee_answer_with_loan_or_payback_language():
     report = build_answer_eval_report(
         answers={
+            **GOOD_ANSWERS,
             "partner_buy_decision": GOOD_PARTNER_ANSWER,
             "employee_inventory_velocity": "Inventory and channel velocity evidence. Read-only. Loan payback looks fine.",
         }
@@ -69,10 +111,7 @@ def test_answer_eval_rejects_employee_answer_with_loan_or_payback_language():
 
 def test_answer_eval_script_outputs_clean_json_for_good_answers():
     script = Path.cwd() / "scripts" / "degen_ops_answer_eval.py"
-    answers = {
-        "partner_buy_decision": GOOD_PARTNER_ANSWER,
-        "employee_inventory_velocity": GOOD_EMPLOYEE_ANSWER,
-    }
+    answers = GOOD_ANSWERS
 
     result = subprocess.run(
         [sys.executable, str(script), "--answers-json", json.dumps(answers), "--json"],
@@ -91,12 +130,7 @@ def test_answer_eval_script_accepts_answers_file(tmp_path):
     script = Path.cwd() / "scripts" / "degen_ops_answer_eval.py"
     answers_path = tmp_path / "answers.json"
     answers_path.write_text(
-        json.dumps(
-            {
-                "partner_buy_decision": GOOD_PARTNER_ANSWER,
-                "employee_inventory_velocity": GOOD_EMPLOYEE_ANSWER,
-            }
-        ),
+        json.dumps(GOOD_ANSWERS),
         encoding="utf-8-sig",
     )
 
@@ -126,6 +160,21 @@ def test_answer_eval_checked_in_examples_pass():
     report = json.loads(result.stdout)
     assert report["ok"] is True
     assert all(not case["evaluation"]["forbidden_markers_present"] for case in report["cases"])
+    assert {case["id"] for case in report["cases"]} == set(GOOD_ANSWERS)
+
+
+def test_answer_eval_rejects_tiktok_sales_answer_without_evidence():
+    report = build_answer_eval_report(
+        answers={
+            **GOOD_ANSWERS,
+            "tiktok_151_sales": "We sold some 151 on TikTok.",
+        }
+    )
+
+    case = next(case for case in report["cases"] if case["id"] == "tiktok_151_sales")
+    assert report["ok"] is False
+    assert "evidence" in case["evaluation"]["missing_required_markers"]
+    assert "read-only" in case["evaluation"]["missing_required_markers"]
 
 
 def test_answer_eval_script_fails_when_answers_are_missing():

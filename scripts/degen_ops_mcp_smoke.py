@@ -15,48 +15,14 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 
-EXPECTED_TOOLS_BY_SCOPE = {
-    "owner": {
-        "get_ops_agent_manifest",
-        "get_finance_snapshot",
-        "get_cash_snapshot",
-        "get_inventory_snapshot",
-        "get_channel_velocity",
-        "get_loan_and_payback_snapshot",
-        "evaluate_inventory_buy",
-        "generate_partner_update",
-        "get_tiktok_agent_manifest",
-        "get_tiktok_status",
-        "get_tiktok_orders",
-        "get_tiktok_products",
-        "get_tiktok_buyer_insights",
-        "get_tiktok_product_performance",
-        "get_tiktok_live_snapshot",
-    },
-    "tiktok": {
-        "get_ops_agent_manifest",
-        "get_tiktok_agent_manifest",
-        "get_tiktok_status",
-        "get_tiktok_orders",
-        "get_tiktok_products",
-        "get_tiktok_buyer_insights",
-        "get_tiktok_product_performance",
-        "get_tiktok_live_snapshot",
-    },
-    "partner": {
-        "get_ops_agent_manifest",
-        "get_finance_snapshot",
-        "get_inventory_snapshot",
-        "get_channel_velocity",
-        "evaluate_inventory_buy",
-        "generate_partner_update",
-    },
-    "employee": {
-        "get_ops_agent_manifest",
-        "get_inventory_snapshot",
-        "get_channel_velocity",
-    },
-}
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from app.ops_mcp import DEGEN_OPS_SCOPE_TOOL_NAMES
+
+
+EXPECTED_TOOLS_BY_SCOPE = {scope: set(tools) for scope, tools in DEGEN_OPS_SCOPE_TOOL_NAMES.items()}
 
 
 SECRET_PATTERNS = [

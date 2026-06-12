@@ -1,3 +1,4 @@
+import asyncio
 import os
 from pathlib import Path
 
@@ -5,7 +6,9 @@ from scripts.degen_ops_discord_bot import (
     BotConfig,
     DiscordScopeConfig,
     PromptRateLimiter,
+    build_discord_context_text,
     build_system_prompt,
+    collect_discord_context_text,
     determine_message_scope,
     build_partner_setup_plan,
     ensure_database_url_from_readonly_env,
@@ -21,6 +24,65 @@ from scripts.degen_ops_discord_bot import (
     strip_bot_mention,
     update_env_allowlist,
 )
+
+
+class _FakeAuthor:
+    def __init__(self, *, author_id: str, name: str, bot: bool = False):
+        self.id = author_id
+        self.display_name = name
+        self.name = name
+        self.bot = bot
+
+
+class _FakeMessage:
+    def __init__(
+        self,
+        *,
+        content: str,
+        author: _FakeAuthor,
+        message_id: str = "1",
+        channel=None,
+        reference=None,
+    ):
+        self.content = content
+        self.clean_content = content
+        self.author = author
+        self.id = message_id
+        self.channel = channel
+        self.reference = reference
+
+
+class _FakeReference:
+    def __init__(self, *, message_id: str, resolved=None):
+        self.message_id = message_id
+        self.resolved = resolved
+
+
+class _FakeHistory:
+    def __init__(self, messages):
+        self._messages = list(messages)
+
+    def __aiter__(self):
+        self._iter = iter(self._messages)
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._iter)
+        except StopIteration:
+            raise StopAsyncIteration
+
+
+class _FakeChannel:
+    def __init__(self, *, messages=None, fetched=None):
+        self.messages = list(messages or [])
+        self.fetched = fetched or {}
+
+    def history(self, *, limit, before):
+        return _FakeHistory(self.messages[:limit])
+
+    async def fetch_message(self, message_id):
+        return self.fetched[str(message_id)]
 
 
 def _config(**overrides):
@@ -285,6 +347,88 @@ def test_allow_any_user_in_private_channel_is_explicit():
 def test_strip_bot_mention_removes_direct_mentions():
     assert strip_bot_mention("<@12345> should we buy this?", 12345) == "should we buy this?"
     assert strip_bot_mention("<@!12345> should we buy this?", 12345) == "should we buy this?"
+
+
+def test_build_discord_context_text_includes_replied_to_bot_answer():
+    bot_answer = _FakeMessage(
+        message_id="10",
+        author=_FakeAuthor(author_id="555", name="Degen Ops Bot", bot=True),
+        content="Top 5 Selling Products (90-day snapshot): Shopify custom sales dominate.",
+    )
+    user_followup = _FakeMessage(
+        message_id="11",
+        author=_FakeAuthor(author_id="42", name="Jeff"),
+        content="No I mean on tiktok",
+    )
+
+    context = build_discord_context_text(
+        current_message=user_followup,
+        referenced_message=bot_answer,
+        recent_messages=[],
+        bot_user_id=555,
+    )
+
+    assert "Replied-to message" in context
+    assert "bot Degen Ops Bot: Top 5 Selling Products" in context
+    assert "Current user message: Jeff: No I mean on tiktok" in context
+
+
+def test_build_discord_context_text_keeps_recent_channel_order_and_limits_noise():
+    first = _FakeMessage(
+        message_id="1",
+        author=_FakeAuthor(author_id="42", name="Jeff"),
+        content="top 5 selling products",
+    )
+    second = _FakeMessage(
+        message_id="2",
+        author=_FakeAuthor(author_id="555", name="Degen Ops Bot", bot=True),
+        content="Top products are Shopify custom sales, Discord sealed, Discord slabs.",
+    )
+    current = _FakeMessage(
+        message_id="3",
+        author=_FakeAuthor(author_id="42", name="Jeff"),
+        content="No I mean on tiktok",
+    )
+
+    context = build_discord_context_text(
+        current_message=current,
+        referenced_message=None,
+        recent_messages=[second, first, current],
+        bot_user_id=555,
+        max_chars=500,
+    )
+
+    assert context.index("user Jeff: top 5 selling products") < context.index("bot Degen Ops Bot: Top products")
+    assert "Current user message: Jeff: No I mean on tiktok" in context
+    assert context.count("No I mean on tiktok") == 1
+
+
+def test_collect_discord_context_text_fetches_reply_and_recent_history():
+    bot_answer = _FakeMessage(
+        message_id="10",
+        author=_FakeAuthor(author_id="555", name="Degen Ops Bot", bot=True),
+        content="Top 5 Selling Products: Shopify custom sales dominate.",
+    )
+    prior_user = _FakeMessage(
+        message_id="9",
+        author=_FakeAuthor(author_id="42", name="Jeff"),
+        content="top 5 selling products",
+    )
+    channel = _FakeChannel(messages=[bot_answer, prior_user], fetched={"10": bot_answer})
+    current = _FakeMessage(
+        message_id="11",
+        author=_FakeAuthor(author_id="42", name="Jeff"),
+        content="No I mean on tiktok",
+        channel=channel,
+        reference=_FakeReference(message_id="10"),
+    )
+
+    context = asyncio.run(collect_discord_context_text(current, bot_user_id=555))
+
+    assert "Replied-to message" in context
+    assert "bot Degen Ops Bot: Top 5 Selling Products" in context
+    assert "user Jeff: top 5 selling products" in context
+    assert "Current user message: Jeff: No I mean on tiktok" in context
 
 
 def test_split_discord_message_keeps_chunks_under_limit():

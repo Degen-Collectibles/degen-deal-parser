@@ -157,6 +157,28 @@ def build_completion_audit(*, repo_root: Path | str = REPO_ROOT) -> dict[str, An
             evidence=["scripts/degen_ops_answer_eval.py", "tests/test_degen_ops_answer_eval.py"],
         ),
         _requirement(
+            item_id="prompt_tool_coverage",
+            label="Core owner, partner, employee, and TikTok prompt families have scoped tool coverage",
+            status=(
+                "satisfied"
+                if _contains(root, "scripts/degen_ops_prompt_coverage.py", "tiktok_151_sales", "price_and_market_trend", "weekly_partner_update_draft")
+                and _contains(root, "tests/test_degen_ops_prompt_coverage.py", "get_employee_clock_status", "forbidden_tools_absent")
+                else "missing"
+            ),
+            evidence=["scripts/degen_ops_prompt_coverage.py", "tests/test_degen_ops_prompt_coverage.py"],
+        ),
+        _requirement(
+            item_id="deploy_preflight",
+            label="Production rollout has an explicit read-only preflight with targets, rollback, and post-checks",
+            status=(
+                "satisfied"
+                if _contains(root, "scripts/degen_ops_deploy_preflight.py", "approval_phrase", "rollback_plan", "post_deploy_checks")
+                and _contains(root, "tests/test_degen_ops_deploy_preflight.py", "restart Degen Ops Discord bot service", "No production writes")
+                else "missing"
+            ),
+            evidence=["scripts/degen_ops_deploy_preflight.py", "tests/test_degen_ops_deploy_preflight.py"],
+        ),
+        _requirement(
             item_id="change_manifest",
             label="Mixed worktree can be separated into intended Degen Ops files and unrelated changes before staging",
             status=(

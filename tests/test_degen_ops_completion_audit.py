@@ -24,6 +24,8 @@ def test_completion_audit_maps_chatbot_mcp_and_green_pilot_requirements():
     assert requirements["hermes_codex_config_and_smoke"]["status"] == "satisfied"
     assert requirements["green_pilot_handoff"]["status"] == "satisfied"
     assert requirements["team_live_rollout"]["status"] == "pending_decision"
+    assert requirements["prompt_tool_coverage"]["status"] == "satisfied"
+    assert requirements["deploy_preflight"]["status"] == "satisfied"
 
 
 def test_completion_audit_names_live_evidence_required_before_goal_complete():

@@ -5,9 +5,24 @@ from datetime import datetime, timedelta, timezone
 import json
 
 import pytest
-from sqlmodel import SQLModel, Session, create_engine
+import httpx
+from sqlmodel import SQLModel, Session, create_engine, select
 
-from app.models import InventoryItem, PriceHistory, TikTokOrder, TikTokProduct
+from app.models import (
+    ClockifyTimeEntry,
+    BuylistSubmission,
+    DiscordMessage,
+    EmployeeProfile,
+    InventoryItem,
+    OpsBotMemory,
+    PriceHistory,
+    ShopifyOrder,
+    SupplyRequest,
+    TikTokOrder,
+    TikTokProduct,
+    TimeOffRequest,
+    User,
+)
 from app.ops_mcp import (
     DegenOpsMcpHarness,
     DEGEN_OPS_MCP_TOOL_NAMES,
@@ -113,6 +128,7 @@ def test_register_degen_ops_tools_employee_scope_limits_sensitive_tools():
     assert "get_loan_and_payback_snapshot" not in fake.tools
     assert "evaluate_inventory_buy" not in fake.tools
     assert "get_tiktok_orders" not in fake.tools
+    assert "get_web_search" in fake.tools
 
 
 def test_register_degen_ops_tools_partner_scope_excludes_raw_cash_and_loan_tools():
@@ -130,6 +146,7 @@ def test_register_degen_ops_tools_partner_scope_excludes_raw_cash_and_loan_tools
     assert "get_cash_snapshot" not in fake.tools
     assert "get_loan_and_payback_snapshot" not in fake.tools
     assert "get_tiktok_orders" not in fake.tools
+    assert "get_web_search" in fake.tools
 
 
 def test_register_degen_ops_tools_tiktok_scope_is_dedicated_read_only_agent():
@@ -407,6 +424,566 @@ def test_tiktok_product_sales_does_not_match_short_query_terms_inside_numeric_id
     assert result["matches"] == []
 
 
+def test_tiktok_top_products_returns_quantity_sorted_paid_line_items():
+    engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine)
+    now = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                TikTokOrder(
+                    tiktok_order_id="tt-top-1",
+                    order_number="order-top-1",
+                    created_at=now - timedelta(days=1),
+                    updated_at=now - timedelta(days=1),
+                    subtotal_price=90.0,
+                    financial_status="paid",
+                    line_items_summary_json=json.dumps(
+                        [
+                            {"title": "Pokemon 151 Booster Pack", "quantity": 5, "unit_price": 10.0},
+                            {"title": "One Piece Pack", "quantity": 2, "unit_price": 20.0},
+                        ]
+                    ),
+                ),
+                TikTokOrder(
+                    tiktok_order_id="tt-top-2",
+                    order_number="order-top-2",
+                    created_at=now - timedelta(days=2),
+                    updated_at=now - timedelta(days=2),
+                    subtotal_price=30.0,
+                    financial_status="paid",
+                    line_items_summary_json=json.dumps(
+                        [{"title": "Pokemon 151 Booster Pack", "quantity": 3, "unit_price": 10.0}]
+                    ),
+                ),
+                TikTokOrder(
+                    tiktok_order_id="tt-top-refund",
+                    order_number="order-top-refund",
+                    created_at=now - timedelta(days=2),
+                    updated_at=now - timedelta(days=2),
+                    subtotal_price=999.0,
+                    financial_status="refunded",
+                    line_items_summary_json=json.dumps(
+                        [{"title": "Refunded Product", "quantity": 99, "unit_price": 99.0}]
+                    ),
+                ),
+            ]
+        )
+        session.commit()
+
+        harness = DegenOpsMcpHarness(session_factory=lambda: session)
+        result = harness.get_tiktok_top_products(days=7, limit=5, sort_by="quantity")
+
+    assert result["read_only"] is True
+    assert result["summary"]["paid_orders_scanned"] == 2
+    assert result["products"][0]["title"] == "Pokemon 151 Booster Pack"
+    assert result["products"][0]["quantity"] == 8
+    assert result["products"][0]["revenue"] == 80.0
+    assert result["products"][0]["order_count"] == 2
+    assert all(product["title"] != "Refunded Product" for product in result["products"])
+
+
+def test_shopify_product_sales_matches_paid_line_items_by_keyword():
+    engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine)
+    now = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                ShopifyOrder(
+                    shopify_order_id="shopify-1",
+                    order_number="S1001",
+                    created_at=now - timedelta(days=1),
+                    updated_at=now - timedelta(days=1),
+                    subtotal_price=60.0,
+                    total_price=66.0,
+                    financial_status="paid",
+                    line_items_summary_json=json.dumps(
+                        [{"title": "Pokemon 151 Booster Pack", "quantity": 3, "unit_price": 20.0, "sku": "151-PACK"}]
+                    ),
+                ),
+                ShopifyOrder(
+                    shopify_order_id="shopify-2",
+                    order_number="S1002",
+                    created_at=now - timedelta(days=2),
+                    updated_at=now - timedelta(days=2),
+                    subtotal_price=40.0,
+                    total_price=44.0,
+                    financial_status="paid",
+                    line_items_summary_json=json.dumps(
+                        [{"title": "Pokemon 151 Booster Pack", "quantity": 2, "unit_price": 20.0, "sku": "151-PACK"}]
+                    ),
+                ),
+                ShopifyOrder(
+                    shopify_order_id="shopify-unpaid",
+                    order_number="S1003",
+                    created_at=now - timedelta(days=1),
+                    updated_at=now - timedelta(days=1),
+                    subtotal_price=999.0,
+                    total_price=999.0,
+                    financial_status="pending",
+                    line_items_summary_json=json.dumps(
+                        [{"title": "Pokemon 151 Booster Pack", "quantity": 99, "unit_price": 99.0}]
+                    ),
+                ),
+            ]
+        )
+        session.commit()
+
+        harness = DegenOpsMcpHarness(session_factory=lambda: session)
+        result = harness.get_shopify_product_sales(product_query="151 pack", days=7, limit=5)
+
+    assert result["summary"]["matched_quantity"] == 5
+    assert result["summary"]["matched_order_count"] == 2
+    assert result["summary"]["matched_revenue"] == 100.0
+    assert result["matches"][0]["title"] == "Pokemon 151 Booster Pack"
+    assert result["read_only"] is True
+
+
+def test_shopify_top_products_returns_revenue_sorted_paid_line_items():
+    engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine)
+    now = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                ShopifyOrder(
+                    shopify_order_id="shopify-top-1",
+                    order_number="S2001",
+                    created_at=now - timedelta(days=1),
+                    updated_at=now - timedelta(days=1),
+                    subtotal_price=120.0,
+                    total_price=130.0,
+                    financial_status="paid",
+                    line_items_summary_json=json.dumps(
+                        [
+                            {"title": "Pokemon 151 Booster Pack", "quantity": 4, "unit_price": 20.0},
+                            {"title": "Premium Slab", "quantity": 1, "unit_price": 40.0},
+                        ]
+                    ),
+                ),
+                ShopifyOrder(
+                    shopify_order_id="shopify-top-2",
+                    order_number="S2002",
+                    created_at=now - timedelta(days=2),
+                    updated_at=now - timedelta(days=2),
+                    subtotal_price=200.0,
+                    total_price=210.0,
+                    financial_status="paid",
+                    line_items_summary_json=json.dumps(
+                        [{"title": "Premium Slab", "quantity": 1, "unit_price": 200.0}]
+                    ),
+                ),
+            ]
+        )
+        session.commit()
+
+        harness = DegenOpsMcpHarness(session_factory=lambda: session)
+        result = harness.get_shopify_top_products(days=7, limit=5, sort_by="revenue")
+
+    assert result["products"][0]["title"] == "Premium Slab"
+    assert result["products"][0]["revenue"] == 240.0
+    assert result["products"][0]["quantity"] == 2
+    assert result["products"][1]["title"] == "Pokemon 151 Booster Pack"
+
+
+def test_sales_summary_combines_paid_tiktok_shopify_and_discord_sales():
+    engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine)
+    now = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                TikTokOrder(
+                    tiktok_order_id="tt-sales-summary",
+                    order_number="tt-sales-summary",
+                    created_at=now - timedelta(days=1),
+                    updated_at=now - timedelta(days=1),
+                    subtotal_price=80.0,
+                    total_price=88.0,
+                    financial_status="paid",
+                    line_items_summary_json=json.dumps(
+                        [{"title": "Pokemon 151 Booster Pack", "quantity": 4, "unit_price": 20.0}]
+                    ),
+                ),
+                ShopifyOrder(
+                    shopify_order_id="shopify-sales-summary",
+                    order_number="S3001",
+                    created_at=now - timedelta(days=1),
+                    updated_at=now - timedelta(days=1),
+                    subtotal_price=100.0,
+                    total_price=110.0,
+                    financial_status="paid",
+                    line_items_summary_json=json.dumps(
+                        [{"title": "Premium Slab", "quantity": 1, "unit_price": 100.0}]
+                    ),
+                ),
+                DiscordMessage(
+                    discord_message_id="discord-sale-1",
+                    channel_id="sales",
+                    channel_name="store-sales",
+                    author_id="42",
+                    author_name="Jeff",
+                    content="sell 40 cash",
+                    created_at=now - timedelta(days=1),
+                    parse_status="parsed",
+                    entry_kind="sale",
+                    money_in=40.0,
+                    money_out=0.0,
+                    category="Singles",
+                ),
+                DiscordMessage(
+                    discord_message_id="discord-buy-1",
+                    channel_id="buys",
+                    channel_name="store-buys",
+                    author_id="42",
+                    author_name="Jeff",
+                    content="buy 500 cash",
+                    created_at=now - timedelta(days=1),
+                    parse_status="parsed",
+                    entry_kind="buy",
+                    money_in=0.0,
+                    money_out=500.0,
+                    category="Inventory",
+                ),
+            ]
+        )
+        session.commit()
+
+        harness = DegenOpsMcpHarness(session_factory=lambda: session)
+        result = harness.get_sales_summary(days=7)
+
+    assert result["summary"]["total_revenue"] == 220.0
+    assert result["channels"] == [
+        {"channel": "shopify", "orders": 1, "revenue": 100.0, "avg_order_value": 100.0},
+        {"channel": "tiktok", "orders": 1, "revenue": 80.0, "avg_order_value": 80.0},
+        {"channel": "discord", "orders": 1, "revenue": 40.0, "avg_order_value": 40.0},
+    ]
+    assert result["summary"]["top_channel_by_revenue"] == "shopify"
+    assert result["read_only"] is True
+
+
+def test_discord_sales_summary_filters_by_keyword_and_breaks_down_channels():
+    engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine)
+    now = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                DiscordMessage(
+                    discord_message_id="discord-151-pack-1",
+                    channel_id="show-1",
+                    channel_name="collect-a-con-sales",
+                    author_id="42",
+                    author_name="Jeff",
+                    content="sell Pokemon 151 booster packs 60 cash",
+                    created_at=now - timedelta(days=1),
+                    parse_status="parsed",
+                    entry_kind="sale",
+                    money_in=60.0,
+                    money_out=0.0,
+                    category="Sealed",
+                    item_names_json=json.dumps(["Pokemon 151 Booster Packs"]),
+                ),
+                DiscordMessage(
+                    discord_message_id="discord-151-pack-2",
+                    channel_id="discord-store",
+                    channel_name="discord-store-sales",
+                    author_id="42",
+                    author_name="Jeff",
+                    content="151 pack bundle sell 40 venmo",
+                    created_at=now - timedelta(days=2),
+                    parse_status="parsed",
+                    entry_kind="sale",
+                    money_in=40.0,
+                    money_out=0.0,
+                    category="Sealed",
+                    item_names_json=json.dumps(["Pokemon 151 Booster Pack Bundle"]),
+                ),
+                DiscordMessage(
+                    discord_message_id="discord-slab",
+                    channel_id="discord-store",
+                    channel_name="discord-store-sales",
+                    author_id="42",
+                    author_name="Jeff",
+                    content="sell slab 200",
+                    created_at=now - timedelta(days=1),
+                    parse_status="parsed",
+                    entry_kind="sale",
+                    money_in=200.0,
+                    money_out=0.0,
+                    category="Slabs",
+                    item_names_json=json.dumps(["Premium Slab"]),
+                ),
+                DiscordMessage(
+                    discord_message_id="discord-buy",
+                    channel_id="discord-store",
+                    channel_name="discord-store-sales",
+                    author_id="42",
+                    author_name="Jeff",
+                    content="buy 151 packs 500",
+                    created_at=now - timedelta(days=1),
+                    parse_status="parsed",
+                    entry_kind="buy",
+                    money_in=0.0,
+                    money_out=500.0,
+                    category="Sealed",
+                    item_names_json=json.dumps(["Pokemon 151 Booster Pack"]),
+                ),
+            ]
+        )
+        session.commit()
+
+        harness = DegenOpsMcpHarness(session_factory=lambda: session)
+        result = harness.get_discord_sales_summary(product_query="151 packs", days=7)
+
+    assert result["read_only"] is True
+    assert result["summary"] == {
+        "matched_sales": 2,
+        "matched_revenue": 100.0,
+        "avg_sale_value": 50.0,
+        "top_channel_by_revenue": "collect-a-con-sales",
+        "top_category_by_revenue": "Sealed",
+    }
+    assert result["channels"] == [
+        {"channel": "collect-a-con-sales", "sales": 1, "revenue": 60.0, "avg_sale_value": 60.0},
+        {"channel": "discord-store-sales", "sales": 1, "revenue": 40.0, "avg_sale_value": 40.0},
+    ]
+    assert result["categories"] == [
+        {"category": "Sealed", "sales": 2, "revenue": 100.0, "avg_sale_value": 50.0}
+    ]
+    assert result["matches"][0]["discord_message_id"] == "discord-151-pack-1"
+    assert result["evidence"][0]["source"] == "discord_financial_rows"
+
+
+def test_employee_clock_status_returns_latest_running_entry_for_owner_scope_data():
+    engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine)
+    now = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        user = User(
+            username="alex",
+            password_hash="hash",
+            display_name="Alex",
+            role="viewer",
+            is_active=True,
+        )
+        session.add(user)
+        session.commit()
+        session.add(EmployeeProfile(user_id=user.id, clockify_user_id="clockify-alex"))
+        session.add_all(
+            [
+                ClockifyTimeEntry(
+                    clockify_entry_id="old-entry",
+                    clockify_user_id="clockify-alex",
+                    user_id=user.id,
+                    description="Morning shift",
+                    start_at=now - timedelta(hours=6),
+                    end_at=now - timedelta(hours=2),
+                    duration_seconds=4 * 3600,
+                    is_running=False,
+                ),
+                ClockifyTimeEntry(
+                    clockify_entry_id="running-entry",
+                    clockify_user_id="clockify-alex",
+                    user_id=user.id,
+                    description="Afternoon shift",
+                    start_at=now - timedelta(minutes=45),
+                    end_at=None,
+                    duration_seconds=0,
+                    is_running=True,
+                ),
+            ]
+        )
+        session.commit()
+
+        harness = DegenOpsMcpHarness(session_factory=lambda: session)
+        result = harness.get_employee_clock_status(person_query="Alex", days=1)
+
+    assert result["summary"]["matched_employee_count"] == 1
+    assert result["employees"][0]["display_name"] == "Alex"
+    assert result["employees"][0]["clock_status"] == "clocked_in"
+    assert result["employees"][0]["latest_entry"]["description"] == "Afternoon shift"
+    assert result["read_only"] is True
+
+
+def test_employee_ops_status_summarizes_supply_buylist_and_timeoff_queues():
+    engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine)
+    now = datetime.now(timezone.utc)
+    today = now.date()
+    with Session(engine) as session:
+        user = User(
+            username="alex",
+            password_hash="hash",
+            display_name="Alex",
+            role="viewer",
+            is_active=True,
+        )
+        session.add(user)
+        session.commit()
+        session.add_all(
+            [
+                SupplyRequest(
+                    submitted_by_user_id=user.id,
+                    title="Top loaders",
+                    description="Need more 35pt top loaders",
+                    urgency="high",
+                    status="submitted",
+                    created_at=now - timedelta(hours=2),
+                ),
+                BuylistSubmission(
+                    submitted_by_user_id=user.id,
+                    customer_name="Walk-in seller",
+                    status="submitted",
+                    totals_json=json.dumps({"offer_total": 125.0}),
+                    created_at=now - timedelta(hours=1),
+                ),
+                TimeOffRequest(
+                    submitted_by_user_id=user.id,
+                    start_date=today + timedelta(days=3),
+                    end_date=today + timedelta(days=4),
+                    status="approved",
+                    reason="Family",
+                    created_at=now - timedelta(days=1),
+                ),
+            ]
+        )
+        session.commit()
+
+        harness = DegenOpsMcpHarness(session_factory=lambda: session)
+        result = harness.get_employee_ops_status(person_query="Alex", days=7, limit=10)
+
+    assert result["summary"]["person_query"] == "Alex"
+    assert result["summary"]["supply_requests"] == {"submitted": 1}
+    assert result["summary"]["buylist_submissions"] == {"submitted": 1}
+    assert result["summary"]["time_off_requests"] == {"approved": 1}
+    assert {row["kind"] for row in result["items"]} == {
+        "supply_request",
+        "buylist_submission",
+        "time_off_request",
+    }
+    assert result["read_only"] is True
+
+
+def test_ops_memory_respects_scope_and_active_filter():
+    engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine)
+    now = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                OpsBotMemory(
+                    scope="public",
+                    key="default_channel_question",
+                    value="Ask whether top-products questions mean TikTok, Shopify, Discord, or all channels.",
+                    tags_json=json.dumps(["preference"]),
+                    created_at=now,
+                ),
+                OpsBotMemory(
+                    scope="owner",
+                    key="reserve_floor",
+                    value="Owner cash reserve floor must be configured before safety verdicts.",
+                    tags_json=json.dumps(["cash"]),
+                    created_at=now,
+                ),
+                OpsBotMemory(
+                    scope="employee",
+                    key="stream_room_note",
+                    value="Employees can ask for TikTok product sales but not owner cash.",
+                    tags_json=json.dumps(["scope"]),
+                    created_at=now,
+                ),
+                OpsBotMemory(
+                    scope="public",
+                    key="inactive",
+                    value="Do not show this.",
+                    is_active=False,
+                    created_at=now,
+                ),
+            ]
+        )
+        session.commit()
+
+        employee_result = DegenOpsMcpHarness(session_factory=lambda: session).get_ops_memory(
+            query="",
+            audience_scope="employee",
+        )
+        owner_result = DegenOpsMcpHarness(session_factory=lambda: session).get_ops_memory(
+            query="reserve",
+            audience_scope="owner",
+        )
+
+    assert [row["key"] for row in employee_result["memories"]] == [
+        "stream_room_note",
+        "default_channel_question",
+    ]
+    assert "reserve_floor" not in [row["key"] for row in employee_result["memories"]]
+    assert owner_result["memories"][0]["key"] == "reserve_floor"
+    assert owner_result["read_only"] is True
+
+
+def test_ops_memory_proposal_is_read_only_and_does_not_write():
+    engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        harness = DegenOpsMcpHarness(session_factory=lambda: session)
+        result = harness.propose_ops_memory(
+            key="weekly_update_day",
+            value="Partner update cadence is Monday morning.",
+            scope="partner",
+            tags=["partner-update"],
+            proposed_by="Jeff",
+        )
+        rows = session.exec(select(OpsBotMemory)).all()
+
+    assert rows == []
+    assert result["proposal"]["key"] == "weekly_update_day"
+    assert result["proposal"]["scope"] == "partner"
+    assert result["requires_owner_approval"] is True
+    assert result["read_only"] is True
+
+
+def test_weekly_partner_update_draft_uses_read_only_business_snapshots(monkeypatch):
+    harness = DegenOpsMcpHarness(session_factory=lambda: FakeSession())
+    monkeypatch.setattr(
+        harness,
+        "get_finance_snapshot",
+        lambda days=7: {
+            "finance_statement": {
+                "revenue": 10000.0,
+                "operating_profit": 1500.0,
+                "operating_expenses": 2500.0,
+            },
+            "read_only": True,
+        },
+    )
+    monkeypatch.setattr(
+        harness,
+        "get_sales_summary",
+        lambda days=7: {
+            "summary": {"total_revenue": 2200.0, "total_orders": 30, "top_channel_by_revenue": "tiktok"},
+            "channels": [{"channel": "tiktok", "revenue": 1200.0, "orders": 20}],
+            "read_only": True,
+        },
+    )
+    monkeypatch.setattr(
+        harness,
+        "get_inventory_snapshot",
+        lambda: {"inventory_snapshot": {"active_items": 42, "estimated_list_value": 9000.0}, "read_only": True},
+    )
+
+    result = harness.generate_weekly_partner_update_draft(days=7, audience_scope="partner")
+
+    assert result["read_only"] is True
+    assert result["write_performed"] is False
+    assert result["approval_required"] is True
+    assert "Weekly Degen Ops Update" in result["draft"]
+    assert "Revenue: $10,000" in result["draft"]
+    assert "Top channel: tiktok" in result["draft"]
+    assert result["evidence"][0]["source"] == "finance_snapshot"
+
+
 def test_price_lookup_returns_inventory_price_history_and_recent_tiktok_sales():
     engine = create_engine("sqlite:///:memory:")
     SQLModel.metadata.create_all(engine)
@@ -462,6 +1039,69 @@ def test_price_lookup_returns_inventory_price_history_and_recent_tiktok_sales():
     assert result["inventory_matches"][0]["latest_price_history"]["source"] == "tcgtracking"
     assert result["recent_tiktok_sales"]["summary"]["matched_quantity"] == 2
     assert result["evidence"][0]["source"] == "inventory_items"
+
+
+def test_price_lookup_uses_cross_channel_recent_sales_when_inventory_missing():
+    engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine)
+    now = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                TikTokOrder(
+                    tiktok_order_id="tt-151-price-cross",
+                    order_number="order-151-price-cross",
+                    created_at=now - timedelta(days=1),
+                    updated_at=now - timedelta(days=1),
+                    subtotal_price=30.0,
+                    financial_status="paid",
+                    line_items_summary_json=json.dumps(
+                        [{"title": "Pokemon 151 Booster Pack", "quantity": 2, "unit_price": 15.0}]
+                    ),
+                ),
+                ShopifyOrder(
+                    shopify_order_id="shopify-151-price-cross",
+                    order_number="S151",
+                    created_at=now - timedelta(days=1),
+                    updated_at=now - timedelta(days=1),
+                    subtotal_price=40.0,
+                    total_price=44.0,
+                    financial_status="paid",
+                    line_items_summary_json=json.dumps(
+                        [{"title": "Pokemon 151 Booster Pack", "quantity": 2, "unit_price": 20.0}]
+                    ),
+                ),
+                DiscordMessage(
+                    discord_message_id="discord-151-price-cross",
+                    channel_id="store-sales",
+                    channel_name="discord-store-sales",
+                    author_id="42",
+                    author_name="Jeff",
+                    content="sell Pokemon 151 booster packs 25 cash",
+                    created_at=now - timedelta(days=1),
+                    parse_status="parsed",
+                    entry_kind="sale",
+                    money_in=25.0,
+                    money_out=0.0,
+                    category="Sealed",
+                    item_names_json=json.dumps(["Pokemon 151 Booster Pack"]),
+                ),
+            ]
+        )
+        session.commit()
+
+        harness = DegenOpsMcpHarness(session_factory=lambda: session)
+        result = harness.get_price_lookup(query="151 booster pack", days=7)
+
+    assert result["summary"]["recommended_price"] == 19.0
+    assert result["summary"]["recommended_price_source"] == "recent_cross_channel_avg_sale_price"
+    assert result["summary"]["recent_cross_channel_quantity"] == 5
+    assert result["summary"]["recent_cross_channel_revenue"] == 95.0
+    assert result["recent_channel_prices"] == [
+        {"channel": "tiktok", "quantity": 2, "revenue": 30.0, "avg_sale_price": 15.0},
+        {"channel": "shopify", "quantity": 2, "revenue": 40.0, "avg_sale_price": 20.0},
+        {"channel": "discord", "quantity": 1, "revenue": 25.0, "avg_sale_price": 25.0},
+    ]
 
 
 def test_price_lookup_reports_data_gap_when_no_price_sources_match():
@@ -544,6 +1184,83 @@ def test_market_trend_lookup_compares_recent_and_previous_tiktok_windows_with_pr
     assert result["price_history_trend"]["latest_market_price"] == 32.0
 
 
+def test_market_trend_lookup_uses_cross_channel_sales_when_tiktok_is_not_enough():
+    engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine)
+    now = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                ShopifyOrder(
+                    shopify_order_id="shopify-current-trend",
+                    order_number="S-current",
+                    created_at=now - timedelta(days=1),
+                    updated_at=now - timedelta(days=1),
+                    subtotal_price=60.0,
+                    total_price=66.0,
+                    financial_status="paid",
+                    line_items_summary_json=json.dumps(
+                        [{"title": "Pokemon 151 Booster Pack", "quantity": 2, "unit_price": 30.0}]
+                    ),
+                ),
+                ShopifyOrder(
+                    shopify_order_id="shopify-previous-trend",
+                    order_number="S-previous",
+                    created_at=now - timedelta(days=10),
+                    updated_at=now - timedelta(days=10),
+                    subtotal_price=40.0,
+                    total_price=44.0,
+                    financial_status="paid",
+                    line_items_summary_json=json.dumps(
+                        [{"title": "Pokemon 151 Booster Pack", "quantity": 2, "unit_price": 20.0}]
+                    ),
+                ),
+                DiscordMessage(
+                    discord_message_id="discord-current-trend",
+                    channel_id="show-sales",
+                    channel_name="show-sales",
+                    author_id="42",
+                    author_name="Jeff",
+                    content="sell Pokemon 151 booster pack 35",
+                    created_at=now - timedelta(days=2),
+                    parse_status="parsed",
+                    entry_kind="sale",
+                    money_in=35.0,
+                    money_out=0.0,
+                    category="Sealed",
+                    item_names_json=json.dumps(["Pokemon 151 Booster Pack"]),
+                ),
+                DiscordMessage(
+                    discord_message_id="discord-previous-trend",
+                    channel_id="show-sales",
+                    channel_name="show-sales",
+                    author_id="42",
+                    author_name="Jeff",
+                    content="sell Pokemon 151 booster pack 25",
+                    created_at=now - timedelta(days=11),
+                    parse_status="parsed",
+                    entry_kind="sale",
+                    money_in=25.0,
+                    money_out=0.0,
+                    category="Sealed",
+                    item_names_json=json.dumps(["Pokemon 151 Booster Pack"]),
+                ),
+            ]
+        )
+        session.commit()
+
+        harness = DegenOpsMcpHarness(session_factory=lambda: session)
+        result = harness.get_market_trend_lookup(query="151 booster pack", days=7)
+
+    assert result["summary"]["trend_direction"] == "up"
+    assert result["summary"]["cross_channel_direction"] == "up"
+    assert result["cross_channel_trend"]["current_window"]["quantity"] == 3
+    assert result["cross_channel_trend"]["current_window"]["avg_price"] == 31.67
+    assert result["cross_channel_trend"]["previous_window"]["avg_price"] == 21.67
+    assert result["cross_channel_trend"]["channels"] == ["discord", "shopify"]
+    assert "No recent TikTok comparison windows matched query='151 booster pack'." in result["data_gaps"]
+
+
 def test_market_trend_lookup_reports_data_gap_without_comparison_points():
     engine = create_engine("sqlite:///:memory:")
     SQLModel.metadata.create_all(engine)
@@ -554,6 +1271,48 @@ def test_market_trend_lookup_reports_data_gap_without_comparison_points():
     assert result["summary"]["trend_direction"] == "unknown"
     assert "No recent TikTok comparison windows matched query='missing card'." in result["data_gaps"]
     assert "No stored price-history trend matched query='missing card'." in result["data_gaps"]
+
+
+def test_web_search_returns_cited_results_from_search_page():
+    html = """
+    <html><body>
+      <a class="result__a" href="https://www.pricecharting.com/game/pokemon-scarlet-&-violet-151/booster-pack">
+        Pokemon 151 Booster Pack Prices
+      </a>
+      <a class="result__snippet">Recent sold prices and market chart.</a>
+    </body></html>
+    """
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, text=html, request=request)
+
+    harness = DegenOpsMcpHarness(
+        session_factory=lambda: FakeSession(),
+        web_client_factory=lambda: httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    result = harness.get_web_search(query="pokemon 151 booster pack price", limit=3)
+
+    assert result["summary"] == {
+        "query": "pokemon 151 booster pack price",
+        "result_count": 1,
+        "provider": "duckduckgo_html",
+    }
+    assert result["results"][0]["title"] == "Pokemon 151 Booster Pack Prices"
+    assert result["results"][0]["url"].startswith("https://www.pricecharting.com/")
+    assert result["results"][0]["snippet"] == "Recent sold prices and market chart."
+    assert result["evidence"] == [
+        {
+            "source": "web_search",
+            "provider": "duckduckgo_html",
+            "url": result["search_url"],
+            "detail": "Search results only; no page content was fetched.",
+        }
+    ]
+    assert result["read_only"] is True
+    assert requests[0].url.params["q"] == "pokemon 151 booster pack price"
 
 
 def test_mcp_harness_evaluate_inventory_buy_uses_context_and_returns_evidence(monkeypatch):
