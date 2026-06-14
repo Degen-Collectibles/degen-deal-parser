@@ -14,14 +14,14 @@ class PublicTikTokLiveStatusTests(unittest.TestCase):
         return json.loads(response.body)
 
     def test_public_status_reports_each_channel_without_internal_metrics(self) -> None:
-        checked_at = datetime(2026, 5, 25, 18, 30, tzinfo=timezone.utc)
+        checked_at = datetime.now(timezone.utc).replace(microsecond=0)
         sessions = [
             {
                 "ok": True,
                 "id": "main-live",
                 "title": "Fresh slab drops",
                 "username": "degencollectibles",
-                "start_time": 1779730200,
+                "start_time": int(checked_at.timestamp()) - 300,
                 "end_time": 0,
                 "gmv": 9999.99,
                 "sku_orders": 42,
@@ -46,7 +46,7 @@ class PublicTikTokLiveStatusTests(unittest.TestCase):
 
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["source"], "ops-tiktok-live-session-cache")
-        self.assertEqual(payload["updatedAt"], "2026-05-25T18:30:00+00:00")
+        self.assertEqual(payload["updatedAt"], checked_at.isoformat())
         self.assertEqual(payload["staleAfterSeconds"], 900)
         self.assertEqual([channel["handle"] for channel in payload["channels"]], ["@degencollectibles", "@degenboss0"])
         self.assertTrue(payload["channels"][0]["isLive"])
