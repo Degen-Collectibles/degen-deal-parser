@@ -97,6 +97,7 @@ STREAM_METRIC_SOURCE_ORDER_ACTIVITY_FALLBACK = "order_activity_fallback"
 RECENT_ORDER_ACTIVITY_FALLBACK_MINUTES = 30
 ORDER_ACTIVITY_FALLBACK_LOOKBACK_HOURS = 12
 ORDER_ACTIVITY_FALLBACK_STREAM_RANGE_MAX_DAYS = 7
+LIVE_SESSION_OPEN_MAX_SECONDS = 24 * 60 * 60
 _LIVE_PRODUCTS_CACHE_TTL_SECONDS = 10.0
 _live_products_cache: dict[str, Any] = {}
 _live_products_cache_lock = threading.Lock()
@@ -128,7 +129,7 @@ PUBLIC_TIKTOK_LIVE_STATUS_HEADERS = {
 def _stream_session_recency_key(session_data: dict) -> tuple[int, int, int]:
     end_ts = int(session_data.get("end_time") or 0)
     start_ts = int(session_data.get("start_time") or 0)
-    is_active = 1 if end_ts == 0 and start_ts > 0 else 0
+    is_active = 1 if end_ts == 0 and start_ts > 0 and not _stream_session_is_stale_open(session_data) else 0
     return (is_active, end_ts, start_ts)
 
 
@@ -142,6 +143,20 @@ def _session_username(session_data: Optional[dict]) -> str:
     return str(session_data.get("username") or "").strip().lstrip("@").lower()
 
 
+def _stream_session_is_stale_open(session_data: Optional[dict], now: Optional[datetime] = None) -> bool:
+    if not session_data:
+        return False
+    try:
+        start_ts = int(session_data.get("start_time") or 0)
+        end_ts = int(session_data.get("end_time") or 0)
+    except (TypeError, ValueError):
+        return False
+    if start_ts <= 0 or end_ts > 0:
+        return False
+    now_ts = int((_coerce_utc_datetime(now) or datetime.now(timezone.utc)).timestamp())
+    return now_ts >= start_ts and (now_ts - start_ts) > LIVE_SESSION_OPEN_MAX_SECONDS
+
+
 def _stream_session_is_live(session_data: Optional[dict]) -> bool:
     if not session_data:
         return False
@@ -150,7 +165,7 @@ def _stream_session_is_live(session_data: Optional[dict]) -> bool:
     if start_ts <= 0:
         return False
     if end_ts <= 0:
-        return True
+        return not _stream_session_is_stale_open(session_data)
     now_ts = datetime.now(timezone.utc).timestamp()
     return (now_ts - end_ts) < 900
 
@@ -163,6 +178,8 @@ def _stream_session_interval(session_data: Optional[dict]) -> Optional[tuple[int
         return None
     end_ts = int(session_data.get("end_time") or 0)
     if end_ts <= 0:
+        if _stream_session_is_stale_open(session_data):
+            return None
         end_ts = int(datetime.now(timezone.utc).timestamp())
     if end_ts < start_ts:
         end_ts = start_ts
@@ -289,10 +306,15 @@ def _build_stream_context(
 ) -> dict[str, Any]:
     creator = _normalize_creator(selected_creator) or _creator_from_stream_id(legacy_stream_id) or DEFAULT_STREAM_CREATOR
     creator_sessions = _creator_stream_sessions(creator)
-    live_session = creator_sessions[0] if creator_sessions else None
+    live_session = next(
+        (session_data for session_data in creator_sessions if not _stream_session_is_stale_open(session_data)),
+        None,
+    )
     snapshot = _get_live_session_snapshot()
     if not live_session and snapshot.get("ok") and _session_username(snapshot) == creator:
         live_session = dict(snapshot)
+        if _stream_session_is_stale_open(live_session):
+            live_session = None
 
     start = None
     end = None
