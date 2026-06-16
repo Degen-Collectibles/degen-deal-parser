@@ -880,24 +880,27 @@ def bank_reconciliation_export_csv(
     for row in rows:
         writer.writerow(
             [
-                row.row_index,
-                row.posted_at.date().isoformat() if row.posted_at else "",
-                row.account_label,
-                f"{float(row.amount or 0.0):.2f}",
-                row.expense_category or "uncategorized",
-                expense_category_label(row.expense_category or "uncategorized"),
-                row.expense_subcategory or "",
-                row.category_confidence or "",
-                row.category_reason or "",
-                row.classification,
-                classification_label(row.classification),
-                row.confidence,
-                row.review_status,
-                row.description,
-                row.match_reason,
-                row.matched_transaction_id or "",
-                row.matched_source_message_id or "",
-                row.review_note or "",
+                escape_spreadsheet_text(value)
+                for value in [
+                    row.row_index,
+                    row.posted_at.date().isoformat() if row.posted_at else "",
+                    row.account_label,
+                    f"{float(row.amount or 0.0):.2f}",
+                    row.expense_category or "uncategorized",
+                    expense_category_label(row.expense_category or "uncategorized"),
+                    row.expense_subcategory or "",
+                    row.category_confidence or "",
+                    row.category_reason or "",
+                    row.classification,
+                    classification_label(row.classification),
+                    row.confidence,
+                    row.review_status,
+                    row.description,
+                    row.match_reason,
+                    row.matched_transaction_id or "",
+                    row.matched_source_message_id or "",
+                    row.review_note or "",
+                ]
             ]
         )
     return Response(

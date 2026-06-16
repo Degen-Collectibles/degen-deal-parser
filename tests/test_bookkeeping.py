@@ -1,10 +1,12 @@
 import asyncio
 import base64
+import csv
 import hashlib
 import json
 import os
 import unittest
 from datetime import datetime, timezone
+from io import StringIO
 from unittest.mock import patch
 
 from cryptography.fernet import Fernet
@@ -29,7 +31,13 @@ _set_test_env_default("SESSION_SECRET", "bookkeeping-test-session-xxxxxxxxxxxxxx
 _set_test_env_default("ADMIN_PASSWORD", "bookkeeping-test-admin-password")
 _set_test_env_default("EMPLOYEE_TOKEN_HMAC_KEY", "bookkeeping-test-token-key")
 
-from app.discord.bookkeeping import fetch_google_sheet_export, read_tabular_rows, reconcile_bookkeeping_import
+from app.discord.bookkeeping import (
+    fetch_google_sheet_export,
+    infer_show_label_from_message,
+    normalize_bookkeeping_rows,
+    read_tabular_rows,
+    reconcile_bookkeeping_import,
+)
 import app.cache as cache_module
 from app.cache import cache_get, cache_set
 from app.models import (
@@ -135,6 +143,41 @@ class ReadTabularRowsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             read_tabular_rows("export.txt", b"some data")
 
+    def test_normalize_bookkeeping_rows_skips_card_reference_tabs(self):
+        rows = [
+            {
+                "__sheet_name": "CardList",
+                "set": "1st Edition Base Set",
+                "shortcut": "1B",
+                "number": "4/102",
+                "card_name": "Charizard",
+                "rarity_variant": "Holo Rare",
+                "combined": "1st Edition Base Set - 4/102 - Charizard",
+            },
+            {
+                "__sheet_name": "INCOME",
+                "date": "2026-05-17",
+                "amount": "100",
+                "payment": "cash",
+                "notes": "show sale",
+            },
+        ]
+
+        normalized = normalize_bookkeeping_rows(rows)
+
+        self.assertEqual(len(normalized), 1)
+        self.assertEqual(normalized[0]["sheet_name"], "INCOME")
+        self.assertEqual(normalized[0]["entry_kind"], "sale")
+        self.assertEqual(normalized[0]["amount"], 100.0)
+
+    def test_infer_show_label_strips_sheet_url_before_colon_split(self):
+        label = infer_show_label_from_message(
+            "May 16\nhttps://docs.google.com/spreadsheets/d/example/edit?gid=0",
+            "Discord bookkeeping import",
+        )
+
+        self.assertEqual(label, "May 16")
+
 
 class GoogleSheetExportFetchTests(unittest.TestCase):
     def test_follows_safe_google_redirect_before_streaming_export(self):
@@ -172,7 +215,11 @@ class GoogleSheetExportFetchTests(unittest.TestCase):
                 if len(self.streamed_urls) == 1:
                     return FakeResponse(
                         status_code=302,
-                        headers={"location": "https://docs.google.com/spreadsheets/d/abc/export?format=xlsx&gid=0"},
+                        headers={
+                            "location": (
+                                "https://doc-10-18-sheets.googleusercontent.com/exported-spreadsheet.xlsx"
+                            )
+                        },
                     )
                 return FakeResponse()
 
@@ -188,6 +235,32 @@ class GoogleSheetExportFetchTests(unittest.TestCase):
         class FakeResponse:
             status_code = 302
             headers = {"location": "https://evil.example/export.xlsx"}
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+        class FakeAsyncClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            def stream(self, method, url):
+                return FakeResponse()
+
+        export_url = "https://docs.google.com/spreadsheets/d/abc/export?format=xlsx"
+        with patch("app.discord.bookkeeping.httpx.AsyncClient", return_value=FakeAsyncClient()):
+            with self.assertRaises(ValueError):
+                asyncio.run(fetch_google_sheet_export(export_url))
+
+    def test_rejects_google_sheet_export_redirect_to_non_sheet_googleusercontent_host(self):
+        class FakeResponse:
+            status_code = 302
+            headers = {"location": "https://docs-usercontent.googleusercontent.com/export.xlsx"}
 
             async def __aenter__(self):
                 return self
@@ -420,6 +493,60 @@ class PlaidWebhookVerificationTests(unittest.TestCase):
                 self.assertEqual(cache_get("other:test"), {"keep": True})
         finally:
             cache_module._cache.clear()
+            engine.dispose()
+
+    def test_bank_reconciliation_export_escapes_formula_like_text_cells(self):
+        from app.routers.bookkeeping import bank_reconciliation_export_csv
+
+        engine = _fresh_engine()
+        try:
+            with Session(engine) as session:
+                session.add(
+                    BankStatementImport(
+                        id=1,
+                        label="Chase import",
+                        account_label="Chase Checking",
+                    )
+                )
+                session.add(
+                    BankTransaction(
+                        id=101,
+                        import_id=1,
+                        row_index=1,
+                        account_label="Chase Checking",
+                        account_type="checking",
+                        posted_at=_dt(2026, 5, 25),
+                        description='=HYPERLINK("http://evil.test","x")',
+                        description_stem="HYPERLINK",
+                        amount=-12.34,
+                        classification="expense_or_purchase_needs_review",
+                        expense_category="uncategorized",
+                        category_reason="+SUM(1,2)",
+                        match_reason="-cmd",
+                        review_note="@risk",
+                    )
+                )
+                session.commit()
+
+                with patch("app.routers.bookkeeping.require_role_response", return_value=None):
+                    response = bank_reconciliation_export_csv(
+                        request=object(),
+                        import_id=1,
+                        classification="",
+                        expense_category="",
+                        review_status="",
+                        attention=False,
+                        expenses_only=True,
+                        search="",
+                        session=session,
+                    )
+
+            exported_row = next(csv.DictReader(StringIO(response.body.decode("utf-8"))))
+            self.assertTrue(exported_row["description"].startswith("'="))
+            self.assertTrue(exported_row["category_reason"].startswith("'+"))
+            self.assertTrue(exported_row["match_reason"].startswith("'-"))
+            self.assertTrue(exported_row["review_note"].startswith("'@"))
+        finally:
             engine.dispose()
 
 

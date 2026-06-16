@@ -1742,6 +1742,86 @@ def test_ledger_transaction_edit_form_preserves_missing_financial_fields_on_part
     assert transaction.expense_category == "inventory_purchases"
 
 
+def test_ledger_transaction_edit_form_preserves_trade_cash_legs_on_partial_post():
+    from app.routers import ledger as ledger_router
+
+    edit_form = getattr(ledger_router, "ledger_transaction_edit_form", None)
+    assert edit_form is not None
+
+    engine = make_engine()
+    occurred_at = datetime(2026, 5, 19, 12, tzinfo=timezone.utc)
+    with Session(engine) as session:
+        message = DiscordMessage(
+            id=1807,
+            discord_message_id="trade-row-message-partial",
+            channel_id="offline-cash-channel",
+            channel_name="offline-cash",
+            author_name="tester",
+            content="Trade top out bottom in plus 195 zelle",
+            created_at=occurred_at,
+            parse_status=PARSE_PARSED,
+            deal_type="trade",
+            entry_kind="trade",
+            payment_method="zelle",
+            cash_direction="to_store",
+            amount=195.0,
+            money_in=195.0,
+            money_out=400.0,
+            expense_category="inventory",
+            needs_review=False,
+        )
+        session.add(message)
+        session.add(
+            Transaction(
+                id=1808,
+                source_message_id=1807,
+                occurred_at=occurred_at,
+                parse_status="parsed",
+                entry_kind="trade",
+                payment_method="zelle",
+                cash_direction="to_store",
+                expense_category="inventory",
+                amount=195.0,
+                money_in=195.0,
+                money_out=400.0,
+                source_content="Trade top out bottom in plus 195 zelle",
+            )
+        )
+        session.commit()
+
+        with patch("app.routers.ledger.require_role_response", return_value=None):
+            response = edit_form(
+                make_request(
+                    "/ledger/transactions/1807/edit-form",
+                    method="POST",
+                    headers=[(b"x-requested-with", b"fetch")],
+                ),
+                source_message_id=1807,
+                entry_kind=None,
+                amount=None,
+                payment_method=None,
+                expense_category="inventory_purchases",
+                notes=None,
+                selected_source="cash",
+                session=session,
+            )
+        message = session.get(DiscordMessage, 1807)
+        transaction = session.exec(select(Transaction).where(Transaction.source_message_id == 1807)).one()
+
+    payload = json.loads(response.body)
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert message.entry_kind == "trade"
+    assert message.amount == 195.0
+    assert message.money_in == 195.0
+    assert message.money_out == 400.0
+    assert transaction.entry_kind == "trade"
+    assert transaction.amount == 195.0
+    assert transaction.money_in == 195.0
+    assert transaction.money_out == 400.0
+    assert transaction.expense_category == "inventory_purchases"
+
+
 def test_ledger_transaction_edit_form_updates_discord_source_transaction():
     from app.routers import ledger as ledger_router
 

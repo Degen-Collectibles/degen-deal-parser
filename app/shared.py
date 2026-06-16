@@ -236,6 +236,18 @@ except ImportError:
     _upsert_tiktok_product_row = None
 
 
+SPREADSHEET_FORMULA_PREFIXES = ("=", "+", "-", "@")
+
+
+def escape_spreadsheet_text(value: object) -> object:
+    if not isinstance(value, str):
+        return value
+    stripped = value.lstrip()
+    if stripped and stripped[0] in SPREADSHEET_FORMULA_PREFIXES:
+        return f"'{value}"
+    return value
+
+
 settings = get_settings()
 
 settings = get_settings()
@@ -5936,7 +5948,7 @@ def csv_response(filename: str, rows: list[dict]) -> Response:
     writer = csv.DictWriter(buffer, fieldnames=fieldnames)
     writer.writeheader()
     for row in rows:
-        writer.writerow(row)
+        writer.writerow({key: escape_spreadsheet_text(value) for key, value in row.items()})
 
     return Response(
         content=buffer.getvalue(),

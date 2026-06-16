@@ -17,7 +17,7 @@ from ..attachment_repair import (
     row_status_snapshot,
 )
 from ..attachment_storage import delete_attachment_cache_file, write_attachment_cache_file
-from .bookkeeping import auto_import_public_google_sheet, extract_google_sheet_url
+from .bookkeeping import auto_import_public_google_sheet, extract_google_sheet_url, get_existing_import_by_source_url
 from ..config import get_settings
 from ..db import engine, managed_session, run_write_with_retry
 from ..models import (
@@ -709,6 +709,10 @@ async def maybe_auto_import_bookkeeping_message(message: discord.Message) -> Non
     if not sheet_url:
         return
 
+    with managed_session() as session:
+        if get_existing_import_by_source_url(session, sheet_url):
+            return
+
     try:
         imported_id = await auto_import_public_google_sheet(
             message_text=message.content or "",
@@ -825,8 +829,10 @@ async def audit_recent_channel_history(
                     skipped_count += 1
                 elif action == "inserted":
                     inserted_count += 1
+                    await maybe_auto_import_bookkeeping_message(message)
                 else:
                     updated_count += 1
+                    await maybe_auto_import_bookkeeping_message(message)
 
         with managed_session() as session:
             stmt = (
@@ -900,8 +906,10 @@ async def audit_recent_channel_history(
                     skipped_count += 1
                 elif action == "inserted":
                     inserted_count += 1
+                    await maybe_auto_import_bookkeeping_message(fetched_message)
                 else:
                     updated_count += 1
+                    await maybe_auto_import_bookkeeping_message(fetched_message)
             else:
                 skipped_count += 1
 
@@ -1374,8 +1382,10 @@ class DealIngestBot(discord.Client):
                         skipped_count += 1
                     elif action == "inserted":
                         inserted_count += 1
+                        await maybe_auto_import_bookkeeping_message(message)
                     else:
                         updated_count += 1
+                        await maybe_auto_import_bookkeeping_message(message)
 
                 # Cancellation is checked inside the progress callback. We emit
                 # progress on the first message and then every few messages so

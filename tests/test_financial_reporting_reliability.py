@@ -9,6 +9,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 import app.routers.reports as reports_module
 from app.discord.transactions import get_transactions
 from app.models import DiscordMessage, PARSE_PARSED, Transaction
+from app.shared import csv_response
 
 
 def make_engine():
@@ -19,6 +20,26 @@ def make_engine():
 
 def make_request(role: str = "viewer"):
     return SimpleNamespace(state=SimpleNamespace(current_user=SimpleNamespace(role=role, username="tester")))
+
+
+def test_csv_response_escapes_formula_like_text_cells():
+    response = csv_response(
+        "report.csv",
+        [
+            {
+                "notes": '=HYPERLINK("http://evil.test","x")',
+                "trade_summary": "+SUM(1,2)",
+                "source_content": "-cmd",
+                "message": "@risk",
+            }
+        ],
+    )
+
+    exported_row = next(csv.DictReader(StringIO(response.body.decode("utf-8"))))
+    assert exported_row["notes"].startswith("'=")
+    assert exported_row["trade_summary"].startswith("'+")
+    assert exported_row["source_content"].startswith("'-")
+    assert exported_row["message"].startswith("'@")
 
 
 def add_message_and_transaction(

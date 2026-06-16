@@ -68,16 +68,8 @@ LEDGER_EXPORT_COLUMNS = [
     "review_note",
 ]
 
-SPREADSHEET_FORMULA_PREFIXES = ("=", "+", "-", "@")
-
-
 def _escape_spreadsheet_text(value: object) -> object:
-    if not isinstance(value, str):
-        return value
-    stripped = value.lstrip()
-    if stripped and stripped[0] in SPREADSHEET_FORMULA_PREFIXES:
-        return f"'{value}"
-    return value
+    return escape_spreadsheet_text(value)
 
 
 def _sanitize_ledger_export_row(row: list[object]) -> list[object]:
@@ -378,7 +370,11 @@ def ledger_transaction_edit_form(
     normalized_expense_category = (
         (expense_category if expense_category is not None else row.expense_category) or "uncategorized"
     ).strip() or "uncategorized"
-    money_in, money_out = _money_for_ledger_entry(normalized_entry_kind, normalized_amount)
+    if normalized_entry_kind == "trade" and amount is None:
+        money_in = round(float(row.money_in or 0.0), 2)
+        money_out = round(float(row.money_out or 0.0), 2)
+    else:
+        money_in, money_out = _money_for_ledger_entry(normalized_entry_kind, normalized_amount)
     incomplete = (
         parsed_amount is None
         or normalized_entry_kind == "unknown"

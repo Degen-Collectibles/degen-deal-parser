@@ -84,6 +84,19 @@ SHEET_ENTRY_KIND_HINTS = {
     "trade": "trade",
     "overview": None,
 }
+NON_BOOKKEEPING_SHEET_NAMES = {
+    "card_list",
+    "cardlist",
+    "paste",
+}
+CARD_REFERENCE_HEADER_HINTS = {
+    "set",
+    "shortcut",
+    "number",
+    "card_name",
+    "rarity_variant",
+    "combined",
+}
 MAX_GOOGLE_SHEET_EXPORT_BYTES = 8 * 1024 * 1024
 
 
@@ -115,7 +128,11 @@ def build_google_sheet_export_url(sheet_url: str) -> tuple[str, str]:
 def _allowed_google_export_url(url: str) -> bool:
     parsed = urlparse(url)
     hostname = (parsed.hostname or "").lower()
-    return parsed.scheme == "https" and hostname in {"docs.google.com", "drive.usercontent.google.com"}
+    if parsed.scheme != "https":
+        return False
+    if hostname in {"docs.google.com", "drive.usercontent.google.com"}:
+        return True
+    return re.fullmatch(r"doc-[a-z0-9-]+-sheets\.googleusercontent\.com", hostname) is not None
 
 
 async def fetch_google_sheet_export(export_url: str) -> bytes:
@@ -152,11 +169,13 @@ async def fetch_google_sheet_export(export_url: str) -> bytes:
 
 
 def infer_show_label_from_message(message_text: str, fallback_name: str) -> str:
-    text = (message_text or "").strip()
-    if ":" in text:
-        prefix = text.split(":", 1)[0].strip()
-        if prefix and len(prefix) <= 80:
-            return prefix
+    text = re.sub(r"https://docs\.google\.com/spreadsheets/[^\s>]+", "", message_text or "", flags=re.I).strip()
+    first_line = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    if ":" in first_line:
+        first_line = first_line.split(":", 1)[0].strip()
+    label = re.sub(r"[*_`]+", "", first_line).strip()
+    if label and len(label) <= 80:
+        return label
     return fallback_name
 
 
@@ -481,6 +500,30 @@ def is_header_like_row(row: dict[str, Any]) -> bool:
     return populated_values > 0 and header_like_values >= max(2, populated_values // 2)
 
 
+def is_non_bookkeeping_reference_sheet(sheet_name: Optional[str], row: dict[str, Any]) -> bool:
+    normalized_sheet = normalize_header(sheet_name)
+    if normalized_sheet in NON_BOOKKEEPING_SHEET_NAMES:
+        return True
+
+    row_headers = {normalize_header(key) for key in row.keys() if normalize_header(key)}
+    card_header_count = len(row_headers & CARD_REFERENCE_HEADER_HINTS)
+    bookkeeping_header_count = sum(
+        1
+        for key in row_headers
+        if looks_like_header(
+            key,
+            DATE_HEADER_HINTS
+            + ENTRY_KIND_HEADER_HINTS
+            + PAYMENT_HEADER_HINTS
+            + CATEGORY_HEADER_HINTS
+            + MONEY_IN_HEADER_HINTS
+            + MONEY_OUT_HEADER_HINTS
+            + AMOUNT_HEADER_HINTS,
+        )
+    )
+    return card_header_count >= 3 and bookkeeping_header_count == 0
+
+
 def infer_amount_fields(row: dict[str, Any]) -> tuple[Optional[float], Optional[float], Optional[float]]:
     money_in_candidates = collect_amount_candidates(row, MONEY_IN_HEADER_HINTS)
     money_out_candidates = collect_amount_candidates(row, MONEY_OUT_HEADER_HINTS)
@@ -610,6 +653,8 @@ def normalize_bookkeeping_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any
             if key != "__sheet_name" and normalize_header(key)
         }
         if not normalized_row:
+            continue
+        if is_non_bookkeeping_reference_sheet(sheet_name, normalized_row):
             continue
         if is_header_like_row(normalized_row):
             continue

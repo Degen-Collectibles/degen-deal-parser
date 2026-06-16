@@ -746,6 +746,50 @@ class ShowDealsAutoWatchMessageTests(unittest.TestCase):
         self.assertIsNotNone(stored_message)
         self.assertEqual(stored_message.channel_id, "5001")
 
+    def test_backfill_auto_imports_bookkeeping_sheet_messages(self):
+        guild = types.SimpleNamespace(id=111, name="Degen Guild")
+
+        class FakeChannel:
+            def __init__(self):
+                self.id = 5002
+                self.name = "2026-may-31-card-party"
+                self.guild = guild
+
+            def history(self, **_kwargs):
+                async def _messages():
+                    message = _fake_message(
+                        msg_id="9002",
+                        content="May 31 sales log https://docs.google.com/spreadsheets/d/sheet-123/edit#gid=0",
+                        channel_id="5002",
+                        channel_name=self.name,
+                    )
+                    message.channel = self
+                    message.guild = self.guild
+                    yield message
+
+                return _messages()
+
+        imported_messages = []
+
+        async def fake_auto_import(message):
+            imported_messages.append(str(message.id))
+
+        with patch("app.discord.discord_ingest.managed_session", self._managed_session), patch(
+            "app.discord.discord_ingest.get_enabled_channel_ids", return_value={5002}
+        ), patch(
+            "app.discord.discord_ingest.maybe_auto_import_bookkeeping_message",
+            side_effect=fake_auto_import,
+        ), patch("app.discord.discord_ingest.sync_attachment_assets"):
+            bot = discord_ingest_module.DealIngestBot(
+                intents=discord_ingest_module.discord.Intents.none()
+            )
+            with patch.object(bot, "get_channel", return_value=FakeChannel()):
+                result = asyncio.run(bot.backfill_channel(5002, limit=1))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["inserted"], 1)
+        self.assertEqual(imported_messages, ["9002"])
+
 
 class AvailableChannelChoiceTests(unittest.TestCase):
     def setUp(self):
