@@ -220,6 +220,9 @@ class BotConfig:
     owner_user_ids: set[str]
     allow_any_user_in_channel: bool
     scope_config: DiscordScopeConfig
+    db_auth_enabled: bool
+    legacy_allowlist_fallback: bool
+    allow_dms: bool
     model: str
     max_prompt_chars: int
     rate_limit_per_minute: int
@@ -252,6 +255,9 @@ def load_config_from_env(*, dry_run: bool = False) -> BotConfig:
     allowed_user_ids = _csv_set(os.getenv("DEGEN_OPS_DISCORD_ALLOWED_USER_IDS", ""))
     owner_user_ids = _csv_set(os.getenv("DEGEN_OPS_DISCORD_OWNER_USER_IDS", ""))
     allow_any = _truthy(os.getenv("DEGEN_OPS_DISCORD_ALLOW_ANY_USER_IN_CHANNEL", "false"))
+    db_auth_enabled = _truthy(os.getenv("DEGEN_OPS_DISCORD_DB_AUTH_ENABLED", "false"))
+    legacy_allowlist_fallback = _truthy(os.getenv("DEGEN_OPS_DISCORD_LEGACY_ALLOWLIST_FALLBACK", "true"))
+    allow_dms = _truthy(os.getenv("DEGEN_OPS_DISCORD_ALLOW_DMS", "false"))
     model = os.getenv("DEGEN_OPS_DISCORD_MODEL", "").strip()
     max_prompt_chars = int(os.getenv("DEGEN_OPS_DISCORD_MAX_PROMPT_CHARS", str(DEFAULT_MAX_PROMPT_CHARS)))
     rate_limit = int(os.getenv("DEGEN_OPS_DISCORD_RATE_LIMIT_PER_MINUTE", str(DEFAULT_RATE_LIMIT_PER_MINUTE)))
@@ -263,9 +269,9 @@ def load_config_from_env(*, dry_run: bool = False) -> BotConfig:
     missing = []
     if not token and not dry_run:
         missing.append("DEGEN_OPS_DISCORD_BOT_TOKEN")
-    if not allowed_channel_ids and not scope_config.has_mappings():
+    if not db_auth_enabled and not allowed_channel_ids and not scope_config.has_mappings():
         missing.append("DEGEN_OPS_DISCORD_ALLOWED_CHANNEL_IDS")
-    if not allowed_user_ids and not allow_any and not scope_config.has_mappings():
+    if not db_auth_enabled and not allowed_user_ids and not allow_any and not scope_config.has_mappings():
         missing.append("DEGEN_OPS_DISCORD_ALLOWED_USER_IDS or DEGEN_OPS_DISCORD_ALLOW_ANY_USER_IN_CHANNEL=true")
     if missing:
         raise RuntimeError("Missing required Degen Ops Discord bot config: " + ", ".join(missing))
@@ -277,6 +283,9 @@ def load_config_from_env(*, dry_run: bool = False) -> BotConfig:
         owner_user_ids=owner_user_ids,
         allow_any_user_in_channel=allow_any,
         scope_config=scope_config,
+        db_auth_enabled=db_auth_enabled,
+        legacy_allowlist_fallback=legacy_allowlist_fallback,
+        allow_dms=allow_dms,
         model=model,
         max_prompt_chars=max_prompt_chars,
         rate_limit_per_minute=rate_limit,
@@ -337,7 +346,19 @@ def resolve_discord_scope(
     return effective, "ok"
 
 
-def determine_message_scope(author_id: str, channel_id: str, config: BotConfig) -> tuple[str | None, str]:
+def determine_message_scope(
+    author_id: str,
+    channel_id: str,
+    config: BotConfig,
+    *,
+    db_scope: tuple[str | None, str] | None = None,
+) -> tuple[str | None, str]:
+    if config.db_auth_enabled and db_scope is not None:
+        scope, reason = db_scope
+        if scope:
+            return scope, reason
+        if not config.legacy_allowlist_fallback:
+            return None, reason
     if config.scope_config.has_mappings():
         return resolve_discord_scope(author_id, channel_id, config.scope_config)
     if channel_id in config.allowed_channel_ids and (
@@ -558,11 +579,20 @@ def should_respond(
     author_id: str,
     content: str,
     config: BotConfig,
+    db_scope: tuple[str | None, str] | None = None,
 ) -> tuple[bool, str]:
     if author_is_bot:
         return False, "bot_author"
     if not content.strip():
         return False, "empty_message"
+    if config.db_auth_enabled and db_scope is not None:
+        scope, reason = db_scope
+        if scope:
+            if len(content) > config.max_prompt_chars:
+                return False, "prompt_too_long"
+            return True, "ok"
+        if not config.legacy_allowlist_fallback:
+            return False, reason
     if config.scope_config.has_mappings():
         scope, reason = resolve_discord_scope(author_id, channel_id, config.scope_config)
         if not scope:
@@ -637,16 +667,49 @@ async def run_bot(config: BotConfig) -> None:
         channel_id = str(getattr(getattr(message, "channel", None), "id", ""))
         author = getattr(message, "author", None)
         author_id = str(getattr(author, "id", ""))
+        is_dm = getattr(message, "guild", None) is None
+        author_scope = None
+        db_scope = None
+        if config.db_auth_enabled:
+            from app.db import managed_session
+            from app.degen_ops_discord_auth import resolve_discord_author_scope
+
+            with managed_session() as session:
+                author_scope = resolve_discord_author_scope(
+                    session=session,
+                    discord_user_id=author_id,
+                    channel_id=channel_id,
+                    channel_scopes=config.scope_config.channel_scopes,
+                    allow_dm=config.allow_dms,
+                    is_dm=is_dm,
+                )
+            db_scope = (author_scope.scope, author_scope.reason)
         ok, reason = should_respond(
             author_is_bot=bool(getattr(author, "bot", False)),
             channel_id=channel_id,
             author_id=author_id,
             content=prompt,
             config=config,
+            db_scope=db_scope,
         )
         if not ok:
             if reason == "prompt_too_long":
                 await message.reply(f"Please keep requests under {config.max_prompt_chars} characters.", mention_author=False)
+            elif config.db_auth_enabled and reason in {
+                "discord_user_not_linked",
+                "linked_user_inactive",
+                "linked_user_missing",
+                "role_not_allowed",
+            }:
+                await message.reply(
+                    "I can't answer from this Discord account yet. Ask an admin to link your Discord user ID on your employee profile.",
+                    mention_author=False,
+                )
+            elif config.db_auth_enabled and reason in {"channel_not_mapped", "dm_not_allowed"}:
+                await message.reply(
+                    "I can help with Degen Ops questions in your access scope, but that request is restricted for your role or channel.",
+                    mention_author=False,
+                )
             return
 
         now = datetime.now(timezone.utc).timestamp()
@@ -654,7 +717,7 @@ async def run_bot(config: BotConfig) -> None:
             await message.reply("Rate limit hit. Give me a minute, then try again.", mention_author=False)
             return
 
-        resolved_scope, scope_reason = determine_message_scope(author_id, channel_id, config)
+        resolved_scope, scope_reason = determine_message_scope(author_id, channel_id, config, db_scope=db_scope)
         if not resolved_scope:
             return
 
@@ -668,6 +731,8 @@ async def run_bot(config: BotConfig) -> None:
             "scope_reason": scope_reason,
             "read_only": True,
         }
+        if author_scope is not None:
+            audit_base.update(author_scope.as_audit_fields())
 
         if prompt.strip() == "!ops whoami":
             await message.reply(
@@ -782,6 +847,9 @@ def main() -> int:
                     "allowed_user_count": len(config.allowed_user_ids),
                     "owner_user_count": len(config.owner_user_ids),
                     "allow_any_user_in_channel": config.allow_any_user_in_channel,
+                    "allow_dms": config.allow_dms,
+                    "db_auth_enabled": config.db_auth_enabled,
+                    "legacy_allowlist_fallback": config.legacy_allowlist_fallback,
                     "audit_log_path": str(config.audit_log_path),
                     "read_only": True,
                 },

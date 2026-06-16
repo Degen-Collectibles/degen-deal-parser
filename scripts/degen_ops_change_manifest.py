@@ -16,12 +16,22 @@ from scripts.degen_ops_readiness import REQUIRED_ARTIFACTS
 
 
 EXTRA_INTENDED_PATHS = {
+    "app/db.py",
+    "app/degen_ops_discord_auth.py",
     "app/models.py",
     "docs/ops/degen-ops-bot-improvement-plan.md",
+    "docs/ops/degen-ops-discord-employee-auth-prd.md",
+    "docs/superpowers/plans/2026-06-12-degen-ops-discord-employee-auth.md",
     "requirements.txt",
+    "app/routers/team_admin_employees.py",
+    "app/templates/team/admin/employee_detail.html",
+    "app/templates/team/admin/employees_list.html",
     "scripts/degen_ops_discord_bot.py",
+    "tests/test_admin_employee_list_search.py",
+    "tests/test_degen_ops_discord_auth.py",
     "tests/test_ops_agent.py",
     "tests/test_ops_mcp.py",
+    "tests/test_wave47_admin_tools.py",
 }
 
 

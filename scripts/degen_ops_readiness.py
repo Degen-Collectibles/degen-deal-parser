@@ -24,6 +24,7 @@ REQUIRED_ARTIFACTS = [
     "app/ops_mcp.py",
     "app/ops_agent.py",
     "app/ops_chat.py",
+    "app/degen_ops_discord_auth.py",
     "scripts/degen_ops_mcp.py",
     "scripts/degen_ops_mcp_smoke.py",
     "scripts/degen_ops_mcp_config.py",
@@ -50,6 +51,7 @@ REQUIRED_ARTIFACTS = [
     "docs/ops/degen-ops-hermes-mcp-pilot.md",
     "docs/ops/degen-ops-team-rollout-prd.md",
     "docs/ops/degen-ops-readonly-db-role.sql",
+    "docs/ops/degen-ops-discord-employee-auth-prd.md",
 ]
 
 
@@ -139,6 +141,43 @@ def _checks(repo_root: Path, scopes: dict[str, dict[str, Any]]) -> list[dict[str
         )
     else:
         checks.append(_fail_check("partner_scope_excludes_owner_only_raw_cash_and_loan_tools", "Partner scope cannot run the buy workflow."))
+
+    manager_tools = set(scopes.get("manager", {}).get("tools", []))
+    manager_bad_tools = manager_tools & {
+        "get_cash_snapshot",
+        "get_loan_and_payback_snapshot",
+        "evaluate_inventory_buy",
+        "generate_partner_update",
+    }
+    if not manager_tools:
+        checks.append(_fail_check("manager_scope_exists", "Manager scope is missing."))
+    elif manager_bad_tools:
+        checks.append(
+            _fail_check(
+                "manager_scope_excludes_owner_cash_loan_and_buy_tools",
+                f"Manager scope exposes: {', '.join(sorted(manager_bad_tools))}",
+            )
+        )
+    elif {"get_employee_clock_status", "get_employee_ops_status"}.issubset(manager_tools):
+        checks.append(
+            _pass_check(
+                "manager_scope_excludes_owner_cash_loan_and_buy_tools",
+                "Manager scope can answer employee ops status but excludes owner cash, loan, and buy tools.",
+            )
+        )
+    else:
+        checks.append(_fail_check("manager_scope_excludes_owner_cash_loan_and_buy_tools", "Manager scope is missing employee ops status tools."))
+
+    auth_module = (repo_root / "app/degen_ops_discord_auth.py").read_text(encoding="utf-8")
+    if (
+        '"reviewer": "employee"' in auth_module
+        and '"manager": "manager"' in auth_module
+        and "discord_user_not_linked" in auth_module
+        and "linked_user_inactive" in auth_module
+    ):
+        checks.append(_pass_check("discord_db_auth_is_deny_by_default", "Discord DB auth maps reviewer to employee and denies unlinked/inactive users."))
+    else:
+        checks.append(_fail_check("discord_db_auth_is_deny_by_default", "Discord DB auth role mapping or deny-by-default checks are missing."))
 
     if all(scope["chat_schema_matches_mcp_scope"] for scope in scopes.values()):
         checks.append(_pass_check("chat_tool_schemas_match_mcp_scopes", "Chat tool schemas match MCP scope tool lists."))

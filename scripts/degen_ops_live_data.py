@@ -15,50 +15,10 @@ if str(REPO_ROOT) not in sys.path:
 os.environ["LOG_TO_FILE"] = "false"
 
 from scripts.degen_ops_chat import sanitize
+from app.ops_mcp import DEGEN_OPS_SCOPE_TOOL_NAMES
 
 
-SCOPE_TOOLS = {
-    "owner": [
-        "get_ops_agent_manifest",
-        "get_finance_snapshot",
-        "get_cash_snapshot",
-        "get_inventory_snapshot",
-        "get_channel_velocity",
-        "get_loan_and_payback_snapshot",
-        "evaluate_inventory_buy",
-        "generate_partner_update",
-        "get_tiktok_agent_manifest",
-        "get_tiktok_status",
-        "get_tiktok_orders",
-        "get_tiktok_products",
-        "get_tiktok_buyer_insights",
-        "get_tiktok_product_performance",
-        "get_tiktok_live_snapshot",
-    ],
-    "tiktok": [
-        "get_ops_agent_manifest",
-        "get_tiktok_agent_manifest",
-        "get_tiktok_status",
-        "get_tiktok_orders",
-        "get_tiktok_products",
-        "get_tiktok_buyer_insights",
-        "get_tiktok_product_performance",
-        "get_tiktok_live_snapshot",
-    ],
-    "partner": [
-        "get_ops_agent_manifest",
-        "get_finance_snapshot",
-        "get_inventory_snapshot",
-        "get_channel_velocity",
-        "evaluate_inventory_buy",
-        "generate_partner_update",
-    ],
-    "employee": [
-        "get_ops_agent_manifest",
-        "get_inventory_snapshot",
-        "get_channel_velocity",
-    ],
-}
+SCOPE_TOOLS = {scope: list(tools) for scope, tools in DEGEN_OPS_SCOPE_TOOL_NAMES.items()}
 
 SMOKE_SCENARIO = {
     "lot_name": "Read-only smoke test lot",
@@ -76,6 +36,28 @@ def _tool_args(tool_name: str, *, days: int) -> dict[str, Any]:
         return {"days": days}
     if tool_name in {"evaluate_inventory_buy", "generate_partner_update"}:
         return {"scenario": dict(SMOKE_SCENARIO), "days": days}
+    if tool_name == "generate_weekly_partner_update_draft":
+        return {"days": days}
+    if tool_name in {"get_tiktok_orders", "get_tiktok_buyer_insights", "get_tiktok_product_performance"}:
+        return {"days": days, "limit": 5}
+    if tool_name in {"get_tiktok_products", "get_tiktok_live_snapshot", "get_tiktok_status", "get_tiktok_agent_manifest"}:
+        return {}
+    if tool_name in {"get_tiktok_product_sales", "get_shopify_product_sales", "get_discord_sales_summary"}:
+        return {"product_query": "151", "days": days, "limit": 5}
+    if tool_name in {"get_tiktok_top_products", "get_shopify_top_products"}:
+        return {"days": days, "limit": 5, "sort_by": "quantity"}
+    if tool_name == "get_price_lookup":
+        return {"query": "Pokemon 151 booster pack", "days": days, "limit": 5}
+    if tool_name == "get_market_trend_lookup":
+        return {"query": "Pokemon 151 booster pack", "days": days, "limit": 5}
+    if tool_name == "get_web_search":
+        return {"query": "Pokemon 151 booster pack market price", "limit": 3, "freshness": "recent"}
+    if tool_name in {"get_employee_clock_status", "get_employee_ops_status"}:
+        return {"person_query": "", "days": min(days, 7), "limit": 5}
+    if tool_name == "propose_ops_memory":
+        return {"key": "live_data_smoke", "value": "Read-only smoke proposal", "scope": "owner", "tags": ["smoke"]}
+    if tool_name == "get_ops_memory":
+        return {"query": "", "limit": 5}
     return {}
 
 
@@ -177,7 +159,7 @@ def _render_markdown(report: dict[str, Any]) -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Verify live Degen Ops read-only data access for one scope.")
-    parser.add_argument("--scope", choices=("owner", "partner", "employee", "tiktok"), required=True)
+    parser.add_argument("--scope", choices=("owner", "partner", "manager", "employee", "tiktok"), required=True)
     parser.add_argument("--database-url", default="", help="Temporary database URL override. The value is never printed.")
     parser.add_argument("--database-url-env", default="DEGEN_OPS_READONLY_DATABASE_URL")
     parser.add_argument("--days", type=int, default=90)

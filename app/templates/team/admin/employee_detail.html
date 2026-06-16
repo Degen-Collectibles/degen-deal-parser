@@ -214,6 +214,14 @@
                 <td style="padding:6px 0; color:var(--lx-muted);">Clockify user ID</td>
                 <td><input type="text" name="clockify_user_id" value="{{ profile.clockify_user_id or '' }}" {% if not can_edit_profile %}disabled{% endif %} style="width:320px; padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/></td>
             </tr>
+            <tr>
+                <td style="padding:6px 0; color:var(--lx-muted);">Discord user ID</td>
+                <td><input type="text" name="discord_user_id" value="{{ profile.discord_user_id or '' }}" {% if not can_edit_profile %}disabled{% endif %} style="width:320px; padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/></td>
+            </tr>
+            <tr>
+                <td style="padding:6px 0; color:var(--lx-muted);">Discord name</td>
+                <td><input type="text" name="discord_username" value="{{ profile.discord_username or '' }}" {% if not can_edit_profile %}disabled{% endif %} style="width:320px; padding:5px 8px; border-radius:6px; border:1px solid var(--lx-br); background:var(--lx-s2); color:var(--lx-text);"/></td>
+            </tr>
         </table>
         {% if can_edit_profile %}
         <button class="ta-btn" type="submit" style="margin-top:10px;">Save profile</button>

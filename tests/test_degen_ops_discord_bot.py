@@ -98,6 +98,9 @@ def _config(**overrides):
         "rate_limit_per_minute": 2,
         "audit_log_path": Path("logs/test.jsonl"),
         "config_env_path": None,
+        "db_auth_enabled": False,
+        "legacy_allowlist_fallback": True,
+        "allow_dms": False,
         "dry_run": True,
     }
     base.update(overrides)
@@ -181,6 +184,46 @@ def test_build_system_prompt_mentions_resolved_scope():
 
 def test_determine_message_scope_defaults_legacy_allowed_channels_to_partner():
     assert determine_message_scope("42", "123", _config()) == ("partner", "legacy_partner")
+
+
+def test_determine_message_scope_uses_db_auth_when_supplied():
+    config = _config(db_auth_enabled=True, allowed_channel_ids=set(), allowed_user_ids=set())
+
+    assert determine_message_scope("42", "123", config, db_scope=("employee", "db_auth")) == (
+        "employee",
+        "db_auth",
+    )
+
+
+def test_determine_message_scope_denies_db_auth_without_legacy_fallback():
+    config = _config(
+        db_auth_enabled=True,
+        legacy_allowlist_fallback=False,
+        allowed_channel_ids={"123"},
+        allowed_user_ids={"42"},
+    )
+
+    assert determine_message_scope("42", "123", config, db_scope=(None, "discord_user_not_linked")) == (
+        None,
+        "discord_user_not_linked",
+    )
+
+
+def test_load_config_from_env_allows_db_auth_and_dms_without_legacy_allowlists(monkeypatch, tmp_path):
+    monkeypatch.setenv("DEGEN_OPS_DISCORD_DB_AUTH_ENABLED", "true")
+    monkeypatch.setenv("DEGEN_OPS_DISCORD_LEGACY_ALLOWLIST_FALLBACK", "false")
+    monkeypatch.setenv("DEGEN_OPS_DISCORD_ALLOW_DMS", "true")
+    monkeypatch.setenv("DEGEN_OPS_DISCORD_AUDIT_LOG", str(tmp_path / "audit.jsonl"))
+    monkeypatch.delenv("DEGEN_OPS_DISCORD_ALLOWED_CHANNEL_IDS", raising=False)
+    monkeypatch.delenv("DEGEN_OPS_DISCORD_ALLOWED_USER_IDS", raising=False)
+
+    config = load_config_from_env(dry_run=True)
+
+    assert config.db_auth_enabled is True
+    assert config.legacy_allowlist_fallback is False
+    assert config.allow_dms is True
+    assert config.allowed_channel_ids == set()
+    assert config.allowed_user_ids == set()
 
 
 def test_determine_message_scope_uses_explicit_map_when_configured():

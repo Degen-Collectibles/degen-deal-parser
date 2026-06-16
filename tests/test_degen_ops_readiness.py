@@ -31,6 +31,7 @@ def test_readiness_report_confirms_scoped_read_only_code_and_flags_live_data_dec
     assert "evaluate_inventory_buy" not in report["scopes"]["employee"]["tools"]
     assert report["scopes"]["owner"]["tool_count"] == 29
     assert report["scopes"]["partner"]["tool_count"] == 17
+    assert report["scopes"]["manager"]["tool_count"] == 15
     assert report["scopes"]["tiktok"]["tool_count"] == 14
     assert "get_tiktok_orders" in report["scopes"]["tiktok"]["tools"]
     assert "get_cash_snapshot" not in report["scopes"]["tiktok"]["tools"]
@@ -40,6 +41,8 @@ def test_readiness_report_confirms_scoped_read_only_code_and_flags_live_data_dec
     assert all(check["status"] == "pass" for check in report["checks"])
     assert any(check["name"] == "missing_scope_defaults_to_employee" for check in report["checks"])
     assert any(check["name"] == "partner_access_package_is_redacted_and_secret_free" for check in report["checks"])
+    assert any(check["name"] == "manager_scope_excludes_owner_cash_loan_and_buy_tools" for check in report["checks"])
+    assert any(check["name"] == "discord_db_auth_is_deny_by_default" for check in report["checks"])
 
 
 def test_readiness_report_requires_expected_docs_and_scripts():
@@ -49,6 +52,7 @@ def test_readiness_report_requires_expected_docs_and_scripts():
 
     assert artifacts["app/ops_mcp.py"] is True
     assert artifacts["app/ops_chat.py"] is True
+    assert artifacts["app/degen_ops_discord_auth.py"] is True
     assert artifacts["scripts/degen_ops_chat.py"] is True
     assert artifacts["scripts/degen_ops_change_manifest.py"] is True
     assert artifacts["scripts/degen_ops_prompt_coverage.py"] is True
@@ -70,6 +74,7 @@ def test_readiness_report_requires_expected_docs_and_scripts():
     assert artifacts["docs/ops/degen-ops-answer-examples.json"] is True
     assert artifacts["docs/ops/degen-ops-team-rollout-prd.md"] is True
     assert artifacts["docs/ops/degen-ops-readonly-db-role.sql"] is True
+    assert artifacts["docs/ops/degen-ops-discord-employee-auth-prd.md"] is True
 
 
 def test_readiness_script_outputs_clean_json_when_run_directly():

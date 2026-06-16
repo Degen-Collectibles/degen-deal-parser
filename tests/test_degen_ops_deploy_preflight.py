@@ -21,8 +21,11 @@ def test_deploy_preflight_is_read_only_and_names_exact_targets():
         "discord_surface": "Degen Ops Bot",
     }
     assert "app/ops_mcp.py" in report["intended_files"]
+    assert "app/degen_ops_discord_auth.py" in report["intended_files"]
+    assert "app/routers/team_admin_employees.py" in report["intended_files"]
     assert "scripts/degen_ops_discord_bot.py" in report["intended_files"]
-    assert "tests/test_degen_ops_prompt_coverage.py" in report["intended_files"]
+    assert "tests/test_degen_ops_discord_auth.py" in report["intended_files"]
+    assert "tests/test_admin_employee_list_search.py" in report["intended_files"]
     assert "app/routers/bookkeeping.py" in report["known_unrelated_files"]
     assert "commit/push to origin/main or reviewed branch" in report["externally_visible_changes"]
     assert "restart Degen Ops Discord bot service" in report["externally_visible_changes"]

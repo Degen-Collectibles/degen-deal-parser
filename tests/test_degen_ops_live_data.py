@@ -2,35 +2,14 @@ from pathlib import Path
 import subprocess
 import sys
 
+from app.ops_mcp import DEGEN_OPS_SCOPE_TOOL_NAMES
 from scripts.degen_ops_live_data import build_live_data_report
 
 
 class RecordingRunner:
     def __init__(self, *, scope="employee", failing_tool=""):
         self.scope = scope
-        self.allowed_tools = {
-            "get_ops_agent_manifest",
-            "get_inventory_snapshot",
-            "get_channel_velocity",
-        }
-        if scope == "owner":
-            self.allowed_tools.update(
-                {
-                    "get_finance_snapshot",
-                    "get_cash_snapshot",
-                    "get_loan_and_payback_snapshot",
-                    "evaluate_inventory_buy",
-                    "generate_partner_update",
-                }
-            )
-        if scope == "partner":
-            self.allowed_tools.update(
-                {
-                    "get_finance_snapshot",
-                    "evaluate_inventory_buy",
-                    "generate_partner_update",
-                }
-            )
+        self.allowed_tools = set(DEGEN_OPS_SCOPE_TOOL_NAMES[scope])
         self.failing_tool = failing_tool
         self.calls = []
 
@@ -55,12 +34,10 @@ def test_employee_live_data_report_only_checks_employee_safe_tools():
     assert report["ok"] is True
     assert report["scope"] == "employee"
     assert report["database_url_source"] == "DEGEN_OPS_READONLY_DATABASE_URL"
-    assert [call[0] for call in runner.calls] == [
-        "get_ops_agent_manifest",
-        "get_inventory_snapshot",
-        "get_channel_velocity",
-    ]
-    assert "get_cash_snapshot" not in [check["tool"] for check in report["checks"]]
+    called_tools = [call[0] for call in runner.calls]
+    assert called_tools == list(DEGEN_OPS_SCOPE_TOOL_NAMES["employee"])
+    assert "get_cash_snapshot" not in called_tools
+    assert "evaluate_inventory_buy" not in called_tools
     assert all(check["status"] == "pass" for check in report["checks"])
 
 

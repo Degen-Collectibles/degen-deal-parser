@@ -262,6 +262,17 @@ def test_chat_tool_schemas_follow_partner_scope_without_owner_cash_tools():
     assert "get_loan_and_payback_snapshot" not in names
 
 
+def test_chat_tool_schemas_follow_manager_scope_without_owner_cash_tools():
+    schemas = tool_schemas_for_scope("manager")
+    names = {schema["function"]["name"] for schema in schemas}
+
+    assert "get_employee_clock_status" in names
+    assert "get_employee_ops_status" in names
+    assert "get_cash_snapshot" not in names
+    assert "get_loan_and_payback_snapshot" not in names
+    assert "evaluate_inventory_buy" not in names
+
+
 def test_chat_tool_schemas_follow_tiktok_scope_without_business_tools():
     schemas = tool_schemas_for_scope("tiktok")
     names = {schema["function"]["name"] for schema in schemas}

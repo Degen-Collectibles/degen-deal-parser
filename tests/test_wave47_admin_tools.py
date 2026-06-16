@@ -225,6 +225,35 @@ class SimplifiedAddEmployeeTests(unittest.TestCase, _W47Harness):
         )
         self.assertEqual(user.display_name, "Legal Only")
 
+    def test_profile_update_saves_discord_identity(self):
+        from app.auth import create_draft_employee
+        from app.models import EmployeeProfile
+
+        admin = self._login_as("admin")
+        user = create_draft_employee(
+            self.session,
+            created_by_user_id=admin.id,
+            display_name="Discord User",
+        )
+
+        response = self.client.post(
+            f"/team/admin/employees/{user.id}/profile-update",
+            data={
+                "csrf_token": self._csrf(),
+                "role": "employee",
+                "display_name": "Discord User",
+                "staff_kind": "storefront",
+                "discord_user_id": "<@111222333444555666>",
+                "discord_username": "@linked.discord",
+            },
+            follow_redirects=False,
+        )
+
+        self.assertIn(response.status_code, (302, 303))
+        profile = self.session.get(EmployeeProfile, user.id)
+        self.assertEqual(profile.discord_user_id, "111222333444555666")
+        self.assertEqual(profile.discord_username, "linked.discord")
+
 
 # ---------------------------------------------------------------------------
 # Employees list default active-only

@@ -131,6 +131,16 @@ def test_register_degen_ops_tools_employee_scope_limits_sensitive_tools():
     assert "get_web_search" in fake.tools
 
 
+def test_manager_scope_includes_employee_ops_but_excludes_owner_cash_and_loan_tools():
+    tools = set(DEGEN_OPS_SCOPE_TOOL_NAMES["manager"])
+
+    assert "get_employee_clock_status" in tools
+    assert "get_employee_ops_status" in tools
+    assert "get_cash_snapshot" not in tools
+    assert "get_loan_and_payback_snapshot" not in tools
+    assert "evaluate_inventory_buy" not in tools
+
+
 def test_register_degen_ops_tools_partner_scope_excludes_raw_cash_and_loan_tools():
     fake = FakeMcp()
     harness = DegenOpsMcpHarness(session_factory=lambda: FakeSession())

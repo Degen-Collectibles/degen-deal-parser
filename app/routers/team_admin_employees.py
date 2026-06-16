@@ -10,6 +10,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 from calendar import monthrange
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
@@ -717,6 +718,8 @@ def admin_employees_list(
                 User.username.ilike(q_like),
                 User.display_name.ilike(q_like),
                 EmployeeProfile.email_lookup_hash.ilike(q_like),
+                EmployeeProfile.discord_user_id.ilike(q_like),
+                EmployeeProfile.discord_username.ilike(q_like),
             )
         )
     rows = list(session.exec(stmt.limit(200)).all())
@@ -1814,6 +1817,8 @@ async def admin_employee_profile_update(
     hire_date: str = Form(default=""),
     termination_date: str = Form(default=""),
     clockify_user_id: str = Form(default=""),
+    discord_user_id: str = Form(default=""),
+    discord_username: str = Form(default=""),
     session: Session = Depends(get_session),
 ):
     denial, current = _permission_gate(request, session, "admin.employees.view")
@@ -1974,6 +1979,18 @@ async def admin_employee_profile_update(
         if clk_raw != (profile.clockify_user_id or ""):
             profile.clockify_user_id = clk_raw or None
             changed.append("clockify_user_id")
+
+        discord_id = re.sub(r"\D+", "", discord_user_id or "")
+        if discord_id != (profile.discord_user_id or ""):
+            profile.discord_user_id = discord_id or None
+            profile.discord_linked_at = now if discord_id else None
+            profile.discord_linked_by_user_id = current.id if discord_id else None
+            changed.append("discord_user_id")
+
+        discord_name = (discord_username or "").strip().lstrip("@")
+        if discord_name != (profile.discord_username or ""):
+            profile.discord_username = discord_name or None
+            changed.append("discord_username")
 
     if changed:
         history_recorded = False

@@ -36,3 +36,16 @@ def test_render_codex_partner_uses_scope_and_no_owner_name():
     assert 'DEGEN_OPS_MCP_SCOPE = "partner"' in rendered
     assert 'DATABASE_URL = "${DEGEN_OPS_READONLY_DATABASE_URL}"' in rendered
     assert "degen_ops_owner" not in rendered
+
+
+def test_render_hermes_manager_uses_manager_scope():
+    rendered = render_hermes(
+        server_name="degen_ops_manager",
+        scope="manager",
+        python_path=Path("C:/repo/.venv/Scripts/python.exe"),
+        script_path=Path("C:/repo/scripts/degen_ops_mcp.py"),
+        database_url="${DEGEN_OPS_READONLY_DATABASE_URL}",
+    )
+
+    assert "degen_ops_manager:" in rendered
+    assert 'DEGEN_OPS_MCP_SCOPE: "manager"' in rendered

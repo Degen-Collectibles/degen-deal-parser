@@ -171,14 +171,14 @@ class EmployeeListTests(unittest.TestCase, _W4Harness):
         by_name = self.client.get("/team/admin/employees?q=emp504")
         self.assertEqual(by_name.status_code, 200)
         self.assertIn("emp504", by_name.text)
-        self.assertIn("Search username", by_name.text)
+        self.assertIn("Discord name/user ID", by_name.text)
 
         by_hash = self.client.get(
             f"/team/admin/employees?q={profile.email_lookup_hash[:12]}"
         )
         self.assertEqual(by_hash.status_code, 200)
         self.assertIn("emp504", by_hash.text)
-        self.assertIn("display name, legal name, email", by_hash.text)
+        self.assertIn("email hash fingerprint", by_hash.text)
 
 
 class DetailAndRevealTests(unittest.TestCase, _W4Harness):

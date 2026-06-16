@@ -77,7 +77,16 @@ class EmployeeListSearchTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         return response.body.decode("utf-8")
 
-    def _seed_user(self, uid: int, username: str, *, display_name: str = "", legal_name: str = ""):
+    def _seed_user(
+        self,
+        uid: int,
+        username: str,
+        *,
+        display_name: str = "",
+        legal_name: str = "",
+        discord_user_id: str = "",
+        discord_username: str = "",
+    ):
         from app.models import EmployeeProfile, User
         from app.team.pii import encrypt_pii
 
@@ -91,7 +100,11 @@ class EmployeeListSearchTests(unittest.TestCase):
             is_active=True,
         )
         self.session.add(user)
-        profile = EmployeeProfile(user_id=uid)
+        profile = EmployeeProfile(
+            user_id=uid,
+            discord_user_id=discord_user_id or None,
+            discord_username=discord_username or None,
+        )
         if legal_name:
             profile.legal_name_enc = encrypt_pii(legal_name)
         self.session.add(profile)
@@ -141,3 +154,19 @@ class EmployeeListSearchTests(unittest.TestCase):
         html = self._list_html()
         self.assertIn("(no display name)", html)
         self.assertNotIn("Hidden Legal", html)
+
+    def test_search_matches_discord_identity(self):
+        self._seed_user(
+            3006,
+            "discord-linked",
+            display_name="Discord Linked",
+            discord_user_id="111222333444555666",
+            discord_username="linked.discord",
+        )
+        self._seed_user(3007, "other-user", display_name="Other User")
+        self.session.commit()
+
+        html = self._list_html(q="linked.discord")
+        self.assertIn("discord-linked", html)
+        self.assertIn("linked.discord", html)
+        self.assertNotIn("other-user", html)

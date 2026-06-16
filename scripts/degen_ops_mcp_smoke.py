@@ -169,7 +169,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--scope",
-        choices=("owner", "partner", "employee", "tiktok"),
+        choices=("owner", "partner", "manager", "employee", "tiktok"),
         default="",
         help="Only test configured servers with this DEGEN_OPS_MCP_SCOPE.",
     )

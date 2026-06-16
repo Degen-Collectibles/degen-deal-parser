@@ -42,6 +42,20 @@ def test_smoke_expected_partner_tools_exclude_owner_cash_and_loan():
     assert "get_loan_and_payback_snapshot" not in tools
 
 
+def test_smoke_expected_manager_tools_include_employee_status_but_exclude_owner_finance():
+    tools = EXPECTED_TOOLS_BY_SCOPE["manager"]
+
+    assert "get_employee_clock_status" in tools
+    assert "get_employee_ops_status" in tools
+    assert "get_tiktok_product_sales" in tools
+    assert "get_shopify_product_sales" in tools
+    assert "get_price_lookup" in tools
+    assert "get_web_search" in tools
+    assert "get_finance_snapshot" not in tools
+    assert "get_cash_snapshot" not in tools
+    assert "evaluate_inventory_buy" not in tools
+
+
 def test_smoke_expected_tiktok_tools_exclude_business_tools():
     tools = EXPECTED_TOOLS_BY_SCOPE["tiktok"]
 
