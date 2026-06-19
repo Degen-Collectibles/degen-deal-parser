@@ -27,6 +27,7 @@ from scripts.degen_ops_discord_bot import (
     resolve_discord_scope,
     sanitize_for_log,
     should_respond,
+    message_addresses_bot,
     split_discord_message,
     summarize_tool_history,
     strip_bot_mention,
@@ -421,6 +422,15 @@ def test_allow_any_user_in_private_channel_is_explicit():
 def test_strip_bot_mention_removes_direct_mentions():
     assert strip_bot_mention("<@12345> should we buy this?", 12345) == "should we buy this?"
     assert strip_bot_mention("<@!12345> should we buy this?", 12345) == "should we buy this?"
+
+
+def test_message_addresses_bot_only_for_dms_mentions_or_ops_commands():
+    assert message_addresses_bot(content="Singles in + 84 card", bot_user_id=12345, is_dm=False) is False
+    assert message_addresses_bot(content="<@12345> what is market price?", bot_user_id=12345, is_dm=False) is True
+    assert message_addresses_bot(content="<@!12345> what is market price?", bot_user_id=12345, is_dm=False) is True
+    assert message_addresses_bot(content="<@99999> what is market price?", bot_user_id=12345, is_dm=False) is False
+    assert message_addresses_bot(content="!ops whoami", bot_user_id=12345, is_dm=False) is True
+    assert message_addresses_bot(content="hello from DM", bot_user_id=12345, is_dm=True) is True
 
 
 def test_build_discord_context_text_includes_replied_to_bot_answer():

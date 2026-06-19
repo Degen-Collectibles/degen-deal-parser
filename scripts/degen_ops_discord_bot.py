@@ -66,6 +66,19 @@ def strip_bot_mention(content: str, bot_user_id: int | None) -> str:
     return text
 
 
+def message_addresses_bot(*, content: str, bot_user_id: int | None, is_dm: bool) -> bool:
+    if is_dm:
+        return True
+    text = str(content or "").strip()
+    if not text:
+        return False
+    if text.lower().startswith("!ops"):
+        return True
+    if bot_user_id and re.search(rf"<@!?{bot_user_id}>", text):
+        return True
+    return False
+
+
 def _collapse_context_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
@@ -821,11 +834,14 @@ async def run_bot(config: BotConfig) -> None:
     @client.event
     async def on_message(message) -> None:
         bot_user_id = getattr(client.user, "id", None)
-        prompt = strip_bot_mention(getattr(message, "content", ""), bot_user_id)
+        raw_content = getattr(message, "content", "")
         channel_id = str(getattr(getattr(message, "channel", None), "id", ""))
         author = getattr(message, "author", None)
         author_id = str(getattr(author, "id", ""))
         is_dm = getattr(message, "guild", None) is None
+        if not message_addresses_bot(content=raw_content, bot_user_id=bot_user_id, is_dm=is_dm):
+            return
+        prompt = strip_bot_mention(raw_content, bot_user_id)
         author_scope = None
         db_scope = None
         if config.db_auth_enabled:
