@@ -21,8 +21,15 @@
                    style="accent-color:#3b82f6;"/>
             Show inactive
         </label>
+        <select name="discord"
+                onchange="this.form.submit()"
+                style="padding:7px 10px; border-radius:8px; border:1px solid var(--lx-br); background:var(--lx-s1); color:var(--lx-text);">
+            <option value="" {% if not discord_filter %}selected{% endif %}>All Discord</option>
+            <option value="missing" {% if discord_filter == 'missing' %}selected{% endif %}>Discord missing</option>
+            <option value="linked" {% if discord_filter == 'linked' %}selected{% endif %}>Discord linked</option>
+        </select>
         <button class="ta-btn" type="submit">Search</button>
-        {% if q or show_inactive %}<a class="ta-btn" href="/team/admin/employees">Clear</a>{% endif %}
+        {% if q or show_inactive or discord_filter %}<a class="ta-btn" href="/team/admin/employees">Clear</a>{% endif %}
     </form>
     {% if can_edit_employee_profile %}
     <div style="display:flex; gap:8px; flex-wrap:wrap;">
@@ -42,6 +49,11 @@
         Showing <strong style="color:var(--lx-text);">all</strong> employees (active + inactive).
     {% else %}
         Showing <strong style="color:var(--lx-text);">active</strong> employees only. Check <em>Show inactive</em> to see former staff.
+    {% endif %}
+    {% if discord_filter == 'missing' %}
+        <span style="color:#fcd34d;">Discord missing</span> filter is active.
+    {% elif discord_filter == 'linked' %}
+        Discord linked filter is active.
     {% endif %}
 </p>
 
@@ -102,7 +114,7 @@
                             <div style="font-size:11px; color:var(--lx-muted); font-family:ui-monospace, Menlo, monospace;">{{ profile.discord_user_id }}</div>
                         {% endif %}
                     {% else %}
-                        <span style="color:var(--lx-muted);">—</span>
+                        <span style="padding:2px 8px; border-radius:999px; background:rgba(251,191,36,0.15); color:#fcd34d; font-size:11px; font-weight:500;">Discord missing</span>
                     {% endif %}
                 </td>
                 <td style="padding:10px 14px; border-bottom:1px solid var(--lx-br);">

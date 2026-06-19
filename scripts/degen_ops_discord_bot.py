@@ -5,11 +5,13 @@ import asyncio
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import sys
+import time
 from typing import Any
 
 
@@ -249,6 +251,14 @@ class PartnerSetupPlan:
     confirmation_phrase: str
 
 
+@dataclass(frozen=True)
+class PromptAnswer:
+    answer: str
+    tool_names: list[str]
+    tool_calls: list[dict[str, Any]]
+    duration_ms: int
+
+
 def load_config_from_env(*, dry_run: bool = False) -> BotConfig:
     token = os.getenv("DEGEN_OPS_DISCORD_BOT_TOKEN", "").strip()
     allowed_channel_ids = _csv_set(os.getenv("DEGEN_OPS_DISCORD_ALLOWED_CHANNEL_IDS", ""))
@@ -257,7 +267,8 @@ def load_config_from_env(*, dry_run: bool = False) -> BotConfig:
     allow_any = _truthy(os.getenv("DEGEN_OPS_DISCORD_ALLOW_ANY_USER_IN_CHANNEL", "false"))
     db_auth_enabled = _truthy(os.getenv("DEGEN_OPS_DISCORD_DB_AUTH_ENABLED", "false"))
     legacy_allowlist_fallback = _truthy(os.getenv("DEGEN_OPS_DISCORD_LEGACY_ALLOWLIST_FALLBACK", "true"))
-    allow_dms = _truthy(os.getenv("DEGEN_OPS_DISCORD_ALLOW_DMS", "false"))
+    default_allow_dms = "true" if db_auth_enabled and not legacy_allowlist_fallback else "false"
+    allow_dms = _truthy(os.getenv("DEGEN_OPS_DISCORD_ALLOW_DMS", default_allow_dms))
     model = os.getenv("DEGEN_OPS_DISCORD_MODEL", "").strip()
     max_prompt_chars = int(os.getenv("DEGEN_OPS_DISCORD_MAX_PROMPT_CHARS", str(DEFAULT_MAX_PROMPT_CHARS)))
     rate_limit = int(os.getenv("DEGEN_OPS_DISCORD_RATE_LIMIT_PER_MINUTE", str(DEFAULT_RATE_LIMIT_PER_MINUTE)))
@@ -549,6 +560,16 @@ def build_system_prompt(scope: str = PARTNER_SCOPE) -> str:
     )
 
 
+def format_unlinked_discord_account_message(discord_user_id: str) -> str:
+    clean_id = "".join(ch for ch in str(discord_user_id or "") if ch.isdigit())
+    if not clean_id:
+        clean_id = "unknown"
+    return (
+        "I can't answer from this Discord account yet. Ask an admin to link your Discord user ID "
+        f"`{clean_id}` on your employee profile."
+    )
+
+
 class PromptRateLimiter:
     def __init__(self, *, limit_per_minute: int):
         self.limit = max(1, int(limit_per_minute))
@@ -565,11 +586,116 @@ class PromptRateLimiter:
         return True
 
 
-def append_audit_event(path: Path, payload: dict[str, Any]) -> None:
+def _safe_json_dumps(value: Any) -> str:
+    return json.dumps(value, default=str, sort_keys=True)
+
+
+def _redacted_preview(value: Any, *, max_chars: int = 1000) -> str:
+    text = sanitize_for_log(value)
+    return text[:max_chars].rstrip()
+
+
+def _sha256_text(value: str) -> str | None:
+    text = str(value or "")
+    if not text:
+        return None
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def summarize_tool_history(history: list[dict[str, Any]] | None) -> dict[str, Any]:
+    tool_calls: list[dict[str, Any]] = []
+    for message in history or []:
+        raw_calls = message.get("tool_calls") if isinstance(message, dict) else None
+        for raw_call in raw_calls or []:
+            function = raw_call.get("function") if isinstance(raw_call, dict) else None
+            if not isinstance(function, dict):
+                continue
+            name = str(function.get("name") or "").strip()
+            if not name:
+                continue
+            arguments = str(function.get("arguments") or "{}")
+            tool_calls.append(
+                {
+                    "id": str(raw_call.get("id") or ""),
+                    "name": name,
+                    "arguments_preview": _redacted_preview(arguments, max_chars=500),
+                }
+            )
+    return {
+        "tool_names": [row["name"] for row in tool_calls],
+        "tool_call_count": len(tool_calls),
+        "tool_calls": tool_calls,
+    }
+
+
+def build_db_audit_log_row(payload: dict[str, Any]):
+    from app.models import OpsAuditLog
+
+    prompt = str(payload.get("prompt") or "")
+    answer = str(payload.get("answer") or "")
+    tool_names = payload.get("tool_names") if isinstance(payload.get("tool_names"), list) else []
+    tool_calls = payload.get("tool_calls") if isinstance(payload.get("tool_calls"), list) else []
+    details = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"prompt", "answer", "tool_names", "tool_calls"}
+    }
+    return OpsAuditLog(
+        event=str(payload.get("event") or "answer"),
+        outcome=str(payload.get("outcome") or ("error" if payload.get("error") else "ok")),
+        discord_user_id=str(payload.get("author_id") or "") or None,
+        discord_channel_id=str(payload.get("channel_id") or "") or None,
+        discord_message_id=str(payload.get("message_id") or "") or None,
+        app_user_id=payload.get("app_user_id") if isinstance(payload.get("app_user_id"), int) else None,
+        app_role=str(payload.get("app_role") or ""),
+        scope=str(payload.get("scope") or ""),
+        scope_reason=str(payload.get("scope_reason") or ""),
+        prompt_sha256=_sha256_text(prompt),
+        prompt_preview=_redacted_preview(prompt),
+        answer_preview=_redacted_preview(answer),
+        tool_names_json=_safe_json_dumps(tool_names),
+        tool_calls_json=_safe_json_dumps(tool_calls),
+        duration_ms=payload.get("duration_ms") if isinstance(payload.get("duration_ms"), int) else None,
+        error=_redacted_preview(payload.get("error") or "", max_chars=1000),
+        details_json=_safe_json_dumps(json.loads(sanitize_for_log(_safe_json_dumps(details)))),
+        read_only=bool(payload.get("read_only", True)),
+    )
+
+
+def record_ops_audit_event(session: Any, payload: dict[str, Any]):
+    row = build_db_audit_log_row(payload)
+    session.add(row)
+    if hasattr(session, "flush"):
+        session.flush()
+    return row
+
+
+def _write_audit_jsonl(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     clean_payload = json.loads(sanitize_for_log(json.dumps(payload, default=str)))
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(clean_payload, sort_keys=True) + "\n")
+
+
+def append_audit_event(path: Path, payload: dict[str, Any], *, db_session_factory: Any | None = None) -> None:
+    _write_audit_jsonl(path, payload)
+    if db_session_factory is None:
+        return
+    try:
+        with db_session_factory() as session:
+            record_ops_audit_event(session, payload)
+            if hasattr(session, "commit"):
+                session.commit()
+    except Exception as exc:
+        _write_audit_jsonl(
+            path,
+            {
+                "at": datetime.now(timezone.utc).isoformat(),
+                "event": "audit_db_error",
+                "error": sanitize_for_log(exc),
+                "read_only": True,
+            },
+        )
 
 
 def should_respond(
@@ -614,6 +740,23 @@ async def answer_prompt(
     scope: str = PARTNER_SCOPE,
     discord_context: str = "",
 ) -> str:
+    return (
+        await answer_prompt_with_audit(
+            prompt,
+            model=model,
+            scope=scope,
+            discord_context=discord_context,
+        )
+    ).answer
+
+
+async def answer_prompt_with_audit(
+    prompt: str,
+    *,
+    model: str,
+    scope: str = PARTNER_SCOPE,
+    discord_context: str = "",
+) -> PromptAnswer:
     from app.ai_client import get_ai_client, get_fast_model
     from app.ops_chat import DegenOpsChatToolRunner, initial_chat_messages, run_chat_turn
 
@@ -632,7 +775,8 @@ async def answer_prompt(
             }
         )
     messages.append({"role": "user", "content": prompt})
-    answer, _history = await asyncio.to_thread(
+    started = time.perf_counter()
+    answer, history = await asyncio.to_thread(
         run_chat_turn,
         client=get_ai_client(),
         model=model or get_fast_model(),
@@ -641,17 +785,31 @@ async def answer_prompt(
         temperature=0.2,
         max_tool_rounds=4,
     )
-    return answer
+    tool_summary = summarize_tool_history(history)
+    return PromptAnswer(
+        answer=answer,
+        tool_names=tool_summary["tool_names"],
+        tool_calls=tool_summary["tool_calls"],
+        duration_ms=int((time.perf_counter() - started) * 1000),
+    )
 
 
 async def run_bot(config: BotConfig) -> None:
     import discord
+    from app.db import managed_session as audit_db_session_factory
 
     intents = discord.Intents.default()
     intents.message_content = True
     client = discord.Client(intents=intents)
     limiter = PromptRateLimiter(limit_per_minute=config.rate_limit_per_minute)
     pending_partner_setups: dict[str, PartnerSetupPlan] = {}
+
+    def audit(payload: dict[str, Any]) -> None:
+        append_audit_event(
+            config.audit_log_path,
+            payload,
+            db_session_factory=audit_db_session_factory,
+        )
 
     @client.event
     async def on_ready() -> None:
@@ -701,10 +859,7 @@ async def run_bot(config: BotConfig) -> None:
                 "linked_user_missing",
                 "role_not_allowed",
             }:
-                await message.reply(
-                    "I can't answer from this Discord account yet. Ask an admin to link your Discord user ID on your employee profile.",
-                    mention_author=False,
-                )
+                await message.reply(format_unlinked_discord_account_message(author_id), mention_author=False)
             elif config.db_auth_enabled and reason in {"channel_not_mapped", "dm_not_allowed"}:
                 await message.reply(
                     "I can help with Degen Ops questions in your access scope, but that request is restricted for your role or channel.",
@@ -739,7 +894,7 @@ async def run_bot(config: BotConfig) -> None:
                 f"You are authorized as `{resolved_scope}` in this channel.",
                 mention_author=False,
             )
-            append_audit_event(config.audit_log_path, {**audit_base, "event": "whoami"})
+            audit({**audit_base, "event": "whoami"})
             return
 
         setup_command = parse_partner_setup_command(prompt)
@@ -752,10 +907,7 @@ async def run_bot(config: BotConfig) -> None:
                 guild_id=str(getattr(guild, "id", "")),
                 requester_user_id=author_id,
             )
-            append_audit_event(
-                config.audit_log_path,
-                {**audit_base, "event": "partner_setup_draft", "allowed": allowed, "reason": reason},
-            )
+            audit({**audit_base, "event": "partner_setup_draft", "allowed": allowed, "reason": reason})
             if not allowed:
                 if reason == "owner_only":
                     await message.reply("Only a Degen Ops bot owner can set up partner channels.", mention_author=False)
@@ -774,21 +926,17 @@ async def run_bot(config: BotConfig) -> None:
             try:
                 channel = await apply_partner_setup(getattr(message, "guild", None), getattr(message.guild, "me", None), plan, config)
             except Exception as exc:
-                append_audit_event(
-                    config.audit_log_path,
-                    {**audit_base, "event": "partner_setup_error", "error": sanitize_for_log(exc)},
-                )
+                audit({**audit_base, "event": "partner_setup_error", "error": sanitize_for_log(exc)})
                 await message.reply("I could not create the partner channel. No business data was changed.", mention_author=False)
                 return
             pending_partner_setups.pop(pending_key, None)
-            append_audit_event(
-                config.audit_log_path,
+            audit(
                 {
                     **audit_base,
                     "event": "partner_setup_applied",
                     "created_channel_id": str(getattr(channel, "id", "")),
                     "partner_user_id": plan.partner_user_id,
-                },
+                }
             )
             await message.reply(
                 f"Created/updated #{getattr(channel, 'name', plan.channel_name)} for partner user ID {plan.partner_user_id}.",
@@ -796,26 +944,37 @@ async def run_bot(config: BotConfig) -> None:
             )
             return
 
-        append_audit_event(config.audit_log_path, {**audit_base, "event": "prompt", "prompt": prompt})
+        audit({**audit_base, "event": "prompt", "prompt": prompt})
 
         async with message.channel.typing():
             try:
                 discord_context = await collect_discord_context_text(message, bot_user_id=bot_user_id)
-                answer = await answer_prompt(
+                prompt_answer = await answer_prompt_with_audit(
                     prompt,
                     model=config.model,
                     scope=resolved_scope,
                     discord_context=discord_context,
                 )
+                answer = prompt_answer.answer
             except Exception as exc:
-                append_audit_event(config.audit_log_path, {**audit_base, "event": "error", "error": sanitize_for_log(exc)})
+                audit({**audit_base, "event": "error", "prompt": prompt, "error": sanitize_for_log(exc)})
                 await message.reply(
                     "I hit an internal error while answering. I did not change money, inventory, listings, or messages.",
                     mention_author=False,
                 )
                 return
 
-        append_audit_event(config.audit_log_path, {**audit_base, "event": "answer", "answer": answer})
+        audit(
+            {
+                **audit_base,
+                "event": "answer",
+                "prompt": prompt,
+                "answer": answer,
+                "tool_names": prompt_answer.tool_names,
+                "tool_calls": prompt_answer.tool_calls,
+                "duration_ms": prompt_answer.duration_ms,
+            }
+        )
         for index, chunk in enumerate(split_discord_message(answer)):
             if index == 0:
                 await message.reply(chunk, mention_author=False)

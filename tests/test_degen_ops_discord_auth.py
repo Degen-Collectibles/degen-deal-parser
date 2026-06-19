@@ -73,6 +73,36 @@ def test_resolver_maps_active_employee_to_employee_scope():
     assert result.app_role == "employee"
 
 
+def test_resolver_denies_linked_user_when_channel_scope_map_is_missing():
+    from app.degen_ops_discord_auth import resolve_discord_author_scope
+    from app.models import EmployeeProfile, User
+
+    with _session() as session:
+        session.add(
+            User(
+                id=5,
+                username="unmapped",
+                password_hash="x",
+                password_salt="s",
+                role="employee",
+                is_active=True,
+            )
+        )
+        session.add(EmployeeProfile(user_id=5, discord_user_id="555"))
+        session.commit()
+
+        result = resolve_discord_author_scope(
+            session=session,
+            discord_user_id="555",
+            channel_id="missing-channel",
+            channel_scopes={},
+        )
+
+    assert result.allowed is False
+    assert result.scope is None
+    assert result.reason == "channel_not_mapped"
+
+
 def test_resolver_maps_reviewer_to_employee_scope():
     from app.degen_ops_discord_auth import resolve_discord_author_scope
     from app.models import EmployeeProfile, User

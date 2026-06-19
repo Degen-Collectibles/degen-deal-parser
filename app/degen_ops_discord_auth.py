@@ -114,7 +114,7 @@ def resolve_discord_author_scope(
         )
 
     channel_scope = channel_scopes.get(str(channel_id))
-    if channel_scopes and not channel_scope:
+    if not channel_scope:
         return DiscordAuthorScope(
             False,
             None,

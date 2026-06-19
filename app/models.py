@@ -1188,6 +1188,31 @@ class OpsBotMemory(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utcnow, index=True)
 
 
+class OpsAuditLog(SQLModel, table=True):
+    __tablename__ = "ops_audit_log"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    event: str = Field(default="answer", index=True)
+    outcome: str = Field(default="ok", index=True)
+    discord_user_id: Optional[str] = Field(default=None, index=True)
+    discord_channel_id: Optional[str] = Field(default=None, index=True)
+    discord_message_id: Optional[str] = Field(default=None, index=True)
+    app_user_id: Optional[int] = Field(default=None, foreign_key="user.id", index=True)
+    app_role: str = Field(default="", index=True)
+    scope: str = Field(default="", index=True)
+    scope_reason: str = Field(default="")
+    prompt_sha256: Optional[str] = Field(default=None, index=True)
+    prompt_preview: str = Field(default="")
+    answer_preview: str = Field(default="")
+    tool_names_json: str = Field(default="[]")
+    tool_calls_json: str = Field(default="[]")
+    duration_ms: Optional[int] = Field(default=None, index=True)
+    error: str = Field(default="")
+    details_json: str = Field(default="{}")
+    read_only: bool = Field(default=True, index=True)
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+
+
 # ---------------------------------------------------------------------------
 # Inventory
 # ---------------------------------------------------------------------------

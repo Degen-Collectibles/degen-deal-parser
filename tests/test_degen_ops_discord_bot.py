@@ -1,26 +1,34 @@
 import asyncio
+import json
 import os
 from pathlib import Path
 
+from sqlmodel import SQLModel, Session, create_engine, select
+
+from app.models import OpsAuditLog
 from scripts.degen_ops_discord_bot import (
     BotConfig,
     DiscordScopeConfig,
     PromptRateLimiter,
+    build_db_audit_log_row,
     build_discord_context_text,
     build_system_prompt,
     collect_discord_context_text,
     determine_message_scope,
     build_partner_setup_plan,
     ensure_database_url_from_readonly_env,
+    format_unlinked_discord_account_message,
     format_partner_setup_draft,
     load_config_from_env,
     matches_partner_setup_confirmation,
     parse_partner_setup_command,
     parse_scope_config,
+    record_ops_audit_event,
     resolve_discord_scope,
     sanitize_for_log,
     should_respond,
     split_discord_message,
+    summarize_tool_history,
     strip_bot_mention,
     update_env_allowlist,
 )
@@ -224,6 +232,29 @@ def test_load_config_from_env_allows_db_auth_and_dms_without_legacy_allowlists(m
     assert config.allow_dms is True
     assert config.allowed_channel_ids == set()
     assert config.allowed_user_ids == set()
+
+
+def test_load_config_defaults_to_dms_for_db_auth_without_legacy_allowlists(monkeypatch, tmp_path):
+    monkeypatch.setenv("DEGEN_OPS_DISCORD_DB_AUTH_ENABLED", "true")
+    monkeypatch.setenv("DEGEN_OPS_DISCORD_LEGACY_ALLOWLIST_FALLBACK", "false")
+    monkeypatch.setenv("DEGEN_OPS_DISCORD_AUDIT_LOG", str(tmp_path / "audit.jsonl"))
+    monkeypatch.delenv("DEGEN_OPS_DISCORD_ALLOW_DMS", raising=False)
+    monkeypatch.delenv("DEGEN_OPS_DISCORD_ALLOWED_CHANNEL_IDS", raising=False)
+    monkeypatch.delenv("DEGEN_OPS_DISCORD_ALLOWED_USER_IDS", raising=False)
+
+    config = load_config_from_env(dry_run=True)
+
+    assert config.db_auth_enabled is True
+    assert config.legacy_allowlist_fallback is False
+    assert config.allow_dms is True
+
+
+def test_unlinked_discord_reply_includes_user_id_for_admin_linking():
+    message = format_unlinked_discord_account_message("206237952412483584")
+
+    assert "206237952412483584" in message
+    assert "employee profile" in message
+    assert "admin" in message.lower()
 
 
 def test_determine_message_scope_uses_explicit_map_when_configured():
@@ -501,6 +532,95 @@ def test_sanitize_for_log_redacts_common_secret_shapes():
     assert "keyval" not in text
     assert "sk-abcd" in text
     assert "123456" not in text
+
+
+def test_summarize_tool_history_extracts_tool_names_and_counts():
+    history = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "get_sales_summary", "arguments": '{"days":7}'},
+                },
+                {
+                    "id": "call-2",
+                    "type": "function",
+                    "function": {"name": "get_inventory_snapshot", "arguments": "{}"},
+                },
+            ],
+        },
+        {"role": "tool", "name": "get_sales_summary", "content": '{"read_only":true}'},
+    ]
+
+    summary = summarize_tool_history(history)
+
+    assert summary["tool_names"] == ["get_sales_summary", "get_inventory_snapshot"]
+    assert summary["tool_call_count"] == 2
+    assert summary["tool_calls"][0]["name"] == "get_sales_summary"
+
+
+def test_build_db_audit_log_row_redacts_prompt_and_captures_tool_names():
+    row = build_db_audit_log_row(
+        {
+            "event": "answer",
+            "author_id": "206237952412483584",
+            "channel_id": "123",
+            "message_id": "456",
+            "app_user_id": 7,
+            "app_role": "admin",
+            "scope": "owner",
+            "scope_reason": "db_auth",
+            "prompt": "Should we buy it? token=super-secret",
+            "answer": "Decision: safe. api_key=also-secret",
+            "tool_names": ["get_sales_summary"],
+            "tool_calls": [{"name": "get_sales_summary"}],
+            "duration_ms": 321,
+            "read_only": True,
+        }
+    )
+
+    assert row.discord_user_id == "206237952412483584"
+    assert row.discord_channel_id == "123"
+    assert row.scope == "owner"
+    assert row.prompt_sha256
+    assert "super-secret" not in row.prompt_preview
+    assert "also-secret" not in row.answer_preview
+    assert json.loads(row.tool_names_json) == ["get_sales_summary"]
+    assert row.duration_ms == 321
+    assert row.read_only is True
+
+
+def test_record_ops_audit_event_persists_compact_db_row(tmp_path):
+    engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        row = record_ops_audit_event(
+            session,
+            {
+                "event": "answer",
+                "author_id": "42",
+                "channel_id": "123",
+                "message_id": "999",
+                "scope": "partner",
+                "prompt": "Top products?",
+                "answer": "Read-only answer.",
+                "tool_names": ["get_tiktok_top_products"],
+                "outcome": "ok",
+            },
+        )
+        session.commit()
+
+        stored = session.exec(select(OpsAuditLog).where(OpsAuditLog.id == row.id)).one()
+
+    assert stored.discord_user_id == "42"
+    assert stored.discord_channel_id == "123"
+    assert stored.event == "answer"
+    assert json.loads(stored.tool_names_json) == ["get_tiktok_top_products"]
+    assert stored.prompt_preview == "Top products?"
 
 
 def test_load_config_dry_run_allows_missing_token(monkeypatch):

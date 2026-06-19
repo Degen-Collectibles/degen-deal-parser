@@ -66,12 +66,18 @@ class EmployeeListSearchTests(unittest.TestCase):
             url=SimpleNamespace(path=path, query=query),
         )
 
-    def _list_html(self, *, q=None):
+    def _list_html(self, *, q=None, discord=None):
         from app.routers.team_admin_employees import admin_employees_list
 
+        params = []
+        if q:
+            params.append(f"q={q}")
+        if discord:
+            params.append(f"discord={discord}")
         response = admin_employees_list(
-            self._request(query=f"q={q}" if q else ""),
+            self._request(query="&".join(params)),
             q=q,
+            discord=discord,
             session=self.session,
         )
         self.assertEqual(response.status_code, 200)
@@ -170,3 +176,20 @@ class EmployeeListSearchTests(unittest.TestCase):
         self.assertIn("discord-linked", html)
         self.assertIn("linked.discord", html)
         self.assertNotIn("other-user", html)
+
+    def test_discord_missing_filter_lists_only_active_unlinked_profiles(self):
+        self._seed_user(
+            3008,
+            "linked-user",
+            display_name="Linked User",
+            discord_user_id="111222333444555666",
+            discord_username="linked.discord",
+        )
+        self._seed_user(3009, "missing-user", display_name="Missing Discord")
+        self.session.commit()
+
+        html = self._list_html(discord="missing")
+
+        self.assertIn("missing-user", html)
+        self.assertIn("Discord missing", html)
+        self.assertNotIn("linked-user", html)

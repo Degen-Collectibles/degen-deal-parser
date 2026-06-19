@@ -19,7 +19,7 @@ from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy import or_, update
+from sqlalchemy import and_, or_, update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
@@ -684,6 +684,7 @@ def _detail_context(
 def admin_employees_list(
     request: Request,
     q: Optional[str] = Query(default=None),
+    discord: Optional[str] = Query(default=None),
     flash: Optional[str] = Query(default=None),
     # Hide deactivated employees by default — the common case is "who's on
     # payroll right now". Admins opt in to see everyone via the "Show
@@ -720,6 +721,24 @@ def admin_employees_list(
                 EmployeeProfile.email_lookup_hash.ilike(q_like),
                 EmployeeProfile.discord_user_id.ilike(q_like),
                 EmployeeProfile.discord_username.ilike(q_like),
+            )
+        )
+    discord_filter = (discord if isinstance(discord, str) else "").strip().lower()
+    if discord_filter == "missing":
+        stmt = stmt.where(
+            or_(
+                EmployeeProfile.user_id == None,  # noqa: E711
+                and_(
+                    or_(EmployeeProfile.discord_user_id == None, EmployeeProfile.discord_user_id == ""),  # noqa: E711
+                    or_(EmployeeProfile.discord_username == None, EmployeeProfile.discord_username == ""),  # noqa: E711
+                ),
+            )
+        )
+    elif discord_filter == "linked":
+        stmt = stmt.where(
+            or_(
+                and_(EmployeeProfile.discord_user_id != None, EmployeeProfile.discord_user_id != ""),  # noqa: E711
+                and_(EmployeeProfile.discord_username != None, EmployeeProfile.discord_username != ""),  # noqa: E711
             )
         )
     rows = list(session.exec(stmt.limit(200)).all())
@@ -775,6 +794,7 @@ def admin_employees_list(
             "can_view_labor_financials": can_view_labor_financials,
             "can_text_invite": can_issue_invite and can_reveal_pii,
             "q": q or "",
+            "discord_filter": discord_filter,
             "flash": flash,
             "show_inactive": include_inactive,
             "csrf_token": issue_token(request),
