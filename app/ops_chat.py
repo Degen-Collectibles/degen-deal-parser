@@ -65,7 +65,7 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "type": "function",
         "function": {
             "name": "get_inventory_snapshot",
-            "description": "Read-only inventory count, cost basis, and list-value snapshot.",
+            "description": "Read-only inventory count and list-value snapshot; cost basis is owner-scope only.",
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
         },
     },
@@ -128,7 +128,7 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "type": "function",
         "function": {
             "name": "get_employee_clock_status",
-            "description": "Owner-only read-only employee clock-in/out status from cached Clockify rows.",
+            "description": "Manager/owner read-only employee clock-in/out status from cached Clockify rows.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -148,7 +148,7 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "type": "function",
         "function": {
             "name": "get_employee_ops_status",
-            "description": "Owner-only read-only employee ops request status from supply, buylist, and time-off queues.",
+            "description": "Manager/owner read-only employee ops request status from supply, buylist, and time-off queues.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -364,7 +364,7 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "type": "function",
         "function": {
             "name": "get_price_lookup",
-            "description": "Read-only price lookup from stored inventory prices, price history, and recent TikTok sale prices.",
+            "description": "Read-only price lookup from stored inventory prices, price history, and recent sales; cost basis is owner-scope only.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -513,7 +513,7 @@ class DegenOpsChatToolRunner:
         if name == "get_cash_snapshot":
             return self.harness.get_cash_snapshot()
         if name == "get_inventory_snapshot":
-            return self.harness.get_inventory_snapshot()
+            return self.harness.get_inventory_snapshot(audience_scope=self.scope)
         if name == "get_channel_velocity":
             return self.harness.get_channel_velocity(
                 days=payload.get("days", 90),
@@ -612,6 +612,7 @@ class DegenOpsChatToolRunner:
                 query=payload.get("query", ""),
                 days=payload.get("days", 30),
                 limit=payload.get("limit", 10),
+                audience_scope=self.scope,
             )
         if name == "get_market_trend_lookup":
             return self.harness.get_market_trend_lookup(

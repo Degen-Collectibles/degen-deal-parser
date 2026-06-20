@@ -134,11 +134,23 @@ def test_register_degen_ops_tools_employee_scope_limits_sensitive_tools():
 def test_manager_scope_includes_employee_ops_but_excludes_owner_cash_and_loan_tools():
     tools = set(DEGEN_OPS_SCOPE_TOOL_NAMES["manager"])
 
+    assert set(DEGEN_OPS_SCOPE_TOOL_NAMES["employee"]).issubset(tools)
+    assert set(TIKTOK_MCP_TOOL_NAMES).issubset(tools)
     assert "get_employee_clock_status" in tools
     assert "get_employee_ops_status" in tools
     assert "get_cash_snapshot" not in tools
     assert "get_loan_and_payback_snapshot" not in tools
     assert "evaluate_inventory_buy" not in tools
+
+
+def test_role_scopes_are_hierarchical_for_employee_manager_owner():
+    employee = set(DEGEN_OPS_SCOPE_TOOL_NAMES["employee"])
+    manager = set(DEGEN_OPS_SCOPE_TOOL_NAMES["manager"])
+    owner = set(DEGEN_OPS_SCOPE_TOOL_NAMES["owner"])
+
+    assert employee.issubset(manager)
+    assert manager.issubset(owner)
+    assert {"get_price_lookup", "get_market_trend_lookup"}.issubset(employee)
 
 
 def test_register_degen_ops_tools_partner_scope_excludes_raw_cash_and_loan_tools():
@@ -171,6 +183,26 @@ def test_register_degen_ops_tools_tiktok_scope_is_dedicated_read_only_agent():
     assert "get_finance_snapshot" not in fake.tools
     assert "get_cash_snapshot" not in fake.tools
     assert all("read-only" in (tool["description"] or "").lower() for tool in fake.tools.values())
+
+
+def test_inventory_snapshot_redacts_cost_basis_outside_owner_scope(monkeypatch):
+    context = {
+        "inventory_snapshot": {
+            "active_items": 4,
+            "estimated_list_value": 1200.0,
+            "cost_basis_total": 700.0,
+            "evidence_url": "/inventory",
+        }
+    }
+    harness = DegenOpsMcpHarness(session_factory=lambda: FakeSession())
+    monkeypatch.setattr(harness, "get_context", lambda days=90: context)
+
+    owner = harness.get_inventory_snapshot(audience_scope="owner")
+    employee = harness.get_inventory_snapshot(audience_scope="employee")
+
+    assert owner["inventory_snapshot"]["cost_basis_total"] == 700.0
+    assert "cost_basis_total" not in employee["inventory_snapshot"]
+    assert "cost_basis_total hidden outside owner scope" in employee["redactions"]
 
 
 def test_register_degen_ops_tools_uses_env_scope(monkeypatch):

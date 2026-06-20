@@ -46,6 +46,17 @@ from .reporting import (
 )
 
 
+def _dedupe_tool_names(names: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for name in names:
+        if name in seen:
+            continue
+        seen.add(name)
+        result.append(name)
+    return result
+
+
 DEGEN_OPS_BUSINESS_TOOL_NAMES = [
     "get_ops_agent_manifest",
     "get_ops_memory",
@@ -94,6 +105,51 @@ DEGEN_OPS_MCP_TOOL_NAMES = [
     *WEB_MCP_TOOL_NAMES,
 ]
 
+EMPLOYEE_MCP_TOOL_NAMES = [
+    "get_ops_agent_manifest",
+    "get_ops_memory",
+    "get_inventory_snapshot",
+    "get_channel_velocity",
+    "get_sales_summary",
+    "get_discord_sales_summary",
+    "get_tiktok_product_sales",
+    "get_tiktok_top_products",
+    "get_shopify_product_sales",
+    "get_shopify_top_products",
+    "get_price_lookup",
+    "get_market_trend_lookup",
+    "get_web_search",
+]
+
+MANAGER_MCP_TOOL_NAMES = _dedupe_tool_names(
+    [
+        *EMPLOYEE_MCP_TOOL_NAMES,
+        *TIKTOK_MCP_TOOL_NAMES,
+        "get_employee_clock_status",
+        "get_employee_ops_status",
+    ]
+)
+
+PARTNER_MCP_TOOL_NAMES = [
+    "get_ops_agent_manifest",
+    "get_ops_memory",
+    "get_finance_snapshot",
+    "get_inventory_snapshot",
+    "get_channel_velocity",
+    "get_sales_summary",
+    "get_discord_sales_summary",
+    "get_tiktok_product_sales",
+    "get_tiktok_top_products",
+    "get_shopify_product_sales",
+    "get_shopify_top_products",
+    "get_price_lookup",
+    "get_market_trend_lookup",
+    "get_web_search",
+    "evaluate_inventory_buy",
+    "generate_partner_update",
+    "generate_weekly_partner_update_draft",
+]
+
 DEGEN_OPS_SCOPE_TOOL_NAMES = {
     "owner": DEGEN_OPS_MCP_TOOL_NAMES,
     "tiktok": [
@@ -102,57 +158,9 @@ DEGEN_OPS_SCOPE_TOOL_NAMES = {
         *TIKTOK_MCP_TOOL_NAMES,
         *WEB_MCP_TOOL_NAMES,
     ],
-    "partner": [
-        "get_ops_agent_manifest",
-        "get_ops_memory",
-        "get_finance_snapshot",
-        "get_inventory_snapshot",
-        "get_channel_velocity",
-        "get_sales_summary",
-        "get_discord_sales_summary",
-        "get_tiktok_product_sales",
-        "get_tiktok_top_products",
-        "get_shopify_product_sales",
-        "get_shopify_top_products",
-        "get_price_lookup",
-        "get_market_trend_lookup",
-        "get_web_search",
-        "evaluate_inventory_buy",
-        "generate_partner_update",
-        "generate_weekly_partner_update_draft",
-    ],
-    "manager": [
-        "get_ops_agent_manifest",
-        "get_ops_memory",
-        "get_inventory_snapshot",
-        "get_channel_velocity",
-        "get_sales_summary",
-        "get_discord_sales_summary",
-        "get_tiktok_product_sales",
-        "get_tiktok_top_products",
-        "get_shopify_product_sales",
-        "get_shopify_top_products",
-        "get_price_lookup",
-        "get_market_trend_lookup",
-        "get_web_search",
-        "get_employee_clock_status",
-        "get_employee_ops_status",
-    ],
-    "employee": [
-        "get_ops_agent_manifest",
-        "get_ops_memory",
-        "get_inventory_snapshot",
-        "get_channel_velocity",
-        "get_sales_summary",
-        "get_discord_sales_summary",
-        "get_tiktok_product_sales",
-        "get_tiktok_top_products",
-        "get_shopify_product_sales",
-        "get_shopify_top_products",
-        "get_price_lookup",
-        "get_market_trend_lookup",
-        "get_web_search",
-    ],
+    "partner": PARTNER_MCP_TOOL_NAMES,
+    "manager": MANAGER_MCP_TOOL_NAMES,
+    "employee": EMPLOYEE_MCP_TOOL_NAMES,
 }
 
 OWNER_FINANCIAL_TOOL_NAMES = [
@@ -162,8 +170,6 @@ OWNER_FINANCIAL_TOOL_NAMES = [
 
 OWNER_ONLY_TOOL_NAMES = [
     *OWNER_FINANCIAL_TOOL_NAMES,
-    "get_employee_clock_status",
-    "get_employee_ops_status",
     "propose_ops_memory",
 ]
 
@@ -971,6 +977,42 @@ def _redact_partner_recommendation(result: dict[str, Any], scenario: dict[str, A
     return redacted
 
 
+def _redact_inventory_snapshot_for_scope(
+    snapshot: dict[str, Any],
+    *,
+    audience_scope: str,
+) -> tuple[dict[str, Any], list[str]]:
+    safe_snapshot = dict(snapshot or {})
+    if _normalize_scope(audience_scope) == "owner":
+        return safe_snapshot, []
+
+    redactions: list[str] = []
+    if "cost_basis_total" in safe_snapshot:
+        safe_snapshot.pop("cost_basis_total", None)
+        redactions.append("cost_basis_total hidden outside owner scope")
+    return safe_snapshot, redactions
+
+
+def _redact_inventory_price_matches_for_scope(
+    matches: list[dict[str, Any]],
+    *,
+    audience_scope: str,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    if _normalize_scope(audience_scope) == "owner":
+        return matches, []
+
+    redactions: list[str] = []
+    safe_matches: list[dict[str, Any]] = []
+    for row in matches:
+        safe_row = dict(row)
+        if "cost_basis" in safe_row:
+            safe_row.pop("cost_basis", None)
+            if not redactions:
+                redactions.append("inventory cost_basis hidden outside owner scope")
+        safe_matches.append(safe_row)
+    return safe_matches, redactions
+
+
 class DegenOpsMcpHarness:
     def __init__(
         self,
@@ -1040,6 +1082,8 @@ class DegenOpsMcpHarness:
                 .limit(500)
             )
             rows = session.exec(stmt).all()
+        scope_rank = {normalized_scope: 0, "public": 1}
+        rows = sorted(rows, key=lambda row: scope_rank.get(str(row.scope or ""), 2))
         terms = _query_terms(clean_query)
         memories = []
         for row in rows:
@@ -1831,7 +1875,14 @@ class DegenOpsMcpHarness:
             "read_only": True,
         }
 
-    def get_price_lookup(self, query: str, days: int = 30, limit: int = 10) -> dict[str, Any]:
+    def get_price_lookup(
+        self,
+        query: str,
+        days: int = 30,
+        limit: int = 10,
+        *,
+        audience_scope: str = "owner",
+    ) -> dict[str, Any]:
         safe_days = max(_safe_int(days, 30), 1)
         safe_limit = _bounded_limit(limit, default=10, maximum=50)
         clean_query = str(query or "").strip()
@@ -1887,6 +1938,10 @@ class DegenOpsMcpHarness:
                     }
                 )
 
+        inventory_matches, redactions = _redact_inventory_price_matches_for_scope(
+            inventory_matches,
+            audience_scope=audience_scope,
+        )
         recent_sales = self.get_tiktok_product_sales(product_query=clean_query, days=safe_days, limit=safe_limit)
         sale_summary = recent_sales.get("summary") or {}
         recent_avg_sale_price = None
@@ -1943,7 +1998,7 @@ class DegenOpsMcpHarness:
         if not clean_query:
             data_gaps.append("Missing query; provide a card, sealed product, barcode, SKU, or product keyword.")
 
-        return {
+        response = {
             "summary": {
                 "query": clean_query,
                 "recommended_price": recommended_price,
@@ -1972,6 +2027,9 @@ class DegenOpsMcpHarness:
             ],
             "read_only": True,
         }
+        if redactions:
+            response["redactions"] = redactions
+        return response
 
     def _tiktok_product_sales_between(
         self,
@@ -2237,13 +2295,20 @@ class DegenOpsMcpHarness:
             "read_only": True,
         }
 
-    def get_inventory_snapshot(self) -> dict[str, Any]:
+    def get_inventory_snapshot(self, *, audience_scope: str = "owner") -> dict[str, Any]:
         context = self.get_context(days=90)
-        return {
-            "inventory_snapshot": context["inventory_snapshot"],
-            "evidence": [{"source": "inventory_items", "url": context["inventory_snapshot"].get("evidence_url", "/inventory")}],
+        inventory_snapshot, redactions = _redact_inventory_snapshot_for_scope(
+            context["inventory_snapshot"],
+            audience_scope=audience_scope,
+        )
+        response = {
+            "inventory_snapshot": inventory_snapshot,
+            "evidence": [{"source": "inventory_items", "url": inventory_snapshot.get("evidence_url", "/inventory")}],
             "read_only": True,
         }
+        if redactions:
+            response["redactions"] = redactions
+        return response
 
     def get_channel_velocity(self, days: int = 90, category: str = "") -> dict[str, Any]:
         context = self.get_context(days=days)
@@ -2415,9 +2480,9 @@ def register_degen_ops_tools(
             return ops.get_cash_snapshot()
 
     if should_register("get_inventory_snapshot"):
-        @mcp.tool(description="Read-only inventory count, cost basis, and list-value snapshot.")
+        @mcp.tool(description="Read-only inventory count and list-value snapshot; cost basis is owner-scope only.")
         def get_inventory_snapshot() -> dict[str, Any]:
-            return ops.get_inventory_snapshot()
+            return ops.get_inventory_snapshot(audience_scope=normalized_scope)
 
     if should_register("get_channel_velocity"):
         @mcp.tool(description="Read-only sell-through velocity by TikTok, Shopify, Discord, and show/channel sales.")
@@ -2440,12 +2505,12 @@ def register_degen_ops_tools(
             return ops.get_loan_and_payback_snapshot(days=days)
 
     if should_register("get_employee_clock_status"):
-        @mcp.tool(description="Owner-only read-only employee clock-in/out status from cached Clockify rows.")
+        @mcp.tool(description="Manager/owner read-only employee clock-in/out status from cached Clockify rows.")
         def get_employee_clock_status(person_query: str = "", days: int = 1, limit: int = 20) -> dict[str, Any]:
             return ops.get_employee_clock_status(person_query=person_query, days=days, limit=limit)
 
     if should_register("get_employee_ops_status"):
-        @mcp.tool(description="Owner-only read-only employee ops request status from supply, buylist, and time-off queues.")
+        @mcp.tool(description="Manager/owner read-only employee ops request status from supply, buylist, and time-off queues.")
         def get_employee_ops_status(person_query: str = "", days: int = 30, limit: int = 50) -> dict[str, Any]:
             return ops.get_employee_ops_status(person_query=person_query, days=days, limit=limit)
 
@@ -2522,9 +2587,9 @@ def register_degen_ops_tools(
             return ops.get_shopify_top_products(days=days, limit=limit, sort_by=sort_by)
 
     if should_register("get_price_lookup"):
-        @mcp.tool(description="Read-only price lookup from stored inventory prices, price history, and recent TikTok sale prices.")
+        @mcp.tool(description="Read-only price lookup from stored inventory prices, price history, and recent sales; cost basis is owner-scope only.")
         def get_price_lookup(query: str, days: int = 30, limit: int = 10) -> dict[str, Any]:
-            return ops.get_price_lookup(query=query, days=days, limit=limit)
+            return ops.get_price_lookup(query=query, days=days, limit=limit, audience_scope=normalized_scope)
 
     if should_register("get_market_trend_lookup"):
         @mcp.tool(description="Read-only market trend lookup comparing recent TikTok sale prices and stored price history.")

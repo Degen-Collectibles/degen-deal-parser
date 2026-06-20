@@ -7,6 +7,7 @@ from app.ops_chat import (
     run_chat_turn,
     tool_schemas_for_scope,
 )
+from app.ops_mcp import DEGEN_OPS_SCOPE_TOOL_NAMES, TIKTOK_MCP_TOOL_NAMES
 
 
 class FakeHarness:
@@ -28,9 +29,13 @@ class FakeHarness:
             "read_only": True,
         }
 
-    def get_inventory_snapshot(self):
+    def get_inventory_snapshot(self, audience_scope="employee"):
         return {
-            "inventory_snapshot": {"active_items": 12, "estimated_list_value": 3456.0},
+            "inventory_snapshot": {
+                "active_items": 12,
+                "estimated_list_value": 3456.0,
+                "audience_scope": audience_scope,
+            },
             "evidence": [{"source": "inventory_items", "url": "/inventory"}],
             "read_only": True,
         }
@@ -130,9 +135,9 @@ class FakeHarness:
             "read_only": True,
         }
 
-    def get_price_lookup(self, query="", days=30, limit=10):
+    def get_price_lookup(self, query="", days=30, limit=10, audience_scope="employee"):
         return {
-            "summary": {"query": query, "recommended_price": 29.99},
+            "summary": {"query": query, "recommended_price": 29.99, "audience_scope": audience_scope},
             "range": {"days": days, "limit": limit},
             "read_only": True,
         }
@@ -163,7 +168,7 @@ class FakeHarness:
 
 
 class FailingHarness(FakeHarness):
-    def get_inventory_snapshot(self):
+    def get_inventory_snapshot(self, audience_scope="employee"):
         raise RuntimeError("postgresql+psycopg://user:secret@db.example.com/degen read failed")
 
 
@@ -266,6 +271,8 @@ def test_chat_tool_schemas_follow_manager_scope_without_owner_cash_tools():
     schemas = tool_schemas_for_scope("manager")
     names = {schema["function"]["name"] for schema in schemas}
 
+    assert set(DEGEN_OPS_SCOPE_TOOL_NAMES["employee"]).issubset(names)
+    assert set(TIKTOK_MCP_TOOL_NAMES).issubset(names)
     assert "get_employee_clock_status" in names
     assert "get_employee_ops_status" in names
     assert "get_cash_snapshot" not in names
@@ -295,6 +302,17 @@ def test_chat_tool_schemas_follow_tiktok_scope_without_business_tools():
     }
     assert "get_cash_snapshot" not in names
     assert "evaluate_inventory_buy" not in names
+
+
+def test_chat_role_scopes_are_hierarchical_for_employee_manager_owner():
+    employee = {schema["function"]["name"] for schema in tool_schemas_for_scope("employee")}
+    manager = {schema["function"]["name"] for schema in tool_schemas_for_scope("manager")}
+    owner = {schema["function"]["name"] for schema in tool_schemas_for_scope("owner")}
+
+    assert employee.issubset(manager)
+    assert manager.issubset(owner)
+    assert {"get_price_lookup", "get_market_trend_lookup"}.issubset(employee)
+    assert set(TIKTOK_MCP_TOOL_NAMES).issubset(manager)
 
 
 def test_chat_runner_refuses_out_of_scope_tool():
