@@ -6,6 +6,9 @@ set -Eeuo pipefail
 APP_DIR="${DEGEN_APP_DIR:-/opt/degen/app}"
 WEB_UNIT="${DEGEN_WEB_UNIT:-degen-web.service}"
 WORKER_UNIT="${DEGEN_WORKER_UNIT:-degen-worker.service}"
+BOT_UNIT="${DEGEN_OPS_DISCORD_BOT_UNIT:-degen-ops-discord-bot.service}"
+BOT_SYSTEMD_SCOPE="${DEGEN_OPS_DISCORD_BOT_SYSTEMD_SCOPE:-user}"
+RESTART_BOT="${DEGEN_OPS_DISCORD_BOT_RESTART:-1}"
 HEALTH_URL="${DEGEN_HEALTH_URL:-http://127.0.0.1:8000/health}"
 MAX_WAIT_SECONDS="${DEGEN_HEALTH_MAX_WAIT_SECONDS:-120}"
 INTERVAL_SECONDS="${DEGEN_HEALTH_INTERVAL_SECONDS:-5}"
@@ -107,6 +110,60 @@ wait_for_systemd_unit() {
   return 1
 }
 
+bot_systemctl() {
+  if [[ "$BOT_SYSTEMD_SCOPE" == "user" ]]; then
+    systemctl --user "$@"
+  else
+    sudo -n systemctl "$@"
+  fi
+}
+
+bot_unit_installed() {
+  if [[ "$RESTART_BOT" == "0" ]]; then
+    log "Discord bot restart disabled by DEGEN_OPS_DISCORD_BOT_RESTART=0"
+    return 1
+  fi
+
+  bot_systemctl list-unit-files "$BOT_UNIT" --no-legend 2>/dev/null | grep -q "^$BOT_UNIT"
+}
+
+wait_for_bot_unit() {
+  local unit="$1"
+  local elapsed=0
+  local stable_seconds="${DEGEN_UNIT_STABLE_SECONDS:-10}"
+  local state
+
+  while (( elapsed <= MAX_WAIT_SECONDS )); do
+    if bot_systemctl is-active --quiet "$unit"; then
+      sleep "$stable_seconds"
+      elapsed=$((elapsed + stable_seconds))
+      if bot_systemctl is-active --quiet "$unit"; then
+        log "$unit is active after ${elapsed}s"
+        return 0
+      fi
+    fi
+
+    state="$(bot_systemctl is-active "$unit" 2>/dev/null || true)"
+    log "$unit state at ${elapsed}s: ${state:-unknown}"
+    sleep "$INTERVAL_SECONDS"
+    elapsed=$((elapsed + INTERVAL_SECONDS))
+  done
+
+  echo "ERROR: $unit did not become active within ${MAX_WAIT_SECONDS}s" >&2
+  bot_systemctl status "$unit" --no-pager || true
+  return 1
+}
+
+restart_discord_bot() {
+  if bot_unit_installed; then
+    log "Restarting $BOT_UNIT ($BOT_SYSTEMD_SCOPE scope)"
+    bot_systemctl restart "$BOT_UNIT"
+    wait_for_bot_unit "$BOT_UNIT"
+  else
+    log "Discord bot unit $BOT_UNIT not installed in $BOT_SYSTEMD_SCOPE scope; skipping bot restart"
+  fi
+}
+
 if [[ ! -d "$APP_DIR/.git" ]]; then
   echo "ERROR: APP_DIR is not a git checkout: $APP_DIR" >&2
   exit 2
@@ -180,6 +237,8 @@ if systemctl list-unit-files "$WORKER_UNIT" --no-legend 2>/dev/null | grep -q "^
 else
   log "Worker unit $WORKER_UNIT not installed; skipping worker restart"
 fi
+
+restart_discord_bot
 
 log "Waiting for health: $HEALTH_URL"
 elapsed=0
