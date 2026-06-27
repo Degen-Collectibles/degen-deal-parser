@@ -672,14 +672,21 @@ def _find_stock_movement_by_dedupe_key(
         raise
 
 
-def _ensure_sqlite_outer_transaction(session: Session) -> None:
+def _begin_stock_mutation_transaction(session: Session) -> bool:
+    """Acquire SQLite's write lock and report whether this function owns the transaction."""
+    session_transaction_preexisting = session.in_transaction()
+    bind = session.get_bind()
+    bind_in_transaction = getattr(bind, "in_transaction", None)
+    external_transaction_preexisting = bool(
+        bind_in_transaction() if callable(bind_in_transaction) else False
+    )
     connection = session.connection()
-    if connection.dialect.name != "sqlite":
-        return
-    pooled_connection = connection.connection
-    driver_connection = getattr(pooled_connection, "dbapi_connection", None)
-    if driver_connection is not None and not driver_connection.in_transaction:
-        connection.exec_driver_sql("BEGIN")
+    if connection.dialect.name == "sqlite":
+        pooled_connection = connection.connection
+        driver_connection = getattr(pooled_connection, "dbapi_connection", None)
+        if driver_connection is not None and not driver_connection.in_transaction:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+    return not session_transaction_preexisting and not external_transaction_preexisting
 
 
 def mark_inventory_sold_from_shopify_order(
@@ -792,6 +799,107 @@ def mark_inventory_sold_from_shopify_order(
     marked = 0
     issues_recorded = 0
     movement_claims_recorded = 0
+    prepared_sales: list[dict[str, Any]] = []
+
+    def movement_quantities(
+        movement: InventoryStockMovement,
+    ) -> tuple[int, Optional[int], int]:
+        applied_quantity = max(
+            0,
+            int(movement.quantity_before or 0) - int(movement.quantity_after or 0),
+        )
+        requested_quantity = movement.requested_quantity
+        comparison_quantity = (
+            max(0, int(requested_quantity))
+            if requested_quantity is not None
+            else applied_quantity
+        )
+        return applied_quantity, requested_quantity, comparison_quantity
+
+    def log_replay(
+        *,
+        sku: str,
+        inventory_item_id: int,
+        applied_quantity: int,
+        requested_quantity: Optional[int],
+    ) -> None:
+        print(
+            structured_log_line(
+                runtime=runtime_name,
+                action="inventory.shopify_order.replay_skipped",
+                success=True,
+                shopify_order_id=order_identity,
+                inventory_item_id=inventory_item_id,
+                barcode=sku,
+                applied_quantity=applied_quantity,
+                requested_quantity=requested_quantity,
+            )
+        )
+
+    def record_quantity_change(
+        *,
+        sku: str,
+        sale: dict[str, Any],
+        sale_price: float,
+        sold_quantity: int,
+        inventory_item_id: int,
+        card_name: str,
+        dedupe_key: str,
+        applied_quantity: int,
+        requested_quantity: Optional[int],
+        comparison_quantity: int,
+    ) -> None:
+        nonlocal issues_recorded
+        message = (
+            f"Shopify order {order_identity} SKU {sku} previously requested quantity "
+            f"{comparison_quantity}; applied quantity {applied_quantity} locally; "
+            f"current paid quantity {sold_quantity}. "
+            "Local inventory was not changed automatically."
+        )
+        record_shopify_sync_issue(
+            session,
+            issue_type=SHOPIFY_SYNC_ISSUE_ORDER_QUANTITY_CHANGED,
+            shopify_sku=sku,
+            shopify_title=str(sale.get("title") or card_name or ""),
+            shopify_order_id=order_identity,
+            shopify_order_number=order_number,
+            shopify_variant_id=str(sale.get("variant_id") or "") or None,
+            inventory_item_id=inventory_item_id,
+            quantity=sold_quantity,
+            unit_price=sale_price if sale_price > 0 else None,
+            message=message,
+            payload={
+                "shopify_order_identity": order_identity,
+                "inventory_item_id": inventory_item_id,
+                "sku": sku,
+                "dedupe_key": dedupe_key,
+                "applied_quantity": applied_quantity,
+                "requested_quantity": comparison_quantity,
+                "requested_quantity_recorded": requested_quantity,
+                "current_quantity": sold_quantity,
+                "line_items": sale.get("payloads") or [],
+            },
+            severity="error",
+        )
+        issues_recorded += 1
+        print(
+            structured_log_line(
+                runtime=runtime_name,
+                action="inventory.shopify_order.quantity_changed",
+                success=False,
+                error=message,
+                shopify_order_id=order_identity,
+                inventory_item_id=inventory_item_id,
+                barcode=sku,
+                applied_quantity=applied_quantity,
+                requested_quantity=comparison_quantity,
+                current_quantity=sold_quantity,
+            )
+        )
+
+    # PostgreSQL locks matching rows via FOR UPDATE. SQLite ignores FOR UPDATE,
+    # so reserve its write lock before reading any quantity used for a decrement.
+    transaction_started_here = _begin_stock_mutation_transaction(session)
     for sku in sorted(sold_by_sku):
         sale = sold_by_sku[sku]
         sale_price = float(sale.get("price") or 0)
@@ -884,86 +992,58 @@ def mark_inventory_sold_from_shopify_order(
                     )
                 ).first()
 
-        def handle_existing_movement(movement: InventoryStockMovement) -> None:
-            nonlocal issues_recorded
-            applied_quantity = max(
-                0,
-                int(movement.quantity_before or 0) - int(movement.quantity_after or 0),
-            )
-            requested_quantity = movement.requested_quantity
-            comparison_quantity = (
-                max(0, int(requested_quantity))
-                if requested_quantity is not None
-                else applied_quantity
+        if existing_movement is not None:
+            applied_quantity, requested_quantity, comparison_quantity = (
+                movement_quantities(existing_movement)
             )
             if comparison_quantity == sold_quantity:
-                print(
-                    structured_log_line(
-                        runtime=runtime_name,
-                        action="inventory.shopify_order.replay_skipped",
-                        success=True,
-                        shopify_order_id=order_identity,
-                        inventory_item_id=inv_item.id,
-                        barcode=sku,
-                        applied_quantity=applied_quantity,
-                        requested_quantity=requested_quantity,
-                    )
-                )
-                return
-
-            message = (
-                f"Shopify order {order_identity} SKU {sku} previously requested quantity "
-                f"{comparison_quantity}; applied quantity {applied_quantity} locally; "
-                f"current paid quantity {sold_quantity}. "
-                "Local inventory was not changed automatically."
-            )
-            record_shopify_sync_issue(
-                session,
-                issue_type=SHOPIFY_SYNC_ISSUE_ORDER_QUANTITY_CHANGED,
-                shopify_sku=sku,
-                shopify_title=str(sale.get("title") or inv_item.card_name or ""),
-                shopify_order_id=order_identity,
-                shopify_order_number=order_number,
-                shopify_variant_id=str(sale.get("variant_id") or "") or None,
-                inventory_item_id=inv_item.id,
-                quantity=sold_quantity,
-                unit_price=sale_price if sale_price > 0 else None,
-                message=message,
-                payload={
-                    "shopify_order_identity": order_identity,
-                    "inventory_item_id": inv_item.id,
-                    "sku": sku,
-                    "dedupe_key": dedupe_key,
-                    "applied_quantity": applied_quantity,
-                    "requested_quantity": comparison_quantity,
-                    "requested_quantity_recorded": requested_quantity,
-                    "current_quantity": sold_quantity,
-                    "line_items": sale.get("payloads") or [],
-                },
-                severity="error",
-            )
-            issues_recorded += 1
-            print(
-                structured_log_line(
-                    runtime=runtime_name,
-                    action="inventory.shopify_order.quantity_changed",
-                    success=False,
-                    error=message,
-                    shopify_order_id=order_identity,
+                log_replay(
+                    sku=sku,
                     inventory_item_id=inv_item.id,
-                    barcode=sku,
                     applied_quantity=applied_quantity,
-                    requested_quantity=comparison_quantity,
-                    current_quantity=sold_quantity,
+                    requested_quantity=requested_quantity,
                 )
-            )
-
-        if existing_movement is not None:
-            handle_existing_movement(existing_movement)
+            else:
+                record_quantity_change(
+                    sku=sku,
+                    sale=sale,
+                    sale_price=sale_price,
+                    sold_quantity=sold_quantity,
+                    inventory_item_id=inv_item.id,
+                    card_name=str(inv_item.card_name or ""),
+                    dedupe_key=dedupe_key,
+                    applied_quantity=applied_quantity,
+                    requested_quantity=requested_quantity,
+                    comparison_quantity=comparison_quantity,
+                )
             continue
         if sold_quantity == 0:
             continue
 
+        prepared_sales.append(
+            {
+                "sku": sku,
+                "sale": sale,
+                "sale_price": sale_price,
+                "sold_quantity": sold_quantity,
+                "inv_item": inv_item,
+                "dedupe_key": dedupe_key,
+                "movement_notes": movement_notes,
+            }
+        )
+
+    if issues_recorded:
+        session.commit()
+        return 0
+
+    for prepared_sale in prepared_sales:
+        sku = prepared_sale["sku"]
+        sale = prepared_sale["sale"]
+        sale_price = prepared_sale["sale_price"]
+        sold_quantity = prepared_sale["sold_quantity"]
+        inv_item = prepared_sale["inv_item"]
+        dedupe_key = prepared_sale["dedupe_key"]
+        movement_notes = prepared_sale["movement_notes"]
         before_qty = max(0, inv_item.quantity or 0)
         after_qty = max(0, before_qty - sold_quantity)
         movement = InventoryStockMovement(
@@ -979,7 +1059,6 @@ def mark_inventory_sold_from_shopify_order(
             created_by=runtime_name,
             created_at=utcnow(),
         )
-        _ensure_sqlite_outer_transaction(session)
         try:
             with session.begin_nested():
                 session.add(movement)
@@ -1009,8 +1088,38 @@ def mark_inventory_sold_from_shopify_order(
                 )
             if concurrent_movement is None:
                 raise
-            handle_existing_movement(concurrent_movement)
-            continue
+            applied_quantity, requested_quantity, comparison_quantity = (
+                movement_quantities(concurrent_movement)
+            )
+            if comparison_quantity == sold_quantity:
+                log_replay(
+                    sku=sku,
+                    inventory_item_id=inv_item.id,
+                    applied_quantity=applied_quantity,
+                    requested_quantity=requested_quantity,
+                )
+                continue
+
+            # A conflicting claim appeared after preflight. Roll back every
+            # mutation for this order, then persist only the durable issue.
+            inventory_item_id = inv_item.id
+            card_name = str(inv_item.card_name or "")
+            session.rollback()
+            issues_recorded = 0
+            record_quantity_change(
+                sku=sku,
+                sale=sale,
+                sale_price=sale_price,
+                sold_quantity=sold_quantity,
+                inventory_item_id=inventory_item_id,
+                card_name=card_name,
+                dedupe_key=dedupe_key,
+                applied_quantity=applied_quantity,
+                requested_quantity=requested_quantity,
+                comparison_quantity=comparison_quantity,
+            )
+            session.commit()
+            return 0
 
         if after_qty == before_qty:
             print(
@@ -1066,5 +1175,7 @@ def mark_inventory_sold_from_shopify_order(
 
     if marked or issues_recorded or movement_claims_recorded:
         session.commit()
+    elif transaction_started_here:
+        session.rollback()
 
     return marked

@@ -68,15 +68,25 @@ def _issue_key(
                 str(shopify_variant_id or shopify_sku or shopify_title or "unknown-variant"),
             ]
         )
-    if issue_type in {
-        SHOPIFY_SYNC_ISSUE_ORDER_QUANTITY_CHANGED,
-        SHOPIFY_SYNC_ISSUE_INVALID_ORDER_QUANTITY,
-    }:
+    if issue_type == SHOPIFY_SYNC_ISSUE_ORDER_QUANTITY_CHANGED:
         return ":".join(
             [
                 issue_type,
                 str(shopify_order_id or "unknown-order"),
                 str(inventory_item_id or shopify_sku or "unknown-item"),
+            ]
+        )
+    if issue_type == SHOPIFY_SYNC_ISSUE_INVALID_ORDER_QUANTITY:
+        return ":".join(
+            [
+                issue_type,
+                str(shopify_order_id or "unknown-order"),
+                str(
+                    shopify_variant_id
+                    or shopify_sku
+                    or inventory_item_id
+                    or "unknown-item"
+                ),
             ]
         )
     if issue_type == SHOPIFY_SYNC_ISSUE_INVALID_ORDER_IDENTITY:

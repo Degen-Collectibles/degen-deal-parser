@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import pytest
 from jinja2 import DictLoader, Environment
+from sqlalchemy import event
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
 from sqlalchemy.pool import StaticPool
@@ -17,6 +18,7 @@ from sqlmodel import SQLModel, Session, create_engine, select
 from starlette.requests import Request
 
 from app.inventory.shopify_ingest import (
+    _begin_stock_mutation_transaction,
     mark_inventory_sold_from_shopify_order,
     normalize_shopify_order_identity,
 )
@@ -279,7 +281,7 @@ def test_invalid_paid_quantity_records_deduped_nonimportable_issue(
             issue = session.exec(select(ShopifySyncIssue)).one()
             assert issue.issue_type == "invalid_order_quantity"
             assert issue.issue_key == (
-                f"invalid_order_quantity:order-invalid-quantity:{item.id}"
+                "invalid_order_quantity:order-invalid-quantity:variant-DGN-SAFE1"
             )
             assert issue.inventory_item_id == item.id
             assert issue.quantity == 0
@@ -304,6 +306,40 @@ def test_invalid_paid_quantity_records_deduped_nonimportable_issue(
             "invalid_order_quantity"
             not in shopify_sync.SHOPIFY_SYNC_IMPORTABLE_ISSUE_TYPES
         )
+    finally:
+        engine.dispose()
+
+
+def test_invalid_quantity_issue_key_stays_stable_when_inventory_link_appears():
+    engine = _engine()
+    try:
+        payload = _paid_payload(
+            order_id="order-invalid-link",
+            sku="DGN-LINK-LATER",
+        )
+        payload["line_items"][0]["quantity"] = "not-a-quantity"
+
+        with Session(engine) as session:
+            assert mark_inventory_sold_from_shopify_order(session, payload) == 0
+            issue = session.exec(select(ShopifySyncIssue)).one()
+            assert issue.issue_key == (
+                "invalid_order_quantity:order-invalid-link:variant-DGN-LINK-LATER"
+            )
+            assert issue.inventory_item_id is None
+
+            item = _item(barcode="DGN-LINK-LATER")
+            session.add(item)
+            session.commit()
+            session.refresh(item)
+
+            assert mark_inventory_sold_from_shopify_order(session, payload) == 0
+            issues = _rows(session, ShopifySyncIssue)
+            assert len(issues) == 1
+            assert issues[0].issue_key == (
+                "invalid_order_quantity:order-invalid-link:variant-DGN-LINK-LATER"
+            )
+            assert issues[0].inventory_item_id == item.id
+            assert issues[0].occurrence_count == 2
     finally:
         engine.dispose()
 
@@ -1200,7 +1236,53 @@ def test_non_schema_programming_error_propagates_without_schema_log(capsys):
         engine.dispose()
 
 
-def test_multi_sku_failure_rolls_back_early_mutation_job_and_quantity_issue():
+@pytest.mark.parametrize(
+    ("unsafe_line", "expected_issue_type"),
+    [
+        (
+            {"sku": "DGN-Z-BAD", "quantity": "invalid", "price": "2.00"},
+            "invalid_order_quantity",
+        ),
+        (
+            {"sku": "DGN-Z-MISSING", "quantity": 1, "price": "2.00"},
+            "unknown_sku",
+        ),
+    ],
+    ids=["invalid-quantity", "unknown-sku"],
+)
+def test_multi_sku_safety_issue_prevents_every_stock_mutation(
+    unsafe_line, expected_issue_type
+):
+    engine = _engine()
+    try:
+        with Session(engine) as session:
+            item = _item(barcode="DGN-A", quantity=5)
+            session.add(item)
+            session.commit()
+            session.refresh(item)
+
+            payload = {
+                "id": f"order-all-or-nothing-{expected_issue_type}",
+                "financial_status": "paid",
+                "line_items": [
+                    {"sku": "DGN-A", "quantity": 1, "price": "1.00"},
+                    unsafe_line,
+                ],
+            }
+
+            assert mark_inventory_sold_from_shopify_order(session, payload) == 0
+            session.refresh(item)
+            assert item.quantity == 5
+            assert _rows(session, InventoryStockMovement) == []
+            assert _rows(session, ShopifySyncJob) == []
+            issues = _rows(session, ShopifySyncIssue)
+            assert len(issues) == 1
+            assert issues[0].issue_type == expected_issue_type
+    finally:
+        engine.dispose()
+
+
+def test_multi_sku_quantity_change_issue_prevents_every_stock_mutation():
     engine = _engine()
     try:
         with Session(engine) as setup:
@@ -1229,13 +1311,72 @@ def test_multi_sku_failure_rolls_back_early_mutation_job_and_quantity_issue():
             setup.commit()
             item_a_id, item_b_id, item_c_id = item_a.id, item_b.id, item_c.id
 
-        conflict_key = f"shopify-order:order-atomic:inventory-item:{item_c_id}"
         payload = {
             "id": "order-atomic",
             "financial_status": "paid",
             "line_items": [
                 {"sku": "DGN-A", "quantity": 1},
                 {"sku": "DGN-B", "quantity": 2},
+                {"sku": "DGN-C", "quantity": 1},
+            ],
+        }
+        with Session(engine) as session:
+            assert mark_inventory_sold_from_shopify_order(session, payload) == 0
+
+        with Session(engine) as verify:
+            assert verify.get(InventoryItem, item_a_id).quantity == 5
+            assert verify.get(InventoryItem, item_b_id).quantity == 4
+            assert verify.get(InventoryItem, item_c_id).quantity == 5
+            movements = _rows(verify, InventoryStockMovement)
+            assert len(movements) == 1
+            assert movements[0].item_id == item_b_id
+            assert _rows(verify, ShopifySyncJob) == []
+            issues = _rows(verify, ShopifySyncIssue)
+            assert len(issues) == 1
+            assert issues[0].issue_type == "order_quantity_changed"
+            assert issues[0].inventory_item_id == item_b_id
+    finally:
+        engine.dispose()
+
+
+def test_multi_sku_failure_rolls_back_early_mutation_job_and_quantity_issue():
+    engine = _engine()
+    try:
+        with Session(engine) as setup:
+            item_a = _item(barcode="DGN-A", quantity=5)
+            item_b = _item(barcode="DGN-B", quantity=4)
+            item_c = _item(barcode="DGN-C", quantity=5)
+            setup.add_all([item_a, item_b, item_c])
+            setup.commit()
+            for item in (item_a, item_b, item_c):
+                setup.refresh(item)
+            setup.add(
+                InventoryStockMovement(
+                    item_id=item_b.id,
+                    reason="sale",
+                    quantity_delta=-1,
+                    quantity_before=5,
+                    quantity_after=4,
+                    source="Shopify",
+                    notes="Shopify order order-atomic-failure",
+                    dedupe_key=(
+                        f"shopify-order:order-atomic-failure:inventory-item:{item_b.id}"
+                    ),
+                    requested_quantity=1,
+                )
+            )
+            setup.commit()
+            item_a_id, item_b_id, item_c_id = item_a.id, item_b.id, item_c.id
+
+        conflict_key = (
+            f"shopify-order:order-atomic-failure:inventory-item:{item_c_id}"
+        )
+        payload = {
+            "id": "order-atomic-failure",
+            "financial_status": "paid",
+            "line_items": [
+                {"sku": "DGN-A", "quantity": 1},
+                {"sku": "DGN-B", "quantity": 1},
                 {"sku": "DGN-C", "quantity": 1},
             ],
         }
@@ -1273,6 +1414,153 @@ class _CaptureInventorySelectSession(Session):
         if any(row.get("entity") is InventoryItem for row in descriptions):
             self.inventory_statements.append(statement)
         return super().exec(statement, *args, **kwargs)
+
+
+def test_sqlite_immediate_transaction_begins_before_inventory_read():
+    engine = _engine()
+    statements: list[str] = []
+
+    def capture_statement(
+        _connection, _cursor, statement, _parameters, _context, _many
+    ):
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", capture_statement)
+    try:
+        with Session(engine) as session:
+            session.add(_item(barcode="DGN-SAFE1"))
+            session.commit()
+            statements.clear()
+
+            assert mark_inventory_sold_from_shopify_order(
+                session,
+                _paid_payload(order_id="order-immediate-lock"),
+            ) == 1
+
+        normalized = [" ".join(statement.upper().split()) for statement in statements]
+        begin_index = normalized.index("BEGIN IMMEDIATE")
+        inventory_select_index = next(
+            index
+            for index, statement in enumerate(normalized)
+            if statement.startswith("SELECT") and "FROM INVENTORY_ITEMS" in statement
+        )
+        assert begin_index < inventory_select_index
+    finally:
+        event.remove(engine, "before_cursor_execute", capture_statement)
+        engine.dispose()
+
+
+def test_sqlite_replay_releases_function_owned_immediate_transaction(tmp_path):
+    database_path = tmp_path / "shopify-replay-lock.db"
+    engine = create_engine(
+        f"sqlite:///{database_path.as_posix()}",
+        connect_args={"check_same_thread": False, "timeout": 0.1},
+    )
+    SQLModel.metadata.create_all(engine)
+    try:
+        with Session(engine) as setup:
+            setup.add(_item(barcode="DGN-SAFE1", quantity=5))
+            setup.commit()
+
+        with Session(engine) as replay_session:
+            payload = _paid_payload(order_id="order-replay-lock", quantity=1)
+            assert mark_inventory_sold_from_shopify_order(replay_session, payload) == 1
+            assert mark_inventory_sold_from_shopify_order(replay_session, payload) == 0
+            assert replay_session.in_transaction() is False
+
+            driver_connection = (
+                replay_session.connection().connection.dbapi_connection
+            )
+            assert driver_connection.in_transaction is False
+
+            with Session(engine) as second_writer:
+                assert mark_inventory_sold_from_shopify_order(
+                    second_writer,
+                    _paid_payload(order_id="order-after-replay", quantity=1),
+                ) == 1
+    finally:
+        engine.dispose()
+
+
+def test_sqlite_replay_preserves_caller_owned_transaction(tmp_path):
+    database_path = tmp_path / "shopify-caller-transaction.db"
+    engine = create_engine(
+        f"sqlite:///{database_path.as_posix()}",
+        connect_args={"check_same_thread": False, "timeout": 0.1},
+    )
+    SQLModel.metadata.create_all(engine)
+    try:
+        payload = _paid_payload(order_id="order-caller-owned", quantity=1)
+        with Session(engine) as setup:
+            setup.add(_item(barcode="DGN-SAFE1", quantity=5))
+            assert mark_inventory_sold_from_shopify_order(setup, payload) == 1
+
+        with Session(engine) as caller:
+            pending = _item(barcode="DGN-CALLER-PENDING", quantity=1)
+            caller.add(pending)
+            assert caller.in_transaction() is True
+
+            assert mark_inventory_sold_from_shopify_order(caller, payload) == 0
+            assert caller.in_transaction() is True
+            caller.commit()
+
+        with Session(engine) as verify:
+            persisted = verify.exec(
+                select(InventoryItem).where(
+                    InventoryItem.barcode == "DGN-CALLER-PENDING"
+                )
+            ).one()
+            assert persisted.quantity == 1
+    finally:
+        engine.dispose()
+
+
+class _TransactionOwnershipDialect:
+    name = "postgresql"
+
+
+class _TransactionOwnershipConnection:
+    dialect = _TransactionOwnershipDialect()
+
+
+class _ExternalTransactionBind:
+    def in_transaction(self):
+        return True
+
+
+class _TransactionOwnershipSession:
+    def __init__(self, *, session_preexisting: bool, external_preexisting: bool):
+        self.session_preexisting = session_preexisting
+        self.bind = _ExternalTransactionBind() if external_preexisting else object()
+
+    def in_transaction(self):
+        return self.session_preexisting
+
+    def get_bind(self):
+        return self.bind
+
+    def connection(self):
+        return _TransactionOwnershipConnection()
+
+
+@pytest.mark.parametrize(
+    ("session_preexisting", "external_preexisting", "expected_owned"),
+    [
+        (False, False, True),
+        (True, False, False),
+        (False, True, False),
+        (True, True, False),
+    ],
+)
+def test_stock_mutation_transaction_ownership_is_dialect_independent(
+    session_preexisting, external_preexisting, expected_owned
+):
+    session = _TransactionOwnershipSession(
+        session_preexisting=session_preexisting,
+        external_preexisting=external_preexisting,
+    )
+
+    assert _begin_stock_mutation_transaction(session) is expected_owned
 
 
 def test_inventory_rows_are_locked_and_skus_process_in_sorted_order():
@@ -1328,9 +1616,13 @@ def test_quantity_change_issue_type_is_not_importable():
 
 
 def _render_sync_issue(issue: ShopifySyncIssue, importable_issue_types: set[str]) -> str:
-    template_source = Path("app/templates/inventory_shopify_sync.html").read_text(
-        encoding="utf-8"
+    template_path = (
+        Path(__file__).resolve().parents[1]
+        / "app"
+        / "templates"
+        / "inventory_shopify_sync.html"
     )
+    template_source = template_path.read_text(encoding="utf-8")
     environment = Environment(
         loader=DictLoader(
             {
@@ -1352,6 +1644,22 @@ def _render_sync_issue(issue: ShopifySyncIssue, importable_issue_types: set[str]
         effective_price=lambda _item: 0,
         importable_issue_types=importable_issue_types,
     )
+
+
+def test_sync_issue_template_render_is_independent_of_working_directory(
+    tmp_path, monkeypatch
+):
+    issue = ShopifySyncIssue(
+        id=1,
+        issue_key="unknown_sku:order-1:DGN-MISSING",
+        issue_type="unknown_sku",
+        message="Unknown SKU.",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    html = _render_sync_issue(issue, {"unknown_sku"})
+
+    assert 'action="/inventory/shopify-sync/import"' in html
 
 
 def test_quantity_change_issue_hides_import_action_in_rendered_ui():

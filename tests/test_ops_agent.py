@@ -158,6 +158,8 @@ _MISSING = object()
         ("unit_count", 1.5),
         ("unit_count", 10**10000),
         ("financing_amount", -1),
+        ("cash_on_hand", True),
+        ("cash_on_hand", False),
         ("target_payback_weeks", _MISSING),
         ("target_payback_weeks", None),
         ("target_payback_weeks", True),
@@ -174,6 +176,8 @@ _MISSING = object()
         "fractional-unit-count",
         "huge-unit-count",
         "negative-financing",
+        "true-cash-on-hand",
+        "false-cash-on-hand",
         "missing-target-payback-weeks",
         "null-target-payback-weeks",
         "boolean-target-payback-weeks",
@@ -216,6 +220,41 @@ def test_ops_agent_invalid_scenario_fields_are_field_specific_and_never_safe(fie
     assert any(f"Invalid {field}" in flag for flag in result["risk_flags"])
     if field == "unit_count":
         assert result["unit_economics"]["unit_count"] == 0
+
+
+@pytest.mark.parametrize("reserve_floor", [True, False], ids=["true", "false"])
+def test_ops_agent_boolean_reserve_floor_is_unconfigured_and_never_safe(reserve_floor):
+    scenario = {
+        "lot_name": "Pokemon sealed weekend lot",
+        "purchase_cost": 2000.0,
+        "expected_revenue": 3600.0,
+        "unit_count": 40,
+        "cash_on_hand": 12000.0,
+        "minimum_cash_reserve": reserve_floor,
+        "target_payback_weeks": 4,
+        "financing_amount": 0.0,
+        "categories": ["Pokemon sealed"],
+    }
+    context = {
+        "finance_statement": {"avg_daily_profit": 240.0},
+        "channel_velocity": [
+            {
+                "channel": "TikTok",
+                "matched_category": "Pokemon sealed",
+                "units_per_week": 20.0,
+                "revenue_per_week": 1500.0,
+                "confidence": "high",
+            }
+        ],
+        "loan_snapshot": {},
+    }
+
+    result = build_ops_agent_recommendation(scenario, context)
+
+    assert result["verdict"] != "safe"
+    assert result["cash_flow"]["minimum_cash_reserve"] is None
+    assert result["cash_flow"]["reserve_floor_configured"] is False
+    assert "Reserve floor is not configured" in result["risk_flags"]
 
 
 def test_ops_agent_missing_reserve_floor_is_not_assessed_and_cannot_be_safe():

@@ -63,8 +63,11 @@ def _money(value: Any) -> float:
 
 
 def _configured_reserve_floor(scenario: dict[str, Any]) -> float | None:
+    raw_amount = scenario.get("minimum_cash_reserve")
+    if isinstance(raw_amount, bool):
+        return None
     try:
-        amount = float(scenario.get("minimum_cash_reserve"))
+        amount = float(raw_amount)
     except (OverflowError, TypeError, ValueError):
         return None
     if not isfinite(amount) or amount <= 0 or amount > MAX_DEGEN_MONEY_USD:
@@ -189,10 +192,13 @@ def _scenario_validation_risk_flags(scenario: dict[str, Any]) -> list[str]:
 
     cash_on_hand = scenario.get("cash_on_hand")
     if cash_on_hand is not None and cash_on_hand != "":
-        try:
-            parsed_cash = float(cash_on_hand)
-        except (OverflowError, TypeError, ValueError):
+        if isinstance(cash_on_hand, bool):
             parsed_cash = None
+        else:
+            try:
+                parsed_cash = float(cash_on_hand)
+            except (OverflowError, TypeError, ValueError):
+                parsed_cash = None
         if parsed_cash is None or not isfinite(parsed_cash) or abs(parsed_cash) > MAX_DEGEN_MONEY_USD:
             flags.append("Invalid cash_on_hand: authoritative cash must be finite and within the supported range")
     return flags

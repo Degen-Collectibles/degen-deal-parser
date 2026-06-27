@@ -496,8 +496,10 @@ def _reset_session_read_only(session: Any, db_url: str) -> None:
 
 
 def _money(value: Any) -> float:
+    if value is None or isinstance(value, bool):
+        return 0.0
     try:
-        amount = float(value or 0.0)
+        amount = float(value)
     except OverflowError:
         try:
             return -MAX_DEGEN_MONEY_USD if value < 0 else MAX_DEGEN_MONEY_USD
@@ -505,10 +507,17 @@ def _money(value: Any) -> float:
             return 0.0
     except (TypeError, ValueError):
         return 0.0
-    if not isfinite(amount):
+    if isfinite(amount):
+        bounded_amount = max(-MAX_DEGEN_MONEY_USD, min(amount, MAX_DEGEN_MONEY_USD))
+        return round(bounded_amount, 2)
+
+    try:
+        exact_amount = Decimal(str(value).strip())
+    except (InvalidOperation, TypeError, ValueError):
         return 0.0
-    bounded_amount = max(-MAX_DEGEN_MONEY_USD, min(amount, MAX_DEGEN_MONEY_USD))
-    return round(bounded_amount, 2)
+    if not exact_amount.is_finite():
+        return 0.0
+    return -MAX_DEGEN_MONEY_USD if exact_amount < 0 else MAX_DEGEN_MONEY_USD
 
 
 def _reserve_floor_from_environment() -> dict[str, Any]:

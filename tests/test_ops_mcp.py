@@ -1778,6 +1778,37 @@ def test_mcp_money_parser_bounds_extreme_finite_values(value, expected):
     assert _money(value) == expected
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("1e309", 1_000_000_000.0),
+        ("-1e309", -1_000_000_000.0),
+        ("Infinity", 0.0),
+        ("-Infinity", 0.0),
+        ("NaN", 0.0),
+        (float("inf"), 0.0),
+        (float("nan"), 0.0),
+        (True, 0.0),
+        (False, 0.0),
+        ("not-a-number", 0.0),
+    ],
+    ids=[
+        "positive-overflowing-numeric-string",
+        "negative-overflowing-numeric-string",
+        "positive-infinity-token",
+        "negative-infinity-token",
+        "nan-token",
+        "infinite-float",
+        "nan-float",
+        "true-is-not-money",
+        "false-is-not-money",
+        "unparseable",
+    ],
+)
+def test_mcp_money_parser_distinguishes_overflowing_finite_strings_from_nonfinite_values(value, expected):
+    assert _money(value) == expected
+
+
 def test_mcp_partner_output_removes_configured_reserve_metadata_and_exact_values(monkeypatch):
     monkeypatch.setenv("DEGEN_OPS_MIN_CASH_RESERVE_USD", "6543.21")
     harness = _reserve_floor_harness(monkeypatch, cash_on_hand=7000.0)

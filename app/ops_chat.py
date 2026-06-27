@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 import json
 from typing import Any
 
@@ -478,13 +479,15 @@ def tool_schemas_for_scope(scope: str | None = None) -> list[dict[str, Any]]:
 def _loads_args(raw_args: Any) -> dict[str, Any]:
     if isinstance(raw_args, dict):
         return raw_args
-    if not raw_args:
+    if raw_args is None or raw_args == "":
         return {}
     try:
         parsed = json.loads(str(raw_args))
     except json.JSONDecodeError:
         return {"_error": f"Invalid JSON tool arguments: {raw_args}"}
-    return parsed if isinstance(parsed, dict) else {}
+    if not isinstance(parsed, dict):
+        return {"_error": f"Tool arguments must be a JSON object: {raw_args}"}
+    return parsed
 
 
 def _json_dumps(payload: Any) -> str:
@@ -501,15 +504,25 @@ class DegenOpsChatToolRunner:
         self.harness = harness or DegenOpsMcpHarness()
         self.allowed_tools = set(DEGEN_OPS_SCOPE_TOOL_NAMES[self.scope])
 
-    def call_tool(self, name: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
+    def call_tool(self, name: str, args: Mapping[str, Any] | None = None) -> dict[str, Any]:
         if name not in self.allowed_tools:
             return {
                 "error": f"Tool {name!r} is not available in Degen Ops scope {self.scope!r}.",
                 "read_only": True,
             }
-        payload = dict(args or {})
+        if args is None:
+            payload: dict[str, Any] = {}
+        elif not isinstance(args, Mapping):
+            return {"error": "Tool arguments must be an object.", "read_only": True}
+        else:
+            payload = dict(args)
         if payload.get("_error"):
             return {"error": payload["_error"], "read_only": True}
+        if name in {"evaluate_inventory_buy", "generate_partner_update"}:
+            scenario = payload.get("scenario")
+            if not isinstance(scenario, Mapping):
+                return {"error": "Tool scenario must be an object.", "read_only": True}
+            payload["scenario"] = dict(scenario)
         if "days" in payload:
             days_schema = (
                 TOOL_SCHEMAS.get(name, {})

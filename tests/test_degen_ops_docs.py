@@ -60,13 +60,12 @@ def test_ops_agent_instructions_make_reserve_floor_environment_authoritative():
 
 
 def test_ops_operational_scripts_do_not_send_caller_reserve_floor():
-    script_paths = [
-        Path("scripts/degen_ops_pilot_demo.py"),
-        Path("scripts/degen_ops_chat.py"),
-        Path("scripts/degen_ops_live_data.py"),
-    ]
+    scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+    script_paths = sorted(scripts_dir.glob("degen_ops_*.py"))
+    assert script_paths
+
     offenders = [
-        str(path)
+        path.name
         for path in script_paths
         if "minimum_cash_reserve" in path.read_text(encoding="utf-8")
     ]
