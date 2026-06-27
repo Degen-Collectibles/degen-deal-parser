@@ -12,12 +12,16 @@ from threading import Lock
 from typing import Any, Optional
 
 import httpx
+from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
 from sqlmodel import Session, select
 
 from ..models import ShopifyOrder, InventoryItem, InventoryStockMovement, INVENTORY_SOLD, utcnow
 from ..runtime_logging import structured_log_line
 from ..shopify_api import SHOPIFY_API_VERSION
 from ..shopify_sync import (
+    SHOPIFY_SYNC_ISSUE_INVALID_ORDER_IDENTITY,
+    SHOPIFY_SYNC_ISSUE_INVALID_ORDER_QUANTITY,
+    SHOPIFY_SYNC_ISSUE_ORDER_QUANTITY_CHANGED,
     SHOPIFY_SYNC_ISSUE_UNKNOWN_SKU,
     enqueue_shopify_sync_job,
     record_shopify_sync_issue,
@@ -83,6 +87,65 @@ def json_dumps(value: Any) -> str:
     return json.dumps(value, default=str, sort_keys=True, separators=(",", ":"))
 
 
+def normalize_shopify_order_identity(payload: dict[str, Any]) -> str:
+    raw_identity = payload.get("id")
+    if isinstance(raw_identity, bool) or raw_identity is None:
+        return ""
+    if isinstance(raw_identity, str):
+        normalized = raw_identity.strip()
+        if not normalized:
+            return ""
+        try:
+            numeric_identity = Decimal(normalized)
+        except InvalidOperation:
+            return normalized
+        if (
+            not numeric_identity.is_finite()
+            or numeric_identity <= 0
+            or numeric_identity != numeric_identity.to_integral_value()
+        ):
+            return ""
+        return normalized
+    if isinstance(raw_identity, int):
+        return str(raw_identity) if raw_identity > 0 else ""
+    if isinstance(raw_identity, (float, Decimal)):
+        numeric_identity = Decimal(str(raw_identity))
+        if (
+            not numeric_identity.is_finite()
+            or numeric_identity <= 0
+            or numeric_identity != numeric_identity.to_integral_value()
+        ):
+            return ""
+        return str(int(numeric_identity))
+    return ""
+
+
+def _normalize_shopify_line_quantity(raw_quantity: Any) -> Optional[int]:
+    if isinstance(raw_quantity, bool) or raw_quantity is None:
+        return None
+    if isinstance(raw_quantity, int):
+        return raw_quantity if raw_quantity >= 0 else None
+    if isinstance(raw_quantity, str):
+        normalized = raw_quantity.strip()
+        if not normalized:
+            return None
+        try:
+            numeric_quantity = Decimal(normalized)
+        except InvalidOperation:
+            return None
+    elif isinstance(raw_quantity, (float, Decimal)):
+        numeric_quantity = Decimal(str(raw_quantity))
+    else:
+        return None
+    if (
+        not numeric_quantity.is_finite()
+        or numeric_quantity < 0
+        or numeric_quantity != numeric_quantity.to_integral_value()
+    ):
+        return None
+    return int(numeric_quantity)
+
+
 def _safe_json_list(value: Any) -> list[dict[str, Any]]:
     if isinstance(value, list):
         return [item for item in value if isinstance(item, dict)]
@@ -104,16 +167,16 @@ def normalize_shopify_line_items(line_items: Any) -> list[dict[str, Any]]:
         if not title:
             continue
 
-        quantity_raw = item.get("quantity")
-        try:
-            quantity = int(quantity_raw or 0)
-        except (TypeError, ValueError):
-            quantity = 0
+        quantity = (
+            _normalize_shopify_line_quantity(item.get("quantity"))
+            if "quantity" in item
+            else None
+        )
 
         normalized.append(
             {
                 "title": title,
-                "quantity": quantity if quantity > 0 else 1,
+                "quantity": quantity if quantity is not None else 0,
                 "sku": str(item.get("sku") or "").strip() or None,
                 "product_id": str(item.get("product_id") or "").strip() or None,
                 "variant_id": str(item.get("variant_id") or "").strip() or None,
@@ -213,9 +276,9 @@ def order_record_from_payload(
     received_at: Optional[datetime] = None,
     runtime_name: str = "shopify_ingest",
 ) -> dict[str, Any]:
-    order_id = payload.get("id")
-    if order_id in (None, ""):
-        raise ValueError("Shopify payload is missing id")
+    order_id = normalize_shopify_order_identity(payload)
+    if not order_id:
+        raise ValueError("Shopify payload has no usable immutable id")
 
     created_at = parse_shopify_datetime(payload.get("created_at"))
     updated_at = parse_shopify_datetime(payload.get("updated_at") or payload.get("created_at"))
@@ -232,7 +295,7 @@ def order_record_from_payload(
             )
         )
     return {
-        "shopify_order_id": str(order_id),
+        "shopify_order_id": order_id,
         "order_number": normalize_order_number(payload),
         "created_at": created_at,
         "updated_at": updated_at,
@@ -522,6 +585,103 @@ def repair_shopify_line_item_summaries(session: Session) -> int:
     return updated
 
 
+_STOCK_MOVEMENT_DEDUPE_INDEX = "idx_inventory_stock_movements_dedupe_key"
+_SQLITE_STOCK_MOVEMENT_DEDUPE_ERROR = (
+    "UNIQUE constraint failed: inventory_stock_movements.dedupe_key"
+)
+
+
+def _is_stock_movement_dedupe_conflict(exc: IntegrityError) -> bool:
+    original = exc.orig
+    diagnostic = getattr(original, "diag", None)
+    constraint_name = getattr(diagnostic, "constraint_name", None) or getattr(
+        original, "constraint_name", None
+    )
+    if constraint_name == _STOCK_MOVEMENT_DEDUPE_INDEX:
+        return True
+    normalized_original = " ".join(str(original).strip().split())
+    return normalized_original == _SQLITE_STOCK_MOVEMENT_DEDUPE_ERROR
+
+
+def _log_stock_movement_schema_unavailable(
+    exc: OperationalError | ProgrammingError,
+    *,
+    runtime_name: str,
+    order_id: str,
+    sku: str,
+    required_column: str,
+) -> None:
+    print(
+        structured_log_line(
+            runtime=runtime_name,
+            action="inventory.shopify_order.schema_unavailable",
+            success=False,
+            error=str(exc),
+            shopify_order_id=order_id,
+            barcode=sku,
+            required_column=required_column,
+        )
+    )
+
+
+def _missing_stock_movement_schema_column(
+    exc: OperationalError | ProgrammingError,
+) -> Optional[str]:
+    original = exc.orig
+    diagnostic = getattr(original, "diag", None)
+    sqlstate = (
+        getattr(original, "sqlstate", None)
+        or getattr(original, "pgcode", None)
+        or getattr(diagnostic, "sqlstate", None)
+    )
+    message = str(original).strip().lower()
+    is_missing_column = sqlstate == "42703" or "no such column" in message
+    if not is_missing_column:
+        return None
+    if "requested_quantity" in message:
+        return "inventory_stock_movements.requested_quantity"
+    if "dedupe_key" in message:
+        return "inventory_stock_movements.dedupe_key"
+    return None
+
+
+def _find_stock_movement_by_dedupe_key(
+    session: Session,
+    dedupe_key: str,
+    *,
+    runtime_name: str,
+    order_id: str,
+    sku: str,
+) -> Optional[InventoryStockMovement]:
+    try:
+        return session.exec(
+            select(InventoryStockMovement).where(
+                InventoryStockMovement.dedupe_key == dedupe_key
+            )
+        ).first()
+    except (OperationalError, ProgrammingError) as exc:
+        required_column = _missing_stock_movement_schema_column(exc)
+        if required_column is not None:
+            _log_stock_movement_schema_unavailable(
+                exc,
+                runtime_name=runtime_name,
+                order_id=order_id,
+                sku=sku,
+                required_column=required_column,
+            )
+        raise
+
+
+def _ensure_sqlite_outer_transaction(session: Session) -> None:
+    connection = session.connection()
+    if connection.dialect.name != "sqlite":
+        return
+    pooled_connection = connection.connection
+    driver_connection = getattr(pooled_connection, "dbapi_connection", None)
+    if driver_connection is not None and not driver_connection.in_transaction:
+        connection.exec_driver_sql("BEGIN")
+
+
 def mark_inventory_sold_from_shopify_order(
     session: Session,
     payload: dict[str, Any],
@@ -534,12 +694,56 @@ def mark_inventory_sold_from_shopify_order(
 
     Returns the count of items marked sold.
     """
+    financial_status = str(payload.get("financial_status") or "").strip().lower()
+    order_number = str(payload.get("name") or payload.get("order_number") or "").strip()
+    order_identity = normalize_shopify_order_identity(payload)
+    if not order_identity:
+        payload_fingerprint = hashlib.sha256(json_dumps(payload).encode("utf-8")).hexdigest()
+        issue = record_shopify_sync_issue(
+            session,
+            issue_type=SHOPIFY_SYNC_ISSUE_INVALID_ORDER_IDENTITY,
+            shopify_order_number=order_number or None,
+            message=(
+                "Shopify order payload did not include a usable immutable order id; "
+                "local inventory was not changed."
+            ),
+            payload=payload,
+            severity="error",
+            issue_fingerprint=payload_fingerprint,
+        )
+        session.commit()
+        print(
+            structured_log_line(
+                runtime=runtime_name,
+                action="inventory.shopify_order.invalid_identity",
+                success=False,
+                error="Shopify order payload is missing usable immutable id.",
+                financial_status=financial_status,
+                shopify_order_number=order_number,
+                issue_id=issue.id,
+                payload_fingerprint=payload_fingerprint,
+            )
+        )
+        return 0
+
+    if financial_status != "paid":
+        print(
+            structured_log_line(
+                runtime=runtime_name,
+                action="inventory.shopify_order.stock_mutation_deferred",
+                success=True,
+                financial_status=financial_status,
+                reason="Shopify order is not paid; local inventory was not changed.",
+                shopify_order_id=payload.get("id"),
+                shopify_order_number=payload.get("name") or payload.get("order_number"),
+            )
+        )
+        return 0
+
     line_items = payload.get("line_items") or []
     if not isinstance(line_items, list):
         return 0
 
-    order_id = str(payload.get("id") or "")
-    order_number = str(payload.get("name") or payload.get("order_number") or "")
     sold_by_sku: dict[str, dict[str, Any]] = {}
     for item in line_items:
         if not isinstance(item, dict):
@@ -547,11 +751,18 @@ def mark_inventory_sold_from_shopify_order(
         sku = str(item.get("sku") or "").strip()
         if not sku:
             continue
-        try:
-            quantity = int(item.get("quantity") or 1)
-        except (TypeError, ValueError):
-            quantity = 1
-        quantity = max(1, quantity)
+        quantity_field = (
+            "current_quantity" if "current_quantity" in item else "quantity"
+        )
+        quantity_present = quantity_field in item
+        quantity_raw = item.get(quantity_field) if quantity_present else None
+        normalized_quantity = (
+            _normalize_shopify_line_quantity(quantity_raw)
+            if quantity_present
+            else None
+        )
+        quantity_valid = normalized_quantity is not None
+        quantity = normalized_quantity if normalized_quantity is not None else 0
         row = sold_by_sku.setdefault(
             sku,
             {
@@ -559,56 +770,264 @@ def mark_inventory_sold_from_shopify_order(
                 "price": 0.0,
                 "title": str(item.get("title") or item.get("name") or ""),
                 "variant_id": str(item.get("variant_id") or ""),
-                "payload": item,
+                "payloads": [],
+                "invalid_quantity_values": [],
             },
         )
         row["quantity"] = int(row["quantity"]) + quantity
         row["price"] = money_to_float(item.get("price"))
+        row["payloads"].append(item)
+        if not quantity_valid:
+            row["invalid_quantity_values"].append(
+                {
+                    "field": quantity_field,
+                    "present": quantity_present,
+                    "value": quantity_raw,
+                }
+            )
 
     if not sold_by_sku:
         return 0
 
     marked = 0
     issues_recorded = 0
-    for sku, sale in sold_by_sku.items():
+    movement_claims_recorded = 0
+    for sku in sorted(sold_by_sku):
+        sale = sold_by_sku[sku]
         sale_price = float(sale.get("price") or 0)
-        sold_quantity = max(1, int(sale.get("quantity") or 1))
+        sold_quantity = max(0, int(sale.get("quantity") or 0))
         inv_item = session.exec(
-            select(InventoryItem).where(InventoryItem.barcode == sku)
+            select(InventoryItem)
+            .where(InventoryItem.barcode == sku)
+            .with_for_update()
         ).first()
+        invalid_quantity_values = sale.get("invalid_quantity_values") or []
+        if invalid_quantity_values:
+            message = (
+                f"Shopify order {order_identity} SKU {sku} included an invalid "
+                "paid quantity; local inventory was not changed."
+            )
+            issue = record_shopify_sync_issue(
+                session,
+                issue_type=SHOPIFY_SYNC_ISSUE_INVALID_ORDER_QUANTITY,
+                shopify_sku=sku,
+                shopify_title=str(sale.get("title") or ""),
+                shopify_order_id=order_identity,
+                shopify_order_number=order_number,
+                shopify_variant_id=str(sale.get("variant_id") or "") or None,
+                inventory_item_id=inv_item.id if inv_item is not None else None,
+                quantity=0,
+                unit_price=sale_price if sale_price > 0 else None,
+                message=message,
+                payload={
+                    "shopify_order_identity": order_identity,
+                    "inventory_item_id": inv_item.id if inv_item is not None else None,
+                    "sku": sku,
+                    "invalid_quantity_values": invalid_quantity_values,
+                    "line_items": sale.get("payloads") or [],
+                },
+                severity="error",
+            )
+            issues_recorded += 1
+            print(
+                structured_log_line(
+                    runtime=runtime_name,
+                    action="inventory.shopify_order.invalid_quantity",
+                    success=False,
+                    error=message,
+                    shopify_order_id=order_identity,
+                    inventory_item_id=inv_item.id if inv_item is not None else None,
+                    barcode=sku,
+                    issue_id=issue.id,
+                )
+            )
+            continue
         if inv_item is None or inv_item.archived_at is not None:
+            if sold_quantity == 0:
+                continue
             record_shopify_sync_issue(
                 session,
                 issue_type=SHOPIFY_SYNC_ISSUE_UNKNOWN_SKU,
                 shopify_sku=sku,
                 shopify_title=str(sale.get("title") or ""),
-                shopify_order_id=order_id,
+                shopify_order_id=order_identity,
                 shopify_order_number=order_number,
                 shopify_variant_id=str(sale.get("variant_id") or "") or None,
                 quantity=sold_quantity,
                 unit_price=sale_price if sale_price > 0 else None,
                 message=(
-                    f"Shopify order {order_id or order_number or '(unknown order)'} used SKU {sku}, "
+                    f"Shopify order {order_identity} used SKU {sku}, "
                     "but no active Degen inventory item matched it."
                 ),
-                payload=sale.get("payload") if isinstance(sale.get("payload"), dict) else {},
+                payload={"line_items": sale.get("payloads") or []},
             )
             issues_recorded += 1
             continue
-        existing_movement = session.exec(
-            select(InventoryStockMovement).where(
-                InventoryStockMovement.item_id == inv_item.id,
-                InventoryStockMovement.reason == "sale",
-                InventoryStockMovement.source == "Shopify",
-                InventoryStockMovement.notes == f"Shopify order {order_id}".strip(),
+
+        dedupe_key = f"shopify-order:{order_identity}:inventory-item:{inv_item.id}"
+        movement_notes = f"Shopify order {order_identity}"
+        with session.no_autoflush:
+            existing_movement = _find_stock_movement_by_dedupe_key(
+                session,
+                dedupe_key,
+                runtime_name=runtime_name,
+                order_id=order_identity,
+                sku=sku,
             )
-        ).first()
+            if existing_movement is None:
+                existing_movement = session.exec(
+                    select(InventoryStockMovement).where(
+                        InventoryStockMovement.item_id == inv_item.id,
+                        InventoryStockMovement.reason == "sale",
+                        InventoryStockMovement.source == "Shopify",
+                        InventoryStockMovement.notes == movement_notes,
+                    )
+                ).first()
+
+        def handle_existing_movement(movement: InventoryStockMovement) -> None:
+            nonlocal issues_recorded
+            applied_quantity = max(
+                0,
+                int(movement.quantity_before or 0) - int(movement.quantity_after or 0),
+            )
+            requested_quantity = movement.requested_quantity
+            comparison_quantity = (
+                max(0, int(requested_quantity))
+                if requested_quantity is not None
+                else applied_quantity
+            )
+            if comparison_quantity == sold_quantity:
+                print(
+                    structured_log_line(
+                        runtime=runtime_name,
+                        action="inventory.shopify_order.replay_skipped",
+                        success=True,
+                        shopify_order_id=order_identity,
+                        inventory_item_id=inv_item.id,
+                        barcode=sku,
+                        applied_quantity=applied_quantity,
+                        requested_quantity=requested_quantity,
+                    )
+                )
+                return
+
+            message = (
+                f"Shopify order {order_identity} SKU {sku} previously requested quantity "
+                f"{comparison_quantity}; applied quantity {applied_quantity} locally; "
+                f"current paid quantity {sold_quantity}. "
+                "Local inventory was not changed automatically."
+            )
+            record_shopify_sync_issue(
+                session,
+                issue_type=SHOPIFY_SYNC_ISSUE_ORDER_QUANTITY_CHANGED,
+                shopify_sku=sku,
+                shopify_title=str(sale.get("title") or inv_item.card_name or ""),
+                shopify_order_id=order_identity,
+                shopify_order_number=order_number,
+                shopify_variant_id=str(sale.get("variant_id") or "") or None,
+                inventory_item_id=inv_item.id,
+                quantity=sold_quantity,
+                unit_price=sale_price if sale_price > 0 else None,
+                message=message,
+                payload={
+                    "shopify_order_identity": order_identity,
+                    "inventory_item_id": inv_item.id,
+                    "sku": sku,
+                    "dedupe_key": dedupe_key,
+                    "applied_quantity": applied_quantity,
+                    "requested_quantity": comparison_quantity,
+                    "requested_quantity_recorded": requested_quantity,
+                    "current_quantity": sold_quantity,
+                    "line_items": sale.get("payloads") or [],
+                },
+                severity="error",
+            )
+            issues_recorded += 1
+            print(
+                structured_log_line(
+                    runtime=runtime_name,
+                    action="inventory.shopify_order.quantity_changed",
+                    success=False,
+                    error=message,
+                    shopify_order_id=order_identity,
+                    inventory_item_id=inv_item.id,
+                    barcode=sku,
+                    applied_quantity=applied_quantity,
+                    requested_quantity=comparison_quantity,
+                    current_quantity=sold_quantity,
+                )
+            )
+
         if existing_movement is not None:
+            handle_existing_movement(existing_movement)
             continue
+        if sold_quantity == 0:
+            continue
+
         before_qty = max(0, inv_item.quantity or 0)
         after_qty = max(0, before_qty - sold_quantity)
-        if before_qty == 0 and inv_item.status == INVENTORY_SOLD:
+        movement = InventoryStockMovement(
+            item_id=inv_item.id,
+            reason="sale",
+            quantity_delta=after_qty - before_qty,
+            quantity_before=before_qty,
+            quantity_after=after_qty,
+            source="Shopify",
+            notes=movement_notes,
+            dedupe_key=dedupe_key,
+            requested_quantity=sold_quantity,
+            created_by=runtime_name,
+            created_at=utcnow(),
+        )
+        _ensure_sqlite_outer_transaction(session)
+        try:
+            with session.begin_nested():
+                session.add(movement)
+                session.flush()
+                movement_claims_recorded += 1
+        except (OperationalError, ProgrammingError) as exc:
+            required_column = _missing_stock_movement_schema_column(exc)
+            if required_column is not None:
+                _log_stock_movement_schema_unavailable(
+                    exc,
+                    runtime_name=runtime_name,
+                    order_id=order_identity,
+                    sku=sku,
+                    required_column=required_column,
+                )
+            raise
+        except IntegrityError as exc:
+            if not _is_stock_movement_dedupe_conflict(exc):
+                raise
+            with session.no_autoflush:
+                concurrent_movement = _find_stock_movement_by_dedupe_key(
+                    session,
+                    dedupe_key,
+                    runtime_name=runtime_name,
+                    order_id=order_identity,
+                    sku=sku,
+                )
+            if concurrent_movement is None:
+                raise
+            handle_existing_movement(concurrent_movement)
             continue
+
+        if after_qty == before_qty:
+            print(
+                structured_log_line(
+                    runtime=runtime_name,
+                    action="inventory.shopify_order.zero_stock_claimed",
+                    success=True,
+                    shopify_order_id=order_identity,
+                    inventory_item_id=inv_item.id,
+                    barcode=sku,
+                    requested_quantity=sold_quantity,
+                    quantity_before=before_qty,
+                    quantity_after=after_qty,
+                )
+            )
+            continue
+
         inv_item.quantity = after_qty
         if after_qty == 0:
             inv_item.status = INVENTORY_SOLD
@@ -616,26 +1035,13 @@ def mark_inventory_sold_from_shopify_order(
             inv_item.sold_price = sale_price if sale_price > 0 else None
         inv_item.updated_at = utcnow()
         session.add(inv_item)
-        session.add(
-            InventoryStockMovement(
-                item_id=inv_item.id,
-                reason="sale",
-                quantity_delta=after_qty - before_qty,
-                quantity_before=before_qty,
-                quantity_after=after_qty,
-                source="Shopify",
-                notes=f"Shopify order {order_id}".strip(),
-                created_by=runtime_name,
-                created_at=utcnow(),
-            )
-        )
         enqueue_shopify_sync_job(
             session,
             inv_item,
             action="quantity",
             source="Shopify order webhook",
             payload={
-                "shopify_order_id": order_id,
+                "shopify_order_id": order_identity,
                 "shopify_order_number": order_number,
                 "sku": sku,
                 "quantity_after": after_qty,
@@ -654,11 +1060,11 @@ def mark_inventory_sold_from_shopify_order(
                 sold_quantity=sold_quantity,
                 quantity_before=before_qty,
                 quantity_after=after_qty,
-                shopify_order_id=order_id,
+                shopify_order_id=order_identity,
             )
         )
 
-    if marked or issues_recorded:
+    if marked or issues_recorded or movement_claims_recorded:
         session.commit()
 
     return marked

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from collections.abc import Iterable
 from typing import Optional
-from sqlalchemy import Column, LargeBinary, UniqueConstraint
+from sqlalchemy import Column, Index, LargeBinary, UniqueConstraint
 from sqlmodel import SQLModel, Field
 
 PARSE_PENDING = "pending"
@@ -1343,6 +1343,13 @@ class PriceHistory(SQLModel, table=True):
 
 class InventoryStockMovement(SQLModel, table=True):
     __tablename__ = "inventory_stock_movements"
+    __table_args__ = (
+        Index(
+            "idx_inventory_stock_movements_dedupe_key",
+            "dedupe_key",
+            unique=True,
+        ),
+    )
 
     id: Optional[int] = Field(default=None, primary_key=True)
     item_id: int = Field(foreign_key="inventory_items.id", index=True)
@@ -1355,6 +1362,8 @@ class InventoryStockMovement(SQLModel, table=True):
     location: Optional[str] = Field(default=None, index=True)
     source: Optional[str] = Field(default=None, index=True)
     notes: Optional[str] = Field(default=None)
+    dedupe_key: Optional[str] = Field(default=None)
+    requested_quantity: Optional[int] = Field(default=None)
     created_by: Optional[str] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=utcnow, index=True)
 

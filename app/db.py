@@ -245,6 +245,8 @@ SQLITE_ADDITIVE_MIGRATIONS = {
         "token_lookup_hmac": "BLOB",
     },
     "employeeprofile": {
+        "email_ciphertext": "BLOB",
+        "email_lookup_hash": "TEXT",
         "compensation_type": "TEXT DEFAULT 'hourly'",
         "monthly_salary_cents_enc": "BLOB",
         "monthly_salary_pay_day": "INTEGER",
@@ -279,6 +281,10 @@ SQLITE_ADDITIVE_MIGRATIONS = {
         "archived_at": "TIMESTAMP",
         "archived_by": "TEXT",
         "archive_reason": "TEXT",
+    },
+    "inventory_stock_movements": {
+        "dedupe_key": "TEXT",
+        "requested_quantity": "INTEGER",
     },
     "bank_transactions": {
         "expense_category": "TEXT DEFAULT 'uncategorized'",
@@ -476,6 +482,7 @@ SQLITE_INDEX_MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS idx_invitetoken_token_lookup_hmac ON invitetoken (token_lookup_hmac)",
     "CREATE INDEX IF NOT EXISTS idx_invitetoken_target_user_id ON invitetoken (target_user_id)",
     "CREATE INDEX IF NOT EXISTS idx_passwordresettoken_token_lookup_hmac ON passwordresettoken (token_lookup_hmac)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ix_employeeprofile_email_lookup_hash ON employeeprofile (email_lookup_hash)",
     "CREATE INDEX IF NOT EXISTS idx_employeeprofile_compensation_type ON employeeprofile (compensation_type)",
     "CREATE INDEX IF NOT EXISTS idx_employeeprofile_monthly_salary_pay_day ON employeeprofile (monthly_salary_pay_day)",
     "CREATE INDEX IF NOT EXISTS idx_employeeprofile_payment_method ON employeeprofile (payment_method)",
@@ -537,6 +544,7 @@ SQLITE_INDEX_MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS idx_inventory_stock_movements_reason ON inventory_stock_movements (reason)",
     "CREATE INDEX IF NOT EXISTS idx_inventory_stock_movements_location ON inventory_stock_movements (location)",
     "CREATE INDEX IF NOT EXISTS idx_inventory_stock_movements_source ON inventory_stock_movements (source)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_stock_movements_dedupe_key ON inventory_stock_movements (dedupe_key)",
     "CREATE INDEX IF NOT EXISTS idx_inventory_stock_movements_created_by ON inventory_stock_movements (created_by)",
     "CREATE INDEX IF NOT EXISTS idx_inventory_stock_movements_created_at ON inventory_stock_movements (created_at)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_shopify_sync_issues_issue_key ON shopify_sync_issues (issue_key)",
@@ -723,6 +731,8 @@ POSTGRES_ADDITIVE_MIGRATIONS = {
         "token_lookup_hmac": "BYTEA",
     },
     "employeeprofile": {
+        "email_ciphertext": "BYTEA",
+        "email_lookup_hash": "TEXT",
         "compensation_type": "TEXT DEFAULT 'hourly'",
         "monthly_salary_cents_enc": "BYTEA",
         "monthly_salary_pay_day": "INTEGER",
@@ -757,6 +767,10 @@ POSTGRES_ADDITIVE_MIGRATIONS = {
         "archived_at": "TIMESTAMP",
         "archived_by": "TEXT",
         "archive_reason": "TEXT",
+    },
+    "inventory_stock_movements": {
+        "dedupe_key": "TEXT",
+        "requested_quantity": "INTEGER",
     },
     "bank_transactions": {
         "expense_category": "TEXT DEFAULT 'uncategorized'",
@@ -954,6 +968,7 @@ POSTGRES_INDEX_MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS idx_invitetoken_token_lookup_hmac ON invitetoken (token_lookup_hmac)",
     "CREATE INDEX IF NOT EXISTS idx_invitetoken_target_user_id ON invitetoken (target_user_id)",
     "CREATE INDEX IF NOT EXISTS idx_passwordresettoken_token_lookup_hmac ON passwordresettoken (token_lookup_hmac)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ix_employeeprofile_email_lookup_hash ON employeeprofile (email_lookup_hash)",
     "CREATE INDEX IF NOT EXISTS idx_employeeprofile_compensation_type ON employeeprofile (compensation_type)",
     "CREATE INDEX IF NOT EXISTS idx_employeeprofile_monthly_salary_pay_day ON employeeprofile (monthly_salary_pay_day)",
     "CREATE INDEX IF NOT EXISTS idx_employeeprofile_payment_method ON employeeprofile (payment_method)",
@@ -1015,6 +1030,7 @@ POSTGRES_INDEX_MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS idx_inventory_stock_movements_reason ON inventory_stock_movements (reason)",
     "CREATE INDEX IF NOT EXISTS idx_inventory_stock_movements_location ON inventory_stock_movements (location)",
     "CREATE INDEX IF NOT EXISTS idx_inventory_stock_movements_source ON inventory_stock_movements (source)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_stock_movements_dedupe_key ON inventory_stock_movements (dedupe_key)",
     "CREATE INDEX IF NOT EXISTS idx_inventory_stock_movements_created_by ON inventory_stock_movements (created_by)",
     "CREATE INDEX IF NOT EXISTS idx_inventory_stock_movements_created_at ON inventory_stock_movements (created_at)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_shopify_sync_issues_issue_key ON shopify_sync_issues (issue_key)",

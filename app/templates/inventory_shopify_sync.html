@@ -78,10 +78,10 @@
                         <input type="hidden" name="issue_id" value="{{ issue.id }}">
                         <button type="submit">Ignore</button>
                     </form>
-                    <form class="inline-form" method="post" action="/inventory/shopify-sync/import">
+                    {% if issue.issue_type in importable_issue_types %}<form class="inline-form" method="post" action="/inventory/shopify-sync/import">
                         <input type="hidden" name="issue_id" value="{{ issue.id }}">
                         <button type="submit">Import</button>
-                    </form>
+                    </form>{% endif %}
                 </td>
             </tr>
             {% else %}
