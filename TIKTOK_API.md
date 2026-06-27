@@ -202,6 +202,8 @@ If TikTok returns `105005 Access denied`, the app/token is missing `seller.affil
 
 For one shared seller shop (DC LLC) with multiple creator accounts, authorize each creator account through the TikTok Shop service authorization flow and store it in `TikTokCreatorAuth`. The creator endpoint returns creator-owned order traces. The app joins those order IDs back to the shared `TikTokOrder` rows and writes `affiliate_creator_username`, so the streamer dashboard can split `@degencollectibles` and `@degenboss0` without duplicating GMV.
 
+Creator trace health is visible to admins on `/tiktok/streamer/config` in the `Creator Attribution` section. Coarse viewer-safe health is also exposed under `/status.json` as `tiktok_creator_attribution`. Per-creator trace pull telemetry is stored in the `AppSetting` key `tiktok_creator_trace_status`; it must contain counts and timestamps only, not token values or raw OAuth payloads. See `docs/ops/tiktok-creator-attribution-runbook.md` for the setup and verification flow.
+
 ### Key Order Fields
 
 | Field | Description |
