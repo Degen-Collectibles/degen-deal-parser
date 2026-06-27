@@ -1806,8 +1806,8 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(summary["line_item_summary"]["line_items_total"], 5)
 
     def test_tiktok_reporting_rows_filter_and_order_by_created_at(self) -> None:
-        earlier = utcnow()
-        later = utcnow()
+        earlier = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        later = earlier + timedelta(seconds=1)
         with Session(self.engine) as session:
             session.add(
                 TikTokOrder(

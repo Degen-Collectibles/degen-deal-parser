@@ -15,11 +15,6 @@ if str(REPO_ROOT) not in sys.path:
 
 os.environ["LOG_TO_FILE"] = "false"
 
-from app.ops_chat import tool_schemas_for_scope
-from app.ops_mcp import DEGEN_OPS_SCOPE_TOOL_NAMES, _normalize_scope
-from scripts.degen_ops_team_package import build_team_package
-
-
 REQUIRED_ARTIFACTS = [
     "app/ops_mcp.py",
     "app/ops_agent.py",
@@ -84,6 +79,9 @@ def _without_env_var(name: str):
 
 
 def _scope_report() -> dict[str, dict[str, Any]]:
+    from app.ops_chat import tool_schemas_for_scope
+    from app.ops_mcp import DEGEN_OPS_SCOPE_TOOL_NAMES
+
     report = {}
     for scope, tools in DEGEN_OPS_SCOPE_TOOL_NAMES.items():
         sorted_tools = sorted(tools)
@@ -97,6 +95,9 @@ def _scope_report() -> dict[str, dict[str, Any]]:
 
 
 def _checks(repo_root: Path, scopes: dict[str, dict[str, Any]]) -> list[dict[str, str]]:
+    from app.ops_mcp import _normalize_scope
+    from scripts.degen_ops_team_package import build_team_package
+
     checks: list[dict[str, str]] = []
     artifacts = _artifact_rows(repo_root)
     missing = [row["path"] for row in artifacts if not row["exists"]]

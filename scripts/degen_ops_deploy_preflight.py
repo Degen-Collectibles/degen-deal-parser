@@ -20,9 +20,13 @@ from scripts.degen_ops_change_manifest import build_change_manifest
 APPROVAL_PHRASE = "proceed with Degen Ops bot commit and Green Discord rollout"
 
 
-def build_deploy_preflight(*, repo_root: Path | str = REPO_ROOT) -> dict[str, Any]:
+def build_deploy_preflight(
+    *,
+    repo_root: Path | str = REPO_ROOT,
+    changed_paths: list[str] | None = None,
+) -> dict[str, Any]:
     root = Path(repo_root)
-    manifest = build_change_manifest(repo_root=root)
+    manifest = build_change_manifest(repo_root=root, changed_paths=changed_paths)
     return {
         "name": "degen_ops_deploy_preflight",
         "read_only": True,

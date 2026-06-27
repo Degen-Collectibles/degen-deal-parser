@@ -1,7 +1,7 @@
 import shutil
 import unittest
 import uuid
-from datetime import timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlmodel import Session, SQLModel, create_engine, select
@@ -55,17 +55,18 @@ class OfflineMessageRecoveryTests(unittest.TestCase):
         self.assertTrue(recent_message_needs_refresh(row, message))
 
     def test_recent_message_needs_refresh_when_edited_timestamp_advances(self) -> None:
+        stored_edited_at = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
         row = DiscordMessage(
             discord_message_id="123",
             channel_id="1",
             content="same",
             attachment_urls_json="[]",
-            created_at=utcnow(),
-            edited_at=utcnow().replace(tzinfo=timezone.utc),
+            created_at=stored_edited_at,
+            edited_at=stored_edited_at,
         )
         message = _FakeMessage(
             content="same",
-            edited_at=utcnow().replace(tzinfo=timezone.utc),
+            edited_at=stored_edited_at + timedelta(seconds=1),
         )
         self.assertTrue(recent_message_needs_refresh(row, message))
 

@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import os
 import subprocess
 import sys
 
@@ -7,7 +8,17 @@ from scripts.degen_ops_deploy_preflight import build_deploy_preflight
 
 
 def test_deploy_preflight_is_read_only_and_names_exact_targets():
-    report = build_deploy_preflight()
+    report = build_deploy_preflight(
+        changed_paths=[
+            "app/ops_mcp.py",
+            "app/degen_ops_discord_auth.py",
+            "app/routers/team_admin_employees.py",
+            "scripts/degen_ops_discord_bot.py",
+            "tests/test_degen_ops_discord_auth.py",
+            "tests/test_admin_employee_list_search.py",
+            "app/routers/bookkeeping.py",
+        ]
+    )
 
     assert report["name"] == "degen_ops_deploy_preflight"
     assert report["read_only"] is True
@@ -64,3 +75,24 @@ def test_deploy_preflight_script_outputs_clean_json_and_markdown():
     assert markdown_result.returncode == 0, markdown_result.stderr
     assert markdown_result.stdout.startswith("# Degen Ops Deploy Preflight")
     assert "## Rollback" in markdown_result.stdout
+
+
+def test_deploy_preflight_script_runs_without_app_runtime_credentials():
+    script = Path.cwd() / "scripts" / "degen_ops_deploy_preflight.py"
+    env = os.environ.copy()
+    env.pop("SESSION_SECRET", None)
+    env.pop("ADMIN_PASSWORD", None)
+
+    result = subprocess.run(
+        [sys.executable, str(script), "--json"],
+        text=True,
+        capture_output=True,
+        timeout=30,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["name"] == "degen_ops_deploy_preflight"
+    assert report["read_only"] is True
+    assert report["performs_changes"] is False

@@ -29,6 +29,7 @@ EXTRA_INTENDED_PATHS = {
     "scripts/degen_ops_discord_bot.py",
     "tests/test_admin_employee_list_search.py",
     "tests/test_degen_ops_discord_auth.py",
+    "tests/test_employee_schema_migrations.py",
     "tests/test_ops_agent.py",
     "tests/test_ops_mcp.py",
     "tests/test_wave47_admin_tools.py",
