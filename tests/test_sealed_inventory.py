@@ -927,6 +927,7 @@ class SealedInventoryTests(unittest.TestCase):
                 {
                     "id": "shop-order-pos-single-1",
                     "name": "#POS1",
+                    "financial_status": "paid",
                     "line_items": [
                         {"sku": "DGN-POS1", "quantity": 1, "price": "4.99"},
                     ],
@@ -973,6 +974,7 @@ class SealedInventoryTests(unittest.TestCase):
                 session,
                 {
                     "id": "shop-order-1",
+                    "financial_status": "paid",
                     "line_items": [
                         {"sku": "DGN-SHOP1", "quantity": 2, "price": "39.99"},
                     ],
@@ -1002,6 +1004,7 @@ class SealedInventoryTests(unittest.TestCase):
                 session,
                 {
                     "id": "shop-order-2",
+                    "financial_status": "paid",
                     "line_items": [
                         {"sku": "DGN-SHOP1", "quantity": 3, "price": "39.99"},
                     ],
@@ -1032,6 +1035,7 @@ class SealedInventoryTests(unittest.TestCase):
 
             payload = {
                 "id": "shop-order-retry",
+                "financial_status": "paid",
                 "line_items": [
                     {"sku": "DGN-RETRY1", "quantity": 2, "price": "99.99"},
                 ],
@@ -1062,6 +1066,7 @@ class SealedInventoryTests(unittest.TestCase):
                 {
                     "id": "shop-order-missing",
                     "name": "#MISSING",
+                    "financial_status": "paid",
                     "line_items": [
                         {"sku": "DGN-NOTFOUND", "quantity": 1, "title": "Unknown Shopify Product"},
                     ],

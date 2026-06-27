@@ -21,6 +21,7 @@ from sqlmodel import Session, select
 from ..csrf import CSRFProtectedRoute
 from ..shared import *  # noqa: F401,F403 -- shared helpers, constants, state
 from ..db import get_session
+from ..inventory.shopify_ingest import normalize_shopify_order_identity
 
 router = APIRouter(route_class=CSRFProtectedRoute)
 
@@ -107,7 +108,84 @@ async def shopify_orders_webhook(request: Request):
 
     try:
         payload = json.loads(raw_body.decode("utf-8"))
-        received_at = utcnow()
+        if not isinstance(payload, dict):
+            raise ValueError("Shopify payload must be a JSON object")
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        print(
+            structured_log_line(
+                runtime=webhook_runtime,
+                action="shopify.webhook.failed",
+                success=False,
+                error="Invalid Shopify webhook payload",
+                error_type=type(exc).__name__,
+                topic=topic,
+                failure_kind="invalid_payload",
+            )
+        )
+        raise HTTPException(status_code=400, detail="Invalid Shopify payload") from exc
+
+    if not normalize_shopify_order_identity(payload):
+        processing_stage = "invalid_order_identity"
+
+        try:
+            def _record_invalid_order_identity(session: Session) -> int:
+                return mark_inventory_sold_from_shopify_order(
+                    session, payload, runtime_name=webhook_runtime
+                )
+
+            await asyncio.to_thread(
+                run_write_with_retry,
+                _record_invalid_order_identity,
+            )
+        except Exception as exc:
+            print(
+                structured_log_line(
+                    runtime=webhook_runtime,
+                    action="inventory.sold_marking.failed",
+                    success=False,
+                    error="Shopify inventory marking failed",
+                    error_type=type(exc).__name__,
+                    failure_kind="processing_error",
+                    processing_stage=processing_stage,
+                    topic=topic,
+                    shopify_order_id=None,
+                    order_number=payload.get("name") or payload.get("order_number"),
+                )
+            )
+            print(
+                structured_log_line(
+                    runtime=webhook_runtime,
+                    action="shopify.webhook.failed",
+                    success=False,
+                    error="Shopify webhook processing failed",
+                    error_type=type(exc).__name__,
+                    failure_kind="processing_error",
+                    processing_stage=processing_stage,
+                    topic=topic,
+                )
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Shopify webhook processing temporarily unavailable",
+            ) from exc
+
+        print(
+            structured_log_line(
+                runtime=webhook_runtime,
+                action="shopify.webhook.failed",
+                success=False,
+                error="Invalid Shopify order identity",
+                error_type="InvalidOrderIdentity",
+                failure_kind="invalid_payload",
+                processing_stage=processing_stage,
+                topic=topic,
+            )
+        )
+        raise HTTPException(status_code=400, detail="Invalid Shopify payload")
+
+    received_at = utcnow()
+    processing_stage = "order_upsert"
+    try:
         def write_shopify_order(session: Session) -> str:
             return upsert_shopify_order(
                 session,
@@ -118,33 +196,57 @@ async def shopify_orders_webhook(request: Request):
             )
 
         outcome = await asyncio.to_thread(run_write_with_retry, write_shopify_order)
+        processing_stage = "inventory_marking"
+
         # Mark inventory items sold if any line item SKU matches a DGN-XXXXXX barcode
         try:
             def _mark_sold(session: Session) -> int:
                 return mark_inventory_sold_from_shopify_order(
                     session, payload, runtime_name=webhook_runtime
                 )
-            await asyncio.to_thread(run_write_with_retry, _mark_sold)
-        except Exception as _inv_exc:
+
+            inventory_marked_count = await asyncio.to_thread(run_write_with_retry, _mark_sold)
+        except Exception as inv_exc:
             print(
                 structured_log_line(
                     runtime=webhook_runtime,
                     action="inventory.sold_marking.failed",
                     success=False,
-                    error=str(_inv_exc),
+                    error="Shopify inventory marking failed",
+                    error_type=type(inv_exc).__name__,
+                    failure_kind="processing_error",
+                    processing_stage=processing_stage,
+                    topic=topic,
+                    shopify_order_id=payload.get("id"),
+                    order_number=payload.get("name") or payload.get("order_number"),
                 )
             )
+            raise
     except Exception as exc:
         print(
             structured_log_line(
                 runtime=webhook_runtime,
                 action="shopify.webhook.failed",
                 success=False,
-                error=str(exc),
+                error="Shopify webhook processing failed",
+                error_type=type(exc).__name__,
+                failure_kind="processing_error",
                 topic=topic,
+                processing_stage=processing_stage,
             )
         )
-        raise HTTPException(status_code=400, detail="Invalid Shopify payload") from exc
+        raise HTTPException(
+            status_code=503,
+            detail="Shopify webhook processing temporarily unavailable",
+        ) from exc
+
+    financial_status = str(payload.get("financial_status") or "").strip().lower()
+    if financial_status != "paid":
+        inventory_outcome = "deferred"
+    elif inventory_marked_count > 0:
+        inventory_outcome = "marked"
+    else:
+        inventory_outcome = "no_change_or_replay"
 
     print(
         structured_log_line(
@@ -155,6 +257,8 @@ async def shopify_orders_webhook(request: Request):
             shopify_order_id=payload.get("id"),
             order_number=payload.get("name") or payload.get("order_number"),
             operation=outcome,
+            inventory_marked_count=inventory_marked_count,
+            inventory_outcome=inventory_outcome,
         )
     )
     return Response(status_code=200)

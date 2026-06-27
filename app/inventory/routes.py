@@ -100,6 +100,7 @@ from .shopify import (
     shopify_admin_configured,
 )
 from ..shopify_sync import (
+    SHOPIFY_SYNC_IMPORTABLE_ISSUE_TYPES,
     SHOPIFY_SYNC_ISSUE_UNLINKED_PRODUCT,
     SHOPIFY_SYNC_ERROR,
     SHOPIFY_SYNC_ISSUE_IGNORED,
@@ -3729,6 +3730,7 @@ async def inventory_shopify_sync_page(
             "recent_jobs": recent_jobs,
             "summary": summary,
             "effective_price": effective_price,
+            "importable_issue_types": SHOPIFY_SYNC_IMPORTABLE_ISSUE_TYPES,
         },
     )
 
@@ -3892,6 +3894,11 @@ async def inventory_shopify_sync_import(
     issue = session.get(ShopifySyncIssue, issue_id)
     if not issue:
         return HTMLResponse("Sync issue not found.", status_code=404)
+    if issue.issue_type not in SHOPIFY_SYNC_IMPORTABLE_ISSUE_TYPES:
+        return HTMLResponse(
+            f"Shopify sync issue type '{issue.issue_type}' cannot be imported into inventory.",
+            status_code=409,
+        )
     item = InventoryItem(
         barcode=issue.shopify_sku if (issue.shopify_sku or "").startswith("DGN-") else "PENDING",
         item_type=ITEM_TYPE_SEALED,

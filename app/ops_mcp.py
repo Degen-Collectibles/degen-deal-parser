@@ -3,14 +3,17 @@ from __future__ import annotations
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from html import unescape
 import json
+from math import isfinite
 import os
 import re
-from typing import Any, Callable, Iterator
+from typing import Annotated, Any, Callable, Iterator
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import httpx
+from pydantic import Field
 from sqlalchemy import text
 from sqlmodel import Session, func, select
 
@@ -31,7 +34,14 @@ from .models import (
     TimeOffRequest,
     User,
 )
-from .ops_agent import READ_ONLY_GUARDRAILS, build_ops_agent_context, build_ops_agent_recommendation
+from .ops_agent import (
+    MAX_DEGEN_MONEY_USD,
+    MAX_DEGEN_UNIT_COUNT,
+    MAX_HISTORY_DAYS,
+    READ_ONLY_GUARDRAILS,
+    build_ops_agent_context,
+    build_ops_agent_recommendation,
+)
 from .reporting import (
     build_tiktok_buyer_insights,
     build_tiktok_product_performance,
@@ -174,9 +184,14 @@ OWNER_ONLY_TOOL_NAMES = [
 ]
 
 PARTNER_REDACTION_NOTE = (
-    "Partner scope hides raw cash balances, account balances, reserve-gap dollars, "
+    "Partner scope hides raw cash balances, account balances, reserve-floor and reserve-gap dollars, "
     "and owner loan/payback totals. Use owner scope for exact cash and loan ledger evidence."
 )
+
+
+HistoryDays = Annotated[int, Field(ge=1, le=MAX_HISTORY_DAYS)]
+
+RESERVE_FLOOR_ENV = "DEGEN_OPS_MIN_CASH_RESERVE_USD"
 
 TIKTOK_READ_ONLY_GUARDRAILS = [
     "Read-only TikTok decision support",
@@ -481,10 +496,69 @@ def _reset_session_read_only(session: Any, db_url: str) -> None:
 
 
 def _money(value: Any) -> float:
+    if value is None or isinstance(value, bool):
+        return 0.0
     try:
-        return round(float(value or 0.0), 2)
+        amount = float(value)
+    except OverflowError:
+        try:
+            return -MAX_DEGEN_MONEY_USD if value < 0 else MAX_DEGEN_MONEY_USD
+        except (TypeError, ValueError):
+            return 0.0
     except (TypeError, ValueError):
         return 0.0
+    if isfinite(amount):
+        bounded_amount = max(-MAX_DEGEN_MONEY_USD, min(amount, MAX_DEGEN_MONEY_USD))
+        return round(bounded_amount, 2)
+
+    try:
+        exact_amount = Decimal(str(value).strip())
+    except (InvalidOperation, TypeError, ValueError):
+        return 0.0
+    if not exact_amount.is_finite():
+        return 0.0
+    return -MAX_DEGEN_MONEY_USD if exact_amount < 0 else MAX_DEGEN_MONEY_USD
+
+
+def _reserve_floor_from_environment() -> dict[str, Any]:
+    raw_value = os.getenv(RESERVE_FLOOR_ENV)
+    try:
+        amount = float(raw_value) if raw_value is not None else None
+    except (TypeError, ValueError):
+        amount = None
+    if amount is None or not isfinite(amount) or amount <= 0 or amount > MAX_DEGEN_MONEY_USD:
+        return {
+            "configured": False,
+            "source": RESERVE_FLOOR_ENV,
+            "amount": None,
+            "note": "Reserve safety was not assessed because the environment policy is not configured with a valid positive amount in the supported operating range.",
+        }
+    return {
+        "configured": True,
+        "source": RESERVE_FLOOR_ENV,
+        "amount": amount,
+    }
+
+
+def _authoritative_cash_from_snapshot(snapshot: Any) -> float | None:
+    if not isinstance(snapshot, dict):
+        return None
+    if not (
+        snapshot.get("available") is True
+        and snapshot.get("complete") is True
+        and snapshot.get("fresh") is True
+    ):
+        return None
+    value = snapshot.get("latest_known_cash")
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        amount = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    if not isfinite(amount) or abs(amount) > MAX_DEGEN_MONEY_USD:
+        return None
+    return round(amount, 2)
 
 
 def _format_money(value: Any) -> str:
@@ -496,12 +570,16 @@ def _format_money(value: Any) -> str:
 def _safe_int(value: Any, default: int = 0) -> int:
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (OverflowError, TypeError, ValueError):
         return default
 
 
 def _bounded_limit(value: Any, *, default: int = 50, maximum: int = 250) -> int:
     return max(1, min(_safe_int(value, default), maximum))
+
+
+def _bounded_days(value: Any, *, default: int) -> int:
+    return max(1, min(_safe_int(value, default), MAX_HISTORY_DAYS))
 
 
 def _safe_json_list(value: Any) -> list[dict[str, Any]]:
@@ -722,6 +800,33 @@ def _external_order_is_paid(row: Any) -> bool:
     return str(getattr(row, "financial_status", "") or "").strip().lower() == "paid"
 
 
+def _external_line_item_quantity(value: Any) -> int:
+    if isinstance(value, bool) or value is None:
+        return 0
+    if isinstance(value, int):
+        return value if 0 <= value <= MAX_DEGEN_UNIT_COUNT else 0
+    if isinstance(value, str):
+        normalized = value.strip()
+        if not normalized:
+            return 0
+        try:
+            numeric_value = Decimal(normalized)
+        except InvalidOperation:
+            return 0
+    elif isinstance(value, (float, Decimal)):
+        numeric_value = Decimal(str(value))
+    else:
+        return 0
+    if (
+        not numeric_value.is_finite()
+        or numeric_value < 0
+        or numeric_value > MAX_DEGEN_UNIT_COUNT
+        or numeric_value != numeric_value.to_integral_value()
+    ):
+        return 0
+    return int(numeric_value)
+
+
 def _external_line_items(row: Any) -> list[dict[str, Any]]:
     value = getattr(row, "line_items_summary_json", "")
     fallback = getattr(row, "line_items_json", "")
@@ -729,9 +834,9 @@ def _external_line_items(row: Any) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     for raw in raw_items:
         title = str(raw.get("product_name") or raw.get("title") or raw.get("name") or "Unknown").strip() or "Unknown"
-        quantity = _safe_int(raw.get("quantity", raw.get("qty")), 1)
-        if quantity <= 0:
-            quantity = 1
+        quantity = _external_line_item_quantity(
+            raw.get("quantity", raw.get("qty"))
+        )
         unit_price = _money(
             raw.get("sale_price", raw.get("unit_price", raw.get("price", raw.get("variant_price", 0.0))))
         )
@@ -891,12 +996,35 @@ def _aggregate_external_product_rows(rows: list[Any], *, channel: str, product_q
 
 
 def _cash_safety_status(cash_flow: dict[str, Any]) -> str:
-    reserve_gap = _money(cash_flow.get("reserve_gap"))
+    configured = cash_flow.get("reserve_floor_configured")
+    if configured is None:
+        try:
+            minimum_cash_reserve = float(cash_flow.get("minimum_cash_reserve"))
+        except (TypeError, ValueError):
+            minimum_cash_reserve = None
+        configured = (
+            minimum_cash_reserve is not None
+            and isfinite(minimum_cash_reserve)
+            and minimum_cash_reserve > 0
+        )
+    if configured is not True:
+        return "not_assessed"
+    try:
+        reserve_gap = float(cash_flow.get("reserve_gap"))
+    except (TypeError, ValueError):
+        return "not_assessed"
+    if not isfinite(reserve_gap):
+        return "not_assessed"
     return "below_minimum_reserve" if reserve_gap < 0 else "at_or_above_minimum_reserve"
 
 
 def _cash_safety_sentence(cash_flow: dict[str, Any]) -> str:
-    if _cash_safety_status(cash_flow) == "below_minimum_reserve":
+    status = _cash_safety_status(cash_flow)
+    if status == "not_assessed":
+        if cash_flow.get("cash_snapshot_available") is False:
+            return "Cash safety was not assessed because authoritative cash data is unavailable or incomplete."
+        return "Reserve safety was not assessed because the reserve floor is not configured."
+    if status == "below_minimum_reserve":
         return "The modeled buy falls below the configured reserve."
     return "The modeled buy stays at or above the configured reserve."
 
@@ -932,6 +1060,7 @@ def _money_line(value: Any) -> str:
 
 def _redact_partner_recommendation(result: dict[str, Any], scenario: dict[str, Any]) -> dict[str, Any]:
     redacted = deepcopy(result)
+    redacted.pop("reserve_floor", None)
     cash_flow = result.get("cash_flow") or {}
     redacted["cash_flow"] = {
         "purchase_cost": _money(cash_flow.get("purchase_cost")),
@@ -1043,8 +1172,9 @@ class DegenOpsMcpHarness:
         yield session_or_cm
 
     def get_context(self, days: int = 90) -> dict[str, Any]:
+        safe_days = _bounded_days(days, default=90)
         with self._session() as session:
-            return build_ops_agent_context(session, days=days)
+            return build_ops_agent_context(session, days=safe_days)
 
     def get_manifest(self, *, scope: str, tools: list[str]) -> dict[str, Any]:
         return {
@@ -1231,7 +1361,7 @@ class DegenOpsMcpHarness:
         status: str = "",
         search: str = "",
     ) -> dict[str, Any]:
-        safe_days = max(_safe_int(days, 7), 1)
+        safe_days = _bounded_days(days, default=7)
         safe_limit = _bounded_limit(limit)
         start = datetime.now(timezone.utc) - timedelta(days=safe_days)
         status_filter = (status or "").strip()
@@ -1287,7 +1417,7 @@ class DegenOpsMcpHarness:
         }
 
     def get_sales_summary(self, days: int = 7) -> dict[str, Any]:
-        safe_days = max(_safe_int(days, 7), 1)
+        safe_days = _bounded_days(days, default=7)
         start = datetime.now(timezone.utc) - timedelta(days=safe_days)
         non_operating = {
             "loan_draw",
@@ -1359,7 +1489,7 @@ class DegenOpsMcpHarness:
         days: int = 7,
         limit: int = 25,
     ) -> dict[str, Any]:
-        safe_days = max(_safe_int(days, 7), 1)
+        safe_days = _bounded_days(days, default=7)
         safe_limit = _bounded_limit(limit, default=25, maximum=100)
         query = str(product_query or "").strip()
         start = datetime.now(timezone.utc) - timedelta(days=safe_days)
@@ -1462,7 +1592,7 @@ class DegenOpsMcpHarness:
         days: int = 1,
         limit: int = 20,
     ) -> dict[str, Any]:
-        safe_days = max(_safe_int(days, 1), 1)
+        safe_days = _bounded_days(days, default=1)
         safe_limit = _bounded_limit(limit, default=20, maximum=100)
         query = str(person_query or "").strip()
         start = datetime.now(timezone.utc) - timedelta(days=safe_days)
@@ -1538,7 +1668,7 @@ class DegenOpsMcpHarness:
         days: int = 30,
         limit: int = 50,
     ) -> dict[str, Any]:
-        safe_days = max(_safe_int(days, 30), 1)
+        safe_days = _bounded_days(days, default=30)
         safe_limit = _bounded_limit(limit, default=50, maximum=100)
         query = str(person_query or "").strip()
         start = datetime.now(timezone.utc) - timedelta(days=safe_days)
@@ -1642,7 +1772,7 @@ class DegenOpsMcpHarness:
         }
 
     def get_tiktok_buyer_insights(self, days: int = 90, limit: int = 50) -> dict[str, Any]:
-        safe_days = max(_safe_int(days, 90), 1)
+        safe_days = _bounded_days(days, default=90)
         safe_limit = _bounded_limit(limit)
         with self._session() as session:
             rows = build_tiktok_buyer_insights(session, days=safe_days)[:safe_limit]
@@ -1654,7 +1784,7 @@ class DegenOpsMcpHarness:
         }
 
     def get_tiktok_product_performance(self, days: int = 30, limit: int = 50) -> dict[str, Any]:
-        safe_days = max(_safe_int(days, 30), 1)
+        safe_days = _bounded_days(days, default=30)
         safe_limit = _bounded_limit(limit)
         with self._session() as session:
             rows = build_tiktok_product_performance(session, days=safe_days)[:safe_limit]
@@ -1666,7 +1796,7 @@ class DegenOpsMcpHarness:
         }
 
     def get_tiktok_top_products(self, days: int = 7, limit: int = 10, sort_by: str = "quantity") -> dict[str, Any]:
-        safe_days = max(_safe_int(days, 7), 1)
+        safe_days = _bounded_days(days, default=7)
         safe_limit = _bounded_limit(limit, default=10, maximum=100)
         with self._session() as session:
             orders = load_paid_tiktok_orders(session, days=safe_days)
@@ -1696,7 +1826,7 @@ class DegenOpsMcpHarness:
         }
 
     def get_tiktok_product_sales(self, product_query: str, days: int = 7, limit: int = 25) -> dict[str, Any]:
-        safe_days = max(_safe_int(days, 7), 1)
+        safe_days = _bounded_days(days, default=7)
         safe_limit = _bounded_limit(limit, default=25, maximum=100)
         query = str(product_query or "").strip()
         matches: list[dict[str, Any]] = []
@@ -1796,7 +1926,7 @@ class DegenOpsMcpHarness:
         }
 
     def get_shopify_product_sales(self, product_query: str, days: int = 7, limit: int = 25) -> dict[str, Any]:
-        safe_days = max(_safe_int(days, 7), 1)
+        safe_days = _bounded_days(days, default=7)
         safe_limit = _bounded_limit(limit, default=25, maximum=100)
         query = str(product_query or "").strip()
         start = datetime.now(timezone.utc) - timedelta(days=safe_days)
@@ -1841,7 +1971,7 @@ class DegenOpsMcpHarness:
         }
 
     def get_shopify_top_products(self, days: int = 7, limit: int = 10, sort_by: str = "quantity") -> dict[str, Any]:
-        safe_days = max(_safe_int(days, 7), 1)
+        safe_days = _bounded_days(days, default=7)
         safe_limit = _bounded_limit(limit, default=10, maximum=100)
         start = datetime.now(timezone.utc) - timedelta(days=safe_days)
         with self._session() as session:
@@ -1883,7 +2013,7 @@ class DegenOpsMcpHarness:
         *,
         audience_scope: str = "owner",
     ) -> dict[str, Any]:
-        safe_days = max(_safe_int(days, 30), 1)
+        safe_days = _bounded_days(days, default=30)
         safe_limit = _bounded_limit(limit, default=10, maximum=50)
         clean_query = str(query or "").strip()
         inventory_matches: list[dict[str, Any]] = []
@@ -2152,7 +2282,7 @@ class DegenOpsMcpHarness:
         }
 
     def get_market_trend_lookup(self, query: str, days: int = 7, limit: int = 10) -> dict[str, Any]:
-        safe_days = max(_safe_int(days, 7), 1)
+        safe_days = _bounded_days(days, default=7)
         clean_query = str(query or "").strip()
         now = datetime.now(timezone.utc)
         current_start = now - timedelta(days=safe_days)
@@ -2279,7 +2409,7 @@ class DegenOpsMcpHarness:
         }
 
     def get_finance_snapshot(self, days: int = 90) -> dict[str, Any]:
-        context = self.get_context(days=days)
+        context = self.get_context(days=_bounded_days(days, default=90))
         return {
             "finance_statement": context["finance_statement"],
             "range": context["range"],
@@ -2291,7 +2421,7 @@ class DegenOpsMcpHarness:
         context = self.get_context(days=90)
         return {
             "cash_snapshot": context["cash_snapshot"],
-            "evidence": [{"source": "bank_transactions", "url": context["cash_snapshot"].get("evidence_url", "/bookkeeping/bank")}],
+            "evidence": [{"source": "bank_feed_accounts", "url": context["cash_snapshot"].get("evidence_url", "/bookkeeping/bank")}],
             "read_only": True,
         }
 
@@ -2311,7 +2441,7 @@ class DegenOpsMcpHarness:
         return response
 
     def get_channel_velocity(self, days: int = 90, category: str = "") -> dict[str, Any]:
-        context = self.get_context(days=days)
+        context = self.get_context(days=_bounded_days(days, default=90))
         rows = context["channel_velocity"]
         category_norm = (category or "").strip().lower()
         if category_norm:
@@ -2328,7 +2458,7 @@ class DegenOpsMcpHarness:
         }
 
     def get_loan_and_payback_snapshot(self, days: int = 90) -> dict[str, Any]:
-        context = self.get_context(days=days)
+        context = self.get_context(days=_bounded_days(days, default=90))
         return {
             "loan_snapshot": context["loan_snapshot"],
             "range": context["range"],
@@ -2348,11 +2478,36 @@ class DegenOpsMcpHarness:
         *,
         audience_scope: str = "owner",
     ) -> dict[str, Any]:
-        context = self.get_context(days=days)
+        safe_days = _bounded_days(days, default=90)
+        context = self.get_context(days=safe_days)
         enriched_scenario = dict(scenario or {})
-        if not enriched_scenario.get("cash_on_hand"):
-            enriched_scenario["cash_on_hand"] = (context.get("cash_snapshot") or {}).get("latest_known_cash", 0.0)
+        caller_supplied_reserve = "minimum_cash_reserve" in enriched_scenario
+        caller_supplied_cash = "cash_on_hand" in enriched_scenario
+        enriched_scenario.pop("minimum_cash_reserve", None)
+        enriched_scenario.pop("reserve_floor_configured", None)
+        enriched_scenario.pop("cash_on_hand", None)
+        reserve_floor = _reserve_floor_from_environment()
+        enriched_scenario["reserve_floor_configured"] = reserve_floor["configured"]
+        if reserve_floor["configured"]:
+            enriched_scenario["minimum_cash_reserve"] = reserve_floor["amount"]
+        cash_snapshot = context.get("cash_snapshot") or {}
+        authoritative_cash = _authoritative_cash_from_snapshot(cash_snapshot)
+        enriched_scenario["cash_snapshot_available"] = authoritative_cash is not None
+        enriched_scenario["cash_snapshot_complete"] = cash_snapshot.get("complete") is True
+        enriched_scenario["cash_snapshot_fresh"] = cash_snapshot.get("fresh") is True
+        enriched_scenario["cash_snapshot_as_of"] = cash_snapshot.get("as_of")
+        enriched_scenario["cash_on_hand"] = authoritative_cash
         result = build_ops_agent_recommendation(enriched_scenario, context)
+        result["reserve_floor"] = reserve_floor
+        result["input_warnings"] = []
+        if caller_supplied_reserve:
+            result["input_warnings"].append(
+                "Caller-supplied minimum_cash_reserve was ignored; the reserve floor is controlled by server environment policy."
+            )
+        if caller_supplied_cash:
+            result["input_warnings"].append(
+                "Caller-supplied cash_on_hand was ignored; cash is sourced from the latest read-only cash snapshot."
+            )
         result["read_only"] = True
         if _normalize_scope(audience_scope) == "partner":
             return _redact_partner_recommendation(result, enriched_scenario)
@@ -2371,6 +2526,7 @@ class DegenOpsMcpHarness:
             "verdict": result.get("verdict"),
             "risk_flags": result.get("risk_flags", []),
             "evidence": result.get("evidence", []),
+            "input_warnings": result.get("input_warnings", []),
             "read_only_guardrails": result.get("read_only_guardrails", []),
             "redaction_note": result.get("redaction_note", ""),
             "read_only": True,
@@ -2382,7 +2538,7 @@ class DegenOpsMcpHarness:
         *,
         audience_scope: str = "partner",
     ) -> dict[str, Any]:
-        safe_days = max(_safe_int(days, 7), 1)
+        safe_days = _bounded_days(days, default=7)
         normalized_scope = _normalize_scope(audience_scope)
         finance = self.get_finance_snapshot(days=safe_days)
         sales = self.get_sales_summary(days=safe_days)
@@ -2471,7 +2627,7 @@ def register_degen_ops_tools(
 
     if should_register("get_finance_snapshot"):
         @mcp.tool(description="Read-only Degen finance snapshot from existing finance/reporting helpers.")
-        def get_finance_snapshot(days: int = 90) -> dict[str, Any]:
+        def get_finance_snapshot(days: HistoryDays = 90) -> dict[str, Any]:
             return ops.get_finance_snapshot(days=days)
 
     if should_register("get_cash_snapshot"):
@@ -2486,32 +2642,32 @@ def register_degen_ops_tools(
 
     if should_register("get_channel_velocity"):
         @mcp.tool(description="Read-only sell-through velocity by TikTok, Shopify, Discord, and show/channel sales.")
-        def get_channel_velocity(days: int = 90, category: str = "") -> dict[str, Any]:
+        def get_channel_velocity(days: HistoryDays = 90, category: str = "") -> dict[str, Any]:
             return ops.get_channel_velocity(days=days, category=category)
 
     if should_register("get_sales_summary"):
         @mcp.tool(description="Read-only cross-channel sales summary for TikTok, Shopify, and Discord store sales.")
-        def get_sales_summary(days: int = 7) -> dict[str, Any]:
+        def get_sales_summary(days: HistoryDays = 7) -> dict[str, Any]:
             return ops.get_sales_summary(days=days)
 
     if should_register("get_discord_sales_summary"):
         @mcp.tool(description="Read-only Discord/show sales summary filtered by product keyword, category, or channel text.")
-        def get_discord_sales_summary(product_query: str = "", days: int = 7, limit: int = 25) -> dict[str, Any]:
+        def get_discord_sales_summary(product_query: str = "", days: HistoryDays = 7, limit: int = 25) -> dict[str, Any]:
             return ops.get_discord_sales_summary(product_query=product_query, days=days, limit=limit)
 
     if should_register("get_loan_and_payback_snapshot"):
         @mcp.tool(description="Read-only loan proceeds, owner payback, and payout timing evidence.")
-        def get_loan_and_payback_snapshot(days: int = 90) -> dict[str, Any]:
+        def get_loan_and_payback_snapshot(days: HistoryDays = 90) -> dict[str, Any]:
             return ops.get_loan_and_payback_snapshot(days=days)
 
     if should_register("get_employee_clock_status"):
         @mcp.tool(description="Manager/owner read-only employee clock-in/out status from cached Clockify rows.")
-        def get_employee_clock_status(person_query: str = "", days: int = 1, limit: int = 20) -> dict[str, Any]:
+        def get_employee_clock_status(person_query: str = "", days: HistoryDays = 1, limit: int = 20) -> dict[str, Any]:
             return ops.get_employee_clock_status(person_query=person_query, days=days, limit=limit)
 
     if should_register("get_employee_ops_status"):
         @mcp.tool(description="Manager/owner read-only employee ops request status from supply, buylist, and time-off queues.")
-        def get_employee_ops_status(person_query: str = "", days: int = 30, limit: int = 50) -> dict[str, Any]:
+        def get_employee_ops_status(person_query: str = "", days: HistoryDays = 30, limit: int = 50) -> dict[str, Any]:
             return ops.get_employee_ops_status(person_query=person_query, days=days, limit=limit)
 
     if should_register("propose_ops_memory"):
@@ -2533,17 +2689,17 @@ def register_degen_ops_tools(
 
     if should_register("evaluate_inventory_buy"):
         @mcp.tool(description="Read-only proposed inventory-buy evaluation with evidence-backed routing and cash plan.")
-        def evaluate_inventory_buy(scenario: dict[str, Any], days: int = 90) -> dict[str, Any]:
+        def evaluate_inventory_buy(scenario: dict[str, Any], days: HistoryDays = 90) -> dict[str, Any]:
             return ops.evaluate_inventory_buy(scenario=scenario, days=days, audience_scope=normalized_scope)
 
     if should_register("generate_partner_update"):
         @mcp.tool(description="Read-only partner-ready weekly update generated from a proposed buy scenario.")
-        def generate_partner_update(scenario: dict[str, Any], days: int = 90) -> dict[str, Any]:
+        def generate_partner_update(scenario: dict[str, Any], days: HistoryDays = 90) -> dict[str, Any]:
             return ops.generate_partner_update(scenario=scenario, days=days, audience_scope=normalized_scope)
 
     if should_register("generate_weekly_partner_update_draft"):
         @mcp.tool(description="Read-only weekly partner update draft from current finance, sales, and inventory snapshots; does not post.")
-        def generate_weekly_partner_update_draft(days: int = 7) -> dict[str, Any]:
+        def generate_weekly_partner_update_draft(days: HistoryDays = 7) -> dict[str, Any]:
             return ops.generate_weekly_partner_update_draft(days=days, audience_scope=normalized_scope)
 
     if should_register("get_tiktok_agent_manifest"):
@@ -2558,7 +2714,7 @@ def register_degen_ops_tools(
 
     if should_register("get_tiktok_orders"):
         @mcp.tool(description="Read-only TikTok order snapshot from local synced/enriched order rows.")
-        def get_tiktok_orders(days: int = 7, limit: int = 50, status: str = "", search: str = "") -> dict[str, Any]:
+        def get_tiktok_orders(days: HistoryDays = 7, limit: int = 50, status: str = "", search: str = "") -> dict[str, Any]:
             return ops.get_tiktok_orders(days=days, limit=limit, status=status, search=search)
 
     if should_register("get_tiktok_products"):
@@ -2568,32 +2724,32 @@ def register_degen_ops_tools(
 
     if should_register("get_tiktok_product_sales"):
         @mcp.tool(description="Read-only TikTok product sales by product title, SKU, or keyword from local paid order line items.")
-        def get_tiktok_product_sales(product_query: str, days: int = 7, limit: int = 25) -> dict[str, Any]:
+        def get_tiktok_product_sales(product_query: str, days: HistoryDays = 7, limit: int = 25) -> dict[str, Any]:
             return ops.get_tiktok_product_sales(product_query=product_query, days=days, limit=limit)
 
     if should_register("get_tiktok_top_products"):
         @mcp.tool(description="Read-only top TikTok products by paid local order line-item quantity or revenue.")
-        def get_tiktok_top_products(days: int = 7, limit: int = 10, sort_by: str = "quantity") -> dict[str, Any]:
+        def get_tiktok_top_products(days: HistoryDays = 7, limit: int = 10, sort_by: str = "quantity") -> dict[str, Any]:
             return ops.get_tiktok_top_products(days=days, limit=limit, sort_by=sort_by)
 
     if should_register("get_shopify_product_sales"):
         @mcp.tool(description="Read-only Shopify product sales by product title, SKU, or keyword from local paid order line items.")
-        def get_shopify_product_sales(product_query: str, days: int = 7, limit: int = 25) -> dict[str, Any]:
+        def get_shopify_product_sales(product_query: str, days: HistoryDays = 7, limit: int = 25) -> dict[str, Any]:
             return ops.get_shopify_product_sales(product_query=product_query, days=days, limit=limit)
 
     if should_register("get_shopify_top_products"):
         @mcp.tool(description="Read-only top Shopify products by paid local order line-item quantity or revenue.")
-        def get_shopify_top_products(days: int = 7, limit: int = 10, sort_by: str = "quantity") -> dict[str, Any]:
+        def get_shopify_top_products(days: HistoryDays = 7, limit: int = 10, sort_by: str = "quantity") -> dict[str, Any]:
             return ops.get_shopify_top_products(days=days, limit=limit, sort_by=sort_by)
 
     if should_register("get_price_lookup"):
         @mcp.tool(description="Read-only price lookup from stored inventory prices, price history, and recent sales; cost basis is owner-scope only.")
-        def get_price_lookup(query: str, days: int = 30, limit: int = 10) -> dict[str, Any]:
+        def get_price_lookup(query: str, days: HistoryDays = 30, limit: int = 10) -> dict[str, Any]:
             return ops.get_price_lookup(query=query, days=days, limit=limit, audience_scope=normalized_scope)
 
     if should_register("get_market_trend_lookup"):
         @mcp.tool(description="Read-only market trend lookup comparing recent TikTok sale prices and stored price history.")
-        def get_market_trend_lookup(query: str, days: int = 7, limit: int = 10) -> dict[str, Any]:
+        def get_market_trend_lookup(query: str, days: HistoryDays = 7, limit: int = 10) -> dict[str, Any]:
             return ops.get_market_trend_lookup(query=query, days=days, limit=limit)
 
     if should_register("get_web_search"):
@@ -2603,12 +2759,12 @@ def register_degen_ops_tools(
 
     if should_register("get_tiktok_buyer_insights"):
         @mcp.tool(description="Read-only TikTok buyer intelligence from existing local reporting helpers.")
-        def get_tiktok_buyer_insights(days: int = 90, limit: int = 50) -> dict[str, Any]:
+        def get_tiktok_buyer_insights(days: HistoryDays = 90, limit: int = 50) -> dict[str, Any]:
             return ops.get_tiktok_buyer_insights(days=days, limit=limit)
 
     if should_register("get_tiktok_product_performance"):
         @mcp.tool(description="Read-only TikTok product performance from existing local reporting helpers.")
-        def get_tiktok_product_performance(days: int = 30, limit: int = 50) -> dict[str, Any]:
+        def get_tiktok_product_performance(days: HistoryDays = 30, limit: int = 50) -> dict[str, Any]:
             return ops.get_tiktok_product_performance(days=days, limit=limit)
 
     if should_register("get_tiktok_live_snapshot"):

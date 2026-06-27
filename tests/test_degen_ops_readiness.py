@@ -31,7 +31,7 @@ def test_readiness_report_confirms_scoped_read_only_code_and_flags_live_data_dec
     assert "evaluate_inventory_buy" not in report["scopes"]["employee"]["tools"]
     assert report["scopes"]["owner"]["tool_count"] == 29
     assert report["scopes"]["partner"]["tool_count"] == 17
-    assert report["scopes"]["manager"]["tool_count"] == 15
+    assert report["scopes"]["manager"]["tool_count"] == 22
     assert report["scopes"]["tiktok"]["tool_count"] == 14
     assert "get_tiktok_orders" in report["scopes"]["tiktok"]["tools"]
     assert "get_cash_snapshot" not in report["scopes"]["tiktok"]["tools"]

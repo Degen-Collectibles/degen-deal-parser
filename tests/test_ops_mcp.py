@@ -3,9 +3,11 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 import json
+from typing import get_type_hints
 
 import pytest
 import httpx
+from pydantic import TypeAdapter
 from sqlmodel import SQLModel, Session, create_engine, select
 
 from app.models import (
@@ -28,6 +30,7 @@ from app.ops_mcp import (
     DEGEN_OPS_MCP_TOOL_NAMES,
     DEGEN_OPS_SCOPE_TOOL_NAMES,
     TIKTOK_MCP_TOOL_NAMES,
+    _money,
     _normalize_scope,
     _apply_session_read_only,
     _reset_session_read_only,
@@ -98,6 +101,44 @@ def test_register_degen_ops_tools_exposes_bounded_read_only_tool_names():
     assert "execute_sql" not in fake.tools
     assert all("read-only" in (tool["description"] or "").lower() for tool in fake.tools.values())
     assert set(TIKTOK_MCP_TOOL_NAMES).issubset(fake.tools)
+
+
+def test_registered_history_day_parameters_have_pydantic_bounds():
+    fake = FakeMcp()
+    register_degen_ops_tools(
+        fake,
+        harness=DegenOpsMcpHarness(session_factory=lambda: FakeSession()),
+        scope="owner",
+    )
+
+    tools_with_days = []
+    for name, tool in fake.tools.items():
+        hints = get_type_hints(tool["func"], include_extras=True)
+        if "days" not in hints:
+            continue
+        tools_with_days.append(name)
+        schema = TypeAdapter(hints["days"]).json_schema()
+        assert schema["minimum"] == 1, name
+        assert schema["maximum"] == 365, name
+
+    assert "evaluate_inventory_buy" in tools_with_days
+    assert "get_finance_snapshot" in tools_with_days
+
+
+def test_mcp_context_caps_untrusted_history_days_before_querying(monkeypatch):
+    observed = {}
+
+    def fake_context(session, *, days):
+        observed["days"] = days
+        return {"range": {"days": days}}
+
+    monkeypatch.setattr("app.ops_mcp.build_ops_agent_context", fake_context)
+    harness = DegenOpsMcpHarness(session_factory=lambda: FakeSession())
+
+    result = harness.get_context(days=10**10000)
+
+    assert observed["days"] == 365
+    assert result["range"]["days"] == 365
 
 
 def test_degen_ops_mcp_launcher_imports_from_outside_repo(tmp_path):
@@ -580,6 +621,51 @@ def test_shopify_product_sales_matches_paid_line_items_by_keyword():
     assert result["summary"]["matched_revenue"] == 100.0
     assert result["matches"][0]["title"] == "Pokemon 151 Booster Pack"
     assert result["read_only"] is True
+
+
+@pytest.mark.parametrize(
+    "raw_quantity",
+    [0, "not-a-quantity", -2, 1.5],
+    ids=["zero", "nonnumeric", "negative", "fractional"],
+)
+def test_shopify_product_sales_never_invents_quantity_for_zero_or_invalid_lines(
+    raw_quantity,
+):
+    engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine)
+    now = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        session.add(
+            ShopifyOrder(
+                shopify_order_id=f"shopify-invalid-{raw_quantity}",
+                order_number="S-invalid",
+                created_at=now - timedelta(days=1),
+                updated_at=now - timedelta(days=1),
+                subtotal_price=10.0,
+                total_price=10.0,
+                financial_status="paid",
+                line_items_summary_json=json.dumps(
+                    [
+                        {
+                            "title": "Phantom Product",
+                            "quantity": raw_quantity,
+                            "unit_price": 10.0,
+                        }
+                    ]
+                ),
+            )
+        )
+        session.commit()
+
+        harness = DegenOpsMcpHarness(session_factory=lambda: session)
+        result = harness.get_shopify_product_sales(
+            product_query="phantom",
+            days=7,
+            limit=5,
+        )
+
+    assert result["summary"]["matched_quantity"] == 0
+    assert result["summary"]["matched_revenue"] == 0.0
 
 
 def test_shopify_top_products_returns_revenue_sorted_paid_line_items():
@@ -1370,7 +1456,14 @@ def test_mcp_harness_evaluate_inventory_buy_uses_context_and_returns_evidence(mo
             "operating_expenses_display": "$1,200",
             "inventory_spend_display": "$6,200",
         },
-        "cash_snapshot": {"latest_known_cash": 12000.0, "accounts": []},
+        "cash_snapshot": {
+            "available": True,
+            "complete": True,
+            "fresh": True,
+            "as_of": "2026-06-27T12:00:00+00:00",
+            "latest_known_cash": 12000.0,
+            "accounts": [],
+        },
         "inventory_snapshot": {"active_items": 10, "estimated_list_value": 5000.0},
         "channel_velocity": [
             {
@@ -1388,6 +1481,7 @@ def test_mcp_harness_evaluate_inventory_buy_uses_context_and_returns_evidence(mo
     }
     harness = DegenOpsMcpHarness(session_factory=lambda: FakeSession())
     monkeypatch.setattr(harness, "get_context", lambda days=90: context)
+    monkeypatch.setenv("DEGEN_OPS_MIN_CASH_RESERVE_USD", "6000")
 
     result = harness.evaluate_inventory_buy(
         {
@@ -1420,7 +1514,14 @@ def test_mcp_harness_partner_evaluate_redacts_owner_cash_and_loan_details(monkey
             "operating_expenses_display": "$1,200",
             "inventory_spend_display": "$6,200",
         },
-        "cash_snapshot": {"latest_known_cash": 7000.0, "accounts": []},
+        "cash_snapshot": {
+            "available": True,
+            "complete": True,
+            "fresh": True,
+            "as_of": "2026-06-27T12:00:00+00:00",
+            "latest_known_cash": 7000.0,
+            "accounts": [],
+        },
         "inventory_snapshot": {"active_items": 10, "estimated_list_value": 5000.0},
         "channel_velocity": [
             {
@@ -1438,6 +1539,7 @@ def test_mcp_harness_partner_evaluate_redacts_owner_cash_and_loan_details(monkey
     }
     harness = DegenOpsMcpHarness(session_factory=lambda: FakeSession())
     monkeypatch.setattr(harness, "get_context", lambda days=90: context)
+    monkeypatch.setenv("DEGEN_OPS_MIN_CASH_RESERVE_USD", "6000")
 
     result = harness.evaluate_inventory_buy(
         {
@@ -1462,6 +1564,298 @@ def test_mcp_harness_partner_evaluate_redacts_owner_cash_and_loan_details(monkey
     assert "Observed loan proceeds" not in str(result["evidence"])
     assert "owner loan/payback totals are owner-scope only" in str(result["evidence"])
     assert result["owner_scope_required_for"] == ["get_cash_snapshot", "get_loan_and_payback_snapshot"]
+
+
+def _reserve_floor_context(*, cash_on_hand=12000.0):
+    return {
+        "finance_statement": {
+            "revenue": 18000.0,
+            "operating_profit": 2400.0,
+            "operating_expenses": 1200.0,
+            "inventory_spend": 6200.0,
+            "avg_daily_profit": 240.0,
+        },
+        "cash_snapshot": {
+            "available": True,
+            "complete": True,
+            "fresh": True,
+            "as_of": "2026-06-27T12:00:00+00:00",
+            "latest_known_cash": cash_on_hand,
+            "accounts": [],
+        },
+        "inventory_snapshot": {"active_items": 10, "estimated_list_value": 5000.0},
+        "channel_velocity": [
+            {
+                "channel": "TikTok",
+                "matched_category": "Pokemon sealed",
+                "units_per_week": 20.0,
+                "revenue_per_week": 1500.0,
+                "avg_price": 75.0,
+                "confidence": "high",
+                "evidence_url": "/tiktok/analytics/api/products?days=90",
+            }
+        ],
+        "loan_snapshot": {},
+        "range": {"days": 90},
+    }
+
+
+def _reserve_floor_scenario(**overrides):
+    scenario = {
+        "lot_name": "Pokemon sealed",
+        "purchase_cost": 2000.0,
+        "expected_revenue": 3600.0,
+        "unit_count": 40,
+        "target_payback_weeks": 4,
+        "categories": ["Pokemon sealed"],
+    }
+    scenario.update(overrides)
+    return scenario
+
+
+def _reserve_floor_harness(monkeypatch, *, cash_on_hand=12000.0):
+    harness = DegenOpsMcpHarness(session_factory=lambda: FakeSession())
+    context = _reserve_floor_context(cash_on_hand=cash_on_hand)
+    monkeypatch.setattr(harness, "get_context", lambda days=90: context)
+    return harness
+
+
+def test_mcp_harness_env_reserve_floor_overrides_caller_value_with_warning(monkeypatch):
+    monkeypatch.setenv("DEGEN_OPS_MIN_CASH_RESERVE_USD", "6000")
+    harness = _reserve_floor_harness(monkeypatch)
+
+    result = harness.evaluate_inventory_buy(_reserve_floor_scenario(minimum_cash_reserve=100.0))
+
+    assert result["reserve_floor"] == {
+        "configured": True,
+        "source": "DEGEN_OPS_MIN_CASH_RESERVE_USD",
+        "amount": 6000.0,
+    }
+    assert result["cash_flow"]["minimum_cash_reserve"] == 6000.0
+    assert result["cash_flow"]["reserve_gap"] == 4000.0
+    assert result["cash_flow"]["reserve_floor_configured"] is True
+    assert result["verdict"] == "safe"
+    assert any("caller-supplied minimum_cash_reserve was ignored" in warning.lower() for warning in result["input_warnings"])
+    assert any("environment policy" in warning.lower() for warning in result["input_warnings"])
+
+
+def test_mcp_harness_ignores_caller_reserve_when_env_is_missing(monkeypatch):
+    monkeypatch.delenv("DEGEN_OPS_MIN_CASH_RESERVE_USD", raising=False)
+    harness = _reserve_floor_harness(monkeypatch)
+
+    result = harness.evaluate_inventory_buy(_reserve_floor_scenario(minimum_cash_reserve=100.0))
+
+    assert result["reserve_floor"]["configured"] is False
+    assert result["reserve_floor"]["amount"] is None
+    assert result["cash_flow"]["minimum_cash_reserve"] is None
+    assert result["cash_flow"]["reserve_gap"] is None
+    assert result["cash_flow"]["reserve_floor_configured"] is False
+    assert result["payback_plan"]["weeks"][0]["below_reserve"] is None
+    assert result["risk_flags"] == ["Reserve floor is not configured"]
+    assert result["verdict"] == "risky"
+    assert "reserve safety was not assessed" in result["partner_update"].lower()
+    assert "reserve gap:" not in result["partner_update"].lower()
+    assert result["input_warnings"]
+
+
+def test_mcp_harness_uses_snapshot_cash_and_warns_when_caller_supplies_cash(monkeypatch):
+    monkeypatch.setenv("DEGEN_OPS_MIN_CASH_RESERVE_USD", "6000")
+    harness = _reserve_floor_harness(monkeypatch, cash_on_hand=7000.0)
+
+    result = harness.evaluate_inventory_buy(_reserve_floor_scenario(cash_on_hand=1_000_000.0))
+
+    assert result["cash_flow"]["cash_on_hand"] == 7000.0
+    assert result["cash_flow"]["post_buy_cash"] == 5000.0
+    assert result["cash_flow"]["reserve_gap"] == -1000.0
+    assert result["verdict"] == "risky"
+    assert "Post-buy cash falls below the minimum reserve" in result["risk_flags"]
+    assert any("caller-supplied cash_on_hand was ignored" in warning.lower() for warning in result["input_warnings"])
+    assert any("cash snapshot" in warning.lower() for warning in result["input_warnings"])
+
+
+@pytest.mark.parametrize(
+    "cash_snapshot",
+    [
+        None,
+        {
+            "available": False,
+            "complete": False,
+            "fresh": False,
+            "as_of": None,
+            "latest_known_cash": None,
+        },
+        {
+            "available": True,
+            "complete": False,
+            "fresh": True,
+            "as_of": "2026-06-27T12:00:00+00:00",
+            "latest_known_cash": 7000.0,
+        },
+        {
+            "available": True,
+            "complete": True,
+            "fresh": False,
+            "as_of": "2026-05-01T12:00:00+00:00",
+            "latest_known_cash": 7000.0,
+        },
+    ],
+    ids=["missing", "unavailable", "incomplete", "stale"],
+)
+def test_mcp_harness_untrustworthy_cash_is_unassessed_and_never_defaults_to_zero(
+    monkeypatch,
+    cash_snapshot,
+):
+    monkeypatch.setenv("DEGEN_OPS_MIN_CASH_RESERVE_USD", "6000")
+    harness = DegenOpsMcpHarness(session_factory=lambda: FakeSession())
+    context = _reserve_floor_context(cash_on_hand=7000.0)
+    if cash_snapshot is None:
+        context.pop("cash_snapshot")
+    else:
+        context["cash_snapshot"] = cash_snapshot
+    monkeypatch.setattr(harness, "get_context", lambda days=90: context)
+
+    result = harness.evaluate_inventory_buy(_reserve_floor_scenario())
+
+    assert result["verdict"] != "safe"
+    assert result["cash_flow"]["cash_snapshot_available"] is False
+    assert result["cash_flow"]["cash_on_hand"] is None
+    assert result["cash_flow"]["post_buy_cash"] is None
+    assert result["cash_flow"]["reserve_gap"] is None
+    assert all(week["ending_cash"] is None for week in result["payback_plan"]["weeks"])
+    assert all(week["below_reserve"] is None for week in result["payback_plan"]["weeks"])
+    assert any("cash" in flag.lower() and "unavailable" in flag.lower() for flag in result["risk_flags"])
+    assert "Cash after buy: $" not in result["partner_update"]
+    assert "cash data is unavailable or incomplete" in result["partner_update"].lower()
+    json.dumps(result, allow_nan=False)
+
+
+def test_mcp_generate_partner_update_preserves_caller_cash_warning(monkeypatch):
+    monkeypatch.setenv("DEGEN_OPS_MIN_CASH_RESERVE_USD", "6000")
+    harness = _reserve_floor_harness(monkeypatch, cash_on_hand=7000.0)
+
+    result = harness.generate_partner_update(
+        _reserve_floor_scenario(cash_on_hand=1_000_000.0),
+        audience_scope="partner",
+    )
+
+    assert any("caller-supplied cash_on_hand was ignored" in warning.lower() for warning in result["input_warnings"])
+
+
+@pytest.mark.parametrize(
+    "env_value",
+    [None, "", "not-a-number", "0", "-1", "NaN", "Infinity", "-Infinity", "1e308", "1e309"],
+)
+def test_mcp_harness_invalid_env_reserve_values_are_unconfigured_and_json_safe(monkeypatch, env_value):
+    if env_value is None:
+        monkeypatch.delenv("DEGEN_OPS_MIN_CASH_RESERVE_USD", raising=False)
+    else:
+        monkeypatch.setenv("DEGEN_OPS_MIN_CASH_RESERVE_USD", env_value)
+    harness = _reserve_floor_harness(monkeypatch)
+
+    result = harness.evaluate_inventory_buy(_reserve_floor_scenario())
+
+    assert result["reserve_floor"]["configured"] is False
+    assert result["reserve_floor"]["amount"] is None
+    assert result["cash_flow"]["minimum_cash_reserve"] is None
+    assert result["cash_flow"]["reserve_gap"] is None
+    assert result["cash_flow"]["reserve_floor_configured"] is False
+    assert result["payback_plan"]["weeks"][0]["below_reserve"] is None
+    assert "Reserve floor is not configured" in result["risk_flags"]
+    json.dumps(result, allow_nan=False)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (1e308, 1_000_000_000.0),
+        (-1e308, -1_000_000_000.0),
+        (10**10000, 1_000_000_000.0),
+        (-(10**10000), -1_000_000_000.0),
+    ],
+    ids=["large-float", "negative-large-float", "huge-int", "negative-huge-int"],
+)
+def test_mcp_money_parser_bounds_extreme_finite_values(value, expected):
+    assert _money(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("1e309", 1_000_000_000.0),
+        ("-1e309", -1_000_000_000.0),
+        ("Infinity", 0.0),
+        ("-Infinity", 0.0),
+        ("NaN", 0.0),
+        (float("inf"), 0.0),
+        (float("nan"), 0.0),
+        (True, 0.0),
+        (False, 0.0),
+        ("not-a-number", 0.0),
+    ],
+    ids=[
+        "positive-overflowing-numeric-string",
+        "negative-overflowing-numeric-string",
+        "positive-infinity-token",
+        "negative-infinity-token",
+        "nan-token",
+        "infinite-float",
+        "nan-float",
+        "true-is-not-money",
+        "false-is-not-money",
+        "unparseable",
+    ],
+)
+def test_mcp_money_parser_distinguishes_overflowing_finite_strings_from_nonfinite_values(value, expected):
+    assert _money(value) == expected
+
+
+def test_mcp_partner_output_removes_configured_reserve_metadata_and_exact_values(monkeypatch):
+    monkeypatch.setenv("DEGEN_OPS_MIN_CASH_RESERVE_USD", "6543.21")
+    harness = _reserve_floor_harness(monkeypatch, cash_on_hand=7000.0)
+
+    result = harness.evaluate_inventory_buy(
+        _reserve_floor_scenario(minimum_cash_reserve=123.45),
+        audience_scope="partner",
+    )
+    serialized = json.dumps(result, allow_nan=False)
+
+    assert "reserve_floor" not in result
+    assert result["cash_flow"]["cash_safety"] == "below_minimum_reserve"
+    assert "DEGEN_OPS_MIN_CASH_RESERVE_USD" not in serialized
+    assert "6543.21" not in serialized
+    assert "$6,543" not in serialized
+    assert "123.45" not in serialized
+    assert "$123" not in serialized
+
+
+def test_mcp_partner_output_marks_missing_reserve_as_not_assessed(monkeypatch):
+    monkeypatch.delenv("DEGEN_OPS_MIN_CASH_RESERVE_USD", raising=False)
+    harness = _reserve_floor_harness(monkeypatch, cash_on_hand=7000.0)
+
+    result = harness.evaluate_inventory_buy(
+        _reserve_floor_scenario(minimum_cash_reserve=123.45),
+        audience_scope="partner",
+    )
+    serialized = json.dumps(result, allow_nan=False)
+
+    assert "reserve_floor" not in result
+    assert result["cash_flow"]["cash_safety"] == "not_assessed"
+    assert "reserve safety was not assessed" in result["cash_flow"]["cash_safety_summary"].lower()
+    assert "reserve safety was not assessed" in result["partner_update"].lower()
+    assert "123.45" not in serialized
+    assert "$123" not in serialized
+
+
+def test_mcp_generate_partner_update_preserves_caller_reserve_warning(monkeypatch):
+    monkeypatch.setenv("DEGEN_OPS_MIN_CASH_RESERVE_USD", "6000")
+    harness = _reserve_floor_harness(monkeypatch)
+
+    result = harness.generate_partner_update(
+        _reserve_floor_scenario(minimum_cash_reserve=100.0),
+        audience_scope="partner",
+    )
+
+    assert any("caller-supplied minimum_cash_reserve was ignored" in warning.lower() for warning in result["input_warnings"])
 
 
 def test_mcp_harness_generate_partner_update_uses_evaluate_result(monkeypatch):

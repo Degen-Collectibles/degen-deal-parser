@@ -1,8 +1,11 @@
+import pytest
+
 from scripts.degen_ops_chat import build_preflight_report, configure_environment, parse_args
 
 from app.ops_chat import (
     DEGEN_OPS_CHAT_SYSTEM_PROMPT,
     DegenOpsChatToolRunner,
+    TOOL_SCHEMAS,
     initial_chat_messages,
     run_chat_turn,
     tool_schemas_for_scope,
@@ -348,6 +351,60 @@ def test_chat_runner_passes_scope_to_buy_evaluation():
     assert result["audience_scope"] == "partner"
 
 
+@pytest.mark.parametrize("args", [[("days", 7)], ["not-a-pair"], "bad", True])
+def test_chat_runner_rejects_non_mapping_tool_arguments(args):
+    runner = DegenOpsChatToolRunner(scope="owner", harness=FakeHarness())
+
+    result = runner.call_tool("get_finance_snapshot", args)
+
+    assert result["read_only"] is True
+    assert "arguments must be an object" in result["error"].lower()
+
+
+@pytest.mark.parametrize("scenario", [None, [], "bad", True])
+@pytest.mark.parametrize("tool_name", ["evaluate_inventory_buy", "generate_partner_update"])
+def test_chat_runner_rejects_non_mapping_buy_scenarios(tool_name, scenario):
+    runner = DegenOpsChatToolRunner(scope="owner", harness=FakeHarness())
+
+    result = runner.call_tool(tool_name, {"scenario": scenario})
+
+    assert result["read_only"] is True
+    assert "scenario must be an object" in result["error"].lower()
+
+
+def test_chat_buy_scenario_guidance_does_not_invite_caller_reserve_floor():
+    schemas = tool_schemas_for_scope("owner")
+    schema = next(row for row in schemas if row["function"]["name"] == "evaluate_inventory_buy")
+    description = schema["function"]["parameters"]["properties"]["scenario"]["description"]
+
+    assert "minimum_cash_reserve" not in description
+    assert "reserve floor" in description.lower()
+    assert "environment policy" in description.lower()
+
+
+def test_chat_history_day_schemas_and_runtime_are_bounded():
+    tools_with_days = []
+    for name, tool in TOOL_SCHEMAS.items():
+        days_schema = (
+            tool["function"]["parameters"].get("properties", {}).get("days")
+        )
+        if days_schema is None:
+            continue
+        tools_with_days.append(name)
+        assert days_schema["minimum"] == 1, name
+        assert days_schema["maximum"] == 365, name
+
+    runner = DegenOpsChatToolRunner(scope="partner", harness=FakeHarness())
+    result = runner.call_tool(
+        "generate_weekly_partner_update_draft",
+        {"days": 10**10000},
+    )
+
+    assert "(365-day draft)" in result["draft"]
+    assert "evaluate_inventory_buy" in tools_with_days
+    assert "get_finance_snapshot" in tools_with_days
+
+
 def test_chat_runner_dispatches_weekly_partner_update_draft():
     runner = DegenOpsChatToolRunner(scope="partner", harness=FakeHarness())
 
@@ -545,6 +602,28 @@ def test_run_chat_turn_returns_tool_error_for_invalid_json_arguments():
 
     tool_messages = [message for message in history if message["role"] == "tool"]
     assert "Invalid JSON tool arguments" in tool_messages[0]["content"]
+
+
+def test_run_chat_turn_returns_tool_error_for_non_object_json_arguments():
+    client = FakeClient(
+        [
+            _tool_call_response("get_inventory_snapshot", "[]"),
+            _final_response("The tool arguments were invalid, so I cannot use that result."),
+        ]
+    )
+    runner = DegenOpsChatToolRunner(scope="employee", harness=FakeHarness())
+
+    _, history = run_chat_turn(
+        client=client,
+        model="fake-model",
+        messages=[{"role": "user", "content": "Check inventory"}],
+        runner=runner,
+    )
+
+    tool_messages = [message for message in history if message["role"] == "tool"]
+    assert len(tool_messages) == 1
+    assert "arguments must be a JSON object" in tool_messages[0]["content"]
+    assert '"read_only": true' in tool_messages[0]["content"]
 
 
 def test_chat_script_missing_database_url_env_fails(monkeypatch):

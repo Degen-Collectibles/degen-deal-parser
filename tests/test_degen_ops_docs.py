@@ -51,6 +51,28 @@ def test_ops_docs_describe_redacted_partner_scope():
     assert "Partner scope must not reveal raw cash balances" in prompt
 
 
+def test_ops_agent_instructions_make_reserve_floor_environment_authoritative():
+    prompt = Path("docs/ops/degen-ops-agent-instructions.md").read_text(encoding="utf-8")
+
+    assert "optional `minimum_cash_reserve`" not in prompt
+    assert "`DEGEN_OPS_MIN_CASH_RESERVE_USD`" in prompt
+    assert "Do not ask the user to supply or override the reserve floor" in prompt
+
+
+def test_ops_operational_scripts_do_not_send_caller_reserve_floor():
+    scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+    script_paths = sorted(scripts_dir.glob("degen_ops_*.py"))
+    assert script_paths
+
+    offenders = [
+        path.name
+        for path in script_paths
+        if "minimum_cash_reserve" in path.read_text(encoding="utf-8")
+    ]
+
+    assert offenders == []
+
+
 def test_ops_docs_include_topology_planner_before_team_rollout():
     prd = Path("docs/ops/degen-ops-team-rollout-prd.md").read_text(encoding="utf-8")
     pilot = Path("docs/ops/degen-ops-hermes-mcp-pilot.md").read_text(encoding="utf-8")

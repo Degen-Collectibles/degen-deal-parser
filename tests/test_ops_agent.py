@@ -1,10 +1,25 @@
 import json
 from datetime import datetime, timedelta, timezone
+from time import perf_counter
 
+import pytest
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from app.models import BankStatementImport, BankTransaction, InventoryItem, ShopifyOrder, TikTokOrder, Transaction
-from app.ops_agent import build_ops_agent_context, build_ops_agent_recommendation
+from app.models import (
+    BankFeedAccount,
+    BankStatementImport,
+    BankTransaction,
+    InventoryItem,
+    ShopifyOrder,
+    TikTokOrder,
+    Transaction,
+)
+from app.ops_agent import (
+    MAX_TARGET_PAYBACK_WEEKS,
+    _target_payback_weeks,
+    build_ops_agent_context,
+    build_ops_agent_recommendation,
+)
 
 
 def make_engine():
@@ -20,6 +35,34 @@ def add_bank_import(session: Session) -> BankStatementImport:
         account_type="checking",
         source_kind="plaid",
         provider="plaid",
+    )
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    return row
+
+
+def add_feed_account(
+    session: Session,
+    *,
+    provider_account_id: str,
+    account_type: str,
+    current_balance=None,
+    available_balance=None,
+    updated_at: datetime,
+    is_active: bool = True,
+    iso_currency_code: str | None = "USD",
+) -> BankFeedAccount:
+    row = BankFeedAccount(
+        connection_id=1,
+        provider_account_id=provider_account_id,
+        account_label=f"Account {provider_account_id}",
+        account_type=account_type,
+        current_balance=current_balance,
+        available_balance=available_balance,
+        iso_currency_code=iso_currency_code,
+        is_active=is_active,
+        updated_at=updated_at,
     )
     session.add(row)
     session.commit()
@@ -97,6 +140,343 @@ def test_ops_agent_marks_high_margin_fast_velocity_buy_safe_with_evidence():
     assert any(row["source"] == "channel_velocity" and row["url"] for row in result["evidence"])
     assert "Weekly business update" in result["partner_update"]
     assert "safe" in result["partner_update"].lower()
+
+
+_MISSING = object()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("purchase_cost", _MISSING),
+        ("purchase_cost", -1),
+        ("expected_revenue", _MISSING),
+        ("expected_revenue", 0),
+        ("unit_count", _MISSING),
+        ("unit_count", 0),
+        ("unit_count", True),
+        ("unit_count", 1.5),
+        ("unit_count", 10**10000),
+        ("financing_amount", -1),
+        ("cash_on_hand", True),
+        ("cash_on_hand", False),
+        ("target_payback_weeks", _MISSING),
+        ("target_payback_weeks", None),
+        ("target_payback_weeks", True),
+        ("target_payback_weeks", 1.9),
+    ],
+    ids=[
+        "missing-purchase-cost",
+        "negative-purchase-cost",
+        "missing-expected-revenue",
+        "zero-expected-revenue",
+        "missing-unit-count",
+        "zero-unit-count",
+        "boolean-unit-count",
+        "fractional-unit-count",
+        "huge-unit-count",
+        "negative-financing",
+        "true-cash-on-hand",
+        "false-cash-on-hand",
+        "missing-target-payback-weeks",
+        "null-target-payback-weeks",
+        "boolean-target-payback-weeks",
+        "fractional-target-payback-weeks",
+    ],
+)
+def test_ops_agent_invalid_scenario_fields_are_field_specific_and_never_safe(field, value):
+    scenario = {
+        "lot_name": "Pokemon sealed weekend lot",
+        "purchase_cost": 2000.0,
+        "expected_revenue": 3600.0,
+        "unit_count": 40,
+        "cash_on_hand": 12000.0,
+        "minimum_cash_reserve": 6000.0,
+        "target_payback_weeks": 4,
+        "financing_amount": 0.0,
+        "categories": ["Pokemon sealed"],
+    }
+    if value is _MISSING:
+        scenario.pop(field)
+    else:
+        scenario[field] = value
+    context = {
+        "finance_statement": {"avg_daily_profit": 240.0},
+        "channel_velocity": [
+            {
+                "channel": "TikTok",
+                "matched_category": "Pokemon sealed",
+                "units_per_week": 20.0,
+                "revenue_per_week": 1500.0,
+                "confidence": "high",
+            }
+        ],
+        "loan_snapshot": {},
+    }
+
+    result = build_ops_agent_recommendation(scenario, context)
+
+    assert result["verdict"] != "safe"
+    assert any(f"Invalid {field}" in flag for flag in result["risk_flags"])
+    if field == "unit_count":
+        assert result["unit_economics"]["unit_count"] == 0
+
+
+@pytest.mark.parametrize("reserve_floor", [True, False], ids=["true", "false"])
+def test_ops_agent_boolean_reserve_floor_is_unconfigured_and_never_safe(reserve_floor):
+    scenario = {
+        "lot_name": "Pokemon sealed weekend lot",
+        "purchase_cost": 2000.0,
+        "expected_revenue": 3600.0,
+        "unit_count": 40,
+        "cash_on_hand": 12000.0,
+        "minimum_cash_reserve": reserve_floor,
+        "target_payback_weeks": 4,
+        "financing_amount": 0.0,
+        "categories": ["Pokemon sealed"],
+    }
+    context = {
+        "finance_statement": {"avg_daily_profit": 240.0},
+        "channel_velocity": [
+            {
+                "channel": "TikTok",
+                "matched_category": "Pokemon sealed",
+                "units_per_week": 20.0,
+                "revenue_per_week": 1500.0,
+                "confidence": "high",
+            }
+        ],
+        "loan_snapshot": {},
+    }
+
+    result = build_ops_agent_recommendation(scenario, context)
+
+    assert result["verdict"] != "safe"
+    assert result["cash_flow"]["minimum_cash_reserve"] is None
+    assert result["cash_flow"]["reserve_floor_configured"] is False
+    assert "Reserve floor is not configured" in result["risk_flags"]
+
+
+def test_ops_agent_missing_reserve_floor_is_not_assessed_and_cannot_be_safe():
+    scenario = {
+        "lot_name": "Pokemon sealed weekend lot",
+        "purchase_cost": 2000.0,
+        "expected_revenue": 3600.0,
+        "unit_count": 40,
+        "cash_on_hand": 12000.0,
+        "target_payback_weeks": 4,
+        "financing_amount": 0.0,
+        "categories": ["Pokemon sealed"],
+    }
+    context = {
+        "finance_statement": {"avg_daily_profit": 240.0},
+        "channel_velocity": [
+            {
+                "channel": "TikTok",
+                "matched_category": "Pokemon sealed",
+                "units_per_week": 20.0,
+                "revenue_per_week": 1500.0,
+                "confidence": "high",
+                "evidence_url": "/tiktok/analytics/api/products?days=90",
+            }
+        ],
+        "loan_snapshot": {},
+    }
+
+    result = build_ops_agent_recommendation(scenario, context)
+
+    assert result["verdict"] == "risky"
+    assert result["cash_flow"]["minimum_cash_reserve"] is None
+    assert result["cash_flow"]["reserve_gap"] is None
+    assert result["cash_flow"]["reserve_floor_configured"] is False
+    assert all(week["below_reserve"] is None for week in result["payback_plan"]["weeks"])
+    assert result["risk_flags"] == ["Reserve floor is not configured"]
+    assert "reserve safety was not assessed" in result["partner_update"].lower()
+    assert "reserve gap:" not in result["partner_update"].lower()
+    json.dumps(result, allow_nan=False)
+
+
+def test_ops_agent_explicit_unconfigured_flag_overrides_internal_floor_value():
+    scenario = {
+        "lot_name": "Pokemon sealed weekend lot",
+        "purchase_cost": 2000.0,
+        "expected_revenue": 3600.0,
+        "unit_count": 40,
+        "cash_on_hand": 12000.0,
+        "minimum_cash_reserve": 6000.0,
+        "reserve_floor_configured": False,
+        "target_payback_weeks": 4,
+        "categories": ["Pokemon sealed"],
+    }
+    context = {
+        "finance_statement": {"avg_daily_profit": 240.0},
+        "channel_velocity": [
+            {
+                "channel": "TikTok",
+                "matched_category": "Pokemon sealed",
+                "units_per_week": 20.0,
+                "revenue_per_week": 1500.0,
+                "confidence": "high",
+            }
+        ],
+        "loan_snapshot": {},
+    }
+
+    result = build_ops_agent_recommendation(scenario, context)
+
+    assert result["cash_flow"]["reserve_floor_configured"] is False
+    assert result["cash_flow"]["minimum_cash_reserve"] is None
+    assert "Reserve floor is not configured" in result["risk_flags"]
+
+
+def test_ops_agent_extreme_finite_money_inputs_are_bounded_and_json_safe():
+    scenario = {
+        "lot_name": "Impossible scale lot",
+        "purchase_cost": 1e308,
+        "expected_revenue": -1e308,
+        "unit_count": 1,
+        "cash_on_hand": -1e308,
+        "minimum_cash_reserve": 6000.0,
+        "target_payback_weeks": 1,
+        "financing_amount": 1e308,
+        "categories": ["Pokemon sealed"],
+    }
+    context = {
+        "finance_statement": {"avg_daily_profit": 1e308},
+        "channel_velocity": [
+            {
+                "channel": "TikTok",
+                "matched_category": "Pokemon sealed",
+                "units_per_week": 1.0,
+                "revenue_per_week": 1e308,
+                "confidence": "high",
+            }
+        ],
+        "loan_snapshot": {},
+    }
+
+    result = build_ops_agent_recommendation(scenario, context)
+
+    assert result["unit_economics"]["purchase_cost"] == 1_000_000_000.0
+    assert result["unit_economics"]["expected_revenue"] == -1_000_000_000.0
+    json.dumps(result, allow_nan=False)
+
+
+def test_ops_agent_numeric_conversion_overflow_is_validation_risk_not_crash():
+    scenario = {
+        "lot_name": "Hostile numeric input lot",
+        "purchase_cost": 2000.0,
+        "expected_revenue": 3600.0,
+        "unit_count": float("inf"),
+        "cash_on_hand": 12000.0,
+        "minimum_cash_reserve": 6000.0,
+        "target_payback_weeks": 4,
+        "financing_amount": 10**10000,
+        "categories": ["Pokemon sealed"],
+    }
+    context = {
+        "finance_statement": {"avg_daily_profit": 240.0},
+        "channel_velocity": [
+            {
+                "channel": "TikTok",
+                "matched_category": "Pokemon sealed",
+                "units_per_week": 20.0,
+                "revenue_per_week": 1500.0,
+                "confidence": "high",
+            }
+        ],
+        "loan_snapshot": {},
+    }
+
+    result = build_ops_agent_recommendation(scenario, context)
+
+    assert result["verdict"] == "risky"
+    assert "Scenario contains invalid or unsupported numeric inputs" in result["risk_flags"]
+    assert result["unit_economics"]["unit_count"] == 0
+    assert result["payback_plan"]["financing_amount"] == 0.0
+    json.dumps(result, allow_nan=False)
+
+
+@pytest.mark.parametrize(
+    "target_weeks",
+    [MAX_TARGET_PAYBACK_WEEKS + 1, 10**10000],
+    ids=["over_maximum", "huge_integer"],
+)
+def test_ops_agent_caps_unsupported_payback_horizon_and_marks_it_risky(target_weeks):
+    scenario = {
+        "lot_name": "Unbounded schedule lot",
+        "purchase_cost": 2000.0,
+        "expected_revenue": 3600.0,
+        "unit_count": 40,
+        "cash_on_hand": 12000.0,
+        "minimum_cash_reserve": 6000.0,
+        "target_payback_weeks": target_weeks,
+        "financing_amount": 0.0,
+        "categories": ["Pokemon sealed"],
+    }
+    context = {
+        "finance_statement": {"avg_daily_profit": 240.0},
+        "channel_velocity": [
+            {
+                "channel": "TikTok",
+                "matched_category": "Pokemon sealed",
+                "units_per_week": 20.0,
+                "revenue_per_week": 1500.0,
+                "confidence": "high",
+            }
+        ],
+        "loan_snapshot": {},
+    }
+
+    result = build_ops_agent_recommendation(scenario, context)
+
+    assert result["verdict"] == "risky"
+    assert result["payback_plan"]["target_weeks"] == MAX_TARGET_PAYBACK_WEEKS
+    assert len(result["payback_plan"]["weeks"]) == MAX_TARGET_PAYBACK_WEEKS
+    assert (
+        f"Target payback window must be between 1 and {MAX_TARGET_PAYBACK_WEEKS} weeks"
+        in result["risk_flags"]
+    )
+    json.dumps(result, allow_nan=False)
+
+
+def test_ops_agent_infinite_payback_horizon_falls_back_without_crashing():
+    scenario = {
+        "lot_name": "Overflow schedule lot",
+        "purchase_cost": 2000.0,
+        "expected_revenue": 3600.0,
+        "unit_count": 40,
+        "cash_on_hand": 12000.0,
+        "minimum_cash_reserve": 6000.0,
+        "target_payback_weeks": float("inf"),
+        "financing_amount": 0.0,
+        "categories": ["Pokemon sealed"],
+    }
+    context = {
+        "finance_statement": {"avg_daily_profit": 240.0},
+        "channel_velocity": [],
+        "loan_snapshot": {},
+    }
+
+    result = build_ops_agent_recommendation(scenario, context)
+
+    assert result["verdict"] == "risky"
+    assert result["payback_plan"]["target_weeks"] == 1
+    assert len(result["payback_plan"]["weeks"]) == 1
+    assert (
+        f"Target payback window must be between 1 and {MAX_TARGET_PAYBACK_WEEKS} weeks"
+        in result["risk_flags"]
+    )
+    json.dumps(result, allow_nan=False)
+
+
+def test_ops_agent_huge_negative_payback_horizon_rejects_before_integer_materialization():
+    started_at = perf_counter()
+
+    normalized = _target_payback_weeks("-1e1000000")
+
+    assert normalized == (1, False)
+    assert perf_counter() - started_at < 1.0
 
 
 def test_ops_agent_single_category_filters_velocity_evidence():
@@ -264,6 +644,135 @@ def test_ops_agent_flags_cash_reserve_and_slow_sell_through_risk():
     assert result["payback_plan"]["weeks"][0]["ending_cash"] < scenario["minimum_cash_reserve"]
 
 
+def test_ops_agent_cash_snapshot_is_unavailable_when_no_active_depository_accounts_exist():
+    engine = make_engine()
+    now = datetime(2026, 6, 1, 12, tzinfo=timezone.utc)
+
+    with Session(engine) as session:
+        snapshot = build_ops_agent_context(session, now=now, days=30)["cash_snapshot"]
+
+    assert snapshot["available"] is False
+    assert snapshot["complete"] is False
+    assert snapshot["fresh"] is False
+    assert snapshot["as_of"] is None
+    assert snapshot["latest_known_cash"] is None
+    assert snapshot["accounts"] == []
+    assert snapshot["data_gaps"]
+
+
+@pytest.mark.parametrize(
+    ("account_type", "current_balance", "updated_delta", "expected_complete", "expected_fresh"),
+    [
+        ("checking", None, timedelta(hours=1), False, True),
+        ("checking", 1250.0, timedelta(days=8), True, False),
+        ("credit_card", 1250.0, timedelta(hours=1), False, False),
+    ],
+    ids=["missing-balance", "stale-balance", "liability-only"],
+)
+def test_ops_agent_cash_snapshot_rejects_incomplete_stale_or_liability_only_sources(
+    account_type,
+    current_balance,
+    updated_delta,
+    expected_complete,
+    expected_fresh,
+):
+    engine = make_engine()
+    now = datetime(2026, 6, 1, 12, tzinfo=timezone.utc)
+
+    with Session(engine) as session:
+        add_feed_account(
+            session,
+            provider_account_id="candidate",
+            account_type=account_type,
+            current_balance=current_balance,
+            updated_at=now - updated_delta,
+        )
+        snapshot = build_ops_agent_context(session, now=now, days=30)["cash_snapshot"]
+
+    assert snapshot["available"] is False
+    assert snapshot["complete"] is expected_complete
+    assert snapshot["fresh"] is expected_fresh
+    assert snapshot["latest_known_cash"] is None
+    assert snapshot["data_gaps"]
+
+
+def test_ops_agent_cash_snapshot_sums_fresh_active_depository_available_balances():
+    engine = make_engine()
+    now = datetime(2026, 6, 1, 12, tzinfo=timezone.utc)
+
+    with Session(engine) as session:
+        add_feed_account(
+            session,
+            provider_account_id="checking",
+            account_type="checking",
+            current_balance=12000.0,
+            available_balance=11500.0,
+            updated_at=now - timedelta(hours=1),
+        )
+        add_feed_account(
+            session,
+            provider_account_id="savings",
+            account_type="savings",
+            current_balance=2500.0,
+            updated_at=now - timedelta(hours=2),
+        )
+        add_feed_account(
+            session,
+            provider_account_id="card",
+            account_type="credit_card",
+            current_balance=900.0,
+            updated_at=now - timedelta(hours=1),
+        )
+        snapshot = build_ops_agent_context(session, now=now, days=30)["cash_snapshot"]
+
+    assert snapshot["available"] is True
+    assert snapshot["complete"] is True
+    assert snapshot["fresh"] is True
+    assert snapshot["latest_known_cash"] == 14000.0
+    assert snapshot["as_of"]
+    assert {row["account_type"] for row in snapshot["accounts"]} == {"checking", "savings"}
+    assert snapshot["excluded_accounts"] == [
+        {
+            "account_label": "Account card",
+            "account_type": "credit_card",
+            "reason": "non_depository_account",
+        }
+    ]
+
+
+def test_ops_agent_cash_snapshot_rejects_missing_currency_code():
+    engine = make_engine()
+    now = datetime(2026, 6, 1, 12, tzinfo=timezone.utc)
+
+    with Session(engine) as session:
+        add_feed_account(
+            session,
+            provider_account_id="unknown-currency",
+            account_type="checking",
+            current_balance=5000.0,
+            iso_currency_code=None,
+            updated_at=now - timedelta(hours=1),
+        )
+        snapshot = build_ops_agent_context(session, now=now, days=30)["cash_snapshot"]
+
+    assert snapshot["available"] is False
+    assert snapshot["complete"] is False
+    assert snapshot["latest_known_cash"] is None
+    assert snapshot["accounts"][0]["currency"] is None
+    assert any("currency" in gap.lower() for gap in snapshot["data_gaps"])
+
+
+def test_ops_agent_context_caps_untrusted_history_days():
+    engine = make_engine()
+    now = datetime(2026, 6, 1, 12, tzinfo=timezone.utc)
+
+    with Session(engine) as session:
+        context = build_ops_agent_context(session, now=now, days=10**10000)
+
+    assert context["range"]["days"] == 365
+    assert context["range"]["start"] == "2025-06-01"
+
+
 def test_ops_agent_context_collects_existing_orders_inventory_and_loan_evidence_read_only():
     engine = make_engine()
     now = datetime(2026, 6, 1, 12, tzinfo=timezone.utc)
@@ -353,6 +862,20 @@ def test_ops_agent_context_collects_existing_orders_inventory_and_loan_evidence_
                 expense_category="loan_owner_payments",
             )
         )
+        session.add(
+            BankFeedAccount(
+                connection_id=1,
+                bank_import_id=bank_import.id,
+                provider_account_id="chase-checking",
+                account_label="Chase Checking",
+                account_type="checking",
+                current_balance=11250.0,
+                available_balance=11250.0,
+                iso_currency_code="USD",
+                is_active=True,
+                updated_at=now - timedelta(days=2),
+            )
+        )
         session.commit()
 
         before_inventory_count = len(session.exec(select(InventoryItem)).all())
@@ -365,6 +888,7 @@ def test_ops_agent_context_collects_existing_orders_inventory_and_loan_evidence_
     assert context["loan_snapshot"]["observed_loan_proceeds"] == 5000.0
     assert context["loan_snapshot"]["observed_paybacks"] == 750.0
     assert context["cash_snapshot"]["latest_known_cash"] == 11250.0
+    assert context["cash_snapshot"]["available"] is True
     assert context["cash_snapshot"]["accounts"][0]["account_label"] == "Chase Checking"
     assert any(row["channel"] == "TikTok" and row["matched_category"] == "Pokemon 151 ETB" for row in context["channel_velocity"])
     assert any(row["channel"] == "Shopify" and row["matched_category"] == "Pokemon 151 ETB" for row in context["channel_velocity"])

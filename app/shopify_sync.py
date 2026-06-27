@@ -25,6 +25,16 @@ SHOPIFY_SYNC_ISSUE_LINKED = "linked"
 SHOPIFY_SYNC_ISSUE_UNKNOWN_SKU = "unknown_sku"
 SHOPIFY_SYNC_ISSUE_UNLINKED_PRODUCT = "unlinked_product"
 SHOPIFY_SYNC_ISSUE_SYNC_ERROR = "sync_error"
+SHOPIFY_SYNC_ISSUE_ORDER_QUANTITY_CHANGED = "order_quantity_changed"
+SHOPIFY_SYNC_ISSUE_INVALID_ORDER_IDENTITY = "invalid_order_identity"
+SHOPIFY_SYNC_ISSUE_INVALID_ORDER_QUANTITY = "invalid_order_quantity"
+
+SHOPIFY_SYNC_IMPORTABLE_ISSUE_TYPES = frozenset(
+    {
+        SHOPIFY_SYNC_ISSUE_UNKNOWN_SKU,
+        SHOPIFY_SYNC_ISSUE_UNLINKED_PRODUCT,
+    }
+)
 
 
 def _json_dumps(value: Any) -> str:
@@ -39,6 +49,8 @@ def _issue_key(
     shopify_variant_id: Optional[str] = None,
     shopify_sku: Optional[str] = None,
     shopify_title: Optional[str] = None,
+    inventory_item_id: Optional[int] = None,
+    issue_fingerprint: Optional[str] = None,
 ) -> str:
     if issue_type == SHOPIFY_SYNC_ISSUE_UNKNOWN_SKU:
         return ":".join(
@@ -54,6 +66,34 @@ def _issue_key(
                 issue_type,
                 str(shopify_product_id or "unknown-product"),
                 str(shopify_variant_id or shopify_sku or shopify_title or "unknown-variant"),
+            ]
+        )
+    if issue_type == SHOPIFY_SYNC_ISSUE_ORDER_QUANTITY_CHANGED:
+        return ":".join(
+            [
+                issue_type,
+                str(shopify_order_id or "unknown-order"),
+                str(inventory_item_id or shopify_sku or "unknown-item"),
+            ]
+        )
+    if issue_type == SHOPIFY_SYNC_ISSUE_INVALID_ORDER_QUANTITY:
+        return ":".join(
+            [
+                issue_type,
+                str(shopify_order_id or "unknown-order"),
+                str(
+                    shopify_variant_id
+                    or shopify_sku
+                    or inventory_item_id
+                    or "unknown-item"
+                ),
+            ]
+        )
+    if issue_type == SHOPIFY_SYNC_ISSUE_INVALID_ORDER_IDENTITY:
+        return ":".join(
+            [
+                issue_type,
+                str(issue_fingerprint or "unknown-payload"),
             ]
         )
     return ":".join(
@@ -83,6 +123,7 @@ def record_shopify_sync_issue(
     unit_price: Optional[float] = None,
     payload: Optional[dict[str, Any]] = None,
     severity: str = "warning",
+    issue_fingerprint: Optional[str] = None,
 ) -> ShopifySyncIssue:
     key = _issue_key(
         issue_type=issue_type,
@@ -91,6 +132,8 @@ def record_shopify_sync_issue(
         shopify_variant_id=shopify_variant_id,
         shopify_sku=shopify_sku,
         shopify_title=shopify_title,
+        inventory_item_id=inventory_item_id,
+        issue_fingerprint=issue_fingerprint,
     )
     issue = session.exec(
         select(ShopifySyncIssue).where(ShopifySyncIssue.issue_key == key)
@@ -117,7 +160,13 @@ def record_shopify_sync_issue(
     issue.shopify_location_id = shopify_location_id or issue.shopify_location_id
     issue.shopify_sku = shopify_sku or issue.shopify_sku
     issue.shopify_title = shopify_title or issue.shopify_title
-    issue.quantity = max(1, int(quantity or 1))
+    if issue_type in {
+        SHOPIFY_SYNC_ISSUE_ORDER_QUANTITY_CHANGED,
+        SHOPIFY_SYNC_ISSUE_INVALID_ORDER_QUANTITY,
+    }:
+        issue.quantity = max(0, int(quantity if quantity is not None else 0))
+    else:
+        issue.quantity = max(1, int(quantity or 1))
     issue.unit_price = unit_price if unit_price is not None else issue.unit_price
     issue.message = message
     issue.raw_payload_json = _json_dumps(payload)

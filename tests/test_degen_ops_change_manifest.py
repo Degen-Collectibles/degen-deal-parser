@@ -23,6 +23,7 @@ def test_change_manifest_separates_intended_ops_files_from_unrelated_changes():
             "tests/test_admin_employee_list_search.py",
             "tests/test_degen_ops_answer_eval.py",
             "tests/test_degen_ops_discord_auth.py",
+            "tests/test_employee_schema_migrations.py",
             "tests/test_degen_ops_prompt_coverage.py",
             "tests/test_degen_ops_deploy_preflight.py",
             "tests/test_wave47_admin_tools.py",
@@ -61,6 +62,7 @@ def test_change_manifest_separates_intended_ops_files_from_unrelated_changes():
         "tests/test_degen_ops_deploy_preflight.py",
         "tests/test_degen_ops_discord_auth.py",
         "tests/test_degen_ops_prompt_coverage.py",
+        "tests/test_employee_schema_migrations.py",
         "tests/test_wave47_admin_tools.py",
     ]
     assert manifest["unrelated_files"] == [
@@ -91,6 +93,7 @@ def test_intended_path_set_includes_required_ops_artifacts_and_not_outputs():
     assert "tests/test_ops_mcp.py" in paths
     assert "tests/test_admin_employee_list_search.py" in paths
     assert "tests/test_degen_ops_discord_auth.py" in paths
+    assert "tests/test_employee_schema_migrations.py" in paths
     assert "tests/test_wave47_admin_tools.py" in paths
     assert "docs/ops/degen-ops-bot-improvement-plan.md" in paths
     assert "docs/ops/degen-ops-discord-employee-auth-prd.md" in paths
