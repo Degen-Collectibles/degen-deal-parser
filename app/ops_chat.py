@@ -3,7 +3,13 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .ops_mcp import DegenOpsMcpHarness, DEGEN_OPS_SCOPE_TOOL_NAMES, _normalize_scope
+from .ops_agent import MAX_HISTORY_DAYS
+from .ops_mcp import (
+    DegenOpsMcpHarness,
+    DEGEN_OPS_SCOPE_TOOL_NAMES,
+    _bounded_days,
+    _normalize_scope,
+)
 
 
 DEGEN_OPS_CHAT_SYSTEM_PROMPT = """You are the Degen Ops Agent for Degen Collectibles.
@@ -195,8 +201,8 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                         "type": "object",
                         "description": (
                             "Proposed buy fields such as lot_name, category, purchase_cost, "
-                            "expected_revenue, unit_count, minimum_cash_reserve, financing_amount, "
-                            "and target_payback_weeks."
+                            "expected_revenue, unit_count, financing_amount, and target_payback_weeks. "
+                            "The reserve floor is controlled by server environment policy and cannot be supplied in the scenario."
                         ),
                     },
                     "days": {"type": "integer", "minimum": 1, "default": 90},
@@ -456,6 +462,13 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     },
 }
 
+for _tool_schema in TOOL_SCHEMAS.values():
+    _days_schema = (
+        _tool_schema["function"]["parameters"].get("properties", {}).get("days")
+    )
+    if isinstance(_days_schema, dict):
+        _days_schema["maximum"] = MAX_HISTORY_DAYS
+
 
 def tool_schemas_for_scope(scope: str | None = None) -> list[dict[str, Any]]:
     normalized_scope = _normalize_scope(scope)
@@ -494,9 +507,21 @@ class DegenOpsChatToolRunner:
                 "error": f"Tool {name!r} is not available in Degen Ops scope {self.scope!r}.",
                 "read_only": True,
             }
-        payload = args or {}
+        payload = dict(args or {})
         if payload.get("_error"):
             return {"error": payload["_error"], "read_only": True}
+        if "days" in payload:
+            days_schema = (
+                TOOL_SCHEMAS.get(name, {})
+                .get("function", {})
+                .get("parameters", {})
+                .get("properties", {})
+                .get("days", {})
+            )
+            payload["days"] = _bounded_days(
+                payload.get("days"),
+                default=int(days_schema.get("default", 90)),
+            )
         if name == "get_ops_agent_manifest":
             return self.harness.get_manifest(
                 scope=self.scope,

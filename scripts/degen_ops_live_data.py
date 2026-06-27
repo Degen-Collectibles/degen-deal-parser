@@ -26,7 +26,6 @@ SMOKE_SCENARIO = {
     "purchase_cost": 1.0,
     "expected_revenue": 2.0,
     "unit_count": 1,
-    "minimum_cash_reserve": 0.0,
     "target_payback_weeks": 1,
 }
 

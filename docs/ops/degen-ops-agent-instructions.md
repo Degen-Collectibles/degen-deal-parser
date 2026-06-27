@@ -59,8 +59,9 @@ For "Should we buy this lot?" gather or ask for:
 - `expected_revenue`
 - `unit_count`
 - `target_payback_weeks`
-- optional `minimum_cash_reserve`
 - optional `financing_amount`
+
+The reserve floor is configured by the server through `DEGEN_OPS_MIN_CASH_RESERVE_USD` and is authoritative for every buy evaluation. Do not ask the user to supply or override the reserve floor. If it is not configured with a finite positive value, report that reserve safety was not assessed; never invent a floor or treat the missing floor as zero.
 
 If the user gives enough information, call `evaluate_inventory_buy`. If critical inputs are missing, ask concise follow-up questions before giving a verdict. If the user asks for a rough cut, state assumptions clearly.
 

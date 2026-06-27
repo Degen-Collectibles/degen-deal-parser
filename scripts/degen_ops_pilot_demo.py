@@ -21,9 +21,21 @@ DEFAULT_SCENARIO = {
     "purchase_cost": 2000.0,
     "expected_revenue": 3600.0,
     "unit_count": 40,
-    "minimum_cash_reserve": 6000.0,
     "target_payback_weeks": 4,
     "financing_amount": 0.0,
+}
+
+SCENARIO_FIELDS = {
+    "lot_name",
+    "category",
+    "categories",
+    "matched_category",
+    "inventory_category",
+    "purchase_cost",
+    "expected_revenue",
+    "unit_count",
+    "target_payback_weeks",
+    "financing_amount",
 }
 
 WORKFLOW_TOOLS = [
@@ -37,6 +49,16 @@ WORKFLOW_TOOLS = [
     "generate_partner_update",
 ]
 
+MAX_PILOT_HISTORY_DAYS = 365
+
+
+def _bounded_history_days(value: Any) -> int:
+    try:
+        parsed = int(value)
+    except (OverflowError, TypeError, ValueError):
+        parsed = 90
+    return max(1, min(parsed, MAX_PILOT_HISTORY_DAYS))
+
 
 def build_pilot_demo_report(
     *,
@@ -46,6 +68,7 @@ def build_pilot_demo_report(
     days: int = 90,
 ) -> dict[str, Any]:
     normalized_scope = str(scope or "").strip().lower()
+    safe_days = _bounded_history_days(days)
     manifest = runner.call_tool("get_ops_agent_manifest", {})
     if normalized_scope == "employee" or "evaluate_inventory_buy" not in set(getattr(runner, "allowed_tools", [])):
         return {
@@ -56,11 +79,15 @@ def build_pilot_demo_report(
             "manifest": manifest,
         }
 
-    scenario_payload = dict(scenario or DEFAULT_SCENARIO)
+    scenario_payload = {
+        key: value
+        for key, value in dict(scenario or DEFAULT_SCENARIO).items()
+        if key in SCENARIO_FIELDS
+    }
     allowed_tools = set(getattr(runner, "allowed_tools", []))
     snapshots = {}
     if "get_finance_snapshot" in allowed_tools:
-        snapshots["finance"] = runner.call_tool("get_finance_snapshot", {"days": days})
+        snapshots["finance"] = runner.call_tool("get_finance_snapshot", {"days": safe_days})
     if "get_cash_snapshot" in allowed_tools:
         snapshots["cash"] = runner.call_tool("get_cash_snapshot", {})
     if "get_inventory_snapshot" in allowed_tools:
@@ -68,19 +95,27 @@ def build_pilot_demo_report(
     if "get_channel_velocity" in allowed_tools:
         snapshots["channel_velocity"] = runner.call_tool(
             "get_channel_velocity",
-            {"days": days, "category": scenario_payload.get("category", "")},
+            {"days": safe_days, "category": scenario_payload.get("category", "")},
         )
     if "get_loan_and_payback_snapshot" in allowed_tools:
-        snapshots["loan_and_payback"] = runner.call_tool("get_loan_and_payback_snapshot", {"days": days})
+        snapshots["loan_and_payback"] = runner.call_tool("get_loan_and_payback_snapshot", {"days": safe_days})
     evaluation = runner.call_tool(
         "evaluate_inventory_buy",
-        {"scenario": scenario_payload, "days": days},
+        {"scenario": scenario_payload, "days": safe_days},
     )
     update = runner.call_tool(
         "generate_partner_update",
-        {"scenario": scenario_payload, "days": days},
+        {"scenario": scenario_payload, "days": safe_days},
     )
-    return {
+    input_warnings = list(
+        dict.fromkeys(
+            [
+                *(evaluation.get("input_warnings", []) or []),
+                *(update.get("input_warnings", []) or []),
+            ]
+        )
+    )
+    report = {
         "ok": not bool(evaluation.get("error") or update.get("error")),
         "scope": normalized_scope,
         "read_only": True,
@@ -93,12 +128,16 @@ def build_pilot_demo_report(
         "cash_flow": evaluation.get("cash_flow", {}) or {},
         "sell_through": evaluation.get("sell_through", {}) or {},
         "payback_plan": evaluation.get("payback_plan", {}) or {},
+        "input_warnings": input_warnings,
         "partner_update": update.get("partner_update", ""),
         "snapshots_checked": list(snapshots),
         "redaction_note": evaluation.get("redaction_note", ""),
         "workflow_tools": [tool for tool in WORKFLOW_TOOLS if tool in allowed_tools],
         "read_only_guardrails": evaluation.get("read_only_guardrails", []),
     }
+    if normalized_scope == "owner" and "reserve_floor" in evaluation:
+        report["reserve_floor"] = evaluation["reserve_floor"]
+    return report
 
 
 def _missing_database_report(*, scope: str, database_url_source: str) -> dict[str, Any]:
@@ -153,6 +192,23 @@ def _render_markdown(report: dict[str, Any]) -> str:
                 f"- reserve_gap: {report.get('cash_flow', {}).get('reserve_gap', 'owner-scope only')}",
                 f"- cash_safety: {report.get('cash_flow', {}).get('cash_safety', 'owner exact cash view')}",
                 f"- weekly_payback: {report.get('payback_plan', {}).get('weekly_payback')}",
+            ]
+        )
+        reserve_floor = report.get("reserve_floor")
+        if report.get("scope") == "owner" and isinstance(reserve_floor, dict):
+            lines.extend(
+                [
+                    f"- reserve_floor_configured: {str(bool(reserve_floor.get('configured'))).lower()}",
+                    f"- reserve_floor_source: {reserve_floor.get('source')}",
+                    f"- reserve_floor_amount: {reserve_floor.get('amount')}",
+                ]
+            )
+        input_warnings = report.get("input_warnings", []) or []
+        if input_warnings:
+            lines.extend(["", "## Input Warnings", ""])
+            lines.extend(f"- {warning}" for warning in input_warnings)
+        lines.extend(
+            [
                 "",
                 "## Partner Update Draft",
                 "",
