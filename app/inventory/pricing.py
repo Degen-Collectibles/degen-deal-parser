@@ -27,14 +27,24 @@ import asyncio
 import base64
 import csv
 import io
+import os
+import signal
+import subprocess
 import sys
+from contextlib import contextmanager, suppress
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 from urllib.parse import urljoin, urlencode
 
 import httpx
 
+from ..image_security import (
+    ImageDecodeBusy,
+    ImageSecurityError,
+    image_decode_slot,
+    validate_image_base64,
+)
 from ..models import InventoryItem, ITEM_TYPE_SEALED, ITEM_TYPE_SINGLE, ITEM_TYPE_SLAB, utcnow
 
 logger = logging.getLogger(__name__)
@@ -1022,6 +1032,382 @@ def _result_from_comp_records(
     }
 
 
+_CARD_LADDER_BUSY_MESSAGE = "Card Ladder refresh is already running. Try again shortly."
+_CARD_LADDER_SYNC_LOCK = asyncio.Lock()
+_CARD_LADDER_MIN_TIMEOUT_SECONDS = 5.0
+_CARD_LADDER_TERMINATE_GRACE_SECONDS = 1.0
+_CARD_LADDER_TASKKILL_TIMEOUT_SECONDS = 5.0
+
+
+def _card_ladder_subprocess_kwargs(*, is_windows: bool | None = None) -> dict[str, Any]:
+    """Launch the CLI as a process-tree root without invoking a shell."""
+    windows = os.name == "nt" if is_windows is None else bool(is_windows)
+    if windows:
+        return {
+            "creationflags": getattr(
+                subprocess,
+                "CREATE_NEW_PROCESS_GROUP",
+                0x00000200,
+            )
+        }
+    return {"start_new_session": True}
+
+
+def _resolved_card_ladder_profile_dir(profile_dir: str | Path, *, repo_root: Path) -> Path:
+    path = Path(profile_dir).expanduser()
+    if not path.is_absolute():
+        path = repo_root / path
+    return path.resolve()
+
+
+@contextmanager
+def _card_ladder_profile_lock(profile_dir: str | Path) -> Iterator[None]:
+    """Hold a nonblocking same-host advisory lock for one browser profile."""
+    profile_path = Path(profile_dir)
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = profile_path.with_name(f".{profile_path.name}.refresh.lock")
+    handle = lock_path.open("a+b")
+    acquired = False
+    try:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"0")
+            handle.flush()
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError):
+            raise RuntimeError(_CARD_LADDER_BUSY_MESSAGE) from None
+        acquired = True
+        yield
+    finally:
+        if acquired:
+            if os.name == "nt":
+                import msvcrt
+
+                with suppress(OSError):
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                with suppress(OSError):
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+
+async def _reap_card_ladder_process(process: Any) -> None:
+    """Drain pipes and reap the supervised CLI after its tree is stopped."""
+    try:
+        await process.communicate()
+    except Exception:
+        await process.wait()
+
+
+def _windows_descendant_pids(root_pid: int) -> list[int]:
+    """Snapshot Windows descendants, including children whose parent exited."""
+    if os.name != "nt":
+        return []
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class ProcessEntry32W(ctypes.Structure):
+            _fields_ = (
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_size_t),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", wintypes.WCHAR * 260),
+            )
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_snapshot = kernel32.CreateToolhelp32Snapshot
+        create_snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
+        create_snapshot.restype = wintypes.HANDLE
+        process_first = kernel32.Process32FirstW
+        process_first.argtypes = (wintypes.HANDLE, ctypes.POINTER(ProcessEntry32W))
+        process_first.restype = wintypes.BOOL
+        process_next = kernel32.Process32NextW
+        process_next.argtypes = (wintypes.HANDLE, ctypes.POINTER(ProcessEntry32W))
+        process_next.restype = wintypes.BOOL
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        close_handle.restype = wintypes.BOOL
+
+        snapshot = create_snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
+        if snapshot == ctypes.c_void_p(-1).value:
+            return []
+        rows: list[tuple[int, int]] = []
+        try:
+            entry = ProcessEntry32W()
+            entry.dwSize = ctypes.sizeof(entry)
+            if process_first(snapshot, ctypes.byref(entry)):
+                while True:
+                    rows.append(
+                        (int(entry.th32ProcessID), int(entry.th32ParentProcessID))
+                    )
+                    if not process_next(snapshot, ctypes.byref(entry)):
+                        break
+        finally:
+            close_handle(snapshot)
+    except (AttributeError, OSError, ValueError):
+        return []
+
+    children: dict[int, list[int]] = {}
+    for process_id, parent_id in rows:
+        children.setdefault(parent_id, []).append(process_id)
+    descendants: list[int] = []
+    pending = list(children.get(int(root_pid), ()))
+    seen = {int(root_pid)}
+    while pending:
+        process_id = pending.pop(0)
+        if process_id in seen:
+            continue
+        seen.add(process_id)
+        descendants.append(process_id)
+        pending.extend(children.get(process_id, ()))
+    return descendants
+
+
+def _attach_card_ladder_windows_job(process: Any) -> bool:
+    """Assign the CLI tree to a kill-on-close Windows Job Object."""
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class IoCounters(ctypes.Structure):
+            _fields_ = tuple(
+                (name, ctypes.c_uint64)
+                for name in (
+                    "ReadOperationCount",
+                    "WriteOperationCount",
+                    "OtherOperationCount",
+                    "ReadTransferCount",
+                    "WriteTransferCount",
+                    "OtherTransferCount",
+                )
+            )
+
+        class BasicLimitInformation(ctypes.Structure):
+            _fields_ = (
+                ("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            )
+
+        class ExtendedLimitInformation(ctypes.Structure):
+            _fields_ = (
+                ("BasicLimitInformation", BasicLimitInformation),
+                ("IoInfo", IoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            )
+
+        transport = getattr(process, "_transport", None)
+        popen = transport.get_extra_info("subprocess") if transport is not None else None
+        process_handle = int(getattr(popen, "_handle"))
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_job = kernel32.CreateJobObjectW
+        create_job.argtypes = (ctypes.c_void_p, wintypes.LPCWSTR)
+        create_job.restype = wintypes.HANDLE
+        set_job_info = kernel32.SetInformationJobObject
+        set_job_info.argtypes = (
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+        )
+        set_job_info.restype = wintypes.BOOL
+        assign_process = kernel32.AssignProcessToJobObject
+        assign_process.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+        assign_process.restype = wintypes.BOOL
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        close_handle.restype = wintypes.BOOL
+
+        job_handle = create_job(None, None)
+        if not job_handle:
+            return False
+        assigned = False
+        try:
+            limits = ExtendedLimitInformation()
+            limits.BasicLimitInformation.LimitFlags = 0x00002000  # KILL_ON_JOB_CLOSE
+            if not set_job_info(
+                job_handle,
+                9,  # JobObjectExtendedLimitInformation
+                ctypes.byref(limits),
+                ctypes.sizeof(limits),
+            ):
+                return False
+            if not assign_process(job_handle, wintypes.HANDLE(process_handle)):
+                return False
+            setattr(process, "_card_ladder_job_handle", int(job_handle))
+            assigned = True
+            return True
+        finally:
+            if not assigned:
+                close_handle(job_handle)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
+
+
+def _close_card_ladder_windows_job(process: Any) -> bool:
+    handle = getattr(process, "_card_ladder_job_handle", None)
+    if not handle:
+        return False
+    setattr(process, "_card_ladder_job_handle", None)
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        close_handle = ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        close_handle.restype = wintypes.BOOL
+        return bool(close_handle(wintypes.HANDLE(int(handle))))
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
+
+
+async def _run_windows_taskkill(process_id: int) -> bool:
+    taskkill_process = None
+    try:
+        taskkill_process = await asyncio.create_subprocess_exec(
+            "taskkill",
+            "/PID",
+            str(int(process_id)),
+            "/T",
+            "/F",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(
+            taskkill_process.communicate(),
+            timeout=_CARD_LADDER_TASKKILL_TIMEOUT_SECONDS,
+        )
+        return taskkill_process.returncode == 0
+    except (OSError, asyncio.TimeoutError, RuntimeError):
+        if taskkill_process is not None and taskkill_process.returncode is None:
+            with suppress(ProcessLookupError):
+                taskkill_process.kill()
+            with suppress(Exception):
+                await taskkill_process.wait()
+        return False
+
+
+async def _terminate_windows_card_ladder_tree(process: Any) -> None:
+    descendants = _windows_descendant_pids(int(process.pid))
+    taskkill_succeeded = await _run_windows_taskkill(int(process.pid))
+    _close_card_ladder_windows_job(process)
+    if not taskkill_succeeded:
+        for process_id in _windows_descendant_pids(int(process.pid)):
+            if process_id not in descendants:
+                descendants.append(process_id)
+        for process_id in descendants:
+            await _run_windows_taskkill(process_id)
+
+    if not taskkill_succeeded:
+        with suppress(ProcessLookupError):
+            process.kill()
+    await _reap_card_ladder_process(process)
+
+
+async def _terminate_posix_card_ladder_tree(process: Any) -> None:
+    group_term_sent = False
+    try:
+        os.killpg(int(process.pid), signal.SIGTERM)
+        group_term_sent = True
+    except ProcessLookupError:
+        pass
+    except (OSError, ValueError):
+        if process.returncode is None:
+            with suppress(ProcessLookupError):
+                process.terminate()
+                group_term_sent = True
+
+    if group_term_sent:
+        await asyncio.sleep(max(float(_CARD_LADDER_TERMINATE_GRACE_SECONDS), 0.0))
+
+    try:
+        os.killpg(int(process.pid), signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except (OSError, ValueError):
+        if process.returncode is None:
+            with suppress(ProcessLookupError):
+                process.kill()
+    await _reap_card_ladder_process(process)
+
+
+async def _terminate_card_ladder_process_tree(
+    process: Any,
+    *,
+    is_windows: bool | None = None,
+) -> None:
+    windows = os.name == "nt" if is_windows is None else bool(is_windows)
+    if windows:
+        await _terminate_windows_card_ladder_tree(process)
+    else:
+        await _terminate_posix_card_ladder_tree(process)
+
+
+async def _await_card_ladder_tree_cleanup(process: Any) -> None:
+    """Finish cleanup even when the requesting task is being cancelled."""
+    cleanup_task = asyncio.create_task(_terminate_card_ladder_process_tree(process))
+    cancelled = False
+    while not cleanup_task.done():
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            cancelled = True
+    await cleanup_task
+    if cancelled:
+        raise asyncio.CancelledError
+
+
+async def _spawn_card_ladder_process(*cmd: str, **kwargs: Any) -> Any:
+    """Return a supervised process handle even if cancellation races startup."""
+    spawn_task = asyncio.create_task(asyncio.create_subprocess_exec(*cmd, **kwargs))
+    try:
+        process = await asyncio.shield(spawn_task)
+        _attach_card_ladder_windows_job(process)
+        return process
+    except asyncio.CancelledError:
+        while not spawn_task.done():
+            try:
+                await asyncio.shield(spawn_task)
+            except asyncio.CancelledError:
+                continue
+        if spawn_task.cancelled() or spawn_task.exception() is not None:
+            raise
+        process = spawn_task.result()
+        _attach_card_ladder_windows_job(process)
+        await _await_card_ladder_tree_cleanup(process)
+        raise
+
+
 async def sync_card_ladder_cli_for_item(
     item: InventoryItem,
     *,
@@ -1035,7 +1421,7 @@ async def sync_card_ladder_cli_for_item(
     except Exception as exc:
         raise RuntimeError(f"Card Ladder CLI is unavailable: {exc}") from exc
 
-    repo_root = Path(__file__).resolve().parent.parent
+    repo_root = Path(__file__).resolve().parent.parent.parent
     script_path = repo_root / "scripts" / "cardladder_cli.py"
     if not script_path.exists():
         raise RuntimeError(f"Card Ladder CLI script is missing: {script_path}")
@@ -1047,6 +1433,11 @@ async def sync_card_ladder_cli_for_item(
     if not base_query and not cert:
         raise RuntimeError("Card name or cert number is required before refreshing Card Ladder.")
 
+    profile_dir = _resolved_card_ladder_profile_dir(
+        cardladder_cli.default_profile_dir(),
+        repo_root=repo_root,
+    )
+
     cmd = [sys.executable, str(script_path), "sync"]
     if base_query:
         cmd.append(base_query)
@@ -1056,42 +1447,66 @@ async def sync_card_ladder_cli_for_item(
         cmd.extend(["--grade", grade])
     if cert:
         cmd.extend(["--cert", cert])
+    cmd.extend(["--profile-dir", str(profile_dir)])
     cmd.extend(["--limit", str(max(1, int(limit)))])
     if headless:
         cmd.append("--headless")
     cmd.append("--no-prompt")
 
+    process_lock = _CARD_LADDER_SYNC_LOCK
+    if process_lock.locked():
+        raise RuntimeError(_CARD_LADDER_BUSY_MESSAGE)
+    await process_lock.acquire()
     try:
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            cwd=str(repo_root),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            process.communicate(),
-            timeout=max(5, int(timeout_seconds)),
-        )
-    except asyncio.TimeoutError as exc:
-        raise RuntimeError("Card Ladder refresh timed out. Run the CLI login command, then try again.") from exc
+        with _card_ladder_profile_lock(profile_dir):
+            process = await _spawn_card_ladder_process(
+                *cmd,
+                cwd=str(repo_root),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                **_card_ladder_subprocess_kwargs(),
+            )
+            try:
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    process.communicate(),
+                    timeout=max(
+                        float(_CARD_LADDER_MIN_TIMEOUT_SECONDS),
+                        float(timeout_seconds),
+                    ),
+                )
+            except asyncio.TimeoutError as exc:
+                await _await_card_ladder_tree_cleanup(process)
+                raise RuntimeError(
+                    "Card Ladder refresh timed out. Run the CLI login command, then try again."
+                ) from exc
+            except asyncio.CancelledError:
+                await _await_card_ladder_tree_cleanup(process)
+                raise
+            except Exception:
+                await _await_card_ladder_tree_cleanup(process)
+                raise
 
-    stdout = stdout_bytes.decode("utf-8", errors="replace").strip()
-    stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
-    if process.returncode != 0:
-        detail = stderr or stdout or f"Card Ladder CLI exited with code {process.returncode}."
-        raise RuntimeError(detail[:1000])
+            stdout = stdout_bytes.decode("utf-8", errors="replace").strip()
+            stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
+            if process.returncode != 0:
+                await _await_card_ladder_tree_cleanup(process)
+                detail = stderr or stdout or f"Card Ladder CLI exited with code {process.returncode}."
+                raise RuntimeError(detail[:1000])
+            _close_card_ladder_windows_job(process)
 
-    query = cardladder_cli.build_slab_query(
-        base_query,
-        grader=grader,
-        grade=grade,
-        cert=cert,
-        strict=True,
-    )
-    result = _fetch_card_ladder_cli_cache(item, query=query, limit=limit)
-    if not result:
-        raise RuntimeError("Card Ladder CLI finished, but no comps were saved for this slab query.")
-    return result
+            query = cardladder_cli.build_slab_query(
+                base_query,
+                grader=grader,
+                grade=grade,
+                cert=cert,
+                strict=True,
+            )
+            result = _fetch_card_ladder_cli_cache(item, query=query, limit=limit)
+            if not result:
+                raise RuntimeError("Card Ladder CLI finished, but no comps were saved for this slab query.")
+            return result
+    finally:
+        process_lock.release()
 
 
 def import_card_ladder_cli_records_for_item(
@@ -1307,24 +1722,23 @@ async def fetch_ximilar_slab_price_from_image(
 
 
 def _prepare_ximilar_image_base64(image_b64: str) -> str:
-    raw = str(image_b64 or "").strip()
-    if "," in raw:
-        raw = raw.split(",", 1)[1]
-    try:
-        data = base64.b64decode(raw)
-    except Exception:
-        return raw
+    validated = validate_image_base64(image_b64)
+    raw = validated.encoded_b64
     try:
         from PIL import Image
 
-        img = Image.open(io.BytesIO(data))
-        max_dim = max(img.size)
-        if max_dim > 960:
-            scale = 960 / max_dim
-            img = img.resize((int(img.size[0] * scale), int(img.size[1] * scale)), Image.LANCZOS)
-        buf = io.BytesIO()
-        img.convert("RGB").save(buf, format="JPEG", quality=84)
-        return base64.b64encode(buf.getvalue()).decode("ascii")
+        with image_decode_slot():
+            with Image.open(io.BytesIO(validated.decoded_bytes)) as source:
+                img = source.copy()
+            max_dim = max(img.size)
+            if max_dim > 960:
+                scale = 960 / max_dim
+                img = img.resize((int(img.size[0] * scale), int(img.size[1] * scale)), Image.LANCZOS)
+            buf = io.BytesIO()
+            img.convert("RGB").save(buf, format="JPEG", quality=84)
+            return base64.b64encode(buf.getvalue()).decode("ascii")
+    except (ImageDecodeBusy, ImageSecurityError):
+        raise
     except Exception:
         return raw
 

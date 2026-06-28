@@ -55,7 +55,11 @@ Be precise about card_name. If you cannot read the card clearly, set confidence 
 Always return valid JSON only — no other text."""
 
 
-async def identify_card_from_image(base64_image: str) -> dict[str, Any]:
+async def identify_card_from_image(
+    base64_image: str,
+    *,
+    mime_type: str = "image/jpeg",
+) -> dict[str, Any]:
     """
     Send a base64-encoded card image to AI Vision and return structured card info.
 
@@ -76,7 +80,7 @@ async def identify_card_from_image(base64_image: str) -> dict[str, Any]:
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": f"data:image/jpeg;base64,{base64_image}",
+                                "url": f"data:{mime_type};base64,{base64_image}",
                                 "detail": "high",
                             },
                         },

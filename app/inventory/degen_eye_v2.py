@@ -22,7 +22,6 @@ actually happened.
 from __future__ import annotations
 
 import asyncio
-import base64
 import collections
 import datetime as _dt
 import json
@@ -36,6 +35,12 @@ from zoneinfo import ZoneInfo
 
 from .card_detect import detect_and_crop
 from ..config import get_settings
+from ..image_security import (
+    ImageDecodeBusy,
+    ImageSecurityError,
+    run_in_image_decode_thread,
+    validate_image_base64,
+)
 from .phash_scanner import (
     MEDIUM_THRESHOLD,
     PhashMatch,
@@ -143,13 +148,10 @@ def get_v2_scan_history() -> list[dict]:
 
 
 def _b64_to_bytes(image_b64: str) -> Optional[bytes]:
-    s = (image_b64 or "").strip()
-    if "," in s:
-        s = s.split(",", 1)[1]
     try:
-        return base64.b64decode(s)
-    except Exception as exc:
-        logger.warning("[degen_eye_v2] base64 decode failed: %s", exc)
+        return validate_image_base64(image_b64).decoded_bytes
+    except ImageSecurityError:
+        logger.warning("[degen_eye_v2] rejected invalid or oversized image")
         return None
 
 
@@ -241,6 +243,8 @@ async def _enrich_top_candidate(
     t_price = time.monotonic()
     try:
         price_info = await get_price_for_match(matches[0], category_id=category_id)
+    except ImageDecodeBusy:
+        raise
     except Exception as exc:
         logger.warning("[degen_eye_v2] price lookup failed for %s: %s", candidates[0].name, exc)
         debug["price_error"] = str(exc)
@@ -338,6 +342,8 @@ async def _run_ximilar_fallback(
         result = await _run_ximilar_pipeline(
             image_b64, settings.ximilar_api_token, category_id,
         )
+    except ImageDecodeBusy:
+        raise
     except Exception as exc:
         logger.warning("[degen_eye_v2] Ximilar fallback failed: %s", exc)
         debug["ximilar_fallback"] = f"error: {exc}"
@@ -395,7 +401,7 @@ async def run_v2_pipeline(image_b64: str, category_id: str = "3") -> dict[str, A
 
     # Stage 1: card detection + rectification
     t_detect = time.monotonic()
-    crop_bytes, detect_debug = await asyncio.to_thread(detect_and_crop, raw_bytes)
+    crop_bytes, detect_debug = await run_in_image_decode_thread(detect_and_crop, raw_bytes)
     v2_debug["stages_ms"]["detect"] = _elapsed(t_detect)
     v2_debug["detect"] = detect_debug
 
@@ -427,14 +433,18 @@ async def run_v2_pipeline(image_b64: str, category_id: str = "3") -> dict[str, A
         return out
 
     t_phash = time.monotonic()
-    phash_value, matches = await asyncio.to_thread(lookup, image_for_hash, top_n=5)
+    phash_value, matches = await run_in_image_decode_thread(lookup, image_for_hash, top_n=5)
     phash_source = "crop" if crop_bytes else "raw"
     # If we warped and the best distance is still weak, also try the raw
     # input. Card detection's perspective transform can introduce small
     # resampling shifts that move the pHash even when the content is right;
     # the raw image may produce a tighter match.
     if crop_bytes and (not matches or matches[0].distance > MEDIUM_THRESHOLD):
-        raw_phash_value, raw_matches = await asyncio.to_thread(lookup, raw_bytes, top_n=5)
+        raw_phash_value, raw_matches = await run_in_image_decode_thread(
+            lookup,
+            raw_bytes,
+            top_n=5,
+        )
         if raw_matches and (not matches or raw_matches[0].distance < matches[0].distance):
             v2_debug["raw_image_preferred"] = {
                 "crop_distance": matches[0].distance if matches else None,
@@ -586,7 +596,7 @@ async def run_v2_pipeline_stream(
 
     # --- Stage 1: detect + crop ---
     t_detect = time.monotonic()
-    crop_bytes, detect_debug = await asyncio.to_thread(detect_and_crop, raw_bytes)
+    crop_bytes, detect_debug = await run_in_image_decode_thread(detect_and_crop, raw_bytes)
     v2_debug["stages_ms"]["detect"] = _elapsed(t_detect)
     v2_debug["detect"] = detect_debug
     image_for_hash = crop_bytes if crop_bytes else raw_bytes
@@ -602,9 +612,17 @@ async def run_v2_pipeline_stream(
     phash_source = "crop" if crop_bytes else "raw"
     if await asyncio.to_thread(has_index):
         t_phash = time.monotonic()
-        phash_value, matches = await asyncio.to_thread(lookup, image_for_hash, top_n=5)
+        phash_value, matches = await run_in_image_decode_thread(
+            lookup,
+            image_for_hash,
+            top_n=5,
+        )
         if crop_bytes and (not matches or matches[0].distance > MEDIUM_THRESHOLD):
-            raw_phash_value, raw_matches = await asyncio.to_thread(lookup, raw_bytes, top_n=5)
+            raw_phash_value, raw_matches = await run_in_image_decode_thread(
+                lookup,
+                raw_bytes,
+                top_n=5,
+            )
             if raw_matches and (not matches or raw_matches[0].distance < matches[0].distance):
                 v2_debug["raw_image_preferred"] = {
                     "crop_distance": matches[0].distance if matches else None,
