@@ -3038,7 +3038,7 @@ def summarize_tiktok_query_params(params: dict[str, str]) -> dict[str, str]:
     for key in allowed_keys:
         value = (params.get(key) or "").strip()
         if value:
-            summary[key] = value if key != "code" else f"{value[:8]}..."
+            summary[key] = value if key != "code" else "present"
     return summary
 
 

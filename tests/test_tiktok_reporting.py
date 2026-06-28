@@ -184,7 +184,7 @@ class TikTokRegressionTests(unittest.TestCase):
             "/integrations/tiktok/callback",
             query_params={
                 "app_key": "expected-key",
-                "code": "TTP_7uiSewAAAADOpEzqRGelGGdjsXyE7_hWWHsDgwDodg32Dzg_s9WqptBSVEn6mA7PoOxIUKykLtFMPQ2l8O8iSeSbgE4gyciq6gAnNKBzxC-nKFQorJowSPwPMiwHCMxaA5HeesYu_rNKKTt-tQiTAuUGsgupbg8o",
+                "code": "synthetic-authorization-code",
                 "locale": "en",
                 "shop_region": "US",
                 "state": oauth_state,
@@ -205,7 +205,7 @@ class TikTokRegressionTests(unittest.TestCase):
             "/status?error=TikTok+auth+config+missing%3A+app+secret",
         )
         self.assertIn("tiktok_callback", request.session)
-        self.assertTrue(request.session["tiktok_callback"]["query"]["code"].startswith("TTP_7uiS"))
+        self.assertEqual(request.session["tiktok_callback"]["query"]["code"], "present")
         update_tiktok_integration_state.assert_called_once()
         self.assertEqual(
             update_tiktok_integration_state.call_args.kwargs["last_error"],

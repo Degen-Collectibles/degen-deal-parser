@@ -7,7 +7,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, MutableMapping, Optional
+from typing import Any, Callable, MutableMapping, NoReturn, Optional
 
 import httpx
 from sqlmodel import Session, select
@@ -275,6 +275,38 @@ def _parse_token_exchange_data(api_data: dict[str, Any]) -> TikTokTokenExchangeR
     )
 
 
+def _sanitized_tiktok_token_exchange_error(
+    exc: Exception,
+    *,
+    operation: str,
+    method: str,
+    url: str,
+    sensitive_values: tuple[str, ...],
+) -> TikTokIngestError:
+    parsed_url = httpx.URL(url)
+    endpoint = f"{parsed_url.host or 'unknown'}{parsed_url.path}"
+    if isinstance(exc, httpx.HTTPStatusError):
+        status_code = getattr(exc.response, "status_code", None)
+        detail = f"HTTP {status_code}" if status_code is not None else "HTTP status error"
+    elif isinstance(exc, httpx.TransportError):
+        detail = f"transport error ({type(exc).__name__})"
+    elif isinstance(exc, TikTokIngestError):
+        detail = str(exc)
+        for sensitive_value in sorted(
+            {value for value in sensitive_values if value},
+            key=len,
+            reverse=True,
+        ):
+            detail = detail.replace(sensitive_value, "[REDACTED]")
+    else:
+        detail = type(exc).__name__
+    return TikTokIngestError(f"{operation} failed: {detail} for {method} {endpoint}")
+
+
+def _raise_sanitized_tiktok_token_exchange_error(error: TikTokIngestError) -> NoReturn:
+    raise error
+
+
 def exchange_tiktok_authorization_code(
     *,
     auth_code: str,
@@ -305,17 +337,118 @@ def exchange_tiktok_authorization_code(
     url = build_tiktok_api_url(api_base_url=api_base_url, path=token_path)
     close_client = client is None
     http_client = client or httpx.Client(timeout=timeout_seconds)
+    exchange_error: Optional[TikTokIngestError] = None
+    response: Optional[httpx.Response] = None
+    api_data: Optional[dict[str, Any]] = None
     try:
         response = http_client.get(url, params=query_params)
         response.raise_for_status()
         api_data = validate_tiktok_api_response(response.json())
+        token_result = _parse_token_exchange_data(api_data)
     except Exception as exc:
-        raise TikTokIngestError(f"TikTok token exchange failed: {exc}") from exc
+        exchange_error = _sanitized_tiktok_token_exchange_error(
+            exc,
+            operation="TikTok token exchange",
+            method="GET",
+            url=url,
+            sensitive_values=(auth_code, app_secret),
+        )
     finally:
         if close_client:
             http_client.close()
 
-    return _parse_token_exchange_data(api_data)
+    if exchange_error is not None:
+        safe_error = exchange_error
+        if api_data is not None:
+            api_data.clear()
+        query_params.clear()
+        del exchange_error
+        del api_data
+        del query_params
+        del auth_code
+        del app_key
+        del app_secret
+        del redirect_uri
+        del request_signer
+        del client
+        del http_client
+        del response
+        _raise_sanitized_tiktok_token_exchange_error(safe_error)
+    return token_result
+
+
+def exchange_tiktok_creator_authorization_code(
+    *,
+    auth_code: str,
+    client_key: str,
+    client_secret: str,
+    redirect_uri: str,
+    api_base_url: str = TIKTOK_DEFAULT_API_BASE_URL,
+    token_path: str = TIKTOK_TOKEN_GET_PATH,
+    client: Optional[httpx.Client] = None,
+    timeout_seconds: float = TIKTOK_DEFAULT_TIMEOUT_SECONDS,
+    runtime_name: str = "tiktok_ingest",
+) -> TikTokTokenExchangeResult:
+    if not auth_code:
+        raise TikTokIngestError("TikTok creator authorization code is required")
+    if not client_key:
+        raise TikTokIngestError("TikTok creator client key is required")
+    if not client_secret:
+        raise TikTokIngestError("TikTok creator client secret is required")
+    if not redirect_uri:
+        raise TikTokIngestError("TikTok creator redirect URI is required")
+
+    form_data = {
+        "client_key": client_key,
+        "client_secret": client_secret,
+        "code": auth_code,
+        "grant_type": "authorization_code",
+        "redirect_uri": redirect_uri,
+    }
+    url = build_tiktok_api_url(api_base_url=api_base_url, path=token_path)
+    close_client = client is None
+    http_client = client or httpx.Client(timeout=timeout_seconds)
+    exchange_error: Optional[TikTokIngestError] = None
+    response: Optional[httpx.Response] = None
+    api_data: Optional[dict[str, Any]] = None
+    try:
+        response = http_client.post(
+            url,
+            data=form_data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        response.raise_for_status()
+        api_data = validate_tiktok_api_response(response.json())
+        token_result = _parse_token_exchange_data(api_data)
+    except Exception as exc:
+        exchange_error = _sanitized_tiktok_token_exchange_error(
+            exc,
+            operation="TikTok creator token exchange",
+            method="POST",
+            url=url,
+            sensitive_values=(auth_code, client_secret),
+        )
+    finally:
+        if close_client:
+            http_client.close()
+
+    if exchange_error is not None:
+        safe_error = exchange_error
+        if api_data is not None:
+            api_data.clear()
+        form_data.clear()
+        del exchange_error
+        del api_data
+        del form_data
+        del auth_code
+        del client_key
+        del client_secret
+        del redirect_uri
+        del client
+        del http_client
+        del response
+        _raise_sanitized_tiktok_token_exchange_error(safe_error)
+    return token_result
 
 
 def refresh_tiktok_shop_token(
@@ -1470,6 +1603,7 @@ __all__ = [
     "build_tiktok_reconciliation_snapshot",
     "build_tiktok_request_signature",
     "exchange_tiktok_authorization_code",
+    "exchange_tiktok_creator_authorization_code",
     "extract_tiktok_api_data",
     "json_dumps",
     "money_to_float",
