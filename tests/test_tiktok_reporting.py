@@ -527,7 +527,9 @@ class TikTokRegressionTests(unittest.TestCase):
 
         error_text = str(ctx.exception)
         self.assertNotIn("TTP_secret_token", error_text)
-        self.assertIn("access_token=REDACTED", error_text)
+        self.assertNotIn("access_token", error_text)
+        self.assertFalse(ctx.exception.request.url.query)
+        self.assertEqual(ctx.exception.response.content, b"")
 
     def test_tiktok_callback_success_exchanges_code_with_shop_auth_endpoint(self) -> None:
         oauth_state = "test-oauth-state"

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote
 from unittest.mock import patch
 
 import httpx
@@ -14,6 +14,7 @@ AUTH_CODE = "auth-code-SENTINEL-7c91"
 APP_SECRET = "app-secret-SENTINEL-2e64"
 ACCESS_TOKEN = "access-token-SENTINEL-1f52"
 REFRESH_TOKEN = "refresh-token-SENTINEL-8ad3"
+REFRESH_INPUT_TOKEN = "refresh-input-token-SENTINEL-4b72"
 
 
 def _serialized_exception_graph(exc: BaseException) -> str:
@@ -98,6 +99,11 @@ def _assert_oauth_secrets_absent(text: str) -> None:
 def _assert_token_canaries_absent(text: str) -> None:
     assert ACCESS_TOKEN not in text
     assert REFRESH_TOKEN not in text
+
+
+def _assert_refresh_secrets_absent(text: str) -> None:
+    assert APP_SECRET not in text
+    assert REFRESH_INPUT_TOKEN not in text
 
 
 def _assert_sensitive_exchange_locals_absent(
@@ -256,6 +262,457 @@ def test_shop_malformed_success_payload_does_not_retain_token_canaries() -> None
     assert raised.__context__ is None
     assert "OverflowError" in str(raised)
     assert "auth.tiktok-shops.com/api/v2/token/get" in str(raised)
+
+
+def test_shop_exchange_validation_failure_does_not_retain_supplied_credentials() -> None:
+    try:
+        tiktok_ingest.exchange_tiktok_authorization_code(
+            auth_code=AUTH_CODE,
+            app_key="",
+            app_secret=APP_SECRET,
+        )
+    except tiktok_ingest.TikTokIngestError as exc:
+        raised = exc
+    else:  # pragma: no cover - the missing app key always fails validation
+        raise AssertionError("expected TikTokIngestError")
+
+    _assert_oauth_secrets_absent(_serialized_exception_graph(raised))
+    _assert_sensitive_exchange_locals_absent(
+        raised,
+        forbidden_names={"auth_code", "app_key", "app_secret", "client"},
+    )
+    assert raised.__cause__ is None
+    assert raised.__context__ is None
+    assert "app key is required" in str(raised)
+
+
+def test_creator_exchange_validation_failure_does_not_retain_supplied_credentials() -> None:
+    try:
+        tiktok_ingest.exchange_tiktok_creator_authorization_code(
+            auth_code=AUTH_CODE,
+            client_key="",
+            client_secret=APP_SECRET,
+            redirect_uri="https://example.test/integrations/tiktok/creator-callback",
+        )
+    except tiktok_ingest.TikTokIngestError as exc:
+        raised = exc
+    else:  # pragma: no cover - the missing client key always fails validation
+        raise AssertionError("expected TikTokIngestError")
+
+    _assert_oauth_secrets_absent(_serialized_exception_graph(raised))
+    _assert_sensitive_exchange_locals_absent(
+        raised,
+        forbidden_names={"auth_code", "client_key", "client_secret", "client"},
+    )
+    assert raised.__cause__ is None
+    assert raised.__context__ is None
+    assert "client key is required" in str(raised)
+
+
+def test_shop_exchange_owned_client_close_failure_clears_token_success() -> None:
+    class CloseFailingShopClient:
+        def get(self, url: str, params: dict[str, str]) -> httpx.Response:
+            request = httpx.Request("GET", url, params=params)
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "access_token": ACCESS_TOKEN,
+                        "refresh_token": REFRESH_TOKEN,
+                        "access_token_expire_in": 3600,
+                    },
+                },
+                request=request,
+            )
+
+        def close(self) -> None:
+            raise RuntimeError(f"close failed auth_code={AUTH_CODE} app_secret={APP_SECRET}")
+
+    with patch.object(tiktok_ingest.httpx, "Client", return_value=CloseFailingShopClient()):
+        try:
+            tiktok_ingest.exchange_tiktok_authorization_code(
+                auth_code=AUTH_CODE,
+                app_key="synthetic-app-key",
+                app_secret=APP_SECRET,
+            )
+        except tiktok_ingest.TikTokIngestError as exc:
+            raised = exc
+        else:  # pragma: no cover - owned client close always fails
+            raise AssertionError("expected TikTokIngestError")
+
+    serialized = _serialized_exception_graph(raised)
+    _assert_oauth_secrets_absent(serialized)
+    _assert_token_canaries_absent(serialized)
+    _assert_sensitive_exchange_locals_absent(
+        raised,
+        forbidden_names={
+            "auth_code",
+            "app_secret",
+            "query_params",
+            "client",
+            "http_client",
+            "response",
+            "api_data",
+            "token_result",
+            "exc",
+        },
+    )
+    assert raised.__cause__ is None
+    assert raised.__context__ is None
+    assert "RuntimeError" in str(raised)
+
+
+def test_creator_exchange_close_failure_does_not_replace_sanitized_http_error() -> None:
+    class FailingCreatorClient:
+        def post(
+            self,
+            url: str,
+            data: dict[str, str],
+            headers: dict[str, str],
+        ) -> httpx.Response:
+            request = httpx.Request("POST", url, data=data, headers=headers)
+            return httpx.Response(
+                401,
+                json={"error": f"code={AUTH_CODE} client_secret={APP_SECRET}"},
+                request=request,
+            )
+
+        def close(self) -> None:
+            raise RuntimeError(f"close failed code={AUTH_CODE} client_secret={APP_SECRET}")
+
+    with patch.object(tiktok_ingest.httpx, "Client", return_value=FailingCreatorClient()):
+        try:
+            tiktok_ingest.exchange_tiktok_creator_authorization_code(
+                auth_code=AUTH_CODE,
+                client_key="synthetic-client-key",
+                client_secret=APP_SECRET,
+                redirect_uri="https://example.test/integrations/tiktok/creator-callback",
+            )
+        except tiktok_ingest.TikTokIngestError as exc:
+            raised = exc
+        else:  # pragma: no cover - the response always fails
+            raise AssertionError("expected TikTokIngestError")
+
+    _assert_oauth_secrets_absent(_serialized_exception_graph(raised))
+    _assert_sensitive_exchange_locals_absent(
+        raised,
+        forbidden_names={
+            "auth_code",
+            "client_secret",
+            "form_data",
+            "client",
+            "http_client",
+            "response",
+            "api_data",
+            "token_result",
+            "exc",
+        },
+    )
+    assert raised.__cause__ is None
+    assert raised.__context__ is None
+    assert "HTTP 401" in str(raised)
+
+
+def test_shop_refresh_http_failure_does_not_retain_credentials() -> None:
+    outgoing: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        outgoing.append(request)
+        return httpx.Response(
+            401,
+            headers={"x-debug-secret": REFRESH_INPUT_TOKEN},
+            json={"error": f"app_secret={APP_SECRET} refresh_token={REFRESH_INPUT_TOKEN}"},
+            request=request,
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        try:
+            tiktok_ingest.refresh_tiktok_shop_token(
+                app_key="synthetic-app-key",
+                app_secret=APP_SECRET,
+                refresh_token=REFRESH_INPUT_TOKEN,
+                client=client,
+            )
+        except tiktok_ingest.TikTokIngestError as exc:
+            raised = exc
+        else:  # pragma: no cover - the handler always returns HTTP 401
+            raise AssertionError("expected TikTokIngestError")
+
+    assert len(outgoing) == 1
+    assert outgoing[0].url.params["app_secret"] == APP_SECRET
+    assert outgoing[0].url.params["refresh_token"] == REFRESH_INPUT_TOKEN
+    _assert_refresh_secrets_absent(_serialized_exception_graph(raised))
+    _assert_sensitive_exchange_locals_absent(
+        raised,
+        forbidden_names={
+            "app_secret",
+            "refresh_token",
+            "query_params",
+            "client",
+            "http_client",
+            "response",
+            "api_data",
+            "exc",
+        },
+    )
+    assert raised.__cause__ is None
+    assert raised.__context__ is None
+    assert "HTTP 401" in str(raised)
+    assert "auth.tiktok-shops.com/api/v2/token/refresh" in str(raised)
+
+
+def test_shop_refresh_transport_failure_does_not_retain_credentials() -> None:
+    outgoing: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        outgoing.append(request)
+        raise httpx.ConnectError(
+            f"connect failed app_secret={APP_SECRET} refresh_token={REFRESH_INPUT_TOKEN}",
+            request=request,
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        try:
+            tiktok_ingest.refresh_tiktok_shop_token(
+                app_key="synthetic-app-key",
+                app_secret=APP_SECRET,
+                refresh_token=REFRESH_INPUT_TOKEN,
+                client=client,
+            )
+        except tiktok_ingest.TikTokIngestError as exc:
+            raised = exc
+        else:  # pragma: no cover - the handler always raises
+            raise AssertionError("expected TikTokIngestError")
+
+    assert len(outgoing) == 1
+    _assert_refresh_secrets_absent(_serialized_exception_graph(raised))
+    _assert_sensitive_exchange_locals_absent(
+        raised,
+        forbidden_names={
+            "app_secret",
+            "refresh_token",
+            "query_params",
+            "client",
+            "http_client",
+            "response",
+            "api_data",
+            "exc",
+        },
+    )
+    assert raised.__cause__ is None
+    assert raised.__context__ is None
+    assert "ConnectError" in str(raised)
+    assert "auth.tiktok-shops.com/api/v2/token/refresh" in str(raised)
+
+
+def test_shop_refresh_malformed_success_does_not_retain_credentials() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "application/json"},
+            content=(
+                '{"code":0,"data":{"access_token":"'
+                + ACCESS_TOKEN
+                + '","refresh_token":"'
+                + REFRESH_INPUT_TOKEN
+                + '","access_token_expire_in":1e400}}'
+            ),
+            request=request,
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        try:
+            tiktok_ingest.refresh_tiktok_shop_token(
+                app_key="synthetic-app-key",
+                app_secret=APP_SECRET,
+                refresh_token=REFRESH_INPUT_TOKEN,
+                client=client,
+            )
+        except Exception as exc:
+            raised = exc
+        else:  # pragma: no cover - malformed expiry always fails
+            raise AssertionError("expected token parsing failure")
+
+    serialized = _serialized_exception_graph(raised)
+    _assert_refresh_secrets_absent(serialized)
+    assert ACCESS_TOKEN not in serialized
+    assert isinstance(raised, tiktok_ingest.TikTokIngestError)
+    _assert_sensitive_exchange_locals_absent(
+        raised,
+        forbidden_names={
+            "app_secret",
+            "refresh_token",
+            "query_params",
+            "client",
+            "http_client",
+            "response",
+            "api_data",
+            "exc",
+        },
+    )
+    assert raised.__cause__ is None
+    assert raised.__context__ is None
+    assert "OverflowError" in str(raised)
+    assert "auth.tiktok-shops.com/api/v2/token/refresh" in str(raised)
+
+
+def test_shop_refresh_validation_failure_does_not_retain_supplied_credentials() -> None:
+    try:
+        tiktok_ingest.refresh_tiktok_shop_token(
+            app_key="",
+            app_secret=APP_SECRET,
+            refresh_token=REFRESH_INPUT_TOKEN,
+        )
+    except tiktok_ingest.TikTokIngestError as exc:
+        raised = exc
+    else:  # pragma: no cover - the missing app key always fails validation
+        raise AssertionError("expected TikTokIngestError")
+
+    _assert_refresh_secrets_absent(_serialized_exception_graph(raised))
+    _assert_sensitive_exchange_locals_absent(
+        raised,
+        forbidden_names={"app_key", "app_secret", "refresh_token", "client"},
+    )
+    assert raised.__cause__ is None
+    assert raised.__context__ is None
+    assert "app key is required" in str(raised)
+
+
+def test_shop_refresh_client_setup_failure_does_not_retain_credentials() -> None:
+    setup_error = httpx.ConnectError(
+        f"setup failed app_secret={APP_SECRET} refresh_token={REFRESH_INPUT_TOKEN}"
+    )
+    with patch.object(tiktok_ingest.httpx, "Client", side_effect=setup_error):
+        try:
+            tiktok_ingest.refresh_tiktok_shop_token(
+                app_key="synthetic-app-key",
+                app_secret=APP_SECRET,
+                refresh_token=REFRESH_INPUT_TOKEN,
+            )
+        except tiktok_ingest.TikTokIngestError as exc:
+            raised = exc
+        else:  # pragma: no cover - client construction always raises
+            raise AssertionError("expected TikTokIngestError")
+
+    _assert_refresh_secrets_absent(_serialized_exception_graph(raised))
+    _assert_sensitive_exchange_locals_absent(
+        raised,
+        forbidden_names={
+            "app_secret",
+            "refresh_token",
+            "query_params",
+            "client",
+            "http_client",
+            "response",
+            "api_data",
+            "exc",
+        },
+    )
+    assert raised.__cause__ is None
+    assert raised.__context__ is None
+    assert "ConnectError" in str(raised)
+
+
+def test_shop_refresh_owned_client_close_failure_does_not_retain_credentials() -> None:
+    class CloseFailingClient:
+        def get(self, url: str, params: dict[str, str]) -> httpx.Response:
+            request = httpx.Request("GET", url, params=params)
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "access_token": ACCESS_TOKEN,
+                        "refresh_token": REFRESH_INPUT_TOKEN,
+                        "access_token_expire_in": 3600,
+                    },
+                },
+                request=request,
+            )
+
+        def close(self) -> None:
+            raise RuntimeError(
+                f"close failed app_secret={APP_SECRET} refresh_token={REFRESH_INPUT_TOKEN}"
+            )
+
+    with patch.object(tiktok_ingest.httpx, "Client", return_value=CloseFailingClient()):
+        try:
+            tiktok_ingest.refresh_tiktok_shop_token(
+                app_key="synthetic-app-key",
+                app_secret=APP_SECRET,
+                refresh_token=REFRESH_INPUT_TOKEN,
+            )
+        except tiktok_ingest.TikTokIngestError as exc:
+            raised = exc
+        else:  # pragma: no cover - owned client close always raises
+            raise AssertionError("expected TikTokIngestError")
+
+    serialized = _serialized_exception_graph(raised)
+    _assert_refresh_secrets_absent(serialized)
+    assert ACCESS_TOKEN not in serialized
+    _assert_sensitive_exchange_locals_absent(
+        raised,
+        forbidden_names={
+            "app_secret",
+            "refresh_token",
+            "query_params",
+            "client",
+            "http_client",
+            "response",
+            "api_data",
+            "exc",
+        },
+    )
+    assert raised.__cause__ is None
+    assert raised.__context__ is None
+    assert "RuntimeError" in str(raised)
+
+
+def test_shop_refresh_api_error_does_not_retain_percent_encoded_credentials() -> None:
+    encoded_refresh_token = quote(REFRESH_INPUT_TOKEN + "/a+b", safe="")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "code": 105001,
+                "message": f"refresh_token={encoded_refresh_token}",
+            },
+            request=request,
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        try:
+            tiktok_ingest.refresh_tiktok_shop_token(
+                app_key="synthetic-app-key",
+                app_secret=APP_SECRET,
+                refresh_token=REFRESH_INPUT_TOKEN + "/a+b",
+                client=client,
+            )
+        except tiktok_ingest.TikTokIngestError as exc:
+            raised = exc
+        else:  # pragma: no cover - the API error payload always fails
+            raise AssertionError("expected TikTokIngestError")
+
+    serialized = _serialized_exception_graph(raised)
+    assert REFRESH_INPUT_TOKEN not in serialized
+    assert encoded_refresh_token not in serialized
+    _assert_sensitive_exchange_locals_absent(
+        raised,
+        forbidden_names={
+            "app_secret",
+            "refresh_token",
+            "query_params",
+            "client",
+            "http_client",
+            "response",
+            "api_data",
+            "exc",
+        },
+    )
+    assert raised.__cause__ is None
+    assert raised.__context__ is None
 
 
 def test_creator_authorization_exchange_uses_post_form_without_query_credentials() -> None:
