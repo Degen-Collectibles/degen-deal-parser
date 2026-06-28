@@ -7,6 +7,11 @@ from typing import Any, Optional
 from sqlmodel import Session, select
 
 from ..db import engine, managed_session
+from ..financial_values import (
+    InvalidFinancialValueError,
+    parse_optional_money,
+    sanitize_nonfinite_json_values,
+)
 from .financials import EXPENSE_PATTERNS
 from ..models import DiscordMessage, PARSE_PARSED, PARSE_REVIEW_REQUIRED, ReviewCorrection, normalize_parse_status, utcnow
 
@@ -81,7 +86,7 @@ def _safe_json_list(value: str) -> list[str]:
 
 
 def snapshot_message_parse(row: DiscordMessage) -> dict[str, Any]:
-    return {
+    return sanitize_nonfinite_json_values({
         "deal_type": row.deal_type,
         "amount": row.amount,
         "payment_method": row.payment_method,
@@ -101,7 +106,7 @@ def snapshot_message_parse(row: DiscordMessage) -> dict[str, Any]:
             needs_review=row.needs_review,
         ),
         "needs_review": bool(row.needs_review),
-    }
+    })
 
 
 def snapshot_correction_parse(correction: ReviewCorrection) -> dict[str, Any]:
@@ -153,11 +158,18 @@ def extract_payment_phrase(message_text: str) -> tuple[float | None, str | None]
         if not match:
             continue
         if match.group(1).replace(".", "", 1).isdigit():
-            amount = float(match.group(1))
+            amount_text = match.group(1)
             payment_method = match.group(2).lower()
         else:
             payment_method = match.group(1).lower()
-            amount = float(match.group(2))
+            amount_text = match.group(2)
+        try:
+            amount = parse_optional_money(
+                amount_text,
+                field_name="learned payment amount",
+            )
+        except InvalidFinancialValueError:
+            return None, None
         if payment_method in {"tap", "cc", "dc"}:
             payment_method = "card"
         return amount, payment_method
@@ -178,7 +190,13 @@ def extract_trade_cash_phrase(message_text: str) -> tuple[float | None, str | No
     if not match:
         return None, None
 
-    amount = float(match.group(1))
+    try:
+        amount = parse_optional_money(
+            match.group(1),
+            field_name="learned trade amount",
+        )
+    except InvalidFinancialValueError:
+        return None, None
     payment_method = (match.group(2) or "").lower() or None
     if payment_method in {"tap", "cc", "dc"}:
         payment_method = "card"
@@ -333,17 +351,26 @@ def save_review_correction(
     correction.items_out_json = row.items_out_json or "[]"
     correction.item_names_json = row.item_names_json or "[]"
     corrected_after = snapshot_message_parse(row)
-    baseline_before = parsed_before or {}
+    baseline_before = sanitize_nonfinite_json_values(parsed_before or {})
+    corrected_after = sanitize_nonfinite_json_values(corrected_after)
     field_diffs = build_field_diffs(baseline_before, corrected_after)
     correction.confidence = compute_correction_confidence(
         session, normalized_text, field_diffs, row.confidence
     )
-    features = extract_learning_features(row.content or "")
+    features = sanitize_nonfinite_json_values(
+        extract_learning_features(row.content or "")
+    )
     correction.pattern_type = infer_pattern_type(row.content or "", corrected_after, field_diffs, features)
-    correction.parsed_before_json = json.dumps(baseline_before, sort_keys=True)
-    correction.corrected_after_json = json.dumps(corrected_after, sort_keys=True)
-    correction.field_diffs_json = json.dumps(field_diffs, sort_keys=True)
-    correction.features_json = json.dumps(features, sort_keys=True)
+    correction.parsed_before_json = json.dumps(
+        baseline_before, sort_keys=True, allow_nan=False
+    )
+    correction.corrected_after_json = json.dumps(
+        corrected_after, sort_keys=True, allow_nan=False
+    )
+    correction.field_diffs_json = json.dumps(
+        field_diffs, sort_keys=True, allow_nan=False
+    )
+    correction.features_json = json.dumps(features, sort_keys=True, allow_nan=False)
     correction.updated_at = utcnow()
 
     session.add(correction)

@@ -69,6 +69,7 @@ from .discord.discord_ingest import (
     parse_iso_datetime,
 )
 from .discord.financials import compute_financials
+from .financial_values import parse_optional_money
 from .models import (
     AppSetting,
     AttachmentAsset,
@@ -148,6 +149,8 @@ from .display_media import (
     row_has_images,
 )
 from .discord.transactions import (
+    SourceRefreshRequiredError,
+    StaleSourceRevisionError,
     build_transaction_summary,
     get_transactions,
     is_non_operating_transaction,
@@ -268,6 +271,7 @@ FINANCE_WINDOW_MTD = "mtd"
 FINANCE_WINDOW_30D = "30d"
 FINANCE_WINDOW_90D = "90d"
 FINANCE_WINDOW_YTD = "ytd"
+MAX_FINANCE_RANGE_DAYS = 366
 FINANCE_WINDOW_OPTIONS = {
     FINANCE_WINDOW_MTD,
     FINANCE_WINDOW_30D,
@@ -1273,8 +1277,14 @@ def resolve_finance_range(
     today_start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
     today_end_local = today_start_local + timedelta(days=1) - timedelta(microseconds=1)
 
-    start_dt = parse_report_datetime(start)
-    end_dt = parse_report_datetime(end, end_of_day=True)
+    start_probe = parse_report_datetime(start)
+    end_probe = parse_report_datetime(end)
+    if start_probe is not None and end_probe is not None and end_probe < start_probe:
+        start_dt = end_probe
+        end_dt = parse_report_datetime(start, end_of_day=True)
+    else:
+        start_dt = start_probe
+        end_dt = parse_report_datetime(end, end_of_day=True)
     manual_range = bool(start_dt or end_dt)
 
     if manual_range:
@@ -1299,15 +1309,27 @@ def resolve_finance_range(
         selected_window = normalized_window
 
     if end_dt < start_dt:
-        start_dt, end_dt = end_dt, start_dt
-
-    current_span = end_dt - start_dt
-    previous_end_dt = start_dt - timedelta(microseconds=1)
-    previous_start_dt = previous_end_dt - current_span
+        if end_probe is None and start_probe is not None:
+            start_dt = today_start_local.astimezone(timezone.utc)
+            end_dt = parse_report_datetime(start, end_of_day=True) or start_probe
+        else:
+            start_dt, end_dt = end_dt, start_dt
 
     start_local = start_dt.astimezone(PACIFIC_TZ)
     end_local = end_dt.astimezone(PACIFIC_TZ)
     day_count = max((end_local.date() - start_local.date()).days + 1, 1)
+    if day_count > MAX_FINANCE_RANGE_DAYS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Finance ranges are limited to {MAX_FINANCE_RANGE_DAYS} days. "
+                "Choose a shorter date range."
+            ),
+        )
+
+    current_span = end_dt - start_dt
+    previous_end_dt = start_dt - timedelta(microseconds=1)
+    previous_start_dt = previous_end_dt - current_span
 
     return {
         "start_dt": start_dt,
@@ -4935,10 +4957,9 @@ def build_review_shortcuts(items: list[dict]) -> list[dict[str, object]]:
 
 
 def parse_optional_float(value: Optional[str]) -> Optional[float]:
-    text = (value or "").strip()
-    if not text:
-        return None
-    return float(text)
+    """Backward-compatible safe money parser for legacy shared imports."""
+
+    return parse_optional_money(value)
 
 
 def parse_string_list(value: Optional[str]) -> list[str]:
@@ -5910,31 +5931,38 @@ def build_backfill_queue_snapshot(session: Session) -> dict:
 
 def recompute_financial_fields(session: Session) -> int:
     rows = session.exec(
-        select(DiscordMessage).where(
+        select(DiscordMessage)
+        .where(
             DiscordMessage.parse_status.in_(
                 sorted(expand_parse_status_filter_values([PARSE_PARSED, PARSE_REVIEW_REQUIRED]))
             )
         )
+        .order_by(DiscordMessage.created_at, DiscordMessage.id)
     ).all()
 
     updated = 0
     for row in rows:
-        financials = compute_financials(
-            parsed_type=row.deal_type,
-            parsed_category=row.category,
-            amount=row.amount,
-            cash_direction=row.cash_direction,
-            message_text=row.content or "",
-        )
-        row.entry_kind = financials.entry_kind
-        row.money_in = financials.money_in
-        row.money_out = financials.money_out
-        row.expense_category = financials.expense_category
-        if financials.requires_review:
-            row.parse_status = PARSE_REVIEW_REQUIRED
-            row.needs_review = True
-        session.add(row)
-        sync_transaction_from_message(session, row)
+        try:
+            with session.begin_nested():
+                financials = compute_financials(
+                    parsed_type=row.deal_type,
+                    parsed_category=row.category,
+                    amount=row.amount,
+                    cash_direction=row.cash_direction,
+                    message_text=row.content or "",
+                )
+                row.entry_kind = financials.entry_kind
+                row.money_in = financials.money_in
+                row.money_out = financials.money_out
+                row.expense_category = financials.expense_category
+                if financials.requires_review:
+                    row.parse_status = PARSE_REVIEW_REQUIRED
+                    row.needs_review = True
+                session.add(row)
+                sync_transaction_from_message(session, row)
+        except (SourceRefreshRequiredError, StaleSourceRevisionError):
+            session.expire(row)
+            continue
         updated += 1
 
     session.commit()

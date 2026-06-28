@@ -70,7 +70,7 @@ class OfflineMessageRecoveryTests(unittest.TestCase):
         )
         self.assertTrue(recent_message_needs_refresh(row, message))
 
-    def test_mark_message_deleted_row_removes_existing_transaction(self) -> None:
+    def test_mark_message_deleted_row_tombstones_existing_transaction(self) -> None:
         with Session(self.engine) as session:
             row = DiscordMessage(
                 discord_message_id="123",
@@ -100,7 +100,9 @@ class OfflineMessageRecoveryTests(unittest.TestCase):
             self.assertTrue(changed)
 
             transaction = session.exec(select(Transaction).where(Transaction.source_message_id == row.id)).first()
-            self.assertIsNone(transaction)
+            self.assertIsNotNone(transaction)
+            self.assertTrue(transaction.is_deleted)
+            self.assertEqual(transaction.parse_status, "pending")
             self.assertTrue(row.is_deleted)
             self.assertEqual(row.parse_status, "ignored")
 

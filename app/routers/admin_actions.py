@@ -6,6 +6,7 @@ Extracted from app/main.py.
 from __future__ import annotations
 
 from typing import Optional
+from urllib.parse import quote_plus
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -17,16 +18,76 @@ from ..db import get_session, managed_session
 from ..discord.backfill_requests import cancel_backfill_request
 from ..discord.channels import normalize_channel_ids, upsert_watched_channel
 from ..discord.discord_ingest import get_discord_client, invalidate_available_channels_cache, list_available_discord_channels
+from ..discord.worker import RangeReparseSelectionLimitError
 
 router = APIRouter(route_class=CSRFProtectedRoute)
+_TRUE_FORM_FLAG_VALUES = {"1", "true", "yes", "on"}
+
+
+def _form_flag_enabled(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().casefold() in _TRUE_FORM_FLAG_VALUES
+
+
+def _finalize_empty_reparse_run(run_id: str | None) -> None:
+    if not run_id:
+        return
+    safe_finalize_reparse_run_queue(
+        run_id=run_id,
+        selected_count=0,
+        queued_count=0,
+        already_queued_count=0,
+        skipped_reviewed_count=0,
+        first_message_id=None,
+        last_message_id=None,
+        first_message_created_at=None,
+        last_message_created_at=None,
+    )
+
+
+def _refuse_immutable_discord_revision_clear(
+    session: Session,
+    *,
+    message_ids: list[int] | None = None,
+) -> None:
+    if message_ids is None:
+        has_audit_rows = bool(
+            int(session.exec(select(func.count()).select_from(DiscordMessage)).one())
+        )
+    else:
+        has_audit_rows = bool(message_ids)
+    if has_audit_rows:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Stored Discord audit messages cannot be "
+                "physically cleared. Use non-destructive message deletion instead."
+            ),
+        )
 
 
 def _bulk_clear_all_discord_messages(session: Session) -> int:
+    _refuse_immutable_discord_revision_clear(session)
     session.exec(delete(ParseAttempt))
     count = int(session.exec(select(func.count()).select_from(DiscordMessage)).one())
     session.exec(delete(DiscordMessage))
     session.commit()
     return count
+
+
+def _bulk_clear_channel_discord_messages(session: Session, channel_id: str) -> int:
+    rows = session.exec(
+        select(DiscordMessage).where(DiscordMessage.channel_id == channel_id)
+    ).all()
+    row_ids = [row.id for row in rows if row.id is not None]
+    _refuse_immutable_discord_revision_clear(session, message_ids=row_ids)
+    if row_ids:
+        session.exec(delete(ParseAttempt).where(ParseAttempt.message_id.in_(row_ids)))
+    for row in rows:
+        session.delete(row)
+    session.commit()
+    return len(rows)
 
 
 @router.post("/admin/clear")
@@ -112,12 +173,13 @@ def admin_parser_reprocess_form(
     if denial := require_role_response(request, "admin"):
         return denial
 
+    force_enabled = _form_flag_enabled(force)
     queued = queue_auto_reprocess_candidates(
         session,
-        force=bool(force),
+        force=force_enabled,
     )
     separator = "&" if "?" in return_path else "?"
-    mode_label = "manual+full" if force else "manual"
+    mode_label = "manual+full" if force_enabled else "manual"
     return RedirectResponse(
         url=f"{return_path}{separator}success=Queued+{queued}+rows+for+{mode_label}+parser+reprocess",
         status_code=303,
@@ -142,16 +204,20 @@ def admin_parser_reparse_range(
     end = parse_report_datetime(before, end_of_day=True)
     if start is None and end is None:
         raise HTTPException(status_code=400, detail="Provide after and/or before to define a reparse range.")
-    if include_reviewed and not force_reviewed:
+    include_failed_enabled = _form_flag_enabled(include_failed)
+    include_ignored_enabled = _form_flag_enabled(include_ignored)
+    include_reviewed_enabled = _form_flag_enabled(include_reviewed)
+    force_reviewed_enabled = _form_flag_enabled(force_reviewed)
+    if include_reviewed_enabled and not force_reviewed_enabled:
         raise HTTPException(
             status_code=400,
             detail="Reviewed rows require force_reviewed to avoid overwriting manual review corrections.",
         )
 
     include_statuses = [PARSE_PARSED, PARSE_REVIEW_REQUIRED]
-    if include_failed:
+    if include_failed_enabled:
         include_statuses.append("failed")
-    if include_ignored:
+    if include_ignored_enabled:
         include_statuses.append("ignored")
 
     run_id = safe_create_reparse_run(
@@ -160,21 +226,26 @@ def admin_parser_reparse_range(
         range_after=start,
         range_before=end,
         channel_id=channel_id or None,
-        include_reviewed=bool(include_reviewed),
-        force_reviewed=bool(force_reviewed),
+        include_reviewed=include_reviewed_enabled,
+        force_reviewed=force_reviewed_enabled,
         requested_statuses=include_statuses,
     )
 
-    result = queue_reparse_range(
-        session,
-        start=start,
-        end=end,
-        channel_id=channel_id or None,
-        include_statuses=include_statuses,
-        include_reviewed=bool(include_reviewed),
-        reason="manual range reparse",
-        reparse_run_id=run_id,
-    )
+    try:
+        result = queue_reparse_range(
+            session,
+            start=start,
+            end=end,
+            channel_id=channel_id or None,
+            include_statuses=include_statuses,
+            include_reviewed=include_reviewed_enabled,
+            reason="manual range reparse",
+            reparse_run_id=run_id,
+        )
+    except RangeReparseSelectionLimitError as exc:
+        session.rollback()
+        _finalize_empty_reparse_run(run_id)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     safe_finalize_reparse_run_queue(
         run_id=run_id,
         selected_count=result["matched"],
@@ -191,11 +262,16 @@ def admin_parser_reparse_range(
         "run_id": run_id,
         "queued": result["queued"],
         "matched": result["matched"],
+        "already_queued": result["already_queued"],
+        "skipped_reviewed": result["skipped_reviewed"],
+        "skipped_quarantined": result["skipped_quarantined"],
+        "skipped_integrity": result["skipped_integrity"],
+        "skipped_changed": result["skipped_changed"],
         "channel_id": channel_id or None,
         "after": after or None,
         "before": before or None,
         "included_statuses": include_statuses,
-        "include_reviewed": bool(include_reviewed),
+        "include_reviewed": include_reviewed_enabled,
     }
 
 @router.post("/admin/parser/reparse-range-form")
@@ -222,7 +298,11 @@ def admin_parser_reparse_range_form(
             url=f"{return_path}{separator}error=Provide+after+and/or+before+to+define+a+reparse+range",
             status_code=303,
         )
-    if include_reviewed and not force_reviewed:
+    include_failed_enabled = _form_flag_enabled(include_failed)
+    include_ignored_enabled = _form_flag_enabled(include_ignored)
+    include_reviewed_enabled = _form_flag_enabled(include_reviewed)
+    force_reviewed_enabled = _form_flag_enabled(force_reviewed)
+    if include_reviewed_enabled and not force_reviewed_enabled:
         separator = "&" if "?" in return_path else "?"
         return RedirectResponse(
             url=(
@@ -233,9 +313,9 @@ def admin_parser_reparse_range_form(
         )
 
     include_statuses = [PARSE_PARSED, PARSE_REVIEW_REQUIRED]
-    if include_failed:
+    if include_failed_enabled:
         include_statuses.append("failed")
-    if include_ignored:
+    if include_ignored_enabled:
         include_statuses.append("ignored")
 
     run_id = safe_create_reparse_run(
@@ -244,21 +324,30 @@ def admin_parser_reparse_range_form(
         range_after=start,
         range_before=end,
         channel_id=channel_id or None,
-        include_reviewed=bool(include_reviewed),
-        force_reviewed=bool(force_reviewed),
+        include_reviewed=include_reviewed_enabled,
+        force_reviewed=force_reviewed_enabled,
         requested_statuses=include_statuses,
     )
 
-    result = queue_reparse_range(
-        session,
-        start=start,
-        end=end,
-        channel_id=channel_id or None,
-        include_statuses=include_statuses,
-        include_reviewed=bool(include_reviewed),
-        reason="manual range reparse",
-        reparse_run_id=run_id,
-    )
+    try:
+        result = queue_reparse_range(
+            session,
+            start=start,
+            end=end,
+            channel_id=channel_id or None,
+            include_statuses=include_statuses,
+            include_reviewed=include_reviewed_enabled,
+            reason="manual range reparse",
+            reparse_run_id=run_id,
+        )
+    except RangeReparseSelectionLimitError as exc:
+        session.rollback()
+        _finalize_empty_reparse_run(run_id)
+        separator = "&" if "?" in return_path else "?"
+        return RedirectResponse(
+            url=f"{return_path}{separator}error={quote_plus(str(exc))}",
+            status_code=303,
+        )
     safe_finalize_reparse_run_queue(
         run_id=run_id,
         selected_count=result["matched"],
@@ -271,11 +360,16 @@ def admin_parser_reparse_range_form(
         last_message_created_at=result["last_message_created_at"],
     )
     separator = "&" if "?" in return_path else "?"
+    success_message = (
+        f"Queued {result['queued']} of {result['matched']} matched rows; "
+        f"already queued: {result['already_queued']}; "
+        f"skipped reviewed: {result['skipped_reviewed']}; "
+        f"skipped quarantined: {result['skipped_quarantined']}; "
+        f"skipped integrity: {result['skipped_integrity']}; "
+        f"skipped changed: {result['skipped_changed']}"
+    )
     return RedirectResponse(
-        url=(
-            f"{return_path}{separator}"
-            f"success=Queued+{result['queued']}+rows+for+parser+range+reparse"
-        ),
+        url=f"{return_path}{separator}success={quote_plus(success_message)}",
         status_code=303,
     )
 
@@ -337,18 +431,7 @@ def clear_channel_messages(request: Request, channel_id: str):
     if denial := require_role_response(request, "admin"):
         return denial
     with managed_session() as session:
-        rows = session.exec(
-            select(DiscordMessage).where(DiscordMessage.channel_id == channel_id)
-        ).all()
-
-        count = len(rows)
-        row_ids = [row.id for row in rows if row.id is not None]
-        if row_ids:
-            session.exec(delete(ParseAttempt).where(ParseAttempt.message_id.in_(row_ids)))
-        for row in rows:
-            session.delete(row)
-
-        session.commit()
+        count = _bulk_clear_channel_discord_messages(session, channel_id)
 
     return {
         "ok": True,
@@ -366,16 +449,8 @@ def clear_channel_messages_form(
         rows = session.exec(
             select(DiscordMessage).where(DiscordMessage.channel_id == channel_id)
         ).all()
-
-        count = len(rows)
         channel_name = rows[0].channel_name if rows else channel_id
-        row_ids = [row.id for row in rows if row.id is not None]
-        if row_ids:
-            session.exec(delete(ParseAttempt).where(ParseAttempt.message_id.in_(row_ids)))
-        for row in rows:
-            session.delete(row)
-
-        session.commit()
+        count = _bulk_clear_channel_discord_messages(session, channel_id)
 
     return RedirectResponse(
         url=f"/table?success=Cleared+{count}+messages+from+{channel_name}",
