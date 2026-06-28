@@ -249,9 +249,11 @@
                         <td>
                             <div class="action-cell">
                                 <a class="btn-sm" href="/hits/{{ hit.id }}/edit">Edit</a>
+                                {% if can_delete_hits %}
                                 <form method="post" action="/hits/{{ hit.id }}/delete" style="display:inline;" onsubmit="return confirm('Delete this hit?')">
                                     <button type="submit" class="btn-sm btn-sm-danger">Delete</button>
                                 </form>
+                                {% endif %}
                             </div>
                         </td>
                     </tr>
