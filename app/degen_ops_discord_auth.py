@@ -7,12 +7,12 @@ from sqlmodel import Session, select
 from .models import EmployeeProfile, User
 
 
-SCOPE_RANKS = {
-    "employee": 0,
-    "manager": 1,
-    "partner": 2,
-    "tiktok": 2,
-    "owner": 3,
+SCOPE_SUBSCOPES = {
+    "employee": frozenset({"employee"}),
+    "tiktok": frozenset({"tiktok"}),
+    "partner": frozenset({"employee", "partner"}),
+    "manager": frozenset({"employee", "tiktok", "manager"}),
+    "owner": frozenset({"employee", "tiktok", "partner", "manager", "owner"}),
 }
 
 ROLE_TO_DEGEN_OPS_SCOPE = {
@@ -45,8 +45,13 @@ def _normalize_discord_user_id(value: str) -> str:
     return "".join(ch for ch in str(value or "") if ch.isdigit())
 
 
-def _lower_ranked_scope(first: str, second: str) -> str:
-    return first if SCOPE_RANKS[first] <= SCOPE_RANKS[second] else second
+def _intersect_named_scopes(first: str, second: str) -> str | None:
+    """Return the narrower named scope, or deny partially overlapping domains."""
+    if first in SCOPE_SUBSCOPES[second]:
+        return first
+    if second in SCOPE_SUBSCOPES[first]:
+        return second
+    return None
 
 
 def resolve_discord_author_scope(
@@ -123,7 +128,16 @@ def resolve_discord_author_scope(
             app_role=app_role,
             display_name=display_name,
         )
-    effective_scope = _lower_ranked_scope(user_scope, channel_scope) if channel_scope else user_scope
+    effective_scope = _intersect_named_scopes(user_scope, channel_scope)
+    if effective_scope is None:
+        return DiscordAuthorScope(
+            False,
+            None,
+            "incomparable_scopes",
+            app_user_id=user.id,
+            app_role=app_role,
+            display_name=display_name,
+        )
     return DiscordAuthorScope(
         True,
         effective_scope,

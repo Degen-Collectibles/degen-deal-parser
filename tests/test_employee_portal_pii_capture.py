@@ -407,15 +407,26 @@ class ProfileSelfEditEmailTests(unittest.TestCase, _PIIHarness):
     def tearDown(self):
         self._teardown()
 
-    def _seed_employee(self, *, user_id: int, username: str, email: str):
+    _CURRENT_PASSWORD = "OldPassword1!"
+
+    def _seed_employee(
+        self,
+        *,
+        user_id: int,
+        username: str,
+        email: str,
+        phone: str = "",
+    ):
+        from app.auth import hash_password
         from app.models import EmployeeProfile, User
         from app.team.pii import encrypt_pii, email_lookup_hash
 
+        password_hash, password_salt = hash_password(self._CURRENT_PASSWORD)
         u = User(
             id=user_id,
             username=username,
-            password_hash="x",
-            password_salt="x",
+            password_hash=password_hash,
+            password_salt=password_salt,
             display_name=username,
             role="employee",
             is_active=True,
@@ -425,35 +436,263 @@ class ProfileSelfEditEmailTests(unittest.TestCase, _PIIHarness):
             email_ciphertext=encrypt_pii(email),
             email_lookup_hash=email_lookup_hash(email),
         )
+        if phone:
+            prof.phone_enc = encrypt_pii(phone)
         self.session.add(u)
         self.session.add(prof)
         self.session.commit()
         return u
 
+    def _post_profile(
+        self,
+        *,
+        email: str,
+        preferred_name: str = "self_edit",
+        phone: str = "",
+        current_password: str | None = None,
+    ):
+        csrf = self._csrf()
+        data = {
+            "preferred_name": preferred_name,
+            "email": email,
+            "phone": phone,
+            "csrf_token": csrf,
+        }
+        if current_password is not None:
+            data["current_password"] = current_password
+        return self.client.post(
+            "/team/profile",
+            data=data,
+            follow_redirects=False,
+        )
+
+    def _assert_sensitive_profile_unchanged(
+        self,
+        *,
+        user_id: int,
+        email_ciphertext: bytes,
+        email_lookup_hash: str,
+        display_name: str,
+        phone: str = "",
+    ) -> None:
+        from app.models import EmployeeProfile, User
+        from app.team.pii import decrypt_pii
+
+        self.session.expire_all()
+        profile = self.session.get(EmployeeProfile, user_id)
+        db_user = self.session.get(User, user_id)
+        self.assertIsNotNone(profile)
+        self.assertIsNotNone(db_user)
+        self.assertEqual(profile.email_ciphertext, email_ciphertext)
+        self.assertEqual(profile.email_lookup_hash, email_lookup_hash)
+        self.assertEqual(db_user.display_name, display_name)
+        if phone:
+            self.assertEqual(decrypt_pii(profile.phone_enc), phone)
+
     def test_employee_can_update_own_email(self):
-        from app.models import EmployeeProfile
+        from app.models import AuditLog, EmployeeProfile
         from app.team.pii import decrypt_pii, email_lookup_hash
 
         emp = self._seed_employee(
             user_id=900, username="self_edit", email="old@example.com"
         )
         self._login(role="employee", user_id=900, username="self_edit")
-        csrf = self._csrf()
-        r = self.client.post(
-            "/team/profile",
-            data={
-                "preferred_name": "Edited",
-                "email": "new@example.com",
-                "csrf_token": csrf,
-            },
-            follow_redirects=False,
+        r = self._post_profile(
+            preferred_name="Edited",
+            email="New@Example.COM",
+            current_password=self._CURRENT_PASSWORD,
         )
         self.assertIn(r.status_code, (200, 303), r.text)
 
+        self.session.expire_all()
         prof = self.session.get(EmployeeProfile, emp.id)
-        self.session.refresh(prof)
         self.assertEqual(decrypt_pii(prof.email_ciphertext), "new@example.com")
         self.assertEqual(prof.email_lookup_hash, email_lookup_hash("new@example.com"))
+        audit = self.session.exec(
+            select(AuditLog).where(
+                AuditLog.target_user_id == emp.id,
+                AuditLog.action == "profile.self_update",
+            )
+        ).one()
+        self.assertTrue(
+            {"preferred_name", "email"}.issubset(
+                set(json.loads(audit.details_json)["fields"])
+            )
+        )
+
+    def test_email_change_requires_current_password_before_any_profile_mutation(self):
+        from app.models import EmployeeProfile
+
+        emp = self._seed_employee(
+            user_id=901,
+            username="missing_password",
+            email="old@example.com",
+            phone="555-0101",
+        )
+        profile = self.session.get(EmployeeProfile, emp.id)
+        old_ciphertext = profile.email_ciphertext
+        old_hash = profile.email_lookup_hash
+        self._login(role="employee", user_id=emp.id, username=emp.username)
+
+        response = self._post_profile(
+            email="attacker@example.com",
+            preferred_name="Tampered Name",
+            phone="555-9999",
+        )
+
+        self.assertIn(response.status_code, (303, 400), response.text)
+        self.assertIn("password", response.headers.get("location", "").lower())
+        self._assert_sensitive_profile_unchanged(
+            user_id=emp.id,
+            email_ciphertext=old_ciphertext,
+            email_lookup_hash=old_hash,
+            display_name=emp.username,
+            phone="555-0101",
+        )
+
+    def test_email_change_rejects_wrong_current_password_before_any_profile_mutation(self):
+        from app.models import EmployeeProfile
+
+        emp = self._seed_employee(
+            user_id=902,
+            username="wrong_password",
+            email="old@example.com",
+            phone="555-0102",
+        )
+        profile = self.session.get(EmployeeProfile, emp.id)
+        old_ciphertext = profile.email_ciphertext
+        old_hash = profile.email_lookup_hash
+        self._login(role="employee", user_id=emp.id, username=emp.username)
+
+        response = self._post_profile(
+            email="attacker@example.com",
+            preferred_name="Tampered Name",
+            phone="555-9999",
+            current_password="WrongPassword1!",
+        )
+
+        self.assertIn(response.status_code, (303, 400), response.text)
+        self.assertIn("password", response.headers.get("location", "").lower())
+        self._assert_sensitive_profile_unchanged(
+            user_id=emp.id,
+            email_ciphertext=old_ciphertext,
+            email_lookup_hash=old_hash,
+            display_name=emp.username,
+            phone="555-0102",
+        )
+
+    def test_clearing_email_requires_current_password(self):
+        from app.models import EmployeeProfile
+
+        emp = self._seed_employee(
+            user_id=903, username="clear_requires_password", email="old@example.com"
+        )
+        profile = self.session.get(EmployeeProfile, emp.id)
+        old_ciphertext = profile.email_ciphertext
+        old_hash = profile.email_lookup_hash
+        self._login(role="employee", user_id=emp.id, username=emp.username)
+
+        response = self._post_profile(email="", preferred_name=emp.username)
+
+        self.assertIn(response.status_code, (303, 400), response.text)
+        self._assert_sensitive_profile_unchanged(
+            user_id=emp.id,
+            email_ciphertext=old_ciphertext,
+            email_lookup_hash=old_hash,
+            display_name=emp.username,
+        )
+
+    def test_employee_can_clear_email_with_current_password(self):
+        from app.models import EmployeeProfile
+
+        emp = self._seed_employee(
+            user_id=904, username="clear_with_password", email="old@example.com"
+        )
+        self._login(role="employee", user_id=emp.id, username=emp.username)
+
+        response = self._post_profile(
+            email="",
+            preferred_name=emp.username,
+            current_password=self._CURRENT_PASSWORD,
+        )
+
+        self.assertIn(response.status_code, (200, 303), response.text)
+        self.session.expire_all()
+        profile = self.session.get(EmployeeProfile, emp.id)
+        self.assertIsNone(profile.email_ciphertext)
+        self.assertIsNone(profile.email_lookup_hash)
+
+    def test_email_change_rejects_non_single_or_malformed_mailboxes_before_mutation(self):
+        from app.models import EmployeeProfile
+
+        emp = self._seed_employee(
+            user_id=905,
+            username="invalid_email",
+            email="old@example.com",
+            phone="555-0105",
+        )
+        profile = self.session.get(EmployeeProfile, emp.id)
+        old_ciphertext = profile.email_ciphertext
+        old_hash = profile.email_lookup_hash
+        self._login(role="employee", user_id=emp.id, username=emp.username)
+
+        invalid_addresses = (
+            "victim@example.com,attacker@example.com",
+            "victim@example.com\r\nBcc: attacker@example.com",
+            "not-an-email",
+            "Attacker <attacker@example.com>",
+        )
+        for invalid_email in invalid_addresses:
+            with self.subTest(invalid_email=repr(invalid_email)):
+                response = self._post_profile(
+                    email=invalid_email,
+                    preferred_name="Tampered Name",
+                    phone="555-9999",
+                    current_password=self._CURRENT_PASSWORD,
+                )
+                self.assertIn(response.status_code, (303, 400), response.text)
+                self.assertIn("email", response.headers.get("location", "").lower())
+                self._assert_sensitive_profile_unchanged(
+                    user_id=emp.id,
+                    email_ciphertext=old_ciphertext,
+                    email_lookup_hash=old_hash,
+                    display_name=emp.username,
+                    phone="555-0105",
+                )
+
+    def test_unchanged_email_allows_ordinary_profile_edit_without_password(self):
+        from app.models import EmployeeProfile, User
+
+        emp = self._seed_employee(
+            user_id=906, username="ordinary_edit", email="same@example.com"
+        )
+        profile = self.session.get(EmployeeProfile, emp.id)
+        old_ciphertext = profile.email_ciphertext
+        self._login(role="employee", user_id=emp.id, username=emp.username)
+
+        response = self._post_profile(
+            email="same@example.com",
+            preferred_name="Ordinary Edit",
+        )
+
+        self.assertIn(response.status_code, (200, 303), response.text)
+        self.session.expire_all()
+        profile = self.session.get(EmployeeProfile, emp.id)
+        db_user = self.session.get(User, emp.id)
+        self.assertEqual(profile.email_ciphertext, old_ciphertext)
+        self.assertEqual(db_user.display_name, "Ordinary Edit")
+
+    def test_profile_form_explains_current_password_for_email_changes(self):
+        emp = self._seed_employee(
+            user_id=907, username="profile_form", email="same@example.com"
+        )
+        self._login(role="employee", user_id=emp.id, username=emp.username)
+
+        response = self.client.get("/team/profile")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('name="current_password"', response.text)
+        self.assertIn("email", response.text.lower())
 
 
 if __name__ == "__main__":

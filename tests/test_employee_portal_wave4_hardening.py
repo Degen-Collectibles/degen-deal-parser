@@ -291,6 +291,174 @@ class ProfileUpdateGateTests(unittest.TestCase, _Harness):
         self.session.expire_all()
         self.assertEqual(self.session.get(User, emp.id).role, "employee")
 
+    def test_manager_with_role_grants_cannot_promote_employee_to_admin(self):
+        from app.models import User
+
+        self._login(role="manager", user_id=2201, username="mgr_no_promote")
+        self._set_role_permission("manager", "admin.employees.edit", True)
+        self._set_role_permission("manager", "admin.permissions.edit", True)
+        emp = self._seed_employee(user_id=2202, username="emp_no_promote")
+
+        r = self.client.post(
+            f"/team/admin/employees/{emp.id}/profile-update",
+            data={"csrf_token": self._csrf(), "role": "admin"},
+            follow_redirects=False,
+        )
+
+        self.assertEqual(r.status_code, 403)
+        self.session.expire_all()
+        self.assertEqual(self.session.get(User, emp.id).role, "employee")
+
+    def test_manager_with_role_grants_can_assign_lower_viewer_role(self):
+        from app.models import User
+
+        self._login(role="manager", user_id=2203, username="mgr_lower_role")
+        self._set_role_permission("manager", "admin.employees.edit", True)
+        self._set_role_permission("manager", "admin.permissions.edit", True)
+        emp = self._seed_employee(user_id=2204, username="emp_lower_role")
+
+        r = self.client.post(
+            f"/team/admin/employees/{emp.id}/profile-update",
+            data={"csrf_token": self._csrf(), "role": "viewer"},
+            follow_redirects=False,
+        )
+
+        self.assertEqual(r.status_code, 303)
+        self.session.expire_all()
+        self.assertEqual(self.session.get(User, emp.id).role, "viewer")
+
+    def test_manager_cannot_demote_peer_or_admin_targets(self):
+        from app.models import User
+
+        self._login(role="manager", user_id=2205, username="mgr_peer_guard")
+        self._set_role_permission("manager", "admin.employees.edit", True)
+        self._set_role_permission("manager", "admin.permissions.edit", True)
+        peer = self._seed_employee(user_id=2206, username="manager_peer")
+        peer.role = "manager"
+        admin = self._seed_employee(user_id=2207, username="admin_target")
+        admin.role = "admin"
+        self.session.add(peer)
+        self.session.add(admin)
+        self.session.commit()
+
+        for target in (peer, admin):
+            with self.subTest(target_role=target.role):
+                r = self.client.post(
+                    f"/team/admin/employees/{target.id}/profile-update",
+                    data={"csrf_token": self._csrf(), "role": "employee"},
+                    follow_redirects=False,
+                )
+                self.assertEqual(r.status_code, 403)
+
+        self.session.expire_all()
+        self.assertEqual(self.session.get(User, peer.id).role, "manager")
+        self.assertEqual(self.session.get(User, admin.id).role, "admin")
+
+    def test_reviewer_cannot_demote_peer_or_admin_targets(self):
+        from app.models import User
+
+        self._login(role="reviewer", user_id=2208, username="reviewer_peer_guard")
+        self._set_role_permission("reviewer", "admin.employees.view", True)
+        self._set_role_permission("reviewer", "admin.employees.edit", True)
+        self._set_role_permission("reviewer", "admin.permissions.edit", True)
+        peer = self._seed_employee(user_id=2209, username="reviewer_peer")
+        peer.role = "reviewer"
+        admin = self._seed_employee(user_id=2210, username="reviewer_admin_target")
+        admin.role = "admin"
+        self.session.add(peer)
+        self.session.add(admin)
+        self.session.commit()
+
+        for target in (peer, admin):
+            with self.subTest(target_role=target.role):
+                r = self.client.post(
+                    f"/team/admin/employees/{target.id}/profile-update",
+                    data={"csrf_token": self._csrf(), "role": "employee"},
+                    follow_redirects=False,
+                )
+                self.assertEqual(r.status_code, 403)
+
+        self.session.expire_all()
+        self.assertEqual(self.session.get(User, peer.id).role, "reviewer")
+        self.assertEqual(self.session.get(User, admin.id).role, "admin")
+
+    def test_role_changes_with_unknown_roles_fail_closed(self):
+        from app.models import User
+
+        self._login(role="manager", user_id=2211, username="mgr_unknown_role")
+        self._set_role_permission("manager", "admin.employees.edit", True)
+        self._set_role_permission("manager", "admin.permissions.edit", True)
+        known_target = self._seed_employee(user_id=2212, username="known_target")
+        unknown_target = self._seed_employee(user_id=2213, username="unknown_target")
+        unknown_target.role = "legacy_role"
+        self.session.add(unknown_target)
+        self.session.commit()
+
+        attempts = (
+            (known_target, "superadmin", "employee"),
+            (unknown_target, "viewer", "legacy_role"),
+        )
+        for target, requested_role, expected_role in attempts:
+            with self.subTest(
+                current_role=target.role,
+                requested_role=requested_role,
+            ):
+                r = self.client.post(
+                    f"/team/admin/employees/{target.id}/profile-update",
+                    data={"csrf_token": self._csrf(), "role": requested_role},
+                    follow_redirects=False,
+                )
+                self.assertEqual(r.status_code, 403)
+                self.session.expire_all()
+                self.assertEqual(self.session.get(User, target.id).role, expected_role)
+
+    def test_delegated_editor_detail_only_offers_lower_roles(self):
+        self._login(role="manager", user_id=2214, username="mgr_role_options")
+        self._set_role_permission("manager", "admin.employees.edit", True)
+        self._set_role_permission("manager", "admin.permissions.edit", True)
+        emp = self._seed_employee(user_id=2215, username="role_option_target")
+
+        r = self.client.get(
+            f"/team/admin/employees/{emp.id}",
+            follow_redirects=False,
+        )
+
+        self.assertEqual(r.status_code, 200)
+        start = r.text.index('<select name="role"')
+        end = r.text.index("</select>", start)
+        role_control = r.text[start:end]
+        self.assertNotIn("disabled", role_control.split(">", 1)[0])
+        self.assertIn('option value="employee"', role_control)
+        self.assertIn('option value="viewer"', role_control)
+        self.assertNotIn('option value="manager"', role_control)
+        self.assertNotIn('option value="reviewer"', role_control)
+        self.assertNotIn('option value="admin"', role_control)
+
+    def test_delegated_editor_detail_disables_roles_for_peer_and_admin_targets(self):
+        self._login(role="manager", user_id=2216, username="mgr_role_controls")
+        self._set_role_permission("manager", "admin.employees.edit", True)
+        self._set_role_permission("manager", "admin.permissions.edit", True)
+        peer = self._seed_employee(user_id=2217, username="peer_role_target")
+        peer.role = "reviewer"
+        admin = self._seed_employee(user_id=2218, username="admin_role_target")
+        admin.role = "admin"
+        self.session.add(peer)
+        self.session.add(admin)
+        self.session.commit()
+
+        for target in (peer, admin):
+            with self.subTest(target_role=target.role):
+                r = self.client.get(
+                    f"/team/admin/employees/{target.id}",
+                    follow_redirects=False,
+                )
+                self.assertEqual(r.status_code, 200)
+                start = r.text.index('<select name="role"')
+                end = r.text.index("</select>", start)
+                role_control = r.text[start:end]
+                self.assertIn("disabled", role_control.split(">", 1)[0])
+                self.assertNotIn("<option", role_control)
+
     def test_self_role_change_rejected_even_with_role_management_permission(self):
         from app.models import User
 

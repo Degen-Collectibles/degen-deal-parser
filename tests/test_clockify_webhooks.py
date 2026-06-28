@@ -86,6 +86,10 @@ class ClockifyWebhookTests(unittest.TestCase):
         self.session.commit()
         return user
 
+    @staticmethod
+    def _webhook_headers(token: str = "clockify-signing-secret") -> dict[str, str]:
+        return {"X-Clockify-Webhook-Token": token}
+
     def test_clockify_webhook_rejects_bad_secret(self):
         response = self.client.post(
             "/webhooks/clockify?secret=wrong",
@@ -112,14 +116,32 @@ class ClockifyWebhookTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
 
-    def test_clockify_webhook_accepts_url_secret_if_signing_header_unknown(self):
+    def test_clockify_webhook_rejects_url_secret_if_signing_header_unknown(self):
         response = self.client.post(
             "/webhooks/clockify?secret=test-clockify-secret",
             headers={"X-Clockify-Webhook-Token": "wrong-signing-secret"},
             json={"event": "NEW_TIMER_STARTED"},
         )
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 403)
+
+    def test_clockify_webhook_rejects_correct_query_secret_without_header(self):
+        response = self.client.post(
+            "/webhooks/clockify?secret=test-clockify-secret",
+            json={"event": "NEW_TIMER_STARTED"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_clockify_webhook_requires_signing_secret_configuration(self):
+        os.environ.pop("CLOCKIFY_WEBHOOK_SIGNING_SECRETS", None)
+        os.environ.pop("CLOCKIFY_WEBHOOK_SIGNING_SECRET", None)
+        response = self.client.post(
+            "/webhooks/clockify?secret=test-clockify-secret",
+            json={"event": "NEW_TIMER_STARTED"},
+        )
+
+        self.assertEqual(response.status_code, 503)
 
     def test_clockify_webhook_rejects_bad_signing_secret_without_url_secret(self):
         response = self.client.post(
@@ -129,6 +151,52 @@ class ClockifyWebhookTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 403)
+
+    def test_clockify_webhook_rejects_legacy_generic_secret_headers(self):
+        for header_name in (
+            "X-Degen-Webhook-Secret",
+            "X-Webhook-Secret",
+            "X-Webhook-Token",
+            "Auth-Token",
+        ):
+            with self.subTest(header_name=header_name):
+                response = self.client.post(
+                    "/webhooks/clockify",
+                    headers={header_name: "clockify-signing-secret"},
+                    json={"event": "NEW_TIMER_STARTED"},
+                )
+                self.assertEqual(response.status_code, 403)
+
+    def test_clockify_webhook_ignores_query_secret_when_valid_header_is_present(self):
+        response = self.client.post(
+            "/webhooks/clockify?secret=leaked-old-value",
+            headers=self._webhook_headers(),
+            json={"id": "event-header-wins", "event": "NEW_TIMER_STARTED"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_clockify_authorization_header_requires_bearer_scheme(self):
+        for authorization in (
+            "second-clockify-signing-secret",
+            "Basic second-clockify-signing-secret",
+            "Bearer",
+            "Bearer   ",
+        ):
+            with self.subTest(authorization=authorization):
+                response = self.client.post(
+                    "/webhooks/clockify",
+                    headers={"Authorization": authorization},
+                    json={"event": "NEW_TIMER_STARTED"},
+                )
+                self.assertEqual(response.status_code, 403)
+
+        accepted = self.client.post(
+            "/webhooks/clockify",
+            headers={"Authorization": "bEaReR second-clockify-signing-secret"},
+            json={"id": "event-mixed-bearer", "event": "NEW_TIMER_STARTED"},
+        )
+        self.assertEqual(accepted.status_code, 200)
 
     def test_clockify_webhook_logs_event_and_caches_time_entry(self):
         from app.models import ClockifyTimeEntry, ClockifyWebhookEvent
@@ -151,7 +219,8 @@ class ClockifyWebhookTests(unittest.TestCase):
         }
 
         response = self.client.post(
-            "/webhooks/clockify?secret=test-clockify-secret",
+            "/webhooks/clockify",
+            headers=self._webhook_headers(),
             json=payload,
         )
 
@@ -185,11 +254,13 @@ class ClockifyWebhookTests(unittest.TestCase):
         }
 
         first = self.client.post(
-            "/webhooks/clockify?secret=test-clockify-secret",
+            "/webhooks/clockify",
+            headers=self._webhook_headers(),
             json=payload,
         )
         second = self.client.post(
-            "/webhooks/clockify?secret=test-clockify-secret",
+            "/webhooks/clockify",
+            headers=self._webhook_headers(),
             json=payload,
         )
 
@@ -221,11 +292,13 @@ class ClockifyWebhookTests(unittest.TestCase):
         }
 
         self.client.post(
-            "/webhooks/clockify?secret=test-clockify-secret",
+            "/webhooks/clockify",
+            headers=self._webhook_headers(),
             json=start_payload,
         )
         response = self.client.post(
-            "/webhooks/clockify?secret=test-clockify-secret",
+            "/webhooks/clockify",
+            headers=self._webhook_headers(),
             json=delete_payload,
         )
 

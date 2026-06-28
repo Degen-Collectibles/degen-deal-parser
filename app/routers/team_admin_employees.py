@@ -30,6 +30,7 @@ from ..auth import (
     generate_password_reset_token,
     has_permission,
     is_draft_user,
+    role_rank,
 )
 from ..csrf import issue_token, require_csrf
 from ..config import get_settings
@@ -116,6 +117,29 @@ def _can_edit_compensation(session: Session, user: User) -> bool:
 
 def _can_manage_employee_roles(session: Session, user: User) -> bool:
     return has_permission(session, user, ROLE_MANAGEMENT_PERMISSION)
+
+
+def _can_transition_employee_role(
+    actor: User,
+    target: User,
+    requested_role: str,
+) -> bool:
+    actor_role = actor.role or ""
+    target_role = target.role or ""
+    if (
+        actor.id == target.id
+        or actor_role not in ROLES
+        or target_role not in ROLES
+        or requested_role not in ROLES
+    ):
+        return False
+    if actor_role == "admin":
+        return True
+    actor_rank = role_rank(actor_role)
+    return (
+        role_rank(target_role) < actor_rank
+        and role_rank(requested_role) < actor_rank
+    )
 
 
 def _normalize_compensation_type(value: str) -> str:
@@ -619,11 +643,16 @@ def _detail_context(
     )
     can_view_labor_financials = _can_view_compensation(session, current)
     can_edit_compensation = _can_edit_compensation(session, current)
-    can_manage_roles = (
-        can_edit_profile
-        and current.id != employee.id
-        and _can_manage_employee_roles(session, current)
+    has_role_management_permission = (
+        can_edit_profile and _can_manage_employee_roles(session, current)
     )
+    assignable_roles = tuple(
+        role
+        for role in ROLES
+        if has_role_management_permission
+        and _can_transition_employee_role(current, employee, role)
+    )
+    can_manage_roles = bool(assignable_roles)
     hourly_rate_cents = (
         _decrypt_hourly_rate_cents(profile) if can_view_labor_financials else None
     )
@@ -636,7 +665,7 @@ def _detail_context(
         "current_user": current,
         "employee": employee,
         "profile": profile,
-        "roles": ROLES,
+        "roles": assignable_roles,
         "compensation_types": COMPENSATION_TYPES,
         "compensation_type_labels": COMPENSATION_TYPE_LABELS,
         "current_compensation_type": _normalize_compensation_type(
@@ -1880,7 +1909,7 @@ async def admin_employee_profile_update(
 
     if can_edit_profile:
         new_role = (role or "").strip().lower()
-        if new_role in ROLES and new_role != employee.role:
+        if new_role and new_role != employee.role:
             if current.id == user_id:
                 return HTMLResponse(
                     "You cannot change your own role.",
@@ -1892,6 +1921,13 @@ async def admin_employee_profile_update(
                     session,
                     current,
                     message="You do not have permission to change employee roles.",
+                )
+            if not _can_transition_employee_role(current, employee, new_role):
+                return _admin_denied_response(
+                    request,
+                    session,
+                    current,
+                    message="You do not have permission to assign that employee role.",
                 )
             employee.role = new_role
             employee.updated_at = now

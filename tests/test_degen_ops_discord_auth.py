@@ -170,6 +170,55 @@ def test_resolver_maps_manager_to_manager_scope_and_channel_can_lower_it():
     assert employee_channel.scope == "employee"
 
 
+def test_resolver_applies_domain_scope_subset_and_denies_unrepresentable_intersection():
+    from app.degen_ops_discord_auth import resolve_discord_author_scope
+    from app.models import EmployeeProfile, User
+
+    with _session() as session:
+        session.add_all(
+            [
+                User(
+                    id=7,
+                    username="domain-manager",
+                    password_hash="x",
+                    password_salt="s",
+                    role="manager",
+                    is_active=True,
+                ),
+                User(
+                    id=8,
+                    username="domain-employee",
+                    password_hash="x",
+                    password_salt="s",
+                    role="employee",
+                    is_active=True,
+                ),
+                EmployeeProfile(user_id=7, discord_user_id="777"),
+                EmployeeProfile(user_id=8, discord_user_id="888"),
+            ]
+        )
+        session.commit()
+
+        manager_result = resolve_discord_author_scope(
+            session=session,
+            discord_user_id="777",
+            channel_id="tiktok-channel",
+            channel_scopes={"tiktok-channel": "tiktok"},
+        )
+        employee_result = resolve_discord_author_scope(
+            session=session,
+            discord_user_id="888",
+            channel_id="tiktok-channel",
+            channel_scopes={"tiktok-channel": "tiktok"},
+        )
+
+    assert manager_result.allowed is True
+    assert manager_result.scope == "tiktok"
+    assert employee_result.allowed is False
+    assert employee_result.scope is None
+    assert employee_result.reason == "incomparable_scopes"
+
+
 def test_resolver_denies_inactive_linked_user():
     from app.degen_ops_discord_auth import resolve_discord_author_scope
     from app.models import EmployeeProfile, User
@@ -197,4 +246,33 @@ def test_resolver_denies_inactive_linked_user():
 
     assert result.allowed is False
     assert result.reason == "linked_user_inactive"
+
+
+def test_resolver_owner_scope_is_restricted_to_mapped_channel_domain():
+    from app.degen_ops_discord_auth import resolve_discord_author_scope
+    from app.models import EmployeeProfile, User
+
+    with _session() as session:
+        session.add(
+            User(
+                id=6,
+                username="owner",
+                password_hash="x",
+                password_salt="s",
+                role="admin",
+                is_active=True,
+            )
+        )
+        session.add(EmployeeProfile(user_id=6, discord_user_id="666"))
+        session.commit()
+
+        result = resolve_discord_author_scope(
+            session=session,
+            discord_user_id="666",
+            channel_id="tiktok-channel",
+            channel_scopes={"tiktok-channel": "tiktok"},
+        )
+
+    assert result.allowed is True
+    assert result.scope == "tiktok"
 
