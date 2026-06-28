@@ -26,18 +26,27 @@ from ..models import (
     GmailReceipt,
     GmailReceiptLineItem,
     GmailSyncRun,
+    PARSE_IGNORED,
     PARSE_REVIEW_REQUIRED,
     Transaction,
     TransactionItem,
     normalize_money_value,
     utcnow,
 )
+from .gmail_authentication import (
+    SORTSWIFT_EXPECTED_MAILBOX,
+    safe_source_trust_reason,
+    source_authentication_from_headers,
+    strict_single_mailbox,
+)
+from .transactions import cleanup_transaction_dependents
 
 GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 GMAIL_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GMAIL_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1"
 DEFAULT_GMAIL_ACCOUNT = "degencollectiblesllc@gmail.com"
+GMAIL_RAW_SOURCE_STORAGE_LIMIT = 12_000
 
 
 class GmailConfigurationError(ValueError):
@@ -440,6 +449,8 @@ def _synthetic_gmail_message(session: Session, receipt: GmailReceipt, *, body_te
         )
     row.author_name = receipt.sender or "Gmail"
     row.content = body_text[:8000]
+    row.is_deleted = False
+    row.deleted_at = None
     row.parse_status = PARSE_REVIEW_REQUIRED
     row.needs_review = True
     row.entry_kind = "buy"
@@ -457,7 +468,12 @@ def _synthetic_gmail_message(session: Session, receipt: GmailReceipt, *, body_te
 
 def _upsert_sortswift_transaction(session: Session, receipt: GmailReceipt, parsed: SortSwiftParseResult, *, body_text: str) -> Transaction:
     source_row = _synthetic_gmail_message(session, receipt, body_text=body_text)
-    tx = session.exec(select(Transaction).where(Transaction.source_external_id == receipt.gmail_message_id)).first()
+    tx = session.exec(
+        select(Transaction).where(
+            Transaction.source_kind == "gmail_sortswift",
+            Transaction.source_external_id == receipt.gmail_message_id,
+        )
+    ).first()
     if tx is None:
         tx = session.exec(select(Transaction).where(Transaction.source_message_id == source_row.id)).first()
     if tx is None:
@@ -485,6 +501,7 @@ def _upsert_sortswift_transaction(session: Session, receipt: GmailReceipt, parse
     warning_text = " ".join(parsed.warnings)
     tx.notes = f"Gmail SortSwift buylist receipt. {warning_text}".strip()
     tx.source_content = body_text[:8000]
+    tx.is_deleted = False
     tx.updated_at = utcnow()
     session.add(tx)
     session.flush()
@@ -504,6 +521,51 @@ def _upsert_sortswift_transaction(session: Session, receipt: GmailReceipt, parse
     return tx
 
 
+def _invalidate_sortswift_transaction(session: Session, receipt: GmailReceipt) -> None:
+    transactions = session.exec(
+        select(Transaction).where(
+            Transaction.source_kind == "gmail_sortswift",
+            Transaction.source_external_id == receipt.gmail_message_id,
+        )
+    ).all()
+
+    source_message_ids: set[int] = set()
+    for transaction in transactions:
+        cleanup_transaction_dependents(
+            session,
+            transaction,
+            bank_unmatch_reason=(
+                "Unmatched because the source Gmail SortSwift transaction is no longer trusted."
+            ),
+        )
+        transaction.is_deleted = True
+        transaction.needs_review = True
+        transaction.parse_status = PARSE_REVIEW_REQUIRED
+        transaction.updated_at = utcnow()
+        session.add(transaction)
+        if transaction.source_message_id:
+            source_message_ids.add(transaction.source_message_id)
+
+    synthetic_id = f"gmail:{receipt.gmail_message_id}"
+    synthetic = session.exec(
+        select(DiscordMessage).where(DiscordMessage.discord_message_id == synthetic_id)
+    ).first()
+    source_messages = [synthetic] if synthetic is not None else []
+    for source_message_id in source_message_ids:
+        source_message = session.get(DiscordMessage, source_message_id)
+        if source_message is not None and source_message.discord_message_id == synthetic_id:
+            source_messages.append(source_message)
+    for source_message in {row.id or id(row): row for row in source_messages}.values():
+        source_message.is_deleted = True
+        source_message.deleted_at = source_message.deleted_at or utcnow()
+        source_message.parse_status = PARSE_IGNORED
+        source_message.needs_review = False
+        session.add(source_message)
+
+    receipt.transaction_id = None
+    session.add(receipt)
+
+
 def upsert_gmail_receipt_from_message(
     session: Session,
     *,
@@ -515,9 +577,17 @@ def upsert_gmail_receipt_from_message(
     html_body: str,
     snippet: str = "",
     connection_id: Optional[int] = None,
+    source_trusted: bool,
+    source_trust_reason: str,
 ) -> GmailReceipt:
     if not gmail_message_id:
         raise ValueError("gmail_message_id is required")
+
+    mailbox = strict_single_mailbox(sender)
+    effective_source_trusted = bool(source_trusted and mailbox == SORTSWIFT_EXPECTED_MAILBOX)
+    effective_trust_reason = safe_source_trust_reason(bool(source_trusted), source_trust_reason)
+    if source_trusted and mailbox != SORTSWIFT_EXPECTED_MAILBOX:
+        effective_trust_reason = "from_malformed" if mailbox is None else "from_unexpected"
 
     body_text = _plain_text_from_html(html_body)
     sortswift = parse_sortswift_buylist_email(f"{subject}\n{sender}\n{html_body}")
@@ -559,7 +629,9 @@ def upsert_gmail_receipt_from_message(
     receipt.tender = tender
     receipt.confidence = "high" if sortswift.is_sortswift and total else "medium" if total else "low"
     receipt.snippet = (snippet or body_text)[:1000]
-    receipt.raw_text = (html_body or body_text)[:12000]
+    source_body = html_body or body_text
+    source_body_truncated = len(source_body) > GMAIL_RAW_SOURCE_STORAGE_LIMIT
+    receipt.raw_text = source_body[:GMAIL_RAW_SOURCE_STORAGE_LIMIT]
     receipt.dedupe_hash = dedupe_hash
     receipt.parsed_json = json.dumps(
         {
@@ -570,6 +642,9 @@ def upsert_gmail_receipt_from_message(
             "actual_tender": tender,
             "quantity_total": sortswift.quantity_total,
             "warnings": sortswift.warnings,
+            "source_body_truncated": source_body_truncated,
+            "source_trusted": effective_source_trusted,
+            "source_trust_reason": effective_trust_reason,
         },
         sort_keys=True,
     )
@@ -599,8 +674,13 @@ def upsert_gmail_receipt_from_message(
             )
         )
 
-    if sortswift.is_sortswift:
+    if sortswift.is_sortswift and effective_source_trusted:
         _upsert_sortswift_transaction(session, receipt, sortswift, body_text=body_text)
+    else:
+        _invalidate_sortswift_transaction(session, receipt)
+        if sortswift.is_sortswift:
+            receipt.status = "quarantined"
+            session.add(receipt)
     return receipt
 
 
@@ -666,12 +746,18 @@ def _gmail_get(access_token: str, path: str, *, params: Optional[dict[str, Any]]
     return data
 
 
-def _message_header(payload: dict[str, Any], name: str) -> str:
+def _message_headers(payload: dict[str, Any], name: str) -> list[str]:
     headers = payload.get("headers") if isinstance(payload.get("headers"), list) else []
-    for header in headers:
-        if str(header.get("name") or "").lower() == name.lower():
-            return str(header.get("value") or "")
-    return ""
+    return [
+        str(header.get("value") or "")
+        for header in headers
+        if isinstance(header, dict) and str(header.get("name") or "").lower() == name.lower()
+    ]
+
+
+def _message_header(payload: dict[str, Any], name: str) -> str:
+    values = _message_headers(payload, name)
+    return values[0] if values else ""
 
 
 def _decode_part_body(part: dict[str, Any]) -> str:
@@ -749,16 +835,19 @@ def sync_gmail_connection(
                 internal_date = message.get("internalDate")
                 if internal_date:
                     received_at = datetime.fromtimestamp(int(internal_date) / 1000, tz=timezone.utc)
+                sender, source_trust = source_authentication_from_headers(payload.get("headers"))
                 receipt = upsert_gmail_receipt_from_message(
                     session,
                     gmail_message_id=message_id,
                     thread_id=str(message.get("threadId") or ""),
-                    sender=_message_header(payload, "From"),
+                    sender=sender,
                     subject=_message_header(payload, "Subject"),
                     received_at=received_at,
                     html_body=_message_html(payload),
                     snippet=str(message.get("snippet") or ""),
                     connection_id=connection.id,
+                    source_trusted=source_trust.trusted,
+                    source_trust_reason=source_trust.reason,
                 )
                 imported += 1
                 if receipt.transaction_id:
