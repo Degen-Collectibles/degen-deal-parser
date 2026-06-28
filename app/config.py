@@ -68,6 +68,7 @@ class Settings(BaseSettings):
     app_name: str = "Degen Live Deal Parser"
     database_url: str = Field(default=f"sqlite:///{DEFAULT_DB.as_posix()}", alias="DATABASE_URL")
     session_secret: str = Field(default=DEFAULT_SESSION_SECRET, alias="SESSION_SECRET")
+    buylist_quote_signing_keys: str = Field(default="", alias="BUYLIST_QUOTE_SIGNING_KEYS")
     public_base_url: str = Field(default="http://127.0.0.1:8000", alias="PUBLIC_BASE_URL")
     session_cookie_name: str = Field(default="degen_session", alias="SESSION_COOKIE_NAME")
     session_https_only: bool = Field(default=True, alias="SESSION_HTTPS_ONLY")
@@ -246,6 +247,7 @@ class Settings(BaseSettings):
     shopify_store_domain: str = Field(default="", alias="SHOPIFY_STORE_DOMAIN")
     tiktok_app_key: str = Field(default="", alias="TIKTOK_APP_KEY")
     tiktok_app_secret: str = Field(default="", alias="TIKTOK_APP_SECRET")
+    tiktok_token_encryption_keys: str = Field(default="", alias="TIKTOK_TOKEN_ENCRYPTION_KEYS")
     tiktok_redirect_uri: str = Field(default="", alias="TIKTOK_REDIRECT_URI")
     tiktok_service_id: str = Field(default="", alias="TIKTOK_SERVICE_ID")
     tiktok_shop_id: str = Field(default="", alias="TIKTOK_SHOP_ID")

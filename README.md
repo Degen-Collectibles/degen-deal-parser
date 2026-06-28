@@ -124,13 +124,45 @@ POKEMON_TCG_API_KEY=<pokemontcg.io key>         # higher rate limits for Pokemon
 ```
 TCGTracking's public API is currently unauthenticated, so no key is needed for variant/condition pricing.
 
+Application-managed signing secrets:
+```
+BUYLIST_QUOTE_SIGNING_KEYS=<dedicated random 32+ character current key[,previous key...]>
+CLOCKIFY_WEBHOOK_SIGNING_SECRETS=<dedicated random current header token[,previous token...]>
+```
+
+These are new random secrets owned by this application, not replacements for
+the Clockify API key or another vendor API key. Do not reuse `SESSION_SECRET`.
+Clockify must send the current token in `Authorization: Bearer ...` or one of
+the supported Clockify webhook token headers; never put it in the callback URL.
+
 TikTok (needed for order sync and streamer dashboard):
 ```
 TIKTOK_APP_KEY=<tiktok partner center app key>
 TIKTOK_APP_SECRET=<tiktok partner center app secret>
+TIKTOK_TOKEN_ENCRYPTION_KEYS=<dedicated random 32+ character current key[,previous key...]>
 TIKTOK_REDIRECT_URI=<oauth callback url>
 TIKTOK_SHOP_CIPHER=<from oauth response>
 ```
+
+`TIKTOK_TOKEN_ENCRYPTION_KEYS` is required before starting against a database
+that contains OAuth tokens. Put the current key first and retain previous keys
+until startup has migrated all rows; never reuse `SESSION_SECRET`.
+
+The first encrypted-token rollout must be a coordinated, non-rolling migration:
+stop every old web/worker process that can refresh TikTok tokens, configure the
+dedicated key, start one upgraded instance and let startup migrate the rows,
+verify the stored token columns use the `enc:v1:` prefix, then start the other
+upgraded instances. Old code can still write plaintext after a new instance has
+migrated a row, so it must not overlap this first rollout. Later key rotations
+may be rolling as long as every running instance already includes encrypted
+token storage and the previous key remains in the ring.
+
+If startup reports a token migration conflict, leave that instance stopped and
+retry after the active refresh finishes; the compare-and-set guard intentionally
+refuses to overwrite the newer token. Encryption does not erase plaintext from
+historical backups, PostgreSQL WAL, or SQLite free pages. After the code rollout,
+revoke and reauthorize both Seller and Creator OAuth grants, apply the backup
+retention policy, and checkpoint/VACUUM any SQLite database that held tokens.
 
 TikTok Live Chat (optional):
 ```
