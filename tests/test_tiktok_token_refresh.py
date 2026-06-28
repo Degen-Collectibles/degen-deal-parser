@@ -1,8 +1,12 @@
 import asyncio
+import io
+import json
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock, patch
 
+import httpx
 from sqlmodel import SQLModel, Session, create_engine
 
 from app.tiktok.tiktok_auth_refresh import refresh_tiktok_auth_if_needed
@@ -295,11 +299,29 @@ class PeriodicLoopTests(unittest.TestCase):
         """The per-iteration try/except swallows errors so the loop can keep running."""
         from app.discord.worker_service import periodic_tiktok_token_refresh_loop
 
-        error_log = []
         sleep_calls = [0]
+        secret = "worker-app-secret-SENTINEL-129a"
+        refresh_token = "worker-refresh-token-SENTINEL-741b"
 
         async def fake_to_thread(fn, *args, **kwargs):
-            raise RuntimeError("simulated network error")
+            request = httpx.Request(
+                "GET",
+                "https://auth.tiktok-shops.com/api/v2/token/refresh",
+                params={"app_secret": secret, "refresh_token": refresh_token},
+            )
+            response = httpx.Response(
+                400,
+                request=request,
+                headers={"x-debug-secret": secret},
+                content=refresh_token,
+            )
+            exc = httpx.HTTPStatusError(
+                f"failed app_secret={secret} refresh_token={refresh_token}",
+                request=request,
+                response=response,
+            )
+            exc.tiktok_error_code = "105001"
+            raise exc
 
         async def fake_sleep(seconds):
             sleep_calls[0] += 1
@@ -314,17 +336,32 @@ class PeriodicLoopTests(unittest.TestCase):
             with patch("app.discord.worker_service.settings") as mock_settings, \
                  patch("asyncio.to_thread", fake_to_thread), \
                  patch("app.discord.worker_service.managed_session"), \
-                 patch("asyncio.sleep", fake_sleep), \
-                 patch("builtins.print", lambda *a, **kw: error_log.append(str(a))):
+                 patch("asyncio.sleep", fake_sleep):
                 mock_settings.tiktok_token_refresh_interval_minutes = 0.001
                 mock_settings.runtime_name = "test"
                 task = asyncio.create_task(periodic_tiktok_token_refresh_loop(stop))
                 await asyncio.wait_for(task, timeout=2.0)
 
         stop = None
-        asyncio.run(run())
-        # The error should have been printed (swallowed, not re-raised)
-        self.assertTrue(any("simulated network error" in str(entry) for entry in error_log))
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            asyncio.run(run())
+
+        output = stdout.getvalue() + stderr.getvalue()
+        self.assertNotIn(secret, output)
+        self.assertNotIn(refresh_token, output)
+        lines = [line for line in stdout.getvalue().splitlines() if line.strip()]
+        self.assertEqual(len(lines), 1)
+        payload = json.loads(lines[0])
+        self.assertEqual(payload["action"], "tiktok.auth.refresh_failed")
+        self.assertEqual(payload["error"], "TikTok token refresh failed")
+        self.assertEqual(payload["error_type"], "HTTPStatusError")
+        self.assertEqual(payload["error_code"], "105001")
+        self.assertEqual(payload["status_code"], 400)
+        self.assertEqual(payload["method"], "GET")
+        self.assertEqual(payload["endpoint_host"], "auth.tiktok-shops.com")
+        self.assertEqual(payload["endpoint_path"], "/api/v2/token/refresh")
 
 
 if __name__ == "__main__":

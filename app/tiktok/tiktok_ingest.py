@@ -13,6 +13,7 @@ import httpx
 from sqlmodel import Session, select
 
 from ..runtime_logging import structured_log_line
+from .token_storage import sanitize_tiktok_token_payload
 
 TIKTOK_DEFAULT_API_BASE_URL = "https://open.tiktokapis.com"
 TIKTOK_TOKEN_GET_PATH = "/v2/oauth/token/"
@@ -693,7 +694,7 @@ def build_tiktok_auth_record(
         "shop_region": str(_pick_first(raw_payload, "shop_region", "shopRegion") or "").strip() or None,
         "seller_name": str(_pick_first(raw_payload, "seller_name", "sellerName", "user_name", "userName") or "").strip() or None,
         "scopes_json": json_dumps(_pick_first(raw_payload, "scopes", "scope", "granted_scopes") or []),
-        "raw_payload": json_dumps(raw_payload),
+        "raw_payload": json_dumps(sanitize_tiktok_token_payload(raw_payload)),
         "source": auth_source,
         "received_at": received_at or datetime.now(timezone.utc),
         "updated_at": received_at or datetime.now(timezone.utc),
@@ -756,7 +757,7 @@ def build_tiktok_creator_auth_record(
         "access_token_expires_at": token_result.access_token_expires_at,
         "refresh_token_expires_at": token_result.refresh_token_expires_at,
         "scopes_json": json_dumps(_pick_first(raw_payload, "scopes", "scope", "granted_scopes") or []),
-        "raw_payload": json_dumps(raw_payload),
+        "raw_payload": json_dumps(sanitize_tiktok_token_payload(raw_payload)),
         "source": source,
         "received_at": timestamp,
         "updated_at": timestamp,

@@ -35,6 +35,7 @@ from app.tiktok.tiktok_ingest import (  # noqa: E402
     TIKTOK_TOKEN_GET_PATH,
     TIKTOK_TOKEN_REFRESH_PATH,
     exchange_tiktok_authorization_code,
+    sanitize_tiktok_token_payload,
     structured_tiktok_log_line,
 )
 
@@ -360,12 +361,39 @@ def build_tiktok_request(
     return f"{url}?{urlencode(query_params)}", body_json, headers
 
 
-def raise_for_tiktok_error(payload: Any, *, path: str) -> None:
+def _normalized_sensitive_values(values: Optional[tuple[str, ...]]) -> tuple[str, ...]:
+    return tuple(sorted({str(value) for value in (values or ()) if str(value)}, key=len, reverse=True))
+
+
+def _safe_error_code(value: Any, *, sensitive_values: tuple[str, ...] = ()) -> Optional[str]:
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    if not text or len(text) > 64 or re.fullmatch(r"[A-Za-z0-9_.-]+", text) is None:
+        return None
+    if any(secret in text for secret in sensitive_values):
+        return None
+    return text
+
+
+def raise_for_tiktok_error(
+    payload: Any,
+    *,
+    path: str,
+    sensitive_values: Optional[tuple[str, ...]] = None,
+) -> None:
     if not isinstance(payload, dict):
         return
     code = payload.get("code")
     if code in (0, "0", None):
         return
+    known_secrets = _normalized_sensitive_values(sensitive_values)
+    if known_secrets:
+        safe_code = _safe_error_code(code, sensitive_values=known_secrets)
+        suffix = f" code {safe_code}" if safe_code else ""
+        exc = RuntimeError(f"{path}: TikTok API error{suffix}")
+        exc.tiktok_error_code = safe_code  # type: ignore[attr-defined]
+        raise exc
     message = payload.get("message") or payload.get("msg") or "TikTok API error"
     raise RuntimeError(f"{path}: {code} {message}")
 
@@ -384,19 +412,88 @@ def tiktok_affiliate_order_error_is_scope_missing(exc: BaseException) -> bool:
     )
 
 
-def redact_http_log_text(text: str, max_len: int = 500) -> str:
+def redact_http_log_text(
+    text: str,
+    max_len: int = 500,
+    *,
+    sensitive_values: Optional[tuple[str, ...]] = None,
+) -> str:
     """Truncate and redact tokens from text logged on HTTP errors."""
     if not text:
         return "(empty)"
+    redacted = text
+    for secret in _normalized_sensitive_values(sensitive_values):
+        redacted = redacted.replace(secret, "[REDACTED]")
     redacted = re.sub(
-        r"(access_token|refresh_token|auth_code|Authorization)[=:]\s*[^\s&\"']+",
+        r"(access_token|refresh_token|auth_code|app_secret|client_secret|Authorization)[=:]\s*[^\s&\"']+",
         r"\1=REDACTED",
-        text,
+        redacted,
         flags=re.IGNORECASE,
     )
     if len(redacted) > max_len:
         return redacted[:max_len] + "…"
     return redacted
+
+
+def _safe_request_for_diagnostics(*, method: str, url: str | httpx.URL) -> httpx.Request:
+    parsed = httpx.URL(url)
+    safe_url = parsed.copy_with(query=None, fragment=None)
+    return httpx.Request(method.upper(), safe_url)
+
+
+def _safe_response_error_code(
+    response: httpx.Response,
+    *,
+    sensitive_values: tuple[str, ...],
+) -> Optional[str]:
+    try:
+        payload = response.json()
+    except (ValueError, UnicodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return _safe_error_code(
+        payload.get("code") if payload.get("code") not in (None, "") else payload.get("error"),
+        sensitive_values=sensitive_values,
+    )
+
+
+def _sanitized_http_status_error(
+    response: httpx.Response,
+    *,
+    method: str,
+    url: str,
+    sensitive_values: tuple[str, ...],
+) -> httpx.HTTPStatusError:
+    safe_request = _safe_request_for_diagnostics(method=method, url=url)
+    safe_response = httpx.Response(response.status_code, request=safe_request)
+    safe_code = _safe_response_error_code(response, sensitive_values=sensitive_values)
+    code_suffix = f" code={safe_code}" if safe_code else ""
+    exc = httpx.HTTPStatusError(
+        f"TikTok HTTP {response.status_code}{code_suffix} for "
+        f"{safe_request.method} {safe_request.url.host}{safe_request.url.path}",
+        request=safe_request,
+        response=safe_response,
+    )
+    exc.tiktok_error_code = safe_code  # type: ignore[attr-defined]
+    return exc
+
+
+def _sanitized_transport_error(
+    exc: httpx.TransportError,
+    *,
+    method: str,
+    url: str,
+) -> httpx.TransportError:
+    safe_request = _safe_request_for_diagnostics(method=method, url=url)
+    message = (
+        f"TikTok transport error ({type(exc).__name__}) for "
+        f"{safe_request.method} {safe_request.url.host}{safe_request.url.path}"
+    )
+    try:
+        return type(exc)(message, request=safe_request)
+    except TypeError:
+        return httpx.TransportError(message, request=safe_request)
 
 
 def request_json(
@@ -408,7 +505,9 @@ def request_json(
     form_body: Optional[dict[str, Any]] = None,
     raw_body: Optional[str] = None,
     extra_headers: Optional[dict[str, str]] = None,
+    sensitive_values: Optional[tuple[str, ...]] = None,
 ) -> dict[str, Any]:
+    known_secrets = _normalized_sensitive_values(sensitive_values)
     request_kwargs: dict[str, Any] = {}
     headers: dict[str, str] = dict(extra_headers) if extra_headers else {}
     if raw_body is not None:
@@ -424,6 +523,7 @@ def request_json(
     max_attempts = 3
     backoff = 0.5
     for attempt in range(1, max_attempts + 1):
+        sanitized_error: Optional[BaseException] = None
         try:
             response = client.request(method, url, **request_kwargs)
             if response.status_code == 429 or response.status_code >= 500:
@@ -439,6 +539,30 @@ def request_json(
                     backoff *= 2
                     continue
             if not response.is_success:
+                if known_secrets:
+                    safe_request = _safe_request_for_diagnostics(method=method, url=url)
+                    safe_code = _safe_response_error_code(response, sensitive_values=known_secrets)
+                    print(
+                        structured_log_line(
+                            runtime="tiktok_backfill",
+                            action="tiktok.auth.http_failed",
+                            success=False,
+                            error="TikTok authentication request failed",
+                            error_type="HTTPStatusError",
+                            error_code=safe_code,
+                            method=safe_request.method,
+                            status_code=response.status_code,
+                            endpoint_host=safe_request.url.host,
+                            endpoint_path=safe_request.url.path,
+                        ),
+                        file=sys.stderr,
+                    )
+                    raise _sanitized_http_status_error(
+                        response,
+                        method=method,
+                        url=url,
+                        sensitive_values=known_secrets,
+                    ) from None
                 body_text = redact_http_log_text(response.text or "")
                 print(
                     f"[tiktok_backfill] HTTP {response.status_code} response body: {body_text}",
@@ -451,16 +575,35 @@ def request_json(
                     request=safe_request,
                     response=response,
                 )
-            payload = response.json()
-            if not isinstance(payload, dict):
-                raise RuntimeError(f"Unexpected TikTok response payload type: {type(payload).__name__}")
-            return payload
-        except (httpx.TimeoutException, httpx.TransportError):
+            decode_error: Optional[RuntimeError] = None
+            try:
+                payload = response.json()
+            except (ValueError, UnicodeError) as exc:
+                if known_secrets:
+                    safe_request = _safe_request_for_diagnostics(method=method, url=url)
+                    decode_error = RuntimeError(
+                        f"TikTok response decode error ({type(exc).__name__}) for "
+                        f"{safe_request.method} {safe_request.url.host}{safe_request.url.path}"
+                    )
+                else:
+                    raise
+            if decode_error is not None:
+                sanitized_error = decode_error
+            else:
+                if not isinstance(payload, dict):
+                    raise RuntimeError(f"Unexpected TikTok response payload type: {type(payload).__name__}")
+                return payload
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
             if attempt < max_attempts:
                 time.sleep(backoff)
                 backoff *= 2
                 continue
-            raise
+            if known_secrets:
+                sanitized_error = _sanitized_transport_error(exc, method=method, url=url)
+            else:
+                raise
+        if sanitized_error is not None:
+            raise sanitized_error
     raise RuntimeError("request_json: exhausted retries without response")
 
 
@@ -499,8 +642,18 @@ def refresh_access_token(
         "grant_type": "refresh_token",
     }
     url = f"{SHOP_AUTH_BASE_URL}{SHOP_TOKEN_REFRESH_PATH}?{urlencode(params)}"
-    payload = request_json(client, method="GET", url=url)
-    raise_for_tiktok_error(payload, path=SHOP_TOKEN_REFRESH_PATH)
+    sensitive_values = (app_secret, refresh_token)
+    payload = request_json(
+        client,
+        method="GET",
+        url=url,
+        sensitive_values=sensitive_values,
+    )
+    raise_for_tiktok_error(
+        payload,
+        path=SHOP_TOKEN_REFRESH_PATH,
+        sensitive_values=sensitive_values,
+    )
     return payload
 
 
@@ -843,7 +996,7 @@ def upsert_tiktok_auth(
         "scopes_json": json_dumps(
             _first_present(data, ("scopes", "scope", "granted_scopes")) or []
         ),
-        "raw_payload": json_dumps(payload),
+        "raw_payload": json_dumps(sanitize_tiktok_token_payload(payload)),
         "source": source,
         "created_at": utcnow(),
         "updated_at": utcnow(),
