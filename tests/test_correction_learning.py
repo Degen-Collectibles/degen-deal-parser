@@ -4,6 +4,7 @@ import shutil
 import unittest
 import uuid
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,8 +17,9 @@ from app.discord.corrections import (
     extract_learning_features,
     get_learned_rule_match,
     infer_pattern_type,
+    save_review_correction,
 )
-from app.models import ReviewCorrection
+from app.models import DiscordMessage, PARSE_PARSED, ReviewCorrection
 from app.discord.parser import parse_message
 
 
@@ -72,6 +74,40 @@ class CorrectionLearningTests(unittest.TestCase):
         self.assertEqual(diffs["deal_type"]["after"], "sell")
         self.assertEqual(diffs["payment_method"]["after"], "zelle")
         self.assertFalse(diffs["needs_review"]["after"])
+
+    def test_huge_payment_token_does_not_block_saving_finite_manual_correction(self):
+        with Session(self.engine) as session:
+            row = DiscordMessage(
+                discord_message_id="huge-payment-correction",
+                channel_id="financials",
+                channel_name="financials",
+                author_name="attacker",
+                content=("9" * 400) + " cash",
+                created_at=datetime.now(timezone.utc),
+                parse_status=PARSE_PARSED,
+                deal_type="sell",
+                amount=10.0,
+                payment_method="cash",
+                entry_kind="sale",
+                expense_category="inventory",
+                confidence=0.99,
+                needs_review=False,
+            )
+            session.add(row)
+            session.commit()
+
+            correction = save_review_correction(
+                session,
+                row,
+                parsed_before={"amount": None, "confidence": None},
+            )
+            session.commit()
+
+            self.assertIsNotNone(correction)
+            features = json.loads(correction.features_json)
+            self.assertIsNone(features["payment_amount"])
+            self.assertFalse(features["payment_only_text"])
+            json.dumps(features, allow_nan=False)
 
     def test_applies_trade_in_out_learned_rule(self):
         correction = ReviewCorrection(

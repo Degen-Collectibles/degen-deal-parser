@@ -37,6 +37,12 @@ from ..ai_client import (
     has_tiebreaker_key,
 )
 from ..config import get_settings
+from ..image_security import (
+    ImageDecodeBusy,
+    ImageSecurityError,
+    image_decode_slot,
+    validate_image_base64,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2978,28 +2984,35 @@ async def _run_ximilar_pipeline(
         return d
 
     try:
-        raw_bytes = base64.b64decode(image_b64)
-    except Exception:
+        validated_image = validate_image_base64(image_b64)
+    except ImageSecurityError as exc:
         return _early(ScanResult(
             status="ERROR",
-            error="Invalid base64 image data",
+            error=exc.public_message,
             processing_time_ms=_elapsed(t_start),
         ))
+    raw_bytes = validated_image.decoded_bytes
+    image_b64 = validated_image.encoded_b64
 
     # Resize for Ximilar: 640px max dimension is plenty for visual recognition
     # and dramatically reduces upload time from phone -> server -> Ximilar.
     t_stage = time.monotonic()
     try:
         from PIL import Image
-        img = Image.open(io.BytesIO(raw_bytes))
-        max_dim = max(img.size)
-        if max_dim > 640:
-            scale = 640 / max_dim
-            new_size = (int(img.size[0] * scale), int(img.size[1] * scale))
-            img = img.resize(new_size, Image.LANCZOS)
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=80)
-        send_b64 = base64.b64encode(buf.getvalue()).decode()
+
+        with image_decode_slot():
+            with Image.open(io.BytesIO(raw_bytes)) as source:
+                img = source.copy()
+            max_dim = max(img.size)
+            if max_dim > 640:
+                scale = 640 / max_dim
+                new_size = (int(img.size[0] * scale), int(img.size[1] * scale))
+                img = img.resize(new_size, Image.LANCZOS)
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=80)
+            send_b64 = base64.b64encode(buf.getvalue()).decode()
+    except ImageDecodeBusy:
+        raise
     except Exception:
         send_b64 = image_b64
     debug_info["stage_times_ms"]["resize"] = _elapsed(t_stage)
@@ -3258,27 +3271,34 @@ async def _run_vision_pipeline(
     # collector numbers and set symbols while keeping the payload reasonable.
     t_stage = time.monotonic()
     try:
-        raw_bytes = base64.b64decode(image_b64)
-    except Exception:
+        validated_image = validate_image_base64(image_b64)
+    except ImageSecurityError as exc:
         return _early(ScanResult(
             status="ERROR",
-            error="Invalid base64 image data",
+            error=exc.public_message,
             processing_time_ms=_elapsed(t_start),
         ))
+    raw_bytes = validated_image.decoded_bytes
+    image_b64 = validated_image.encoded_b64
 
     try:
         from PIL import Image
-        img = Image.open(io.BytesIO(raw_bytes))
-        if img.mode not in ("RGB", "L"):
-            img = img.convert("RGB")
-        max_dim = max(img.size)
-        if max_dim > 1024:
-            scale = 1024 / max_dim
-            new_size = (int(img.size[0] * scale), int(img.size[1] * scale))
-            img = img.resize(new_size, Image.LANCZOS)
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=85)
-        send_b64 = base64.b64encode(buf.getvalue()).decode()
+
+        with image_decode_slot():
+            with Image.open(io.BytesIO(raw_bytes)) as source:
+                img = source.copy()
+            if img.mode not in ("RGB", "L"):
+                img = img.convert("RGB")
+            max_dim = max(img.size)
+            if max_dim > 1024:
+                scale = 1024 / max_dim
+                new_size = (int(img.size[0] * scale), int(img.size[1] * scale))
+                img = img.resize(new_size, Image.LANCZOS)
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=85)
+            send_b64 = base64.b64encode(buf.getvalue()).decode()
+    except ImageDecodeBusy:
+        raise
     except Exception as exc:
         logger.warning("[pokemon_scanner] Vision pipeline image resize failed, sending raw: %s", exc)
         send_b64 = image_b64
@@ -3622,19 +3642,28 @@ async def _run_tiebreaker(
     try:
         # Resize identically to the primary vision pipeline so the two models
         # see the same input and we can trust a majority vote.
-        raw_bytes = base64.b64decode(image_b64)
+        validated_image = validate_image_base64(image_b64)
+        raw_bytes = validated_image.decoded_bytes
+        image_b64 = validated_image.encoded_b64
         from PIL import Image
-        img = Image.open(io.BytesIO(raw_bytes))
-        if img.mode not in ("RGB", "L"):
-            img = img.convert("RGB")
-        max_dim = max(img.size)
-        if max_dim > 1024:
-            scale = 1024 / max_dim
-            new_size = (int(img.size[0] * scale), int(img.size[1] * scale))
-            img = img.resize(new_size, Image.LANCZOS)
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=85)
-        send_b64 = base64.b64encode(buf.getvalue()).decode()
+
+        with image_decode_slot():
+            with Image.open(io.BytesIO(raw_bytes)) as source:
+                img = source.copy()
+            if img.mode not in ("RGB", "L"):
+                img = img.convert("RGB")
+            max_dim = max(img.size)
+            if max_dim > 1024:
+                scale = 1024 / max_dim
+                new_size = (int(img.size[0] * scale), int(img.size[1] * scale))
+                img = img.resize(new_size, Image.LANCZOS)
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=85)
+            send_b64 = base64.b64encode(buf.getvalue()).decode()
+    except ImageDecodeBusy:
+        raise
+    except ImageSecurityError:
+        return None
     except Exception as exc:
         logger.warning("[pokemon_scanner] Tiebreaker image preprocess failed: %s", exc)
         send_b64 = image_b64
@@ -4062,6 +4091,9 @@ async def _run_balanced_pipeline(image_b64: str, category_id: str) -> dict[str, 
             model_name=get_gemini_flash_model(), engine_label="vision_gemini_flash",
         )
         results = await asyncio.gather(haiku_task, gemini_task, return_exceptions=True)
+        for item in results:
+            if isinstance(item, ImageDecodeBusy):
+                raise item
         haiku_result = results[0] if not isinstance(results[0], Exception) else None
         gemini_result = results[1] if not isinstance(results[1], Exception) else None
         winner, summary = _vote_three_way(None, haiku_result, gemini_result)
@@ -4079,6 +4111,8 @@ async def _run_balanced_pipeline(image_b64: str, category_id: str) -> dict[str, 
         ximilar_result = await _run_ximilar_pipeline(
             image_b64, settings.ximilar_api_token, category_id,
         )
+    except ImageDecodeBusy:
+        raise
     except Exception as exc:
         logger.error("[pokemon_scanner] Balanced: Ximilar pipeline failed: %s", exc)
         if not has_vision:
@@ -4096,6 +4130,9 @@ async def _run_balanced_pipeline(image_b64: str, category_id: str) -> dict[str, 
             model_name=get_gemini_flash_model(), engine_label="vision_gemini_flash",
         )
         results = await asyncio.gather(haiku_task, gemini_task, return_exceptions=True)
+        for item in results:
+            if isinstance(item, ImageDecodeBusy):
+                raise item
         haiku_result = results[0] if not isinstance(results[0], Exception) else None
         gemini_result = results[1] if not isinstance(results[1], Exception) else None
         winner, summary = _vote_three_way(None, haiku_result, gemini_result)
@@ -4765,6 +4802,8 @@ async def _run_fast_pipeline(image_b64: str, category_id: str) -> dict[str, Any]
         result = await _run_ximilar_pipeline(
             image_b64, settings.ximilar_api_token, category_id,
         )
+    except ImageDecodeBusy:
+        raise
     except Exception as exc:
         logger.error("[pokemon_scanner] Fast: Ximilar pipeline failed: %s", exc)
         return _stamp_game_for(asdict(ScanResult(
@@ -4819,6 +4858,8 @@ async def _run_accurate_pipeline(image_b64: str, category_id: str) -> dict[str, 
     # Run Ximilar first (fast: 2-4s)
     try:
         ximilar_result = await _run_ximilar_pipeline(image_b64, settings.ximilar_api_token, category_id)
+    except ImageDecodeBusy:
+        raise
     except Exception as exc:
         logger.error("[pokemon_scanner] Ximilar pipeline failed: %s", exc)
         if has_vision:
@@ -4890,6 +4931,8 @@ async def _run_accurate_pipeline(image_b64: str, category_id: str) -> dict[str, 
         )
         try:
             vision_result = await _run_vision_pipeline(image_b64, category_id)
+        except ImageDecodeBusy:
+            raise
         except Exception as exc:
             logger.error("[pokemon_scanner] Vision pipeline failed in LOW tier: %s", exc)
             vision_result = None

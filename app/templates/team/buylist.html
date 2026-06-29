@@ -901,6 +901,7 @@
     const variant = cardNode.querySelector('.js-card-variant').value;
     const condition = cardNode.querySelector('.js-card-condition').value;
     const item = {
+      candidate_token: card.candidate_token,
       id: card.id,
       product_id: card.product_id || card.id,
       item_type: card.item_type || 'card',
@@ -939,6 +940,16 @@
     repriceCart();
   }
 
+  function quoteRequestItems() {
+    return state.items.map(line => ({
+      candidate_token: line.candidate_token,
+      quantity: Math.max(1, Math.min(999, Number(line.quantity || 1))),
+      condition: line.condition,
+      language: line.language,
+      variant: line.variant
+    }));
+  }
+
   async function repriceCart() {
     if (!state.items.length) {
       state.quote = { cash: 0, trade: 0, quantity: 0, items: 0 };
@@ -949,7 +960,7 @@
       const res = await fetch('/team/buylist/quote', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-        body: JSON.stringify({ items: state.items })
+        body: JSON.stringify({ items: quoteRequestItems() })
       });
       const data = await res.json();
       if (!data.ok) throw new Error(data.error || 'Quote failed');
@@ -1048,7 +1059,7 @@
       customer_contact: document.getElementById('buylistContact').value.trim(),
       notes: document.getElementById('buylistNotes').value.trim(),
       payment_view: state.payment,
-      items: state.items
+      items: quoteRequestItems()
     };
     try {
       const res = await fetch('/team/buylist/save', {

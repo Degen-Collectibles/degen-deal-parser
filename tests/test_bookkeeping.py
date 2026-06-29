@@ -7,6 +7,7 @@ import os
 import unittest
 from datetime import datetime, timezone
 from io import StringIO
+from urllib.parse import unquote, unquote_plus
 from unittest.mock import patch
 
 from cryptography.fernet import Fernet
@@ -14,7 +15,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec, utils
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
-from sqlmodel import SQLModel, Session, create_engine
+from sqlmodel import SQLModel, Session, create_engine, select
 
 
 def _set_test_env_default(key: str, value: str) -> None:
@@ -38,6 +39,7 @@ from app.discord.bookkeeping import (
     read_tabular_rows,
     reconcile_bookkeeping_import,
 )
+from app.discord.gmail_financials import GMAIL_RAW_SOURCE_STORAGE_LIMIT
 import app.cache as cache_module
 from app.cache import cache_get, cache_set
 from app.models import (
@@ -46,7 +48,9 @@ from app.models import (
     BookkeepingEntry,
     BookkeepingImport,
     DiscordMessage,
+    GmailReceipt,
     Transaction,
+    TransactionItem,
     PARSE_PARSED,
 )
 
@@ -107,6 +111,35 @@ def _plaid_verification_jwt(
     r, s = utils.decode_dss_signature(der_signature)
     raw_signature = r.to_bytes(32, "big") + s.to_bytes(32, "big")
     return f"{signing_input.decode('ascii')}.{_b64url(raw_signature)}"
+
+
+SORTSWIFT_REPARSE_HTML = """
+<html><body>
+<h1>SortSwift Buylist Confirmation</h1>
+<table>
+<tr><th>Name</th><th>Set</th><th>Qty</th><th>Cash</th><th>Credit</th></tr>
+<tr><td>Pikachu</td><td>Base</td><td>1</td><td>USD $10.00</td><td></td></tr>
+<tr><td>Totals:</td><td></td><td>1</td><td>USD $10.00</td><td>USD $0.00</td></tr>
+</table>
+</body></html>
+"""
+
+
+def _long_sortswift_reparse_html():
+    table = """
+    <table>
+    <tr><th>Name</th><th>Set</th><th>Qty</th><th>Cash</th><th>Credit</th></tr>
+    <tr><td>Charizard</td><td>Base</td><td>2</td><td>USD $25.00</td><td></td></tr>
+    <tr><td>Totals:</td><td></td><td>2</td><td>USD $25.00</td><td>USD $0.00</td></tr>
+    </table>
+    """
+    return (
+        "<html><body><h1>SortSwift Buylist Confirmation</h1><p>"
+        + ("x" * GMAIL_RAW_SOURCE_STORAGE_LIMIT)
+        + "</p>"
+        + table
+        + "</body></html>"
+    )
 
 
 class ReadTabularRowsTests(unittest.TestCase):
@@ -548,6 +581,353 @@ class PlaidWebhookVerificationTests(unittest.TestCase):
             self.assertTrue(exported_row["review_note"].startswith("'@"))
         finally:
             engine.dispose()
+
+
+class GmailReceiptReparseRouteTests(unittest.TestCase):
+    def setUp(self):
+        self.engine = _fresh_engine()
+
+    def tearDown(self):
+        self.engine.dispose()
+
+    def _seed_receipt(self, session, *, message_id, trusted, reason, html_body=SORTSWIFT_REPARSE_HTML):
+        from app.discord.gmail_financials import upsert_gmail_receipt_from_message
+
+        receipt = upsert_gmail_receipt_from_message(
+            session,
+            gmail_message_id=message_id,
+            thread_id=f"thread-{message_id}",
+            sender="SortSwift Buylist <no-reply@mail.sortswift.com>",
+            subject="Buylist Confirmation - Degen Collectibles",
+            received_at=_dt(2026, 5, 19),
+            html_body=html_body,
+            snippet="Buylist Confirmation - Degen Collectibles",
+            source_trusted=trusted,
+            source_trust_reason=reason,
+        )
+        session.commit()
+        session.refresh(receipt)
+        return receipt
+
+    def test_reparse_preserves_persisted_verified_trust_and_live_transaction(self):
+        from app.routers.bookkeeping import gmail_receipt_reparse_form
+
+        with Session(self.engine) as session:
+            receipt = self._seed_receipt(
+                session,
+                message_id="gmail-route-reparse-trusted",
+                trusted=True,
+                reason="trusted_dmarc_aligned",
+            )
+            transaction_id = receipt.transaction_id
+
+            with patch("app.routers.bookkeeping.require_role_response", return_value=None):
+                response = gmail_receipt_reparse_form(
+                    request=object(),
+                    receipt_id=receipt.id or 0,
+                    session=session,
+                )
+
+            session.expire_all()
+            reparsed = session.get(GmailReceipt, receipt.id)
+            transaction = session.get(Transaction, transaction_id)
+
+        self.assertEqual(response.status_code, 303)
+        self.assertIn("success=Reparsed+Gmail+receipt", response.headers["location"])
+        self.assertIsNotNone(reparsed)
+        self.assertEqual(reparsed.status, "transaction_created")
+        self.assertEqual(reparsed.transaction_id, transaction_id)
+        self.assertIsNotNone(transaction)
+        self.assertFalse(transaction.is_deleted)
+
+    def test_reparse_keeps_persisted_untrusted_receipt_quarantined(self):
+        from app.routers.bookkeeping import gmail_receipt_reparse_form
+
+        with Session(self.engine) as session:
+            receipt = self._seed_receipt(
+                session,
+                message_id="gmail-route-reparse-quarantined",
+                trusted=False,
+                reason="auth_no_aligned_pass",
+            )
+
+            with patch("app.routers.bookkeeping.require_role_response", return_value=None):
+                response = gmail_receipt_reparse_form(
+                    request=object(),
+                    receipt_id=receipt.id or 0,
+                    session=session,
+                )
+
+            session.expire_all()
+            reparsed = session.get(GmailReceipt, receipt.id)
+            transactions = list(session.exec(select(Transaction)).all())
+
+        self.assertEqual(response.status_code, 303)
+        self.assertIsNotNone(reparsed)
+        self.assertEqual(reparsed.status, "quarantined")
+        self.assertIsNone(reparsed.transaction_id)
+        self.assertEqual(transactions, [])
+
+    def test_reparse_refuses_truncated_trusted_source_without_mutating_transaction(self):
+        from app.routers.bookkeeping import gmail_receipt_reparse_form
+
+        with Session(self.engine) as session:
+            receipt = self._seed_receipt(
+                session,
+                message_id="gmail-route-reparse-truncated",
+                trusted=True,
+                reason="trusted_dmarc_aligned",
+                html_body=_long_sortswift_reparse_html(),
+            )
+            transaction_id = receipt.transaction_id
+            transaction = session.get(Transaction, transaction_id)
+            before_amount = transaction.amount
+            before_status = receipt.status
+            before_link = receipt.transaction_id
+            before_transaction_updated_at = transaction.updated_at
+            before_receipt_updated_at = receipt.updated_at
+            before_items = [
+                item.item_name
+                for item in session.exec(
+                    select(TransactionItem).where(TransactionItem.transaction_id == transaction_id)
+                ).all()
+            ]
+
+            with patch("app.routers.bookkeeping.require_role_response", return_value=None):
+                response = gmail_receipt_reparse_form(
+                    request=object(),
+                    receipt_id=receipt.id or 0,
+                    session=session,
+                )
+
+            session.expire_all()
+            reparsed = session.get(GmailReceipt, receipt.id)
+            transaction = session.get(Transaction, transaction_id)
+            after_items = [
+                item.item_name
+                for item in session.exec(
+                    select(TransactionItem).where(TransactionItem.transaction_id == transaction_id)
+                ).all()
+            ]
+
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(before_amount, 25.0)
+        self.assertEqual(before_items, ["Charizard (Base)"])
+        self.assertEqual(transaction.amount, before_amount)
+        self.assertEqual(after_items, before_items)
+        self.assertEqual(reparsed.status, before_status)
+        self.assertEqual(reparsed.transaction_id, before_link)
+        self.assertEqual(transaction.updated_at, before_transaction_updated_at)
+        self.assertEqual(reparsed.updated_at, before_receipt_updated_at)
+        self.assertFalse(transaction.is_deleted)
+        self.assertIn("truncated", unquote(response.headers["location"]).lower())
+
+    def test_reparse_refuses_legacy_source_at_storage_limit_without_mutation(self):
+        from app.routers.bookkeeping import gmail_receipt_reparse_form
+
+        with Session(self.engine) as session:
+            receipt = self._seed_receipt(
+                session,
+                message_id="gmail-route-reparse-legacy-limit",
+                trusted=True,
+                reason="trusted_dmarc_aligned",
+            )
+            parsed = json.loads(receipt.parsed_json)
+            parsed.pop("source_body_truncated", None)
+            receipt.parsed_json = json.dumps(parsed, sort_keys=True)
+            receipt.raw_text = (
+                SORTSWIFT_REPARSE_HTML + (" " * GMAIL_RAW_SOURCE_STORAGE_LIMIT)
+            )[:GMAIL_RAW_SOURCE_STORAGE_LIMIT]
+            session.add(receipt)
+            session.commit()
+            transaction_id = receipt.transaction_id
+            transaction = session.get(Transaction, transaction_id)
+            before_amount = transaction.amount
+            before_link = receipt.transaction_id
+            before_transaction_updated_at = transaction.updated_at
+            before_receipt_updated_at = receipt.updated_at
+
+            with patch("app.routers.bookkeeping.require_role_response", return_value=None):
+                response = gmail_receipt_reparse_form(
+                    request=object(),
+                    receipt_id=receipt.id or 0,
+                    session=session,
+                )
+
+            session.expire_all()
+            reparsed = session.get(GmailReceipt, receipt.id)
+            transaction = session.get(Transaction, transaction_id)
+
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(transaction.amount, before_amount)
+        self.assertEqual(reparsed.transaction_id, before_link)
+        self.assertEqual(transaction.updated_at, before_transaction_updated_at)
+        self.assertEqual(reparsed.updated_at, before_receipt_updated_at)
+        self.assertIn("truncated", unquote(response.headers["location"]).lower())
+
+    def test_reparse_refuses_unknown_legacy_trust_without_mutating_financial_state(self):
+        from app.routers.bookkeeping import gmail_receipt_reparse_form
+
+        with Session(self.engine) as session:
+            receipt = self._seed_receipt(
+                session,
+                message_id="gmail-route-reparse-unknown-trust",
+                trusted=True,
+                reason="trusted_dmarc_aligned",
+            )
+            transaction_id = receipt.transaction_id or 0
+            transaction = session.get(Transaction, transaction_id)
+            source = session.get(DiscordMessage, transaction.source_message_id)
+
+            bookkeeping_import = BookkeepingImport(show_label="Legacy Gmail trust")
+            bank_import = BankStatementImport(
+                label="Legacy Gmail trust",
+                account_label="Chase",
+                account_type="checking",
+            )
+            session.add(bookkeeping_import)
+            session.add(bank_import)
+            session.flush()
+            bookkeeping_entry = BookkeepingEntry(
+                import_id=bookkeeping_import.id or 0,
+                row_index=1,
+                matched_transaction_id=transaction_id,
+                match_status="matched_strong",
+            )
+            bank_transaction = BankTransaction(
+                import_id=bank_import.id or 0,
+                row_index=1,
+                account_label="Chase",
+                account_type="checking",
+                description="Legacy Gmail match",
+                amount=-10.0,
+                classification="logged_in_discord_strong",
+                confidence="high",
+                matched_transaction_id=transaction_id,
+                matched_source_message_id=source.id,
+                matched_platform="gmail",
+                match_reason="Original Gmail match",
+            )
+            session.add(bookkeeping_entry)
+            session.add(bank_transaction)
+            parsed = json.loads(receipt.parsed_json)
+            parsed.pop("source_trusted", None)
+            parsed.pop("source_trust_reason", None)
+            receipt.parsed_json = json.dumps(parsed, sort_keys=True)
+            session.add(receipt)
+            session.commit()
+
+            receipt_id = receipt.id or 0
+            source_id = source.id or 0
+            bookkeeping_entry_id = bookkeeping_entry.id or 0
+            bank_transaction_id = bank_transaction.id or 0
+            before_receipt = (
+                receipt.status,
+                receipt.transaction_id,
+                receipt.updated_at,
+                receipt.parsed_json,
+            )
+            before_transaction = (
+                transaction.amount,
+                transaction.is_deleted,
+                transaction.parse_status,
+                transaction.updated_at,
+            )
+            before_items = [
+                (item.id, item.direction, item.item_name)
+                for item in session.exec(
+                    select(TransactionItem).where(TransactionItem.transaction_id == transaction_id)
+                ).all()
+            ]
+            before_source = (
+                source.is_deleted,
+                source.deleted_at,
+                source.parse_status,
+                source.needs_review,
+                source.content,
+            )
+            before_bookkeeping = (
+                bookkeeping_entry.matched_transaction_id,
+                bookkeeping_entry.match_status,
+            )
+            before_bank = (
+                bank_transaction.matched_transaction_id,
+                bank_transaction.matched_source_message_id,
+                bank_transaction.matched_platform,
+                bank_transaction.classification,
+                bank_transaction.confidence,
+                bank_transaction.match_reason,
+                bank_transaction.updated_at,
+            )
+
+            with patch("app.routers.bookkeeping.require_role_response", return_value=None):
+                response = gmail_receipt_reparse_form(
+                    request=object(),
+                    receipt_id=receipt_id,
+                    session=session,
+                )
+
+            session.expire_all()
+            receipt = session.get(GmailReceipt, receipt_id)
+            transaction = session.get(Transaction, transaction_id)
+            source = session.get(DiscordMessage, source_id)
+            bookkeeping_entry = session.get(BookkeepingEntry, bookkeeping_entry_id)
+            bank_transaction = session.get(BankTransaction, bank_transaction_id)
+            after_items = [
+                (item.id, item.direction, item.item_name)
+                for item in session.exec(
+                    select(TransactionItem).where(TransactionItem.transaction_id == transaction_id)
+                ).all()
+            ]
+
+        self.assertEqual(
+            (
+                receipt.status,
+                receipt.transaction_id,
+                receipt.updated_at,
+                receipt.parsed_json,
+            ),
+            before_receipt,
+        )
+        self.assertEqual(
+            (
+                transaction.amount,
+                transaction.is_deleted,
+                transaction.parse_status,
+                transaction.updated_at,
+            ),
+            before_transaction,
+        )
+        self.assertEqual(after_items, before_items)
+        self.assertEqual(
+            (
+                source.is_deleted,
+                source.deleted_at,
+                source.parse_status,
+                source.needs_review,
+                source.content,
+            ),
+            before_source,
+        )
+        self.assertEqual(
+            (bookkeeping_entry.matched_transaction_id, bookkeeping_entry.match_status),
+            before_bookkeeping,
+        )
+        self.assertEqual(
+            (
+                bank_transaction.matched_transaction_id,
+                bank_transaction.matched_source_message_id,
+                bank_transaction.matched_platform,
+                bank_transaction.classification,
+                bank_transaction.confidence,
+                bank_transaction.match_reason,
+                bank_transaction.updated_at,
+            ),
+            before_bank,
+        )
+        location = unquote_plus(response.headers["location"]).lower()
+        self.assertIn("sync gmail", location)
+        self.assertIn("trust evidence unavailable", location)
 
 
 class ReconcileBookkeepingTests(unittest.TestCase):

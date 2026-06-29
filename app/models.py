@@ -3,8 +3,18 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from collections.abc import Iterable
 from typing import Optional
-from sqlalchemy import Column, Index, LargeBinary, UniqueConstraint
+from sqlalchemy import (
+    Column,
+    ForeignKeyConstraint,
+    Index,
+    Integer,
+    LargeBinary,
+    UniqueConstraint,
+    event,
+)
 from sqlmodel import SQLModel, Field
+
+from .tiktok.token_storage import EncryptedTikTokToken
 
 PARSE_PENDING = "pending"
 PARSE_PROCESSING = "processing"
@@ -12,6 +22,19 @@ PARSE_PARSED = "parsed"
 PARSE_FAILED = "failed"
 PARSE_REVIEW_REQUIRED = "review_required"
 PARSE_IGNORED = "ignored"
+DISCORD_SOURCE_REFRESH_REQUIRED_ERROR = (
+    "canonical Discord refresh required after raw edit fetch failure"
+)
+
+
+def discord_source_refresh_blocked(
+    last_error: Optional[str],
+    source_refresh_required: bool = False,
+) -> bool:
+    return bool(
+        source_refresh_required
+        or DISCORD_SOURCE_REFRESH_REQUIRED_ERROR in (last_error or "")
+    )
 
 LEGACY_PARSE_STATUS_ALIASES = {
     "queued": PARSE_PENDING,
@@ -111,7 +134,21 @@ class AvailableDiscordChannel(SQLModel, table=True):
 
 
 class DiscordMessage(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["id", "current_revision_id"],
+            [
+                "discord_message_revisions.message_id",
+                "discord_message_revisions.id",
+            ],
+            name="fk_discordmessage_current_revision_provenance",
+        ),
+    )
+
+    id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(Integer, primary_key=True, autoincrement="ignore_fk"),
+    )
 
     discord_message_id: str = Field(index=True, unique=True)
     guild_id: Optional[str] = Field(default=None, index=True)
@@ -123,6 +160,10 @@ class DiscordMessage(SQLModel, table=True):
 
     content: str = ""
     attachment_urls_json: str = "[]"
+    current_revision_id: Optional[int] = Field(
+        default=None,
+        index=True,
+    )
 
     created_at: datetime = Field(index=True)
     ingested_at: datetime = Field(default_factory=utcnow, index=True)
@@ -139,6 +180,8 @@ class DiscordMessage(SQLModel, table=True):
     parse_status: str = Field(default=PARSE_PENDING, index=True)
     parse_attempts: int = Field(default=0)
     last_error: Optional[str] = None
+    source_refresh_required: bool = Field(default=False, index=True)
+    active_parse_attempt_id: Optional[int] = Field(default=None, index=True)
     active_reparse_run_id: Optional[str] = Field(default=None, index=True)
 
     deal_type: Optional[str] = None
@@ -174,6 +217,47 @@ class DiscordMessage(SQLModel, table=True):
     #  "confidence": 0..1,
     #  "reasoning": "...", "proposed_parse": {...}, "resolved_at": "..."}.
     ai_resolver_reasoning_json: Optional[str] = Field(default=None)
+
+
+class DiscordMessageRevision(SQLModel, table=True):
+    __tablename__ = "discord_message_revisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "message_id",
+            "revision_number",
+            name="uq_discord_message_revisions_message_revision",
+        ),
+        UniqueConstraint(
+            "message_id",
+            "id",
+            name="uq_discord_message_revisions_message_id_id",
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    message_id: int = Field(index=True, foreign_key="discordmessage.id")
+    revision_number: int
+    content: str = ""
+    attachment_urls_json: str = "[]"
+    source_edited_at: Optional[datetime] = None
+    captured_at: datetime = Field(default_factory=utcnow)
+    snapshot_hash: str = Field(index=True)
+
+
+def _reject_discord_message_revision_mutation(*_args) -> None:
+    raise RuntimeError("Discord message revisions are append-only")
+
+
+event.listen(
+    DiscordMessageRevision,
+    "before_update",
+    _reject_discord_message_revision_mutation,
+)
+event.listen(
+    DiscordMessageRevision,
+    "before_delete",
+    _reject_discord_message_revision_mutation,
+)
 
 
 class AttachmentAsset(SQLModel, table=True):
@@ -239,8 +323,23 @@ class ReparseRun(SQLModel, table=True):
 
 
 class Transaction(SQLModel, table=True):
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["source_message_id", "source_revision_id"],
+            [
+                "discord_message_revisions.message_id",
+                "discord_message_revisions.id",
+            ],
+            name="fk_transaction_source_revision_provenance",
+        ),
+    )
+
     id: Optional[int] = Field(default=None, primary_key=True)
     source_message_id: int = Field(index=True, unique=True, foreign_key="discordmessage.id")
+    source_revision_id: Optional[int] = Field(
+        default=None,
+        index=True,
+    )
     source_kind: str = Field(default="discord", index=True)
     source_external_id: Optional[str] = Field(default=None, index=True)
 
@@ -271,6 +370,38 @@ class Transaction(SQLModel, table=True):
     is_deleted: bool = Field(default=False, index=True)
     created_at: datetime = Field(default_factory=utcnow, index=True)
     updated_at: datetime = Field(default_factory=utcnow, index=True)
+
+
+class TransactionSourceRevision(SQLModel, table=True):
+    """Exact Discord source revisions used to derive a transaction."""
+
+    __tablename__ = "transaction_source_revisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "transaction_id",
+            "message_id",
+            name="uq_transaction_source_revisions_transaction_message",
+        ),
+        UniqueConstraint(
+            "transaction_id",
+            "source_position",
+            name="uq_transaction_source_revisions_transaction_position",
+        ),
+        ForeignKeyConstraint(
+            ["message_id", "revision_id"],
+            [
+                "discord_message_revisions.message_id",
+                "discord_message_revisions.id",
+            ],
+            name="fk_transaction_source_revisions_revision_provenance",
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    transaction_id: int = Field(index=True, foreign_key="transaction.id")
+    message_id: int = Field(index=True)
+    revision_id: int = Field(index=True)
+    source_position: int
 
 
 class TransactionItem(SQLModel, table=True):
@@ -595,8 +726,14 @@ class TikTokAuth(SQLModel, table=True):
     seller_name: Optional[str] = Field(default=None, index=True)
     app_key: Optional[str] = Field(default=None, index=True)
     redirect_uri: Optional[str] = None
-    access_token: Optional[str] = None
-    refresh_token: Optional[str] = None
+    access_token: Optional[str] = Field(
+        default=None,
+        sa_column=Column(EncryptedTikTokToken(), nullable=True),
+    )
+    refresh_token: Optional[str] = Field(
+        default=None,
+        sa_column=Column(EncryptedTikTokToken(), nullable=True),
+    )
     access_token_expires_at: Optional[datetime] = Field(default=None, index=True)
     refresh_token_expires_at: Optional[datetime] = Field(default=None, index=True)
     scopes_json: str = Field(default="[]")
@@ -605,8 +742,14 @@ class TikTokAuth(SQLModel, table=True):
     received_at: Optional[datetime] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=utcnow, index=True)
     updated_at: datetime = Field(default_factory=utcnow, index=True)
-    creator_access_token: Optional[str] = Field(default=None)
-    creator_refresh_token: Optional[str] = Field(default=None)
+    creator_access_token: Optional[str] = Field(
+        default=None,
+        sa_column=Column(EncryptedTikTokToken(), nullable=True),
+    )
+    creator_refresh_token: Optional[str] = Field(
+        default=None,
+        sa_column=Column(EncryptedTikTokToken(), nullable=True),
+    )
     creator_token_expires_at: Optional[datetime] = Field(default=None)
 
 
@@ -619,8 +762,14 @@ class TikTokCreatorAuth(SQLModel, table=True):
     display_name: Optional[str] = Field(default=None, index=True)
     app_key: Optional[str] = Field(default=None, index=True)
     redirect_uri: Optional[str] = None
-    access_token: Optional[str] = None
-    refresh_token: Optional[str] = None
+    access_token: Optional[str] = Field(
+        default=None,
+        sa_column=Column(EncryptedTikTokToken(), nullable=True),
+    )
+    refresh_token: Optional[str] = Field(
+        default=None,
+        sa_column=Column(EncryptedTikTokToken(), nullable=True),
+    )
     access_token_expires_at: Optional[datetime] = Field(default=None, index=True)
     refresh_token_expires_at: Optional[datetime] = Field(default=None, index=True)
     scopes_json: str = Field(default="[]")
@@ -1145,6 +1294,24 @@ class LiveHit(SQLModel, table=True):
     notes: Optional[str] = Field(default=None)
     created_by: Optional[str] = Field(default=None)
     image_filename: Optional[str] = Field(default=None)
+
+
+class LiveHitImageUpload(SQLModel, table=True):
+    """Server-owned lifecycle record for a Live Hit image upload."""
+
+    __tablename__ = "live_hit_image_uploads"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    token: str = Field(index=True, unique=True)
+    filename: str = Field(index=True, unique=True)
+    owner_user_id: int = Field(index=True, foreign_key="user.id")
+    size_bytes: int = Field(default=0)
+    content_type: str
+    state: str = Field(default="pending", index=True)
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+    expires_at: datetime = Field(index=True)
+    bound_hit_id: Optional[int] = Field(default=None, index=True, foreign_key="live_hits.id")
+    bound_at: Optional[datetime] = Field(default=None)
 
 
 class TikTokSyncState(SQLModel, table=True):

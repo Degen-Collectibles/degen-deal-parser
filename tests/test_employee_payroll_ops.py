@@ -1,6 +1,8 @@
 """Payroll export and exceptions inbox helper tests."""
 from __future__ import annotations
 
+import csv
+import io
 import os
 import unittest
 from datetime import date, datetime, timezone
@@ -173,6 +175,92 @@ class PayrollOpsTests(unittest.TestCase):
         self.assertEqual(result["locked"], 1)
         approval = self.session.exec(select(TimecardApproval)).one()
         self.assertEqual(approval.status, "locked")
+
+    def test_payroll_csv_neutralizes_every_formula_prefix_in_data_cells(self):
+        from app.routers import team_admin_clockify as mod
+
+        dangerous = [
+            "=HYPERLINK(\"https://attacker.invalid\")",
+            "+SUM(1,1)",
+            "-1+1",
+            "@SUM(1,1)",
+            "\t=1+1",
+            "\r=1+1",
+            "\n=1+1",
+            "  =1+1",
+            "  +1+1",
+            "  -1+1",
+            "  @SUM(1,1)",
+            "  \t=1+1",
+            "  \r=1+1",
+            "  \n=1+1",
+        ]
+        keys = [
+            "employee_name",
+            "pay_type_label",
+            "clockify_user_id_masked",
+            "work_hours_label",
+            "break_hours_label",
+            "hourly_label",
+            "salary_cost_label",
+            "total_label",
+            "active_day_count",
+            "approved_day_count",
+            "locked_day_count",
+            "pending_day_count",
+            "rejected_day_count",
+            "approval_note_label",
+        ]
+        row = dict(zip(keys, dangerous, strict=True))
+        row["clockify_user_id"] = "clockify-present"
+
+        parsed = list(csv.reader(io.StringIO(mod.payroll_summary_to_csv({"rows": [row]}))))
+
+        self.assertEqual(len(parsed), 2)
+        self.assertEqual(parsed[1], ["'" + value for value in dangerous])
+
+    def test_payroll_csv_preserves_normal_text_numbers_and_unicode(self):
+        from app.routers import team_admin_clockify as mod
+
+        row = {
+            "employee_name": "Zoë 山田",
+            "pay_type_label": "Hourly",
+            "clockify_user_id": "ck-1",
+            "clockify_user_id_masked": "ck-••1",
+            "work_hours_label": "A+B is text",
+            "break_hours_label": "  ordinary leading space",
+            "hourly_label": "$150.00",
+            "salary_cost_label": "$0.00",
+            "total_label": "$150.00",
+            "active_day_count": -1,
+            "approved_day_count": 1,
+            "locked_day_count": 0,
+            "pending_day_count": 0,
+            "rejected_day_count": 0,
+            "approval_note_label": "Café — reviewed",
+        }
+
+        parsed = list(csv.reader(io.StringIO(mod.payroll_summary_to_csv({"rows": [row]}))))
+
+        self.assertEqual(
+            parsed[1],
+            [
+                "Zoë 山田",
+                "Hourly",
+                "ck-••1",
+                "A+B is text",
+                "  ordinary leading space",
+                "$150.00",
+                "$0.00",
+                "$150.00",
+                "-1",
+                "1",
+                "0",
+                "0",
+                "0",
+                "Café — reviewed",
+            ],
+        )
 
     def test_payroll_uses_compensation_history_effective_dates(self):
         from app.models import EmployeeCompensationHistory

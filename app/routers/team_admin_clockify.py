@@ -479,13 +479,6 @@ def _json_loads_body(raw_body: bytes) -> dict[str, Any]:
     return payload
 
 
-def _clockify_webhook_secret() -> str:
-    env_value = (os.getenv("CLOCKIFY_WEBHOOK_SECRET") or "").strip()
-    if env_value:
-        return env_value
-    return _env_file_value("CLOCKIFY_WEBHOOK_SECRET")
-
-
 def _split_secret_values(raw: str) -> list[str]:
     values: list[str] = []
     for value in re.split(r"[\s,;]+", raw or ""):
@@ -523,52 +516,26 @@ def _env_file_value(key_name: str) -> str:
 
 def _strip_bearer(value: str) -> str:
     value = (value or "").strip()
-    if value.lower().startswith("bearer "):
-        return value[7:].strip()
-    return value
-
-
-def _clockify_url_secret_candidates(request: Request, supplied_secret: str) -> list[str]:
-    return [
-        (supplied_secret or "").strip(),
-        request.headers.get("X-Degen-Webhook-Secret", ""),
-        request.headers.get("X-Webhook-Secret", ""),
-    ]
+    parts = value.split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return ""
+    return parts[1].strip()
 
 
 def _clockify_signing_secret_candidates(request: Request) -> list[str]:
-    raw_values = [
-        request.headers.get("Authorization", ""),
+    values = [
+        _strip_bearer(request.headers.get("Authorization", "")),
         request.headers.get("X-Clockify-Webhook-Token", ""),
         request.headers.get("Clockify-Webhook-Token", ""),
-        request.headers.get("X-Clockify-Webhook-Signature", ""),
-        request.headers.get("Clockify-Webhook-Signature", ""),
-        request.headers.get("X-Clockify-Signature", ""),
-        request.headers.get("Clockify-Signature", ""),
-        request.headers.get("X-Webhook-Signature", ""),
-        request.headers.get("Webhook-Signature", ""),
-        request.headers.get("X-Webhook-Token", ""),
-        request.headers.get("Webhook-Token", ""),
-        request.headers.get("X-Auth-Token", ""),
-        request.headers.get("Auth-Token", ""),
-        request.headers.get("authToken", ""),
     ]
-    return [_strip_bearer(value) for value in raw_values if (value or "").strip()]
+    return [(value or "").strip() for value in values if (value or "").strip()]
 
 
-def _require_clockify_webhook_secret(request: Request, supplied_secret: str) -> None:
-    expected_url_secret = _clockify_webhook_secret()
+def _require_clockify_webhook_secret(request: Request) -> None:
     expected_signing_secrets = _clockify_webhook_signing_secrets()
-    if not expected_url_secret and not expected_signing_secrets:
+    if not expected_signing_secrets:
         raise HTTPException(status_code=503, detail="Clockify webhook secret is not configured.")
 
-    url_secret_ok = bool(
-        expected_url_secret
-        and any(
-            hmac.compare_digest(expected_url_secret, (candidate or "").strip())
-            for candidate in _clockify_url_secret_candidates(request, supplied_secret)
-        )
-    )
     signing_candidates = _clockify_signing_secret_candidates(request)
     signing_secret_ok = bool(
         expected_signing_secrets
@@ -578,7 +545,7 @@ def _require_clockify_webhook_secret(request: Request, supplied_secret: str) -> 
             for candidate in signing_candidates
         )
     )
-    if not url_secret_ok and not signing_secret_ok:
+    if not signing_secret_ok:
         raise HTTPException(status_code=403, detail="Invalid Clockify webhook secret.")
 
 
@@ -2366,6 +2333,20 @@ def build_payroll_export_summary(
     }
 
 
+def _payroll_csv_cell(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    for character in value:
+        if character in "\t\r\n":
+            return "'" + value
+        if character.isspace():
+            continue
+        if character in "=+-@":
+            return "'" + value
+        break
+    return value
+
+
 def payroll_summary_to_csv(summary: dict[str, Any]) -> str:
     out = io.StringIO()
     writer = csv.writer(out, lineterminator="\n")
@@ -2373,20 +2354,25 @@ def payroll_summary_to_csv(summary: dict[str, Any]) -> str:
     for row in summary["rows"]:
         writer.writerow(
             [
-                row["employee_name"],
-                row["pay_type_label"],
-                row["clockify_user_id_masked"] if row.get("clockify_user_id") else "",
-                row["work_hours_label"],
-                row["break_hours_label"],
-                row["hourly_label"],
-                row["salary_cost_label"],
-                row["total_label"],
-                row["active_day_count"],
-                row["approved_day_count"],
-                row["locked_day_count"],
-                row["pending_day_count"],
-                row["rejected_day_count"],
-                row["approval_note_label"],
+                _payroll_csv_cell(value)
+                for value in (
+                    row["employee_name"],
+                    row["pay_type_label"],
+                    row["clockify_user_id_masked"]
+                    if row.get("clockify_user_id")
+                    else "",
+                    row["work_hours_label"],
+                    row["break_hours_label"],
+                    row["hourly_label"],
+                    row["salary_cost_label"],
+                    row["total_label"],
+                    row["active_day_count"],
+                    row["approved_day_count"],
+                    row["locked_day_count"],
+                    row["pending_day_count"],
+                    row["rejected_day_count"],
+                    row["approval_note_label"],
+                )
             ]
         )
     return out.getvalue()
@@ -3081,10 +3067,9 @@ def sync_clockify_user_ids_by_email(
 @router.post("/webhooks/clockify")
 async def clockify_webhook(
     request: Request,
-    secret: str = Query(default=""),
     session: Session = Depends(get_session),
 ):
-    _require_clockify_webhook_secret(request, secret)
+    _require_clockify_webhook_secret(request)
     raw_body = await request.body()
     try:
         payload = _json_loads_body(raw_body)

@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import re
 import hmac
 import json
+import math
 import os
 import sys
 import time
+import traceback
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, NoReturn, Optional
 from urllib.parse import urlencode
 
 import httpx
@@ -35,6 +38,7 @@ from app.tiktok.tiktok_ingest import (  # noqa: E402
     TIKTOK_TOKEN_GET_PATH,
     TIKTOK_TOKEN_REFRESH_PATH,
     exchange_tiktok_authorization_code,
+    sanitize_tiktok_token_payload,
     structured_tiktok_log_line,
 )
 
@@ -65,6 +69,7 @@ LIVE_SESSION_LIST_PATH = "/analytics/202509/shop_lives/performance"
 LIVE_PER_MINUTES_PATH_TEMPLATE = "/analytics/202510/shop_lives/{live_id}/performance_per_minutes"
 LIVE_PRODUCTS_PERFORMANCE_PATH_TEMPLATE = "/analytics/202512/shop/{live_id}/products_performance"
 DEFAULT_SHOP_API_BASE_URL = "https://open-api.tiktokglobalshop.com"
+MAX_TIKTOK_RETRY_AFTER_SECONDS = 60.0
 
 
 @dataclass
@@ -360,17 +365,151 @@ def build_tiktok_request(
     return f"{url}?{urlencode(query_params)}", body_json, headers
 
 
-def raise_for_tiktok_error(payload: Any, *, path: str) -> None:
+def _normalized_sensitive_values(values: Optional[tuple[str, ...]]) -> tuple[str, ...]:
+    return tuple(sorted({str(value) for value in (values or ()) if str(value)}, key=len, reverse=True))
+
+
+_CREDENTIAL_NAMES = frozenset(
+    {
+        "access_token",
+        "api_key",
+        "api_token",
+        "app_secret",
+        "auth_code",
+        "authorization",
+        "authorization_code",
+        "client_secret",
+        "creator_access_token",
+        "refresh_token",
+        "shop_cipher",
+        "token",
+        "x_tts_access_token",
+    }
+)
+
+
+def _normalized_credential_name(value: Any) -> str:
+    return str(value).strip().lower().replace("-", "_")
+
+
+def _credential_values_from_container(value: Any) -> tuple[str, ...]:
+    found: list[str] = []
+
+    def collect_sensitive(item: Any) -> None:
+        if isinstance(item, dict):
+            for nested in item.values():
+                collect_sensitive(nested)
+        elif isinstance(item, (list, tuple, set, frozenset)):
+            for nested in item:
+                collect_sensitive(nested)
+        elif item not in (None, ""):
+            found.append(str(item))
+
+    def visit(item: Any) -> None:
+        if isinstance(item, dict):
+            for key, nested in item.items():
+                if _normalized_credential_name(key) in _CREDENTIAL_NAMES:
+                    collect_sensitive(nested)
+                else:
+                    visit(nested)
+        elif isinstance(item, (list, tuple)):
+            for nested in item:
+                visit(nested)
+
+    visit(value)
+    return tuple(found)
+
+
+def _request_sensitive_values(
+    *,
+    url: str,
+    json_body: Optional[dict[str, Any]],
+    form_body: Optional[dict[str, Any]],
+    raw_body: Optional[str],
+    extra_headers: Optional[dict[str, str]],
+    sensitive_values: Optional[tuple[str, ...]],
+) -> tuple[str, ...]:
+    found: list[str] = list(sensitive_values or ())
+    for name, value in httpx.URL(url).params.multi_items():
+        if _normalized_credential_name(name) in _CREDENTIAL_NAMES and value:
+            found.append(str(value))
+    for name, value in (extra_headers or {}).items():
+        normalized_name = _normalized_credential_name(name)
+        if normalized_name not in _CREDENTIAL_NAMES or not value:
+            continue
+        text = str(value)
+        found.append(text)
+        if normalized_name == "authorization":
+            _scheme, separator, credential = text.partition(" ")
+            if separator and credential:
+                found.append(credential.strip())
+    found.extend(_credential_values_from_container(json_body))
+    found.extend(_credential_values_from_container(form_body))
+    if raw_body:
+        try:
+            parsed_body = json.loads(raw_body)
+        except (TypeError, ValueError):
+            parsed_body = None
+        found.extend(_credential_values_from_container(parsed_body))
+    return _normalized_sensitive_values(tuple(found))
+
+
+def _safe_error_code(value: Any, *, sensitive_values: tuple[str, ...] = ()) -> Optional[str]:
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    if not text or len(text) > 64 or re.fullmatch(r"[A-Za-z0-9_.-]+", text) is None:
+        return None
+    if any(secret in text or text in secret for secret in sensitive_values):
+        return None
+    return text
+
+
+def _tiktok_error_payload_scope_missing(payload: dict[str, Any]) -> bool:
+    code = str(payload.get("code") or payload.get("error") or "").strip()
+    if code == "105005":
+        return True
+    message = str(payload.get("message") or payload.get("msg") or "").lower()
+    return any(
+        marker in message
+        for marker in (
+            "access denied",
+            "required access scope",
+            "not authorized to access the endpoint",
+        )
+    )
+
+
+def raise_for_tiktok_error(
+    payload: Any,
+    *,
+    path: str,
+    sensitive_values: Optional[tuple[str, ...]] = None,
+) -> None:
     if not isinstance(payload, dict):
         return
     code = payload.get("code")
     if code in (0, "0", None):
         return
-    message = payload.get("message") or payload.get("msg") or "TikTok API error"
-    raise RuntimeError(f"{path}: {code} {message}")
+    known_secrets = _normalized_sensitive_values(sensitive_values)
+    scope_missing = _tiktok_error_payload_scope_missing(payload)
+    safe_code = _safe_error_code(code, sensitive_values=known_secrets)
+    if not known_secrets and safe_code is not None and not safe_code.isdigit():
+        safe_code = None
+    suffix = f" code {safe_code}" if safe_code else ""
+    safe_error = RuntimeError(f"{path}: TikTok API error{suffix}")
+    safe_error.tiktok_error_code = safe_code  # type: ignore[attr-defined]
+    safe_error.tiktok_scope_missing = scope_missing  # type: ignore[attr-defined]
+    del payload
+    del sensitive_values
+    del known_secrets
+    del code
+    _raise_sanitized_request_error(safe_error)
 
 
 def tiktok_affiliate_order_error_is_scope_missing(exc: BaseException) -> bool:
+    if bool(getattr(exc, "tiktok_scope_missing", False)):
+        return True
     response = getattr(exc, "response", None)
     status_code = getattr(response, "status_code", None)
     text = str(exc).lower()
@@ -384,19 +523,130 @@ def tiktok_affiliate_order_error_is_scope_missing(exc: BaseException) -> bool:
     )
 
 
-def redact_http_log_text(text: str, max_len: int = 500) -> str:
+def redact_http_log_text(
+    text: str,
+    max_len: int = 500,
+    *,
+    sensitive_values: Optional[tuple[str, ...]] = None,
+) -> str:
     """Truncate and redact tokens from text logged on HTTP errors."""
     if not text:
         return "(empty)"
+    redacted = text
+    for secret in _normalized_sensitive_values(sensitive_values):
+        redacted = redacted.replace(secret, "[REDACTED]")
     redacted = re.sub(
-        r"(access_token|refresh_token|auth_code|Authorization)[=:]\s*[^\s&\"']+",
+        r"(access_token|refresh_token|auth_code|app_secret|client_secret|Authorization)[=:]\s*[^\s&\"']+",
         r"\1=REDACTED",
-        text,
+        redacted,
         flags=re.IGNORECASE,
     )
     if len(redacted) > max_len:
         return redacted[:max_len] + "…"
     return redacted
+
+
+def _safe_request_for_diagnostics(*, method: str, url: str | httpx.URL) -> httpx.Request:
+    parsed = httpx.URL(url)
+    safe_url = parsed.copy_with(query=None, fragment=None)
+    return httpx.Request(method.upper(), safe_url)
+
+
+def _safe_response_error_code(
+    response: httpx.Response,
+    *,
+    sensitive_values: tuple[str, ...],
+) -> Optional[str]:
+    try:
+        payload = response.json()
+    except (ValueError, UnicodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return _safe_error_code(
+        payload.get("code") if payload.get("code") not in (None, "") else payload.get("error"),
+        sensitive_values=sensitive_values,
+    )
+
+
+def _sanitized_http_status_error(
+    response: httpx.Response,
+    *,
+    method: str,
+    url: str,
+    sensitive_values: tuple[str, ...],
+    known_error_code: Optional[str] = None,
+) -> httpx.HTTPStatusError:
+    safe_request = _safe_request_for_diagnostics(method=method, url=url)
+    safe_response = httpx.Response(response.status_code, request=safe_request)
+    safe_code = known_error_code or _safe_response_error_code(
+        response,
+        sensitive_values=sensitive_values,
+    )
+    code_suffix = f" code={safe_code}" if safe_code else ""
+    exc = httpx.HTTPStatusError(
+        f"TikTok HTTP {response.status_code}{code_suffix} for "
+        f"{safe_request.method} {safe_request.url.host}{safe_request.url.path}",
+        request=safe_request,
+        response=safe_response,
+    )
+    exc.tiktok_error_code = safe_code  # type: ignore[attr-defined]
+    return exc
+
+
+def _sanitized_transport_error(
+    exc: httpx.TransportError,
+    *,
+    method: str,
+    url: str,
+) -> httpx.TransportError:
+    safe_request = _safe_request_for_diagnostics(method=method, url=url)
+    message = (
+        f"TikTok transport error ({type(exc).__name__}) for "
+        f"{safe_request.method} {safe_request.url.host}{safe_request.url.path}"
+    )
+    try:
+        return type(exc)(message, request=safe_request)
+    except TypeError:
+        return httpx.TransportError(message, request=safe_request)
+
+
+def _sanitized_request_construction_error(
+    exc: Exception,
+    *,
+    method: str,
+    url: str,
+) -> RuntimeError:
+    message = f"TikTok request construction error ({type(exc).__name__})"
+    try:
+        safe_request = _safe_request_for_diagnostics(method=method, url=url)
+    except Exception:
+        return RuntimeError(message)
+    return RuntimeError(
+        f"{message} for {safe_request.method} "
+        f"{safe_request.url.host}{safe_request.url.path}"
+    )
+
+
+def _sanitized_unexpected_request_error(
+    exc: Exception,
+    *,
+    method: str,
+    url: str,
+) -> RuntimeError:
+    message = f"TikTok request error ({type(exc).__name__})"
+    try:
+        safe_request = _safe_request_for_diagnostics(method=method, url=url)
+    except Exception:
+        return RuntimeError(message)
+    return RuntimeError(
+        f"{message} for {safe_request.method} "
+        f"{safe_request.url.host}{safe_request.url.path}"
+    )
+
+
+def _raise_sanitized_request_error(error: BaseException) -> NoReturn:
+    raise error from None
 
 
 def request_json(
@@ -408,22 +658,65 @@ def request_json(
     form_body: Optional[dict[str, Any]] = None,
     raw_body: Optional[str] = None,
     extra_headers: Optional[dict[str, str]] = None,
+    sensitive_values: Optional[tuple[str, ...]] = None,
 ) -> dict[str, Any]:
+    known_secrets: tuple[str, ...] = ()
     request_kwargs: dict[str, Any] = {}
-    headers: dict[str, str] = dict(extra_headers) if extra_headers else {}
-    if raw_body is not None:
-        headers.setdefault("Content-Type", "application/json")
-        request_kwargs["content"] = raw_body.encode("utf-8")
-    elif form_body is not None:
-        headers["Content-Type"] = "application/x-www-form-urlencoded"
-        request_kwargs["data"] = form_body
-    elif json_body is not None:
-        request_kwargs["json"] = json_body
-    if headers:
-        request_kwargs["headers"] = headers
+    headers: dict[str, str] = {}
+    setup_error: Optional[RuntimeError] = None
+    try:
+        known_secrets = _request_sensitive_values(
+            url=url,
+            json_body=json_body,
+            form_body=form_body,
+            raw_body=raw_body,
+            extra_headers=extra_headers,
+            sensitive_values=sensitive_values,
+        )
+        headers = dict(extra_headers) if extra_headers else {}
+        if raw_body is not None:
+            headers.setdefault("Content-Type", "application/json")
+            request_kwargs["content"] = raw_body.encode("utf-8")
+        elif form_body is not None:
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+            request_kwargs["data"] = form_body
+        elif json_body is not None:
+            request_kwargs["json"] = json_body
+        if headers:
+            request_kwargs["headers"] = headers
+    except Exception as exc:
+        setup_error = _sanitized_request_construction_error(
+            exc,
+            method=method,
+            url=url,
+        )
+
+    if setup_error is not None:
+        safe_error = setup_error
+        request_kwargs.clear()
+        headers.clear()
+        del setup_error
+        del request_kwargs
+        del headers
+        del known_secrets
+        del client
+        del url
+        del json_body
+        del form_body
+        del raw_body
+        del extra_headers
+        del sensitive_values
+        _raise_sanitized_request_error(safe_error)
+
     max_attempts = 3
     backoff = 0.5
     for attempt in range(1, max_attempts + 1):
+        sanitized_error: Optional[BaseException] = None
+        response: Optional[httpx.Response] = None
+        payload: Any = None
+        retry_after_hdr: Optional[str] = None
+        wait_s = 0.0
+        safe_request: Optional[httpx.Request] = None
         try:
             response = client.request(method, url, **request_kwargs)
             if response.status_code == 429 or response.status_code >= 500:
@@ -431,39 +724,250 @@ def request_json(
                 wait_s = backoff
                 if retry_after_hdr:
                     try:
-                        wait_s = max(wait_s, float(retry_after_hdr))
-                    except ValueError:
+                        retry_after_seconds = float(retry_after_hdr)
+                        if math.isfinite(retry_after_seconds):
+                            wait_s = max(
+                                wait_s,
+                                min(
+                                    max(retry_after_seconds, 0.0),
+                                    MAX_TIKTOK_RETRY_AFTER_SECONDS,
+                                ),
+                            )
+                    except (TypeError, ValueError, OverflowError):
                         pass
                 if attempt < max_attempts:
                     time.sleep(wait_s)
                     backoff *= 2
                     continue
             if not response.is_success:
-                body_text = redact_http_log_text(response.text or "")
+                safe_request = _safe_request_for_diagnostics(method=method, url=url)
+                safe_code = _safe_response_error_code(response, sensitive_values=known_secrets)
                 print(
-                    f"[tiktok_backfill] HTTP {response.status_code} response body: {body_text}",
+                    structured_log_line(
+                        runtime="tiktok_backfill",
+                        action="tiktok.auth.http_failed",
+                        success=False,
+                        error="TikTok authentication request failed",
+                        error_type="HTTPStatusError",
+                        error_code=safe_code,
+                        method=safe_request.method,
+                        status_code=response.status_code,
+                        endpoint_host=safe_request.url.host,
+                        endpoint_path=safe_request.url.path,
+                    ),
                     file=sys.stderr,
                 )
-                safe_url = redact_http_log_text(str(response.request.url), max_len=500)
-                safe_request = httpx.Request(response.request.method, safe_url)
-                raise httpx.HTTPStatusError(
-                    f"HTTP {response.status_code} response for url '{safe_url}'",
-                    request=safe_request,
-                    response=response,
+                sanitized_error = _sanitized_http_status_error(
+                    response,
+                    method=method,
+                    url=url,
+                    sensitive_values=known_secrets,
                 )
-            payload = response.json()
-            if not isinstance(payload, dict):
-                raise RuntimeError(f"Unexpected TikTok response payload type: {type(payload).__name__}")
-            return payload
-        except (httpx.TimeoutException, httpx.TransportError):
+            else:
+                try:
+                    payload = response.json()
+                except (ValueError, UnicodeError) as exc:
+                    safe_request = _safe_request_for_diagnostics(method=method, url=url)
+                    sanitized_error = RuntimeError(
+                        f"TikTok response decode error ({type(exc).__name__}) for "
+                        f"{safe_request.method} {safe_request.url.host}{safe_request.url.path}"
+                    )
+                if sanitized_error is None:
+                    if not isinstance(payload, dict):
+                        safe_request = _safe_request_for_diagnostics(method=method, url=url)
+                        sanitized_error = RuntimeError(
+                            f"Unexpected TikTok response payload type: {type(payload).__name__} for "
+                            f"{safe_request.method} {safe_request.url.host}{safe_request.url.path}"
+                        )
+                    else:
+                        return payload
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
             if attempt < max_attempts:
-                time.sleep(backoff)
-                backoff *= 2
-                continue
-            raise
+                try:
+                    time.sleep(backoff)
+                except Exception as retry_exc:
+                    sanitized_error = _sanitized_unexpected_request_error(
+                        retry_exc,
+                        method=method,
+                        url=url,
+                    )
+                else:
+                    backoff *= 2
+                    continue
+            if sanitized_error is None:
+                sanitized_error = _sanitized_transport_error(exc, method=method, url=url)
+        except (TypeError, ValueError, UnicodeError) as exc:
+            sanitized_error = _sanitized_request_construction_error(
+                exc,
+                method=method,
+                url=url,
+            )
+        except Exception as exc:
+            sanitized_error = _sanitized_unexpected_request_error(
+                exc,
+                method=method,
+                url=url,
+            )
+        if sanitized_error is not None:
+            safe_error = sanitized_error
+            if isinstance(payload, (dict, list)):
+                payload.clear()
+            request_kwargs.clear()
+            headers.clear()
+            retry_after_hdr = None
+            wait_s = 0.0
+            del sanitized_error
+            del payload
+            del response
+            del request_kwargs
+            del headers
+            del known_secrets
+            del retry_after_hdr
+            del wait_s
+            del safe_request
+            del client
+            del url
+            del json_body
+            del form_body
+            del raw_body
+            del extra_headers
+            del sensitive_values
+            _raise_sanitized_request_error(safe_error)
     raise RuntimeError("request_json: exhausted retries without response")
 
 
+def _safe_exception_status_code(error: Exception) -> Optional[int]:
+    response = getattr(error, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if isinstance(status_code, int) and 100 <= status_code <= 599:
+        return status_code
+    match = re.search(r"\bHTTP\s+([1-5]\d\d)\b", str(error))
+    if match is not None:
+        return int(match.group(1))
+    return None
+
+
+def _sanitized_tiktok_api_boundary_error(
+    error: Exception,
+    *,
+    endpoint_path: str,
+    sensitive_values: tuple[str, ...],
+) -> Exception:
+    safe_code = _safe_error_code(
+        getattr(error, "tiktok_error_code", None),
+        sensitive_values=sensitive_values,
+    )
+    scope_missing = bool(getattr(error, "tiktok_scope_missing", False))
+    status_code = _safe_exception_status_code(error)
+    code_suffix = f" code {safe_code}" if safe_code else ""
+    status_suffix = f" HTTP {status_code}" if status_code is not None else ""
+    message = (
+        f"{endpoint_path}: TikTok API request failed "
+        f"({type(error).__name__}){status_suffix}{code_suffix}"
+    )
+
+    safe_error: Exception
+    if isinstance(error, httpx.HTTPStatusError):
+        request = getattr(error, "request", None)
+        response = getattr(error, "response", None)
+        if isinstance(request, httpx.Request) and isinstance(response, httpx.Response):
+            safe_error = _sanitized_http_status_error(
+                response,
+                method=request.method,
+                url=str(request.url),
+                sensitive_values=sensitive_values,
+                known_error_code=safe_code,
+            )
+        else:
+            safe_request = httpx.Request("GET", f"https://tiktok.invalid{endpoint_path}")
+            safe_response = httpx.Response(status_code or 500, request=safe_request)
+            safe_error = httpx.HTTPStatusError(
+                message,
+                request=safe_request,
+                response=safe_response,
+            )
+    elif isinstance(error, httpx.TransportError):
+        request = getattr(error, "request", None)
+        if isinstance(request, httpx.Request):
+            safe_error = _sanitized_transport_error(
+                error,
+                method=request.method,
+                url=str(request.url),
+            )
+        else:
+            try:
+                safe_error = type(error)(message)
+            except Exception:
+                safe_error = httpx.TransportError(message)
+    else:
+        try:
+            safe_error = type(error)(message)
+        except Exception:
+            safe_error = RuntimeError(message)
+
+    if safe_code is None:
+        safe_code = _safe_error_code(
+            getattr(safe_error, "tiktok_error_code", None),
+            sensitive_values=sensitive_values,
+        )
+    safe_error.tiktok_error_code = safe_code  # type: ignore[attr-defined]
+    safe_error.tiktok_scope_missing = scope_missing  # type: ignore[attr-defined]
+    if status_code is not None:
+        safe_error.status_code = status_code  # type: ignore[attr-defined]
+    return safe_error
+
+
+def _clear_tiktok_api_boundary_error(error: Exception) -> None:
+    try:
+        if error.__traceback__ is not None:
+            traceback.clear_frames(error.__traceback__)
+        error.__traceback__ = None
+        error.__cause__ = None
+        error.__context__ = None
+        error.args = ()
+        error_state = getattr(error, "__dict__", None)
+        if isinstance(error_state, dict):
+            error_state.clear()
+    except Exception:
+        pass
+
+
+def _sanitize_tiktok_api_boundary(endpoint_path: str) -> Any:
+    def decorate(func: Any) -> Any:
+        @functools.wraps(func)
+        def wrapped(*args: Any, **kwargs: Any) -> Any:
+            sensitive_values: tuple[str, ...] = ()
+            failure: Optional[Exception] = None
+            try:
+                sensitive_values = _normalized_sensitive_values(
+                    _credential_values_from_container(kwargs)
+                )
+                return func(*args, **kwargs)
+            except Exception as exc:
+                failure = exc
+
+            try:
+                safe_error = _sanitized_tiktok_api_boundary_error(
+                    failure,
+                    endpoint_path=endpoint_path,
+                    sensitive_values=sensitive_values,
+                )
+            except Exception:
+                safe_error = RuntimeError(f"{endpoint_path}: TikTok API request failed")
+            _clear_tiktok_api_boundary_error(failure)
+            kwargs.clear()
+            del args
+            del kwargs
+            del sensitive_values
+            del failure
+            _raise_sanitized_request_error(safe_error)
+
+        return wrapped
+
+    return decorate
+
+
+@_sanitize_tiktok_api_boundary(SHOP_TOKEN_GET_PATH)
 def exchange_authorized_code(
     client: httpx.Client,
     *,
@@ -484,6 +988,7 @@ def exchange_authorized_code(
     return payload
 
 
+@_sanitize_tiktok_api_boundary(SHOP_TOKEN_REFRESH_PATH)
 def refresh_access_token(
     client: httpx.Client,
     *,
@@ -499,8 +1004,18 @@ def refresh_access_token(
         "grant_type": "refresh_token",
     }
     url = f"{SHOP_AUTH_BASE_URL}{SHOP_TOKEN_REFRESH_PATH}?{urlencode(params)}"
-    payload = request_json(client, method="GET", url=url)
-    raise_for_tiktok_error(payload, path=SHOP_TOKEN_REFRESH_PATH)
+    sensitive_values = (app_secret, refresh_token)
+    payload = request_json(
+        client,
+        method="GET",
+        url=url,
+        sensitive_values=sensitive_values,
+    )
+    raise_for_tiktok_error(
+        payload,
+        path=SHOP_TOKEN_REFRESH_PATH,
+        sensitive_values=sensitive_values,
+    )
     return payload
 
 
@@ -586,6 +1101,7 @@ def affiliate_order_attribution_from_payload(payload: dict[str, Any]) -> dict[st
 _TIKTOK_CREATED_AT_ALIASES = ("create_time", "created_time", "created_at", "order_create_time")
 
 
+@_sanitize_tiktok_api_boundary(ORDER_DETAIL_PATH)
 def order_record_from_payload(
     payload: dict[str, Any],
     *,
@@ -843,7 +1359,7 @@ def upsert_tiktok_auth(
         "scopes_json": json_dumps(
             _first_present(data, ("scopes", "scope", "granted_scopes")) or []
         ),
-        "raw_payload": json_dumps(payload),
+        "raw_payload": json_dumps(sanitize_tiktok_token_payload(payload)),
         "source": source,
         "created_at": utcnow(),
         "updated_at": utcnow(),
@@ -870,6 +1386,7 @@ def upsert_tiktok_auth(
     return "updated"
 
 
+@_sanitize_tiktok_api_boundary(ORDER_SEARCH_PATH)
 def fetch_tiktok_order_list_page(
     client: httpx.Client,
     *,
@@ -915,6 +1432,7 @@ def fetch_tiktok_order_list_page(
     return payload, orders
 
 
+@_sanitize_tiktok_api_boundary(ORDER_DETAIL_PATH)
 def fetch_tiktok_order_details(
     client: httpx.Client,
     *,
@@ -954,6 +1472,7 @@ def fetch_tiktok_order_details(
     return []
 
 
+@_sanitize_tiktok_api_boundary(AFFILIATE_SELLER_ORDER_SEARCH_PATH)
 def fetch_tiktok_seller_affiliate_orders_page(
     client: httpx.Client,
     *,
@@ -999,6 +1518,7 @@ def fetch_tiktok_seller_affiliate_orders_page(
     return payload, [item for item in orders if isinstance(item, dict)]
 
 
+@_sanitize_tiktok_api_boundary(AFFILIATE_CREATOR_ORDER_SEARCH_PATH)
 def fetch_tiktok_creator_affiliate_orders_page(
     client: httpx.Client,
     *,
@@ -1186,6 +1706,7 @@ def _parse_live_core_stats(raw: dict, currency: str = "USD") -> dict[str, Any]:
     }
 
 
+@_sanitize_tiktok_api_boundary(LIVE_ANALYTICS_PATH)
 def fetch_tiktok_live_analytics(
     client: httpx.Client,
     *,
@@ -1295,6 +1816,7 @@ def fetch_tiktok_live_analytics(
     return best
 
 
+@_sanitize_tiktok_api_boundary(LIVE_SESSION_LIST_PATH)
 def fetch_live_session_list(
     client: httpx.Client,
     *,
@@ -1391,6 +1913,7 @@ def fetch_live_session_list(
     return results
 
 
+@_sanitize_tiktok_api_boundary(LIVE_ANALYTICS_PATH)
 def fetch_overview_performance_daily(
     client: httpx.Client,
     *,
@@ -1463,6 +1986,7 @@ def fetch_overview_performance_daily(
     return results
 
 
+@_sanitize_tiktok_api_boundary(LIVE_PER_MINUTES_PATH_TEMPLATE)
 def fetch_stream_performance_per_minutes(
     client: httpx.Client,
     *,
@@ -1543,6 +2067,7 @@ def fetch_stream_performance_per_minutes(
     return {"overall": overall, "intervals": intervals}
 
 
+@_sanitize_tiktok_api_boundary(LIVE_PRODUCTS_PERFORMANCE_PATH_TEMPLATE)
 def fetch_live_product_performance_list(
     client: httpx.Client,
     *,
@@ -1626,6 +2151,7 @@ def fetch_live_product_performance_list(
     return results
 
 
+@_sanitize_tiktok_api_boundary(PRODUCT_SEARCH_PATH)
 def fetch_tiktok_product_list_page(
     client: httpx.Client,
     *,
@@ -1801,6 +2327,7 @@ def product_record_from_payload(
     }
 
 
+@_sanitize_tiktok_api_boundary(PRODUCT_DETAIL_PATH)
 def upsert_tiktok_product_row(
     session: Session,
     payload: dict[str, Any],
@@ -1827,6 +2354,7 @@ def upsert_tiktok_product_row(
     return "updated"
 
 
+@_sanitize_tiktok_api_boundary(PRODUCT_SEARCH_PATH)
 def backfill_tiktok_products(
     session: Session,
     *,
@@ -1973,6 +2501,7 @@ def backfill_tiktok_products(
     return summary
 
 
+@_sanitize_tiktok_api_boundary(CATEGORIES_PATH)
 def fetch_tiktok_categories(
     client: httpx.Client,
     *,
@@ -2007,6 +2536,7 @@ def fetch_tiktok_categories(
     return [c for c in categories if isinstance(c, dict)]
 
 
+@_sanitize_tiktok_api_boundary(CATEGORY_ATTRIBUTES_PATH)
 def fetch_tiktok_category_attributes(
     client: httpx.Client,
     *,
@@ -2038,6 +2568,7 @@ def fetch_tiktok_category_attributes(
     return [a for a in attributes if isinstance(a, dict)]
 
 
+@_sanitize_tiktok_api_boundary(BRANDS_PATH)
 def fetch_tiktok_brands(
     client: httpx.Client,
     *,
@@ -2076,6 +2607,7 @@ def fetch_tiktok_brands(
     return [b for b in brands if isinstance(b, dict)]
 
 
+@_sanitize_tiktok_api_boundary(IMAGE_UPLOAD_PATH)
 def upload_tiktok_product_image(
     client: httpx.Client,
     *,
@@ -2125,6 +2657,7 @@ def upload_tiktok_product_image(
     return str(uri).strip()
 
 
+@_sanitize_tiktok_api_boundary(PRODUCT_CREATE_PATH)
 def create_tiktok_product(
     client: httpx.Client,
     *,
@@ -2151,6 +2684,7 @@ def create_tiktok_product(
     return extract_tiktok_data(payload)
 
 
+@_sanitize_tiktok_api_boundary(PRODUCT_EDIT_PATH)
 def edit_tiktok_product(
     client: httpx.Client,
     *,
@@ -2179,6 +2713,7 @@ def edit_tiktok_product(
     return extract_tiktok_data(payload)
 
 
+@_sanitize_tiktok_api_boundary(PRODUCT_DETAIL_PATH)
 def fetch_tiktok_product_detail(
     client: httpx.Client,
     *,
@@ -2206,6 +2741,7 @@ def fetch_tiktok_product_detail(
     return extract_tiktok_data(payload)
 
 
+@_sanitize_tiktok_api_boundary(AFFILIATE_SELLER_ORDER_SEARCH_PATH)
 def backfill_tiktok_order_affiliate_attributions(
     session: Session,
     *,
@@ -2310,6 +2846,7 @@ def _scope_json_contains(scopes_json: str, scope: str) -> bool:
     return scope in {item.strip() for item in scopes if item and item.strip()}
 
 
+@_sanitize_tiktok_api_boundary(AFFILIATE_CREATOR_ORDER_SEARCH_PATH)
 def backfill_tiktok_creator_affiliate_attributions(
     session: Session,
     *,
@@ -2415,6 +2952,7 @@ def backfill_tiktok_creator_affiliate_attributions(
     return summary
 
 
+@_sanitize_tiktok_api_boundary(ORDER_SEARCH_PATH)
 def backfill_tiktok_orders(
     session: Session,
     *,

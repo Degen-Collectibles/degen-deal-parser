@@ -23,6 +23,230 @@ TIKTOK_AUTH_TABLE = "tiktok_auth"
 TIKTOK_CREATOR_AUTH_TABLE = "tiktok_creator_auth"
 TIKTOK_ORDERS_TABLE = "tiktok_orders"
 TIKTOK_WEBHOOK_ENRICHMENT_JOBS_TABLE = "tiktok_webhook_enrichment_jobs"
+DISCORD_MESSAGE_REVISIONS_TABLE = "discord_message_revisions"
+TRANSACTION_SOURCE_REVISIONS_TABLE = "transaction_source_revisions"
+DISCORD_SOURCE_REFRESH_MARKER_SQL = (
+    _models.DISCORD_SOURCE_REFRESH_REQUIRED_ERROR.replace("'", "''")
+)
+
+
+SQLITE_TRANSACTION_SOURCE_REVISIONS_CREATE = f"""
+CREATE TABLE IF NOT EXISTS {TRANSACTION_SOURCE_REVISIONS_TABLE} (
+    id INTEGER PRIMARY KEY,
+    transaction_id INTEGER NOT NULL REFERENCES "transaction" (id),
+    message_id INTEGER NOT NULL,
+    revision_id INTEGER NOT NULL,
+    source_position INTEGER NOT NULL,
+    CONSTRAINT uq_transaction_source_revisions_transaction_message
+        UNIQUE (transaction_id, message_id),
+    CONSTRAINT uq_transaction_source_revisions_transaction_position
+        UNIQUE (transaction_id, source_position),
+    CONSTRAINT fk_transaction_source_revisions_revision_provenance
+        FOREIGN KEY (message_id, revision_id)
+        REFERENCES discord_message_revisions (message_id, id)
+)
+"""
+
+
+POSTGRES_TRANSACTION_SOURCE_REVISIONS_CREATE = f"""
+CREATE TABLE IF NOT EXISTS {TRANSACTION_SOURCE_REVISIONS_TABLE} (
+    id BIGSERIAL PRIMARY KEY,
+    transaction_id INTEGER NOT NULL REFERENCES "transaction" (id),
+    message_id INTEGER NOT NULL,
+    revision_id INTEGER NOT NULL,
+    source_position INTEGER NOT NULL,
+    CONSTRAINT uq_transaction_source_revisions_transaction_message
+        UNIQUE (transaction_id, message_id),
+    CONSTRAINT uq_transaction_source_revisions_transaction_position
+        UNIQUE (transaction_id, source_position),
+    CONSTRAINT fk_transaction_source_revisions_revision_provenance
+        FOREIGN KEY (message_id, revision_id)
+        REFERENCES discord_message_revisions (message_id, id)
+)
+"""
+
+
+SQLITE_DISCORD_REVISION_GUARD_MIGRATIONS = (
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_discord_message_revisions_no_replace
+    BEFORE INSERT ON discord_message_revisions
+    WHEN EXISTS (
+             SELECT 1
+             FROM discord_message_revisions
+             WHERE id = NEW.id
+         )
+         OR EXISTS (
+             SELECT 1
+             FROM discord_message_revisions
+             WHERE message_id = NEW.message_id
+               AND revision_number = NEW.revision_number
+         )
+    BEGIN
+        SELECT RAISE(ABORT, 'discord_message_revisions is append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_discord_message_revisions_no_update
+    BEFORE UPDATE ON discord_message_revisions
+    BEGIN
+        SELECT RAISE(ABORT, 'discord_message_revisions is append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_discord_message_revisions_no_delete
+    BEFORE DELETE ON discord_message_revisions
+    BEGIN
+        SELECT RAISE(ABORT, 'discord_message_revisions is append-only');
+    END
+    """,
+)
+
+
+SQLITE_DISCORD_MESSAGE_REVISION_PROVENANCE_MIGRATIONS = (
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_discordmessage_revision_provenance_insert
+    BEFORE INSERT ON discordmessage
+    WHEN NEW.current_revision_id IS NOT NULL
+         AND NOT EXISTS (
+             SELECT 1
+             FROM discord_message_revisions
+             WHERE id = NEW.current_revision_id
+               AND message_id = NEW.id
+         )
+    BEGIN
+        SELECT RAISE(ABORT, 'discordmessage revision provenance violation');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_discordmessage_revision_provenance_update
+    BEFORE UPDATE OF id, current_revision_id ON discordmessage
+    WHEN NEW.current_revision_id IS NOT NULL
+         AND NOT EXISTS (
+             SELECT 1
+             FROM discord_message_revisions
+             WHERE id = NEW.current_revision_id
+               AND message_id = NEW.id
+         )
+    BEGIN
+        SELECT RAISE(ABORT, 'discordmessage revision provenance violation');
+    END
+    """,
+)
+
+
+SQLITE_TRANSACTION_REVISION_PROVENANCE_MIGRATIONS = (
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_transaction_revision_provenance_insert
+    BEFORE INSERT ON "transaction"
+    WHEN NEW.source_revision_id IS NOT NULL
+         AND NOT EXISTS (
+             SELECT 1
+             FROM discord_message_revisions
+             WHERE id = NEW.source_revision_id
+               AND message_id = NEW.source_message_id
+         )
+    BEGIN
+        SELECT RAISE(ABORT, 'transaction revision provenance violation');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_transaction_revision_provenance_update
+    BEFORE UPDATE OF source_message_id, source_revision_id ON "transaction"
+    WHEN NEW.source_revision_id IS NOT NULL
+         AND NOT EXISTS (
+             SELECT 1
+             FROM discord_message_revisions
+             WHERE id = NEW.source_revision_id
+               AND message_id = NEW.source_message_id
+         )
+    BEGIN
+        SELECT RAISE(ABORT, 'transaction revision provenance violation');
+    END
+    """,
+)
+
+
+POSTGRES_DISCORD_REVISION_GUARD_MIGRATIONS = (
+    (
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS
+            uq_discord_message_revisions_message_id_id
+        ON discord_message_revisions (message_id, id)
+        """,
+        "discord_message_revisions.message_id_id_unique",
+    ),
+    (
+        """
+        CREATE OR REPLACE FUNCTION reject_discord_message_revision_mutation()
+        RETURNS trigger AS $function$
+        BEGIN
+            RAISE EXCEPTION USING
+                ERRCODE = '23000',
+                MESSAGE = 'discord_message_revisions is append-only';
+        END;
+        $function$ LANGUAGE plpgsql
+        """,
+        "discord_message_revisions.append_only_function",
+    ),
+    (
+        """
+        DO $migration$
+        BEGIN
+            EXECUTE 'DROP TRIGGER IF EXISTS
+                     trg_discord_message_revisions_append_only
+                     ON discord_message_revisions';
+            EXECUTE 'CREATE TRIGGER trg_discord_message_revisions_append_only
+                     BEFORE UPDATE OR DELETE ON discord_message_revisions
+                     FOR EACH ROW EXECUTE FUNCTION
+                     reject_discord_message_revision_mutation()';
+        END
+        $migration$
+        """,
+        "discord_message_revisions.append_only_trigger",
+    ),
+    (
+        """
+        DO $migration$
+        BEGIN
+            IF NOT EXISTS (
+                   SELECT 1
+                   FROM pg_constraint
+                   WHERE conname = 'fk_discordmessage_current_revision_provenance'
+                     AND conrelid = 'discordmessage'::regclass
+               ) THEN
+                EXECUTE 'ALTER TABLE discordmessage
+                         ADD CONSTRAINT fk_discordmessage_current_revision_provenance
+                         FOREIGN KEY (id, current_revision_id)
+                         REFERENCES discord_message_revisions (message_id, id)
+                         NOT VALID';
+            END IF;
+        END
+        $migration$
+        """,
+        "discordmessage.current_revision_provenance",
+    ),
+    (
+        """
+        DO $migration$
+        BEGIN
+            IF NOT EXISTS (
+                   SELECT 1
+                   FROM pg_constraint
+                   WHERE conname = 'fk_transaction_source_revision_provenance'
+                     AND conrelid = 'transaction'::regclass
+               ) THEN
+                EXECUTE 'ALTER TABLE transaction
+                         ADD CONSTRAINT fk_transaction_source_revision_provenance
+                         FOREIGN KEY (source_message_id, source_revision_id)
+                         REFERENCES discord_message_revisions (message_id, id)
+                         NOT VALID';
+            END IF;
+        END
+        $migration$
+        """,
+        "transaction.source_revision_provenance",
+    ),
+)
 
 
 def normalize_database_url(raw_database_url: str) -> str:
@@ -61,6 +285,9 @@ else:
 
 engine_kwargs = {
     "echo": False,
+    # OAuth tokens and other secrets can appear in bound-parameter collections
+    # on database failures. Keep SQL diagnostics without echoing values.
+    "hide_parameters": True,
     "connect_args": connect_args,
     "pool_pre_ping": True,
     "poolclass": _poolclass,
@@ -102,6 +329,9 @@ SQLITE_ADDITIVE_MIGRATIONS = {
         "active_reparse_run_id": "TEXT",
         "parse_disagreement_json": "TEXT",
         "ai_resolver_reasoning_json": "TEXT",
+        "current_revision_id": "INTEGER",
+        "source_refresh_required": "BOOLEAN DEFAULT 0",
+        "active_parse_attempt_id": "INTEGER",
     },
     "watchedchannel": {
         "backfill_enabled": "BOOLEAN DEFAULT 1",
@@ -116,6 +346,7 @@ SQLITE_ADDITIVE_MIGRATIONS = {
     "transaction": {
         "source_kind": "TEXT DEFAULT 'discord'",
         "source_external_id": "TEXT",
+        "source_revision_id": "INTEGER",
     },
     "parseattempt": {
         "provider_used": "TEXT",
@@ -210,6 +441,9 @@ SQLITE_ADDITIVE_MIGRATIONS = {
     "live_hits": {
         "order_value": "REAL",
         "image_filename": "TEXT",
+    },
+    "live_hit_image_uploads": {
+        "state": "TEXT DEFAULT 'pending'",
     },
     "stream_schedules": {
         "stream_account_id": "INTEGER",
@@ -418,11 +652,18 @@ SQLITE_INDEX_MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS idx_discordmessage_expense_category ON discordmessage (expense_category)",
     "CREATE INDEX IF NOT EXISTS idx_discordmessage_reviewed_by ON discordmessage (reviewed_by)",
     "CREATE INDEX IF NOT EXISTS idx_discordmessage_reviewed_at ON discordmessage (reviewed_at)",
+    "CREATE INDEX IF NOT EXISTS idx_discordmessage_current_revision_id ON discordmessage (current_revision_id)",
+    "CREATE INDEX IF NOT EXISTS idx_discordmessage_source_refresh_required ON discordmessage (source_refresh_required)",
+    "CREATE INDEX IF NOT EXISTS idx_discordmessage_active_parse_attempt_id ON discordmessage (active_parse_attempt_id)",
+    "CREATE INDEX IF NOT EXISTS ix_live_hit_image_uploads_state ON live_hit_image_uploads (state)",
+    "CREATE INDEX IF NOT EXISTS idx_transaction_source_revisions_message_id ON transaction_source_revisions (message_id)",
+    "CREATE INDEX IF NOT EXISTS idx_transaction_source_revisions_revision_id ON transaction_source_revisions (revision_id)",
     "CREATE INDEX IF NOT EXISTS idx_watchedchannel_created_at ON watchedchannel (created_at)",
     "CREATE INDEX IF NOT EXISTS idx_watchedchannel_updated_at ON watchedchannel (updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_bookkeepingentry_sheet_name ON bookkeepingentry (sheet_name)",
     'CREATE INDEX IF NOT EXISTS idx_transaction_source_kind ON "transaction" (source_kind)',
     'CREATE INDEX IF NOT EXISTS idx_transaction_source_external_id ON "transaction" (source_external_id)',
+    'CREATE INDEX IF NOT EXISTS idx_transaction_source_revision_id ON "transaction" (source_revision_id)',
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_gmail_connections_email_address ON gmail_connections (email_address)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_gmail_receipts_gmail_message_id ON gmail_receipts (gmail_message_id)",
     "CREATE INDEX IF NOT EXISTS idx_gmail_receipts_status ON gmail_receipts (status)",
@@ -596,6 +837,9 @@ POSTGRES_ADDITIVE_MIGRATIONS = {
         "active_reparse_run_id": "TEXT",
         "parse_disagreement_json": "TEXT",
         "ai_resolver_reasoning_json": "TEXT",
+        "current_revision_id": "INTEGER",
+        "source_refresh_required": "BOOLEAN DEFAULT FALSE",
+        "active_parse_attempt_id": "INTEGER",
     },
     "watchedchannel": {
         "backfill_enabled": "BOOLEAN DEFAULT TRUE",
@@ -610,6 +854,7 @@ POSTGRES_ADDITIVE_MIGRATIONS = {
     "transaction": {
         "source_kind": "TEXT DEFAULT 'discord'",
         "source_external_id": "TEXT",
+        "source_revision_id": "INTEGER",
     },
     "parseattempt": {
         "provider_used": "TEXT",
@@ -697,6 +942,9 @@ POSTGRES_ADDITIVE_MIGRATIONS = {
     "live_hits": {
         "order_value": "DOUBLE PRECISION",
         "image_filename": "TEXT",
+    },
+    "live_hit_image_uploads": {
+        "state": "TEXT DEFAULT 'pending'",
     },
     "stream_schedules": {
         "stream_account_id": "INTEGER",
@@ -904,11 +1152,18 @@ POSTGRES_INDEX_MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS idx_discordmessage_expense_category ON discordmessage (expense_category)",
     "CREATE INDEX IF NOT EXISTS idx_discordmessage_reviewed_by ON discordmessage (reviewed_by)",
     "CREATE INDEX IF NOT EXISTS idx_discordmessage_reviewed_at ON discordmessage (reviewed_at)",
+    "CREATE INDEX IF NOT EXISTS idx_discordmessage_current_revision_id ON discordmessage (current_revision_id)",
+    "CREATE INDEX IF NOT EXISTS idx_discordmessage_source_refresh_required ON discordmessage (source_refresh_required)",
+    "CREATE INDEX IF NOT EXISTS idx_discordmessage_active_parse_attempt_id ON discordmessage (active_parse_attempt_id)",
+    "CREATE INDEX IF NOT EXISTS ix_live_hit_image_uploads_state ON live_hit_image_uploads (state)",
+    "CREATE INDEX IF NOT EXISTS idx_transaction_source_revisions_message_id ON transaction_source_revisions (message_id)",
+    "CREATE INDEX IF NOT EXISTS idx_transaction_source_revisions_revision_id ON transaction_source_revisions (revision_id)",
     "CREATE INDEX IF NOT EXISTS idx_watchedchannel_created_at ON watchedchannel (created_at)",
     "CREATE INDEX IF NOT EXISTS idx_watchedchannel_updated_at ON watchedchannel (updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_bookkeepingentry_sheet_name ON bookkeepingentry (sheet_name)",
     'CREATE INDEX IF NOT EXISTS idx_transaction_source_kind ON "transaction" (source_kind)',
     'CREATE INDEX IF NOT EXISTS idx_transaction_source_external_id ON "transaction" (source_external_id)',
+    'CREATE INDEX IF NOT EXISTS idx_transaction_source_revision_id ON "transaction" (source_revision_id)',
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_gmail_connections_email_address ON gmail_connections (email_address)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_gmail_receipts_gmail_message_id ON gmail_receipts (gmail_message_id)",
     "CREATE INDEX IF NOT EXISTS idx_gmail_receipts_status ON gmail_receipts (status)",
@@ -1054,6 +1309,31 @@ def sqlite_table_exists(connection, table_name: str) -> bool:
         {"table_name": table_name},
     ).first()
     return row is not None
+
+
+def install_sqlite_discord_revision_guards(connection) -> None:
+    if not sqlite_table_exists(connection, DISCORD_MESSAGE_REVISIONS_TABLE):
+        return
+    for statement in SQLITE_DISCORD_REVISION_GUARD_MIGRATIONS:
+        connection.execute(text(statement))
+
+    if sqlite_table_exists(connection, "discordmessage"):
+        discord_columns = {
+            row[1]
+            for row in connection.execute(text("PRAGMA table_info('discordmessage')"))
+        }
+        if "current_revision_id" in discord_columns:
+            for statement in SQLITE_DISCORD_MESSAGE_REVISION_PROVENANCE_MIGRATIONS:
+                connection.execute(text(statement))
+
+    if sqlite_table_exists(connection, "transaction"):
+        transaction_columns = {
+            row[1]
+            for row in connection.execute(text("PRAGMA table_info('transaction')"))
+        }
+        if {"source_message_id", "source_revision_id"} <= transaction_columns:
+            for statement in SQLITE_TRANSACTION_REVISION_PROVENANCE_MIGRATIONS:
+                connection.execute(text(statement))
 
 
 def migrate_legacy_sqlite_shopify_orders(connection) -> None:
@@ -1474,6 +1754,22 @@ def ensure_sqlite_schema() -> None:
                     )
                 )
 
+        discord_columns = {
+            row[1]
+            for row in connection.execute(text('PRAGMA table_info("discordmessage")'))
+        }
+        if {"last_error", "source_refresh_required"} <= discord_columns:
+            connection.execute(
+                text(
+                    "UPDATE discordmessage "
+                    "SET source_refresh_required = 1 "
+                    "WHERE COALESCE(source_refresh_required, 0) = 0 "
+                    f"AND INSTR(COALESCE(last_error, ''), '{DISCORD_SOURCE_REFRESH_MARKER_SQL}') > 0"
+                )
+            )
+
+        connection.execute(text(SQLITE_TRANSACTION_SOURCE_REVISIONS_CREATE))
+
         connection.execute(
             text(
                 f"""
@@ -1496,6 +1792,7 @@ def ensure_sqlite_schema() -> None:
 
         for statement in SQLITE_INDEX_MIGRATIONS:
             connection.execute(text(statement))
+        install_sqlite_discord_revision_guards(connection)
         migrate_legacy_sqlite_shopify_orders(connection)
         _migrate_shift_entry_drop_unique(connection)
         _migrate_schedule_roster_member_calendar_unique(connection)
@@ -1546,6 +1843,24 @@ def _pg_migrate_statement(stmt: str, label: str) -> None:
         print(f"[db] migration skipped ({label}): {exc}")
 
 
+def _pg_security_migrate_statement(stmt: str, label: str) -> None:
+    """Install a required security invariant or fail application startup."""
+
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("SET LOCAL lock_timeout = '5s'"))
+            conn.execute(text(stmt))
+    except Exception as exc:
+        raise RuntimeError(
+            f"[db] required security migration failed ({label}): {exc}"
+        ) from exc
+
+
+def install_postgres_discord_revision_guards() -> None:
+    for statement, label in POSTGRES_DISCORD_REVISION_GUARD_MIGRATIONS:
+        _pg_security_migrate_statement(statement, label)
+
+
 def ensure_postgres_schema() -> None:
     if not is_postgres_database_url(database_url):
         return
@@ -1576,6 +1891,20 @@ def ensure_postgres_schema() -> None:
                 f"ALTER TABLE {pg_table} ADD COLUMN IF NOT EXISTS {column_name} {column_type}",
                 f"{table_name}.{column_name}",
             )
+    _pg_migrate_statement(
+        "UPDATE discordmessage "
+        "SET source_refresh_required = TRUE "
+        "WHERE source_refresh_required IS DISTINCT FROM TRUE "
+        f"AND POSITION('{DISCORD_SOURCE_REFRESH_MARKER_SQL}' IN COALESCE(last_error, '')) > 0",
+        "discordmessage.source_refresh_required.backfill",
+    )
+    install_postgres_discord_revision_guards()
+    # The association FK depends on the revision table's (message_id, id)
+    # uniqueness installed above. Create it before its lookup indexes.
+    _pg_security_migrate_statement(
+        POSTGRES_TRANSACTION_SOURCE_REVISIONS_CREATE,
+        f"{TRANSACTION_SOURCE_REVISIONS_TABLE}.create",
+    )
     for idx_stmt in POSTGRES_INDEX_MIGRATIONS:
         _pg_migrate_statement(idx_stmt, idx_stmt[:60])
     # Multi-shift-per-day: the original shift_entry table had a UNIQUE
@@ -1645,6 +1974,7 @@ DEFAULT_ROLE_PERMISSIONS: tuple[tuple[str, str, bool], ...] = tuple(
         ("ops.inventory.receive", (True, True, True, True, True)),
         ("ops.inventory.manage", (False, False, True, True, True)),
         ("ops.live_hits.view", (True, True, True, True, True)),
+        ("ops.live_hits.delete", (False, False, True, True, True)),
         ("ops.live_stream.view", (True, True, True, True, True)),
         ("ops.degen_eye.view", (True, True, True, True, True)),
         ("ops.buylist.view", (True, True, True, True, True)),
@@ -1936,6 +2266,16 @@ def init_db() -> None:
             delay_seconds *= 2
     ensure_postgres_schema()
     ensure_sqlite_schema()
+    from .tiktok.token_storage import migrate_tiktok_token_storage
+
+    with Session(engine) as session:
+        migrated_tiktok_tokens = migrate_tiktok_token_storage(session)
+    if any(migrated_tiktok_tokens.values()):
+        print(
+            "[db] protected TikTok OAuth token rows: "
+            f"seller={migrated_tiktok_tokens['seller_rows']} "
+            f"creator={migrated_tiktok_tokens['creator_rows']}"
+        )
     fixup_transaction_parse_status_aliases()
     try:
         from .discord.backfill_requests import repair_backfill_request_state_rows

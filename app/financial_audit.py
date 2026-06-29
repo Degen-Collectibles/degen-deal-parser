@@ -5,15 +5,12 @@ from typing import Any
 
 from sqlmodel import Session
 
+from .financial_values import sanitize_nonfinite_json_values
 from .models import AuditLog
 
 
 def _clean_payload(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {str(key): _clean_payload(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_clean_payload(item) for item in value]
-    return value
+    return sanitize_nonfinite_json_values(value)
 
 
 def record_financial_audit(
@@ -38,7 +35,7 @@ def record_financial_audit(
         actor_user_id=actor_user_id,
         action=action,
         resource_key=resource_key,
-        details_json=json.dumps(details, sort_keys=True, default=str),
+        details_json=json.dumps(details, sort_keys=True, default=str, allow_nan=False),
     )
     session.add(row)
     return row

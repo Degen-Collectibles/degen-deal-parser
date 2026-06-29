@@ -250,45 +250,26 @@ def reports_page(
     start_dt = parse_report_datetime(start)
     end_dt = parse_report_datetime(end, end_of_day=True)
 
-    reports_cache_key = f"reports:{start or ''}:{end or ''}:{channel_id or ''}:{entry_kind or ''}:{selected_source}"
-    cached_reports = cache_get(reports_cache_key)
-    if cached_reports is None:
-        transactions_all = get_transactions(
-            session,
-            start=start_dt,
-            end=end_dt,
-            channel_id=channel_id,
-            entry_kind=entry_kind,
-        )
-        discord_summary = build_transaction_summary(transactions_all)
-        shopify_rows = get_shopify_reporting_rows(session, start=start_dt, end=end_dt)
-        shopify_summary = build_shopify_reporting_summary(shopify_rows)
-        tiktok_rows = get_tiktok_reporting_rows(session, start=start_dt, end=end_dt)
-        tiktok_summary = build_tiktok_reporting_summary(tiktok_rows)
-        shopify_daily_totals = build_shopify_daily_totals(shopify_rows)
-        tiktok_daily_totals = list(tiktok_summary.get("daily_totals", []))
-        period_rows = build_report_period_comparison_rows(
-            session,
-            periods=build_reporting_periods(selected_start=start_dt, selected_end=end_dt),
-            channel_id=channel_id,
-            entry_kind=entry_kind,
-        )
-        cached_reports = {
-            "discord_summary": discord_summary,
-            "shopify_summary": shopify_summary,
-            "tiktok_summary": tiktok_summary,
-            "shopify_daily_totals": shopify_daily_totals,
-            "tiktok_daily_totals": tiktok_daily_totals,
-            "period_rows": period_rows,
-        }
-        cache_set(reports_cache_key, cached_reports)
-    else:
-        discord_summary = cached_reports["discord_summary"]
-        shopify_summary = cached_reports["shopify_summary"]
-        tiktok_summary = cached_reports["tiktok_summary"]
-        shopify_daily_totals = cached_reports["shopify_daily_totals"]
-        tiktok_daily_totals = cached_reports["tiktok_daily_totals"]
-        period_rows = cached_reports["period_rows"]
+    transactions_all = get_transactions(
+        session,
+        start=start_dt,
+        end=end_dt,
+        channel_id=channel_id,
+        entry_kind=entry_kind,
+    )
+    discord_summary = build_transaction_summary(transactions_all)
+    shopify_rows = get_shopify_reporting_rows(session, start=start_dt, end=end_dt)
+    shopify_summary = build_shopify_reporting_summary(shopify_rows)
+    tiktok_rows = get_tiktok_reporting_rows(session, start=start_dt, end=end_dt)
+    tiktok_summary = build_tiktok_reporting_summary(tiktok_rows)
+    shopify_daily_totals = build_shopify_daily_totals(shopify_rows)
+    tiktok_daily_totals = list(tiktok_summary.get("daily_totals", []))
+    period_rows = build_report_period_comparison_rows(
+        session,
+        periods=build_reporting_periods(selected_start=start_dt, selected_end=end_dt),
+        channel_id=channel_id,
+        entry_kind=entry_kind,
+    )
 
     transactions = get_transactions(
         session,
@@ -372,25 +353,18 @@ def finance_page(
 
     range_data = resolve_finance_range(start=start, end=end, window=window)
     selected_bank_account = normalize_bank_account_filter(bank_account if isinstance(bank_account, str) else "all")
-    finance_cache_key = f"finance:v4:{start or ''}:{end or ''}:{window or ''}"
-    cached_finance = cache_get(finance_cache_key)
-    if cached_finance is None:
-        current_snapshot = build_finance_range_snapshot(
-            session,
-            start=range_data["start_dt"],
-            end=range_data["end_dt"],
-            day_count=int(range_data["day_count"]),
-        )
-        prior_snapshot = build_finance_range_snapshot(
-            session,
-            start=range_data["previous_start_dt"],
-            end=range_data["previous_end_dt"],
-            day_count=int(range_data["day_count"]),
-        )
-        cache_set(finance_cache_key, {"current": current_snapshot, "prior": prior_snapshot})
-    else:
-        current_snapshot = cached_finance["current"]
-        prior_snapshot = cached_finance["prior"]
+    current_snapshot = build_finance_range_snapshot(
+        session,
+        start=range_data["start_dt"],
+        end=range_data["end_dt"],
+        day_count=int(range_data["day_count"]),
+    )
+    prior_snapshot = build_finance_range_snapshot(
+        session,
+        start=range_data["previous_start_dt"],
+        end=range_data["previous_end_dt"],
+        day_count=int(range_data["day_count"]),
+    )
 
     current_statement = current_snapshot["statement"]
     prior_statement = prior_snapshot["statement"]

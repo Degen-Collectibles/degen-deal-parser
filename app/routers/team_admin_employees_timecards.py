@@ -612,6 +612,14 @@ def set_timecard_day_status(
     status = (status or "").strip().lower()
     if status not in TIMECARD_STATUS_VALUES:
         raise ValueError("Unsupported timecard status")
+    if not has_permission(session, current_user, "admin.employees.edit"):
+        raise PermissionError("Employee edit permission required")
+    if status == TIMECARD_STATUS_LOCKED and not has_permission(
+        session,
+        current_user,
+        "admin.payroll.lock",
+    ):
+        raise PermissionError("Payroll lock permission required")
     note = (note or "").strip()[:1000]
     if work_date > datetime.now(_tz()).date():
         raise ValueError("Cannot edit future timecards")
@@ -697,6 +705,8 @@ def admin_employee_timecard_day_status(
             note=note,
             ip_address=request.client.host if request.client else None,
         )
+    except PermissionError:
+        return HTMLResponse("Forbidden", status_code=403)
     except ValueError as exc:
         return RedirectResponse(
             _timecard_redirect_url(user_id, week_start, error=str(exc)),
@@ -1004,6 +1014,21 @@ def admin_employee_timecards(
         f"{_format_month_day(week_end_inclusive, include_year=True)}"
     )
 
+    can_set_locked = has_permission(
+        session,
+        current,
+        "admin.employees.edit",
+    ) and has_permission(
+        session,
+        current,
+        "admin.payroll.lock",
+    )
+    timecard_status_options = [
+        option
+        for option in TIMECARD_STATUS_OPTIONS
+        if option["value"] != TIMECARD_STATUS_LOCKED or can_set_locked
+    ]
+
     context = {
         "request": request,
         "title": f"Timecards · {_employee_display_name(employee)}",
@@ -1037,7 +1062,7 @@ def admin_employee_timecards(
         "shifts_worked": shifts_worked,
         "running_count": running_count,
         "approval_counts": approval_counts,
-        "timecard_status_options": TIMECARD_STATUS_OPTIONS,
+        "timecard_status_options": timecard_status_options,
         "active_day_count": len(active_day_rows),
         "audit_history": audit_history,
         "labor_total_label": _format_dollars(labor_cents) if not pay_missing else None,

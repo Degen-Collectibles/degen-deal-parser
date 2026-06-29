@@ -17,6 +17,8 @@ import json
 import re
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
+from email.errors import HeaderParseError, InvalidHeaderDefect
+from email.headerregistry import Address
 from typing import Any, Optional, Tuple
 from urllib.parse import unquote, urlparse
 
@@ -28,6 +30,7 @@ from sqlmodel import Session, select
 
 from .. import permissions as perms
 from ..auth import (
+    AuthError,
     BadCurrentPasswordError,
     LoginRateLimitedError,
     WeakPasswordError,
@@ -40,6 +43,7 @@ from ..auth import (
     _find_token_row,
     _token_hmac_key,
     validate_password_strength,
+    verify_password,
 )
 from ..team.clockify import (
     ClockifyApiError,
@@ -1926,6 +1930,20 @@ def _decode_address(blob: Optional[bytes]) -> dict[str, str]:
         return {}
 
 
+def _normalize_profile_email(raw: str) -> str:
+    """Return one canonical addr-spec, or reject non-mailbox/header syntax."""
+    candidate = (raw or "").strip().lower()
+    if not candidate:
+        return ""
+    try:
+        address = Address(addr_spec=candidate)
+    except (ValueError, HeaderParseError, InvalidHeaderDefect) as exc:
+        raise ValueError("invalid profile email") from exc
+    if not address.username or not address.domain or address.addr_spec != candidate:
+        raise ValueError("invalid profile email")
+    return candidate
+
+
 @router.get("/team/profile", response_class=HTMLResponse)
 def team_profile(
     request: Request,
@@ -1974,6 +1992,7 @@ async def team_profile_post(
     preferred_name: str = Form(default=""),
     legal_name: str = Form(default=""),
     email: str = Form(default=""),
+    current_password: str = Form(default=""),
     phone: str = Form(default=""),
     emergency_contact_name: str = Form(default=""),
     emergency_contact_phone: str = Form(default=""),
@@ -1993,13 +2012,72 @@ async def team_profile_post(
         window_seconds=900,
     ):
         return limited
-    profile = _profile_for(session, user.id)
+    # Re-fetch both records into this request's session. The middleware user is
+    # detached, and security decisions must use current persisted credentials.
+    db_user = session.get(User, user.id)
+    profile = session.get(EmployeeProfile, user.id)
+    try:
+        new_email = _normalize_profile_email(email)
+    except ValueError:
+        return RedirectResponse(
+            "/team/profile?flash=Enter+a+valid+single+email+address.",
+            status_code=303,
+        )
+    try:
+        current_email = (
+            (decrypt_pii(profile.email_ciphertext) or "").strip().lower()
+            if profile is not None
+            else ""
+        )
+    except (PIIDecryptError, ValueError):
+        current_email = ""
+    email_changed = new_email != current_email
+
+    # Email controls password-reset delivery. Prove knowledge of the current
+    # password before applying *any* submitted profile mutation.
+    if email_changed:
+        if not current_password:
+            return RedirectResponse(
+                "/team/profile?flash=Enter+your+current+password+to+change+your+email.",
+                status_code=303,
+            )
+        password_verified = False
+        if db_user is not None and db_user.password_hash and db_user.password_salt:
+            try:
+                password_verified = verify_password(
+                    current_password,
+                    db_user.password_hash,
+                    salt=db_user.password_salt,
+                )
+            except AuthError:
+                password_verified = False
+        if not password_verified:
+            return RedirectResponse(
+                "/team/profile?flash=Current+password+could+not+be+verified.",
+                status_code=303,
+            )
+
+    from ..team.pii import email_lookup_hash as _email_hash
+
+    new_email_hash = _email_hash(new_email) if new_email else None
+    if email_changed and new_email_hash:
+        clash = session.exec(
+            select(EmployeeProfile).where(
+                EmployeeProfile.email_lookup_hash == new_email_hash,
+                EmployeeProfile.user_id != user.id,
+            )
+        ).first()
+        if clash is not None:
+            return RedirectResponse(
+                "/team/profile?flash=That+email+is+already+taken.", status_code=303
+            )
+
+    if profile is None:
+        profile = EmployeeProfile(user_id=user.id)
+        session.add(profile)
+
     now = utcnow()
     changed: list[str] = []
-
-    # Re-fetch into the router session; the middleware-supplied `user` is
-    # detached from any session and cannot be safely mutated here.
-    db_user = session.get(User, user.id)
     new_display = (preferred_name or "").strip()
     if db_user is not None and new_display and new_display != (db_user.display_name or ""):
         db_user.display_name = new_display
@@ -2031,27 +2109,10 @@ async def team_profile_post(
     )
 
     # Email needs both the ciphertext AND the lookup hash kept in sync.
-    from ..team.pii import email_lookup_hash as _email_hash
-    new_email = (email or "").strip().lower()
-    try:
-        current_email = decrypt_pii(profile.email_ciphertext) or ""
-    except (PIIDecryptError, ValueError):
-        current_email = ""
-    if new_email != current_email:
+    if email_changed:
         if new_email:
-            new_hash = _email_hash(new_email)
-            clash = session.exec(
-                select(EmployeeProfile).where(
-                    EmployeeProfile.email_lookup_hash == new_hash,
-                    EmployeeProfile.user_id != user.id,
-                )
-            ).first()
-            if clash is not None:
-                return RedirectResponse(
-                    "/team/profile?flash=That+email+is+already+taken.", status_code=303
-                )
             profile.email_ciphertext = encrypt_pii(new_email)
-            profile.email_lookup_hash = new_hash
+            profile.email_lookup_hash = new_email_hash
         else:
             profile.email_ciphertext = None
             profile.email_lookup_hash = None

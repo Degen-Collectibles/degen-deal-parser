@@ -878,8 +878,8 @@ class ConfigSecretFailClosedTests(unittest.TestCase):
 
 
 class StitchedChildTransactionCleanupTests(unittest.TestCase):
-    """Area D: a row that becomes a stitched child must lose its Transaction
-    and any BookkeepingEntry references."""
+    """Area D: a row that becomes a stitched child must tombstone its old
+    standalone Transaction and clear reconciliation dependents."""
 
     def setUp(self) -> None:
         self.engine = _make_engine()
@@ -915,8 +915,47 @@ class StitchedChildTransactionCleanupTests(unittest.TestCase):
         statement = select(Transaction).where(Transaction.source_message_id == row_id)
         return session.scalars(statement).first()
 
-    def test_marking_row_as_stitched_child_deletes_existing_transaction(self):
-        from app.models import DiscordMessage, TransactionItem
+    def _make_valid_stitched_child(self, session, row, *, group_id):
+        from app.discord.message_revisions import ensure_message_revision
+        from app.discord.transactions import sync_transaction_from_message
+        from app.models import DiscordMessage, PARSE_IGNORED, PARSE_PARSED
+
+        primary = DiscordMessage(
+            discord_message_id=f"{row.discord_message_id}-primary",
+            channel_id=row.channel_id,
+            channel_name=row.channel_name,
+            author_name=row.author_name,
+            content="Photo",
+            created_at=row.created_at - timedelta(seconds=1),
+            parse_status=PARSE_PARSED,
+            deal_type="buy",
+            entry_kind="buy",
+            amount=50.0,
+            money_out=50.0,
+        )
+        session.add(primary)
+        session.flush()
+        membership = json.dumps([primary.id, row.id])
+        primary.stitched_group_id = group_id
+        primary.stitched_primary = True
+        primary.stitched_message_ids_json = membership
+        row.stitched_group_id = group_id
+        row.stitched_primary = False
+        row.stitched_message_ids_json = membership
+        row.parse_status = PARSE_IGNORED
+        ensure_message_revision(session, primary)
+        ensure_message_revision(session, row)
+        primary_transaction = sync_transaction_from_message(
+            session,
+            primary,
+            source_rows=[primary, row],
+            source_content="Message 1: Photo\nMessage 2: bought a slab for 50",
+        )
+        session.commit()
+        return primary_transaction.id
+
+    def test_marking_row_as_stitched_child_tombstones_existing_transaction(self):
+        from app.models import DiscordMessage, Transaction, TransactionItem
         from app.discord.transactions import sync_transaction_from_message
 
         with Session(self.engine) as session:
@@ -929,10 +968,11 @@ class StitchedChildTransactionCleanupTests(unittest.TestCase):
             session.add(TransactionItem(transaction_id=tx.id, direction="named", item_name="Charizard"))
             session.commit()
 
-            row.stitched_group_id = "grp-1"
-            row.stitched_primary = False
-            session.add(row)
-            session.commit()
+            primary_transaction_id = self._make_valid_stitched_child(
+                session,
+                row,
+                group_id="grp-1",
+            )
             sync_transaction_from_message(session, row)
             session.commit()
 
@@ -942,7 +982,10 @@ class StitchedChildTransactionCleanupTests(unittest.TestCase):
                     select(TransactionItem).where(TransactionItem.transaction_id == (tx.id or 0))
                 ).all()
             )
-        self.assertIsNone(tx_after)
+            primary_transaction = session.get(Transaction, primary_transaction_id)
+        self.assertIsNotNone(tx_after)
+        self.assertTrue(tx_after.is_deleted)
+        self.assertFalse(primary_transaction.is_deleted)
         self.assertEqual(items_after, [])
 
     def test_stitched_child_clears_bookkeeping_entry_match(self):
@@ -950,6 +993,7 @@ class StitchedChildTransactionCleanupTests(unittest.TestCase):
             BookkeepingEntry,
             BookkeepingImport,
             DiscordMessage,
+            Transaction,
         )
         from app.discord.transactions import sync_transaction_from_message
 
@@ -975,16 +1019,20 @@ class StitchedChildTransactionCleanupTests(unittest.TestCase):
             session.commit()
             session.refresh(entry)
 
-            row.stitched_group_id = "grp-2"
-            row.stitched_primary = False
-            session.add(row)
-            session.commit()
+            primary_transaction_id = self._make_valid_stitched_child(
+                session,
+                row,
+                group_id="grp-2",
+            )
             sync_transaction_from_message(session, row)
             session.commit()
 
             entry_after = session.get(BookkeepingEntry, entry.id)
             tx_after = self._fetch_transaction(session, row_id)
-        self.assertIsNone(tx_after)
+            primary_transaction = session.get(Transaction, primary_transaction_id)
+        self.assertIsNotNone(tx_after)
+        self.assertTrue(tx_after.is_deleted)
+        self.assertFalse(primary_transaction.is_deleted)
         self.assertIsNotNone(entry_after)
         self.assertIsNone(entry_after.matched_transaction_id)
         self.assertEqual(entry_after.match_status, "unmatched")
@@ -994,6 +1042,7 @@ class StitchedChildTransactionCleanupTests(unittest.TestCase):
             BankStatementImport,
             BankTransaction,
             DiscordMessage,
+            Transaction,
         )
         from app.discord.transactions import sync_transaction_from_message
 
@@ -1033,17 +1082,21 @@ class StitchedChildTransactionCleanupTests(unittest.TestCase):
             session.commit()
             session.refresh(bank_row)
 
-            row.stitched_group_id = "grp-bank"
-            row.stitched_primary = False
-            session.add(row)
-            session.commit()
+            primary_transaction_id = self._make_valid_stitched_child(
+                session,
+                row,
+                group_id="grp-bank",
+            )
             sync_transaction_from_message(session, row)
             session.commit()
 
             bank_after = session.get(BankTransaction, bank_row.id)
             tx_after = self._fetch_transaction(session, row_id)
+            primary_transaction = session.get(Transaction, primary_transaction_id)
 
-        self.assertIsNone(tx_after)
+        self.assertIsNotNone(tx_after)
+        self.assertTrue(tx_after.is_deleted)
+        self.assertFalse(primary_transaction.is_deleted)
         self.assertIsNotNone(bank_after)
         self.assertIsNone(bank_after.matched_transaction_id)
         self.assertIsNone(bank_after.matched_source_message_id)
@@ -1051,7 +1104,7 @@ class StitchedChildTransactionCleanupTests(unittest.TestCase):
         self.assertEqual(bank_after.classification, "needs_review")
         self.assertEqual(bank_after.confidence, "low")
 
-    def test_marking_row_as_ignored_also_deletes_transaction(self):
+    def test_marking_row_as_ignored_also_tombstones_transaction(self):
         from app.models import DiscordMessage, PARSE_IGNORED
         from app.discord.transactions import sync_transaction_from_message
 
@@ -1067,7 +1120,209 @@ class StitchedChildTransactionCleanupTests(unittest.TestCase):
             session.commit()
             sync_transaction_from_message(session, row)
             session.commit()
-            self.assertIsNone(self._fetch_transaction(session, row_id))
+            transaction = self._fetch_transaction(session, row_id)
+            self.assertIsNotNone(transaction)
+            self.assertTrue(transaction.is_deleted)
+
+
+class DiscordRevisionTransactionSyncTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.engine = _make_engine()
+
+    def tearDown(self) -> None:
+        self.engine.dispose()
+
+    def test_successful_sync_revives_exact_transaction_on_current_source_revision(self):
+        from app.discord.transactions import sync_transaction_from_message
+        from app.models import (
+            DiscordMessage,
+            DiscordMessageRevision,
+            PARSE_PARSED,
+            Transaction,
+            TransactionItem,
+        )
+
+        with Session(self.engine) as session:
+            row = DiscordMessage(
+                discord_message_id="revision-sync-1",
+                channel_id="chan-1",
+                channel_name="deals",
+                author_name="alice",
+                content="Buy original for 50",
+                attachment_urls_json='["https://cdn.discord.com/original.png"]',
+                created_at=utcnow(),
+                parse_status=PARSE_PARSED,
+                deal_type="buy",
+                entry_kind="buy",
+                amount=50.0,
+                money_out=50.0,
+                item_names_json='["Original Card"]',
+            )
+            session.add(row)
+            session.flush()
+            sync_transaction_from_message(session, row)
+            session.commit()
+
+            transaction = session.exec(
+                select(Transaction).where(Transaction.source_message_id == row.id)
+            ).one()
+            transaction_id = transaction.id
+            original_revision_id = transaction.source_revision_id
+            self.assertEqual(row.current_revision_id, original_revision_id)
+
+            row.content = "Buy edited for 75"
+            row.attachment_urls_json = '["https://cdn.discord.com/edited.png"]'
+            row.amount = 75.0
+            row.money_out = 75.0
+            row.item_names_json = '["Edited Card"]'
+            transaction.is_deleted = True
+            transaction.needs_review = True
+            transaction.source_content = "Buy original for 50"
+            session.add(row)
+            session.add(transaction)
+            session.flush()
+
+            revived = sync_transaction_from_message(
+                session,
+                row,
+                source_rows=[row],
+                source_content=row.content,
+            )
+            session.commit()
+
+            revisions = list(
+                session.exec(
+                    select(DiscordMessageRevision).order_by(
+                        DiscordMessageRevision.revision_number
+                    )
+                ).all()
+            )
+            items = list(
+                session.exec(
+                    select(TransactionItem).where(
+                        TransactionItem.transaction_id == transaction_id
+                    )
+                ).all()
+            )
+            revived_id = revived.id
+            current_revision_id = row.current_revision_id
+            revived_source_revision_id = revived.source_revision_id
+            revived_source_content = revived.source_content
+            revived_is_deleted = revived.is_deleted
+            revision_snapshots = [
+                (revision.id, revision.revision_number, revision.content)
+                for revision in revisions
+            ]
+            item_snapshots = [(item.direction, item.item_name) for item in items]
+
+        self.assertEqual(revived_id, transaction_id)
+        self.assertEqual(
+            [(number, content) for _id, number, content in revision_snapshots],
+            [(1, "Buy original for 50"), (2, "Buy edited for 75")],
+        )
+        self.assertEqual(revision_snapshots[0][0], original_revision_id)
+        self.assertEqual(current_revision_id, revision_snapshots[1][0])
+        self.assertEqual(revived_source_revision_id, revision_snapshots[1][0])
+        self.assertEqual(revived_source_content, "Buy edited for 75")
+        self.assertFalse(revived_is_deleted)
+        self.assertEqual(item_snapshots, [("named", "Edited Card")])
+
+    def test_stale_worker_cannot_append_old_source_or_revive_transaction_after_edit(self):
+        from app.discord.message_revisions import ensure_message_revision
+        from app.discord.transactions import (
+            cleanup_transaction_dependents,
+            sync_transaction_from_message,
+            transaction_base_query,
+        )
+        from app.models import (
+            DiscordMessage,
+            DiscordMessageRevision,
+            PARSE_PARSED,
+            PARSE_PENDING,
+            Transaction,
+        )
+
+        with Session(self.engine) as session:
+            row = DiscordMessage(
+                discord_message_id="stale-worker-edit-1",
+                channel_id="chan-1",
+                content="Buy original for 50",
+                attachment_urls_json='["https://cdn.discord.com/original.png"]',
+                created_at=utcnow(),
+                parse_status=PARSE_PARSED,
+                deal_type="buy",
+                entry_kind="buy",
+                amount=50.0,
+                money_out=50.0,
+            )
+            session.add(row)
+            session.flush()
+            transaction = sync_transaction_from_message(session, row)
+            session.commit()
+            row_id = row.id
+            transaction_id = transaction.id
+            original_revision_id = transaction.source_revision_id
+
+        stale_worker_session = Session(self.engine)
+        try:
+            stale_row = stale_worker_session.get(DiscordMessage, row_id)
+            self.assertEqual(stale_row.content, "Buy original for 50")
+
+            with Session(self.engine) as edit_session:
+                edited_row = edit_session.get(DiscordMessage, row_id)
+                edited_transaction = edit_session.get(Transaction, transaction_id)
+                edited_row.content = "Buy edited for 75"
+                edited_row.attachment_urls_json = (
+                    '["https://cdn.discord.com/edited.png"]'
+                )
+                edited_row.edited_at = utcnow()
+                edited_row.parse_status = PARSE_PENDING
+                edited_row.amount = 75.0
+                edited_row.money_out = 75.0
+                edited_revision = ensure_message_revision(edit_session, edited_row)
+                cleanup_transaction_dependents(
+                    edit_session,
+                    edited_transaction,
+                    bank_unmatch_reason="Edited during stale worker test.",
+                )
+                edited_transaction.is_deleted = True
+                edited_transaction.needs_review = True
+                edited_transaction.parse_status = PARSE_PENDING
+                edit_session.add(edited_row)
+                edit_session.add(edited_transaction)
+                edit_session.commit()
+                edited_revision_id = edited_revision.id
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "changed while parsing",
+            ):
+                sync_transaction_from_message(stale_worker_session, stale_row)
+        finally:
+            stale_worker_session.close()
+
+        with Session(self.engine) as session:
+            current_row = session.get(DiscordMessage, row_id)
+            current_transaction = session.get(Transaction, transaction_id)
+            revisions = list(
+                session.exec(
+                    select(DiscordMessageRevision).order_by(
+                        DiscordMessageRevision.revision_number
+                    )
+                ).all()
+            )
+            reportable_ids = {
+                transaction.id for transaction in session.exec(transaction_base_query()).all()
+            }
+
+        self.assertEqual([revision.revision_number for revision in revisions], [1, 2])
+        self.assertEqual(current_row.content, "Buy edited for 75")
+        self.assertEqual(current_row.current_revision_id, edited_revision_id)
+        self.assertTrue(current_transaction.is_deleted)
+        self.assertEqual(current_transaction.parse_status, PARSE_PENDING)
+        self.assertEqual(current_transaction.source_revision_id, original_revision_id)
+        self.assertEqual(current_transaction.source_content, "Buy original for 50")
+        self.assertNotIn(transaction_id, reportable_ids)
 
 
 if __name__ == "__main__":

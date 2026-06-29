@@ -54,6 +54,12 @@
           </div>
 
           <div class="pt-field">
+              <label class="pt-field-label" for="current_password">Current password</label>
+              <input class="pt-input" type="password" id="current_password" name="current_password" value="" autocomplete="current-password" placeholder="Required for email changes">
+              <small style="display:block; margin-top:6px; color:var(--pt-muted);">Required only when changing or clearing your email.</small>
+          </div>
+
+          <div class="pt-field">
               <label class="pt-field-label">Mailing address</label>
               <input class="pt-input" type="text" name="address_street" value="{{ address.street or '' }}" placeholder="Street address" style="margin-bottom:8px;" autocomplete="street-address" autocapitalize="words">
               <div class="pt-addr-row">

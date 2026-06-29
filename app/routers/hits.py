@@ -5,19 +5,35 @@ Extracted from app/main.py -- all routes under /hits/ and /api/hits/.
 """
 from __future__ import annotations
 
-import uuid
+import json
+import os
+import io
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Form, Query, Request, UploadFile, File
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from sqlalchemy import or_
 from sqlmodel import Session, select
 
 from ..auth import has_permission
 from ..config import get_settings
 from ..csrf import CSRFProtectedRoute
+from ..models import AuditLog
+from ..hit_image_uploads import (
+    MAX_HIT_IMAGE_BYTES,
+    HitImageUploadError,
+    abandon_pending_upload,
+    bind_pending_upload,
+    finalize_pending_upload,
+    parse_upload_marker,
+    reserve_pending_upload,
+    upload_marker,
+)
+from ..image_security import ImageSecurityError, validate_image_file
+from ..image_security import image_decode_slot
+from PIL import Image, UnidentifiedImageError
 from ..shared import *  # noqa: F401,F403 -- shared helpers, constants, state
 from ..db import get_session, managed_session
 
@@ -27,8 +43,18 @@ router = APIRouter(route_class=CSRFProtectedRoute)
 def _hit_images_dir() -> Path:
     return get_settings().media_path("hit_images")
 
-ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
-MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10 MB
+ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
+MAX_IMAGE_SIZE = MAX_HIT_IMAGE_BYTES
+MAX_HIT_IMAGE_FRAMES = 120
+MAX_HIT_IMAGE_TOTAL_DECODED_PIXELS = 24_000_000
+_HIT_IMAGE_RESPONSE_HEADERS = {
+    "Cache-Control": "private, max-age=300",
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "sandbox; default-src 'none'",
+    "Content-Disposition": "inline",
+}
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+_PNG_END_MARKER = b"\x00\x00\x00\x00IEND\xaeB\x60\x82"
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +149,78 @@ def _require_live_hits(request: Request, session: Optional[Session] = None):
     return None
 
 
+def _can_delete_live_hits(request: Request, session: Session) -> bool:
+    """Return whether the authenticated user may soft-delete live hits."""
+    user = getattr(request.state, "current_user", None) or get_request_user(request)
+    if not user:
+        return False
+    try:
+        return has_permission(session, user, "ops.live_hits.delete")
+    except Exception:
+        return False
+
+
+def _require_live_hit_delete(request: Request, session: Session):
+    """Fail closed before any hit-row lookup to avoid an existence oracle."""
+    if denial := _require_live_hits(request, session):
+        return denial
+    if not _can_delete_live_hits(request, session):
+        return HTMLResponse(
+            "You do not have permission to delete live hits.",
+            status_code=403,
+        )
+    return None
+
+
+def _current_live_hits_user_id(request: Request) -> int:
+    user = getattr(request.state, "current_user", None) or get_request_user(request)
+    user_id = getattr(user, "id", None)
+    if not isinstance(user_id, int):
+        raise HitImageUploadError(
+            "Image upload is no longer valid.",
+            status_code=409,
+            code="invalid_pending_upload",
+        )
+    return user_id
+
+
+def _submitted_hit_image_filename(
+    session: Session,
+    *,
+    request: Request,
+    hit: LiveHit,
+    submitted_value: str | None,
+    existing_filename: str | None = None,
+) -> str | None:
+    raw = str(submitted_value or "").strip()
+    if not raw:
+        return existing_filename
+    if raw == "__remove__":
+        return None
+    if existing_filename and raw == existing_filename:
+        return existing_filename
+    if parse_upload_marker(raw) is None or hit.id is None:
+        raise HitImageUploadError(
+            "Image upload is no longer valid.",
+            status_code=409,
+            code="invalid_pending_upload",
+        )
+    return bind_pending_upload(
+        session,
+        images_dir=_hit_images_dir(),
+        marker=raw,
+        owner_user_id=_current_live_hits_user_id(request),
+        hit_id=hit.id,
+    )
+
+
+def _hit_upload_error_response(exc: HitImageUploadError | ImageSecurityError) -> JSONResponse:
+    return JSONResponse(
+        {"ok": False, "error": exc.public_message, "code": exc.code},
+        status_code=exc.status_code,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -191,6 +289,7 @@ def hits_list_page(
         "total_value": total_value,
         "big_hits_count": big_hits_count,
         "active_streamers": active_streamers,
+        "can_delete_hits": _can_delete_live_hits(request, session),
         # filter values for form re-population
         "sel_streamer": streamer or "",
         "sel_platform": platform or "",
@@ -252,10 +351,6 @@ def hits_new_submit(
     if denial := _require_live_hits(request, session):
         return denial
 
-    img_fn = (image_filename or "").strip() or None
-    if img_fn and (".." in img_fn or "/" in img_fn or "\\" in img_fn):
-        img_fn = None
-
     hit = LiveHit(
         streamer_name=streamer_name.strip(),
         hit_note=hit_note.strip(),
@@ -268,10 +363,22 @@ def hits_new_submit(
         notes=(notes or "").strip() or None,
         hit_at=_parse_hit_at(hit_at_raw),
         created_by=current_user_label(request),
-        image_filename=img_fn,
+        image_filename=None,
     )
-    session.add(hit)
-    session.commit()
+    try:
+        session.add(hit)
+        session.flush()
+        hit.image_filename = _submitted_hit_image_filename(
+            session,
+            request=request,
+            hit=hit,
+            submitted_value=image_filename,
+        )
+        session.add(hit)
+        session.commit()
+    except HitImageUploadError as exc:
+        session.rollback()
+        return _hit_upload_error_response(exc)
 
     qs = f"success=1&last_streamer={hit.streamer_name}"
     if add_another:
@@ -300,6 +407,7 @@ def hits_edit_page(
         "streamers": get_streamer_names(session),
         "platforms": PLATFORMS,
         "big_hit_threshold": BIG_HIT_THRESHOLD,
+        "can_delete_hits": _can_delete_live_hits(request, session),
     })
 
 
@@ -338,15 +446,20 @@ def hits_edit_submit(
     hit.notes = (notes or "").strip() or None
     hit.hit_at = _parse_hit_at(hit_at_raw)
 
-    img_val = (image_filename or "").strip()
-    if img_val == "__remove__":
-        hit.image_filename = None
-    elif img_val and ".." not in img_val and "/" not in img_val and "\\" not in img_val:
-        hit.image_filename = img_val
-
-    hit.updated_at = utcnow()
-    session.add(hit)
-    session.commit()
+    try:
+        hit.image_filename = _submitted_hit_image_filename(
+            session,
+            request=request,
+            hit=hit,
+            submitted_value=image_filename,
+            existing_filename=hit.image_filename,
+        )
+        hit.updated_at = utcnow()
+        session.add(hit)
+        session.commit()
+    except HitImageUploadError as exc:
+        session.rollback()
+        return _hit_upload_error_response(exc)
 
     return RedirectResponse(url="/hits?success=1", status_code=303)
 
@@ -357,14 +470,30 @@ def hits_delete(
     hit_id: int,
     session: Session = Depends(get_session),
 ):
-    if denial := _require_live_hits(request, session):
+    if denial := _require_live_hit_delete(request, session):
         return denial
 
     hit = session.get(LiveHit, hit_id)
     if hit and not hit.is_deleted:
+        user = getattr(request.state, "current_user", None) or get_request_user(request)
         hit.is_deleted = True
         hit.updated_at = utcnow()
         session.add(hit)
+        session.add(
+            AuditLog(
+                actor_user_id=(user.id if user else None),
+                action="live_hit.delete",
+                resource_key=f"live_hit:{hit.id}",
+                details_json=json.dumps(
+                    {
+                        "actor_label": current_user_label(request),
+                        "live_hit_id": hit.id,
+                    },
+                    sort_keys=True,
+                ),
+                ip_address=(request.client.host if request.client else None),
+            )
+        )
         session.commit()
 
     return RedirectResponse(url="/hits?success=1", status_code=303)
@@ -480,10 +609,6 @@ async def hits_api_create(
     if not streamer_name or not hit_note:
         return JSONResponse({"ok": False, "error": "streamer_name and hit_note are required"}, status_code=422)
 
-    img_fn = (body.get("image_filename") or "").strip() or None
-    if img_fn and (".." in img_fn or "/" in img_fn or "\\" in img_fn):
-        img_fn = None
-
     hit = LiveHit(
         streamer_name=streamer_name,
         hit_note=hit_note,
@@ -496,11 +621,23 @@ async def hits_api_create(
         notes=(body.get("notes") or "").strip() or None,
         hit_at=_parse_hit_at(body.get("hit_at")),
         created_by=current_user_label(request),
-        image_filename=img_fn,
+        image_filename=None,
     )
-    session.add(hit)
-    session.commit()
-    session.refresh(hit)
+    try:
+        session.add(hit)
+        session.flush()
+        hit.image_filename = _submitted_hit_image_filename(
+            session,
+            request=request,
+            hit=hit,
+            submitted_value=body.get("image_filename"),
+        )
+        session.add(hit)
+        session.commit()
+        session.refresh(hit)
+    except HitImageUploadError as exc:
+        session.rollback()
+        return _hit_upload_error_response(exc)
 
     return JSONResponse({"ok": True, "id": hit.id, "hit": _hit_to_dict(hit)})
 
@@ -528,43 +665,270 @@ def hits_api_recent(
 # Hit image upload & serving
 # ---------------------------------------------------------------------------
 
+def _png_container_ends_at_eof(raw: bytes) -> bool:
+    if not raw.startswith(_PNG_SIGNATURE):
+        return False
+
+    offset = len(_PNG_SIGNATURE)
+    while offset < len(raw):
+        if len(raw) - offset < 12:
+            return False
+        chunk_length = int.from_bytes(raw[offset : offset + 4], "big")
+        chunk_end = offset + 12 + chunk_length
+        if chunk_end > len(raw):
+            return False
+        chunk_type = raw[offset + 4 : offset + 8]
+        if chunk_type == b"IEND":
+            return (
+                raw[offset:chunk_end] == _PNG_END_MARKER
+                and chunk_end == len(raw)
+            )
+        offset = chunk_end
+    return False
+
+
+def _jpeg_segment_end(raw: bytes, length_offset: int) -> int | None:
+    if len(raw) - length_offset < 2:
+        return None
+    segment_length = int.from_bytes(raw[length_offset : length_offset + 2], "big")
+    if segment_length < 2:
+        return None
+    segment_end = length_offset + segment_length
+    return segment_end if segment_end <= len(raw) else None
+
+
+def _jpeg_container_ends_at_eof(raw: bytes) -> bool:
+    if not raw.startswith(b"\xff\xd8"):
+        return False
+
+    offset = 2
+    in_scan = False
+    while offset < len(raw):
+        if in_scan:
+            marker_start = raw.find(b"\xff", offset)
+            if marker_start < 0:
+                return False
+            marker_code_offset = marker_start + 1
+            while marker_code_offset < len(raw) and raw[marker_code_offset] == 0xFF:
+                marker_code_offset += 1
+            if marker_code_offset >= len(raw):
+                return False
+            marker_code = raw[marker_code_offset]
+            marker_end = marker_code_offset + 1
+            if marker_code == 0x00 or 0xD0 <= marker_code <= 0xD7 or marker_code == 0x01:
+                offset = marker_end
+                continue
+            if marker_code == 0xD9:
+                return marker_end == len(raw)
+            if marker_code == 0xDC:
+                segment_end = _jpeg_segment_end(raw, marker_end)
+                if segment_end is None:
+                    return False
+                offset = segment_end
+                continue
+            in_scan = False
+            offset = marker_start
+            continue
+
+        if raw[offset] != 0xFF:
+            return False
+        marker_code_offset = offset + 1
+        while marker_code_offset < len(raw) and raw[marker_code_offset] == 0xFF:
+            marker_code_offset += 1
+        if marker_code_offset >= len(raw):
+            return False
+        marker_code = raw[marker_code_offset]
+        marker_end = marker_code_offset + 1
+        if marker_code == 0xD9:
+            return marker_end == len(raw)
+        if marker_code == 0x01:
+            offset = marker_end
+            continue
+        if marker_code == 0x00 or marker_code == 0xD8 or 0xD0 <= marker_code <= 0xD7:
+            return False
+        segment_end = _jpeg_segment_end(raw, marker_end)
+        if segment_end is None:
+            return False
+        in_scan = marker_code == 0xDA
+        offset = segment_end
+    return False
+
+
+def _has_exact_hit_image_container(validated) -> bool:
+    raw = validated.decoded_bytes
+    if validated.image_format == "JPEG":
+        return _jpeg_container_ends_at_eof(raw)
+    if validated.image_format == "PNG":
+        return _png_container_ends_at_eof(raw)
+    if validated.image_format == "WEBP":
+        return (
+            len(raw) >= 12
+            and raw[:4] == b"RIFF"
+            and raw[8:12] == b"WEBP"
+            and int.from_bytes(raw[4:8], "little") + 8 == len(raw)
+        )
+    return False
+
+
+def _decode_hit_image_frames(decoded: Image.Image) -> None:
+    frame_count = int(getattr(decoded, "n_frames", 1))
+    if frame_count <= 0:
+        raise ImageSecurityError(
+            "Image could not be read.",
+            status_code=422,
+            code="invalid_image_data",
+        )
+    if frame_count > MAX_HIT_IMAGE_FRAMES:
+        raise ImageSecurityError(
+            "Image has too many animation frames.",
+            status_code=413,
+            code="image_frame_count_exceeded",
+        )
+
+    canvas_width, canvas_height = decoded.size
+    if canvas_width <= 0 or canvas_height <= 0:
+        raise ImageSecurityError(
+            "Image could not be read.",
+            status_code=422,
+            code="invalid_image_data",
+        )
+    if canvas_width > MAX_HIT_IMAGE_TOTAL_DECODED_PIXELS // canvas_height:
+        raise ImageSecurityError(
+            "Animated image requires too much processing.",
+            status_code=413,
+            code="image_animation_pixels_exceeded",
+        )
+    canvas_pixels = canvas_width * canvas_height
+    if frame_count > MAX_HIT_IMAGE_TOTAL_DECODED_PIXELS // canvas_pixels:
+        raise ImageSecurityError(
+            "Animated image requires too much processing.",
+            status_code=413,
+            code="image_animation_pixels_exceeded",
+        )
+
+    for frame_index in range(frame_count):
+        decoded.seek(frame_index)
+        decoded.load()
+
 @router.post("/api/hits/upload-image")
 async def hits_upload_image(
     request: Request,
     file: UploadFile = File(...),
+    session: Session = Depends(get_session),
 ):
-    if denial := _require_live_hits(request):
+    if denial := _require_live_hits(request, session):
         return denial
 
     content_type = (file.content_type or "").lower()
     if content_type not in ALLOWED_IMAGE_TYPES:
-        return JSONResponse(
-            {"ok": False, "error": f"File type '{content_type}' not allowed. Use JPEG, PNG, or WebP."},
-            status_code=400,
+        return _hit_upload_error_response(
+            HitImageUploadError(
+                "Unsupported image type. Use JPEG, PNG, or WebP.",
+                status_code=415,
+                code="unsupported_image_type",
+            )
         )
 
-    data = await file.read()
-    if len(data) > MAX_IMAGE_SIZE:
-        return JSONResponse(
-            {"ok": False, "error": "Image too large (max 10 MB)"},
-            status_code=400,
+    images_dir = _hit_images_dir()
+    owner_user_id = _current_live_hits_user_id(request)
+    try:
+        reservation = reserve_pending_upload(
+            session,
+            images_dir=images_dir,
+            owner_user_id=owner_user_id,
+            content_type=content_type,
         )
+    except HitImageUploadError as exc:
+        return _hit_upload_error_response(exc)
 
-    ext_map = {
-        "image/jpeg": ".jpg",
-        "image/png": ".png",
-        "image/webp": ".webp",
-        "image/heic": ".heic",
-        "image/heif": ".heif",
-    }
-    ext = ext_map.get(content_type, ".jpg")
-    filename = f"{uuid.uuid4().hex}{ext}"
-
-    hit_images_dir = _hit_images_dir()
-    hit_images_dir.mkdir(parents=True, exist_ok=True)
-    (hit_images_dir / filename).write_bytes(data)
-
-    return JSONResponse({"ok": True, "filename": filename})
+    temp_path = images_dir / f".{reservation.filename}.{reservation.token}.part"
+    final_path = images_dir / reservation.filename
+    total = 0
+    completed = False
+    try:
+        descriptor = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as output:
+            while True:
+                chunk = await file.read(64 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_IMAGE_SIZE:
+                    raise HitImageUploadError(
+                        "Image too large (max 10 MB).",
+                        status_code=413,
+                        code="image_bytes_exceeded",
+                    )
+                output.write(chunk)
+            output.flush()
+            os.fsync(output.fileno())
+        validated = validate_image_file(
+            temp_path,
+            allowed_formats=frozenset({"JPEG", "PNG", "WEBP"}),
+            max_bytes=MAX_IMAGE_SIZE,
+            max_dimension=8192,
+            max_pixels=24_000_000,
+        )
+        if validated.mime_type != content_type:
+            raise ImageSecurityError(
+                "Image type does not match its data.",
+                status_code=415,
+                code="image_mime_mismatch",
+            )
+        try:
+            with image_decode_slot():
+                with Image.open(io.BytesIO(validated.decoded_bytes)) as decoded:
+                    _decode_hit_image_frames(decoded)
+        except ImageSecurityError:
+            raise
+        except (EOFError, UnidentifiedImageError, OSError, SyntaxError, ValueError):
+            raise ImageSecurityError(
+                "Image could not be read.",
+                status_code=422,
+                code="invalid_image_data",
+            ) from None
+        os.replace(temp_path, final_path)
+        finalize_pending_upload(
+            session,
+            images_dir=images_dir,
+            token=reservation.token,
+            owner_user_id=owner_user_id,
+            actual_size=total,
+            content_type=validated.mime_type,
+        )
+        completed = True
+        marker = upload_marker(reservation.token)
+        return JSONResponse(
+            {"ok": True, "filename": marker, "upload_token": reservation.token},
+        )
+    except (HitImageUploadError, ImageSecurityError) as exc:
+        return _hit_upload_error_response(exc)
+    except OSError:
+        return _hit_upload_error_response(
+            HitImageUploadError(
+                "Image could not be stored.",
+                status_code=503,
+                code="image_storage_failed",
+            )
+        )
+    finally:
+        try:
+            await file.close()
+        except Exception:
+            pass
+        if not completed:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            try:
+                abandon_pending_upload(
+                    session,
+                    images_dir=images_dir,
+                    token=reservation.token,
+                )
+            except Exception:
+                session.rollback()
 
 
 @router.get("/hit-images/{filename}")
@@ -591,4 +955,39 @@ def serve_hit_image(
     if not path.is_file():
         return JSONResponse({"error": "Not found"}, status_code=404)
 
-    return FileResponse(path, headers={"Cache-Control": "private, max-age=300"})
+    try:
+        validated = validate_image_file(
+            path,
+            allowed_formats=frozenset({"JPEG", "PNG", "WEBP"}),
+            max_bytes=MAX_IMAGE_SIZE,
+            max_dimension=8192,
+            max_pixels=24_000_000,
+        )
+        try:
+            with image_decode_slot():
+                with Image.open(io.BytesIO(validated.decoded_bytes)) as decoded:
+                    _decode_hit_image_frames(decoded)
+        except ImageSecurityError:
+            raise
+        except (EOFError, UnidentifiedImageError, OSError, SyntaxError, ValueError):
+            raise ImageSecurityError(
+                "Image could not be read.",
+                status_code=422,
+                code="invalid_image_data",
+            ) from None
+        if not _has_exact_hit_image_container(validated):
+            raise ImageSecurityError(
+                "Image contains unexpected trailing or incomplete data.",
+                status_code=415,
+                code="image_polyglot",
+            )
+    except ImageSecurityError as exc:
+        if exc.code == "image_file_unreadable" and not path.is_file():
+            return JSONResponse({"error": "Not found"}, status_code=404)
+        return _hit_upload_error_response(exc)
+
+    return Response(
+        content=validated.decoded_bytes,
+        media_type=validated.mime_type,
+        headers=_HIT_IMAGE_RESPONSE_HEADERS,
+    )

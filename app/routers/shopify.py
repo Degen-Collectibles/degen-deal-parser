@@ -22,6 +22,7 @@ from ..csrf import CSRFProtectedRoute
 from ..shared import *  # noqa: F401,F403 -- shared helpers, constants, state
 from ..db import get_session
 from ..inventory.shopify_ingest import normalize_shopify_order_identity
+from ..tiktok.tiktok_ingest import exchange_tiktok_creator_authorization_code
 
 router = APIRouter(route_class=CSRFProtectedRoute)
 
@@ -662,10 +663,11 @@ def tiktok_creator_oauth_callback(request: Request):
         )
 
     try:
-        token_result = exchange_tiktok_authorization_code(
+        token_result = exchange_tiktok_creator_authorization_code(
             auth_code=code,
-            app_key=app_key,
-            app_secret=app_secret,
+            client_key=app_key,
+            client_secret=app_secret,
+            redirect_uri=_tiktok_creator_redirect_uri(),
             runtime_name=runtime_name,
         )
     except Exception as exc:

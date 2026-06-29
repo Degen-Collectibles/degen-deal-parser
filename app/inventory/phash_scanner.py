@@ -28,6 +28,8 @@ from typing import Optional
 import imagehash
 from PIL import Image
 
+from ..image_security import ImageDecodeBusy, ImageSecurityError, image_decode_slot, validate_image_bytes
+
 logger = logging.getLogger(__name__)
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -196,12 +198,17 @@ def compute_phash(image_bytes: bytes) -> Optional[int]:
 
     Returns None on decode failure so callers can surface a clean error.
     """
+    validated = validate_image_bytes(image_bytes)
     try:
-        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        with image_decode_slot():
+            with Image.open(io.BytesIO(validated.decoded_bytes)) as source:
+                img = source.convert("RGB")
+            h = imagehash.phash(img, hash_size=8)
+    except (ImageDecodeBusy, ImageSecurityError):
+        raise
     except Exception as exc:
         logger.warning("[phash_scanner] compute_phash decode failed: %s", exc)
         return None
-    h = imagehash.phash(img, hash_size=8)
     bits = h.hash.flatten()
     value = 0
     for b in bits:

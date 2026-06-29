@@ -8,23 +8,35 @@ need a schema migration.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
+import hmac
 import json
 import logging
 import re
 import time
 from copy import deepcopy
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from sqlalchemy import update
 from sqlmodel import Session, select
 
 from ..auth import has_permission
 from ..config import get_settings
 from ..csrf import issue_token, require_csrf
 from ..db import get_session
-from ..models import AppSetting, AuditLog, BuylistSubmission, User, utcnow
+from ..financial_values import InvalidFinancialValueError, validate_optional_money
+from ..models import (
+    AppSetting,
+    AuditLog,
+    BuylistSubmission,
+    InventoryStockMovement,
+    User,
+    utcnow,
+)
 from ..inventory.pokemon_scanner import text_search_cards
 from ..shared import templates
 from ..inventory.tcgplayer_sales import fetch_tcgplayer_public_sales, tcgplayer_product_id_from_url
@@ -54,6 +66,71 @@ BUYLIST_EDIT_PERMISSION = "admin.buylist.edit"
 
 _BUYLIST_SEARCH_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 BUYLIST_SEARCH_CACHE_VERSION = "buylist-search-v4"
+BUYLIST_QUOTE_TOKEN_VERSION = 1
+BUYLIST_CANDIDATE_TOKEN_MAX_AGE_SECONDS = 15 * 60
+BUYLIST_TOKEN_FUTURE_SKEW_SECONDS = 60
+BUYLIST_TOKEN_MAX_BYTES = 64 * 1024
+BUYLIST_TOKEN_MAX_ENCODED_BYTES = ((BUYLIST_TOKEN_MAX_BYTES + 2) // 3) * 4
+BUYLIST_SIGNING_KEY_MIN_CHARS = 32
+BUYLIST_MAX_VARIANTS = 32
+BUYLIST_MAX_QUOTE_ITEMS = 100
+BUYLIST_QUOTE_UNAVAILABLE_ERROR = (
+    "Buylist quoting is unavailable until BUYLIST_QUOTE_SIGNING_KEYS is configured."
+)
+BUYLIST_QUOTE_INVALID_ERROR = "This buylist search result is invalid or expired. Search again."
+BUYLIST_ATTESTATION_INVALID_ERROR = (
+    "This submission has an invalid or legacy quote. Re-quote it before approval."
+)
+BUYLIST_APPROVAL_ATOMIC_ERROR = (
+    "Buylist approval could not be completed. No inventory changes were saved."
+)
+
+_BUYLIST_IDENTITY_FIELDS = (
+    "id",
+    "product_id",
+    "tcgplayer_product_id",
+    "item_type",
+    "game",
+    "category_id",
+    "name",
+    "set_name",
+    "set_code",
+    "number",
+    "upc",
+    "sealed_product_kind",
+    "rarity",
+    "image_url",
+    "external_url",
+    "tcgplayer_url",
+)
+_BUYLIST_ATTESTED_LINE_FIELDS = (
+    *_BUYLIST_IDENTITY_FIELDS,
+    "quantity",
+    "condition",
+    "language",
+    "variant",
+    "market_price",
+    "base_market_price",
+    "condition_market_price",
+    "condition_price_source",
+    "unit_cash",
+    "unit_trade",
+    "line_cash",
+    "line_trade",
+    "pricing_notes",
+    "blocked",
+    "quote_source",
+    "candidate_issued_at",
+    "quoted_at",
+)
+
+
+class BuylistQuoteConfigurationError(RuntimeError):
+    pass
+
+
+class BuylistQuoteTokenError(ValueError):
+    pass
 
 BUYLIST_GAMES: tuple[dict[str, str], ...] = (
     {"game": "Pokemon", "label": "Pokemon", "category_id": "3"},
@@ -144,6 +221,131 @@ def _can_manage_buylist_pricing(session: Session, user: Optional[User]) -> bool:
     return has_permission(session, user, BUYLIST_EDIT_PERMISSION)
 
 
+def _buylist_signing_keys() -> list[bytes]:
+    settings = get_settings()
+    raw = str(getattr(settings, "buylist_quote_signing_keys", "") or "")
+    keys = [part.strip() for part in raw.split(",") if part.strip()]
+    session_secret = str(getattr(settings, "session_secret", "") or "").strip()
+    if (
+        not keys
+        or any(len(key) < BUYLIST_SIGNING_KEY_MIN_CHARS for key in keys)
+        or (session_secret and any(hmac.compare_digest(key, session_secret) for key in keys))
+    ):
+        raise BuylistQuoteConfigurationError(BUYLIST_QUOTE_UNAVAILABLE_ERROR)
+    return [key.encode("utf-8") for key in keys]
+
+
+def _buylist_unavailable_response() -> JSONResponse:
+    return JSONResponse(
+        {"ok": False, "error": BUYLIST_QUOTE_UNAVAILABLE_ERROR},
+        status_code=503,
+    )
+
+
+def _base64url_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def _base64url_decode(value: str) -> bytes:
+    if not value or len(value) > BUYLIST_TOKEN_MAX_ENCODED_BYTES:
+        raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR)
+    try:
+        return base64.b64decode(
+            value + ("=" * (-len(value) % 4)),
+            altchars=b"-_",
+            validate=True,
+        )
+    except (ValueError, TypeError) as exc:
+        raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR) from exc
+
+
+def _sign_buylist_payload(payload: dict[str, Any]) -> str:
+    keys = _buylist_signing_keys()
+    try:
+        encoded_payload = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR) from exc
+    if len(encoded_payload) > BUYLIST_TOKEN_MAX_BYTES:
+        raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR)
+    signature = hmac.new(keys[0], encoded_payload, hashlib.sha256).digest()
+    return f"{_base64url_encode(encoded_payload)}.{_base64url_encode(signature)}"
+
+
+def _verify_buylist_payload(
+    token: Any,
+    *,
+    purpose: str,
+    employee_id: int,
+    max_age_seconds: Optional[int],
+) -> dict[str, Any]:
+    if (
+        not isinstance(token, str)
+        or len(token) > BUYLIST_TOKEN_MAX_ENCODED_BYTES + 64
+        or token.count(".") != 1
+    ):
+        raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR)
+    encoded_payload, encoded_signature = token.split(".", 1)
+    payload_bytes = _base64url_decode(encoded_payload)
+    supplied_signature = _base64url_decode(encoded_signature)
+    if len(payload_bytes) > BUYLIST_TOKEN_MAX_BYTES or len(supplied_signature) != hashlib.sha256().digest_size:
+        raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR)
+    keys = _buylist_signing_keys()
+    if not any(
+        hmac.compare_digest(
+            supplied_signature,
+            hmac.new(key, payload_bytes, hashlib.sha256).digest(),
+        )
+        for key in keys
+    ):
+        raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR)
+    try:
+        payload = json.loads(payload_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR) from exc
+    if not isinstance(payload, dict):
+        raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR)
+    if payload.get("version") != BUYLIST_QUOTE_TOKEN_VERSION or payload.get("purpose") != purpose:
+        raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR)
+    bound_employee_id = payload.get("employee_id")
+    if (
+        isinstance(bound_employee_id, bool)
+        or not isinstance(bound_employee_id, int)
+        or bound_employee_id <= 0
+        or bound_employee_id != employee_id
+    ):
+        raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR)
+    issued_at = payload.get("issued_at")
+    if isinstance(issued_at, bool) or not isinstance(issued_at, int) or issued_at < 0:
+        raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR)
+    now = int(time.time())
+    if issued_at > now + BUYLIST_TOKEN_FUTURE_SKEW_SECONDS:
+        raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR)
+    if max_age_seconds is not None and now - issued_at > max_age_seconds:
+        raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR)
+    if not isinstance(payload.get("source"), str) or not payload["source"]:
+        raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR)
+    return payload
+
+
+def _bounded_buylist_text(value: Any, *, max_chars: int = 500) -> str:
+    return str(value or "").strip()[:max_chars]
+
+
+def _trusted_buylist_price(value: Any, *, field_name: str) -> float:
+    try:
+        price = validate_optional_money(value, field_name=field_name)
+    except InvalidFinancialValueError as exc:
+        raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR) from exc
+    if price is None or price < 0:
+        raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR)
+    return _money(price)
+
+
 def _deep_merge(defaults: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     merged = deepcopy(defaults)
     for key, value in (override or {}).items():
@@ -226,6 +428,9 @@ def _buylist_search_cache_set(key: str, payload: dict[str, Any]) -> None:
         _BUYLIST_SEARCH_CACHE.pop(oldest_key, None)
     cached_payload = deepcopy(payload)
     cached_payload["cached"] = False
+    for card in cached_payload.get("cards") or []:
+        if isinstance(card, dict):
+            card.pop("candidate_token", None)
     _BUYLIST_SEARCH_CACHE[key] = (
         time.monotonic() + BUYLIST_SEARCH_CACHE_TTL_SECONDS,
         cached_payload,
@@ -808,6 +1013,182 @@ def _sealed_product_fallback_id(product: dict[str, Any]) -> str:
     return "sealed:" + hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:16]
 
 
+def _trusted_condition_price(
+    conditions: dict[str, Any],
+    condition: str,
+    *,
+    field_name: str,
+) -> Optional[float]:
+    raw_value = _condition_raw_value_from_conditions(conditions, condition)
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, dict):
+        raw_value = next(
+            (
+                raw_value[key]
+                for key in ("mkt", "market", "market_price", "price")
+                if key in raw_value
+            ),
+            None,
+        )
+        if raw_value is None:
+            return None
+    return _trusted_buylist_price(raw_value, field_name=field_name)
+
+
+def _candidate_snapshot(card: dict[str, Any]) -> dict[str, Any]:
+    item_type = _normalize_product_type(str(card.get("item_type") or BUYLIST_PRODUCT_TYPE_CARD))
+    identity: dict[str, str] = {}
+    for field in _BUYLIST_IDENTITY_FIELDS:
+        if field == "item_type":
+            identity[field] = item_type
+        else:
+            max_chars = 2_000 if field in {"image_url", "external_url", "tcgplayer_url"} else 500
+            identity[field] = _bounded_buylist_text(card.get(field), max_chars=max_chars)
+
+    base_value = card.get("base_market_price")
+    if base_value is None:
+        base_value = card.get("market_price")
+    base_market_price = _trusted_buylist_price(
+        base_value,
+        field_name="candidate base market price",
+    )
+    default_variant = (
+        "Sealed Product"
+        if item_type == BUYLIST_PRODUCT_TYPE_SEALED
+        else _bounded_buylist_text(card.get("variant") or "Normal", max_chars=100)
+    )
+
+    canonical_variants: list[dict[str, Any]] = []
+    seen_variants: set[str] = set()
+    raw_variants = card.get("available_variants")
+    if isinstance(raw_variants, list):
+        for raw_variant in raw_variants[:BUYLIST_MAX_VARIANTS]:
+            if not isinstance(raw_variant, dict):
+                continue
+            name = _bounded_buylist_text(raw_variant.get("name"), max_chars=100)
+            if not name or name.casefold() in seen_variants:
+                continue
+            raw_price = raw_variant.get("price")
+            if raw_price is None and name.casefold() == default_variant.casefold():
+                raw_price = base_market_price
+            if raw_price is None:
+                continue
+            price = _trusted_buylist_price(
+                raw_price,
+                field_name=f"candidate {name} price",
+            )
+            condition_prices: dict[str, float] = {}
+            raw_conditions = raw_variant.get("conditions")
+            if isinstance(raw_conditions, dict):
+                for condition in CONDITION_OPTIONS:
+                    condition_price = _trusted_condition_price(
+                        raw_conditions,
+                        condition,
+                        field_name=f"candidate {name} {condition} price",
+                    )
+                    if condition_price is not None:
+                        condition_prices[condition] = condition_price
+            canonical_variants.append(
+                {
+                    "name": name,
+                    "price": price,
+                    "condition_prices": condition_prices,
+                }
+            )
+            seen_variants.add(name.casefold())
+
+    if item_type == BUYLIST_PRODUCT_TYPE_SEALED:
+        canonical_variants = [
+            {
+                "name": "Sealed Product",
+                "price": base_market_price,
+                "condition_prices": {},
+            }
+        ]
+        default_variant = "Sealed Product"
+    elif not canonical_variants:
+        canonical_variants = [
+            {
+                "name": default_variant or "Normal",
+                "price": base_market_price,
+                "condition_prices": {},
+            }
+        ]
+
+    selected_variant = _select_variant(canonical_variants, default_variant)
+    if selected_variant is None:
+        raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR)
+    default_variant = str(selected_variant["name"])
+    top_level_conditions = card.get("condition_market_prices")
+    if isinstance(top_level_conditions, dict):
+        for condition in CONDITION_OPTIONS:
+            if condition in selected_variant["condition_prices"]:
+                continue
+            condition_price = _trusted_condition_price(
+                top_level_conditions,
+                condition,
+                field_name=f"candidate {default_variant} {condition} price",
+            )
+            if condition_price is not None:
+                selected_variant["condition_prices"][condition] = condition_price
+
+    return {
+        "identity": identity,
+        "base_market_price": _trusted_buylist_price(
+            selected_variant["price"],
+            field_name="candidate selected market price",
+        ),
+        "default_variant": default_variant,
+        "available_variants": canonical_variants,
+        "condition_prices": dict(selected_variant["condition_prices"]),
+    }
+
+
+def _bind_buylist_search_payload(
+    payload: dict[str, Any],
+    *,
+    employee_id: int,
+) -> dict[str, Any]:
+    response = deepcopy(payload)
+    bound_cards: list[dict[str, Any]] = []
+    issued_at = int(time.time())
+    for raw_card in response.get("cards") or []:
+        if not isinstance(raw_card, dict):
+            continue
+        try:
+            snapshot = _candidate_snapshot(raw_card)
+            source = f"search:{snapshot['identity']['item_type']}"
+            token = _sign_buylist_payload(
+                {
+                    "version": BUYLIST_QUOTE_TOKEN_VERSION,
+                    "purpose": "buylist_candidate",
+                    "source": source,
+                    "issued_at": issued_at,
+                    "employee_id": employee_id,
+                    "candidate": snapshot,
+                }
+            )
+        except BuylistQuoteTokenError:
+            logger.warning("Dropping buylist search result with unsafe pricing data")
+            continue
+        card = deepcopy(raw_card)
+        card["candidate_token"] = token
+        card["base_market_price"] = snapshot["base_market_price"]
+        card["available_variants"] = [
+            {
+                "name": variant["name"],
+                "price": variant["price"],
+                "conditions": dict(variant["condition_prices"]),
+            }
+            for variant in snapshot["available_variants"]
+        ]
+        card["condition_market_prices"] = dict(snapshot["condition_prices"])
+        bound_cards.append(card)
+    response["cards"] = bound_cards
+    return response
+
+
 def _parse_ranges(form: dict[str, Any], prefix: str) -> list[dict[str, Any]]:
     ranges: list[dict[str, Any]] = []
     for index in range(8):
@@ -895,6 +1276,104 @@ def _line_selected_unit_cost(line: dict[str, Any], payment_view: str) -> float:
     return _money(_float(line.get("unit_cash"), _float(line.get("cash_offer"), 0.0)))
 
 
+def _verify_stored_buylist_line(
+    line: Any,
+    *,
+    employee_id: int,
+) -> dict[str, Any]:
+    expected_keys = set(_BUYLIST_ATTESTED_LINE_FIELDS) | {"attestation"}
+    if not isinstance(line, dict) or set(line) != expected_keys:
+        raise BuylistQuoteTokenError(BUYLIST_ATTESTATION_INVALID_ERROR)
+    payload = _verify_buylist_payload(
+        line.get("attestation"),
+        purpose="buylist_line",
+        employee_id=employee_id,
+        max_age_seconds=None,
+    )
+    if set(payload) != {
+        "version",
+        "purpose",
+        "source",
+        "issued_at",
+        "employee_id",
+        "line",
+    } or payload.get("source") != "server_quote":
+        raise BuylistQuoteTokenError(BUYLIST_ATTESTATION_INVALID_ERROR)
+    canonical = _canonical_attested_line(line)
+    if payload.get("line") != canonical:
+        raise BuylistQuoteTokenError(BUYLIST_ATTESTATION_INVALID_ERROR)
+    if (
+        canonical["line_cash"] != _money(canonical["unit_cash"] * canonical["quantity"])
+        or canonical["line_trade"] != _money(canonical["unit_trade"] * canonical["quantity"])
+    ):
+        raise BuylistQuoteTokenError(BUYLIST_ATTESTATION_INVALID_ERROR)
+    return {**canonical, "attestation": line["attestation"]}
+
+
+def _verify_submission_quote(
+    submission: BuylistSubmission,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    employee_id = submission.submitted_by_user_id
+    if isinstance(employee_id, bool) or not isinstance(employee_id, int) or employee_id <= 0:
+        raise BuylistQuoteTokenError(BUYLIST_ATTESTATION_INVALID_ERROR)
+    raw_lines = _json_loads(
+        submission.lines_json,
+        [],
+        label=f"buylist_submission.{submission.id}.lines_json",
+    )
+    if not isinstance(raw_lines, list) or not raw_lines:
+        raise BuylistQuoteTokenError(BUYLIST_ATTESTATION_INVALID_ERROR)
+    lines = [
+        _verify_stored_buylist_line(line, employee_id=employee_id)
+        for line in raw_lines
+    ]
+    if any(line["blocked"] for line in lines):
+        raise BuylistQuoteTokenError(BUYLIST_ATTESTATION_INVALID_ERROR)
+    trusted_totals = {
+        "cash": _money(sum(line["line_cash"] for line in lines)),
+        "trade": _money(sum(line["line_trade"] for line in lines)),
+        "quantity": sum(line["quantity"] for line in lines),
+        "items": len(lines),
+    }
+    stored_totals = _json_loads(
+        submission.totals_json,
+        {},
+        label=f"buylist_submission.{submission.id}.totals_json",
+    )
+    if not isinstance(stored_totals, dict) or set(stored_totals) != {
+        "cash",
+        "trade",
+        "quantity",
+        "items",
+    }:
+        raise BuylistQuoteTokenError(BUYLIST_ATTESTATION_INVALID_ERROR)
+    try:
+        stored_cash = _trusted_buylist_price(
+            stored_totals.get("cash"),
+            field_name="stored buylist cash total",
+        )
+        stored_trade = _trusted_buylist_price(
+            stored_totals.get("trade"),
+            field_name="stored buylist trade total",
+        )
+    except BuylistQuoteTokenError as exc:
+        raise BuylistQuoteTokenError(BUYLIST_ATTESTATION_INVALID_ERROR) from exc
+    stored_quantity = stored_totals.get("quantity")
+    stored_items = stored_totals.get("items")
+    if (
+        isinstance(stored_quantity, bool)
+        or not isinstance(stored_quantity, int)
+        or isinstance(stored_items, bool)
+        or not isinstance(stored_items, int)
+        or stored_cash != trusted_totals["cash"]
+        or stored_trade != trusted_totals["trade"]
+        or stored_quantity != trusted_totals["quantity"]
+        or stored_items != trusted_totals["items"]
+    ):
+        raise BuylistQuoteTokenError(BUYLIST_ATTESTATION_INVALID_ERROR)
+    return lines, trusted_totals
+
+
 def _submission_to_view(row: BuylistSubmission, submitter: Optional[User]) -> dict[str, Any]:
     return {
         "row": row,
@@ -948,10 +1427,27 @@ def _receive_submission_inventory(
     notes = f"Customer: {submission.customer_name or 'Customer'}"
     if submission.notes:
         notes = f"{notes}; {submission.notes[:400]}"
+    legacy_receipt = session.exec(
+        select(InventoryStockMovement.id).where(
+            InventoryStockMovement.source == source,
+            InventoryStockMovement.dedupe_key == None,  # noqa: E711
+        )
+    ).first()
+    if legacy_receipt is not None:
+        raise ValueError(
+            "Legacy inventory receipt evidence exists for this submission; manual review is required."
+        )
 
-    for line in lines:
+    for line_index, line in enumerate(lines):
         if not isinstance(line, dict):
-            continue
+            raise ValueError("Submission contains an invalid line item.")
+        receipt_key = f"staff-buylist:{submission.id}:line:{line_index}"
+        if session.exec(
+            select(InventoryStockMovement.id).where(
+                InventoryStockMovement.dedupe_key == receipt_key
+            )
+        ).first() is not None:
+            raise ValueError("Submission line was already received.")
         quantity = max(1, min(int(_float(line.get("quantity"), 1)), 999))
         unit_cost = _line_selected_unit_cost(line, payment_view)
         market_price = _float(line.get("market_price"), _float(line.get("base_market_price"), 0.0))
@@ -972,6 +1468,8 @@ def _receive_submission_inventory(
                 source=source,
                 notes=notes,
                 actor_label=actor_label,
+                dedupe_key=receipt_key,
+                commit=False,
             )
         else:
             item, movement, created = _receive_single_stock(
@@ -993,6 +1491,8 @@ def _receive_submission_inventory(
                 notes=notes,
                 price_payload={"buylist_line": line},
                 actor_label=actor_label,
+                dedupe_key=receipt_key,
+                commit=False,
             )
             language = str(line.get("language") or "").strip()
             if not language:
@@ -1002,7 +1502,6 @@ def _receive_submission_inventory(
             if language and item.language != language:
                 item.language = language
                 session.add(item)
-                session.commit()
         created_items.append(
             {
                 "inventory_item_id": item.id,
@@ -1055,9 +1554,16 @@ async def staff_buylist_search(
     product_type: str = Query(default=BUYLIST_PRODUCT_TYPE_CARD),
     session: Session = Depends(get_session),
 ):
-    denial, _user = _require_team_user(request, session)
+    denial, user = _require_team_user(request, session)
     if denial:
         return denial
+    try:
+        _buylist_signing_keys()
+    except BuylistQuoteConfigurationError:
+        return _buylist_unavailable_response()
+    employee_id = getattr(user, "id", None)
+    if isinstance(employee_id, bool) or not isinstance(employee_id, int) or employee_id <= 0:
+        return JSONResponse({"ok": False, "error": "Employee session is invalid."}, status_code=403)
     config = get_buylist_config(session)
     query = re.sub(r"\s+", " ", (q or "").strip())
     if not query:
@@ -1090,7 +1596,9 @@ async def staff_buylist_search(
     )
     cached = _buylist_search_cache_get(cache_key)
     if cached:
-        return JSONResponse(cached)
+        return JSONResponse(
+            _bind_buylist_search_payload(cached, employee_id=employee_id)
+        )
 
     if product_type == BUYLIST_PRODUCT_TYPE_SEALED:
         game_name = _game_for_category(category_id)
@@ -1118,7 +1626,9 @@ async def staff_buylist_search(
             "cached": False,
         }
         _buylist_search_cache_set(cache_key, payload)
-        return JSONResponse(payload)
+        return JSONResponse(
+            _bind_buylist_search_payload(payload, employee_id=employee_id)
+        )
 
     result = await text_search_cards(
         query,
@@ -1152,7 +1662,9 @@ async def staff_buylist_search(
         "cached": False,
     }
     _buylist_search_cache_set(cache_key, payload)
-    return JSONResponse(payload)
+    return JSONResponse(
+        _bind_buylist_search_payload(payload, employee_id=employee_id)
+    )
 
 
 @router.get("/team/buylist/sales-history")
@@ -1195,90 +1707,322 @@ async def staff_buylist_sales_history(
     )
 
 
+def _validated_candidate_snapshot(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {
+        "identity",
+        "base_market_price",
+        "default_variant",
+        "available_variants",
+        "condition_prices",
+    }:
+        raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR)
+    identity = value.get("identity")
+    if not isinstance(identity, dict) or set(identity) != set(_BUYLIST_IDENTITY_FIELDS):
+        raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR)
+    canonical_identity: dict[str, str] = {}
+    for field in _BUYLIST_IDENTITY_FIELDS:
+        field_value = identity.get(field)
+        if not isinstance(field_value, str):
+            raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR)
+        canonical_identity[field] = field_value
+    canonical_identity["item_type"] = _normalize_product_type(canonical_identity["item_type"])
+
+    raw_variants = value.get("available_variants")
+    if not isinstance(raw_variants, list) or not raw_variants or len(raw_variants) > BUYLIST_MAX_VARIANTS:
+        raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR)
+    variants: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw_variant in raw_variants:
+        if not isinstance(raw_variant, dict) or set(raw_variant) != {
+            "name",
+            "price",
+            "condition_prices",
+        }:
+            raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR)
+        name = raw_variant.get("name")
+        if not isinstance(name, str) or not name.strip() or len(name) > 100:
+            raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR)
+        normalized_name = name.strip()
+        if normalized_name.casefold() in seen:
+            raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR)
+        raw_conditions = raw_variant.get("condition_prices")
+        if not isinstance(raw_conditions, dict) or any(
+            condition not in CONDITION_OPTIONS for condition in raw_conditions
+        ):
+            raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR)
+        conditions = {
+            condition: _trusted_buylist_price(
+                raw_conditions[condition],
+                field_name=f"candidate {normalized_name} {condition} price",
+            )
+            for condition in raw_conditions
+        }
+        variants.append(
+            {
+                "name": normalized_name,
+                "price": _trusted_buylist_price(
+                    raw_variant.get("price"),
+                    field_name=f"candidate {normalized_name} price",
+                ),
+                "condition_prices": conditions,
+            }
+        )
+        seen.add(normalized_name.casefold())
+
+    default_variant = value.get("default_variant")
+    if not isinstance(default_variant, str):
+        raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR)
+    selected = _select_variant(variants, default_variant)
+    if selected is None or selected["name"].casefold() != default_variant.casefold():
+        raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR)
+    condition_prices = value.get("condition_prices")
+    if not isinstance(condition_prices, dict) or any(
+        condition not in CONDITION_OPTIONS for condition in condition_prices
+    ):
+        raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR)
+    canonical_conditions = {
+        condition: _trusted_buylist_price(
+            condition_prices[condition],
+            field_name=f"candidate {condition} price",
+        )
+        for condition in condition_prices
+    }
+    return {
+        "identity": canonical_identity,
+        "base_market_price": _trusted_buylist_price(
+            value.get("base_market_price"),
+            field_name="candidate base market price",
+        ),
+        "default_variant": selected["name"],
+        "available_variants": variants,
+        "condition_prices": canonical_conditions,
+    }
+
+
+def _selected_candidate_variant(
+    snapshot: dict[str, Any],
+    requested_variant: Any,
+) -> dict[str, Any]:
+    requested = str(requested_variant or snapshot["default_variant"]).strip()
+    for variant in snapshot["available_variants"]:
+        if variant["name"].casefold() == requested.casefold():
+            return variant
+    raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR)
+
+
+def _canonical_attested_line(line: dict[str, Any]) -> dict[str, Any]:
+    if any(field not in line for field in _BUYLIST_ATTESTED_LINE_FIELDS):
+        raise BuylistQuoteTokenError(BUYLIST_ATTESTATION_INVALID_ERROR)
+    canonical = {field: deepcopy(line[field]) for field in _BUYLIST_ATTESTED_LINE_FIELDS}
+    for field in (
+        "market_price",
+        "base_market_price",
+        "unit_cash",
+        "unit_trade",
+        "line_cash",
+        "line_trade",
+    ):
+        canonical[field] = _trusted_buylist_price(
+            canonical[field],
+            field_name=f"buylist line {field}",
+        )
+    condition_market = canonical.get("condition_market_price")
+    if condition_market is not None:
+        canonical["condition_market_price"] = _trusted_buylist_price(
+            condition_market,
+            field_name="buylist line condition market price",
+        )
+    quantity = canonical.get("quantity")
+    if isinstance(quantity, bool) or not isinstance(quantity, int) or not 1 <= quantity <= 999:
+        raise BuylistQuoteTokenError(BUYLIST_ATTESTATION_INVALID_ERROR)
+    if not isinstance(canonical.get("blocked"), bool):
+        raise BuylistQuoteTokenError(BUYLIST_ATTESTATION_INVALID_ERROR)
+    notes = canonical.get("pricing_notes")
+    if not isinstance(notes, list) or any(not isinstance(note, str) for note in notes):
+        raise BuylistQuoteTokenError(BUYLIST_ATTESTATION_INVALID_ERROR)
+    return canonical
+
+
+def _quote_signed_candidate(
+    raw: dict[str, Any],
+    *,
+    employee_id: int,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    payload = _verify_buylist_payload(
+        raw.get("candidate_token"),
+        purpose="buylist_candidate",
+        employee_id=employee_id,
+        max_age_seconds=BUYLIST_CANDIDATE_TOKEN_MAX_AGE_SECONDS,
+    )
+    snapshot = _validated_candidate_snapshot(payload.get("candidate"))
+    identity = snapshot["identity"]
+    item_type = identity["item_type"]
+    quantity = raw.get("quantity", 1)
+    if isinstance(quantity, bool) or not isinstance(quantity, int) or not 1 <= quantity <= 999:
+        raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR)
+
+    selected_variant = _selected_candidate_variant(snapshot, raw.get("variant"))
+    variant = selected_variant["name"]
+    if item_type == BUYLIST_PRODUCT_TYPE_SEALED:
+        condition = "Sealed"
+        language = ""
+        if raw.get("condition") not in (None, "", "Sealed") or raw.get("language") not in (None, ""):
+            raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR)
+    else:
+        condition = str(raw.get("condition") or "NM").strip().upper()
+        if condition == "DM":
+            condition = "DMG"
+        if condition not in CONDITION_OPTIONS:
+            raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR)
+        language = str(raw.get("language") or "English").strip()
+        if language not in LANGUAGE_OPTIONS:
+            raise BuylistQuoteTokenError(BUYLIST_QUOTE_INVALID_ERROR)
+
+    base_market_price = _trusted_buylist_price(
+        selected_variant["price"],
+        field_name="selected variant price",
+    )
+    condition_market_price = selected_variant["condition_prices"].get(condition)
+    offer = calculate_buylist_offer(
+        config,
+        market_price=base_market_price,
+        condition_market_price=condition_market_price,
+        condition=condition,
+        language=language,
+        printing=variant,
+        product=identity,
+    )
+    unit_cash = _trusted_buylist_price(offer["cash_offer"], field_name="cash offer")
+    unit_trade = _trusted_buylist_price(offer["trade_offer"], field_name="trade offer")
+    line_cash = _trusted_buylist_price(unit_cash * quantity, field_name="cash line total")
+    line_trade = _trusted_buylist_price(unit_trade * quantity, field_name="trade line total")
+    quoted_at_epoch = int(time.time())
+    line: dict[str, Any] = {
+        **identity,
+        "quantity": quantity,
+        "condition": condition,
+        "language": language,
+        "variant": variant,
+        "market_price": _trusted_buylist_price(offer["market_price"], field_name="market price"),
+        "base_market_price": _trusted_buylist_price(
+            offer["base_market_price"],
+            field_name="base market price",
+        ),
+        "condition_market_price": (
+            _trusted_buylist_price(
+                offer["condition_market_price"],
+                field_name="condition market price",
+            )
+            if offer["condition_market_price"] is not None
+            else None
+        ),
+        "condition_price_source": _bounded_buylist_text(
+            offer["condition_price_source"], max_chars=100
+        ),
+        "unit_cash": unit_cash,
+        "unit_trade": unit_trade,
+        "line_cash": line_cash,
+        "line_trade": line_trade,
+        "pricing_notes": [
+            _bounded_buylist_text(note, max_chars=300) for note in offer["notes"]
+        ],
+        "blocked": bool(offer["blocked"]),
+        "quote_source": payload["source"],
+        "candidate_issued_at": datetime.fromtimestamp(
+            payload["issued_at"], tz=timezone.utc
+        ).isoformat(),
+        "quoted_at": datetime.fromtimestamp(quoted_at_epoch, tz=timezone.utc).isoformat(),
+    }
+    canonical_line = _canonical_attested_line(line)
+    line["attestation"] = _sign_buylist_payload(
+        {
+            "version": BUYLIST_QUOTE_TOKEN_VERSION,
+            "purpose": "buylist_line",
+            "source": "server_quote",
+            "issued_at": quoted_at_epoch,
+            "employee_id": employee_id,
+            "line": canonical_line,
+        }
+    )
+    line["candidate_token"] = raw["candidate_token"]
+    return line
+
+
+def _stored_buylist_line(line: dict[str, Any]) -> dict[str, Any]:
+    canonical = _canonical_attested_line(line)
+    attestation = line.get("attestation")
+    if not isinstance(attestation, str) or not attestation:
+        raise BuylistQuoteTokenError(BUYLIST_ATTESTATION_INVALID_ERROR)
+    return {**canonical, "attestation": attestation}
+
+
 @router.post("/team/buylist/quote")
 async def staff_buylist_quote(request: Request, session: Session = Depends(get_session)):
-    denial, _user = _require_team_user(request, session)
+    denial, user = _require_team_user(request, session)
     if denial:
         return denial
+    try:
+        _buylist_signing_keys()
+    except BuylistQuoteConfigurationError:
+        return _buylist_unavailable_response()
+    employee_id = getattr(user, "id", None)
+    if isinstance(employee_id, bool) or not isinstance(employee_id, int) or employee_id <= 0:
+        return JSONResponse({"ok": False, "error": "Employee session is invalid."}, status_code=403)
     try:
         body = await request.json()
     except Exception:
         return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    raw_items = body.get("items") if isinstance(body, dict) else None
+    if (
+        not isinstance(raw_items, list)
+        or not 1 <= len(raw_items) <= BUYLIST_MAX_QUOTE_ITEMS
+    ):
+        return JSONResponse({"ok": False, "error": BUYLIST_QUOTE_INVALID_ERROR}, status_code=400)
     config = get_buylist_config(session)
     lines: list[dict[str, Any]] = []
     totals = {"cash": 0.0, "trade": 0.0, "quantity": 0}
-    for raw in body.get("items") or []:
+    for raw in raw_items:
         if not isinstance(raw, dict):
-            continue
-        quantity = max(1, min(int(_float(raw.get("quantity"), 1)), 999))
-        item_type = _normalize_product_type(str(raw.get("item_type") or BUYLIST_PRODUCT_TYPE_CARD))
-        if item_type == BUYLIST_PRODUCT_TYPE_SEALED:
-            condition = "Sealed"
-            language = ""
-            variant = "Sealed Product"
-        else:
-            condition = str(raw.get("condition") or "NM").strip().upper()
-            if condition == "DM":
-                condition = "DMG"
-            if condition not in CONDITION_OPTIONS:
-                condition = "NM"
-            language = str(raw.get("language") or "English").strip() or "English"
-            if language not in LANGUAGE_OPTIONS:
-                language = "Other"
-            variant = str(raw.get("variant") or "Normal").strip() or "Normal"
-        product = {
-            "id": raw.get("id") or "",
-            "product_id": raw.get("product_id") or raw.get("id") or "",
-            "item_type": item_type,
-            "name": raw.get("name") or "",
-            "set_name": raw.get("set_name") or "",
-            "number": raw.get("number") or "",
-            "upc": raw.get("upc") or raw.get("number") or "",
-            "sealed_product_kind": raw.get("sealed_product_kind") or "",
-        }
-        base_market_price = _float(raw.get("base_market_price"), _float(raw.get("market_price"), 0.0))
-        condition_market_price = _condition_market_price_from_item(raw, condition, variant)
-        offer = calculate_buylist_offer(
-            config,
-            market_price=base_market_price,
-            condition_market_price=condition_market_price,
-            condition=condition,
-            language=language,
-            printing=variant,
-            product=product,
+            return JSONResponse({"ok": False, "error": BUYLIST_QUOTE_INVALID_ERROR}, status_code=400)
+        try:
+            line = _quote_signed_candidate(
+                raw,
+                employee_id=employee_id,
+                config=config,
+            )
+        except BuylistQuoteConfigurationError:
+            return _buylist_unavailable_response()
+        except BuylistQuoteTokenError:
+            return JSONResponse(
+                {"ok": False, "error": BUYLIST_QUOTE_INVALID_ERROR},
+                status_code=400,
+            )
+        totals["cash"] += line["line_cash"]
+        totals["trade"] += line["line_trade"]
+        totals["quantity"] += line["quantity"]
+        lines.append(line)
+    try:
+        trusted_cash_total = _trusted_buylist_price(
+            totals["cash"],
+            field_name="buylist cash total",
         )
-        line_cash = _money(offer["cash_offer"] * quantity)
-        line_trade = _money(offer["trade_offer"] * quantity)
-        totals["cash"] += line_cash
-        totals["trade"] += line_trade
-        totals["quantity"] += quantity
-        lines.append(
-            {
-                **raw,
-                "item_type": item_type,
-                "quantity": quantity,
-                "condition": condition,
-                "language": language,
-                "variant": variant,
-                "market_price": offer["market_price"],
-                "base_market_price": offer["base_market_price"],
-                "condition_market_price": offer["condition_market_price"],
-                "condition_price_source": offer["condition_price_source"],
-                "unit_cash": offer["cash_offer"],
-                "unit_trade": offer["trade_offer"],
-                "line_cash": line_cash,
-                "line_trade": line_trade,
-                "pricing_notes": offer["notes"],
-                "blocked": offer["blocked"],
-            }
+        trusted_trade_total = _trusted_buylist_price(
+            totals["trade"],
+            field_name="buylist trade total",
+        )
+    except BuylistQuoteTokenError:
+        return JSONResponse(
+            {"ok": False, "error": BUYLIST_QUOTE_INVALID_ERROR},
+            status_code=400,
         )
     return JSONResponse(
         {
             "ok": True,
             "lines": lines,
             "totals": {
-                "cash": _money(totals["cash"]),
-                "trade": _money(totals["trade"]),
+                "cash": trusted_cash_total,
+                "trade": trusted_trade_total,
                 "quantity": int(totals["quantity"]),
                 "items": len(lines),
             },
@@ -1313,6 +2057,22 @@ async def staff_buylist_save(request: Request, session: Session = Depends(get_se
             },
             status_code=400,
         )
+    try:
+        stored_lines = [
+            _stored_buylist_line(line)
+            for line in quote_payload.get("lines") or []
+            if isinstance(line, dict)
+        ]
+    except BuylistQuoteTokenError:
+        return JSONResponse(
+            {"ok": False, "error": BUYLIST_QUOTE_INVALID_ERROR},
+            status_code=400,
+        )
+    if len(stored_lines) != len(quote_payload.get("lines") or []):
+        return JSONResponse(
+            {"ok": False, "error": BUYLIST_QUOTE_INVALID_ERROR},
+            status_code=400,
+        )
 
     details = {
         "customer_name": str(body.get("customer_name") or "").strip()[:200],
@@ -1320,7 +2080,7 @@ async def staff_buylist_save(request: Request, session: Session = Depends(get_se
         "payment_view": str(body.get("payment_view") or "").strip()[:20],
         "notes": str(body.get("notes") or "").strip()[:2000],
         "totals": quote_payload.get("totals") or {},
-        "lines": quote_payload.get("lines") or [],
+        "lines": stored_lines,
     }
     payment_view = details["payment_view"] if details["payment_view"] in {"cash", "trade"} else "cash"
     submission = BuylistSubmission(
@@ -1435,33 +2195,68 @@ async def admin_buylist_submission_approve(
     if row.status != "submitted":
         raise HTTPException(status_code=409, detail=f"Cannot approve {row.status} submission")
 
-    inventory_result = _receive_submission_inventory(
-        session,
-        row,
-        actor=user,
-        location=location,
-    )
-    now = utcnow()
-    row.status = "approved"
-    row.approved_by_user_id = user.id
-    row.approved_at = now
-    row.status_changed_at = now
-    row.updated_at = now
-    row.inventory_result_json = json.dumps(inventory_result, sort_keys=True)
-    session.add(row)
-    session.add(
-        AuditLog(
-            actor_user_id=user.id,
-            action="staff_buylist.approved",
-            resource_key=f"team.buylist.{row.id}",
-            details_json=json.dumps(
-                {"buylist_submission_id": row.id, "inventory_result": inventory_result},
-                sort_keys=True,
-            ),
-            ip_address=(request.client.host if request.client else None),
+    try:
+        claim_time = utcnow()
+        claim_result = session.exec(
+            update(BuylistSubmission)
+            .where(
+                BuylistSubmission.id == submission_id,
+                BuylistSubmission.status == "submitted",
+            )
+            .values(status="approving", updated_at=claim_time)
+            .execution_options(synchronize_session=False)
         )
-    )
-    session.commit()
+        if claim_result.rowcount != 1:
+            session.rollback()
+            raise HTTPException(status_code=409, detail="Submission is already being processed")
+        row.status = "approving"
+        _buylist_signing_keys()
+        _verified_lines, trusted_totals = _verify_submission_quote(row)
+        inventory_result = _receive_submission_inventory(
+            session,
+            row,
+            actor=user,
+            location=location,
+        )
+        now = utcnow()
+        row.status = "approved"
+        row.approved_by_user_id = user.id
+        row.approved_at = now
+        row.status_changed_at = now
+        row.updated_at = now
+        row.inventory_result_json = json.dumps(inventory_result, sort_keys=True)
+        session.add(row)
+        session.add(
+            AuditLog(
+                actor_user_id=user.id,
+                action="staff_buylist.approved",
+                resource_key=f"team.buylist.{row.id}",
+                details_json=json.dumps(
+                    {
+                        "buylist_submission_id": row.id,
+                        "inventory_result": inventory_result,
+                        "quote_attestation_verified": True,
+                        "trusted_totals": trusted_totals,
+                    },
+                    sort_keys=True,
+                ),
+                ip_address=(request.client.host if request.client else None),
+            )
+        )
+        session.commit()
+    except BuylistQuoteConfigurationError as exc:
+        session.rollback()
+        raise HTTPException(status_code=503, detail=BUYLIST_QUOTE_UNAVAILABLE_ERROR) from exc
+    except BuylistQuoteTokenError as exc:
+        session.rollback()
+        raise HTTPException(status_code=409, detail=BUYLIST_ATTESTATION_INVALID_ERROR) from exc
+    except HTTPException:
+        session.rollback()
+        raise
+    except Exception as exc:
+        session.rollback()
+        logger.exception("Atomic buylist approval failed for submission %s", submission_id)
+        raise HTTPException(status_code=409, detail=BUYLIST_APPROVAL_ATOMIC_ERROR) from exc
     return RedirectResponse(
         "/team/admin/buylist/submissions?flash=Approved+and+received+into+inventory.",
         status_code=303,
@@ -1487,26 +2282,40 @@ async def admin_buylist_submission_reject(
     if row.status != "submitted":
         raise HTTPException(status_code=409, detail=f"Cannot reject {row.status} submission")
     now = utcnow()
-    row.status = "rejected"
-    row.rejected_by_user_id = user.id
-    row.rejected_at = now
-    row.status_changed_at = now
-    row.updated_at = now
-    row.decision_notes = decision_notes.strip()[:2000]
-    session.add(row)
+    clean_notes = decision_notes.strip()[:2000]
+    claim = session.exec(
+        update(BuylistSubmission)
+        .where(
+            BuylistSubmission.id == submission_id,
+            BuylistSubmission.status == "submitted",
+        )
+        .values(
+            status="rejected",
+            rejected_by_user_id=user.id,
+            rejected_at=now,
+            status_changed_at=now,
+            updated_at=now,
+            decision_notes=clean_notes,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if claim.rowcount != 1:
+        session.rollback()
+        raise HTTPException(status_code=409, detail="Submission is already being processed")
     session.add(
         AuditLog(
             actor_user_id=user.id,
             action="staff_buylist.rejected",
             resource_key=f"team.buylist.{row.id}",
             details_json=json.dumps(
-                {"buylist_submission_id": row.id, "notes": row.decision_notes},
+                {"buylist_submission_id": row.id, "notes": clean_notes},
                 sort_keys=True,
             ),
             ip_address=(request.client.host if request.client else None),
         )
     )
     session.commit()
+    session.expire(row)
     return RedirectResponse(
         "/team/admin/buylist/submissions?flash=Rejected.",
         status_code=303,
@@ -1531,12 +2340,24 @@ async def admin_buylist_submission_mark_paid(
     if row.status != "approved":
         raise HTTPException(status_code=409, detail=f"Cannot mark {row.status} submission paid")
     now = utcnow()
-    row.status = "paid"
-    row.paid_by_user_id = user.id
-    row.paid_at = now
-    row.status_changed_at = now
-    row.updated_at = now
-    session.add(row)
+    claim = session.exec(
+        update(BuylistSubmission)
+        .where(
+            BuylistSubmission.id == submission_id,
+            BuylistSubmission.status == "approved",
+        )
+        .values(
+            status="paid",
+            paid_by_user_id=user.id,
+            paid_at=now,
+            status_changed_at=now,
+            updated_at=now,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if claim.rowcount != 1:
+        session.rollback()
+        raise HTTPException(status_code=409, detail="Submission payment status already changed")
     session.add(
         AuditLog(
             actor_user_id=user.id,
@@ -1547,6 +2368,7 @@ async def admin_buylist_submission_mark_paid(
         )
     )
     session.commit()
+    session.expire(row)
     return RedirectResponse(
         "/team/admin/buylist/submissions?flash=Marked+paid.",
         status_code=303,

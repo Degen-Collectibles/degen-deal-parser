@@ -21,6 +21,8 @@ import os
 import tempfile
 from pathlib import Path
 
+from cryptography.fernet import Fernet
+
 # Cookie settings — must be http://testserver friendly.
 os.environ.setdefault("SESSION_HTTPS_ONLY", "false")
 os.environ.setdefault("SESSION_DOMAIN", "")
@@ -41,6 +43,8 @@ os.environ["DATABASE_URL"] = f"sqlite:///{_TEST_DB.as_posix()}"
 # Portal-specific — same idea: provide a valid-shape default so
 # `app.pii` / `app.auth` don't fail-closed at import time when a test
 # module forgets to set these. Individual test files can still override.
+os.environ.setdefault("EMPLOYEE_PORTAL_ENABLED", "true")
+os.environ.setdefault("EMPLOYEE_PII_KEY", Fernet.generate_key().decode("ascii"))
 os.environ.setdefault("EMPLOYEE_EMAIL_HASH_SALT", "pytest-email-salt")
 os.environ.setdefault("EMPLOYEE_TOKEN_HMAC_KEY", "pytest-token-hmac-key-" + "x" * 24)
 
@@ -78,6 +82,10 @@ for _external_notification_key in (
 os.environ.setdefault("TIKTOK_APP_KEY", "pytest-tiktok-app-key")
 os.environ.setdefault("TIKTOK_APP_SECRET", "pytest-tiktok-app-secret")
 os.environ.setdefault("TIKTOK_REDIRECT_URI", "http://testserver/integrations/tiktok/callback")
+os.environ.setdefault(
+    "TIKTOK_TOKEN_ENCRYPTION_KEYS",
+    "pytest-tiktok-token-encryption-key-000000000000000001",
+)
 os.environ.setdefault("TIKTOK_SYNC_ENABLED", "false")
 
 # If the cached Settings singleton was somehow created before conftest

@@ -7,11 +7,13 @@ circular imports.
 
 from __future__ import annotations
 
+import functools
 import json
 import threading
+import traceback
 from collections.abc import Callable
 from datetime import timedelta, timezone
-from typing import Any, Optional
+from typing import Any, NoReturn, Optional
 
 import httpx
 from sqlmodel import Session
@@ -20,10 +22,14 @@ from ..config import get_settings
 from ..models import TikTokAuth, TikTokCreatorAuth, utcnow
 from .tiktok_ingest import (
     TIKTOK_DEFAULT_API_BASE_URL,
+    TIKTOK_SHOP_AUTH_BASE_URL,
+    TIKTOK_SHOP_TOKEN_REFRESH_PATH,
     TIKTOK_TOKEN_REFRESH_PATH,
+    TikTokIngestError,
     build_tiktok_api_url,
     upsert_tiktok_creator_auth_from_callback,
     upsert_tiktok_auth_from_callback,
+    validate_tiktok_api_response,
 )
 
 try:
@@ -38,6 +44,189 @@ settings = get_settings()
 _tiktok_auth_refresh_lock = threading.Lock()
 
 
+def _safe_refresh_status_code(error: Exception) -> Optional[int]:
+    response = getattr(error, "response", None)
+    raw_status = getattr(response, "status_code", None)
+    if not isinstance(raw_status, int):
+        raw_status = getattr(error, "status_code", None)
+    if isinstance(raw_status, int) and 100 <= raw_status <= 599:
+        return raw_status
+    return None
+
+
+def _refresh_sensitive_values(error: Exception) -> tuple[str, ...]:
+    values: set[str] = set()
+    traceback_cursor = error.__traceback__
+    while traceback_cursor is not None:
+        frame = traceback_cursor.tb_frame
+        normalized_filename = frame.f_code.co_filename.replace("\\", "/")
+        if normalized_filename.endswith("/app/tiktok/tiktok_auth_refresh.py"):
+            frame_locals = frame.f_locals
+            for name in (
+                "app_secret",
+                "refresh_token",
+                "creator_refresh",
+                "access_token",
+                "new_refresh",
+            ):
+                value = frame_locals.get(name)
+                if isinstance(value, str) and value:
+                    values.add(value)
+            auth_row = frame_locals.get("auth_row")
+            if isinstance(auth_row, TikTokAuth):
+                for field_name in (
+                    "access_token",
+                    "refresh_token",
+                    "creator_access_token",
+                    "creator_refresh_token",
+                ):
+                    try:
+                        value = getattr(auth_row, field_name, None)
+                    except Exception:
+                        value = None
+                    if isinstance(value, str) and value:
+                        values.add(value)
+        traceback_cursor = traceback_cursor.tb_next
+    return tuple(values)
+
+
+def _safe_refresh_error_code(error: Exception, *, sensitive_values: tuple[str, ...]) -> Optional[str]:
+    raw_code = getattr(error, "tiktok_error_code", None)
+    if isinstance(raw_code, int):
+        code = str(raw_code)
+    elif isinstance(raw_code, str):
+        code = raw_code.strip()
+    else:
+        return None
+    if not code.isdigit() or not 1 <= len(code) <= 12:
+        return None
+    for sensitive_value in sensitive_values:
+        if code == sensitive_value or code in sensitive_value or sensitive_value in code:
+            return None
+    return code
+
+
+def _sanitized_refresh_error(
+    error: Exception,
+    *,
+    operation: str,
+    method: str,
+    endpoint_url: str,
+    sensitive_values: tuple[str, ...],
+    preserve_error_code: bool,
+) -> Exception:
+    parsed_url = httpx.URL(endpoint_url)
+    safe_url = str(parsed_url.copy_with(query=None, fragment=None))
+    endpoint = f"{parsed_url.host or 'unknown'}{parsed_url.path}"
+    status_code = _safe_refresh_status_code(error)
+    error_code = (
+        _safe_refresh_error_code(error, sensitive_values=sensitive_values)
+        if preserve_error_code
+        else None
+    )
+    status_suffix = f" HTTP {status_code}" if status_code is not None else ""
+    code_suffix = f" code {error_code}" if error_code is not None else ""
+    message = f"{operation} failed ({type(error).__name__}){status_suffix}{code_suffix} for {method} {endpoint}"
+
+    safe_error: Exception
+    if isinstance(error, httpx.HTTPStatusError):
+        safe_request = httpx.Request(method, safe_url)
+        safe_response = httpx.Response(status_code or 500, request=safe_request)
+        safe_error = httpx.HTTPStatusError(
+            message,
+            request=safe_request,
+            response=safe_response,
+        )
+    elif isinstance(error, httpx.TransportError):
+        safe_request = httpx.Request(method, safe_url)
+        try:
+            safe_error = type(error)(message, request=safe_request)
+        except Exception:
+            safe_error = httpx.TransportError(message)
+    elif isinstance(error, TikTokIngestError):
+        safe_error = TikTokIngestError(message)
+    else:
+        try:
+            safe_error = type(error)(message)
+        except Exception:
+            safe_error = RuntimeError(message)
+
+    if error_code is not None:
+        safe_error.tiktok_error_code = error_code  # type: ignore[attr-defined]
+    if status_code is not None:
+        safe_error.status_code = status_code  # type: ignore[attr-defined]
+    safe_error.tiktok_scope_missing = bool(  # type: ignore[attr-defined]
+        getattr(error, "tiktok_scope_missing", False)
+    )
+    return safe_error
+
+
+def _clear_refresh_failure(error: Exception) -> None:
+    try:
+        if error.__traceback__ is not None:
+            traceback.clear_frames(error.__traceback__)
+        error.__traceback__ = None
+        error.__cause__ = None
+        error.__context__ = None
+        error.args = ()
+        error_state = getattr(error, "__dict__", None)
+        if isinstance(error_state, dict):
+            error_state.clear()
+    except Exception:
+        pass
+
+
+def _raise_sanitized_refresh_error(error: Exception) -> NoReturn:
+    raise error
+
+
+def _sanitize_refresh_boundary(*, operation: str, method: str, endpoint_url: str) -> Callable:
+    def decorate(func: Callable) -> Callable:
+        @functools.wraps(func)
+        def wrapped(*args: Any, **kwargs: Any) -> Any:
+            failure: Optional[Exception] = None
+            try:
+                return func(*args, **kwargs)
+            except Exception as exc:
+                failure = exc
+
+            try:
+                sensitive_values = _refresh_sensitive_values(failure)
+                preserve_error_code = True
+            except Exception as collection_error:
+                _clear_refresh_failure(collection_error)
+                sensitive_values = ()
+                preserve_error_code = False
+            try:
+                safe_error = _sanitized_refresh_error(
+                    failure,
+                    operation=operation,
+                    method=method,
+                    endpoint_url=endpoint_url,
+                    sensitive_values=sensitive_values,
+                    preserve_error_code=preserve_error_code,
+                )
+            except Exception:
+                safe_error = RuntimeError(f"{operation} failed for {method}")
+            _clear_refresh_failure(failure)
+            kwargs.clear()
+            del args
+            del kwargs
+            del sensitive_values
+            del preserve_error_code
+            del failure
+            _raise_sanitized_refresh_error(safe_error)
+
+        return wrapped
+
+    return decorate
+
+
+@_sanitize_refresh_boundary(
+    operation="TikTok Shop token refresh",
+    method="GET",
+    endpoint_url=f"{TIKTOK_SHOP_AUTH_BASE_URL}{TIKTOK_SHOP_TOKEN_REFRESH_PATH}",
+)
 def refresh_tiktok_auth_if_needed(
     session: Session,
     *,
@@ -96,7 +285,7 @@ def refresh_tiktok_auth_if_needed(
                     or token_expires_at <= utcnow() + timedelta(minutes=10)
                 )
                 if should_refresh:
-                    with httpx.Client(timeout=40.0, follow_redirects=True) as client:
+                    with httpx.Client(timeout=40.0, follow_redirects=False) as client:
                         refreshed = _refresh_fn(
                             client,
                             base_url=resolve_base_url(),
@@ -166,7 +355,7 @@ def refresh_tiktok_auth_if_needed(
                 if not should_refresh_creator:
                     continue
 
-                with httpx.Client(timeout=40.0, follow_redirects=True) as client:
+                with httpx.Client(timeout=40.0, follow_redirects=False) as client:
                     refreshed = _refresh_fn(
                         client,
                         base_url=resolve_base_url(),
@@ -234,6 +423,30 @@ def _parse_expires_in_seconds(payload: dict[str, Any]) -> int:
         return 86400
 
 
+def _strict_tiktok_error_code(payload: Any) -> Optional[str]:
+    if not isinstance(payload, dict):
+        return None
+    raw_code = payload.get("code")
+    if raw_code in (None, ""):
+        raw_code = payload.get("error_code")
+    if isinstance(raw_code, bool):
+        return None
+    if isinstance(raw_code, int):
+        code = str(raw_code)
+    elif isinstance(raw_code, str):
+        code = raw_code
+    else:
+        return None
+    if not code.isascii() or not code.isdigit() or not 1 <= len(code) <= 12:
+        return None
+    return code
+
+
+@_sanitize_refresh_boundary(
+    operation="TikTok Creator token refresh",
+    method="POST",
+    endpoint_url=f"{TIKTOK_DEFAULT_API_BASE_URL}{TIKTOK_TOKEN_REFRESH_PATH}",
+)
 def refresh_tiktok_creator_token_if_needed(
     session: Session,
     *,
@@ -275,8 +488,10 @@ def refresh_tiktok_creator_token_if_needed(
         if not should_refresh:
             return None
 
-        api_base = (settings.tiktok_api_base_url or "").strip() or TIKTOK_DEFAULT_API_BASE_URL
-        token_url = build_tiktok_api_url(api_base_url=api_base, path=TIKTOK_TOKEN_REFRESH_PATH)
+        token_url = build_tiktok_api_url(
+            api_base_url=TIKTOK_DEFAULT_API_BASE_URL,
+            path=TIKTOK_TOKEN_REFRESH_PATH,
+        )
         form = {
             "client_key": app_key,
             "client_secret": app_secret,
@@ -284,31 +499,41 @@ def refresh_tiktok_creator_token_if_needed(
             "refresh_token": creator_refresh,
         }
 
-        with httpx.Client(timeout=40.0, follow_redirects=True) as client:
+        with httpx.Client(timeout=40.0, follow_redirects=False) as client:
             response = client.post(
                 token_url,
                 data=form,
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
             response.raise_for_status()
-            body = response.json()
-            if not isinstance(body, dict):
-                raise RuntimeError(f"Creator token refresh: expected JSON object, got {type(body).__name__}")
-
-        if body.get("error"):
-            desc = body.get("error_description") or body.get("message") or body.get("error")
-            raise RuntimeError(f"Creator token refresh failed: {desc}")
+            response_payload = response.json()
+            try:
+                body = validate_tiktok_api_response(response_payload)
+            except TikTokIngestError as validation_error:
+                error_code = _strict_tiktok_error_code(response_payload)
+                if error_code is not None:
+                    validation_error.tiktok_error_code = error_code  # type: ignore[attr-defined]
+                if isinstance(response_payload, (dict, list)):
+                    response_payload.clear()
+                del response_payload
+                raise
 
         access_token = _parse_oauth_token_field(body, "access_token", "accessToken")
         if not access_token:
             raise RuntimeError("Creator token refresh: missing access_token in response")
 
         new_refresh = _parse_oauth_token_field(body, "refresh_token", "refreshToken")
+        expires_in_seconds = _parse_expires_in_seconds(body)
+        if response_payload is not body and isinstance(response_payload, (dict, list)):
+            response_payload.clear()
+        body.clear()
+        del response_payload
+        del body
         if new_refresh:
             auth_row.creator_refresh_token = new_refresh
 
         auth_row.creator_access_token = access_token
-        auth_row.creator_token_expires_at = utcnow() + timedelta(seconds=_parse_expires_in_seconds(body))
+        auth_row.creator_token_expires_at = utcnow() + timedelta(seconds=expires_in_seconds)
         auth_row.updated_at = utcnow()
         session.add(auth_row)
         session.commit()

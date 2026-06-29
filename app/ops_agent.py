@@ -10,6 +10,7 @@ from typing import Any
 from sqlmodel import Session, func, select
 
 from .discord.bank_reconciliation import dedupe_bank_rows_for_reporting
+from .discord.transactions import transaction_base_query
 from .models import BankFeedAccount, BankTransaction, InventoryItem, ShopifyOrder, TikTokOrder, Transaction
 from .reporting import tiktok_order_is_paid
 from .shared import build_finance_range_snapshot
@@ -672,10 +673,7 @@ def _build_channel_velocity(session: Session, *, start: datetime, end: datetime,
                 )
 
     transaction_rows = session.exec(
-        select(Transaction)
-        .where(Transaction.is_deleted == False)  # noqa: E712
-        .where(Transaction.occurred_at >= start)
-        .where(Transaction.occurred_at <= end)
+        transaction_base_query(start=start, end=end)
     ).all()
     for row in transaction_rows:
         entry_kind = str(row.entry_kind or "").strip().lower()

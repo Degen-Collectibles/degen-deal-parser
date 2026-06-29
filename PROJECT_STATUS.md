@@ -30,7 +30,7 @@ Stack: Python 3.14, FastAPI, Uvicorn, PostgreSQL (prod) / SQLite (dev), discord.
 - Run: `powershell -ExecutionPolicy Bypass -File .\scripts\run_hosted.ps1`
 - Runs web server + worker process with auto-restart and liveness watchdog
 - Discord bot, parser worker, TikTok order sync, webhook listener, live chat all run here
-- **PostgreSQL** database (`postgresql+psycopg://degen:degen42069@localhost:5432/degen_live`)
+- **PostgreSQL** database (`postgresql://<redacted>`)
 - Exposed via **Cloudflare tunnel** at `ops.degencollectibles.com`
 - Automated Postgres backup via `scripts/backup_pg.ps1` (pg_dump → OneDrive via rclone)
 - Tailscale IP: `100.110.34.106`

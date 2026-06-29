@@ -106,6 +106,19 @@ class EmployeeTimecardsTests(unittest.TestCase):
         self.session.refresh(user)
         return user
 
+    def _set_permission(self, role: str, resource_key: str, is_allowed: bool):
+        from app.models import RolePermission
+
+        permission = self.session.exec(
+            select(RolePermission).where(
+                RolePermission.role == role,
+                RolePermission.resource_key == resource_key,
+            )
+        ).one()
+        permission.is_allowed = is_allowed
+        self.session.add(permission)
+        self.session.commit()
+
     def _seed_profile(
         self,
         *,
@@ -388,6 +401,119 @@ class EmployeeTimecardsTests(unittest.TestCase):
         persisted = self.session.get(TimecardApproval, locked.id)
         self.assertEqual(persisted.status, mod.TIMECARD_STATUS_LOCKED)
         self.assertEqual(persisted.note, "closed")
+
+    def test_timecard_lock_requires_both_edit_and_payroll_lock_at_service_boundary(self):
+        from app.models import AuditLog, TimecardApproval
+        from app.routers import team_admin_employees_timecards as mod
+
+        manager = self._seed_user(3, role="manager", username="manager")
+        self._set_permission("manager", "admin.employees.edit", True)
+        self._set_permission("manager", "admin.payroll.lock", False)
+
+        aliases = ("locked", " LOCKED ", "LoCkEd")
+        for offset, alias in enumerate(aliases):
+            with self.subTest(alias=alias):
+                with self.assertRaises(PermissionError):
+                    mod.set_timecard_day_status(
+                        self.session,
+                        current_user=manager,
+                        user_id=self.employee.id,
+                        work_date=date(2026, 4, 20 + offset),
+                        status=alias,
+                        note="must not persist",
+                    )
+
+        self.assertEqual(self.session.exec(select(TimecardApproval)).all(), [])
+        self.assertEqual(self.session.exec(select(AuditLog)).all(), [])
+
+    def test_timecard_service_rejects_missing_employee_edit_even_with_payroll_lock(self):
+        from app.models import AuditLog, TimecardApproval
+        from app.routers import team_admin_employees_timecards as mod
+
+        manager = self._seed_user(3, role="manager", username="manager")
+        self._set_permission("manager", "admin.employees.edit", False)
+        self._set_permission("manager", "admin.payroll.lock", True)
+
+        with self.assertRaises(PermissionError):
+            mod.set_timecard_day_status(
+                self.session,
+                current_user=manager,
+                user_id=self.employee.id,
+                work_date=date(2026, 4, 20),
+                status="locked",
+                note="must not persist",
+            )
+
+        self.assertEqual(self.session.exec(select(TimecardApproval)).all(), [])
+        self.assertEqual(self.session.exec(select(AuditLog)).all(), [])
+
+    def test_timecard_lock_aliases_return_403_without_mutation(self):
+        from app.models import AuditLog, TimecardApproval
+        from app.routers import team_admin_employees_timecards as mod
+
+        manager = self._seed_user(3, role="manager", username="manager")
+        self._set_permission("manager", "admin.employees.edit", True)
+        self._set_permission("manager", "admin.payroll.lock", False)
+        request = _FakeRequest(manager)
+
+        for offset, alias in enumerate(("locked", " LOCKED ", "LoCkEd")):
+            with self.subTest(alias=alias):
+                response = mod.admin_employee_timecard_day_status(
+                    request,
+                    self.employee.id,
+                    work_date=f"2026-04-{20 + offset:02d}",
+                    status=alias,
+                    note="must not persist",
+                    week="2026-04-20",
+                    session=self.session,
+                )
+                self.assertEqual(response.status_code, 403)
+
+        self.assertEqual(self.session.exec(select(TimecardApproval)).all(), [])
+        self.assertEqual(self.session.exec(select(AuditLog)).all(), [])
+
+    def test_employee_editor_without_payroll_lock_can_approve_and_reject(self):
+        from app.models import TimecardApproval
+        from app.routers import team_admin_employees_timecards as mod
+
+        manager = self._seed_user(3, role="manager", username="manager")
+        self._set_permission("manager", "admin.employees.edit", True)
+        self._set_permission("manager", "admin.payroll.lock", False)
+
+        approved = mod.set_timecard_day_status(
+            self.session,
+            current_user=manager,
+            user_id=self.employee.id,
+            work_date=date(2026, 4, 20),
+            status=" APPROVED ",
+        )
+        rejected = mod.set_timecard_day_status(
+            self.session,
+            current_user=manager,
+            user_id=self.employee.id,
+            work_date=date(2026, 4, 21),
+            status="ReJeCtEd",
+        )
+
+        self.assertEqual(approved.status, mod.TIMECARD_STATUS_APPROVED)
+        self.assertEqual(rejected.status, mod.TIMECARD_STATUS_REJECTED)
+        self.assertEqual(len(self.session.exec(select(TimecardApproval)).all()), 2)
+
+    def test_timecards_page_hides_locked_option_without_both_permissions(self):
+        manager = self._seed_user(3, role="manager", username="manager")
+        self._set_permission("manager", "admin.employees.view", True)
+        self._set_permission("manager", "admin.employees.edit", True)
+        self._set_permission("manager", "admin.payroll.lock", False)
+
+        response, _ = self._render(actor=manager, configured=False)
+
+        self.assertEqual(response.status_code, 200)
+        body = response.body.decode("utf-8")
+        self.assertNotIn('<option value="locked"', body)
+        self.assertIn('<option value="approved"', body)
+
+        admin_response, _ = self._render(actor=self.admin, configured=False)
+        self.assertIn('<option value="locked"', admin_response.body.decode("utf-8"))
 
     def test_timecards_permission_gate_denies_employee(self):
         # Employee role does NOT have admin.employees.view permission.

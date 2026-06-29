@@ -20,6 +20,12 @@ from ..discord.channels import get_channel_filter_choices
 from ..discord.corrections import promote_correction_pattern, save_review_correction, snapshot_message_parse
 from ..db import get_session
 from ..financial_audit import record_financial_audit
+from ..financial_values import (
+    InvalidFinancialValueError,
+    parse_optional_confidence,
+    parse_optional_money,
+    validate_optional_money,
+)
 from ..models import (
     DiscordMessage,
     PARSE_PARSED,
@@ -27,7 +33,12 @@ from ..models import (
     normalize_parse_status,
     utcnow,
 )
-from ..discord.transactions import sync_transaction_from_message
+from ..discord.transactions import (
+    SourceRefreshRequiredError,
+    StaleSourceRevisionError,
+    require_source_group_mutation_allowed,
+    sync_transaction_from_message,
+)
 
 router = APIRouter(route_class=CSRFProtectedRoute)
 
@@ -273,12 +284,38 @@ def edit_message_form(
     row = session.get(DiscordMessage, message_id)
     if not row:
         raise HTTPException(status_code=404, detail="Message not found")
-    parsed_before = snapshot_message_parse(row)
 
     try:
-        parsed_amount = parse_optional_float(amount)
-        parsed_confidence = parse_optional_float(confidence)
-    except ValueError:
+        parsed_amount = parse_optional_money(amount, field_name="amount")
+        parsed_confidence = parse_optional_confidence(
+            confidence,
+            field_name="confidence",
+        )
+        normalized_deal_type = (deal_type or "").strip() or None
+        normalized_payment_method = (payment_method or "").strip() or None
+        normalized_cash_direction = (
+            row.cash_direction
+            if cash_direction is None
+            else ((cash_direction or "").strip() or None)
+        )
+        normalized_category = (category or "").strip() or None
+        normalized_entry_kind = (entry_kind or "").strip() or None
+        normalized_expense_category = (expense_category or "").strip() or None
+        if normalized_deal_type != "trade":
+            normalized_cash_direction = None
+
+        entry_kind_value, money_in, money_out, expense_category_value = compute_manual_financials(
+            row=row,
+            deal_type=normalized_deal_type,
+            category=normalized_category,
+            amount=parsed_amount,
+            cash_direction=normalized_cash_direction,
+            entry_kind_override=normalized_entry_kind,
+            expense_category_override=normalized_expense_category,
+        )
+        money_in = validate_optional_money(money_in, field_name="money in") or 0.0
+        money_out = validate_optional_money(money_out, field_name="money out") or 0.0
+    except InvalidFinancialValueError:
         detail_url = build_message_detail_url(
             message_id,
             return_path=return_path,
@@ -298,6 +335,13 @@ def edit_message_form(
             status_code=303,
         )
 
+    try:
+        require_source_group_mutation_allowed(session, row)
+    except (SourceRefreshRequiredError, StaleSourceRevisionError) as exc:
+        session.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    parsed_before = snapshot_message_parse(row)
+
     row.parse_status = normalize_parse_status(parse_status or PARSE_PARSED)
     row.needs_review = bool(needs_review)
     if row.parse_status == PARSE_REVIEW_REQUIRED or row.needs_review:
@@ -305,15 +349,6 @@ def edit_message_form(
         row.needs_review = True
     elif row.parse_status == PARSE_PARSED:
         row.needs_review = False
-
-    normalized_deal_type = (deal_type or "").strip() or None
-    normalized_payment_method = (payment_method or "").strip() or None
-    normalized_cash_direction = row.cash_direction if cash_direction is None else ((cash_direction or "").strip() or None)
-    normalized_category = (category or "").strip() or None
-    normalized_entry_kind = (entry_kind or "").strip() or None
-    normalized_expense_category = (expense_category or "").strip() or None
-    if normalized_deal_type != "trade":
-        normalized_cash_direction = None
 
     row.deal_type = normalized_deal_type
     row.amount = parsed_amount
@@ -327,15 +362,6 @@ def edit_message_form(
     row.items_in_json = json.dumps(parse_string_list(items_in_text))
     row.items_out_json = json.dumps(parse_string_list(items_out_text))
 
-    entry_kind_value, money_in, money_out, expense_category_value = compute_manual_financials(
-        row=row,
-        deal_type=normalized_deal_type,
-        category=normalized_category,
-        amount=parsed_amount,
-        cash_direction=normalized_cash_direction,
-        entry_kind_override=normalized_entry_kind,
-        expense_category_override=normalized_expense_category,
-    )
     row.entry_kind = entry_kind_value
     row.money_in = money_in
     row.money_out = money_out
@@ -374,7 +400,11 @@ def edit_message_form(
 
     session.add(row)
     save_review_correction(session, row, parsed_before=parsed_before)
-    sync_transaction_from_message(session, row)
+    try:
+        sync_transaction_from_message(session, row)
+    except (SourceRefreshRequiredError, StaleSourceRevisionError) as exc:
+        session.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     parsed_after = snapshot_message_parse(row)
     if parsed_before != parsed_after:
         user = getattr(request.state, "current_user", None)

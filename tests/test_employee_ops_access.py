@@ -19,6 +19,7 @@ for anyone below role=viewer so employees aren't tempted into 403s.
 """
 from __future__ import annotations
 
+import base64
 import importlib
 import json
 import os
@@ -34,6 +35,11 @@ os.environ.setdefault("EMPLOYEE_PORTAL_ENABLED", "true")
 os.environ.setdefault("EMPLOYEE_PII_KEY", Fernet.generate_key().decode("ascii"))
 os.environ.setdefault("EMPLOYEE_EMAIL_HASH_SALT", "unit-test-salt-opsaccess")
 os.environ.setdefault("EMPLOYEE_TOKEN_HMAC_KEY", "unit-test-hmac-opsaccess")
+
+SAFE_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMB"
+    "AQDJ/pLvAAAAAElFTkSuQmCC"
+)
 
 
 def _fresh_engine():
@@ -54,7 +60,9 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         rate_limit.reset()
 
         self._tmp_media = tempfile.TemporaryDirectory()
+        self._tmp_capture = tempfile.TemporaryDirectory()
         os.environ["MEDIA_ROOT"] = self._tmp_media.name
+        os.environ["DEGEN_EYE_V2_CAPTURE_DIR"] = self._tmp_capture.name
         self.engine = _fresh_engine()
         from app.db import seed_employee_portal_defaults
         self.session = Session(self.engine)
@@ -84,7 +92,11 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         self.app_main.app.dependency_overrides.clear()
         self.session.close()
         os.environ.pop("MEDIA_ROOT", None)
+        os.environ.pop("DEGEN_EYE_V2_CAPTURE_DIR", None)
         self._tmp_media.cleanup()
+        self._tmp_capture.cleanup()
+        from app import config as cfg
+        cfg.get_settings.cache_clear()
         for attr in ("_patcher_shared", "_patcher_main"):
             p = getattr(self, attr, None)
             if p:
@@ -146,6 +158,69 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         self.session.add(hit)
         self.session.commit()
         return hit
+
+    def _set_role_permission(self, role: str, resource_key: str, allowed: bool) -> None:
+        from app.models import RolePermission
+
+        permission = self.session.exec(
+            select(RolePermission).where(
+                RolePermission.role == role,
+                RolePermission.resource_key == resource_key,
+            )
+        ).first()
+        if permission is None:
+            permission = RolePermission(role=role, resource_key=resource_key)
+        permission.is_allowed = allowed
+        self.session.add(permission)
+        self.session.commit()
+
+    def _delete_live_hit(self, hit_id: int):
+        page = self.client.get("/hits", follow_redirects=False)
+        self.assertEqual(page.status_code, 200)
+        csrf = self._csrf_from_html(page.text)
+        return self.client.post(
+            f"/hits/{hit_id}/delete",
+            headers={"X-CSRF-Token": csrf},
+            follow_redirects=False,
+        )
+
+    def _assert_live_hit_delete_audit(self, *, hit_id: int, user_id: int, actor_label: str) -> None:
+        from app.models import AuditLog
+
+        audits = self.session.exec(
+            select(AuditLog).where(AuditLog.action == "live_hit.delete")
+        ).all()
+        self.assertEqual(len(audits), 1)
+        audit = audits[0]
+        self.assertEqual(audit.actor_user_id, user_id)
+        self.assertEqual(audit.resource_key, f"live_hit:{hit_id}")
+        details = json.loads(audit.details_json)
+        self.assertEqual(details, {"actor_label": actor_label, "live_hit_id": hit_id})
+        self.assertEqual(audit.ip_address, "testclient")
+
+    def _seed_v2_capture(
+        self,
+        *,
+        capture_id: str = "20260628_0123456789abcdef0123456789abcdef",
+        employee_id: object = 221,
+        payload_capture_id: object | None = None,
+    ):
+        from pathlib import Path
+
+        date_dir = f"{capture_id[:4]}-{capture_id[4:6]}-{capture_id[6:8]}"
+        path = Path(self._tmp_capture.name) / date_dir / f"{capture_id}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({
+                "capture_id": capture_id if payload_capture_id is None else payload_capture_id,
+                "employee": {"id": employee_id},
+                "prediction": None,
+                "confirmed_label": None,
+                "training": {"eligible": False, "indexed_at": None},
+            }),
+            encoding="utf-8",
+        )
+        return path
 
     # ---------- Sidebar "Tools" group ----------
 
@@ -453,6 +528,229 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         self.session.expire_all()
         self.assertEqual(self.session.exec(select(InventoryItem)).all(), [])
         self.assertEqual(self.session.exec(select(InventoryStockMovement)).all(), [])
+
+    def test_employee_batch_confirm_updates_only_own_capture(self):
+        from app.models import InventoryItem
+
+        self._login_as("employee", user_id=221, username="emp21")
+        capture_id = "20260628_0123456789abcdef0123456789abcdef"
+        path = self._seed_v2_capture(capture_id=capture_id, employee_id=221)
+        token = self._csrf_from_html(self.client.get("/inventory/add-stock").text)
+
+        response = self.client.post(
+            "/inventory/batch/confirm",
+            headers={"X-CSRF-Token": token},
+            json=[{
+                "card_name": "Owned Capture Pikachu",
+                "game": "Pokemon",
+                "set_name": "Base Set",
+                "card_number": "58/102",
+                "condition": "NM",
+                "_v2_capture_id": capture_id,
+            }],
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json().get("warnings"), [])
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["confirmed_label"]["card_name"], "Owned Capture Pikachu")
+        self.assertEqual(payload["inventory_item_id"], response.json()["items"][0]["id"])
+        self.session.expire_all()
+        self.assertEqual(len(self.session.exec(select(InventoryItem)).all()), 1)
+
+    def test_employee_batch_confirm_rejects_other_employees_capture_atomically(self):
+        from app.models import InventoryItem, InventoryStockMovement
+
+        self._login_as("employee", user_id=221, username="emp21")
+        capture_id = "20260628_0123456789abcdef0123456789abcdef"
+        path = self._seed_v2_capture(capture_id=capture_id, employee_id=999)
+        before = path.read_bytes()
+        token = self._csrf_from_html(self.client.get("/inventory/add-stock").text)
+
+        response = self.client.post(
+            "/inventory/batch/confirm",
+            headers={"X-CSRF-Token": token},
+            json=[{
+                "card_name": "Other Owner Pikachu",
+                "game": "Pokemon",
+                "condition": "NM",
+                "capture_id": capture_id,
+            }],
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json(), {"error": "Invalid capture reference"})
+        self.assertEqual(path.read_bytes(), before)
+        self.session.expire_all()
+        self.assertEqual(self.session.exec(select(InventoryItem)).all(), [])
+        self.assertEqual(self.session.exec(select(InventoryStockMovement)).all(), [])
+
+    def test_employee_batch_confirm_rejects_capture_payload_id_mismatch(self):
+        from app.models import InventoryItem, InventoryStockMovement
+
+        self._login_as("employee", user_id=221, username="emp21")
+        capture_id = "20260628_0123456789abcdef0123456789abcdef"
+        path = self._seed_v2_capture(
+            capture_id=capture_id,
+            employee_id=221,
+            payload_capture_id="20260628_fedcba9876543210fedcba9876543210",
+        )
+        before = path.read_bytes()
+        token = self._csrf_from_html(self.client.get("/inventory/add-stock").text)
+
+        response = self.client.post(
+            "/inventory/batch/confirm",
+            headers={"X-CSRF-Token": token},
+            json=[{
+                "card_name": "Mismatched Capture Pikachu",
+                "game": "Pokemon",
+                "condition": "NM",
+                "capture_id": capture_id,
+            }],
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json(), {"error": "Invalid capture reference"})
+        self.assertEqual(path.read_bytes(), before)
+        self.session.expire_all()
+        self.assertEqual(self.session.exec(select(InventoryItem)).all(), [])
+        self.assertEqual(self.session.exec(select(InventoryStockMovement)).all(), [])
+
+    def test_employee_batch_confirm_mixed_batch_preflights_all_captures(self):
+        from app.models import InventoryItem, InventoryStockMovement
+
+        self._login_as("employee", user_id=221, username="emp21")
+        capture_id = "20260628_0123456789abcdef0123456789abcdef"
+        path = self._seed_v2_capture(capture_id=capture_id, employee_id=221)
+        before = path.read_bytes()
+        token = self._csrf_from_html(self.client.get("/inventory/add-stock").text)
+
+        response = self.client.post(
+            "/inventory/batch/confirm",
+            headers={"X-CSRF-Token": token},
+            json=[
+                {
+                    "card_name": "Valid First Row",
+                    "game": "Pokemon",
+                    "condition": "NM",
+                    "capture_id": capture_id,
+                },
+                {
+                    "card_name": "Invalid Later Row",
+                    "game": "Pokemon",
+                    "condition": "NM",
+                    "capture_id": "*",
+                },
+            ],
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json(), {"error": "Invalid capture reference"})
+        self.assertEqual(path.read_bytes(), before)
+        self.session.expire_all()
+        self.assertEqual(self.session.exec(select(InventoryItem)).all(), [])
+        self.assertEqual(self.session.exec(select(InventoryStockMovement)).all(), [])
+
+    def test_employee_batch_confirm_rejects_conflicting_capture_fields(self):
+        from app.models import InventoryItem, InventoryStockMovement
+
+        self._login_as("employee", user_id=221, username="emp21")
+        first_id = "20260628_0123456789abcdef0123456789abcdef"
+        second_id = "20260628_fedcba9876543210fedcba9876543210"
+        first_path = self._seed_v2_capture(capture_id=first_id, employee_id=221)
+        second_path = self._seed_v2_capture(capture_id=second_id, employee_id=221)
+        before = (first_path.read_bytes(), second_path.read_bytes())
+        token = self._csrf_from_html(self.client.get("/inventory/add-stock").text)
+
+        response = self.client.post(
+            "/inventory/batch/confirm",
+            headers={"X-CSRF-Token": token},
+            json=[{
+                "card_name": "Ambiguous Capture",
+                "game": "Pokemon",
+                "condition": "NM",
+                "_v2_capture_id": first_id,
+                "capture_id": second_id,
+            }],
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json(), {"error": "Invalid capture reference"})
+        self.assertEqual((first_path.read_bytes(), second_path.read_bytes()), before)
+        self.session.expire_all()
+        self.assertEqual(self.session.exec(select(InventoryItem)).all(), [])
+        self.assertEqual(self.session.exec(select(InventoryStockMovement)).all(), [])
+
+    def test_employee_batch_confirm_empty_capture_values_keep_v1_behavior(self):
+        from app.models import InventoryItem, InventoryStockMovement
+
+        self._login_as("employee", user_id=221, username="emp21")
+        token = self._csrf_from_html(self.client.get("/inventory/add-stock").text)
+
+        response = self.client.post(
+            "/inventory/batch/confirm",
+            headers={"X-CSRF-Token": token},
+            json=[{
+                "card_name": "No Capture Pikachu",
+                "game": "Pokemon",
+                "condition": "NM",
+                "_v2_capture_id": "",
+                "capture_id": None,
+            }],
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json().get("warnings"), [])
+        self.session.expire_all()
+        self.assertEqual(len(self.session.exec(select(InventoryItem)).all()), 1)
+        self.assertEqual(len(self.session.exec(select(InventoryStockMovement)).all()), 1)
+
+    def test_employee_batch_confirm_postcommit_capture_failure_returns_warning(self):
+        from app.models import InventoryItem, InventoryStockMovement
+
+        self._login_as("employee", user_id=221, username="emp21")
+        capture_id = "20260628_0123456789abcdef0123456789abcdef"
+        path = self._seed_v2_capture(capture_id=capture_id, employee_id=221)
+        before = path.read_bytes()
+        token = self._csrf_from_html(self.client.get("/inventory/add-stock").text)
+
+        with patch(
+            "app.inventory.degen_eye_v2_training._write_json_atomic",
+            side_effect=OSError("simulated metadata write failure"),
+        ):
+            with self.assertLogs("app.inventory.routes", level="WARNING") as logs:
+                response = self.client.post(
+                    "/inventory/batch/confirm",
+                    headers={"X-CSRF-Token": token},
+                    json=[{
+                        "card_name": "Committed Despite Metadata Failure",
+                        "game": "Pokemon",
+                        "condition": "NM",
+                        "capture_id": capture_id,
+                    }],
+                )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        warning = response.json()["warnings"][0]
+        self.assertEqual(warning["code"], "capture_metadata_update_failed")
+        self.assertEqual(warning["inventory_item_id"], response.json()["items"][0]["id"])
+        self.assertTrue(warning["message"])
+        self.assertIn(capture_id, "\n".join(logs.output))
+        self.assertIn("221", "\n".join(logs.output))
+        self.assertEqual(path.read_bytes(), before)
+        self.session.expire_all()
+        self.assertEqual(len(self.session.exec(select(InventoryItem)).all()), 1)
+        self.assertEqual(len(self.session.exec(select(InventoryStockMovement)).all()), 1)
+
+    def test_employee_batch_review_visibly_renders_metadata_warnings(self):
+        self._login_as("employee", user_id=221, username="emp21")
+
+        response = self.client.get("/inventory/scan/batch-review")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('id="success-warnings"', response.text)
+        self.assertIn("Array.isArray(data.warnings)", response.text)
+        self.assertIn("warning.message", response.text)
 
     def test_employee_scan_shell_hides_inventory_admin_actions(self):
         self._login_as("employee", user_id=216, username="emp16")
@@ -1622,6 +1920,137 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         self.assertNotIn('href="/reports"', r.text)
         self.assertNotIn('href="/bookkeeping"', r.text)
 
+    def test_employee_cannot_delete_live_hit_or_probe_missing_id(self):
+        self._login_as("employee", user_id=231, username="emp31")
+        hit = self._seed_hit_image(filename="employee-delete.jpg")
+
+        list_page = self.client.get("/hits", follow_redirects=False)
+        edit_page = self.client.get(f"/hits/{hit.id}/edit", follow_redirects=False)
+        self.assertNotIn(f'action="/hits/{hit.id}/delete"', list_page.text)
+        self.assertNotIn(f'action="/hits/{hit.id}/delete"', edit_page.text)
+
+        existing = self._delete_live_hit(hit.id)
+        missing = self._delete_live_hit(987654321)
+
+        self.assertEqual(existing.status_code, 403)
+        self.assertEqual(missing.status_code, 403)
+        self.assertEqual(existing.text, missing.text)
+        self.session.expire_all()
+        self.assertFalse(self.session.get(type(hit), hit.id).is_deleted)
+        from app.models import AuditLog
+        self.assertEqual(
+            self.session.exec(
+                select(AuditLog).where(AuditLog.action == "live_hit.delete")
+            ).all(),
+            [],
+        )
+
+    def test_viewer_cannot_delete_live_hit(self):
+        self._login_as("viewer", user_id=232, username="viewer32")
+        hit = self._seed_hit_image(filename="viewer-delete.jpg")
+
+        response = self._delete_live_hit(hit.id)
+
+        self.assertEqual(response.status_code, 403)
+        self.session.expire_all()
+        self.assertFalse(self.session.get(type(hit), hit.id).is_deleted)
+        from app.models import AuditLog
+        self.assertEqual(
+            self.session.exec(
+                select(AuditLog).where(AuditLog.action == "live_hit.delete")
+            ).all(),
+            [],
+        )
+
+    def test_manager_can_delete_live_hit_with_audit(self):
+        self._login_as("manager", user_id=233, username="manager33")
+        hit = self._seed_hit_image(filename="manager-delete.jpg")
+
+        list_page = self.client.get("/hits", follow_redirects=False)
+        edit_page = self.client.get(f"/hits/{hit.id}/edit", follow_redirects=False)
+        self.assertIn(f'action="/hits/{hit.id}/delete"', list_page.text)
+        self.assertIn(f'action="/hits/{hit.id}/delete"', edit_page.text)
+        response = self._delete_live_hit(hit.id)
+
+        self.assertEqual(response.status_code, 303)
+        self.session.expire_all()
+        self.assertTrue(self.session.get(type(hit), hit.id).is_deleted)
+        self._assert_live_hit_delete_audit(
+            hit_id=hit.id, user_id=233, actor_label="manager33"
+        )
+
+    def test_reviewer_can_delete_live_hit_with_audit(self):
+        self._login_as("reviewer", user_id=234, username="reviewer34")
+        hit = self._seed_hit_image(filename="reviewer-delete.jpg")
+
+        response = self._delete_live_hit(hit.id)
+
+        self.assertEqual(response.status_code, 303)
+        self.session.expire_all()
+        self.assertTrue(self.session.get(type(hit), hit.id).is_deleted)
+        self._assert_live_hit_delete_audit(
+            hit_id=hit.id, user_id=234, actor_label="reviewer34"
+        )
+
+    def test_admin_can_delete_live_hit_with_audit(self):
+        self._login_as("admin", user_id=235, username="admin35")
+        hit = self._seed_hit_image(filename="admin-delete.jpg")
+
+        response = self._delete_live_hit(hit.id)
+
+        self.assertEqual(response.status_code, 303)
+        self.session.expire_all()
+        self.assertTrue(self.session.get(type(hit), hit.id).is_deleted)
+        self._assert_live_hit_delete_audit(
+            hit_id=hit.id, user_id=235, actor_label="admin35"
+        )
+
+    def test_custom_live_hit_delete_grant_allows_employee(self):
+        self._set_role_permission("employee", "ops.live_hits.delete", True)
+        self._login_as("employee", user_id=236, username="emp36")
+        hit = self._seed_hit_image(filename="custom-grant-delete.jpg")
+
+        response = self._delete_live_hit(hit.id)
+
+        self.assertEqual(response.status_code, 303)
+        self.session.expire_all()
+        self.assertTrue(self.session.get(type(hit), hit.id).is_deleted)
+        self._assert_live_hit_delete_audit(
+            hit_id=hit.id, user_id=236, actor_label="emp36"
+        )
+
+    def test_custom_live_hit_delete_deny_blocks_manager(self):
+        self._set_role_permission("manager", "ops.live_hits.delete", False)
+        self._login_as("manager", user_id=237, username="manager37")
+        hit = self._seed_hit_image(filename="custom-deny-delete.jpg")
+
+        response = self._delete_live_hit(hit.id)
+
+        self.assertEqual(response.status_code, 403)
+        self.session.expire_all()
+        self.assertFalse(self.session.get(type(hit), hit.id).is_deleted)
+
+    def test_live_hit_view_and_create_remain_available_without_delete_permission(self):
+        self._login_as("employee", user_id=238, username="emp38")
+        page = self.client.get("/hits", follow_redirects=False)
+        self.assertEqual(page.status_code, 200)
+        csrf = self._csrf_from_html(page.text)
+
+        response = self.client.post(
+            "/hits/new",
+            headers={"X-CSRF-Token": csrf},
+            data={"streamer_name": "Streamer", "hit_note": "Created safely"},
+            follow_redirects=False,
+        )
+
+        self.assertEqual(response.status_code, 303)
+        from app.models import LiveHit
+        self.assertIsNotNone(
+            self.session.exec(
+                select(LiveHit).where(LiveHit.hit_note == "Created safely")
+            ).first()
+        )
+
     def test_employee_ops_permissions_gate_direct_urls(self):
         self._login_as("employee", user_id=224, username="emp24")
         from app.models import RolePermission
@@ -1682,13 +2111,14 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         self.assertIn(response.status_code, (302, 303, 307))
 
     def test_authorized_live_hits_user_can_fetch_referenced_hit_image(self):
-        self._seed_hit_image(content=b"authorized-image")
+        self._seed_hit_image(content=SAFE_PNG)
         self._login_as("employee", user_id=225, username="emp25")
 
         response = self.client.get("/hit-images/hit-photo.jpg", follow_redirects=False)
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.content, b"authorized-image")
+        self.assertEqual(response.content, SAFE_PNG)
+        self.assertEqual(response.headers.get("content-type"), "image/png")
         self.assertIn("private", response.headers.get("cache-control", ""))
 
     def test_authorized_live_hits_user_cannot_fetch_unreferenced_hit_image(self):

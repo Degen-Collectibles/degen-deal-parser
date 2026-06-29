@@ -3,15 +3,19 @@ from __future__ import annotations
 import csv
 import json
 import re
+import time as monotonic_clock
+import zipfile
 from collections import Counter
 from datetime import datetime, time, timedelta, timezone
 from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urljoin, urlparse
+from xml.parsers import expat
 
 import httpx
 from openpyxl import load_workbook
+from openpyxl.xml.constants import SHEET_MAIN_NS
 from sqlmodel import Session, select
 
 from ..models import (
@@ -25,6 +29,235 @@ from ..models import (
 )
 from .transactions import transaction_base_query
 from ..db import engine, managed_session
+
+
+MAX_BOOKKEEPING_XLSX_COMPRESSED_BYTES = 8 * 1024 * 1024
+MAX_BOOKKEEPING_XLSX_EXPANDED_BYTES = 16 * 1024 * 1024
+MAX_BOOKKEEPING_XLSX_ZIP_ENTRIES = 256
+MAX_BOOKKEEPING_XLSX_WORKSHEETS = 16
+MAX_BOOKKEEPING_XLSX_DATA_ROWS = 10_000
+MAX_BOOKKEEPING_XLSX_PHYSICAL_ROWS_PER_SHEET = MAX_BOOKKEEPING_XLSX_DATA_ROWS + 1
+MAX_BOOKKEEPING_XLSX_COLUMNS = 64
+MAX_BOOKKEEPING_XLSX_VISITED_CELLS = 250_000
+BOOKKEEPING_XLSX_PARSE_DEADLINE_SECONDS = 5.0
+BOOKKEEPING_XLSX_VALIDATION_ERROR = "XLSX file exceeds safe import limits or is invalid"
+MAX_BOOKKEEPING_UPLOAD_BYTES = MAX_BOOKKEEPING_XLSX_COMPRESSED_BYTES
+MAX_BOOKKEEPING_UPLOAD_REQUEST_BYTES = MAX_BOOKKEEPING_UPLOAD_BYTES + (512 * 1024)
+BOOKKEEPING_UPLOAD_READ_CHUNK_BYTES = 64 * 1024
+BOOKKEEPING_UPLOAD_SIZE_ERROR = "Bookkeeping upload exceeds the 8 MB file limit"
+MAX_BOOKKEEPING_CSV_DATA_ROWS = MAX_BOOKKEEPING_XLSX_DATA_ROWS
+MAX_BOOKKEEPING_CSV_COLUMNS = MAX_BOOKKEEPING_XLSX_COLUMNS
+MAX_BOOKKEEPING_CSV_VISITED_CELLS = MAX_BOOKKEEPING_XLSX_VISITED_CELLS
+MAX_BOOKKEEPING_CSV_CELL_CHARACTERS = 32_767
+MAX_BOOKKEEPING_CSV_CELL_BYTES = 64 * 1024
+BOOKKEEPING_CSV_VALIDATION_ERROR = "CSV file exceeds safe import limits or is invalid"
+_XLSX_WORKSHEET_TAG = f"{SHEET_MAIN_NS}}}worksheet"
+_XLSX_ROW_TAG = f"{SHEET_MAIN_NS}}}row"
+_XLSX_CELL_REFERENCE_RE = re.compile(r"^([A-Za-z]+)([0-9]+)$")
+
+
+class BookkeepingFileValidationError(ValueError):
+    """A stable, user-safe error for rejected bookkeeping uploads."""
+
+
+class BookkeepingUploadTooLarge(ValueError):
+    """Raised after reading at most the documented file cap plus one byte."""
+
+
+async def read_bookkeeping_upload(upload_file: Any) -> bytes:
+    chunks: list[bytes] = []
+    remaining = MAX_BOOKKEEPING_UPLOAD_BYTES + 1
+
+    while remaining > 0:
+        chunk = await upload_file.read(min(BOOKKEEPING_UPLOAD_READ_CHUNK_BYTES, remaining))
+        if not chunk:
+            return b"".join(chunks)
+        if len(chunk) > remaining:
+            chunk = chunk[:remaining]
+        chunks.append(chunk)
+        remaining -= len(chunk)
+
+    raise BookkeepingUploadTooLarge(BOOKKEEPING_UPLOAD_SIZE_ERROR)
+
+
+def _reject_unsafe_xlsx() -> None:
+    raise BookkeepingFileValidationError(BOOKKEEPING_XLSX_VALIDATION_ERROR)
+
+
+def _reject_unsafe_csv() -> None:
+    raise BookkeepingFileValidationError(BOOKKEEPING_CSV_VALIDATION_ERROR)
+
+
+def _validate_csv_cell(value: Any) -> None:
+    text = str(value or "")
+    if (
+        len(text) > MAX_BOOKKEEPING_CSV_CELL_CHARACTERS
+        or len(text.encode("utf-8")) > MAX_BOOKKEEPING_CSV_CELL_BYTES
+    ):
+        _reject_unsafe_csv()
+
+
+def read_bounded_csv_dict_rows(
+    content: bytes,
+    *,
+    decode_errors: str = "strict",
+) -> tuple[list[str], list[dict[str | None, Any]]]:
+    if len(content) > MAX_BOOKKEEPING_UPLOAD_BYTES:
+        _reject_unsafe_csv()
+    try:
+        text = content.decode("utf-8-sig", errors=decode_errors)
+        reader = csv.DictReader(StringIO(text))
+        headers = reader.fieldnames or []
+        if len(headers) > MAX_BOOKKEEPING_CSV_COLUMNS:
+            _reject_unsafe_csv()
+        for header in headers:
+            _validate_csv_cell(header)
+
+        visited_cells = len(headers)
+        parsed_rows: list[dict[str | None, Any]] = []
+        for row in reader:
+            if len(parsed_rows) >= MAX_BOOKKEEPING_CSV_DATA_ROWS:
+                _reject_unsafe_csv()
+
+            extras = row.get(None)
+            extra_cells = len(extras) if isinstance(extras, list) else 0
+            row_cells = len(headers) + extra_cells
+            if row_cells > MAX_BOOKKEEPING_CSV_COLUMNS:
+                _reject_unsafe_csv()
+            visited_cells += row_cells
+            if visited_cells > MAX_BOOKKEEPING_CSV_VISITED_CELLS:
+                _reject_unsafe_csv()
+
+            for key, value in row.items():
+                if key is not None:
+                    _validate_csv_cell(key)
+                if isinstance(value, list):
+                    for cell in value:
+                        _validate_csv_cell(cell)
+                else:
+                    _validate_csv_cell(value)
+            parsed_rows.append(dict(row))
+        return headers, parsed_rows
+    except BookkeepingFileValidationError:
+        raise
+    except (csv.Error, UnicodeError, ValueError):
+        _reject_unsafe_csv()
+
+
+def _check_xlsx_deadline(deadline: float) -> None:
+    if monotonic_clock.monotonic() > deadline:
+        _reject_unsafe_xlsx()
+
+
+def _parse_xlsx_cell_reference(reference: str) -> tuple[int, int]:
+    match = _XLSX_CELL_REFERENCE_RE.fullmatch(reference)
+    if not match:
+        _reject_unsafe_xlsx()
+
+    column = 0
+    for character in match.group(1).upper():
+        column = (column * 26) + (ord(character) - ord("A") + 1)
+        if column > MAX_BOOKKEEPING_XLSX_COLUMNS:
+            _reject_unsafe_xlsx()
+
+    row_text = match.group(2)
+    if len(row_text) > 5:
+        _reject_unsafe_xlsx()
+    row = int(row_text)
+    if row < 1 or row > MAX_BOOKKEEPING_XLSX_PHYSICAL_ROWS_PER_SHEET:
+        _reject_unsafe_xlsx()
+    return row, column
+
+
+def _scan_xlsx_worksheet_xml(
+    stream: Any,
+    *,
+    totals: dict[str, int],
+    deadline: float,
+) -> None:
+    depth = 0
+    root_seen = False
+    is_worksheet = False
+    current_row_depth: Optional[int] = None
+    worksheet_rows = 0
+    cells_in_row = 0
+
+    def reject_document_type(*_args: Any) -> None:
+        _reject_unsafe_xlsx()
+
+    def start_element(name: str, attributes: dict[str, str]) -> None:
+        nonlocal depth, root_seen, is_worksheet
+        nonlocal current_row_depth, worksheet_rows, cells_in_row
+        depth += 1
+
+        if not root_seen:
+            root_seen = True
+            is_worksheet = name == _XLSX_WORKSHEET_TAG
+            return
+        if not is_worksheet:
+            return
+
+        if name == _XLSX_ROW_TAG:
+            if current_row_depth is not None:
+                _reject_unsafe_xlsx()
+            current_row_depth = depth
+            worksheet_rows += 1
+            if worksheet_rows > MAX_BOOKKEEPING_XLSX_PHYSICAL_ROWS_PER_SHEET:
+                _reject_unsafe_xlsx()
+            cells_in_row = 0
+            row_reference = attributes.get("r")
+            if row_reference:
+                if not row_reference.isascii() or not row_reference.isdecimal():
+                    _reject_unsafe_xlsx()
+                if len(row_reference) > 5:
+                    _reject_unsafe_xlsx()
+                row_number = int(row_reference)
+                if row_number < 1 or row_number > MAX_BOOKKEEPING_XLSX_PHYSICAL_ROWS_PER_SHEET:
+                    _reject_unsafe_xlsx()
+            return
+
+        # openpyxl treats every direct child of <row> as a cell, even if a
+        # malformed workbook uses a non-<c> tag. Mirror that behavior so a tag
+        # rename cannot bypass the coordinate and allocation guards.
+        if current_row_depth is not None and depth == current_row_depth + 1:
+            cells_in_row += 1
+            totals["cells"] += 1
+            if (
+                cells_in_row > MAX_BOOKKEEPING_XLSX_COLUMNS
+                or totals["cells"] > MAX_BOOKKEEPING_XLSX_VISITED_CELLS
+            ):
+                _reject_unsafe_xlsx()
+            reference = attributes.get("r")
+            if reference:
+                _parse_xlsx_cell_reference(reference)
+
+    def end_element(name: str) -> None:
+        nonlocal depth, current_row_depth
+        if (
+            is_worksheet
+            and name == _XLSX_ROW_TAG
+            and current_row_depth == depth
+        ):
+            current_row_depth = None
+        depth -= 1
+
+    parser = expat.ParserCreate(namespace_separator="}")
+    parser.StartElementHandler = start_element
+    parser.EndElementHandler = end_element
+    parser.StartDoctypeDeclHandler = reject_document_type
+    parser.EntityDeclHandler = reject_document_type
+    parser.ExternalEntityRefHandler = reject_document_type
+
+    while True:
+        _check_xlsx_deadline(deadline)
+        chunk = stream.read(64 * 1024)
+        _check_xlsx_deadline(deadline)
+        if not chunk:
+            break
+        parser.Parse(chunk, False)
+        _check_xlsx_deadline(deadline)
+    parser.Parse(b"", True)
+    _check_xlsx_deadline(deadline)
 
 
 KIND_ALIASES = {
@@ -333,34 +566,92 @@ def parse_optional_datetime(value: Any) -> Optional[datetime]:
         return None
 
 
-def read_tabular_rows(filename: str, content: bytes) -> list[dict[str, Any]]:
-    suffix = Path(filename).suffix.lower()
-    if suffix == ".csv":
-        text = content.decode("utf-8-sig", errors="ignore")
-        reader = csv.DictReader(StringIO(text))
-        return [
-            {
-                "__sheet_name": "import",
-                **dict(row),
-            }
-            for row in reader
-        ]
+def _validate_xlsx_archive(content: bytes, *, deadline: float) -> None:
+    if len(content) > MAX_BOOKKEEPING_XLSX_COMPRESSED_BYTES:
+        _reject_unsafe_xlsx()
+    _check_xlsx_deadline(deadline)
 
-    if suffix == ".xlsx":
-        workbook = load_workbook(BytesIO(content), data_only=True)
+    try:
+        with zipfile.ZipFile(BytesIO(content), mode="r") as archive:
+            members = archive.infolist()
+            if len(members) > MAX_BOOKKEEPING_XLSX_ZIP_ENTRIES:
+                _reject_unsafe_xlsx()
+
+            declared_expanded_bytes = 0
+            for member in members:
+                _check_xlsx_deadline(deadline)
+                declared_expanded_bytes += member.file_size
+                if declared_expanded_bytes > MAX_BOOKKEEPING_XLSX_EXPANDED_BYTES:
+                    _reject_unsafe_xlsx()
+
+            scan_totals = {"cells": 0}
+            for member in members:
+                _check_xlsx_deadline(deadline)
+                if member.is_dir() or not member.filename.lower().endswith(".xml"):
+                    continue
+                with archive.open(member, mode="r") as stream:
+                    _scan_xlsx_worksheet_xml(
+                        stream,
+                        totals=scan_totals,
+                        deadline=deadline,
+                    )
+    except BookkeepingFileValidationError:
+        raise
+    except Exception:
+        _reject_unsafe_xlsx()
+
+
+def _read_xlsx_rows(content: bytes) -> list[dict[str, Any]]:
+    deadline = monotonic_clock.monotonic() + BOOKKEEPING_XLSX_PARSE_DEADLINE_SECONDS
+    _validate_xlsx_archive(content, deadline=deadline)
+    workbook = None
+
+    try:
+        workbook = load_workbook(
+            BytesIO(content),
+            read_only=True,
+            data_only=True,
+            keep_links=False,
+        )
+        _check_xlsx_deadline(deadline)
+        if len(workbook.sheetnames) > MAX_BOOKKEEPING_XLSX_WORKSHEETS:
+            _reject_unsafe_xlsx()
+
         parsed_rows: list[dict[str, Any]] = []
+        data_rows = 0
+        visited_cells = 0
+
         for sheet in workbook.worksheets:
-            rows = list(sheet.iter_rows(values_only=True))
-            if not rows:
-                continue
-            header_row = next((row for row in rows if any(cell not in (None, "") for cell in row)), None)
-            if not header_row:
-                continue
-            header_index = rows.index(header_row)
-            headers = [normalize_header(cell) or f"column_{index+1}" for index, cell in enumerate(header_row)]
-            for row in rows[header_index + 1:]:
+            _check_xlsx_deadline(deadline)
+
+            if (sheet.max_column or 0) > MAX_BOOKKEEPING_XLSX_COLUMNS:
+                _reject_unsafe_xlsx()
+            if (sheet.max_row or 0) > MAX_BOOKKEEPING_XLSX_PHYSICAL_ROWS_PER_SHEET:
+                _reject_unsafe_xlsx()
+            sheet.reset_dimensions()
+
+            headers: Optional[list[str]] = None
+            for row in sheet.iter_rows(values_only=True):
+                _check_xlsx_deadline(deadline)
+
+                if len(row) > MAX_BOOKKEEPING_XLSX_COLUMNS:
+                    _reject_unsafe_xlsx()
+                visited_cells += len(row)
+                if visited_cells > MAX_BOOKKEEPING_XLSX_VISITED_CELLS:
+                    _reject_unsafe_xlsx()
+
                 if not any(cell not in (None, "") for cell in row):
                     continue
+                if headers is None:
+                    headers = [
+                        normalize_header(cell) or f"column_{index + 1}"
+                        for index, cell in enumerate(row)
+                    ]
+                    continue
+
+                data_rows += 1
+                if data_rows > MAX_BOOKKEEPING_XLSX_DATA_ROWS:
+                    _reject_unsafe_xlsx()
                 parsed_rows.append(
                     {
                         "__sheet_name": sheet.title,
@@ -370,7 +661,34 @@ def read_tabular_rows(filename: str, content: bytes) -> list[dict[str, Any]]:
                         },
                     }
                 )
+        _check_xlsx_deadline(deadline)
         return parsed_rows
+    except BookkeepingFileValidationError:
+        raise
+    except Exception:
+        _reject_unsafe_xlsx()
+    finally:
+        if workbook is not None:
+            try:
+                workbook.close()
+            except Exception:
+                pass
+
+
+def read_tabular_rows(filename: str, content: bytes) -> list[dict[str, Any]]:
+    suffix = Path(filename).suffix.lower()
+    if suffix == ".csv":
+        _, rows = read_bounded_csv_dict_rows(content, decode_errors="ignore")
+        return [
+            {
+                "__sheet_name": "import",
+                **dict(row),
+            }
+            for row in rows
+        ]
+
+    if suffix == ".xlsx":
+        return _read_xlsx_rows(content)
 
     raise ValueError("Only .csv and .xlsx files are supported")
 
@@ -801,14 +1119,6 @@ async def refresh_bookkeeping_import_from_source(bookkeeping_import_id: int) -> 
         source_kind = existing.source_kind or "upload"
         source_name = existing.source_name or "bookkeeping-import.xlsx"
 
-        rows = session.exec(
-            select(BookkeepingEntry).where(BookkeepingEntry.import_id == bookkeeping_import_id)
-        ).all()
-        for row in rows:
-            session.delete(row)
-        session.delete(existing)
-        session.commit()
-
     export_url, suffix = build_google_sheet_export_url(source_url)
     content = await fetch_google_sheet_export(export_url)
 
@@ -816,20 +1126,51 @@ async def refresh_bookkeeping_import_from_source(bookkeeping_import_id: int) -> 
     if not filename.lower().endswith((".xlsx", ".csv")):
         filename = f"{filename}{suffix}"
 
+    raw_rows = read_tabular_rows(filename, content)
+    normalized_rows = normalize_bookkeeping_rows(raw_rows)
+
     with managed_session() as session:
-        imported = import_bookkeeping_file(
-            session,
-            filename=filename,
-            content=content,
-            show_label=show_label,
-            show_date=show_date,
-            range_start=range_start,
-            range_end=range_end,
-            source_url=source_url,
-            source_kind=source_kind,
-        )
-        reconcile_bookkeeping_import(session, imported.id)
-        return imported.id
+        existing = session.get(BookkeepingImport, bookkeeping_import_id)
+        if not existing or existing.source_url != source_url:
+            raise ValueError("Bookkeeping import changed while refresh was running")
+
+        rows = session.exec(
+            select(BookkeepingEntry).where(BookkeepingEntry.import_id == bookkeeping_import_id)
+        ).all()
+        for row in rows:
+            session.delete(row)
+
+        existing.show_label = show_label
+        existing.show_date = show_date
+        existing.range_start = range_start
+        existing.range_end = range_end
+        existing.source_kind = source_kind
+        existing.source_name = filename
+        existing.row_count = len(normalized_rows)
+        session.add(existing)
+        for row in normalized_rows:
+            session.add(
+                BookkeepingEntry(
+                    import_id=bookkeeping_import_id,
+                    row_index=row["row_index"],
+                    sheet_name=row["sheet_name"],
+                    occurred_at=row["occurred_at"],
+                    entry_kind=row["entry_kind"],
+                    amount=row["amount"],
+                    payment_method=row["payment_method"],
+                    category=row["category"],
+                    notes=row["notes"],
+                    raw_row_json=row["raw_row_json"],
+                )
+            )
+
+        try:
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        reconcile_bookkeeping_import(session, bookkeeping_import_id)
+        return bookkeeping_import_id
 
 
 def bookkeeping_entry_amount(entry: BookkeepingEntry) -> float:

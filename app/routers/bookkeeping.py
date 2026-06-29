@@ -20,12 +20,14 @@ from sqlmodel import Session, select
 from ..csrf import CSRFProtectedRoute
 from ..shared import *  # noqa: F401,F403 — shared helpers, constants, state
 from ..discord.bookkeeping import (
+    BookkeepingUploadTooLarge,
     extract_google_sheet_url,
     auto_import_public_google_sheet,
     import_bookkeeping_file,
     list_bookkeeping_imports,
     list_detected_bookkeeping_posts,
     reconcile_bookkeeping_import,
+    read_bookkeeping_upload,
     refresh_bookkeeping_import_from_source,
 )
 from ..discord.bank_reconciliation import (
@@ -56,6 +58,7 @@ from ..discord.plaid_bank_feed import (
     verify_plaid_webhook_signature,
 )
 from ..discord.gmail_financials import (
+    GMAIL_RAW_SOURCE_STORAGE_LIMIT,
     build_gmail_oauth_url,
     exchange_gmail_oauth_code,
     gmail_config_status,
@@ -65,6 +68,7 @@ from ..discord.gmail_financials import (
     upsert_gmail_receipt_from_message,
     upsert_gmail_connection_from_oauth,
 )
+from ..discord.gmail_authentication import persisted_source_trust_decision
 from ..models import BankTransaction, GmailEvidenceLink, GmailReceipt, Transaction
 
 router = APIRouter(route_class=CSRFProtectedRoute)
@@ -556,6 +560,28 @@ def gmail_receipt_reparse_form(
     row = session.get(GmailReceipt, receipt_id)
     if not row:
         return RedirectResponse(url=_gmail_redirect_url(error="Gmail receipt not found"), status_code=303)
+    source_trust = persisted_source_trust_decision(row.sender, row.parsed_json)
+    if not source_trust.verified:
+        return RedirectResponse(
+            url=_gmail_redirect_url(
+                error="Gmail trust evidence unavailable; sync Gmail first before reparsing"
+            ),
+            status_code=303,
+        )
+    try:
+        persisted = json.loads(row.parsed_json or "{}")
+    except (TypeError, ValueError):
+        persisted = {}
+    source_body_truncated = bool(
+        isinstance(persisted, dict) and persisted.get("source_body_truncated") is True
+    )
+    if source_body_truncated or len(row.raw_text or "") >= GMAIL_RAW_SOURCE_STORAGE_LIMIT:
+        return RedirectResponse(
+            url=_gmail_redirect_url(
+                error="Stored Gmail source is truncated; sync Gmail before reparsing"
+            ),
+            status_code=303,
+        )
     try:
         upsert_gmail_receipt_from_message(
             session,
@@ -567,6 +593,8 @@ def gmail_receipt_reparse_form(
             html_body=row.raw_text or row.snippet,
             snippet=row.snippet,
             connection_id=row.connection_id,
+            source_trusted=source_trust.trusted,
+            source_trust_reason=source_trust.reason,
         )
         session.commit()
         return RedirectResponse(url=_gmail_redirect_url(success="Reparsed Gmail receipt"), status_code=303)
@@ -711,10 +739,14 @@ async def bank_reconciliation_import_form(
             status_code=303,
         )
     try:
+        upload_content = await read_bookkeeping_upload(upload_file)
+    except BookkeepingUploadTooLarge as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    try:
         imported = import_bank_statement_file(
             session,
             filename=upload_file.filename,
-            content=await upload_file.read(),
+            content=upload_content,
             account_label=account_label,
             account_type=account_type,
         )
@@ -1006,10 +1038,14 @@ async def bookkeeping_import_form(
         )
 
     try:
+        upload_content = await read_bookkeeping_upload(upload_file)
+    except BookkeepingUploadTooLarge as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    try:
         imported = import_bookkeeping_file(
             session,
             filename=upload_file.filename,
-            content=await upload_file.read(),
+            content=upload_content,
             show_label=show_label.strip(),
             show_date=parse_report_datetime(show_date),
             range_start=parse_report_datetime(range_start),
