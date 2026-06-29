@@ -265,7 +265,12 @@ Longer-term improvement: introduce `MEDIA_ROOT` / `DATA_ROOT` env vars so prod d
   - `CLOCKIFY_TIMEOUT_SECONDS`
   - `CLOCKIFY_TIMEZONE`
   - `CLOCKIFY_WEBHOOK_SIGNING_SECRET` or `CLOCKIFY_WEBHOOK_SIGNING_SECRETS`
-    (required header-token key ring; never place the token in the callback URL)
+    (the Clockify-generated webhook `authToken`/verification token, not
+    `CLOCKIFY_API_KEY`, a new API key, or an arbitrary app secret; never place it
+    in the callback URL). No new token is needed unless enabling, repairing, or
+    deliberately rotating the webhook. For a rotation/retry window, configure
+    current then previous temporarily and remove the previous token after
+    in-flight deliveries settle; Clockify rotation invalidates the prior token.
 - Shopify/TikTok:
   - `SHOPIFY_API_KEY`
   - `SHOPIFY_STORE_DOMAIN`
