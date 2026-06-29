@@ -1,6 +1,8 @@
-import unittest
 import asyncio
+import base64
+import io
 import json
+import unittest
 import types
 from datetime import timedelta
 from contextlib import contextmanager
@@ -10,6 +12,7 @@ import uuid
 from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
+from PIL import Image
 from sqlalchemy import update
 from sqlmodel import Session, SQLModel, create_engine, select
 from starlette.requests import Request
@@ -337,7 +340,13 @@ class QueueReparseValidationTests(unittest.TestCase):
             "https://cdn.discordapp.com/attachments/chan/msg/expired.jpg"
             "?ex=69cad376&is=69c981f6&hm=deadbeef"
         )
-        expected_data_url = "data:image/jpeg;base64,Y2FjaGVkLWltYWdlLWJ5dGVz"
+        image_buffer = io.BytesIO()
+        Image.new("RGB", (1, 1), (40, 80, 120)).save(image_buffer, format="JPEG")
+        cached_image_bytes = image_buffer.getvalue()
+        expected_data_url = (
+            "data:image/jpeg;base64,"
+            + base64.b64encode(cached_image_bytes).decode("ascii")
+        )
 
         with self.session() as session, patch("app.discord.worker.parse_message") as parse_message_mock, patch(
             "app.discord.worker.recover_attachment_assets_for_message",
@@ -360,7 +369,7 @@ class QueueReparseValidationTests(unittest.TestCase):
                     filename="expired.jpg",
                     content_type="image/jpeg",
                     is_image=True,
-                    data=b"cached-image-bytes",
+                    data=cached_image_bytes,
                 )
             )
             session.commit()
@@ -393,6 +402,62 @@ class QueueReparseValidationTests(unittest.TestCase):
             parse_message_mock.assert_awaited_once()
             attachment_urls = parse_message_mock.await_args.kwargs["attachment_urls"]
             self.assertEqual(attachment_urls, [expected_data_url])
+
+    def test_process_row_fails_retryably_when_image_context_cannot_be_validated(self) -> None:
+        fixed_error = (
+            "Validated attachment image is unavailable; retry after attachment recovery."
+        )
+
+        for suffix, content in (
+            ("image-only", ""),
+            ("text-and-image", "sold Charizard for $20 zelle"),
+        ):
+            with self.subTest(suffix=suffix), self.session() as session:
+                row = self.make_message(
+                    discord_message_id=f"unvalidated-{suffix}",
+                    content=content,
+                    attachment_urls_json=(
+                        '["https://cdn.discordapp.com/attachments/chan/msg/unavailable.png"]'
+                    ),
+                    parse_status=PARSE_PENDING,
+                    parse_attempts=0,
+                )
+                session.add(row)
+                session.commit()
+                session.refresh(row)
+
+                @contextmanager
+                def fake_managed_session():
+                    yield session
+
+                parse_message_mock = AsyncMock(
+                    side_effect=AssertionError("parser must not run without validated image context")
+                )
+                with patch("app.discord.worker.managed_session", new=fake_managed_session), patch(
+                    "app.discord.worker.parse_message",
+                    new=parse_message_mock,
+                ), patch(
+                    "app.discord.worker.recover_attachment_assets_for_message",
+                    new=AsyncMock(return_value=False),
+                ):
+                    asyncio.run(process_row(row.id))
+
+                session.refresh(row)
+                attachment_failure = session.exec(
+                    select(OperationsLog)
+                    .where(
+                        OperationsLog.event_type
+                        == "queue.attachment_validation_unavailable"
+                    )
+                    .order_by(OperationsLog.id.desc())
+                ).first()
+
+                parse_message_mock.assert_not_awaited()
+                self.assertEqual(row.parse_status, PARSE_FAILED)
+                self.assertEqual(row.last_error, fixed_error)
+                self.assertIsNotNone(attachment_failure)
+                self.assertNotIn("cdn.discordapp.com", attachment_failure.details_json)
+                self.assertNotIn("unavailable.png", attachment_failure.details_json)
 
     def test_process_row_discards_stale_parse_after_source_edit_then_fresh_parse_revives(self) -> None:
         from app.discord.message_revisions import ensure_message_revision
@@ -430,6 +495,19 @@ class QueueReparseValidationTests(unittest.TestCase):
             )
             session.add(row)
             session.flush()
+            cached_image_buffer = io.BytesIO()
+            with Image.new("RGB", (1, 1), (40, 80, 120)) as cached_image:
+                cached_image.save(cached_image_buffer, format="PNG")
+            session.add(
+                AttachmentAsset(
+                    message_id=row.id,
+                    source_url="https://cdn.discord.com/original.png",
+                    filename="original.png",
+                    content_type="image/png",
+                    is_image=True,
+                    data=cached_image_buffer.getvalue(),
+                )
+            )
             transaction = sync_transaction_from_message(session, row)
             session.commit()
             row_id = row.id

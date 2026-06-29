@@ -748,11 +748,7 @@ def attachment_asset(request: Request, asset_id: int, session: Session = Depends
 def attachment_thumbnail(request: Request, asset_id: int, session: Session = Depends(get_session)):
     if denial := require_role_response(request, "viewer"):
         return denial
-    etag = f'"thumb-{asset_id}"'
-    headers = _attachment_response_headers(etag)
-    if_none_match = request.headers.get("if-none-match")
-    if if_none_match and if_none_match.strip() == etag:
-        return Response(status_code=304, headers=headers)
+    failure_headers = _attachment_response_headers(f'"thumb-{asset_id}"')
 
     asset_meta = session.exec(
         select(AttachmentAsset.id, AttachmentAsset.filename, AttachmentAsset.content_type, AttachmentAsset.is_image)
@@ -776,19 +772,24 @@ def attachment_thumbnail(request: Request, asset_id: int, session: Session = Dep
 
     thumb_path = generate_thumbnail(file_path, asset_id)
     if thumb_path and thumb_path.exists():
+        try:
+            thumb_stat = thumb_path.stat()
+        except OSError:
+            return Response(status_code=415, headers=failure_headers)
+        etag = (
+            f'"thumb-{asset_id}-{thumb_stat.st_size:x}-'
+            f'{thumb_stat.st_mtime_ns:x}"'
+        )
+        headers = _attachment_response_headers(etag)
+        if_none_match = request.headers.get("if-none-match")
+        if if_none_match and if_none_match.strip() == etag:
+            return Response(status_code=304, headers=headers)
         return FileResponse(
             path=thumb_path,
             media_type="image/jpeg",
             headers=headers,
         )
-    if _normalize_attachment_content_type(content_type) in _INLINE_ATTACHMENT_MEDIA_TYPES:
-        return _attachment_file_response(
-            path=file_path,
-            content_type=content_type,
-            filename=filename,
-            headers=headers,
-        )
-    return Response(status_code=415, headers=headers)
+    return Response(status_code=415, headers=failure_headers)
 
 @app.get("/messages/{message_id}/attachments/{attachment_index}")
 async def message_attachment_fallback(

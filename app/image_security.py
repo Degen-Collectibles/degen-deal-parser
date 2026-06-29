@@ -49,6 +49,16 @@ DETECT_ONLY_PROFILE = ImageValidationProfile(
     max_pixels=4_000_000,
 )
 
+# Discord attachments arrive outside the scanner JSON endpoints and can be
+# larger than a camera capture. Keep their byte budget separate while sharing
+# the scanner's proven dimension and aggregate-pixel ceilings.
+DISCORD_ATTACHMENT_PROFILE = ImageValidationProfile(
+    max_encoded_chars=20 * 1024 * 1024,
+    max_decoded_bytes=15 * 1024 * 1024,
+    max_dimension=8192,
+    max_pixels=24_000_000,
+)
+
 # JSON endpoints carry one base64 image plus only small scalar metadata. Keep
 # the transport budget close to the validator budget so Starlette never has
 # to buffer an attacker-controlled body before image validation runs.
@@ -137,6 +147,7 @@ def _inspect_image_header(
     profile: ImageValidationProfile,
     declared_mime: str | None,
     allowed_formats: frozenset[str],
+    max_frames: int | None,
 ) -> tuple[str, str, int, int]:
     try:
         with warnings.catch_warnings():
@@ -144,6 +155,11 @@ def _inspect_image_header(
             with Image.open(io.BytesIO(raw)) as image:
                 image_format = str(image.format or "").upper()
                 width, height = image.size
+                frame_count = (
+                    int(getattr(image, "n_frames", 1) or 1)
+                    if max_frames is not None
+                    else None
+                )
     except (Image.DecompressionBombWarning, Image.DecompressionBombError):
         raise ImageSecurityError(
             "Image dimensions are too large.",
@@ -194,6 +210,16 @@ def _inspect_image_header(
             status_code=413,
             code="image_pixels_exceeded",
         )
+    if (
+        max_frames is not None
+        and frame_count is not None
+        and frame_count > max(int(max_frames), 0)
+    ):
+        raise ImageSecurityError(
+            "Animated images are not supported.",
+            status_code=415,
+            code="image_frames_exceeded",
+        )
     return image_format, mime_type, width, height
 
 
@@ -203,6 +229,7 @@ def validate_image_bytes(
     profile: ImageValidationProfile = FULL_SCAN_PROFILE,
     declared_mime: str | None = None,
     allowed_formats: frozenset[str] = SUPPORTED_IMAGE_FORMATS,
+    max_frames: int | None = None,
 ) -> ValidatedImage:
     if not isinstance(raw, bytes):
         raise ImageSecurityError(
@@ -227,6 +254,7 @@ def validate_image_bytes(
         profile=profile,
         declared_mime=declared_mime,
         allowed_formats=frozenset(str(value).upper() for value in allowed_formats),
+        max_frames=max_frames,
     )
     return ValidatedImage(
         encoded_b64=base64.b64encode(raw).decode("ascii"),
@@ -243,6 +271,7 @@ def validate_image_base64(
     *,
     profile: ImageValidationProfile = FULL_SCAN_PROFILE,
     allowed_formats: frozenset[str] = SUPPORTED_IMAGE_FORMATS,
+    max_frames: int | None = None,
 ) -> ValidatedImage:
     if isinstance(value, str) and len(value) > (
         profile.max_encoded_chars + IMAGE_VALUE_OVERHEAD_CHARS
@@ -272,6 +301,7 @@ def validate_image_base64(
         profile=profile,
         declared_mime=declared_mime,
         allowed_formats=allowed_formats,
+        max_frames=max_frames,
     )
 
 
@@ -282,6 +312,7 @@ def validate_image_file(
     max_bytes: int = FULL_SCAN_PROFILE.max_decoded_bytes,
     max_dimension: int = FULL_SCAN_PROFILE.max_dimension,
     max_pixels: int = FULL_SCAN_PROFILE.max_pixels,
+    max_frames: int | None = None,
 ) -> ValidatedImage:
     """Validate uploaded image bytes or a local file without pixel decoding.
 
@@ -320,6 +351,7 @@ def validate_image_file(
         raw,
         profile=profile,
         allowed_formats=allowed_formats,
+        max_frames=max_frames,
     )
 
 

@@ -218,6 +218,55 @@ def test_unsupported_gif_is_rejected() -> None:
     assert exc_info.value.status_code == 415
 
 
+def test_optional_frame_budget_rejects_animation_with_stable_error() -> None:
+    first = Image.new("RGBA", (16, 16), (255, 0, 0, 255))
+    second = Image.new("RGBA", (16, 16), (0, 0, 255, 255))
+    buffer = io.BytesIO()
+    first.save(
+        buffer,
+        format="PNG",
+        save_all=True,
+        append_images=[second],
+        duration=100,
+        loop=0,
+    )
+    first.close()
+    second.close()
+
+    with pytest.raises(image_security.ImageSecurityError) as exc_info:
+        image_security.validate_image_file(buffer.getvalue(), max_frames=1)
+
+    assert exc_info.value.status_code == 415
+    assert exc_info.value.code == "image_frames_exceeded"
+    assert str(exc_info.value) == "Animated images are not supported."
+
+
+def test_default_validation_does_not_inspect_animation_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StaticHeader:
+        format = "PNG"
+        size = (2, 2)
+
+        @property
+        def n_frames(self) -> int:
+            raise AssertionError("default callers must not inspect frame metadata")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(image_security.Image, "open", lambda *_args, **_kwargs: StaticHeader())
+
+    validated = image_security.validate_image_bytes(b"header-only-test")
+
+    assert validated.image_format == "PNG"
+    assert validated.width == 2
+    assert validated.height == 2
+
+
 def test_compressed_huge_pixel_image_is_rejected_before_native_decode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

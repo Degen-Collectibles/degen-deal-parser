@@ -65,6 +65,9 @@ STALE_PROCESSING_AFTER = timedelta(minutes=10)
 STALE_RECOVERY_ERROR = "Recovered from stale processing state after worker interruption."
 MAX_ATTEMPTS_ERROR = "Maximum parse attempts reached; requeue with attempt reset to retry."
 OFFLINE_EDIT_REPARSE_ERROR = "Recovered refreshed message after offline audit."
+ATTACHMENT_IMAGE_UNAVAILABLE_ERROR = (
+    "Validated attachment image is unavailable; retry after attachment recovery."
+)
 logger = logging.getLogger(__name__)
 MAX_RANGE_REPARSE_SELECTION = 10_000
 
@@ -75,6 +78,13 @@ class ParseClaimConflict(RuntimeError):
 
 class RangeReparseSelectionLimitError(ValueError):
     """Raised before mutation when a range reparse selection is too large."""
+
+
+class ValidatedAttachmentUnavailableError(RuntimeError):
+    """Raised when an image-dependent parse has no safe local image input."""
+
+    def __init__(self) -> None:
+        super().__init__(ATTACHMENT_IMAGE_UNAVAILABLE_ERROR)
 
 
 def _null_safe_value_condition(column, value):
@@ -1246,10 +1256,13 @@ def _attachment_asset_data_url(asset: AttachmentAsset) -> str | None:
     return encode_bytes_as_vision_data_url(asset.data, content_type)
 
 
-def _cached_parser_image_inputs(session: Session, group_rows: list[DiscordMessage]) -> list[str]:
+def _cached_parser_image_inputs(
+    session: Session,
+    group_rows: list[DiscordMessage],
+) -> tuple[list[str], bool]:
     row_ids = [row.id for row in group_rows if row.id is not None]
     if not row_ids:
-        return []
+        return [], False
 
     image_assets = session.exec(
         select(AttachmentAsset)
@@ -1258,7 +1271,7 @@ def _cached_parser_image_inputs(session: Session, group_rows: list[DiscordMessag
         .order_by(AttachmentAsset.message_id.asc(), AttachmentAsset.id.asc())
     ).all()
     if not image_assets:
-        return []
+        return [], False
 
     assets_by_message_id: dict[int, list[AttachmentAsset]] = {}
     for asset in image_assets:
@@ -1272,7 +1285,7 @@ def _cached_parser_image_inputs(session: Session, group_rows: list[DiscordMessag
             data_url = _attachment_asset_data_url(asset)
             if data_url:
                 parser_inputs.append(data_url)
-    return parser_inputs
+    return parser_inputs, True
 
 
 async def build_parser_attachment_inputs(
@@ -1280,7 +1293,10 @@ async def build_parser_attachment_inputs(
     group_rows: list[DiscordMessage],
     fallback_attachment_urls: list[str],
 ) -> list[str]:
-    parser_inputs = _cached_parser_image_inputs(session, group_rows)
+    parser_inputs, had_image_assets = _cached_parser_image_inputs(session, group_rows)
+    image_context_expected = had_image_assets or bool(
+        extract_image_urls(fallback_attachment_urls)
+    )
     recovery_candidates = [
         (grouped_row.channel_id, grouped_row.discord_message_id, grouped_row.id)
         for grouped_row in group_rows
@@ -1308,7 +1324,7 @@ async def build_parser_attachment_inputs(
                     action="attachment_recovery_sqlite_busy",
                     level="warning",
                     success=False,
-                    error="SQLite busy during attachment recovery; falling back to URLs",
+                    error="SQLite busy during attachment recovery; skipping unavailable attachments",
                     message_id=message_id,
                 )
             else:
@@ -1316,12 +1332,30 @@ async def build_parser_attachment_inputs(
 
     if recovered_any:
         session.expire_all()
-        parser_inputs = _cached_parser_image_inputs(session, group_rows)
+        parser_inputs, recovered_image_assets = _cached_parser_image_inputs(
+            session,
+            group_rows,
+        )
+        image_context_expected = image_context_expected or recovered_image_assets
         session.commit()
         if parser_inputs:
             return parser_inputs
 
-    return fallback_attachment_urls
+    # Remote Discord URLs are not locally validated and may point to active,
+    # animated, oversized, or decompression-bomb content. Never silently parse
+    # an image-dependent deal without its image context: surface a fixed,
+    # retryable failure after bounded recovery instead.
+    if image_context_expected:
+        worker_log(
+            action="attachment_validation_unavailable",
+            level="warning",
+            success=False,
+            error=ATTACHMENT_IMAGE_UNAVAILABLE_ERROR,
+            session=session,
+            message_id=getattr(group_rows[0], "id", None) if group_rows else None,
+        )
+        raise ValidatedAttachmentUnavailableError()
+    return []
 
 
 def auto_promote_once() -> None:

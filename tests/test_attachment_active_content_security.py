@@ -22,8 +22,11 @@ SAFE_PNG = base64.b64decode(
 )
 
 
-def make_request(path: str) -> Request:
-    return Request({"type": "http", "method": "GET", "path": path, "headers": []})
+def make_request(path: str, *, if_none_match: str | None = None) -> Request:
+    headers = []
+    if if_none_match is not None:
+        headers.append((b"if-none-match", if_none_match.encode("ascii")))
+    return Request({"type": "http", "method": "GET", "path": path, "headers": headers})
 
 
 class AttachmentActiveContentSecurityTests(unittest.TestCase):
@@ -143,7 +146,7 @@ class AttachmentActiveContentSecurityTests(unittest.TestCase):
         self.assertEqual(response.headers["x-content-type-options"], "nosniff")
         self.assertEqual(response.headers["content-security-policy"], "sandbox; default-src 'none'")
 
-    def test_safe_png_thumbnail_failure_falls_back_inline(self) -> None:
+    def test_safe_png_thumbnail_failure_returns_415_without_original_fallback(self) -> None:
         with Session(self.engine) as session:
             asset = self._store_asset(
                 session,
@@ -159,9 +162,8 @@ class AttachmentActiveContentSecurityTests(unittest.TestCase):
                     file_path=self.temp_dir / "safe.png",
                 )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.media_type, "image/png")
-        self.assertTrue(response.headers["content-disposition"].startswith("inline;"))
+        self.assertEqual(response.status_code, 415)
+        self.assertEqual(response.body, b"")
         self.assertEqual(response.headers["x-content-type-options"], "nosniff")
         self.assertEqual(response.headers["content-security-policy"], "sandbox; default-src 'none'")
 
@@ -192,6 +194,35 @@ class AttachmentActiveContentSecurityTests(unittest.TestCase):
         )
         self.assertEqual(response.headers["x-content-type-options"], "nosniff")
         self.assertEqual(response.headers["content-security-policy"], "sandbox; default-src 'none'")
+
+    def test_matching_legacy_etag_cannot_bypass_thumbnail_validation(self) -> None:
+        with Session(self.engine) as session:
+            asset = self._store_asset(
+                session,
+                filename="unsafe.png",
+                content_type="image/png",
+                data=SAFE_PNG,
+            )
+            source_path = self.temp_dir / "unsafe.png"
+            source_path.write_bytes(asset.data)
+            with patch("app.main.require_role_response", return_value=None), patch(
+                "app.main.attachment_cache_path",
+                return_value=source_path,
+            ), patch("app.main.generate_thumbnail", return_value=None) as generate:
+                response = attachment_thumbnail(
+                    request=make_request(
+                        f"/attachments/{asset.id}/thumb",
+                        if_none_match=f'"thumb-{asset.id}"',
+                    ),
+                    asset_id=asset.id,
+                    session=session,
+                )
+
+        self.assertEqual(response.status_code, 415)
+        self.assertEqual(response.body, b"")
+        self.assertEqual(response.headers["x-content-type-options"], "nosniff")
+        self.assertEqual(response.headers["content-security-policy"], "sandbox; default-src 'none'")
+        generate.assert_called_once_with(source_path, asset.id)
 
 
 if __name__ == "__main__":
