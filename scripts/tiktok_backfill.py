@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import re
 import hmac
@@ -9,6 +10,7 @@ import math
 import os
 import sys
 import time
+import traceback
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -377,7 +379,9 @@ _CREDENTIAL_NAMES = frozenset(
         "authorization",
         "authorization_code",
         "client_secret",
+        "creator_access_token",
         "refresh_token",
+        "shop_cipher",
         "token",
         "x_tts_access_token",
     }
@@ -456,7 +460,7 @@ def _safe_error_code(value: Any, *, sensitive_values: tuple[str, ...] = ()) -> O
     text = str(value).strip()
     if not text or len(text) > 64 or re.fullmatch(r"[A-Za-z0-9_.-]+", text) is None:
         return None
-    if any(secret in text for secret in sensitive_values):
+    if any(secret in text or text in secret for secret in sensitive_values):
         return None
     return text
 
@@ -571,10 +575,14 @@ def _sanitized_http_status_error(
     method: str,
     url: str,
     sensitive_values: tuple[str, ...],
+    known_error_code: Optional[str] = None,
 ) -> httpx.HTTPStatusError:
     safe_request = _safe_request_for_diagnostics(method=method, url=url)
     safe_response = httpx.Response(response.status_code, request=safe_request)
-    safe_code = _safe_response_error_code(response, sensitive_values=sensitive_values)
+    safe_code = known_error_code or _safe_response_error_code(
+        response,
+        sensitive_values=sensitive_values,
+    )
     code_suffix = f" code={safe_code}" if safe_code else ""
     exc = httpx.HTTPStatusError(
         f"TikTok HTTP {response.status_code}{code_suffix} for "
@@ -828,6 +836,138 @@ def request_json(
     raise RuntimeError("request_json: exhausted retries without response")
 
 
+def _safe_exception_status_code(error: Exception) -> Optional[int]:
+    response = getattr(error, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if isinstance(status_code, int) and 100 <= status_code <= 599:
+        return status_code
+    match = re.search(r"\bHTTP\s+([1-5]\d\d)\b", str(error))
+    if match is not None:
+        return int(match.group(1))
+    return None
+
+
+def _sanitized_tiktok_api_boundary_error(
+    error: Exception,
+    *,
+    endpoint_path: str,
+    sensitive_values: tuple[str, ...],
+) -> Exception:
+    safe_code = _safe_error_code(
+        getattr(error, "tiktok_error_code", None),
+        sensitive_values=sensitive_values,
+    )
+    scope_missing = bool(getattr(error, "tiktok_scope_missing", False))
+    status_code = _safe_exception_status_code(error)
+    code_suffix = f" code {safe_code}" if safe_code else ""
+    status_suffix = f" HTTP {status_code}" if status_code is not None else ""
+    message = (
+        f"{endpoint_path}: TikTok API request failed "
+        f"({type(error).__name__}){status_suffix}{code_suffix}"
+    )
+
+    safe_error: Exception
+    if isinstance(error, httpx.HTTPStatusError):
+        request = getattr(error, "request", None)
+        response = getattr(error, "response", None)
+        if isinstance(request, httpx.Request) and isinstance(response, httpx.Response):
+            safe_error = _sanitized_http_status_error(
+                response,
+                method=request.method,
+                url=str(request.url),
+                sensitive_values=sensitive_values,
+                known_error_code=safe_code,
+            )
+        else:
+            safe_request = httpx.Request("GET", f"https://tiktok.invalid{endpoint_path}")
+            safe_response = httpx.Response(status_code or 500, request=safe_request)
+            safe_error = httpx.HTTPStatusError(
+                message,
+                request=safe_request,
+                response=safe_response,
+            )
+    elif isinstance(error, httpx.TransportError):
+        request = getattr(error, "request", None)
+        if isinstance(request, httpx.Request):
+            safe_error = _sanitized_transport_error(
+                error,
+                method=request.method,
+                url=str(request.url),
+            )
+        else:
+            try:
+                safe_error = type(error)(message)
+            except Exception:
+                safe_error = httpx.TransportError(message)
+    else:
+        try:
+            safe_error = type(error)(message)
+        except Exception:
+            safe_error = RuntimeError(message)
+
+    if safe_code is None:
+        safe_code = _safe_error_code(
+            getattr(safe_error, "tiktok_error_code", None),
+            sensitive_values=sensitive_values,
+        )
+    safe_error.tiktok_error_code = safe_code  # type: ignore[attr-defined]
+    safe_error.tiktok_scope_missing = scope_missing  # type: ignore[attr-defined]
+    if status_code is not None:
+        safe_error.status_code = status_code  # type: ignore[attr-defined]
+    return safe_error
+
+
+def _clear_tiktok_api_boundary_error(error: Exception) -> None:
+    try:
+        if error.__traceback__ is not None:
+            traceback.clear_frames(error.__traceback__)
+        error.__traceback__ = None
+        error.__cause__ = None
+        error.__context__ = None
+        error.args = ()
+        error_state = getattr(error, "__dict__", None)
+        if isinstance(error_state, dict):
+            error_state.clear()
+    except Exception:
+        pass
+
+
+def _sanitize_tiktok_api_boundary(endpoint_path: str) -> Any:
+    def decorate(func: Any) -> Any:
+        @functools.wraps(func)
+        def wrapped(*args: Any, **kwargs: Any) -> Any:
+            sensitive_values: tuple[str, ...] = ()
+            failure: Optional[Exception] = None
+            try:
+                sensitive_values = _normalized_sensitive_values(
+                    _credential_values_from_container(kwargs)
+                )
+                return func(*args, **kwargs)
+            except Exception as exc:
+                failure = exc
+
+            try:
+                safe_error = _sanitized_tiktok_api_boundary_error(
+                    failure,
+                    endpoint_path=endpoint_path,
+                    sensitive_values=sensitive_values,
+                )
+            except Exception:
+                safe_error = RuntimeError(f"{endpoint_path}: TikTok API request failed")
+            _clear_tiktok_api_boundary_error(failure)
+            kwargs.clear()
+            del args
+            del kwargs
+            del sensitive_values
+            del failure
+            _raise_sanitized_request_error(safe_error)
+
+        return wrapped
+
+    return decorate
+
+
+@_sanitize_tiktok_api_boundary(SHOP_TOKEN_GET_PATH)
 def exchange_authorized_code(
     client: httpx.Client,
     *,
@@ -848,6 +988,7 @@ def exchange_authorized_code(
     return payload
 
 
+@_sanitize_tiktok_api_boundary(SHOP_TOKEN_REFRESH_PATH)
 def refresh_access_token(
     client: httpx.Client,
     *,
@@ -960,6 +1101,7 @@ def affiliate_order_attribution_from_payload(payload: dict[str, Any]) -> dict[st
 _TIKTOK_CREATED_AT_ALIASES = ("create_time", "created_time", "created_at", "order_create_time")
 
 
+@_sanitize_tiktok_api_boundary(ORDER_DETAIL_PATH)
 def order_record_from_payload(
     payload: dict[str, Any],
     *,
@@ -1244,6 +1386,7 @@ def upsert_tiktok_auth(
     return "updated"
 
 
+@_sanitize_tiktok_api_boundary(ORDER_SEARCH_PATH)
 def fetch_tiktok_order_list_page(
     client: httpx.Client,
     *,
@@ -1289,6 +1432,7 @@ def fetch_tiktok_order_list_page(
     return payload, orders
 
 
+@_sanitize_tiktok_api_boundary(ORDER_DETAIL_PATH)
 def fetch_tiktok_order_details(
     client: httpx.Client,
     *,
@@ -1328,6 +1472,7 @@ def fetch_tiktok_order_details(
     return []
 
 
+@_sanitize_tiktok_api_boundary(AFFILIATE_SELLER_ORDER_SEARCH_PATH)
 def fetch_tiktok_seller_affiliate_orders_page(
     client: httpx.Client,
     *,
@@ -1373,6 +1518,7 @@ def fetch_tiktok_seller_affiliate_orders_page(
     return payload, [item for item in orders if isinstance(item, dict)]
 
 
+@_sanitize_tiktok_api_boundary(AFFILIATE_CREATOR_ORDER_SEARCH_PATH)
 def fetch_tiktok_creator_affiliate_orders_page(
     client: httpx.Client,
     *,
@@ -1560,6 +1706,7 @@ def _parse_live_core_stats(raw: dict, currency: str = "USD") -> dict[str, Any]:
     }
 
 
+@_sanitize_tiktok_api_boundary(LIVE_ANALYTICS_PATH)
 def fetch_tiktok_live_analytics(
     client: httpx.Client,
     *,
@@ -1669,6 +1816,7 @@ def fetch_tiktok_live_analytics(
     return best
 
 
+@_sanitize_tiktok_api_boundary(LIVE_SESSION_LIST_PATH)
 def fetch_live_session_list(
     client: httpx.Client,
     *,
@@ -1765,6 +1913,7 @@ def fetch_live_session_list(
     return results
 
 
+@_sanitize_tiktok_api_boundary(LIVE_ANALYTICS_PATH)
 def fetch_overview_performance_daily(
     client: httpx.Client,
     *,
@@ -1837,6 +1986,7 @@ def fetch_overview_performance_daily(
     return results
 
 
+@_sanitize_tiktok_api_boundary(LIVE_PER_MINUTES_PATH_TEMPLATE)
 def fetch_stream_performance_per_minutes(
     client: httpx.Client,
     *,
@@ -1917,6 +2067,7 @@ def fetch_stream_performance_per_minutes(
     return {"overall": overall, "intervals": intervals}
 
 
+@_sanitize_tiktok_api_boundary(LIVE_PRODUCTS_PERFORMANCE_PATH_TEMPLATE)
 def fetch_live_product_performance_list(
     client: httpx.Client,
     *,
@@ -2000,6 +2151,7 @@ def fetch_live_product_performance_list(
     return results
 
 
+@_sanitize_tiktok_api_boundary(PRODUCT_SEARCH_PATH)
 def fetch_tiktok_product_list_page(
     client: httpx.Client,
     *,
@@ -2175,6 +2327,7 @@ def product_record_from_payload(
     }
 
 
+@_sanitize_tiktok_api_boundary(PRODUCT_DETAIL_PATH)
 def upsert_tiktok_product_row(
     session: Session,
     payload: dict[str, Any],
@@ -2201,6 +2354,7 @@ def upsert_tiktok_product_row(
     return "updated"
 
 
+@_sanitize_tiktok_api_boundary(PRODUCT_SEARCH_PATH)
 def backfill_tiktok_products(
     session: Session,
     *,
@@ -2347,6 +2501,7 @@ def backfill_tiktok_products(
     return summary
 
 
+@_sanitize_tiktok_api_boundary(CATEGORIES_PATH)
 def fetch_tiktok_categories(
     client: httpx.Client,
     *,
@@ -2381,6 +2536,7 @@ def fetch_tiktok_categories(
     return [c for c in categories if isinstance(c, dict)]
 
 
+@_sanitize_tiktok_api_boundary(CATEGORY_ATTRIBUTES_PATH)
 def fetch_tiktok_category_attributes(
     client: httpx.Client,
     *,
@@ -2412,6 +2568,7 @@ def fetch_tiktok_category_attributes(
     return [a for a in attributes if isinstance(a, dict)]
 
 
+@_sanitize_tiktok_api_boundary(BRANDS_PATH)
 def fetch_tiktok_brands(
     client: httpx.Client,
     *,
@@ -2450,6 +2607,7 @@ def fetch_tiktok_brands(
     return [b for b in brands if isinstance(b, dict)]
 
 
+@_sanitize_tiktok_api_boundary(IMAGE_UPLOAD_PATH)
 def upload_tiktok_product_image(
     client: httpx.Client,
     *,
@@ -2499,6 +2657,7 @@ def upload_tiktok_product_image(
     return str(uri).strip()
 
 
+@_sanitize_tiktok_api_boundary(PRODUCT_CREATE_PATH)
 def create_tiktok_product(
     client: httpx.Client,
     *,
@@ -2525,6 +2684,7 @@ def create_tiktok_product(
     return extract_tiktok_data(payload)
 
 
+@_sanitize_tiktok_api_boundary(PRODUCT_EDIT_PATH)
 def edit_tiktok_product(
     client: httpx.Client,
     *,
@@ -2553,6 +2713,7 @@ def edit_tiktok_product(
     return extract_tiktok_data(payload)
 
 
+@_sanitize_tiktok_api_boundary(PRODUCT_DETAIL_PATH)
 def fetch_tiktok_product_detail(
     client: httpx.Client,
     *,
@@ -2580,6 +2741,7 @@ def fetch_tiktok_product_detail(
     return extract_tiktok_data(payload)
 
 
+@_sanitize_tiktok_api_boundary(AFFILIATE_SELLER_ORDER_SEARCH_PATH)
 def backfill_tiktok_order_affiliate_attributions(
     session: Session,
     *,
@@ -2684,6 +2846,7 @@ def _scope_json_contains(scopes_json: str, scope: str) -> bool:
     return scope in {item.strip() for item in scopes if item and item.strip()}
 
 
+@_sanitize_tiktok_api_boundary(AFFILIATE_CREATOR_ORDER_SEARCH_PATH)
 def backfill_tiktok_creator_affiliate_attributions(
     session: Session,
     *,
@@ -2789,6 +2952,7 @@ def backfill_tiktok_creator_affiliate_attributions(
     return summary
 
 
+@_sanitize_tiktok_api_boundary(ORDER_SEARCH_PATH)
 def backfill_tiktok_orders(
     session: Session,
     *,
