@@ -2,7 +2,7 @@ import asyncio
 import io
 import json
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock, patch
 
@@ -304,6 +304,8 @@ class PeriodicLoopTests(unittest.TestCase):
         refresh_token = "worker-refresh-token-SENTINEL-741b"
 
         async def fake_to_thread(fn, *args, **kwargs):
+            if getattr(fn, "__name__", "") == "refresh_tiktok_creator_token_if_needed":
+                return None
             request = httpx.Request(
                 "GET",
                 "https://auth.tiktok-shops.com/api/v2/token/refresh",
@@ -362,6 +364,215 @@ class PeriodicLoopTests(unittest.TestCase):
         self.assertEqual(payload["method"], "GET")
         self.assertEqual(payload["endpoint_host"], "auth.tiktok-shops.com")
         self.assertEqual(payload["endpoint_path"], "/api/v2/token/refresh")
+
+    def test_loop_attempts_shop_then_open_creator_refresh_with_separate_sessions(self):
+        from app.discord.worker_service import periodic_tiktok_token_refresh_loop
+
+        session_markers = []
+        calls = []
+        sleep_calls = 0
+
+        @contextmanager
+        def fake_managed_session():
+            marker = object()
+            session_markers.append(marker)
+            yield marker
+
+        def fake_shop_refresh(session, **kwargs):
+            calls.append(("shop", session, kwargs))
+
+        def fake_creator_refresh(session, **kwargs):
+            calls.append(("creator", session, kwargs))
+
+        async def fake_to_thread(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        async def fake_sleep(seconds):
+            nonlocal sleep_calls
+            sleep_calls += 1
+            if sleep_calls >= 2:
+                stop.set()
+
+        async def run():
+            nonlocal stop
+            stop = asyncio.Event()
+            with patch("app.discord.worker_service.settings") as mock_settings, \
+                 patch("app.discord.worker_service.refresh_tiktok_auth_if_needed", fake_shop_refresh), \
+                 patch(
+                     "app.discord.worker_service.refresh_tiktok_creator_token_if_needed",
+                     fake_creator_refresh,
+                     create=True,
+                 ), \
+                 patch("app.discord.worker_service.managed_session", fake_managed_session), \
+                 patch("asyncio.to_thread", fake_to_thread), \
+                 patch("asyncio.sleep", fake_sleep):
+                mock_settings.tiktok_token_refresh_interval_minutes = 0.001
+                mock_settings.runtime_name = "test-runtime"
+                await asyncio.wait_for(periodic_tiktok_token_refresh_loop(stop), timeout=2.0)
+
+        stop = None
+        asyncio.run(run())
+
+        self.assertEqual([call[0] for call in calls], ["shop", "creator"])
+        self.assertEqual(len(session_markers), 2)
+        self.assertIs(calls[0][1], session_markers[0])
+        self.assertIs(calls[1][1], session_markers[1])
+        self.assertIsNot(session_markers[0], session_markers[1])
+        self.assertEqual(calls[0][2]["runtime_name"], "test-runtime")
+        self.assertEqual(calls[1][2], {"runtime_name": "test-runtime"})
+
+    def test_shop_refresh_failure_does_not_block_creator_attempt(self):
+        from app.discord.worker_service import periodic_tiktok_token_refresh_loop
+
+        creator_calls = []
+        sleep_calls = 0
+        secret = "seller-worker-secret-SENTINEL-18c4"
+        refresh_token = "seller-worker-refresh-SENTINEL-6b21"
+
+        @contextmanager
+        def fake_managed_session():
+            yield object()
+
+        def fail_shop_refresh(session, **kwargs):
+            request = httpx.Request(
+                "GET",
+                "https://auth.tiktok-shops.com/api/v2/token/refresh",
+                params={"app_secret": secret, "refresh_token": refresh_token},
+            )
+            response = httpx.Response(
+                401,
+                headers={"x-secret": secret},
+                content=refresh_token.encode(),
+                request=request,
+            )
+            raise httpx.HTTPStatusError(
+                f"seller failed {secret} {refresh_token}",
+                request=request,
+                response=response,
+            )
+
+        def fake_creator_refresh(session, **kwargs):
+            creator_calls.append((session, kwargs))
+
+        async def fake_to_thread(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        async def fake_sleep(seconds):
+            nonlocal sleep_calls
+            sleep_calls += 1
+            if sleep_calls >= 2:
+                stop.set()
+
+        async def run():
+            nonlocal stop
+            stop = asyncio.Event()
+            with patch("app.discord.worker_service.settings") as mock_settings, \
+                 patch("app.discord.worker_service.refresh_tiktok_auth_if_needed", fail_shop_refresh), \
+                 patch(
+                     "app.discord.worker_service.refresh_tiktok_creator_token_if_needed",
+                     fake_creator_refresh,
+                     create=True,
+                 ), \
+                 patch("app.discord.worker_service.managed_session", fake_managed_session), \
+                 patch("asyncio.to_thread", fake_to_thread), \
+                 patch("asyncio.sleep", fake_sleep):
+                mock_settings.tiktok_token_refresh_interval_minutes = 0.001
+                mock_settings.runtime_name = "test-runtime"
+                await asyncio.wait_for(periodic_tiktok_token_refresh_loop(stop), timeout=2.0)
+
+        stop = None
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            asyncio.run(run())
+
+        output = stdout.getvalue() + stderr.getvalue()
+        self.assertNotIn(secret, output)
+        self.assertNotIn(refresh_token, output)
+        self.assertEqual(len(creator_calls), 1)
+        payloads = [json.loads(line) for line in stdout.getvalue().splitlines() if line.strip()]
+        self.assertEqual(len(payloads), 1)
+        self.assertEqual(payloads[0]["method"], "GET")
+        self.assertEqual(payloads[0]["endpoint_host"], "auth.tiktok-shops.com")
+        self.assertEqual(payloads[0]["endpoint_path"], "/api/v2/token/refresh")
+
+    def test_creator_refresh_failure_does_not_undo_shop_attempt_and_logs_safe_metadata(self):
+        from app.discord.worker_service import periodic_tiktok_token_refresh_loop
+
+        shop_calls = []
+        sleep_calls = 0
+        secret = "creator-worker-secret-SENTINEL-49f2"
+        refresh_token = "creator-worker-refresh-SENTINEL-73ae"
+
+        @contextmanager
+        def fake_managed_session():
+            yield object()
+
+        def fake_shop_refresh(session, **kwargs):
+            shop_calls.append((session, kwargs))
+
+        def fail_creator_refresh(session, **kwargs):
+            request = httpx.Request(
+                "POST",
+                "https://open.tiktokapis.com/v2/oauth/token/",
+                data={"client_secret": secret, "refresh_token": refresh_token},
+            )
+            response = httpx.Response(
+                400,
+                headers={"x-secret": secret},
+                content=refresh_token.encode(),
+                request=request,
+            )
+            error = httpx.HTTPStatusError(
+                f"creator failed {secret} {refresh_token}",
+                request=request,
+                response=response,
+            )
+            error.tiktok_error_code = "105001"
+            raise error
+
+        async def fake_to_thread(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        async def fake_sleep(seconds):
+            nonlocal sleep_calls
+            sleep_calls += 1
+            if sleep_calls >= 2:
+                stop.set()
+
+        async def run():
+            nonlocal stop
+            stop = asyncio.Event()
+            with patch("app.discord.worker_service.settings") as mock_settings, \
+                 patch("app.discord.worker_service.refresh_tiktok_auth_if_needed", fake_shop_refresh), \
+                 patch(
+                     "app.discord.worker_service.refresh_tiktok_creator_token_if_needed",
+                     fail_creator_refresh,
+                     create=True,
+                 ), \
+                 patch("app.discord.worker_service.managed_session", fake_managed_session), \
+                 patch("asyncio.to_thread", fake_to_thread), \
+                 patch("asyncio.sleep", fake_sleep):
+                mock_settings.tiktok_token_refresh_interval_minutes = 0.001
+                mock_settings.runtime_name = "test-runtime"
+                await asyncio.wait_for(periodic_tiktok_token_refresh_loop(stop), timeout=2.0)
+
+        stop = None
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            asyncio.run(run())
+
+        output = stdout.getvalue() + stderr.getvalue()
+        self.assertNotIn(secret, output)
+        self.assertNotIn(refresh_token, output)
+        self.assertEqual(len(shop_calls), 1)
+        payloads = [json.loads(line) for line in stdout.getvalue().splitlines() if line.strip()]
+        self.assertEqual(len(payloads), 1)
+        self.assertEqual(payloads[0]["method"], "POST")
+        self.assertEqual(payloads[0]["endpoint_host"], "open.tiktokapis.com")
+        self.assertEqual(payloads[0]["endpoint_path"], "/v2/oauth/token/")
+        self.assertEqual(payloads[0]["error_code"], "105001")
 
 
 if __name__ == "__main__":
