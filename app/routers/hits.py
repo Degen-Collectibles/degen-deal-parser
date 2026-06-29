@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Form, Query, Request, UploadFile, File
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from sqlalchemy import or_
 from sqlmodel import Session, select
 
@@ -45,6 +45,16 @@ def _hit_images_dir() -> Path:
 
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 MAX_IMAGE_SIZE = MAX_HIT_IMAGE_BYTES
+MAX_HIT_IMAGE_FRAMES = 120
+MAX_HIT_IMAGE_TOTAL_DECODED_PIXELS = 24_000_000
+_HIT_IMAGE_RESPONSE_HEADERS = {
+    "Cache-Control": "private, max-age=300",
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "sandbox; default-src 'none'",
+    "Content-Disposition": "inline",
+}
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+_PNG_END_MARKER = b"\x00\x00\x00\x00IEND\xaeB\x60\x82"
 
 
 # ---------------------------------------------------------------------------
@@ -655,6 +665,151 @@ def hits_api_recent(
 # Hit image upload & serving
 # ---------------------------------------------------------------------------
 
+def _png_container_ends_at_eof(raw: bytes) -> bool:
+    if not raw.startswith(_PNG_SIGNATURE):
+        return False
+
+    offset = len(_PNG_SIGNATURE)
+    while offset < len(raw):
+        if len(raw) - offset < 12:
+            return False
+        chunk_length = int.from_bytes(raw[offset : offset + 4], "big")
+        chunk_end = offset + 12 + chunk_length
+        if chunk_end > len(raw):
+            return False
+        chunk_type = raw[offset + 4 : offset + 8]
+        if chunk_type == b"IEND":
+            return (
+                raw[offset:chunk_end] == _PNG_END_MARKER
+                and chunk_end == len(raw)
+            )
+        offset = chunk_end
+    return False
+
+
+def _jpeg_segment_end(raw: bytes, length_offset: int) -> int | None:
+    if len(raw) - length_offset < 2:
+        return None
+    segment_length = int.from_bytes(raw[length_offset : length_offset + 2], "big")
+    if segment_length < 2:
+        return None
+    segment_end = length_offset + segment_length
+    return segment_end if segment_end <= len(raw) else None
+
+
+def _jpeg_container_ends_at_eof(raw: bytes) -> bool:
+    if not raw.startswith(b"\xff\xd8"):
+        return False
+
+    offset = 2
+    in_scan = False
+    while offset < len(raw):
+        if in_scan:
+            marker_start = raw.find(b"\xff", offset)
+            if marker_start < 0:
+                return False
+            marker_code_offset = marker_start + 1
+            while marker_code_offset < len(raw) and raw[marker_code_offset] == 0xFF:
+                marker_code_offset += 1
+            if marker_code_offset >= len(raw):
+                return False
+            marker_code = raw[marker_code_offset]
+            marker_end = marker_code_offset + 1
+            if marker_code == 0x00 or 0xD0 <= marker_code <= 0xD7 or marker_code == 0x01:
+                offset = marker_end
+                continue
+            if marker_code == 0xD9:
+                return marker_end == len(raw)
+            if marker_code == 0xDC:
+                segment_end = _jpeg_segment_end(raw, marker_end)
+                if segment_end is None:
+                    return False
+                offset = segment_end
+                continue
+            in_scan = False
+            offset = marker_start
+            continue
+
+        if raw[offset] != 0xFF:
+            return False
+        marker_code_offset = offset + 1
+        while marker_code_offset < len(raw) and raw[marker_code_offset] == 0xFF:
+            marker_code_offset += 1
+        if marker_code_offset >= len(raw):
+            return False
+        marker_code = raw[marker_code_offset]
+        marker_end = marker_code_offset + 1
+        if marker_code == 0xD9:
+            return marker_end == len(raw)
+        if marker_code == 0x01:
+            offset = marker_end
+            continue
+        if marker_code == 0x00 or marker_code == 0xD8 or 0xD0 <= marker_code <= 0xD7:
+            return False
+        segment_end = _jpeg_segment_end(raw, marker_end)
+        if segment_end is None:
+            return False
+        in_scan = marker_code == 0xDA
+        offset = segment_end
+    return False
+
+
+def _has_exact_hit_image_container(validated) -> bool:
+    raw = validated.decoded_bytes
+    if validated.image_format == "JPEG":
+        return _jpeg_container_ends_at_eof(raw)
+    if validated.image_format == "PNG":
+        return _png_container_ends_at_eof(raw)
+    if validated.image_format == "WEBP":
+        return (
+            len(raw) >= 12
+            and raw[:4] == b"RIFF"
+            and raw[8:12] == b"WEBP"
+            and int.from_bytes(raw[4:8], "little") + 8 == len(raw)
+        )
+    return False
+
+
+def _decode_hit_image_frames(decoded: Image.Image) -> None:
+    frame_count = int(getattr(decoded, "n_frames", 1))
+    if frame_count <= 0:
+        raise ImageSecurityError(
+            "Image could not be read.",
+            status_code=422,
+            code="invalid_image_data",
+        )
+    if frame_count > MAX_HIT_IMAGE_FRAMES:
+        raise ImageSecurityError(
+            "Image has too many animation frames.",
+            status_code=413,
+            code="image_frame_count_exceeded",
+        )
+
+    canvas_width, canvas_height = decoded.size
+    if canvas_width <= 0 or canvas_height <= 0:
+        raise ImageSecurityError(
+            "Image could not be read.",
+            status_code=422,
+            code="invalid_image_data",
+        )
+    if canvas_width > MAX_HIT_IMAGE_TOTAL_DECODED_PIXELS // canvas_height:
+        raise ImageSecurityError(
+            "Animated image requires too much processing.",
+            status_code=413,
+            code="image_animation_pixels_exceeded",
+        )
+    canvas_pixels = canvas_width * canvas_height
+    if frame_count > MAX_HIT_IMAGE_TOTAL_DECODED_PIXELS // canvas_pixels:
+        raise ImageSecurityError(
+            "Animated image requires too much processing.",
+            status_code=413,
+            code="image_animation_pixels_exceeded",
+        )
+
+    for frame_index in range(frame_count):
+        decoded.seek(frame_index)
+        decoded.load()
+
 @router.post("/api/hits/upload-image")
 async def hits_upload_image(
     request: Request,
@@ -723,10 +878,10 @@ async def hits_upload_image(
         try:
             with image_decode_slot():
                 with Image.open(io.BytesIO(validated.decoded_bytes)) as decoded:
-                    decoded.load()
+                    _decode_hit_image_frames(decoded)
         except ImageSecurityError:
             raise
-        except (UnidentifiedImageError, OSError, SyntaxError, ValueError):
+        except (EOFError, UnidentifiedImageError, OSError, SyntaxError, ValueError):
             raise ImageSecurityError(
                 "Image could not be read.",
                 status_code=422,
@@ -800,4 +955,39 @@ def serve_hit_image(
     if not path.is_file():
         return JSONResponse({"error": "Not found"}, status_code=404)
 
-    return FileResponse(path, headers={"Cache-Control": "private, max-age=300"})
+    try:
+        validated = validate_image_file(
+            path,
+            allowed_formats=frozenset({"JPEG", "PNG", "WEBP"}),
+            max_bytes=MAX_IMAGE_SIZE,
+            max_dimension=8192,
+            max_pixels=24_000_000,
+        )
+        try:
+            with image_decode_slot():
+                with Image.open(io.BytesIO(validated.decoded_bytes)) as decoded:
+                    _decode_hit_image_frames(decoded)
+        except ImageSecurityError:
+            raise
+        except (EOFError, UnidentifiedImageError, OSError, SyntaxError, ValueError):
+            raise ImageSecurityError(
+                "Image could not be read.",
+                status_code=422,
+                code="invalid_image_data",
+            ) from None
+        if not _has_exact_hit_image_container(validated):
+            raise ImageSecurityError(
+                "Image contains unexpected trailing or incomplete data.",
+                status_code=415,
+                code="image_polyglot",
+            )
+    except ImageSecurityError as exc:
+        if exc.code == "image_file_unreadable" and not path.is_file():
+            return JSONResponse({"error": "Not found"}, status_code=404)
+        return _hit_upload_error_response(exc)
+
+    return Response(
+        content=validated.decoded_bytes,
+        media_type=validated.mime_type,
+        headers=_HIT_IMAGE_RESPONSE_HEADERS,
+    )

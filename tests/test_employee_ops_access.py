@@ -19,6 +19,7 @@ for anyone below role=viewer so employees aren't tempted into 403s.
 """
 from __future__ import annotations
 
+import base64
 import importlib
 import json
 import os
@@ -34,6 +35,11 @@ os.environ.setdefault("EMPLOYEE_PORTAL_ENABLED", "true")
 os.environ.setdefault("EMPLOYEE_PII_KEY", Fernet.generate_key().decode("ascii"))
 os.environ.setdefault("EMPLOYEE_EMAIL_HASH_SALT", "unit-test-salt-opsaccess")
 os.environ.setdefault("EMPLOYEE_TOKEN_HMAC_KEY", "unit-test-hmac-opsaccess")
+
+SAFE_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMB"
+    "AQDJ/pLvAAAAAElFTkSuQmCC"
+)
 
 
 def _fresh_engine():
@@ -2105,13 +2111,14 @@ class EmployeeOpsAccessTests(unittest.TestCase):
         self.assertIn(response.status_code, (302, 303, 307))
 
     def test_authorized_live_hits_user_can_fetch_referenced_hit_image(self):
-        self._seed_hit_image(content=b"authorized-image")
+        self._seed_hit_image(content=SAFE_PNG)
         self._login_as("employee", user_id=225, username="emp25")
 
         response = self.client.get("/hit-images/hit-photo.jpg", follow_redirects=False)
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.content, b"authorized-image")
+        self.assertEqual(response.content, SAFE_PNG)
+        self.assertEqual(response.headers.get("content-type"), "image/png")
         self.assertIn("private", response.headers.get("cache-control", ""))
 
     def test_authorized_live_hits_user_cannot_fetch_unreferenced_hit_image(self):

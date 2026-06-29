@@ -45,6 +45,55 @@ def _image_bytes(image_format: str) -> bytes:
     return output.getvalue()
 
 
+def _animated_webp_bytes(
+    *,
+    frame_count: int = 3,
+    size: tuple[int, int] = (24, 18),
+    corrupt_second_frame: bool = False,
+) -> bytes:
+    assert frame_count >= 3 if corrupt_second_frame else frame_count >= 1
+    source_frames = [
+        Image.new("RGBA", size, color=color)
+        for color in ((255, 0, 0, 255), (0, 255, 0, 255), (0, 0, 255, 255))
+    ]
+    frames = [source_frames[index % len(source_frames)] for index in range(frame_count)]
+    output = io.BytesIO()
+    frames[0].save(
+        output,
+        format="WEBP",
+        save_all=True,
+        append_images=frames[1:],
+        duration=100,
+        loop=0,
+        lossless=True,
+    )
+    raw = bytearray(output.getvalue())
+    if not corrupt_second_frame:
+        return bytes(raw)
+
+    anmf_offsets: list[int] = []
+    offset = 12
+    while offset + 8 <= len(raw):
+        chunk_size = int.from_bytes(raw[offset + 4 : offset + 8], "little")
+        if raw[offset : offset + 4] == b"ANMF":
+            anmf_offsets.append(offset)
+        offset += 8 + chunk_size + (chunk_size & 1)
+    assert len(anmf_offsets) == frame_count
+
+    inner_chunk_offset = anmf_offsets[1] + 8 + 16
+    assert raw[inner_chunk_offset : inner_chunk_offset + 4] == b"VP8L"
+    inner_size = int.from_bytes(
+        raw[inner_chunk_offset + 4 : inner_chunk_offset + 8],
+        "little",
+    )
+    inner_payload_offset = inner_chunk_offset + 8
+    assert inner_size > 5
+    raw[inner_payload_offset + 5 : inner_payload_offset + inner_size] = b"\x00" * (
+        inner_size - 5
+    )
+    return bytes(raw)
+
+
 def _seed_user(session: Session, user_id: int) -> None:
     session.add(
         User(
@@ -57,6 +106,56 @@ def _seed_user(session: Session, user_id: int) -> None:
         )
     )
     session.commit()
+
+
+def _serve_referenced_hit_image(
+    session: Session,
+    *,
+    tmp_path,
+    monkeypatch,
+    filename: str,
+    data: bytes,
+):
+    from app.routers import hits
+
+    (tmp_path / filename).write_bytes(data)
+    session.add(
+        LiveHit(
+            streamer_name="legacy",
+            hit_note="stored image",
+            image_filename=filename,
+        )
+    )
+    session.commit()
+    monkeypatch.setattr(hits, "_require_live_hits", lambda request, session=None: None)
+    monkeypatch.setattr(hits, "_hit_images_dir", lambda: tmp_path)
+    request = SimpleNamespace(state=SimpleNamespace(current_user=SimpleNamespace(id=1)))
+    return hits.serve_hit_image(filename, request, session)
+
+
+def _upload_hit_image(session: Session, *, tmp_path, monkeypatch, data: bytes):
+    from app.routers import hits
+
+    _seed_user(session, 71)
+    upload = _FakeUpload(data, "image/webp")
+    request = SimpleNamespace(state=SimpleNamespace(current_user=SimpleNamespace(id=71)))
+    monkeypatch.setattr(hits, "_require_live_hits", lambda request, session=None: None)
+    monkeypatch.setattr(hits, "_hit_images_dir", lambda: tmp_path)
+    return asyncio.run(hits.hits_upload_image(request, upload, session))
+
+
+def _track_webp_loads(monkeypatch) -> list[None]:
+    from PIL import WebPImagePlugin
+
+    load_calls: list[None] = []
+    original_load = WebPImagePlugin.WebPImageFile.load
+
+    def tracked_load(self, *args, **kwargs):
+        load_calls.append(None)
+        return original_load(self, *args, **kwargs)
+
+    monkeypatch.setattr(WebPImagePlugin.WebPImageFile, "load", tracked_load)
+    return load_calls
 
 
 def test_hit_upload_state_migration_is_declared_for_both_databases():
@@ -270,6 +369,337 @@ def test_upload_route_stops_after_file_cap_without_unbounded_read(tmp_path, monk
         assert upload.total_returned <= MAX_HIT_IMAGE_BYTES + 64 * 1024
         assert set(upload.read_sizes) == {64 * 1024}
         assert session.exec(select(LiveHitImageUpload)).all() == []
+
+
+def test_serve_hit_image_rejects_referenced_legacy_active_bytes(tmp_path, monkeypatch):
+    engine = _engine()
+    with Session(engine) as session:
+        response = _serve_referenced_hit_image(
+            session,
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            filename="legacy-active.png",
+            data=b"<!doctype html><script>alert(document.domain)</script>",
+        )
+
+    assert response.status_code == 415
+
+
+@pytest.mark.parametrize(
+    ("image_format", "expected_media_type"),
+    [("JPEG", "image/jpeg"), ("PNG", "image/png"), ("WEBP", "image/webp")],
+)
+def test_serve_hit_image_validates_legacy_bytes_and_sets_browser_hardening_headers(
+    tmp_path,
+    monkeypatch,
+    image_format,
+    expected_media_type,
+):
+    engine = _engine()
+    image_bytes = _image_bytes(image_format)
+    with Session(engine) as session:
+        response = _serve_referenced_hit_image(
+            session,
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            filename=f"legacy-{image_format.lower()}.bin",
+            data=image_bytes,
+        )
+
+    assert response.status_code == 200
+    assert response.media_type == expected_media_type
+    assert response.body == image_bytes
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["content-security-policy"] == "sandbox; default-src 'none'"
+    assert response.headers["content-disposition"].startswith("inline")
+    assert "\r" not in response.headers["content-disposition"]
+    assert "\n" not in response.headers["content-disposition"]
+    assert response.headers["cache-control"] == "private, max-age=300"
+
+
+def test_serve_hit_image_revalidates_bytes_after_bound_upload_is_replaced(
+    tmp_path,
+    monkeypatch,
+):
+    from app.routers import hits
+
+    engine = _engine()
+    with Session(engine) as session:
+        _seed_user(session, 61)
+        upload = reserve_pending_upload(
+            session,
+            images_dir=tmp_path,
+            owner_user_id=61,
+            content_type="image/png",
+        )
+        image_path = tmp_path / upload.filename
+        image_path.write_bytes(_image_bytes("PNG"))
+        finalize_pending_upload(
+            session,
+            images_dir=tmp_path,
+            token=upload.token,
+            owner_user_id=61,
+            actual_size=image_path.stat().st_size,
+            content_type="image/png",
+        )
+        hit = LiveHit(streamer_name="replacement", hit_note="replacement")
+        session.add(hit)
+        session.flush()
+        hit.image_filename = bind_pending_upload(
+            session,
+            images_dir=tmp_path,
+            marker=upload_marker(upload.token),
+            owner_user_id=61,
+            hit_id=hit.id,
+        )
+        session.add(hit)
+        session.commit()
+
+        image_path.write_bytes(b"<svg><script>alert(document.domain)</script></svg>")
+        monkeypatch.setattr(hits, "_require_live_hits", lambda request, session=None: None)
+        monkeypatch.setattr(hits, "_hit_images_dir", lambda: tmp_path)
+        request = SimpleNamespace(state=SimpleNamespace(current_user=SimpleNamespace(id=61)))
+        response = hits.serve_hit_image(upload.filename, request, session)
+
+    assert response.status_code == 415
+
+
+def test_serve_hit_image_rejects_raster_with_active_trailing_payload(tmp_path, monkeypatch):
+    engine = _engine()
+    with Session(engine) as session:
+        response = _serve_referenced_hit_image(
+            session,
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            filename="legacy-polyglot.png",
+            data=_image_bytes("PNG") + b"<script>alert(document.domain)</script>",
+        )
+
+    assert response.status_code == 415
+
+
+def test_serve_hit_image_rejects_png_polyglot_with_second_end_marker(tmp_path, monkeypatch):
+    png_end_marker = b"\x00\x00\x00\x00IEND\xaeB\x60\x82"
+    engine = _engine()
+    with Session(engine) as session:
+        response = _serve_referenced_hit_image(
+            session,
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            filename="legacy-double-iend.png",
+            data=(
+                _image_bytes("PNG")
+                + b"<script>alert(document.domain)</script>"
+                + png_end_marker
+            ),
+        )
+
+    assert response.status_code == 415
+
+
+def test_serve_hit_image_rejects_jpeg_polyglot_with_second_end_marker(tmp_path, monkeypatch):
+    engine = _engine()
+    with Session(engine) as session:
+        response = _serve_referenced_hit_image(
+            session,
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            filename="legacy-double-eoi.jpg",
+            data=_image_bytes("JPEG") + b"<script>alert(document.domain)</script>\xff\xd9",
+        )
+
+    assert response.status_code == 415
+
+
+def test_serve_hit_image_preserves_valid_animated_webp(tmp_path, monkeypatch):
+    image_bytes = _animated_webp_bytes()
+    with Image.open(io.BytesIO(image_bytes)) as decoded:
+        assert decoded.n_frames == 3
+
+    engine = _engine()
+    with Session(engine) as session:
+        response = _serve_referenced_hit_image(
+            session,
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            filename="legacy-animated.bin",
+            data=image_bytes,
+        )
+
+    assert response.status_code == 200
+    assert response.media_type == "image/webp"
+    assert response.body == image_bytes
+
+
+def test_serve_hit_image_rejects_animated_webp_with_corrupt_later_frame(
+    tmp_path,
+    monkeypatch,
+):
+    image_bytes = _animated_webp_bytes(corrupt_second_frame=True)
+    with Image.open(io.BytesIO(image_bytes)) as decoded:
+        assert decoded.n_frames == 3
+        decoded.load()
+        decoded.seek(1)
+        with pytest.raises(OSError):
+            decoded.load()
+
+    engine = _engine()
+    with Session(engine) as session:
+        response = _serve_referenced_hit_image(
+            session,
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            filename="legacy-corrupt-animation.webp",
+            data=image_bytes,
+        )
+
+    assert response.status_code == 422
+
+
+def test_upload_hit_image_preserves_modest_animated_webp(tmp_path, monkeypatch):
+    image_bytes = _animated_webp_bytes()
+    engine = _engine()
+    with Session(engine) as session:
+        response = _upload_hit_image(
+            session,
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            data=image_bytes,
+        )
+
+        assert response.status_code == 200
+        upload = session.exec(select(LiveHitImageUpload)).one()
+        assert (tmp_path / upload.filename).read_bytes() == image_bytes
+
+
+def test_upload_hit_image_rejects_excessive_animation_frames_before_decode(
+    tmp_path,
+    monkeypatch,
+):
+    image_bytes = _animated_webp_bytes(frame_count=121, size=(8, 8))
+    with Image.open(io.BytesIO(image_bytes)) as decoded:
+        assert decoded.n_frames == 121
+    load_calls = _track_webp_loads(monkeypatch)
+
+    engine = _engine()
+    with Session(engine) as session:
+        response = _upload_hit_image(
+            session,
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            data=image_bytes,
+        )
+
+        assert response.status_code == 413
+        assert json.loads(response.body)["code"] == "image_frame_count_exceeded"
+        assert load_calls == []
+        assert session.exec(select(LiveHitImageUpload)).all() == []
+
+
+def test_serve_hit_image_rejects_excessive_animation_frames_before_decode(
+    tmp_path,
+    monkeypatch,
+):
+    image_bytes = _animated_webp_bytes(frame_count=121, size=(8, 8))
+    with Image.open(io.BytesIO(image_bytes)) as decoded:
+        assert decoded.n_frames == 121
+    load_calls = _track_webp_loads(monkeypatch)
+
+    engine = _engine()
+    with Session(engine) as session:
+        response = _serve_referenced_hit_image(
+            session,
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            filename="legacy-too-many-frames.webp",
+            data=image_bytes,
+        )
+
+    assert response.status_code == 413
+    assert json.loads(response.body)["code"] == "image_frame_count_exceeded"
+    assert load_calls == []
+
+
+def test_upload_hit_image_rejects_excessive_animation_pixel_work_before_decode(
+    tmp_path,
+    monkeypatch,
+):
+    image_bytes = _animated_webp_bytes(frame_count=25, size=(1024, 1024))
+    with Image.open(io.BytesIO(image_bytes)) as decoded:
+        assert decoded.n_frames == 25
+        assert decoded.size == (1024, 1024)
+    load_calls = _track_webp_loads(monkeypatch)
+
+    engine = _engine()
+    with Session(engine) as session:
+        response = _upload_hit_image(
+            session,
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            data=image_bytes,
+        )
+
+        assert response.status_code == 413
+        assert json.loads(response.body)["code"] == "image_animation_pixels_exceeded"
+        assert load_calls == []
+        assert session.exec(select(LiveHitImageUpload)).all() == []
+
+
+def test_serve_hit_image_rejects_excessive_animation_pixel_work_before_decode(
+    tmp_path,
+    monkeypatch,
+):
+    image_bytes = _animated_webp_bytes(frame_count=25, size=(1024, 1024))
+    with Image.open(io.BytesIO(image_bytes)) as decoded:
+        assert decoded.n_frames == 25
+        assert decoded.size == (1024, 1024)
+    load_calls = _track_webp_loads(monkeypatch)
+
+    engine = _engine()
+    with Session(engine) as session:
+        response = _serve_referenced_hit_image(
+            session,
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            filename="legacy-too-much-animation-work.webp",
+            data=image_bytes,
+        )
+
+    assert response.status_code == 413
+    assert json.loads(response.body)["code"] == "image_animation_pixels_exceeded"
+    assert load_calls == []
+
+
+def test_serve_hit_image_rejects_oversized_referenced_file(tmp_path, monkeypatch):
+    from app.routers import hits
+
+    image_bytes = _image_bytes("PNG")
+    monkeypatch.setattr(hits, "MAX_IMAGE_SIZE", len(image_bytes) - 1)
+    engine = _engine()
+    with Session(engine) as session:
+        response = _serve_referenced_hit_image(
+            session,
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            filename="legacy-oversized.png",
+            data=image_bytes,
+        )
+
+    assert response.status_code == 413
+
+
+def test_serve_hit_image_rejects_truncated_raster(tmp_path, monkeypatch):
+    engine = _engine()
+    with Session(engine) as session:
+        response = _serve_referenced_hit_image(
+            session,
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            filename="legacy-truncated.jpg",
+            data=_image_bytes("JPEG")[:-1],
+        )
+
+    assert response.status_code == 422
 
 
 def test_binding_is_same_user_one_time_and_raw_filename_is_not_a_capability(tmp_path):
