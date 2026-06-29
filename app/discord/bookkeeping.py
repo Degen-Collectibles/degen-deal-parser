@@ -41,6 +41,16 @@ MAX_BOOKKEEPING_XLSX_COLUMNS = 64
 MAX_BOOKKEEPING_XLSX_VISITED_CELLS = 250_000
 BOOKKEEPING_XLSX_PARSE_DEADLINE_SECONDS = 5.0
 BOOKKEEPING_XLSX_VALIDATION_ERROR = "XLSX file exceeds safe import limits or is invalid"
+MAX_BOOKKEEPING_UPLOAD_BYTES = MAX_BOOKKEEPING_XLSX_COMPRESSED_BYTES
+MAX_BOOKKEEPING_UPLOAD_REQUEST_BYTES = MAX_BOOKKEEPING_UPLOAD_BYTES + (512 * 1024)
+BOOKKEEPING_UPLOAD_READ_CHUNK_BYTES = 64 * 1024
+BOOKKEEPING_UPLOAD_SIZE_ERROR = "Bookkeeping upload exceeds the 8 MB file limit"
+MAX_BOOKKEEPING_CSV_DATA_ROWS = MAX_BOOKKEEPING_XLSX_DATA_ROWS
+MAX_BOOKKEEPING_CSV_COLUMNS = MAX_BOOKKEEPING_XLSX_COLUMNS
+MAX_BOOKKEEPING_CSV_VISITED_CELLS = MAX_BOOKKEEPING_XLSX_VISITED_CELLS
+MAX_BOOKKEEPING_CSV_CELL_CHARACTERS = 32_767
+MAX_BOOKKEEPING_CSV_CELL_BYTES = 64 * 1024
+BOOKKEEPING_CSV_VALIDATION_ERROR = "CSV file exceeds safe import limits or is invalid"
 _XLSX_WORKSHEET_TAG = f"{SHEET_MAIN_NS}}}worksheet"
 _XLSX_ROW_TAG = f"{SHEET_MAIN_NS}}}row"
 _XLSX_CELL_REFERENCE_RE = re.compile(r"^([A-Za-z]+)([0-9]+)$")
@@ -50,8 +60,88 @@ class BookkeepingFileValidationError(ValueError):
     """A stable, user-safe error for rejected bookkeeping uploads."""
 
 
+class BookkeepingUploadTooLarge(ValueError):
+    """Raised after reading at most the documented file cap plus one byte."""
+
+
+async def read_bookkeeping_upload(upload_file: Any) -> bytes:
+    chunks: list[bytes] = []
+    remaining = MAX_BOOKKEEPING_UPLOAD_BYTES + 1
+
+    while remaining > 0:
+        chunk = await upload_file.read(min(BOOKKEEPING_UPLOAD_READ_CHUNK_BYTES, remaining))
+        if not chunk:
+            return b"".join(chunks)
+        if len(chunk) > remaining:
+            chunk = chunk[:remaining]
+        chunks.append(chunk)
+        remaining -= len(chunk)
+
+    raise BookkeepingUploadTooLarge(BOOKKEEPING_UPLOAD_SIZE_ERROR)
+
+
 def _reject_unsafe_xlsx() -> None:
     raise BookkeepingFileValidationError(BOOKKEEPING_XLSX_VALIDATION_ERROR)
+
+
+def _reject_unsafe_csv() -> None:
+    raise BookkeepingFileValidationError(BOOKKEEPING_CSV_VALIDATION_ERROR)
+
+
+def _validate_csv_cell(value: Any) -> None:
+    text = str(value or "")
+    if (
+        len(text) > MAX_BOOKKEEPING_CSV_CELL_CHARACTERS
+        or len(text.encode("utf-8")) > MAX_BOOKKEEPING_CSV_CELL_BYTES
+    ):
+        _reject_unsafe_csv()
+
+
+def read_bounded_csv_dict_rows(
+    content: bytes,
+    *,
+    decode_errors: str = "strict",
+) -> tuple[list[str], list[dict[str | None, Any]]]:
+    if len(content) > MAX_BOOKKEEPING_UPLOAD_BYTES:
+        _reject_unsafe_csv()
+    try:
+        text = content.decode("utf-8-sig", errors=decode_errors)
+        reader = csv.DictReader(StringIO(text))
+        headers = reader.fieldnames or []
+        if len(headers) > MAX_BOOKKEEPING_CSV_COLUMNS:
+            _reject_unsafe_csv()
+        for header in headers:
+            _validate_csv_cell(header)
+
+        visited_cells = len(headers)
+        parsed_rows: list[dict[str | None, Any]] = []
+        for row in reader:
+            if len(parsed_rows) >= MAX_BOOKKEEPING_CSV_DATA_ROWS:
+                _reject_unsafe_csv()
+
+            extras = row.get(None)
+            extra_cells = len(extras) if isinstance(extras, list) else 0
+            row_cells = len(headers) + extra_cells
+            if row_cells > MAX_BOOKKEEPING_CSV_COLUMNS:
+                _reject_unsafe_csv()
+            visited_cells += row_cells
+            if visited_cells > MAX_BOOKKEEPING_CSV_VISITED_CELLS:
+                _reject_unsafe_csv()
+
+            for key, value in row.items():
+                if key is not None:
+                    _validate_csv_cell(key)
+                if isinstance(value, list):
+                    for cell in value:
+                        _validate_csv_cell(cell)
+                else:
+                    _validate_csv_cell(value)
+            parsed_rows.append(dict(row))
+        return headers, parsed_rows
+    except BookkeepingFileValidationError:
+        raise
+    except (csv.Error, UnicodeError, ValueError):
+        _reject_unsafe_csv()
 
 
 def _check_xlsx_deadline(deadline: float) -> None:
@@ -588,14 +678,13 @@ def _read_xlsx_rows(content: bytes) -> list[dict[str, Any]]:
 def read_tabular_rows(filename: str, content: bytes) -> list[dict[str, Any]]:
     suffix = Path(filename).suffix.lower()
     if suffix == ".csv":
-        text = content.decode("utf-8-sig", errors="ignore")
-        reader = csv.DictReader(StringIO(text))
+        _, rows = read_bounded_csv_dict_rows(content, decode_errors="ignore")
         return [
             {
                 "__sheet_name": "import",
                 **dict(row),
             }
-            for row in reader
+            for row in rows
         ]
 
     if suffix == ".xlsx":

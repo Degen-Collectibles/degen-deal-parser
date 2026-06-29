@@ -20,12 +20,14 @@ from sqlmodel import Session, select
 from ..csrf import CSRFProtectedRoute
 from ..shared import *  # noqa: F401,F403 — shared helpers, constants, state
 from ..discord.bookkeeping import (
+    BookkeepingUploadTooLarge,
     extract_google_sheet_url,
     auto_import_public_google_sheet,
     import_bookkeeping_file,
     list_bookkeeping_imports,
     list_detected_bookkeeping_posts,
     reconcile_bookkeeping_import,
+    read_bookkeeping_upload,
     refresh_bookkeeping_import_from_source,
 )
 from ..discord.bank_reconciliation import (
@@ -737,10 +739,14 @@ async def bank_reconciliation_import_form(
             status_code=303,
         )
     try:
+        upload_content = await read_bookkeeping_upload(upload_file)
+    except BookkeepingUploadTooLarge as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    try:
         imported = import_bank_statement_file(
             session,
             filename=upload_file.filename,
-            content=await upload_file.read(),
+            content=upload_content,
             account_label=account_label,
             account_type=account_type,
         )
@@ -1032,10 +1038,14 @@ async def bookkeeping_import_form(
         )
 
     try:
+        upload_content = await read_bookkeeping_upload(upload_file)
+    except BookkeepingUploadTooLarge as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    try:
         imported = import_bookkeeping_file(
             session,
             filename=upload_file.filename,
-            content=await upload_file.read(),
+            content=upload_content,
             show_label=show_label.strip(),
             show_date=parse_report_datetime(show_date),
             range_start=parse_report_datetime(range_start),

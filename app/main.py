@@ -149,6 +149,7 @@ from .runtime_logging import resolve_runtime_log_path, setup_runtime_file_loggin
 from .runtime_monitor import get_runtime_heartbeat_status, runtime_heartbeat_loop
 from .hit_image_uploads import MAX_HIT_UPLOAD_REQUEST_BYTES
 from .image_security import DETECT_ONLY_REQUEST_MAX_BYTES, FULL_SCAN_REQUEST_MAX_BYTES
+from .discord.bookkeeping import MAX_BOOKKEEPING_UPLOAD_REQUEST_BYTES
 from .request_body_limits import ExactPathBodyLimitMiddleware
 from .schemas import HealthOut
 from .inventory.shopify import shopify_admin_configured
@@ -862,6 +863,8 @@ app.add_middleware(
     ExactPathBodyLimitMiddleware,
     limits={
         ("POST", "/api/hits/upload-image"): MAX_HIT_UPLOAD_REQUEST_BYTES,
+        ("POST", "/bookkeeping/import-form"): MAX_BOOKKEEPING_UPLOAD_REQUEST_BYTES,
+        ("POST", "/bookkeeping/bank/import-form"): MAX_BOOKKEEPING_UPLOAD_REQUEST_BYTES,
         ("POST", "/degen_eye/identify"): FULL_SCAN_REQUEST_MAX_BYTES,
         ("POST", "/degen_eye/v2/scan"): FULL_SCAN_REQUEST_MAX_BYTES,
         ("POST", "/degen_eye/v2/scan-init"): FULL_SCAN_REQUEST_MAX_BYTES,
