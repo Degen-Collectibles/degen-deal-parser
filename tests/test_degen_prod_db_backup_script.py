@@ -723,7 +723,7 @@ def _runbook_shell_block(name: str) -> str:
 def _run_runbook_shell_block(
     tmp_path: Path,
     name: str,
-    values: dict[str, str],
+    values: dict[str, str | None],
 ) -> subprocess.CompletedProcess[str]:
     if BASH is None:
         pytest.skip("No usable POSIX Bash/WSL environment")
@@ -732,12 +732,18 @@ def _run_runbook_shell_block(
         handle.write(
             "#!/usr/bin/env bash\n"
             "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n"
+            "if [[ -n \"${RUNBOOK_TEST_BIN:-}\" ]]; then export PATH=\"$RUNBOOK_TEST_BIN:$PATH\"; fi\n"
+            + "".join(f"unset {key}\n" for key, value in values.items() if value is None)
             + _runbook_shell_block(name)
         )
     environment = os.environ.copy()
-    environment.update(values)
+    for key, value in values.items():
+        if value is None:
+            environment.pop(key, None)
+        else:
+            environment[key] = value
     if os.name == "nt":
-        environment["WSLENV"] = ":".join(sorted(values))
+        environment["WSLENV"] = ":".join(sorted(key for key, value in values.items() if value is not None))
     return subprocess.run(
         [BASH, _posix_path(script)],
         cwd=ROOT,
@@ -746,6 +752,50 @@ def _run_runbook_shell_block(
         text=True,
         timeout=20,
         check=False,
+    )
+
+
+def _run_runbook_python_block(
+    tmp_path: Path,
+    name: str,
+    values: dict[str, str],
+) -> subprocess.CompletedProcess[str]:
+    script = tmp_path / f"{name.lower()}.py"
+    with script.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(_runbook_shell_block(name))
+    if os.name == "nt":
+        wsl = shutil.which("wsl.exe")
+        if wsl is None:
+            pytest.skip("WSL is unavailable")
+        assignments = [f"{key}={value}" for key, value in values.items()]
+        command = [wsl, "-u", "root", "-e", "env", *assignments, "python3", _posix_path(script)]
+        environment = os.environ.copy()
+    else:
+        if os.geteuid() != 0:
+            pytest.skip("root is required for environment-file ownership tests")
+        command = [shutil.which("python3") or "python3", str(script)]
+        environment = os.environ.copy()
+        environment.update(values)
+    return subprocess.run(
+        command,
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+
+def _wsl_root_command(*arguments: str, check: bool = False) -> subprocess.CompletedProcess[str]:
+    if os.name != "nt" or shutil.which("wsl.exe") is None:
+        pytest.skip("isolated WSL root environment is unavailable")
+    return subprocess.run(
+        ["wsl.exe", "-u", "root", "-e", *arguments],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=check,
     )
 
 
@@ -1135,12 +1185,338 @@ def test_runbook_requires_explicit_approval_for_zero_and_nonzero_candidate_revie
     approval = runbook.index(
         "Both zero-candidate and nonzero-candidate reviews require explicit Jeffrey/operator approval"
     )
-    flag_edit = runbook.index('lines[matches[0]] = "REMOTE_PRUNE_ENABLED=1"')
+    flag_edit = runbook.index("# BEGIN PRUNE_FLAG_NORMALIZATION")
 
     assert zero < approval < flag_edit
     assert "Zero candidates is not approval" in runbook
     assert "record `zero candidates` and then enable" not in runbook
     assert "Only after that approval" in runbook[approval:flag_edit]
+
+
+def test_install_env_writer_normalizes_all_systemd_semantic_managed_key_duplicates(tmp_path: Path) -> None:
+    managed = {
+        "BACKUP_PREFIX": "degen_green_prod_green_",
+        "KEEP_LOCAL_COUNT": "2",
+        "KEEP_REMOTE_DAILY": "7",
+        "KEEP_REMOTE_WEEKLY": "4",
+        "KEEP_REMOTE_MONTHLY": "3",
+        "REMOTE_PRUNE_ENABLED": "0",
+        "MIN_FREE_AFTER_BYTES": "10737418240",
+        "RETENTION_PLANNER": "/usr/local/sbin/degen-prod-db-retention",
+        "LOCK_FILE": "/run/lock/degen-prod-db-backup.lock",
+    }
+    wsl_dir = _wsl_root_command("mktemp", "-d", "/tmp/degen-env-normalize.XXXXXXXX", check=True).stdout.strip()
+    assert wsl_dir.startswith("/tmp/degen-env-normalize.")
+    env_path = f"{wsl_dir}/prod-db-backup.env"
+    source = tmp_path / "input.env"
+    lines = ["# REMOTE_PRUNE_ENABLED=comment-only\n", "UNRELATED = preserve exactly\n"]
+    for key in managed:
+        lines.extend((f" {key}=legacy-one\n", f"\t{key} =legacy-two\n"))
+    lines.append(" REMOTE_PRUNE_ENABLED =1\n")
+    original = "".join(lines)
+    _write_text_lf(source, original)
+    try:
+        _wsl_root_command(
+            "install",
+            "-o",
+            "root",
+            "-g",
+            "root",
+            "-m",
+            "0600",
+            _posix_path(source),
+            env_path,
+            check=True,
+        )
+        result = _run_runbook_python_block(
+            tmp_path,
+            "INSTALL_MANAGED_ENV_NORMALIZATION",
+            {
+                "BACKUP_ENV_FILE": env_path,
+                "BACKUP_PREFIX": managed["BACKUP_PREFIX"],
+            },
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        normalized = _wsl_root_command("cat", env_path, check=True).stdout
+        assert "# REMOTE_PRUNE_ENABLED=comment-only\n" in normalized
+        assert "UNRELATED = preserve exactly\n" in normalized
+        for key, value in managed.items():
+            semantic = [
+                line
+                for line in normalized.splitlines()
+                if (match := re.match(r"^[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*=", line))
+                and match.group(1) == key
+            ]
+            assert semantic == [f"{key}={value}"]
+        metadata = _wsl_root_command("stat", "-c", "%u:%g:%a", env_path, check=True).stdout.strip()
+        assert metadata == "0:0:600"
+
+        malformed = normalized + "REMOTE_PRUNE_ENABLED +=1\n"
+        _write_text_lf(source, malformed)
+        _wsl_root_command("install", "-o", "root", "-g", "root", "-m", "0600", _posix_path(source), env_path, check=True)
+        rejected = _run_runbook_python_block(
+            tmp_path,
+            "INSTALL_MANAGED_ENV_NORMALIZATION",
+            {"BACKUP_ENV_FILE": env_path, "BACKUP_PREFIX": managed["BACKUP_PREFIX"]},
+        )
+        assert rejected.returncode != 0
+        assert _wsl_root_command("cat", env_path, check=True).stdout == malformed
+    finally:
+        _wsl_root_command("rm", "-rf", "--", wsl_dir, check=True)
+
+
+def test_prune_flag_writer_normalizes_whitespace_duplicates_only_after_disabled_gate(tmp_path: Path) -> None:
+    wsl_dir = _wsl_root_command("mktemp", "-d", "/tmp/degen-prune-normalize.XXXXXXXX", check=True).stdout.strip()
+    assert wsl_dir.startswith("/tmp/degen-prune-normalize.")
+    env_path = f"{wsl_dir}/prod-db-backup.env"
+    source = tmp_path / "prune.env"
+    disabled_duplicates = (
+        "# REMOTE_PRUNE_ENABLED=comment-only\n"
+        "UNRELATED=preserve\n"
+        " REMOTE_PRUNE_ENABLED=0\n"
+        "REMOTE_PRUNE_ENABLED = 0\n"
+        "\tREMOTE_PRUNE_ENABLED\t=0\n"
+    )
+    _write_text_lf(source, disabled_duplicates)
+    try:
+        _wsl_root_command("install", "-o", "root", "-g", "root", "-m", "0600", _posix_path(source), env_path, check=True)
+        result = _run_runbook_python_block(
+            tmp_path,
+            "PRUNE_FLAG_NORMALIZATION",
+            {"BACKUP_ENV_FILE": env_path},
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        enabled = _wsl_root_command("cat", env_path, check=True).stdout
+        semantic = [
+            line
+            for line in enabled.splitlines()
+            if re.match(r"^[ \t]*REMOTE_PRUNE_ENABLED[ \t]*=", line)
+        ]
+        assert semantic == ["REMOTE_PRUNE_ENABLED=1"]
+        assert "# REMOTE_PRUNE_ENABLED=comment-only\n" in enabled
+        assert "UNRELATED=preserve\n" in enabled
+        assert _wsl_root_command("stat", "-c", "%u:%g:%a", env_path, check=True).stdout.strip() == "0:0:600"
+
+        already_enabled_duplicate = disabled_duplicates + " REMOTE_PRUNE_ENABLED =1\n"
+        _write_text_lf(source, already_enabled_duplicate)
+        _wsl_root_command("install", "-o", "root", "-g", "root", "-m", "0600", _posix_path(source), env_path, check=True)
+        rejected = _run_runbook_python_block(
+            tmp_path,
+            "PRUNE_FLAG_NORMALIZATION",
+            {"BACKUP_ENV_FILE": env_path},
+        )
+        assert rejected.returncode != 0
+        assert _wsl_root_command("cat", env_path, check=True).stdout == already_enabled_duplicate
+    finally:
+        _wsl_root_command("rm", "-rf", "--", wsl_dir, check=True)
+
+
+@pytest.mark.parametrize(
+    "failure_case",
+    [
+        "unset",
+        "empty",
+        "malformed",
+        "outside-root",
+        "symlink",
+        "wrong-owner",
+        "wrong-mode",
+        "missing-manifest",
+        "corrupt-manifest",
+        "missing-planner-state",
+    ],
+)
+def test_rollback_fails_before_side_effects_for_invalid_snapshot_state(
+    tmp_path: Path,
+    failure_case: str,
+) -> None:
+    case_number = [
+        "unset",
+        "empty",
+        "malformed",
+        "outside-root",
+        "symlink",
+        "wrong-owner",
+        "wrong-mode",
+        "missing-manifest",
+        "corrupt-manifest",
+        "missing-planner-state",
+    ].index(failure_case) + 1
+    stamp = f"209901{case_number:02d}T010203Z"
+    snapshot = f"/opt/degen/backups/config/{stamp}"
+    symlink_target = f"/tmp/degen-rollback-target-{stamp}"
+    setup = tmp_path / "setup-rollback.sh"
+    with setup.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "snapshot=$1\nstate=$2\nmanifest=$3\nowner=$4\nmode=$5\n"
+            "rm -rf -- \"$snapshot\"\nmkdir -p -- /opt/degen/backups/config\nmkdir -m 0700 -- \"$snapshot\"\n"
+            "for name in degen-prod-db-backup degen-prod-db-backup.service degen-prod-db-backup.timer prod-db-backup.env rclone.conf.audit; do printf '%s\\n' \"payload-$name\" > \"$snapshot/$name\"; done\n"
+            "if [[ \"$state\" == saved ]]; then printf '%s\\n' planner > \"$snapshot/degen-prod-db-retention\"; fi\n"
+            "if [[ \"$state\" == absent ]]; then printf '%s\\n' absent > \"$snapshot/degen-prod-db-retention.absent\"; fi\n"
+            "if [[ \"$manifest\" != missing ]]; then (cd \"$snapshot\" && find . -mindepth 1 -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\\0' | sort -z | xargs -0 sha256sum -- > SHA256SUMS); fi\n"
+            "if [[ \"$manifest\" == corrupt ]]; then printf '%s\\n' changed >> \"$snapshot/prod-db-backup.env\"; fi\n"
+            "chown -R \"$owner\" \"$snapshot\"\nchmod \"$mode\" \"$snapshot\"\n"
+        )
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    side_effect_log = tmp_path / "side-effects.log"
+    _write_executable(
+        fake_bin / "sudo",
+        """#!/usr/bin/env bash
+set -eu
+case "${1:-}" in
+  install|rm|systemctl)
+    printf 'SIDE_EFFECT:%s\\n' "$*" >> "$SIDE_EFFECT_LOG"
+    exit 97
+    ;;
+  *) exec /usr/bin/sudo -n "$@" ;;
+esac
+""",
+    )
+    values = {
+        "RUNBOOK_TEST_BIN": _posix_path(fake_bin),
+        "SIDE_EFFECT_LOG": _posix_path(side_effect_log),
+        "CONFIG_BACKUP_DIR": None,
+    }
+    cleanup_paths = [snapshot, symlink_target]
+    try:
+        if failure_case not in {"unset", "empty", "malformed", "outside-root"}:
+            state = "missing" if failure_case == "missing-planner-state" else "absent"
+            manifest = {
+                "missing-manifest": "missing",
+                "corrupt-manifest": "corrupt",
+            }.get(failure_case, "valid")
+            owner = "1000:1000" if failure_case == "wrong-owner" else "0:0"
+            mode = "0755" if failure_case == "wrong-mode" else "0700"
+            target = symlink_target if failure_case == "symlink" else snapshot
+            _wsl_root_command(
+                "bash",
+                _posix_path(setup),
+                target,
+                state,
+                manifest,
+                owner,
+                mode,
+                check=True,
+            )
+            if failure_case == "symlink":
+                _wsl_root_command("ln", "-s", symlink_target, snapshot, check=True)
+
+        if failure_case == "empty":
+            values["CONFIG_BACKUP_DIR"] = ""
+        elif failure_case == "malformed":
+            values["CONFIG_BACKUP_DIR"] = "/opt/degen/backups/config/not-a-timestamp"
+        elif failure_case == "outside-root":
+            values["CONFIG_BACKUP_DIR"] = symlink_target
+        elif failure_case != "unset":
+            values["CONFIG_BACKUP_DIR"] = snapshot
+
+        result = _run_runbook_shell_block(tmp_path, "FAIL_CLOSED_ROLLBACK", values)
+        assert result.returncode != 0
+        assert not side_effect_log.exists() or side_effect_log.read_text(encoding="utf-8") == ""
+    finally:
+        for path in cleanup_paths:
+            assert path.startswith(("/opt/degen/backups/config/2099", "/tmp/degen-rollback-target-2099"))
+            _wsl_root_command("rm", "-rf", "--", path, check=True)
+
+
+def test_rclone_commands_follow_proceed_and_root_only_token_config_snapshot() -> None:
+    runbook = RUNBOOK.read_text(encoding="utf-8")
+    proceed = runbook.index("wait for Jeffrey's explicit `proceed`")
+    snapshot = runbook.index('rclone.conf "$CONFIG_BACKUP_DIR/rclone.conf.audit"')
+    executable_rclone = [match.start() for match in re.finditer(r"(?m)^[ \t]*(?:sudo[ \t]+)?rclone\b", runbook)]
+
+    assert executable_rclone
+    assert proceed < snapshot < executable_rclone[0]
+    assert all(position > snapshot for position in executable_rclone)
+    assert "may refresh or rewrite `/etc/degen/rclone.conf`" in runbook
+    assert "hash and mtime changed" in runbook
+    assert "do not automatically restore `rclone.conf.audit`" in runbook.lower()
+    rollback = runbook[runbook.index("## Rollback") :]
+    assert not re.search(r"(?:install|cp).*rclone\.conf\.audit", rollback)
+
+
+@pytest.mark.parametrize(
+    ("scenario", "fresh", "expected_success"),
+    [
+        ("failed-service", False, False),
+        ("stale-dump", False, False),
+        ("stale-log", True, False),
+        ("valid", True, True),
+    ],
+)
+def test_post_run_freshness_gate_rejects_failed_or_stale_evidence(
+    tmp_path: Path,
+    scenario: str,
+    fresh: bool,
+    expected_success: bool,
+) -> None:
+    prefix = "degen_green_prod_green_"
+    older_dump, older_sidecar = _write_verified_pair(tmp_path, prefix, "20260628T100001Z", b"older\n")
+    dump_name, sidecar_name = _write_verified_pair(tmp_path, prefix, "20260629T100001Z", b"freshness\n")
+    service_start_epoch = 1782727200
+    artifact_epoch = service_start_epoch + 1 if fresh else service_start_epoch - 600
+    os.utime(tmp_path / older_dump, (service_start_epoch - 1200, service_start_epoch - 1200))
+    os.utime(tmp_path / older_sidecar, (service_start_epoch - 1200, service_start_epoch - 1200))
+    os.utime(tmp_path / dump_name, (artifact_epoch, artifact_epoch))
+    os.utime(tmp_path / sidecar_name, (artifact_epoch, artifact_epoch))
+    fake_bin = tmp_path / "freshness-bin"
+    fake_bin.mkdir()
+    systemctl = fake_bin / "systemctl"
+    journalctl = fake_bin / "journalctl"
+    _write_executable(
+        systemctl,
+        """#!/usr/bin/env bash
+set -eu
+if [[ "$*" == *"$SERVICE_UNIT"* ]]; then
+  if [[ "$FRESHNESS_SCENARIO" == failed-service ]]; then
+    printf '%s\\n' 'Result=exit-code' 'ExecMainCode=exited' 'ExecMainStatus=1' 'ExecMainStartTimestamp=2026-06-29T10:00:00Z'
+  else
+    printf '%s\\n' 'Result=success' 'ExecMainCode=exited' 'ExecMainStatus=0' 'ExecMainStartTimestamp=2026-06-29T10:00:00Z'
+  fi
+else
+  printf '%s\\n' 'LastTriggerUSec=2026-06-29T09:59:00Z'
+fi
+""",
+    )
+    _write_executable(
+        journalctl,
+        """#!/usr/bin/env bash
+set -eu
+if [[ "$FRESHNESS_SCENARIO" == stale-log ]]; then
+  printf '%s\\n' 'older unrelated log line'
+else
+  printf '%s\\n' 'Backup completed successfully'
+fi
+""",
+    )
+    values = {
+        "SYSTEMCTL_BIN": _posix_path(systemctl),
+        "JOURNALCTL_BIN": _posix_path(journalctl),
+        "DATE_BIN": "/usr/bin/date",
+        "STAT_BIN": "/usr/bin/stat",
+        "SERVICE_UNIT": "degen-prod-db-backup.service",
+        "TIMER_UNIT": "degen-prod-db-backup.timer",
+        "BACKUP_DIR": _posix_path(tmp_path),
+        "BACKUP_PREFIX": prefix,
+        "FRESHNESS_SCENARIO": scenario,
+    }
+
+    result = _run_runbook_shell_block(tmp_path, "POST_RUN_FRESHNESS_GATE", values)
+
+    assert (result.returncode == 0) is expected_success, result.stdout + result.stderr
+    if expected_success:
+        assert f"fresh_backup={dump_name}" in result.stdout
+    freshness_block = _runbook_shell_block("POST_RUN_FRESHNESS_GATE")
+    assert '--since "$service_start"' in freshness_block
+    for required_property in ("Result", "ExecMainCode", "ExecMainStatus", "ExecMainStartTimestamp", "LastTriggerUSec"):
+        assert required_property in freshness_block
+    runbook = RUNBOOK.read_text(encoding="utf-8")
+    assert runbook.index("# BEGIN POST_RUN_FRESHNESS_GATE") < runbook.index(
+        "# BEGIN POST_RUN_CHECKSUM_VERIFICATION"
+    ) < runbook.index("# BEGIN POST_RUN_PLANNER_REPORTS")
 
 
 def test_systemd_units_and_calendar_validate_when_systemd_analyze_is_available(tmp_path: Path) -> None:
