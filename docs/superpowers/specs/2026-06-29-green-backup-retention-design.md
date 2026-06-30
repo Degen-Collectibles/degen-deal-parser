@@ -1,110 +1,182 @@
 # Green PostgreSQL Backup Retention Design
 
-Date: 2026-06-29
-Status: Approved for direct implementation by Jeffrey
+Dates: 2026-06-29; revised 2026-06-30
+Status: Revised design approved in conversation by Jeffrey; written-spec review pending
 
 ## Problem
 
-Green's host-local backup job keeps seven days of PostgreSQL dumps while each current dump is about 17.3 GB. Seven local dumps would require roughly 121 GB before accounting for temporary output and manual backups, but Green currently has about 101 GB free. The current remote policy keeps 30 daily dumps, which trends toward roughly 520 GB.
+Green's host-local job keeps seven days of PostgreSQL dumps while each current dump is about 17.3 GB. Seven local dumps would require roughly 121 GB before temporary output and manual preservation copies, but Green had about 101 GB free during the audit. The current remote policy keeps 30 daily dumps, trending toward roughly 520 GB.
 
-Overwriting one fixed backup filename would reduce visible storage, but it could replace the only good recovery point with a partial, corrupt, or logically bad backup. Retention must therefore remain timestamped and transactional.
+Overwriting one fixed filename would reduce storage but could replace the only good recovery point with a partial, corrupt, or logically bad backup. Retention must remain timestamped, verified, and transactional.
 
-## Current State
+## Confirmed Current State
 
-- Production runs on Green (`openclaw-9902ae`).
-- The host-local timer runs nightly at 03:15 America/Los_Angeles with up to 20 minutes of randomized delay.
-- The installed job writes custom-format PostgreSQL dumps under `/opt/degen/backups/db` and uploads dump/checksum pairs to OneDrive with `rclone`.
+- Production is Green (`openclaw-9902ae`); the application remains under `/opt/degen/app`.
+- The timer is enabled and active. It runs nightly at 03:15 America/Los_Angeles with up to 20 minutes of randomized delay and persistent catch-up.
+- The current job writes custom-format PostgreSQL dumps under `/opt/degen/backups/db` and uploads dump/checksum pairs to `onedrive:backups/degen-db` with rclone 1.74.1.
 - Live retention is `KEEP_LOCAL_DAYS=7` and `KEEP_REMOTE_DAYS=30`.
-- The installed Green script, service, timer, and environment template are not tracked in Git; the repository only contains the legacy Windows backup implementation and planning documents.
-- Manual preservation directories are outside automatic retention and must not be deleted by this change.
+- Green has only Python 3.10.12 available through its system `python3` paths.
+- `/run/lock` is root-owned but mode `1777`; the proposed lock must not live directly there under a predictable filename.
+- `/etc/degen/rclone.conf` is a regular root-owned `0600` file under a root-owned `0750` directory.
+- `/etc/degen/prod-db-backup.env` currently contains only simple, single-line assignments, no continuations, multiline quotes, or duplicate keys. Its five non-secret path values equal the audited defaults.
+- `/opt/degen/backups/db` is a root-owned, non-symlink `0750` directory with one complete dump/checksum pair.
+- The installed script, service, timer, environment contract, and runbook are not yet tracked on `main`.
+- Manual preservation directories are outside automatic retention and must never be deleted by this change.
 
 ## Success Criteria
 
 1. Every successful backup remains a uniquely timestamped dump plus checksum sidecar.
 2. Green keeps exactly the two newest completed and verified dump/checksum pairs.
 3. A new backup is validated locally and remotely before any prior local pair is deleted.
-4. OneDrive keeps the union of:
-   - the newest backup for each of the latest seven UTC dates;
-   - the newest backup for each of the latest four ISO weeks;
-   - the newest backup for each of the latest three calendar months.
-5. Unknown filenames, incomplete pairs, manual backups, and unparseable objects are never deleted automatically.
-6. Remote pruning supports a deterministic dry-run that lists exact candidates before deletion is enabled.
-7. Concurrent backup invocations are serialized with a host lock.
-8. Backup failures are visible in systemd/journal logs and leave the last good backups intact.
-9. The Linux backup script, service, timer, sanitized environment template, tests, and runbook are tracked in Git.
-10. No application, worker, bot, or PostgreSQL service restart is required.
+4. The second local pair that would remain after pruning is revalidated before older pairs are removed.
+5. OneDrive keeps the union of the newest backup from each of the latest seven distinct UTC dates, four distinct ISO weeks, and three distinct calendar months.
+6. Retention pruning never deletes unknown names, incomplete pairs, manual backups, unowned temporary objects, future timestamps, or unparseable objects. State-tracked temporary objects created by the current run or disposable probe may be cleaned up.
+7. Remote pruning emits a deterministic exact candidate list and remains disabled until a separate approval after dry-run review.
+8. Concurrent manual, timer, and deployment activity is serialized with a validated root-only lock.
+9. Backup, cleanup, validation, and rollback failures remain visible in journal/operator output without replacing the primary failure status.
+10. Manual validation and the scheduled service use the same effective configuration.
+11. Repo-managed installation assets use only bytes exported from an immutable reviewed Git commit and compared to a reviewed manifest. The host-derived environment is staged separately, preserves unrelated assignments, and receives its own manifest entry.
+12. Installation is transactional: staged and validated before mutation, protected from timer races, and automatically restored on an installation failure.
+13. Every production phase is resumable from validated root-only operation state rather than relying on one long-lived shell.
+14. The next scheduled-run proof must be newer than installation and policy enablement; stale successful backups cannot satisfy it.
+15. The Linux scripts, service, timer, sanitized template, tests, design, plan, and runbook are tracked in Git.
+16. No application, PostgreSQL, web, worker, or bot service restart is required.
 
 ## Scope
 
-- Add a repo-managed Green backup orchestrator and deterministic retention planner.
-- Add systemd service/timer files and a secret-free environment template.
-- Add focused tests for retention selection, pair safety, dry-run behavior, and failure ordering.
-- Back up the current host-local backup configuration before installation.
-- Install the reviewed files on Green and reload only systemd metadata/timer configuration.
-- Inventory OneDrive read-only, run remote pruning in dry-run mode, verify exact candidates, then enable the approved policy.
+- Make the planner and tests compatible with Green's Python 3.10 runtime.
+- Add a repo-managed backup orchestrator and credential-free deterministic retention planner.
+- Add the systemd service/timer, a secret-free environment template, focused tests, and a production runbook.
+- Replace the predictable `/run/lock` file with a lock below a validated root-only runtime directory.
+- Make the script load and validate the same managed service environment for timer and direct validation modes.
+- Reject complex `EnvironmentFile` constructs before mutation; preserve unrelated simple assignments and normalize every managed key to one canonical assignment.
+- Replace the disproven rclone `--immutable` assumption with the locally verified rclone 1.74.1 no-clobber composition `--ignore-existing --error-on-no-transfer`, plus case-insensitive inventory checks and post-operation verification.
+- Publish the reviewed branch without merging it, export the exact reviewed commit into a root-owned staging directory, and verify a fixed manifest before installation.
+- After explicit production approval, temporarily stop only the backup timer, verify the backup service is inactive, acquire the backup lock, install staged files transactionally, reload systemd metadata, and restore the timer's exact prior active/enabled state.
+- Snapshot current host configuration and persist a root-only machine-readable operation record for installation, prune enablement, rollback, and next-run proof.
+- Treat rclone OAuth refresh as a possible approved credential-file mutation after the production checkpoint. Snapshot metadata and contents for audit/emergency recovery, but do not automatically restore a potentially stale rotated token.
+- After explicit approval, run a disposable remote-prefix probe to confirm OneDrive behavior before enabling deletion on the production prefix.
 
 ## Non-Scope
 
+- Merging this branch into `main` during installation staging.
 - Changing PostgreSQL credentials, schema, data, or service configuration.
-- Restarting or redeploying the Degen application.
-- Deleting manual backup directories.
-- Purging OneDrive recycle-bin contents.
-- Implementing PostgreSQL physical/incremental backup tooling such as pgBackRest or WAL-G.
-- Repairing separately discovered legacy credential exposure; that remains a merge blocker for the security branch.
+- Restarting or redeploying the Degen application or its web, worker, bot, or PostgreSQL services.
+- Deleting manual backup directories or OneDrive recycle-bin contents.
+- Supporting arbitrary multiline/continued systemd environment files; the installer fails closed and requires a separate migration if those constructs appear.
+- Supporting another writer in `onedrive:backups/degen-db`; the backup job owns that namespace exclusively.
+- Implementing physical/incremental backup tooling such as pgBackRest or WAL-G.
+- Repairing the separately discovered legacy database credential exposure; that remains a distinct merge blocker.
 
-## Architecture and Data Flow
+## Runtime Architecture
 
-The job keeps the existing custom-dump approach and changes retention from age-based deletion to verified count/tier selection:
+### Retention planner
 
-1. Acquire an exclusive backup lock.
-2. Preflight required commands, database configuration, destination paths, and free space.
-3. Write `.<timestamp>.dump.partial` on Green with `pg_dump -Fc -Z6`.
-4. Validate the archive with `pg_restore --list` and calculate SHA-256.
-5. Atomically publish the local timestamped dump and checksum sidecar.
-6. Upload both files under temporary remote names.
-7. Verify remote object sizes and checksum-sidecar content, then atomically move them to final remote names.
-8. Prune local recognized pairs to the newest two.
-9. Calculate the remote 7-daily/4-weekly/3-monthly keep set. Log exact delete candidates; delete only when the explicit remote-prune flag is enabled.
+The Python 3.10-compatible planner accepts only inventory metadata and policy counts. It recognizes exact owned names, forms complete pairs, protects malformed/incomplete/future objects, and emits stable keep/delete/protected decisions. It never receives database or rclone credentials.
 
-The retention planner accepts inventory metadata and emits deterministic keep/delete decisions. It never receives database credentials.
+### Backup orchestrator
+
+The Bash orchestrator performs this ordered flow:
+
+1. Load the same root-owned managed environment used by systemd. Reject duplicates, unsafe values, continuations, or multiline constructs.
+2. Validate the effective database identity, host-derived prefix, local paths, remote path, policy, rclone config metadata, and free space.
+3. Validate and acquire a lock under `/run/degen-prod-db-backup/`, whose parent is root-owned, non-symlinked, and not group/world writable.
+4. Create random same-directory partial files with `mktemp`.
+5. Run `pg_dump -Fc -Z6`, validate with `pg_restore --list`, and calculate SHA-256.
+6. Publish the local pair with no-replace semantics.
+7. Upload both objects under unpredictable temporary remote names using strict no-existing flags.
+8. Verify remote temporary object size and checksum-sidecar content.
+9. Move to final names with the same strict flags; verify source disappearance, final size, and sidecar content.
+10. Revalidate the previous pair that will remain locally. If it fails, stop without pruning.
+11. Prune only planner-approved local names to the two verified pairs.
+12. Emit the remote 7/4/3 plan and delete exact candidates only in normal run mode when the explicit flag is enabled.
+
+Cleanup claims ownership only after successful creation/upload. Signals force a nonzero exit, owned cleanup failures produce secret-safe warnings, and all cleanup attempts preserve the primary status.
+
+### Effective configuration
+
+The service and direct modes use `/etc/degen/prod-db-backup.env` through one parser. The supported host file is intentionally limited to comments, blank lines, and simple one-line assignments. The parser fails before mutation on continuations, multiline quoting, malformed managed keys, unsafe paths, or semantic duplicates.
+
+The deployment requires the audited effective values unless a new design is approved:
+
+- `APP_ENV_FILE=/opt/degen/web.env`
+- `BACKUP_DIR=/opt/degen/backups/db`
+- `LOG_DIR=/var/log/degen`
+- `RCLONE_CONFIG=/etc/degen/rclone.conf`
+- `RCLONE_REMOTE_PATH=onedrive:backups/degen-db`
+
+`BACKUP_PREFIX` is derived on-host from a verified existing complete pair, checked against the actual database name and short hostname, and persisted as a non-secret managed key.
+
+## Transactional Installation
+
+1. Complete local tests and whole-change review.
+2. Push the reviewed feature branch without merging it and record the exact commit SHA and manifest.
+3. Present a production preflight naming every target and possible side effect. Obtain explicit `proceed`.
+4. Export only the required files from that exact commit into a root-owned staging directory outside `/opt/degen/app`; verify the commit and manifest.
+5. Snapshot the current script, service, timer, environment, planner presence/absence, rclone config audit copy, timer state, PIDs, hashes, modes, and non-secret effective configuration. Validate the snapshot manifest immediately.
+6. Precompute the final environment and all install files in staging. Run syntax, policy, path, and metadata checks before the first host-file replacement.
+7. Verify the service is inactive, stop only the backup timer, acquire the deployment/backup lock, and install with a rollback trap active.
+8. Reload systemd metadata, run non-destructive validation with the exact service configuration, restore the timer's prior state, and record the installation epoch and installed hashes in operation state.
+9. Run remote access only after the approved rclone audit snapshot. Bracket every rclone command group with config hash/mtime evidence because OAuth refresh may rewrite the file.
+10. Run and pass the state-tracked disposable remote-prefix collision/cleanup probe, then produce the production-prefix dry-run and present exact candidates.
+11. A second explicit approval is required even when the candidate set is empty, because future scheduled runs may delete.
+12. In a fresh phase, revalidate installed hashes, environment, rclone evidence, and inventory. Stop only the backup timer, verify the service is inactive, reacquire the backup lock, stage the environment change and policy epoch transactionally, then enable pruning and restore the timer's prior state. A failure restores the prior environment and removes the incomplete epoch record before releasing the lock.
+
+No checkout switch, app deployment, or application/database service restart occurs.
 
 ## Safety Rules
 
 - No in-place overwrite of the only backup.
-- No local prune before local archive validation and verified remote publication.
-- No remote deletion of unknown names, incomplete pairs, or the newest successful backup.
-- A failed upload, size mismatch, sidecar mismatch, or retention-planner error stops pruning.
-- Local retention is count-based, avoiding `find -mtime` rounding surprises.
-- Production secrets remain only in the root-owned host environment file; the tracked template contains placeholders.
-- Remote pruning is initially deployed disabled and enabled only after exact dry-run review.
-
-## Alternatives Considered
-
-1. **Overwrite one fixed daily file:** smallest storage footprint, rejected because a failed run can destroy the only recovery point.
-2. **Keep two local and retain 30 remote days:** smallest implementation change, but remote storage still trends toward about 520 GB and age-only pruning is imprecise.
-3. **Keep two local with 7/4/3 remote tiers:** approved. It uses about 34.7 GB steady-state locally, about 52 GB at peak during the next dump, and at most roughly 243 GB remotely at today's dump size.
+- No local prune before local archive validation, verified remote publication, and validation of both pairs that will remain.
+- No retention deletion of unknown, incomplete, unowned temporary, future, or newest objects. State-tracked current-run and disposable-probe temporary objects may be cleaned up.
+- No remote command before the explicit production checkpoint and root-only rclone audit snapshot.
+- No reliance on `--immutable` for direct rclone operations; local v1.74.1 probes proved it can overwrite a different destination.
+- The production remote prefix is single-writer. If another writer is discovered, stop and redesign.
+- The rclone no-existing composition is combined with case-insensitive prechecks, unpredictable temp names, exclusive host locking, and final verification. OneDrive does not expose a universal atomic create-if-absent guarantee, so a hostile post-check race remains a documented platform limit.
+- A failed dump, validation, upload, move, verification, planner, cleanup, environment parse, staging, or manifest check stops destructive work.
+- The timer is restored to its exact prior state on success or rollback.
+- Every later policy mutation repeats the timer-stop, service-inactive, lock, staged-write, rollback, and timer-restoration controls; no approval phase relies on the installation shell remaining alive.
+- Production secrets remain only in root-owned host files; tracked executable/configuration assets contain no secret values or host-derived backup prefix.
 
 ## Verification
 
-- Unit tests cover daily/weekly/monthly overlap, malformed names, incomplete pairs, newest-backup protection, and deterministic output.
-- Integration-style tests use temporary directories and stubbed `pg_dump`, `pg_restore`, and `rclone` commands to prove pruning happens only after verification.
-- Run shell syntax/static checks and the relevant pytest module, followed by the full repository suite.
-- On Green, verify installed hashes, ownership, modes, timer schedule, dry-run remote candidates, and unchanged application/database PIDs.
-- Allow one successful scheduled or explicitly approved manual backup, then verify local count, remote pair integrity, disk space, and journal status.
+- Planner tests cover policy overlap, ISO boundaries, deterministic output, malformed/incomplete/future objects, and Python 3.10 execution.
+- Orchestrator tests model real rclone 1.74.1 direct-operation semantics, strict no-existing flags, signals, cleanup failures, symlink/no-clobber paths, service/direct configuration parity, and destructive failure ordering.
+- A local official-rclone 1.74.1 probe verifies absent/existing behavior for `copyto` and `moveto` with the selected flags.
+- Shell syntax, systemd directives, timer calendar, focused tests, and the full repository suite pass before each commit.
+- The production preflight verifies Green's Python version, exact source SHA/manifest, effective non-secret configuration, lock/runtime directory, backup directory, rclone metadata, timer/service state, disk, existing pair integrity, and unchanged application/database PIDs.
+- A disposable approved OneDrive prefix verifies no-clobber and cleanup behavior without touching production backup objects.
+- The next-run gate requires service success, a trigger/start after the recorded policy epoch, a fresh success log, fresh dump/sidecar mtimes, valid sidecar grammar, SHA-256, archive listing, installed hash parity, local two-pair policy, remote integrity, and unchanged application/database PIDs.
 
 ## Rollback
 
-Before installation, copy the current script, service, timer, and environment file into a root-only timestamped configuration backup. Rollback restores those exact files, reloads systemd metadata, and returns the timer to its prior state. No database rollback is involved.
+The root-only snapshot records current files, absence markers, hashes, metadata, timer state, PIDs, effective configuration, and operation epochs. Installation rollback validates the snapshot before any restore, restores saved script/planner/unit/environment contents and modes, reloads systemd metadata, restores the timer's exact prior state, and verifies installed hashes and unchanged application/database PIDs.
 
-Remote deletion is reversible only through OneDrive retention/recycle behavior, so exact candidate review precedes enabling it. Local automatic pruning affects only recognized backup pairs after a verified remote copy exists.
+The rclone config audit copy is not restored automatically because OAuth refresh-token rotation may invalidate the old copy. Credential recovery requires a separate explicit decision after comparing current authentication state and audit evidence.
 
-## Risks
+Rollback cannot recover local pairs already pruned or remote objects already deleted. These irreversible effects are why installation is deployed with pruning disabled and why exact candidate review has a second approval gate.
 
-- OneDrive object metadata may not expose SHA-256 directly; the job therefore verifies size plus the uploaded checksum-sidecar content.
-- OneDrive recycle-bin retention may continue consuming quota after remote deletion.
-- A large database-growth event could increase temporary disk pressure; preflight and post-run free-space checks remain mandatory.
-- Installing host-level systemd files is production-visible configuration work even though it does not restart the application.
+## Risks and Accepted Limits
+
+- OneDrive object metadata may not expose SHA-256; the job verifies size plus uploaded checksum-sidecar content.
+- OneDrive/rclone has no universal atomic create-if-absent primitive for direct file operations. Strict flags, exclusive ownership, unpredictable temporary names, locks, and verification reduce this to a documented external-writer race.
+- Ordinary rclone access may refresh/rewrite `/etc/degen/rclone.conf`; the audit copy can itself become stale and is not automatic rollback material.
+- Stopping the backup timer during installation temporarily skips trigger delivery, but the timer remains enabled and persistent and is restored immediately. The application and database continue running.
+- A database-growth event can increase temporary disk pressure; preflight requires current database size plus a free-space reserve.
+- Installation modifies host-level systemd/configuration files even though application processes are not restarted.
+- If Green's simple environment-file structure changes, deployment stops rather than guessing at systemd multiline semantics.
+- `pg_restore --list` proves archive readability, not a full logical restore. The previously canceled full restore rehearsal remains an accepted recovery risk; this change does not claim end-to-end restore proof.
+
+## Alternatives Considered
+
+1. **Overwrite one fixed daily file:** rejected because a failed run can destroy the only recovery point.
+2. **Keep two local and 30 remote days:** rejected because remote storage still trends toward about 520 GB.
+3. **Use direct rclone operations with `--immutable`:** rejected after official rclone 1.74.1 local probes showed different existing destinations are overwritten.
+4. **Install directly from `/opt/degen/app`:** rejected because the checkout may be stale or dirty and is not immutable reviewed provenance.
+5. **Leave the timer active during installation:** rejected because a trigger can execute mixed old/new state.
+6. **Use a full systemd environment parser:** rejected as unnecessary for the audited simple host file; fail-closed detection of complex constructs is smaller and safer.
+7. **Two local with 7/4/3 remote tiers plus revised safeguards:** approved in conversation. Steady local use is about 34.7 GB, peak about 52 GB, and remote use at most roughly 243 GB at the current dump size.
 
 ## Open Questions
 
-None. The approved policy is two local backups and remote 7-daily/4-weekly/3-monthly retention, with remote deletion gated by an exact dry-run review.
+None for the design. Production execution still requires the documented preflight and two explicit approvals: installation/rclone validation, then remote-prune enablement.
