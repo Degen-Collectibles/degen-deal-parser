@@ -320,6 +320,14 @@ elif name == "rclone":
         target = remote_path(args[2])
         kind = "sidecar" if ".sha256" in source.name else "dump"
         trace(f"rclone:copy:{kind}")
+        if os.environ.get("FAKE_RACE_TEMP_ON") == kind:
+            remote_root = Path(os.environ["FAKE_REMOTE_ROOT"])
+            remote_prefix = os.environ["RCLONE_REMOTE_PATH"].rstrip("/") + "/"
+            requested_name = args[2][len(remote_prefix):]
+            race_name = requested_name if os.environ.get("FAKE_RACE_TEMP_CASE") == "exact" else requested_name.swapcase()
+            (remote_root / race_name).write_bytes(b"foreign-raced-temp")
+            trace(f"rclone:race:{kind}:{race_name}")
+            target = remote_path(args[2])
         if immutable and target.exists():
             raise SystemExit(83)
         target.write_bytes(source.read_bytes())
@@ -742,11 +750,17 @@ def test_process_group_term_cleans_only_current_run_temps(
     current_dump, current_sidecar = _pair_names()
     assert not list(harness.backup_dir.glob(f".{current_dump}.partial*"))
     assert not list(harness.backup_dir.glob(f".{current_sidecar}.partial*"))
-    assert not [
+    current_remote_temps = [
         path
         for path in harness.remote_dir.iterdir()
         if path.name.lower().startswith(".degen-upload-") and current_dump.lower() in path.name.lower()
     ]
+    if blocked_operation == "pg_dump":
+        assert current_remote_temps == []
+    else:
+        assert [path.name for path in current_remote_temps] == [f".degen-upload-TESTTOKEN-{current_dump}"]
+        assert current_remote_temps[0].read_bytes() == b"DEGEN-CUSTOM-DUMP\x00verified-payload\n"
+        assert f"rclone:delete:{current_remote_temps[0].name}" not in harness.trace_lines()
     assert not (harness.remote_dir / current_dump).exists()
     assert not (harness.remote_dir / current_sidecar).exists()
     if blocked_operation == "pg_dump":
@@ -793,6 +807,53 @@ def test_remote_final_collision_created_during_upload_is_not_overwritten(harness
     assert not (harness.remote_dir / current_sidecar).exists()
     assert not any(path.name.lower().startswith(".degen-upload-") for path in harness.remote_dir.iterdir())
     assert not any(line.startswith("planner:") for line in harness.trace_lines())
+
+
+@pytest.mark.parametrize("race_case", ["exact", "case-variant"])
+def test_failed_dump_temp_copy_never_claims_or_deletes_raced_object(
+    harness: BackupHarness,
+    race_case: str,
+) -> None:
+    current_dump, _ = _pair_names()
+    requested_temp = f".degen-upload-TESTTOKEN-{current_dump}"
+    raced_name = requested_temp if race_case == "exact" else requested_temp.swapcase()
+
+    result = harness.run(
+        overrides={
+            "FAKE_RACE_TEMP_ON": "dump",
+            "FAKE_RACE_TEMP_CASE": "exact" if race_case == "exact" else "case-variant",
+        }
+    )
+
+    assert result.returncode != 0
+    assert (harness.remote_dir / raced_name).read_bytes() == b"foreign-raced-temp"
+    trace = harness.trace_lines()
+    assert f"rclone:delete:{raced_name}" not in trace
+    assert "not cleanup-owned" in result.stdout
+    assert not any(line.startswith("planner:") for line in trace)
+
+
+def test_failed_sidecar_copy_preserves_failed_object_but_cleans_successful_dump(harness: BackupHarness) -> None:
+    current_dump, current_sidecar = _pair_names()
+    dump_temp = f".degen-upload-TESTTOKEN-{current_dump}"
+    sidecar_temp = f".degen-upload-TESTTOKEN-{current_sidecar}"
+
+    result = harness.run(
+        overrides={
+            "FAKE_RACE_TEMP_ON": "sidecar",
+            "FAKE_RACE_TEMP_CASE": "case-variant",
+        }
+    )
+
+    raced_sidecar = sidecar_temp.swapcase()
+    assert result.returncode != 0
+    assert not (harness.remote_dir / dump_temp).exists()
+    assert (harness.remote_dir / raced_sidecar).read_bytes() == b"foreign-raced-temp"
+    trace = harness.trace_lines()
+    assert f"rclone:delete:{dump_temp}" in trace
+    assert f"rclone:delete:{raced_sidecar}" not in trace
+    assert "not cleanup-owned" in result.stdout
+    assert not any(line.startswith("planner:") for line in trace)
 
 
 @pytest.mark.parametrize("collision_kind", ["temp", "final"])
@@ -970,7 +1031,18 @@ def test_preverification_and_planner_failures_never_prune_old_pairs(
     current_dump, current_sidecar = _pair_names()
     assert not list(harness.backup_dir.glob(f".{current_dump}.partial*"))
     assert not list(harness.backup_dir.glob(f".{current_sidecar}.partial*"))
-    assert not any(path.name.startswith(".degen-upload-") for path in harness.remote_dir.iterdir())
+    dump_temp = f".degen-upload-TESTTOKEN-{current_dump}"
+    sidecar_temp = f".degen-upload-TESTTOKEN-{current_sidecar}"
+    remaining_temps = {
+        path.name for path in harness.remote_dir.iterdir() if path.name.startswith(".degen-upload-")
+    }
+    expected_remaining_temps = {
+        "copy_dump": {dump_temp},
+        "copy_sidecar": {sidecar_temp},
+    }.get(failure, set())
+    assert remaining_temps == expected_remaining_temps
+    if failure in {"copy_dump", "copy_sidecar"}:
+        assert "not cleanup-owned" in result.stdout
     trace = harness.trace_lines()
     expected_operation = {
         "pg_dump": "pg_dump",
@@ -989,6 +1061,11 @@ def test_preverification_and_planner_failures_never_prune_old_pairs(
     assert expected_operation in trace
     remote_deletes = _remote_delete_names(trace)
     assert all(name.startswith(".degen-upload-") for name in remote_deletes)
+    if failure == "copy_dump":
+        assert dump_temp not in remote_deletes
+    elif failure == "copy_sidecar":
+        assert dump_temp in remote_deletes
+        assert sidecar_temp not in remote_deletes
     current_remote_names = {
         name
         for name in (current_dump, current_sidecar)

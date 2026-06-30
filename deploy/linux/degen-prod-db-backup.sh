@@ -361,14 +361,16 @@ publish_remote_pair() {
     assert_remote_names_absent remote_inventory "Pre-upload" \
         "$temp_dump_name" "$temp_sidecar_name" "$dump_name" "$sidecar_name"
 
-    owns_remote_dump_temp=1
     if ! rclone --config "$RCLONE_CONFIG" --immutable copyto "$dump_path" "$owned_remote_dump_temp" >/dev/null 2>&1; then
+        log "Remote dump temp was not cleanup-owned after failed upload and remains protected: $temp_dump_name"
         die "Remote dump temporary upload failed"
     fi
-    owns_remote_sidecar_temp=1
+    owns_remote_dump_temp=1
     if ! rclone --config "$RCLONE_CONFIG" --immutable copyto "$sidecar_path" "$owned_remote_sidecar_temp" >/dev/null 2>&1; then
+        log "Remote checksum temp was not cleanup-owned after failed upload and remains protected: $temp_sidecar_name"
         die "Remote checksum temporary upload failed"
     fi
+    owns_remote_sidecar_temp=1
 
     verify_remote_size "$owned_remote_dump_temp" "$local_size" "Temporary"
     verify_remote_sidecar "$owned_remote_sidecar_temp" "$checksum" "$dump_name" "Temporary"
