@@ -41,19 +41,112 @@ BASH = _usable_bash()
 
 
 def _posix_path(path: Path) -> str:
-    resolved = str(path.resolve())
+    resolved = os.path.abspath(path)
     if os.name != "nt":
         return resolved
+    normalized = resolved.replace("\\", "/")
+    if normalized.startswith("//wsl.localhost/") or normalized.startswith("//wsl$/"):
+        parts = normalized.split("/", 4)
+        assert len(parts) == 5 and parts[4], resolved
+        return f"/{parts[4]}"
     drive, tail = os.path.splitdrive(resolved)
     assert drive and len(drive) == 2, resolved
     return f"/mnt/{drive[0].lower()}/{tail.lstrip('\\/').replace('\\', '/')}"
+
+
+def _symlink(target: Path, link: Path) -> None:
+    if os.name == "nt":
+        subprocess.run(
+            ["wsl.exe", "-e", "ln", "-s", _posix_path(target), _posix_path(link)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+    else:
+        link.symlink_to(target, target_is_directory=target.is_dir())
+
+
+def _is_symlink(path: Path) -> bool:
+    if os.name == "nt":
+        return subprocess.run(
+            ["wsl.exe", "-e", "test", "-L", _posix_path(path)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        ).returncode == 0
+    return path.is_symlink()
+
+
+def _chown(path: Path, uid: int) -> None:
+    if os.name == "nt":
+        subprocess.run(
+            ["wsl.exe", "-u", "root", "-e", "chown", str(uid), _posix_path(path)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+    else:
+        os.chown(path, uid, -1)
+
+
+def _effective_uid() -> int:
+    if os.name == "nt":
+        return int(
+            subprocess.run(
+                ["wsl.exe", "-e", "id", "-u"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=True,
+            ).stdout.strip()
+        )
+    return os.geteuid()
+
+
+def _native_behavior_root(tmp_path: Path) -> Path:
+    if os.name != "nt":
+        tmp_path.chmod(0o700)
+        return tmp_path
+    created = subprocess.run(
+        ["wsl.exe", "-e", "mktemp", "-d", "/tmp/degen-backup-test.XXXXXXXX"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    ).stdout.strip()
+    converted = subprocess.run(
+        ["wsl.exe", "-e", "wslpath", "-w", created],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    ).stdout.strip()
+    root = Path(converted)
+    root.chmod(0o700)
+    return root
 
 
 def _write_executable(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="\n") as handle:
         handle.write(content)
-    path.chmod(0o755)
+    _chmod(path, 0o755)
+
+
+def _chmod(path: Path, mode: int) -> None:
+    if os.name == "nt" and str(path).startswith(("\\\\wsl.localhost\\", "\\\\wsl$\\")):
+        subprocess.run(
+            ["wsl.exe", "-e", "chmod", f"{mode:o}", _posix_path(path)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+    else:
+        path.chmod(mode)
 
 
 FAKE_COMMAND = r'''#!/usr/bin/env python3
@@ -63,6 +156,7 @@ import os
 from pathlib import Path
 import shutil
 import sys
+import time
 
 name = Path(sys.argv[0]).name
 args = sys.argv[1:]
@@ -83,9 +177,22 @@ def fail_if(label, code=71):
 
 def require_pgdatabase():
     value = os.environ.get("PGDATABASE", "")
-    if not value or any("postgresql://" in item for item in args):
+    expected = os.environ.get("FAKE_EXPECT_PGDATABASE")
+    if not value or any("://" in item for item in args) or (expected is not None and value != expected):
         print("PGDATABASE transport contract violated", file=sys.stderr)
         raise SystemExit(72)
+
+
+def block_if(label):
+    if os.environ.get("FAKE_BLOCK") != label:
+        return
+    Path(os.environ["FAKE_BLOCK_READY"]).write_text(label, encoding="utf-8")
+    while True:
+        time.sleep(1)
+
+
+def ascii_fold(value):
+    return value.translate(str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"))
 
 
 def remote_path(value):
@@ -101,7 +208,12 @@ def remote_path(value):
     if not relative or "/" in relative or relative in {".", ".."}:
         print("unsafe remote object", file=sys.stderr)
         raise SystemExit(74)
-    return root / relative
+    folded = ascii_fold(relative)
+    matches = [child for child in root.iterdir() if ascii_fold(child.name) == folded]
+    if len(matches) > 1:
+        print("ambiguous case-insensitive remote objects", file=sys.stderr)
+        raise SystemExit(82)
+    return matches[0] if matches else root / relative
 
 
 if name == "hostname":
@@ -138,6 +250,7 @@ elif name == "pg_dump":
     if output is None:
         raise SystemExit(75)
     Path(output).write_bytes(b"DEGEN-CUSTOM-DUMP\x00verified-payload\n")
+    block_if("pg_dump")
     fail_if("pg_dump")
 elif name == "pg_restore":
     trace("pg_restore")
@@ -152,6 +265,9 @@ elif name == "sha256sum":
     targets = [item for item in args if item != "--" and not item.startswith("-")]
     target = Path(targets[-1])
     digest = hashlib.sha256(target.read_bytes()).hexdigest()
+    race_final = os.environ.get("FAKE_CREATE_LOCAL_FINAL")
+    if race_final:
+        Path(race_final).write_bytes(b"local-final-race-sentinel")
     print(f"{digest}  {target}")
 elif name == "mktemp":
     trace("mktemp")
@@ -177,8 +293,19 @@ elif name == "rm":
             if not force:
                 raise
 elif name == "rclone":
-    if len(args) >= 2 and args[0] == "--config":
-        args = args[2:]
+    immutable = "--immutable" in args
+    filtered = []
+    index = 0
+    while index < len(args):
+        if args[index] == "--config" and index + 1 < len(args):
+            index += 2
+            continue
+        if args[index] == "--immutable":
+            index += 1
+            continue
+        filtered.append(args[index])
+        index += 1
+    args = filtered
     if not args:
         raise SystemExit(77)
     operation = args[0]
@@ -193,12 +320,18 @@ elif name == "rclone":
         target = remote_path(args[2])
         kind = "sidecar" if ".sha256" in source.name else "dump"
         trace(f"rclone:copy:{kind}")
+        if immutable and target.exists():
+            raise SystemExit(83)
         target.write_bytes(source.read_bytes())
+        if os.environ.get("FAKE_CREATE_REMOTE_FINAL_ON") == kind:
+            race_name = os.environ["FAKE_REMOTE_RACE_NAME"]
+            (Path(os.environ["FAKE_REMOTE_ROOT"]) / race_name).write_bytes(b"remote-final-race-sentinel")
+        block_if(f"copy_{kind}")
         fail_if(f"copy_{kind}")
     elif operation == "lsjson":
         values = [item for item in args[1:] if not item.startswith("-")]
         target = remote_path(values[0])
-        stage = "temp" if target.name.startswith(".degen-upload-") else "final"
+        stage = "temp" if target.name.lower().startswith(".degen-upload-") else "final"
         trace(f"rclone:{stage}-size")
         size = target.stat().st_size
         if failure == f"{stage}_size":
@@ -206,7 +339,7 @@ elif name == "rclone":
         print(json.dumps({"Path": target.name, "Name": target.name, "Size": size, "IsDir": False}))
     elif operation == "cat":
         target = remote_path(args[1])
-        stage = "temp" if target.name.startswith(".degen-upload-") else "final"
+        stage = "temp" if target.name.lower().startswith(".degen-upload-") else "final"
         trace(f"rclone:{stage}-content")
         if failure == f"{stage}_sidecar" or failure == f"{stage}_content":
             sys.stdout.buffer.write(b"incorrect sidecar\n")
@@ -218,7 +351,14 @@ elif name == "rclone":
         kind = "sidecar" if ".sha256" in source.name else "dump"
         trace(f"rclone:move:{kind}")
         fail_if(f"move_{kind}")
-        source.replace(target)
+        if os.environ.get("FAKE_REQUIRE_IMMUTABLE") == "1" and not immutable:
+            raise SystemExit(84)
+        if immutable and target.exists():
+            raise SystemExit(85)
+        if os.environ.get("FAKE_MOVE_LEAVES_SOURCE") == kind:
+            target.write_bytes(source.read_bytes())
+        else:
+            source.replace(target)
     elif operation == "deletefile":
         target = remote_path(args[1])
         trace(f"rclone:delete:{target.name}")
@@ -270,26 +410,31 @@ class BackupHarness:
     lock_file: Path
     runner: Path
     lock_holder: Path
+    signal_runner: Path
 
     @classmethod
     def create(cls, tmp_path: Path, bash: str) -> "BackupHarness":
-        backup_dir = tmp_path / "backups"
-        log_dir = tmp_path / "logs"
-        remote_dir = tmp_path / "remote"
-        fake_bin = tmp_path / "fake-bin"
+        root = _native_behavior_root(tmp_path)
+        backup_dir = root / "backups"
+        log_dir = root / "logs"
+        remote_dir = root / "remote"
+        fake_bin = root / "fake-bin"
         for path in (backup_dir, log_dir, remote_dir, fake_bin):
-            path.mkdir(parents=True)
+            path.mkdir(parents=True, mode=0o700)
+            _chmod(path, 0o700)
 
         for command in ("date", "df", "hostname", "mktemp", "pg_dump", "pg_restore", "psql", "rclone", "rm", "sha256sum"):
             _write_executable(fake_bin / command, FAKE_COMMAND)
 
-        app_env = tmp_path / "web.env"
+        app_env = root / "web.env"
         app_env.write_text(f"DATABASE_URL='{SECRET}'\n", encoding="utf-8")
-        rclone_config = tmp_path / "rclone.conf"
+        _chmod(app_env, 0o600)
+        rclone_config = root / "rclone.conf"
         rclone_config.write_text("token = do-not-log-rclone-secret\n", encoding="utf-8")
-        planner = tmp_path / "retention-planner"
+        _chmod(rclone_config, 0o600)
+        planner = root / "retention-planner"
         _write_executable(planner, _planner_wrapper(_posix_path(PLANNER)))
-        runner = tmp_path / "run-backup.sh"
+        runner = root / "run-backup.sh"
         _write_executable(
             runner,
             '''#!/usr/bin/env bash
@@ -298,7 +443,7 @@ export PATH="$FAKE_BIN:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/
 exec "$BACKUP_SCRIPT" "$@"
 ''',
         )
-        lock_holder = tmp_path / "hold-lock.sh"
+        lock_holder = root / "hold-lock.sh"
         _write_executable(
             lock_holder,
             '''#!/usr/bin/env bash
@@ -309,10 +454,40 @@ printf 'READY\\n'
 IFS= read -r _
 ''',
         )
-        trace = tmp_path / "trace.log"
+        signal_runner = root / "signal-backup.sh"
+        _write_executable(
+            signal_runner,
+            '''#!/usr/bin/env bash
+set -eu
+export PATH="$FAKE_BIN:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+/usr/bin/setsid "$BACKUP_SCRIPT" >"$FAKE_SIGNAL_STDOUT" 2>"$FAKE_SIGNAL_STDERR" &
+backup_pid=$!
+ready=0
+for _ in $(seq 1 200); do
+    if [[ -f "$FAKE_BLOCK_READY" ]]; then
+        ready=1
+        break
+    fi
+    sleep 0.05
+done
+if [[ "$ready" != "1" ]]; then
+    kill -KILL -- "-$backup_pid" 2>/dev/null || true
+    wait "$backup_pid" 2>/dev/null || true
+    exit 98
+fi
+kill -TERM -- "-$backup_pid"
+set +e
+wait "$backup_pid"
+status=$?
+set -e
+exit "$status"
+''',
+        )
+        trace = root / "trace.log"
         trace.write_text("", encoding="utf-8")
+        _chmod(trace, 0o600)
         return cls(
-            root=tmp_path,
+            root=root,
             bash=bash,
             backup_dir=backup_dir,
             log_dir=log_dir,
@@ -322,9 +497,10 @@ IFS= read -r _
             rclone_config=rclone_config,
             planner=planner,
             trace=trace,
-            lock_file=tmp_path / "backup.lock",
+            lock_file=root / "backup.lock",
             runner=runner,
             lock_holder=lock_holder,
+            signal_runner=signal_runner,
         )
 
     @property
@@ -387,6 +563,28 @@ IFS= read -r _
             check=False,
         )
 
+    def terminate_while(self, blocked_operation: str) -> subprocess.CompletedProcess[str]:
+        ready = self.root / "blocked.ready"
+        signal_stdout = self.root / "signal.stdout"
+        signal_stderr = self.root / "signal.stderr"
+        env = self.environment(
+            {
+                "FAKE_BLOCK": blocked_operation,
+                "FAKE_BLOCK_READY": _posix_path(ready),
+                "FAKE_SIGNAL_STDOUT": _posix_path(signal_stdout),
+                "FAKE_SIGNAL_STDERR": _posix_path(signal_stderr),
+            }
+        )
+        return subprocess.run(
+            [self.bash, _posix_path(self.signal_runner)],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+
     def trace_lines(self) -> list[str]:
         return self.trace.read_text(encoding="utf-8").splitlines()
 
@@ -395,7 +593,12 @@ IFS= read -r _
 def harness(tmp_path: Path) -> BackupHarness:
     if BASH is None:
         pytest.skip("No usable POSIX Bash/WSL environment")
-    return BackupHarness.create(tmp_path, BASH)
+    instance = BackupHarness.create(tmp_path, BASH)
+    try:
+        yield instance
+    finally:
+        if instance.root != tmp_path:
+            shutil.rmtree(instance.root, ignore_errors=True)
 
 
 def _seed_pair(directory: Path, stamp: str, *, prefix: str = PREFIX) -> tuple[str, str]:
@@ -430,6 +633,15 @@ def test_source_declares_safe_shell_contract_and_live_defaults() -> None:
     assert "set -euo pipefail" in source
     assert re.search(r"^umask 077$", source, re.MULTILINE)
     assert "set -x" not in source
+    assert "--ignore-existing" not in source
+    assert "trap 'exit 129' HUP" in source
+    assert "trap 'exit 130' INT" in source
+    assert "trap 'exit 143' TERM" in source
+    assert "owned_local_dump_partial=$(mktemp" in source
+    assert "owned_local_sidecar_partial=$(mktemp" in source
+    assert "owned_upload_token_file=$(mktemp" in source
+    assert not re.search(r"if ! dump_partial=\$\(mktemp", source)
+    assert not re.search(r"if ! sidecar_partial=\$\(mktemp", source)
     for expected in (
         "APP_ENV_FILE=${APP_ENV_FILE:-/opt/degen/web.env}",
         "BACKUP_DIR=${BACKUP_DIR:-/opt/degen/backups/db}",
@@ -508,6 +720,123 @@ def test_success_verifies_before_pruning_and_preserves_non_candidates(harness: B
     assert all(re.match(r"^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\] ", line) for line in log_lines)
 
 
+@pytest.mark.parametrize("blocked_operation", ["pg_dump", "copy_dump"])
+def test_process_group_term_cleans_only_current_run_temps(
+    harness: BackupHarness,
+    blocked_operation: str,
+) -> None:
+    old_local = _seed_old_pairs(harness.backup_dir)
+    old_remote = _seed_old_pairs(harness.remote_dir)
+    unrelated_partial = harness.backup_dir / ".manual-unrelated.partial"
+    unrelated_partial.write_bytes(b"preserve-local-partial")
+    unrelated_remote_temp = harness.remote_dir / ".degen-upload-unrelated"
+    unrelated_remote_temp.write_bytes(b"preserve-remote-temp")
+
+    result = harness.terminate_while(blocked_operation)
+
+    assert result.returncode == 143, result.stdout + result.stderr
+    assert all((harness.backup_dir / name).exists() for name in old_local)
+    assert all((harness.remote_dir / name).exists() for name in old_remote)
+    assert unrelated_partial.read_bytes() == b"preserve-local-partial"
+    assert unrelated_remote_temp.read_bytes() == b"preserve-remote-temp"
+    current_dump, current_sidecar = _pair_names()
+    assert not list(harness.backup_dir.glob(f".{current_dump}.partial*"))
+    assert not list(harness.backup_dir.glob(f".{current_sidecar}.partial*"))
+    assert not [
+        path
+        for path in harness.remote_dir.iterdir()
+        if path.name.lower().startswith(".degen-upload-") and current_dump.lower() in path.name.lower()
+    ]
+    assert not (harness.remote_dir / current_dump).exists()
+    assert not (harness.remote_dir / current_sidecar).exists()
+    if blocked_operation == "pg_dump":
+        assert not (harness.backup_dir / current_dump).exists()
+        assert not (harness.backup_dir / current_sidecar).exists()
+    else:
+        assert (harness.backup_dir / current_dump).exists()
+        assert (harness.backup_dir / current_sidecar).exists()
+    trace = harness.trace_lines()
+    assert not any(line.startswith("planner:") for line in trace)
+    assert not [name for name in _remote_delete_names(trace) if not name.startswith(".degen-upload-")]
+
+
+def test_exact_remote_final_collision_is_never_overwritten(harness: BackupHarness) -> None:
+    current_dump, current_sidecar = _pair_names()
+    dump_sentinel = b"existing-final-dump"
+    sidecar_sentinel = b"existing-final-sidecar"
+    (harness.remote_dir / current_dump).write_bytes(dump_sentinel)
+    (harness.remote_dir / current_sidecar).write_bytes(sidecar_sentinel)
+
+    result = harness.run()
+
+    assert result.returncode != 0
+    assert (harness.remote_dir / current_dump).read_bytes() == dump_sentinel
+    assert (harness.remote_dir / current_sidecar).read_bytes() == sidecar_sentinel
+    trace = harness.trace_lines()
+    assert "rclone:copy:dump" not in trace
+    assert not any(line.startswith("planner:") for line in trace)
+    assert _remote_delete_names(trace) == []
+
+
+def test_remote_final_collision_created_during_upload_is_not_overwritten(harness: BackupHarness) -> None:
+    current_dump, current_sidecar = _pair_names()
+
+    result = harness.run(
+        overrides={
+            "FAKE_CREATE_REMOTE_FINAL_ON": "sidecar",
+            "FAKE_REMOTE_RACE_NAME": current_dump,
+        }
+    )
+
+    assert result.returncode != 0
+    assert (harness.remote_dir / current_dump).read_bytes() == b"remote-final-race-sentinel"
+    assert not (harness.remote_dir / current_sidecar).exists()
+    assert not any(path.name.lower().startswith(".degen-upload-") for path in harness.remote_dir.iterdir())
+    assert not any(line.startswith("planner:") for line in harness.trace_lines())
+
+
+@pytest.mark.parametrize("collision_kind", ["temp", "final"])
+def test_case_variant_remote_collision_is_never_claimed_or_overwritten(
+    harness: BackupHarness,
+    collision_kind: str,
+) -> None:
+    current_dump, _ = _pair_names()
+    if collision_kind == "temp":
+        requested = f".degen-upload-TESTTOKEN-{current_dump}"
+    else:
+        requested = current_dump
+    collision = requested.swapcase()
+    sentinel = harness.remote_dir / collision
+    sentinel.write_bytes(b"case-variant-sentinel")
+
+    result = harness.run()
+
+    assert result.returncode != 0
+    assert sentinel.read_bytes() == b"case-variant-sentinel"
+    trace = harness.trace_lines()
+    assert "rclone:copy:dump" not in trace
+    assert f"rclone:delete:{collision}" not in trace
+    assert not any(line.startswith("planner:") for line in trace)
+
+
+def test_remote_moves_use_immutable_no_overwrite_semantics(harness: BackupHarness) -> None:
+    result = harness.run(overrides={"FAKE_REQUIRE_IMMUTABLE": "1"})
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    current_dump, current_sidecar = _pair_names()
+    assert (harness.remote_dir / current_dump).exists()
+    assert (harness.remote_dir / current_sidecar).exists()
+
+
+@pytest.mark.parametrize("kind", ["dump", "sidecar"])
+def test_remote_move_must_remove_each_temp_source(harness: BackupHarness, kind: str) -> None:
+    result = harness.run(overrides={"FAKE_MOVE_LEAVES_SOURCE": kind})
+
+    assert result.returncode != 0
+    assert not any(path.name.lower().startswith(".degen-upload-") for path in harness.remote_dir.iterdir())
+    assert not any(line.startswith("planner:") for line in harness.trace_lines())
+
+
 def test_remote_prune_is_opt_in_by_default(harness: BackupHarness) -> None:
     old_remote = _seed_old_pairs(harness.remote_dir)
 
@@ -548,6 +877,11 @@ def test_remote_retention_dry_run_never_dumps_or_deletes_even_when_enabled(harne
     assert "planner:remote" in trace
     assert _remote_delete_names(trace) == []
     assert all((harness.remote_dir / name).exists() for name in old_remote)
+    for candidate in old_remote[:4]:
+        assert f"Remote retention candidate: {candidate}" in result.stdout
+        assert f"Remote retention dry run: would delete {candidate}" in result.stdout
+    for protected in old_remote[4:]:
+        assert f"Remote retention candidate: {protected}" not in result.stdout
 
 
 def test_enabled_remote_prune_deletes_only_planner_candidates(harness: BackupHarness) -> None:
@@ -616,6 +950,8 @@ def test_preverification_and_planner_failures_never_prune_old_pairs(
 ) -> None:
     old_local = _seed_old_pairs(harness.backup_dir)
     old_remote = _seed_old_pairs(harness.remote_dir)
+    unrelated_partial = harness.backup_dir / ".preexisting-unrelated.partial"
+    unrelated_partial.write_bytes(b"preserve-unrelated-partial")
 
     result = harness.run(
         overrides={
@@ -630,6 +966,10 @@ def test_preverification_and_planner_failures_never_prune_old_pairs(
     assert result.returncode != 0, failure
     assert all((harness.backup_dir / name).exists() for name in old_local)
     assert all((harness.remote_dir / name).exists() for name in old_remote)
+    assert unrelated_partial.read_bytes() == b"preserve-unrelated-partial"
+    current_dump, current_sidecar = _pair_names()
+    assert not list(harness.backup_dir.glob(f".{current_dump}.partial*"))
+    assert not list(harness.backup_dir.glob(f".{current_sidecar}.partial*"))
     assert not any(path.name.startswith(".degen-upload-") for path in harness.remote_dir.iterdir())
     trace = harness.trace_lines()
     expected_operation = {
@@ -649,7 +989,6 @@ def test_preverification_and_planner_failures_never_prune_old_pairs(
     assert expected_operation in trace
     remote_deletes = _remote_delete_names(trace)
     assert all(name.startswith(".degen-upload-") for name in remote_deletes)
-    current_dump, current_sidecar = _pair_names()
     current_remote_names = {
         name
         for name in (current_dump, current_sidecar)
@@ -721,7 +1060,7 @@ def test_insufficient_capacity_fails_before_dump_or_publish(harness: BackupHarne
     assert "Insufficient backup capacity" in result.stdout
 
 
-def test_preexisting_current_partials_are_not_claimed_or_removed(harness: BackupHarness) -> None:
+def test_preexisting_legacy_partials_are_unrelated_and_preserved(harness: BackupHarness) -> None:
     dump_name, sidecar_name = _pair_names()
     dump_partial = harness.backup_dir / f".{dump_name}.partial"
     sidecar_partial = harness.backup_dir / f".{sidecar_name}.partial"
@@ -730,10 +1069,113 @@ def test_preexisting_current_partials_are_not_claimed_or_removed(harness: Backup
 
     result = harness.run()
 
-    assert result.returncode != 0
+    assert result.returncode == 0, result.stdout + result.stderr
     assert dump_partial.read_bytes() == b"stale-dump-partial"
     assert sidecar_partial.read_bytes() == b"stale-sidecar-partial"
+    assert "pg_dump" in harness.trace_lines()
+
+
+def test_backup_directory_must_not_be_a_symlink(harness: BackupHarness) -> None:
+    target = harness.root / "real-backup-target"
+    target.mkdir(mode=0o700)
+    _chmod(target, 0o700)
+    harness.backup_dir.rmdir()
+    _symlink(target, harness.backup_dir)
+
+    result = harness.run("preflight")
+
+    assert result.returncode != 0
+    assert _is_symlink(harness.backup_dir)
+    assert list(target.iterdir()) == []
     assert "pg_dump" not in harness.trace_lines()
+
+
+def test_backup_directory_must_not_be_group_or_world_writable(harness: BackupHarness) -> None:
+    _chmod(harness.backup_dir, 0o770)
+
+    result = harness.run("preflight")
+
+    assert result.returncode != 0
+    assert "pg_dump" not in harness.trace_lines()
+
+
+def test_backup_directory_must_be_owned_by_effective_uid(harness: BackupHarness) -> None:
+    effective_uid = _effective_uid()
+    other_uid = 0 if effective_uid != 0 else 1
+    _chown(harness.backup_dir, other_uid)
+    try:
+        result = harness.run("preflight")
+    finally:
+        _chown(harness.backup_dir, effective_uid)
+
+    assert result.returncode != 0
+    assert "pg_dump" not in harness.trace_lines()
+
+
+def test_broken_partial_symlink_is_untouched_and_never_followed(harness: BackupHarness) -> None:
+    current_dump, current_sidecar = _pair_names()
+    outside = harness.root / "outside-partial-target"
+    attacker_partial = harness.backup_dir / f".{current_dump}.partial"
+    _symlink(outside, attacker_partial)
+
+    result = harness.run()
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _is_symlink(attacker_partial)
+    assert not outside.exists()
+    assert (harness.backup_dir / current_dump).is_file()
+    assert (harness.backup_dir / current_sidecar).is_file()
+
+
+def test_broken_final_symlink_collision_is_rejected_without_following(harness: BackupHarness) -> None:
+    current_dump, _ = _pair_names()
+    outside = harness.root / "outside-final-target"
+    final_dump = harness.backup_dir / current_dump
+    _symlink(outside, final_dump)
+
+    result = harness.run()
+
+    assert result.returncode != 0
+    assert _is_symlink(final_dump)
+    assert not outside.exists()
+    assert "pg_dump" not in harness.trace_lines()
+    assert not any(line.startswith("planner:") for line in harness.trace_lines())
+
+
+@pytest.mark.parametrize("final_kind", ["dump", "sidecar"])
+def test_preexisting_regular_local_final_is_untouched(
+    harness: BackupHarness,
+    final_kind: str,
+) -> None:
+    current_dump, current_sidecar = _pair_names()
+    final_name = current_dump if final_kind == "dump" else current_sidecar
+    final_path = harness.backup_dir / final_name
+    final_path.write_bytes(b"preexisting-local-final")
+
+    result = harness.run()
+
+    assert result.returncode != 0
+    assert final_path.read_bytes() == b"preexisting-local-final"
+    assert "pg_dump" not in harness.trace_lines()
+    assert not any(line.startswith("planner:") for line in harness.trace_lines())
+
+
+@pytest.mark.parametrize("final_kind", ["dump", "sidecar"])
+def test_local_publish_race_never_overwrites_existing_final(
+    harness: BackupHarness,
+    final_kind: str,
+) -> None:
+    current_dump, current_sidecar = _pair_names()
+    final_name = current_dump if final_kind == "dump" else current_sidecar
+    final_path = harness.backup_dir / final_name
+
+    result = harness.run(overrides={"FAKE_CREATE_LOCAL_FINAL": _posix_path(final_path)})
+
+    assert result.returncode != 0
+    assert final_path.read_bytes() == b"local-final-race-sentinel"
+    assert not list(harness.backup_dir.glob(f".{current_dump}.partial*"))
+    assert not list(harness.backup_dir.glob(f".{current_sidecar}.partial*"))
+    assert not any(line.startswith("planner:") for line in harness.trace_lines())
 
 
 def test_lock_overlap_fails_before_preflight_or_dump(harness: BackupHarness) -> None:
@@ -815,6 +1257,75 @@ def test_database_url_is_read_without_sourcing_and_never_logged(harness: BackupH
     assert "do-not-log-rclone-secret" not in combined
 
 
+@pytest.mark.parametrize(
+    ("database_url", "expected_pgdatabase"),
+    [
+        ("postgresql://degen:uri-secret@db/degen", "postgresql://degen:uri-secret@db/degen"),
+        ("postgres://degen:uri-secret@db/degen", "postgres://degen:uri-secret@db/degen"),
+        ("postgresql+psycopg://degen:uri-secret@db/degen", "postgresql://degen:uri-secret@db/degen"),
+    ],
+)
+def test_postgres_database_uri_forms_are_normalized_only_when_required(
+    harness: BackupHarness,
+    database_url: str,
+    expected_pgdatabase: str,
+) -> None:
+    harness.app_env.write_text(f"DATABASE_URL='{database_url}'\n", encoding="utf-8")
+
+    result = harness.run("preflight", overrides={"FAKE_EXPECT_PGDATABASE": expected_pgdatabase})
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    combined = result.stdout + result.stderr + harness.log_file.read_text(encoding="utf-8")
+    assert database_url not in combined
+    assert expected_pgdatabase not in combined
+
+
+@pytest.mark.parametrize("database_url", ["mysql://degen:bad-secret@db/degen", "postgresql+asyncpg://degen:bad-secret@db/degen"])
+def test_non_postgres_or_other_driver_uri_is_rejected_without_logging(
+    harness: BackupHarness,
+    database_url: str,
+) -> None:
+    harness.app_env.write_text(f"DATABASE_URL='{database_url}'\n", encoding="utf-8")
+
+    result = harness.run("preflight")
+
+    assert result.returncode != 0
+    assert "psql:database" not in harness.trace_lines()
+    combined = result.stdout + result.stderr + harness.log_file.read_text(encoding="utf-8")
+    assert database_url not in combined
+    assert "bad-secret" not in combined
+
+
+@pytest.mark.parametrize("app_file_state", ["missing", "malicious"])
+def test_preset_database_url_takes_precedence_without_logging_or_sourcing(
+    harness: BackupHarness,
+    app_file_state: str,
+) -> None:
+    preset = "postgresql://preset:preset-secret@db/preset"
+    marker = harness.root / "preset-must-not-source"
+    overrides: dict[str, str | None] = {
+        "DATABASE_URL": preset,
+        "FAKE_EXPECT_PGDATABASE": preset,
+    }
+    if app_file_state == "missing":
+        overrides["APP_ENV_FILE"] = _posix_path(harness.root / "missing-web.env")
+    else:
+        harness.app_env.write_text(
+            "DATABASE_URL='mysql://wrong:app-file-secret@db/wrong'\n"
+            f"MALICIOUS=$(touch {_posix_path(marker)})\n",
+            encoding="utf-8",
+        )
+
+    result = harness.run("preflight", overrides=overrides)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not marker.exists()
+    combined = result.stdout + result.stderr + harness.log_file.read_text(encoding="utf-8")
+    assert preset not in combined
+    assert "preset-secret" not in combined
+    assert "app-file-secret" not in combined
+
+
 def test_unsafe_planner_output_is_rejected_before_any_candidate_delete(harness: BackupHarness) -> None:
     old_local = _seed_old_pairs(harness.backup_dir)
     sentinel = harness.root / "outside-sentinel"
@@ -839,6 +1350,22 @@ def test_unsafe_planner_output_is_rejected_before_any_candidate_delete(harness: 
     assert f"rm:{first_dump}" not in trace
     assert f"rm:{first_sidecar}" not in trace
     assert not [name for name in _remote_delete_names(trace) if not name.startswith(".degen-upload-")]
+    assert "Unsafe retention candidate" in result.stdout
+
+
+def test_inventory_present_candidate_under_another_safe_prefix_is_rejected(harness: BackupHarness) -> None:
+    other_dump, other_sidecar = _seed_pair(harness.backup_dir, "20260626T230000Z", prefix="other_green_")
+    malicious = "#!/usr/bin/env python3\n" + f"print({other_dump!r})\nprint({other_sidecar!r})\n"
+    _write_executable(harness.planner, malicious)
+
+    result = harness.run()
+
+    assert result.returncode != 0
+    assert (harness.backup_dir / other_dump).exists()
+    assert (harness.backup_dir / other_sidecar).exists()
+    trace = harness.trace_lines()
+    assert f"rm:{other_dump}" not in trace
+    assert f"rm:{other_sidecar}" not in trace
     assert "Unsafe retention candidate" in result.stdout
 
 

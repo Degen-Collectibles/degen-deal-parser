@@ -21,10 +21,16 @@ database_url=""
 backup_prefix=""
 owned_local_dump_partial=""
 owned_local_sidecar_partial=""
+owned_upload_token_file=""
 owned_remote_dump_temp=""
 owned_remote_sidecar_temp=""
 owns_remote_dump_temp=0
 owns_remote_sidecar_temp=0
+logger_pid=""
+logger_write_fd=""
+logger_read_fd=""
+original_stdout_fd=""
+original_stderr_fd=""
 
 
 die() {
@@ -47,9 +53,26 @@ timestamp_stream() {
 }
 
 
+start_logging() {
+    exec {original_stdout_fd}>&1 {original_stderr_fd}>&2
+    coproc LOGGER_PROCESS {
+        set -o pipefail
+        timestamp_stream | tee -a "$LOG_FILE" >&${original_stdout_fd}
+    }
+    logger_pid=$LOGGER_PROCESS_PID
+    logger_read_fd=${LOGGER_PROCESS[0]}
+    logger_write_fd=${LOGGER_PROCESS[1]}
+    exec {logger_read_fd}<&-
+    exec 1>&${logger_write_fd} 2>&1
+    exec {logger_write_fd}>&-
+}
+
+
 cleanup_on_exit() {
     local status=$?
-    trap - EXIT
+    local logger_status=0
+    trap - EXIT HUP INT TERM
+    set +e
     if (( status != 0 )); then
         if [[ -n "$owned_local_dump_partial" ]]; then
             rm -f -- "$owned_local_dump_partial" >/dev/null 2>&1 || true
@@ -57,12 +80,31 @@ cleanup_on_exit() {
         if [[ -n "$owned_local_sidecar_partial" ]]; then
             rm -f -- "$owned_local_sidecar_partial" >/dev/null 2>&1 || true
         fi
+        if [[ -n "$owned_upload_token_file" ]]; then
+            rm -f -- "$owned_upload_token_file" >/dev/null 2>&1 || true
+        fi
         if (( owns_remote_dump_temp == 1 )) && [[ -n "$owned_remote_dump_temp" ]]; then
             rclone --config "$RCLONE_CONFIG" deletefile "$owned_remote_dump_temp" >/dev/null 2>&1 || true
         fi
         if (( owns_remote_sidecar_temp == 1 )) && [[ -n "$owned_remote_sidecar_temp" ]]; then
             rclone --config "$RCLONE_CONFIG" deletefile "$owned_remote_sidecar_temp" >/dev/null 2>&1 || true
         fi
+    fi
+    if [[ -n "$original_stdout_fd" && -n "$original_stderr_fd" ]]; then
+        exec 1>&${original_stdout_fd} 2>&${original_stderr_fd}
+    fi
+    if [[ -n "$logger_pid" ]]; then
+        wait "$logger_pid"
+        logger_status=$?
+    fi
+    if (( status == 0 && logger_status != 0 )); then
+        status=$logger_status
+    fi
+    if [[ -n "$original_stdout_fd" ]]; then
+        exec {original_stdout_fd}>&-
+    fi
+    if [[ -n "$original_stderr_fd" ]]; then
+        exec {original_stderr_fd}>&-
     fi
     exit "$status"
 }
@@ -124,6 +166,31 @@ load_database_url() {
     fi
     unset DATABASE_URL
     [[ -n "$database_url" ]] || die "DATABASE_URL is missing"
+    case "$database_url" in
+        postgresql+psycopg://*)
+            database_url="postgresql://${database_url#postgresql+psycopg://}"
+            ;;
+        postgresql://*|postgres://*) ;;
+        *) die "DATABASE_URL must use a supported PostgreSQL URI scheme" ;;
+    esac
+}
+
+
+validate_backup_directory() {
+    local owner mode
+    [[ ! -L "$BACKUP_DIR" ]] || die "Backup directory must not be a symlink"
+    [[ -d "$BACKUP_DIR" ]] || die "Backup directory is not a directory"
+    if ! owner=$(stat -c '%u' -- "$BACKUP_DIR" 2>/dev/null); then
+        die "Unable to read backup directory ownership"
+    fi
+    [[ "$owner" == "$EUID" ]] || die "Backup directory must be owned by effective uid $EUID"
+    if ! mode=$(stat -c '%a' -- "$BACKUP_DIR" 2>/dev/null); then
+        die "Unable to read backup directory permissions"
+    fi
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] || die "Backup directory permissions were invalid"
+    if (( (8#$mode & 0022) != 0 )); then
+        die "Backup directory must not be group or world writable"
+    fi
 }
 
 
@@ -183,6 +250,7 @@ check_capacity() {
 run_preflight() {
     local mode=$1
     require_tools
+    validate_backup_directory
     load_database_url
     derive_backup_prefix
     check_remote_access
@@ -225,6 +293,39 @@ verify_remote_sidecar() {
 }
 
 
+load_remote_inventory() {
+    local output_name=$1
+    local listing
+    local -n output_values=$output_name
+    output_values=()
+    if ! listing=$(rclone --config "$RCLONE_CONFIG" lsf "$RCLONE_REMOTE_PATH" --files-only --max-depth 1 2>/dev/null); then
+        die "Unable to inventory remote objects"
+    fi
+    if [[ -n "$listing" ]]; then
+        mapfile -t output_values <<< "$listing"
+    fi
+}
+
+
+assert_remote_names_absent() {
+    local inventory_name=$1
+    local context=$2
+    shift 2
+    local existing requested existing_folded requested_folded
+    local LC_ALL=C
+    local -n inventory_values=$inventory_name
+    for requested in "$@"; do
+        requested_folded=${requested,,}
+        for existing in "${inventory_values[@]}"; do
+            existing_folded=${existing,,}
+            if [[ "$existing_folded" == "$requested_folded" ]]; then
+                die "$context remote object collision: $existing"
+            fi
+        done
+    done
+}
+
+
 publish_remote_pair() {
     local dump_path=$1
     local sidecar_path=$2
@@ -232,20 +333,22 @@ publish_remote_pair() {
     local sidecar_name=$4
     local checksum=$5
     local local_size temp_dump_name temp_sidecar_name final_dump final_sidecar
-    local upload_token_file upload_token remote_listing remote_name
+    local upload_token
+    local -a remote_inventory=()
 
     if ! local_size=$(stat -c '%s' -- "$dump_path" 2>/dev/null); then
         die "Unable to read local dump size"
     fi
     [[ "$local_size" =~ ^[0-9]+$ ]] || die "Local dump size was invalid"
 
-    if ! upload_token_file=$(mktemp "$BACKUP_DIR/.degen-upload-token.XXXXXXXX"); then
+    if ! owned_upload_token_file=$(mktemp "$BACKUP_DIR/.degen-upload-token.XXXXXXXX"); then
         die "Unable to allocate a unique remote upload token"
     fi
-    upload_token=${upload_token_file##*.}
-    if ! rm -f -- "$upload_token_file"; then
+    upload_token=${owned_upload_token_file##*.}
+    if ! rm -f -- "$owned_upload_token_file"; then
         die "Unable to release the remote upload token file"
     fi
+    owned_upload_token_file=""
     [[ "$upload_token" =~ ^[A-Za-z0-9]+$ ]] || die "Remote upload token was unsafe"
     temp_dump_name=".degen-upload-${upload_token}-${dump_name}"
     temp_sidecar_name=".degen-upload-${upload_token}-${sidecar_name}"
@@ -254,36 +357,36 @@ publish_remote_pair() {
     final_dump="${RCLONE_REMOTE_PATH%/}/$dump_name"
     final_sidecar="${RCLONE_REMOTE_PATH%/}/$sidecar_name"
 
-    if ! remote_listing=$(rclone --config "$RCLONE_CONFIG" lsf "$RCLONE_REMOTE_PATH" --files-only --max-depth 1 2>/dev/null); then
-        die "Unable to verify remote upload temp-name availability"
-    fi
-    if [[ -n "$remote_listing" ]]; then
-        while IFS= read -r remote_name; do
-            if [[ "$remote_name" == "$temp_dump_name" || "$remote_name" == "$temp_sidecar_name" ]]; then
-                die "Remote upload temp name already exists and is not owned by this run: $remote_name"
-            fi
-        done <<< "$remote_listing"
-    fi
+    load_remote_inventory remote_inventory
+    assert_remote_names_absent remote_inventory "Pre-upload" \
+        "$temp_dump_name" "$temp_sidecar_name" "$dump_name" "$sidecar_name"
 
     owns_remote_dump_temp=1
-    if ! rclone --config "$RCLONE_CONFIG" copyto "$dump_path" "$owned_remote_dump_temp" >/dev/null 2>&1; then
+    if ! rclone --config "$RCLONE_CONFIG" --immutable copyto "$dump_path" "$owned_remote_dump_temp" >/dev/null 2>&1; then
         die "Remote dump temporary upload failed"
     fi
     owns_remote_sidecar_temp=1
-    if ! rclone --config "$RCLONE_CONFIG" copyto "$sidecar_path" "$owned_remote_sidecar_temp" >/dev/null 2>&1; then
+    if ! rclone --config "$RCLONE_CONFIG" --immutable copyto "$sidecar_path" "$owned_remote_sidecar_temp" >/dev/null 2>&1; then
         die "Remote checksum temporary upload failed"
     fi
 
     verify_remote_size "$owned_remote_dump_temp" "$local_size" "Temporary"
     verify_remote_sidecar "$owned_remote_sidecar_temp" "$checksum" "$dump_name" "Temporary"
 
-    if ! rclone --config "$RCLONE_CONFIG" moveto "$owned_remote_dump_temp" "$final_dump" >/dev/null 2>&1; then
+    load_remote_inventory remote_inventory
+    assert_remote_names_absent remote_inventory "Pre-publish" "$dump_name" "$sidecar_name"
+
+    if ! rclone --config "$RCLONE_CONFIG" --immutable moveto "$owned_remote_dump_temp" "$final_dump" >/dev/null 2>&1; then
         die "Remote dump publish move failed"
     fi
+    load_remote_inventory remote_inventory
+    assert_remote_names_absent remote_inventory "Post-move temp source" "$temp_dump_name"
     owns_remote_dump_temp=0
-    if ! rclone --config "$RCLONE_CONFIG" moveto "$owned_remote_sidecar_temp" "$final_sidecar" >/dev/null 2>&1; then
+    if ! rclone --config "$RCLONE_CONFIG" --immutable moveto "$owned_remote_sidecar_temp" "$final_sidecar" >/dev/null 2>&1; then
         die "Remote checksum publish move failed"
     fi
+    load_remote_inventory remote_inventory
+    assert_remote_names_absent remote_inventory "Post-move temp source" "$temp_sidecar_name"
     owns_remote_sidecar_temp=0
 
     verify_remote_size "$final_dump" "$local_size" "Final"
@@ -449,21 +552,46 @@ run_remote_retention() {
 }
 
 
+publish_local_no_clobber() {
+    local source=$1
+    local destination=$2
+    local label=$3
+    if [[ -e "$destination" || -L "$destination" ]]; then
+        die "$label final path already exists"
+    fi
+    if ! mv -n -T -- "$source" "$destination"; then
+        die "$label local publish move failed"
+    fi
+    if [[ -e "$source" || -L "$source" ]]; then
+        die "$label local publish collision detected"
+    fi
+    [[ -f "$destination" && ! -L "$destination" ]] || die "$label local final was not a regular file"
+}
+
+
 create_backup() {
     local now=$1
-    local dump_name sidecar_name dump_path sidecar_path dump_partial sidecar_partial checksum
+    local dump_name sidecar_name dump_path sidecar_path checksum
     dump_name="${backup_prefix}${now}.dump"
     sidecar_name="${dump_name}.sha256"
     dump_path="$BACKUP_DIR/$dump_name"
     sidecar_path="$BACKUP_DIR/$sidecar_name"
-    dump_partial="$BACKUP_DIR/.$dump_name.partial"
-    sidecar_partial="$BACKUP_DIR/.$sidecar_name.partial"
 
-    if [[ -e "$dump_path" || -e "$sidecar_path" || -e "$dump_partial" || -e "$sidecar_partial" ]]; then
-        die "Backup destination or partial already exists for timestamp $now"
+    if [[ -e "$dump_path" || -L "$dump_path" || -e "$sidecar_path" || -L "$sidecar_path" ]]; then
+        die "Backup final path already exists for timestamp $now"
     fi
-    owned_local_dump_partial=$dump_partial
-    owned_local_sidecar_partial=$sidecar_partial
+    if ! owned_local_dump_partial=$(mktemp "$BACKUP_DIR/.$dump_name.partial.XXXXXXXX"); then
+        die "Unable to allocate dump partial"
+    fi
+    if [[ "$owned_local_dump_partial" != "$BACKUP_DIR/"* || ! -f "$owned_local_dump_partial" || -L "$owned_local_dump_partial" ]]; then
+        die "Dump partial allocation was unsafe"
+    fi
+    if ! owned_local_sidecar_partial=$(mktemp "$BACKUP_DIR/.$sidecar_name.partial.XXXXXXXX"); then
+        die "Unable to allocate checksum partial"
+    fi
+    if [[ "$owned_local_sidecar_partial" != "$BACKUP_DIR/"* || ! -f "$owned_local_sidecar_partial" || -L "$owned_local_sidecar_partial" ]]; then
+        die "Checksum partial allocation was unsafe"
+    fi
 
     log "Creating PostgreSQL custom-format backup: $dump_name"
     if ! PGDATABASE="$database_url" pg_dump \
@@ -485,9 +613,9 @@ create_backup() {
     checksum=${checksum,,}
     printf '%s  %s\n' "$checksum" "$dump_name" > "$owned_local_sidecar_partial"
 
-    mv -- "$owned_local_dump_partial" "$dump_path"
+    publish_local_no_clobber "$owned_local_dump_partial" "$dump_path" "Dump"
     owned_local_dump_partial=""
-    mv -- "$owned_local_sidecar_partial" "$sidecar_path"
+    publish_local_no_clobber "$owned_local_sidecar_partial" "$sidecar_path" "Checksum"
     owned_local_sidecar_partial=""
 
     publish_remote_pair "$dump_path" "$sidecar_path" "$dump_name" "$sidecar_name" "$checksum"
@@ -497,6 +625,10 @@ create_backup() {
 main() {
     local mode now remote_delete_allowed
     trap cleanup_on_exit EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap '' PIPE
 
     if (( $# > 1 )); then
         die "Unsupported mode or extra arguments"
@@ -544,17 +676,5 @@ main() {
 
 
 mkdir -p -- "$BACKUP_DIR" "$LOG_DIR"
-set +e
-(
-    set -e
-    main "$@"
-) 2>&1 | timestamp_stream | tee -a "$LOG_FILE"
-pipeline_status=("${PIPESTATUS[@]}")
-status=${pipeline_status[0]}
-for pipeline_component_status in "${pipeline_status[@]:1}"; do
-    if (( status == 0 && pipeline_component_status != 0 )); then
-        status=$pipeline_component_status
-    fi
-done
-set -e
-exit "$status"
+start_logging
+main "$@"
