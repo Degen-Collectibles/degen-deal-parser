@@ -161,6 +161,7 @@ import time
 name = Path(sys.argv[0]).name
 args = sys.argv[1:]
 failure = os.environ.get("FAKE_FAIL", "")
+cleanup_rm_failure = os.environ.get("FAKE_CLEANUP_RM_FAILURE", "")
 trace_path = Path(os.environ["FAKE_TRACE"])
 
 
@@ -216,7 +217,22 @@ def remote_path(value):
     return matches[0] if matches else root / relative
 
 
-if name == "hostname":
+if name == "tee":
+    targets = [item for item in args if item != "-a" and not item.startswith("-")]
+    if len(targets) != 1:
+        raise SystemExit(87)
+    marker = os.environ.get("FAKE_TEE_EXIT_AFTER", "")
+    mode = "a" if "-a" in args else "w"
+    with Path(targets[0]).open(mode, encoding="utf-8") as log_handle:
+        for line in sys.stdin:
+            log_handle.write(line)
+            log_handle.flush()
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            if marker and marker in line:
+                trace("tee:exit-after-marker")
+                raise SystemExit(96)
+elif name == "hostname":
     trace("hostname")
     print(os.environ.get("FAKE_HOST", "green"))
 elif name == "date":
@@ -284,6 +300,14 @@ elif name == "rm":
     for item in targets:
         target = Path(item)
         trace(f"rm:{target.name}")
+        cleanup_kind = ""
+        if ".dump.sha256.partial." in target.name:
+            cleanup_kind = "sidecar"
+        elif ".dump.partial." in target.name:
+            cleanup_kind = "dump"
+        if cleanup_kind and cleanup_rm_failure in {"all", cleanup_kind}:
+            print(f"injected local {cleanup_kind} cleanup failure", file=sys.stderr)
+            raise SystemExit(88)
         try:
             if target.is_dir():
                 shutil.rmtree(target)
@@ -370,11 +394,17 @@ elif name == "rclone":
     elif operation == "deletefile":
         target = remote_path(args[1])
         trace(f"rclone:delete:{target.name}")
-        fail_if("deletefile")
+        delete_mode = os.environ.get("FAKE_DELETEFILE_MODE", "")
+        if failure == "deletefile" or delete_mode == "fail-before":
+            print("injected deletefile failure", file=sys.stderr)
+            raise SystemExit(71)
         try:
             target.unlink()
         except FileNotFoundError:
             pass
+        if delete_mode == "delete-then-fail":
+            print("injected deletefile post-delete failure", file=sys.stderr)
+            raise SystemExit(71)
     else:
         print(f"unexpected rclone operation: {operation}", file=sys.stderr)
         raise SystemExit(78)
@@ -634,6 +664,10 @@ def _remote_delete_names(trace: list[str]) -> list[str]:
     return [line.removeprefix("rclone:delete:") for line in trace if line.startswith("rclone:delete:")]
 
 
+def _cleanup_warning(category: str, basename: str) -> str:
+    return f"[2026-06-29T23:00:00Z] WARNING: backup cleanup failed ({category}): {basename}"
+
+
 def test_source_declares_safe_shell_contract_and_live_defaults() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
 
@@ -774,6 +808,64 @@ def test_process_group_term_cleans_only_current_run_temps(
     assert not [name for name in _remote_delete_names(trace) if not name.startswith(".degen-upload-")]
 
 
+def test_compound_local_cleanup_failures_warn_on_saved_stderr_and_preserve_primary_status(
+    harness: BackupHarness,
+) -> None:
+    _write_executable(harness.fake_bin / "tee", FAKE_COMMAND)
+    current_dump, current_sidecar = _pair_names()
+    dump_partial = f".{current_dump}.partial.TESTTOKEN"
+    sidecar_partial = f".{current_sidecar}.partial.TESTTOKEN"
+    final_dump = harness.backup_dir / current_dump
+
+    result = harness.run(
+        overrides={
+            "FAKE_CLEANUP_RM_FAILURE": "all",
+            "FAKE_CREATE_LOCAL_FINAL": _posix_path(final_dump),
+            "FAKE_TEE_EXIT_AFTER": "ERROR: Dump final path already exists",
+        }
+    )
+
+    assert result.returncode == 1
+    assert "ERROR: Dump final path already exists" in result.stdout
+    assert "tee:exit-after-marker" in harness.trace_lines()
+    assert _cleanup_warning("local dump partial", dump_partial) in result.stderr
+    assert _cleanup_warning("local checksum partial", sidecar_partial) in result.stderr
+    assert (harness.backup_dir / dump_partial).exists()
+    assert (harness.backup_dir / sidecar_partial).exists()
+    trace = harness.trace_lines()
+    assert f"rm:{dump_partial}" in trace
+    assert f"rm:{sidecar_partial}" in trace
+    combined = result.stdout + result.stderr + harness.log_file.read_text(encoding="utf-8")
+    assert SECRET not in combined
+    assert "do-not-log-rclone-secret" not in combined
+
+
+def test_compound_remote_cleanup_failures_warn_for_every_owned_temp_and_preserve_publication_error(
+    harness: BackupHarness,
+) -> None:
+    current_dump, current_sidecar = _pair_names()
+    dump_temp = f".degen-upload-TESTTOKEN-{current_dump}"
+    sidecar_temp = f".degen-upload-TESTTOKEN-{current_sidecar}"
+
+    result = harness.run(
+        overrides={
+            "FAKE_FAIL": "move_dump",
+            "FAKE_DELETEFILE_MODE": "fail-before",
+        }
+    )
+
+    assert result.returncode == 1
+    assert "ERROR: Remote dump publish move failed" in result.stdout
+    assert _remote_delete_names(harness.trace_lines()) == [dump_temp, sidecar_temp]
+    assert _cleanup_warning("remote dump temp", dump_temp) in result.stderr
+    assert _cleanup_warning("remote checksum temp", sidecar_temp) in result.stderr
+    assert (harness.remote_dir / dump_temp).exists()
+    assert (harness.remote_dir / sidecar_temp).exists()
+    combined = result.stdout + result.stderr + harness.log_file.read_text(encoding="utf-8")
+    assert SECRET not in combined
+    assert "do-not-log-rclone-secret" not in combined
+
+
 def test_exact_remote_final_collision_is_never_overwritten(harness: BackupHarness) -> None:
     current_dump, current_sidecar = _pair_names()
     dump_sentinel = b"existing-final-dump"
@@ -822,6 +914,7 @@ def test_failed_dump_temp_copy_never_claims_or_deletes_raced_object(
         overrides={
             "FAKE_RACE_TEMP_ON": "dump",
             "FAKE_RACE_TEMP_CASE": "exact" if race_case == "exact" else "case-variant",
+            "FAKE_DELETEFILE_MODE": "fail-before",
         }
     )
 
@@ -830,10 +923,13 @@ def test_failed_dump_temp_copy_never_claims_or_deletes_raced_object(
     trace = harness.trace_lines()
     assert f"rclone:delete:{raced_name}" not in trace
     assert "not cleanup-owned" in result.stdout
+    assert "WARNING: backup cleanup failed" not in result.stderr
     assert not any(line.startswith("planner:") for line in trace)
 
 
-def test_failed_sidecar_copy_preserves_failed_object_but_cleans_successful_dump(harness: BackupHarness) -> None:
+def test_failed_sidecar_copy_warns_only_for_owned_dump_cleanup_and_preserves_unowned_race(
+    harness: BackupHarness,
+) -> None:
     current_dump, current_sidecar = _pair_names()
     dump_temp = f".degen-upload-TESTTOKEN-{current_dump}"
     sidecar_temp = f".degen-upload-TESTTOKEN-{current_sidecar}"
@@ -842,17 +938,22 @@ def test_failed_sidecar_copy_preserves_failed_object_but_cleans_successful_dump(
         overrides={
             "FAKE_RACE_TEMP_ON": "sidecar",
             "FAKE_RACE_TEMP_CASE": "case-variant",
+            "FAKE_DELETEFILE_MODE": "fail-before",
         }
     )
 
     raced_sidecar = sidecar_temp.swapcase()
-    assert result.returncode != 0
-    assert not (harness.remote_dir / dump_temp).exists()
+    assert result.returncode == 1
+    assert "ERROR: Remote checksum temporary upload failed" in result.stdout
+    assert (harness.remote_dir / dump_temp).exists()
     assert (harness.remote_dir / raced_sidecar).read_bytes() == b"foreign-raced-temp"
     trace = harness.trace_lines()
     assert f"rclone:delete:{dump_temp}" in trace
     assert f"rclone:delete:{raced_sidecar}" not in trace
     assert "not cleanup-owned" in result.stdout
+    assert _cleanup_warning("remote dump temp", dump_temp) in result.stderr
+    assert _cleanup_warning("remote checksum temp", sidecar_temp) not in result.stderr
+    assert raced_sidecar not in result.stderr
     assert not any(line.startswith("planner:") for line in trace)
 
 
@@ -1078,6 +1179,7 @@ def test_preverification_and_planner_failures_never_prune_old_pairs(
         "planner": {current_dump, current_sidecar},
     }.get(failure, set())
     assert current_remote_names == expected_current_remote
+    assert "WARNING: backup cleanup failed" not in result.stderr
 
 
 def test_remote_planner_failure_preserves_all_remote_final_pairs(harness: BackupHarness) -> None:
@@ -1103,12 +1205,20 @@ def test_remote_planner_failure_preserves_all_remote_final_pairs(harness: Backup
     assert _remote_delete_names(trace) == []
 
 
-def test_remote_delete_failure_stops_and_preserves_undeleted_objects(harness: BackupHarness) -> None:
+@pytest.mark.parametrize(
+    ("delete_mode", "attempted_candidate_remains"),
+    [("fail-before", True), ("delete-then-fail", False)],
+)
+def test_remote_delete_failure_identifies_candidate_and_stops_before_later_candidates(
+    harness: BackupHarness,
+    delete_mode: str,
+    attempted_candidate_remains: bool,
+) -> None:
     old_remote = _seed_old_pairs(harness.remote_dir)
 
     result = harness.run(
         overrides={
-            "FAKE_FAIL": "deletefile",
+            "FAKE_DELETEFILE_MODE": delete_mode,
             "REMOTE_PRUNE_ENABLED": "1",
             "KEEP_REMOTE_DAILY": "0",
             "KEEP_REMOTE_WEEKLY": "0",
@@ -1116,13 +1226,15 @@ def test_remote_delete_failure_stops_and_preserves_undeleted_objects(harness: Ba
         }
     )
 
-    assert result.returncode != 0
+    assert result.returncode == 1
     current_dump, current_sidecar = _pair_names()
-    assert all((harness.remote_dir / name).exists() for name in old_remote)
+    assert (harness.remote_dir / old_remote[0]).exists() is attempted_candidate_remains
+    assert all((harness.remote_dir / name).exists() for name in old_remote[1:])
     assert (harness.remote_dir / current_dump).exists()
     assert (harness.remote_dir / current_sidecar).exists()
     deleted_attempts = _remote_delete_names(harness.trace_lines())
     assert deleted_attempts == [old_remote[0]]
+    assert f"ERROR: Remote retention delete failed: {old_remote[0]}" in result.stdout
 
 
 def test_insufficient_capacity_fails_before_dump_or_publish(harness: BackupHarness) -> None:

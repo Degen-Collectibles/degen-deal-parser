@@ -68,6 +68,22 @@ start_logging() {
 }
 
 
+warn_cleanup_failure() {
+    local category=$1
+    local path=$2
+    local timestamp basename
+    timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf 'timestamp-unavailable')
+    basename=${path##*/}
+    if [[ "$original_stderr_fd" =~ ^[0-9]+$ ]]; then
+        { printf '[%s] WARNING: backup cleanup failed (%s): %s\n' \
+            "$timestamp" "$category" "$basename" >&${original_stderr_fd}; } 2>/dev/null || true
+    else
+        { printf '[%s] WARNING: backup cleanup failed (%s): %s\n' \
+            "$timestamp" "$category" "$basename" >&2; } 2>/dev/null || true
+    fi
+}
+
+
 cleanup_on_exit() {
     local status=$?
     local logger_status=0
@@ -75,19 +91,27 @@ cleanup_on_exit() {
     set +e
     if (( status != 0 )); then
         if [[ -n "$owned_local_dump_partial" ]]; then
-            rm -f -- "$owned_local_dump_partial" >/dev/null 2>&1 || true
+            if ! rm -f -- "$owned_local_dump_partial" >/dev/null 2>&1; then
+                warn_cleanup_failure "local dump partial" "$owned_local_dump_partial"
+            fi
         fi
         if [[ -n "$owned_local_sidecar_partial" ]]; then
-            rm -f -- "$owned_local_sidecar_partial" >/dev/null 2>&1 || true
+            if ! rm -f -- "$owned_local_sidecar_partial" >/dev/null 2>&1; then
+                warn_cleanup_failure "local checksum partial" "$owned_local_sidecar_partial"
+            fi
         fi
         if [[ -n "$owned_upload_token_file" ]]; then
             rm -f -- "$owned_upload_token_file" >/dev/null 2>&1 || true
         fi
         if (( owns_remote_dump_temp == 1 )) && [[ -n "$owned_remote_dump_temp" ]]; then
-            rclone --config "$RCLONE_CONFIG" deletefile "$owned_remote_dump_temp" >/dev/null 2>&1 || true
+            if ! rclone --config "$RCLONE_CONFIG" deletefile "$owned_remote_dump_temp" >/dev/null 2>&1; then
+                warn_cleanup_failure "remote dump temp" "$owned_remote_dump_temp"
+            fi
         fi
         if (( owns_remote_sidecar_temp == 1 )) && [[ -n "$owned_remote_sidecar_temp" ]]; then
-            rclone --config "$RCLONE_CONFIG" deletefile "$owned_remote_sidecar_temp" >/dev/null 2>&1 || true
+            if ! rclone --config "$RCLONE_CONFIG" deletefile "$owned_remote_sidecar_temp" >/dev/null 2>&1; then
+                warn_cleanup_failure "remote checksum temp" "$owned_remote_sidecar_temp"
+            fi
         fi
     fi
     if [[ -n "$original_stdout_fd" && -n "$original_stderr_fd" ]]; then
@@ -365,11 +389,13 @@ publish_remote_pair() {
         log "Remote dump temp was not cleanup-owned after failed upload and remains protected: $temp_dump_name"
         die "Remote dump temporary upload failed"
     fi
+    # Accepted caveat: immutable success cannot distinguish a raced identical-byte object.
     owns_remote_dump_temp=1
     if ! rclone --config "$RCLONE_CONFIG" --immutable copyto "$sidecar_path" "$owned_remote_sidecar_temp" >/dev/null 2>&1; then
         log "Remote checksum temp was not cleanup-owned after failed upload and remains protected: $temp_sidecar_name"
         die "Remote checksum temporary upload failed"
     fi
+    # Accepted caveat: immutable success cannot distinguish a raced identical-byte object.
     owns_remote_sidecar_temp=1
 
     verify_remote_size "$owned_remote_dump_temp" "$local_size" "Temporary"
