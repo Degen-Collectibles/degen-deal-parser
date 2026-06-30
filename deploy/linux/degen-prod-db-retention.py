@@ -6,12 +6,12 @@ import json
 import re
 import sys
 from collections import defaultdict
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Iterable
 
 
 def _stamp(value: str) -> datetime:
-    return datetime.strptime(value, "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
+    return datetime.strptime(value, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
 
 
 def _non_negative_int(value: str) -> int:
@@ -153,10 +153,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--daily", type=_non_negative_int, default=7)
     parser.add_argument("--weekly", type=_non_negative_int, default=4)
     parser.add_argument("--monthly", type=_non_negative_int, default=3)
-    parser.add_argument("--format", choices=("json", "delete-names"), default="json")
+    parser.add_argument("--format", choices=("json", "delete-names", "keep-names"), default="json")
     args = parser.parse_args(argv)
     try:
-        now = _stamp(args.now) if args.now else datetime.now(UTC)
+        now = _stamp(args.now) if args.now else datetime.now(timezone.utc)
     except ValueError:
         parser.error("--now must be a valid UTC timestamp in YYYYMMDDTHHMMSSZ format")
     try:
@@ -172,8 +172,9 @@ def main(argv: list[str] | None = None) -> int:
         )
     except ValueError as exc:
         parser.error(str(exc))
-    if args.format == "delete-names":
-        for item in plan["delete"]:
+    if args.format in {"delete-names", "keep-names"}:
+        key = "delete" if args.format == "delete-names" else "keep"
+        for item in plan[key]:
             print(item["dump"])
             print(item["checksum"])
     else:

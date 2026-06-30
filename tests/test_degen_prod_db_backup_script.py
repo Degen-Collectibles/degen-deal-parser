@@ -56,7 +56,8 @@ def _posix_path(path: Path) -> str:
         return f"/{parts[4]}"
     drive, tail = os.path.splitdrive(resolved)
     assert drive and len(drive) == 2, resolved
-    return f"/mnt/{drive[0].lower()}/{tail.lstrip('\\/').replace('\\', '/')}"
+    stripped_tail = tail.lstrip("\\/").replace("\\", "/")
+    return f"/mnt/{drive[0].lower()}/{stripped_tail}"
 
 
 def _symlink(target: Path, link: Path) -> None:

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -13,7 +14,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 PLANNER = ROOT / "deploy" / "linux" / "degen-prod-db-retention.py"
 PREFIX = "degen_green_prod_green_"
-NOW = datetime(2026, 6, 29, 23, 0, tzinfo=UTC)
+NOW = datetime(2026, 6, 29, 23, 0, tzinfo=timezone.utc)
 NOW_STAMP = "20260629T230000Z"
 
 
@@ -48,6 +49,11 @@ def run_cli(*args: str, names: list[str]) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         check=False,
     )
+
+
+def test_sources_parse_with_python_310_grammar() -> None:
+    for path in (PLANNER, Path(__file__), ROOT / "tests/test_degen_prod_db_backup_script.py"):
+        ast.parse(path.read_text(encoding="utf-8"), filename=str(path), feature_version=(3, 10))
 
 
 def test_local_keeps_exactly_two_newest_complete_pairs() -> None:
@@ -143,7 +149,7 @@ def test_remote_handles_iso_year_boundary() -> None:
         names,
         mode="remote",
         prefix=PREFIX,
-        now=datetime(2026, 1, 6, tzinfo=UTC),
+        now=datetime(2026, 1, 6, tzinfo=timezone.utc),
         daily=0,
         weekly=2,
         monthly=0,
@@ -321,6 +327,29 @@ def test_cli_delete_names_outputs_oldest_pairs_first() -> None:
     assert result.returncode == 0
     assert result.stderr == ""
     assert result.stdout == "\n".join(expected_names) + "\n"
+
+
+def test_cli_keep_names_emits_newest_complete_pairs_first() -> None:
+    names = pair("20260628T031500Z") + pair("20260629T031500Z")
+    expected_names = pair("20260629T031500Z") + pair("20260628T031500Z")
+
+    result = run_cli(
+        "--mode",
+        "local",
+        "--prefix",
+        PREFIX,
+        "--now",
+        "20260630T000000Z",
+        "--local-count",
+        "2",
+        "--format",
+        "keep-names",
+        names=names,
+    )
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert result.stdout.splitlines() == expected_names
 
 
 def test_cli_invalid_now_uses_concise_argparse_error() -> None:
