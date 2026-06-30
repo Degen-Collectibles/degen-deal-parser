@@ -1,5 +1,7 @@
 # Green PostgreSQL Backup Retention Implementation Plan
 
+> **SUPERSEDED FOR PRODUCTION EXECUTION:** Do not execute Tasks 5-6 in this file. The reviewed remediation and production workflow is `docs/superpowers/plans/2026-06-30-green-backup-retention-hardening.md`. This file remains as implementation history for the initial branch.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace Green's untracked age-based PostgreSQL backup job with a tested, repo-managed job that retains the two newest verified local pairs and a deterministic 7-daily/4-weekly/3-monthly OneDrive set.
