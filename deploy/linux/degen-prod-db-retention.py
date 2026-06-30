@@ -14,6 +14,16 @@ def _stamp(value: str) -> datetime:
     return datetime.strptime(value, "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
 
 
+def _non_negative_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be non-negative")
+    return parsed
+
+
 def _record(dump: str, timestamp: datetime, reasons: set[str]) -> dict[str, object]:
     return {
         "dump": dump,
@@ -44,12 +54,14 @@ def plan_inventory(
     }.items():
         if value < 0:
             raise ValueError(f"{label} must be non-negative")
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
 
     unique = sorted({name.rstrip("\r\n") for name in names if name.rstrip("\r\n")})
     pattern = re.compile(rf"^{re.escape(prefix)}(?P<stamp>\d{{8}}T\d{{6}}Z)\.dump$")
     dumps: dict[str, tuple[str, datetime]] = {}
     checksums: set[str] = set()
-    recognized: set[str] = set()
+    recognized: dict[str, datetime] = {}
     protected: list[dict[str, str]] = []
 
     for name in unique:
@@ -63,19 +75,17 @@ def plan_inventory(
         except ValueError:
             protected.append({"name": name, "reason": "unparseable-timestamp"})
             continue
-        recognized.add(name)
+        recognized[name] = parsed
         if name.endswith(".sha256"):
             checksums.add(name)
         else:
             dumps[name] = (match.group("stamp"), parsed)
 
     complete: list[tuple[str, str, datetime]] = []
-    future_names: set[str] = set()
+    future_names = {name for name, parsed in recognized.items() if parsed > now}
     for dump, (stamp, parsed) in dumps.items():
         checksum = f"{dump}.sha256"
-        if parsed > now:
-            future_names.update({dump, checksum} & recognized)
-        elif checksum in checksums:
+        if dump not in future_names and checksum in checksums:
             complete.append((dump, stamp, parsed))
 
     for name in sorted(future_names):
@@ -87,7 +97,7 @@ def plan_inventory(
         for name in (dump, f"{dump}.sha256")
     }
     paired_or_future = complete_names | future_names
-    for name in sorted(recognized - paired_or_future):
+    for name in sorted(set(recognized) - paired_or_future):
         protected.append({"name": name, "reason": "incomplete-pair"})
 
     complete.sort(key=lambda item: (item[2], item[0]), reverse=True)
@@ -139,23 +149,29 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--mode", choices=("local", "remote"), required=True)
     parser.add_argument("--prefix", required=True)
     parser.add_argument("--now")
-    parser.add_argument("--local-count", type=int, default=2)
-    parser.add_argument("--daily", type=int, default=7)
-    parser.add_argument("--weekly", type=int, default=4)
-    parser.add_argument("--monthly", type=int, default=3)
+    parser.add_argument("--local-count", type=_non_negative_int, default=2)
+    parser.add_argument("--daily", type=_non_negative_int, default=7)
+    parser.add_argument("--weekly", type=_non_negative_int, default=4)
+    parser.add_argument("--monthly", type=_non_negative_int, default=3)
     parser.add_argument("--format", choices=("json", "delete-names"), default="json")
     args = parser.parse_args(argv)
-    now = _stamp(args.now) if args.now else datetime.now(UTC)
-    plan = plan_inventory(
-        sys.stdin,
-        mode=args.mode,
-        prefix=args.prefix,
-        now=now,
-        local_count=args.local_count,
-        daily=args.daily,
-        weekly=args.weekly,
-        monthly=args.monthly,
-    )
+    try:
+        now = _stamp(args.now) if args.now else datetime.now(UTC)
+    except ValueError:
+        parser.error("--now must be a valid UTC timestamp in YYYYMMDDTHHMMSSZ format")
+    try:
+        plan = plan_inventory(
+            sys.stdin,
+            mode=args.mode,
+            prefix=args.prefix,
+            now=now,
+            local_count=args.local_count,
+            daily=args.daily,
+            weekly=args.weekly,
+            monthly=args.monthly,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.format == "delete-names":
         for item in plan["delete"]:
             print(item["dump"])

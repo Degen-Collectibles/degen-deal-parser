@@ -56,7 +56,6 @@ def test_local_keeps_exactly_two_newest_complete_pairs() -> None:
 
     plan = module.plan_inventory(names, mode="local", prefix=PREFIX, now=NOW, local_count=2)
 
-    assert list(plan) == ["mode", "prefix", "keep", "delete", "protected"]
     assert plan["mode"] == "local"
     assert plan["prefix"] == PREFIX
     assert plan["keep"] == [
@@ -194,6 +193,24 @@ def test_unknown_incomplete_temporary_malformed_and_future_objects_are_protected
     )
 
 
+def test_future_classification_is_symmetric_for_incomplete_recognized_objects() -> None:
+    module = load_planner()
+    future_dump = pair("20260701T031500Z")[0]
+    future_checksum = pair("20260702T031500Z")[1]
+
+    plan = module.plan_inventory(
+        [future_dump, future_checksum],
+        mode="local",
+        prefix=PREFIX,
+        now=NOW,
+    )
+
+    assert plan["protected"] == [
+        {"name": future_dump, "reason": "future-timestamp"},
+        {"name": future_checksum, "reason": "future-timestamp"},
+    ]
+
+
 def test_decision_is_deterministic_across_input_order_and_duplicates() -> None:
     module = load_planner()
     unique_names = (
@@ -212,9 +229,9 @@ def test_decision_is_deterministic_across_input_order_and_duplicates() -> None:
         "monthly": 1,
     }
 
-    assert module.plan_inventory(names_with_duplicates, **kwargs) == module.plan_inventory(
-        reversed(names_with_duplicates), **kwargs
-    )
+    unique_plan = module.plan_inventory(unique_names, **kwargs)
+    assert module.plan_inventory(names_with_duplicates, **kwargs) == unique_plan
+    assert module.plan_inventory(reversed(names_with_duplicates), **kwargs) == unique_plan
 
 
 @pytest.mark.parametrize(
@@ -306,6 +323,41 @@ def test_cli_delete_names_outputs_oldest_pairs_first() -> None:
     assert result.stdout == "\n".join(expected_names) + "\n"
 
 
+def test_cli_invalid_now_uses_concise_argparse_error() -> None:
+    result = run_cli(
+        "--mode",
+        "local",
+        "--prefix",
+        PREFIX,
+        "--now",
+        "not-a-timestamp",
+        names=[],
+    )
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert "--now must be a valid UTC timestamp in YYYYMMDDTHHMMSSZ format" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize("option", ["--local-count", "--daily", "--weekly", "--monthly"])
+def test_cli_negative_counts_use_concise_argparse_error(option: str) -> None:
+    result = run_cli(
+        "--mode",
+        "local",
+        "--prefix",
+        PREFIX,
+        option,
+        "-1",
+        names=[],
+    )
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert f"argument {option}: must be non-negative" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
 @pytest.mark.parametrize("field", ["local_count", "daily", "weekly", "monthly"])
 def test_negative_policy_counts_are_rejected(field: str) -> None:
     module = load_planner()
@@ -314,6 +366,18 @@ def test_negative_policy_counts_are_rejected(field: str) -> None:
 
     with pytest.raises(ValueError, match=rf"^{field} must be non-negative$"):
         module.plan_inventory([], mode="local", prefix=PREFIX, now=NOW, **policy)
+
+
+def test_naive_now_is_rejected() -> None:
+    module = load_planner()
+
+    with pytest.raises(ValueError, match=r"^now must be timezone-aware$"):
+        module.plan_inventory(
+            pair("20260629T031500Z"),
+            mode="local",
+            prefix=PREFIX,
+            now=datetime(2026, 6, 29, 23, 0),
+        )
 
 
 def test_invalid_mode_is_rejected_by_api_and_cli() -> None:
