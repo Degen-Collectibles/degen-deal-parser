@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -708,6 +709,61 @@ def _systemd_analyze_prefix() -> list[str] | None:
     return [executable] if executable is not None else None
 
 
+def _runbook_shell_block(name: str) -> str:
+    runbook = RUNBOOK.read_text(encoding="utf-8")
+    match = re.search(
+        rf"^# BEGIN {re.escape(name)}\s*$\n(?P<body>.*?)^# END {re.escape(name)}\s*$",
+        runbook,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert match is not None, f"missing runnable runbook block: {name}"
+    return match.group("body")
+
+
+def _run_runbook_shell_block(
+    tmp_path: Path,
+    name: str,
+    values: dict[str, str],
+) -> subprocess.CompletedProcess[str]:
+    if BASH is None:
+        pytest.skip("No usable POSIX Bash/WSL environment")
+    script = tmp_path / f"{name.lower()}.sh"
+    with script.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(
+            "#!/usr/bin/env bash\n"
+            "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n"
+            + _runbook_shell_block(name)
+        )
+    environment = os.environ.copy()
+    environment.update(values)
+    if os.name == "nt":
+        environment["WSLENV"] = ":".join(sorted(values))
+    return subprocess.run(
+        [BASH, _posix_path(script)],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+
+def _write_verified_pair(directory: Path, prefix: str, stamp: str, payload: bytes) -> tuple[str, str]:
+    dump_name = f"{prefix}{stamp}.dump"
+    sidecar_name = f"{dump_name}.sha256"
+    (directory / dump_name).write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    with (directory / sidecar_name).open("w", encoding="ascii", newline="\n") as handle:
+        handle.write(f"{digest}  {dump_name}\n")
+    return dump_name, sidecar_name
+
+
+def _write_text_lf(path: Path, content: str) -> None:
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(content)
+
+
 def test_source_declares_safe_shell_contract_and_live_defaults() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
 
@@ -899,13 +955,192 @@ def test_runbook_covers_green_backup_policy_mapping_and_safety_gates() -> None:
     assert "missing planner" in lowered and "expected on the first install" in lowered
     assert "environment variable names only" in lowered
     assert "every candidate" in lowered and "outside the keep set" in lowered
-    assert "zero candidates" in lowered and "enable the reviewed future policy" in lowered
+    assert "zero candidates" in lowered
+    assert "zero candidates is not approval" in lowered
+    assert "both zero-candidate and nonzero-candidate reviews require explicit jeffrey/operator approval" in lowered
     assert "unchanged MainPID" in runbook
     assert "no secret output" in lowered
     assert "no placeholders" not in lowered
     assert "TBD" not in runbook
     assert "systemctl restart" not in lowered
     assert "systemctl start" not in lowered
+
+
+def test_runbook_checksum_verification_checks_every_pair_and_aggregates_failures(tmp_path: Path) -> None:
+    prefix = "degen_green_prod_green_"
+    invalid_dump, invalid_sidecar = _write_verified_pair(
+        tmp_path,
+        prefix,
+        "20260628T101500Z",
+        b"invalid-after-sidecar-created\n",
+    )
+    (tmp_path / invalid_dump).write_bytes(b"tampered\n")
+    valid_dump, valid_sidecar = _write_verified_pair(
+        tmp_path,
+        prefix,
+        "20260629T101500Z",
+        b"valid\n",
+    )
+
+    result = _run_runbook_shell_block(
+        tmp_path,
+        "POST_RUN_CHECKSUM_VERIFICATION",
+        {
+            "BACKUP_DIR": _posix_path(tmp_path),
+            "BACKUP_PREFIX": prefix,
+        },
+    )
+
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert invalid_dump in combined
+    assert valid_dump in combined
+    assert f"{valid_dump}: OK" in combined
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    empty_result = _run_runbook_shell_block(
+        empty,
+        "POST_RUN_CHECKSUM_VERIFICATION",
+        {
+            "BACKUP_DIR": _posix_path(empty),
+            "BACKUP_PREFIX": prefix,
+        },
+    )
+    assert empty_result.returncode != 0
+    assert "no recognized checksum sidecars" in (empty_result.stdout + empty_result.stderr).lower()
+
+
+def test_runbook_derives_prefix_only_from_newest_verified_complete_pair(tmp_path: Path) -> None:
+    expected_prefix = "degen_green_prod_green_"
+    _write_verified_pair(tmp_path, expected_prefix, "20260628T101500Z", b"verified\n")
+    corrupt_dump, _ = _write_verified_pair(tmp_path, "wrong_newer_", "20260629T101500Z", b"before\n")
+    (tmp_path / corrupt_dump).write_bytes(b"after\n")
+    (tmp_path / "incomplete_newest_20260630T101500Z.dump").write_bytes(b"incomplete\n")
+
+    result = _run_runbook_shell_block(
+        tmp_path,
+        "INSTALL_PREFIX_DERIVATION",
+        {"BACKUP_DIR": _posix_path(tmp_path)},
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip() == expected_prefix
+
+    no_complete_pair = tmp_path / "no-complete-pair"
+    no_complete_pair.mkdir()
+    (no_complete_pair / "degen_green_prod_green_20260630T101500Z.dump").write_bytes(b"incomplete\n")
+    missing_result = _run_runbook_shell_block(
+        no_complete_pair,
+        "INSTALL_PREFIX_DERIVATION",
+        {"BACKUP_DIR": _posix_path(no_complete_pair)},
+    )
+    assert missing_result.returncode != 0
+    assert "verified complete backup pair" in (missing_result.stdout + missing_result.stderr).lower()
+
+
+def test_runbook_reads_only_one_safe_persisted_prefix_in_a_fresh_shell(tmp_path: Path) -> None:
+    env_file = tmp_path / "prod-db-backup.env"
+    _write_text_lf(
+        env_file,
+        "UNRELATED=do-not-print-this\n"
+        "BACKUP_PREFIX=degen_green_prod_green_\n"
+        "ANOTHER=also-do-not-print\n",
+    )
+
+    result = _run_runbook_shell_block(
+        tmp_path,
+        "FRESH_SHELL_PREFIX_RETRIEVAL",
+        {"BACKUP_ENV_FILE": _posix_path(env_file)},
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip() == "degen_green_prod_green_"
+    assert "do-not-print" not in result.stdout + result.stderr
+
+    _write_text_lf(env_file, "BACKUP_PREFIX=safe_\nBACKUP_PREFIX=duplicate_\n")
+    duplicate_result = _run_runbook_shell_block(
+        tmp_path,
+        "FRESH_SHELL_PREFIX_RETRIEVAL",
+        {"BACKUP_ENV_FILE": _posix_path(env_file)},
+    )
+    assert duplicate_result.returncode != 0
+
+    _write_text_lf(env_file, "BACKUP_PREFIX=../unsafe\n")
+    unsafe_result = _run_runbook_shell_block(
+        tmp_path,
+        "FRESH_SHELL_PREFIX_RETRIEVAL",
+        {"BACKUP_ENV_FILE": _posix_path(env_file)},
+    )
+    assert unsafe_result.returncode != 0
+
+
+def test_runbook_persists_derived_prefix_without_putting_host_identity_in_template() -> None:
+    runbook = RUNBOOK.read_text(encoding="utf-8")
+    source = SCRIPT.read_text(encoding="utf-8")
+    template = ENV_TEMPLATE.read_text(encoding="utf-8")
+
+    assert 'sudo env BACKUP_PREFIX="$BACKUP_PREFIX" python3' in runbook
+    assert 'backup_prefix = os.environ.get("BACKUP_PREFIX", "")' in runbook
+    assert '"BACKUP_PREFIX": backup_prefix,' in runbook
+    assert 'if [[ -n "${BACKUP_PREFIX:-}" ]]' in source
+    assert 'validate_label "$BACKUP_PREFIX"' in source
+    assert not re.search(r"^BACKUP_PREFIX=", template, re.MULTILINE)
+
+
+def test_runbook_post_run_planner_commands_generate_local_and_remote_reports(tmp_path: Path) -> None:
+    prefix = "degen_green_prod_green_"
+    names = [
+        name
+        for stamp in ("20260628T101500Z", "20260629T101500Z")
+        for name in (f"{prefix}{stamp}.dump", f"{prefix}{stamp}.dump.sha256")
+    ]
+    local_inventory = tmp_path / "local-inventory.txt"
+    remote_inventory = tmp_path / "remote-inventory.txt"
+    local_plan = tmp_path / "local-plan.json"
+    remote_plan = tmp_path / "remote-plan.json"
+    inventory_text = "\n".join(names) + "\n"
+    local_inventory.write_text(inventory_text, encoding="utf-8")
+    remote_inventory.write_text(inventory_text, encoding="utf-8")
+    values = {
+        "RETENTION_PLANNER": _posix_path(PLANNER),
+        "BACKUP_PREFIX": prefix,
+        "REVIEW_NOW": "20260630T101500Z",
+        "LOCAL_INVENTORY_FILE": _posix_path(local_inventory),
+        "REMOTE_INVENTORY_FILE": _posix_path(remote_inventory),
+        "LOCAL_PLAN_FILE": _posix_path(local_plan),
+        "REMOTE_PLAN_FILE": _posix_path(remote_plan),
+    }
+
+    result = _run_runbook_shell_block(tmp_path, "POST_RUN_PLANNER_REPORTS", values)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    local = json.loads(local_plan.read_text(encoding="utf-8"))
+    remote = json.loads(remote_plan.read_text(encoding="utf-8"))
+    assert local["mode"] == "local"
+    assert len(local["keep"]) == 2 and local["delete"] == []
+    assert remote["mode"] == "remote" and remote["delete"] == []
+    block = _runbook_shell_block("POST_RUN_PLANNER_REPORTS")
+    for exact_policy in ("--local-count 2", "--daily 7", "--weekly 4", "--monthly 3"):
+        assert exact_policy in block
+
+    values["REMOTE_INVENTORY_FILE"] = _posix_path(tmp_path / "missing-inventory.txt")
+    failed = _run_runbook_shell_block(tmp_path, "POST_RUN_PLANNER_REPORTS", values)
+    assert failed.returncode != 0
+
+
+def test_runbook_requires_explicit_approval_for_zero_and_nonzero_candidate_reviews() -> None:
+    runbook = RUNBOOK.read_text(encoding="utf-8")
+    zero = runbook.index("zero candidates")
+    approval = runbook.index(
+        "Both zero-candidate and nonzero-candidate reviews require explicit Jeffrey/operator approval"
+    )
+    flag_edit = runbook.index('lines[matches[0]] = "REMOTE_PRUNE_ENABLED=1"')
+
+    assert zero < approval < flag_edit
+    assert "Zero candidates is not approval" in runbook
+    assert "record `zero candidates` and then enable" not in runbook
+    assert "Only after that approval" in runbook[approval:flag_edit]
 
 
 def test_systemd_units_and_calendar_validate_when_systemd_analyze_is_available(tmp_path: Path) -> None:

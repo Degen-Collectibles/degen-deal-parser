@@ -190,17 +190,75 @@ sudo install -o root -g root -m 0644 \
   /etc/systemd/system/degen-prod-db-backup.timer
 ```
 
-This exact editor preserves every unrelated line in the real file and adds or replaces only the new non-sensitive policy keys. It refuses a symlink, incorrect ownership/mode, or an existing temporary path. `REMOTE_PRUNE_ENABLED=0` remains the initial state.
+The orchestrator accepts a validated `BACKUP_PREFIX` override. Derive that non-sensitive namespace from the newest existing complete pair whose sidecar exactly matches its dump. An incomplete or checksum-invalid pair is not evidence. Stop if no verified complete pair exists or if the newest timestamp is ambiguous across prefixes. This prints only the safe prefix, never environment contents.
 
 ```bash
-sudo python3 - <<'PY'
+BACKUP_PREFIX=$(
+  sudo env BACKUP_DIR=/opt/degen/backups/db bash <<'BASH'
+# BEGIN INSTALL_PREFIX_DERIVATION
+set -uo pipefail
+shopt -s nullglob
+prefix_candidates=()
+for dump_path in "$BACKUP_DIR"/*.dump; do
+  [[ -f "$dump_path" && ! -L "$dump_path" ]] || continue
+  dump_name=${dump_path##*/}
+  if [[ "$dump_name" =~ ^([A-Za-z0-9._-]+)([0-9]{8}T[0-9]{6}Z)\.dump$ ]]; then
+    candidate_prefix=${BASH_REMATCH[1]}
+    candidate_stamp=${BASH_REMATCH[2]}
+  else
+    continue
+  fi
+  sidecar_path="$dump_path.sha256"
+  [[ -f "$sidecar_path" && ! -L "$sidecar_path" ]] || continue
+  sidecar_line=$(<"$sidecar_path") || continue
+  checksum_output=$(sha256sum -- "$dump_path") || continue
+  checksum=${checksum_output%% *}
+  [[ "$sidecar_line" == "$checksum  $dump_name" ]] || continue
+  prefix_candidates+=("$candidate_stamp"$'\t'"$candidate_prefix")
+done
+if (( ${#prefix_candidates[@]} == 0 )); then
+  printf '%s\n' 'ERROR: no verified complete backup pair exists for prefix derivation' >&2
+  exit 1
+fi
+mapfile -t sorted_prefix_candidates < <(
+  printf '%s\n' "${prefix_candidates[@]}" | LC_ALL=C sort -r
+)
+IFS=$'\t' read -r newest_stamp BACKUP_PREFIX <<< "${sorted_prefix_candidates[0]}"
+[[ "$BACKUP_PREFIX" =~ ^[A-Za-z0-9._-]+$ ]] || {
+  printf '%s\n' 'ERROR: derived backup prefix is unsafe' >&2
+  exit 1
+}
+for candidate in "${sorted_prefix_candidates[@]}"; do
+  IFS=$'\t' read -r candidate_stamp candidate_prefix <<< "$candidate"
+  [[ "$candidate_stamp" == "$newest_stamp" ]] || break
+  if [[ "$candidate_prefix" != "$BACKUP_PREFIX" ]]; then
+    printf '%s\n' 'ERROR: newest verified backup timestamp has multiple prefixes' >&2
+    exit 1
+  fi
+done
+printf '%s\n' "$BACKUP_PREFIX"
+# END INSTALL_PREFIX_DERIVATION
+BASH
+)
+[[ "$BACKUP_PREFIX" =~ ^[A-Za-z0-9._-]+$ ]]
+```
+
+This exact editor preserves every unrelated line in the real file and adds or replaces only the new non-sensitive policy keys, including the derived `BACKUP_PREFIX`. It refuses a symlink, incorrect ownership/mode, an unsafe prefix, or an existing temporary path. `REMOTE_PRUNE_ENABLED=0` remains the initial state.
+
+```bash
+sudo env BACKUP_PREFIX="$BACKUP_PREFIX" python3 - <<'PY'
 from pathlib import Path
 import os
+import re
 import stat
 
 path = Path("/etc/degen/prod-db-backup.env")
 temporary = path.with_name(path.name + ".retention-update")
+backup_prefix = os.environ.get("BACKUP_PREFIX", "")
+if re.fullmatch(r"[A-Za-z0-9._-]+", backup_prefix) is None:
+    raise SystemExit("derived backup prefix is unsafe")
 updates = {
+    "BACKUP_PREFIX": backup_prefix,
     "KEEP_LOCAL_COUNT": "2",
     "KEEP_REMOTE_DAILY": "7",
     "KEEP_REMOTE_WEEKLY": "4",
@@ -323,7 +381,9 @@ sudo cat "$CONFIG_BACKUP_DIR/remote-retention-candidates.txt"
 
 Do not cross this gate until every candidate is manually recognized as an automation-owned complete pair and is outside the keep set in `remote-retention-plan.json`. Protected objects must never appear as candidates. Record the decision beside the snapshot.
 
-If there are zero candidates, record `zero candidates` and then enable the reviewed future policy. If candidates exist, enable it only after complete review and explicit approval. The gated edit below refuses anything other than one current `REMOTE_PRUNE_ENABLED=0` line and changes no other line:
+If there are zero candidates, record `zero candidates` in the review evidence. Zero candidates is not approval: future scheduled runs can still produce deletable objects. If candidates exist, record the reviewed object list and keep-set comparison. In both cases, leave `REMOTE_PRUNE_ENABLED=0` unchanged and stop.
+
+Both zero-candidate and nonzero-candidate reviews require explicit Jeffrey/operator approval before remote deletion may be enabled. Only after that approval is recorded may the operator run the gated edit below. It refuses anything other than one current `REMOTE_PRUNE_ENABLED=0` line and changes no other line:
 
 ```bash
 sudo python3 - <<'PY'
@@ -402,32 +462,170 @@ On the Windows workstation, confirm OneDrive stays off before and after this Gre
 Do not claim success before this scheduled observation. After the next scheduled run has actually fired, perform every check below:
 
 ```bash
-sudo journalctl -u degen-prod-db-backup.service -n 200 --no-pager
+set -euo pipefail
+REVIEW_NOW=$(date -u +%Y%m%dT%H%M%SZ)
+OBSERVATION_DIR="/opt/degen/backups/config/${REVIEW_NOW}-scheduled-observation"
+sudo test ! -e "$OBSERVATION_DIR"
+sudo mkdir -m 0700 -- "$OBSERVATION_DIR"
+sudo chown root:root -- "$OBSERVATION_DIR"
+sudo journalctl -u degen-prod-db-backup.service -n 200 --no-pager |
+  sudo tee "$OBSERVATION_DIR/service-journal.txt"
 systemctl show degen-prod-db-backup.service \
-  -p Result -p ExecMainCode -p ExecMainStatus -p InactiveEnterTimestamp
-sudo tail -n 200 /var/log/degen/prod-db-backup.log
+  -p Result -p ExecMainCode -p ExecMainStatus -p InactiveEnterTimestamp |
+  sudo tee "$OBSERVATION_DIR/service-result.txt"
+sudo tail -n 200 /var/log/degen/prod-db-backup.log |
+  sudo tee "$OBSERVATION_DIR/backup-log-tail.txt"
 systemctl list-timers --all degen-prod-db-backup.timer --no-pager
-df -B1 /opt/degen/backups/db
 
-sudo find /opt/degen/backups/db -mindepth 1 -maxdepth 1 -type f \
-  -printf '%f\t%s bytes\n' | sort
-sudo sh -c 'cd /opt/degen/backups/db && for sidecar in "$1"[0-9]*T[0-9]*Z.dump.sha256; do test -f "$sidecar" && sha256sum -c -- "$sidecar"; done' \
-  sh "$BACKUP_PREFIX"
+BACKUP_ENV_FILE=/etc/degen/prod-db-backup.env
+BACKUP_PREFIX=$(
+  sudo env BACKUP_ENV_FILE="$BACKUP_ENV_FILE" bash <<'BASH'
+# BEGIN FRESH_SHELL_PREFIX_RETRIEVAL
+set -uo pipefail
+mapfile -t persisted_prefixes < <(
+  awk -F= '$1 == "BACKUP_PREFIX" { print substr($0, index($0, "=") + 1) }' \
+    "$BACKUP_ENV_FILE"
+)
+if (( ${#persisted_prefixes[@]} != 1 )); then
+  printf '%s\n' 'ERROR: expected exactly one persisted BACKUP_PREFIX entry' >&2
+  exit 1
+fi
+BACKUP_PREFIX=${persisted_prefixes[0]}
+if [[ ! "$BACKUP_PREFIX" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  printf '%s\n' 'ERROR: persisted backup prefix is unsafe' >&2
+  exit 1
+fi
+printf '%s\n' "$BACKUP_PREFIX"
+# END FRESH_SHELL_PREFIX_RETRIEVAL
+BASH
+)
+[[ "$BACKUP_PREFIX" =~ ^[A-Za-z0-9._-]+$ ]]
 
-NEWEST_DUMP=$(sudo find /opt/degen/backups/db -mindepth 1 -maxdepth 1 -type f \
-  -name "${BACKUP_PREFIX}*.dump" -printf '%f\n' | sort | tail -n 1)
-test -n "$NEWEST_DUMP"
-LOCAL_SIZE=$(sudo stat -c '%s' "/opt/degen/backups/db/$NEWEST_DUMP")
+BACKUP_DIR=/opt/degen/backups/db
+RETENTION_PLANNER=/usr/local/sbin/degen-prod-db-retention
+df -B1 "$BACKUP_DIR" | sudo tee "$OBSERVATION_DIR/disk-free.txt"
+sudo find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type f \
+  -printf '%f\t%s bytes\n' | LC_ALL=C sort |
+  sudo tee "$OBSERVATION_DIR/local-files.txt"
+
+sudo env BACKUP_DIR="$BACKUP_DIR" BACKUP_PREFIX="$BACKUP_PREFIX" bash <<'BASH' |
+  sudo tee "$OBSERVATION_DIR/local-checksums.txt"
+# BEGIN POST_RUN_CHECKSUM_VERIFICATION
+set -uo pipefail
+checksum_status=0
+mapfile -d '' -t checksum_sidecars < <(
+  find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type f \
+    -name "${BACKUP_PREFIX}[0-9]*T[0-9]*Z.dump.sha256" -print0 |
+    LC_ALL=C sort -z
+)
+if (( ${#checksum_sidecars[@]} == 0 )); then
+  printf '%s\n' 'ERROR: no recognized checksum sidecars were found' >&2
+  checksum_status=1
+fi
+for sidecar_path in "${checksum_sidecars[@]}"; do
+  sidecar_name=${sidecar_path##*/}
+  if ! (cd "$BACKUP_DIR" && sha256sum -c -- "$sidecar_name"); then
+    checksum_status=1
+  fi
+done
+exit "$checksum_status"
+# END POST_RUN_CHECKSUM_VERIFICATION
+BASH
+
+LOCAL_INVENTORY_FILE="$OBSERVATION_DIR/local-inventory.txt"
+REMOTE_INVENTORY_FILE="$OBSERVATION_DIR/remote-inventory.txt"
+LOCAL_PLAN_FILE="$OBSERVATION_DIR/local-retention-plan.json"
+REMOTE_PLAN_FILE="$OBSERVATION_DIR/remote-retention-plan.json"
+sudo find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' |
+  LC_ALL=C sort | sudo tee "$LOCAL_INVENTORY_FILE" >/dev/null
+sudo rclone --config /etc/degen/rclone.conf lsf \
+  onedrive:backups/degen-db --files-only --max-depth 1 |
+  LC_ALL=C sort | sudo tee "$REMOTE_INVENTORY_FILE" >/dev/null
+
+sudo env \
+  RETENTION_PLANNER="$RETENTION_PLANNER" \
+  BACKUP_PREFIX="$BACKUP_PREFIX" \
+  REVIEW_NOW="$REVIEW_NOW" \
+  LOCAL_INVENTORY_FILE="$LOCAL_INVENTORY_FILE" \
+  REMOTE_INVENTORY_FILE="$REMOTE_INVENTORY_FILE" \
+  LOCAL_PLAN_FILE="$LOCAL_PLAN_FILE" \
+  REMOTE_PLAN_FILE="$REMOTE_PLAN_FILE" \
+  bash <<'BASH'
+# BEGIN POST_RUN_PLANNER_REPORTS
+set -euo pipefail
+"$RETENTION_PLANNER" \
+  --mode local \
+  --prefix "$BACKUP_PREFIX" \
+  --now "$REVIEW_NOW" \
+  --local-count 2 \
+  --format json \
+  < "$LOCAL_INVENTORY_FILE" \
+  > "$LOCAL_PLAN_FILE"
+"$RETENTION_PLANNER" \
+  --mode remote \
+  --prefix "$BACKUP_PREFIX" \
+  --now "$REVIEW_NOW" \
+  --daily 7 \
+  --weekly 4 \
+  --monthly 3 \
+  --format json \
+  < "$REMOTE_INVENTORY_FILE" \
+  > "$REMOTE_PLAN_FILE"
+# END POST_RUN_PLANNER_REPORTS
+BASH
+
+sudo python3 - "$LOCAL_PLAN_FILE" "$REMOTE_PLAN_FILE" "$BACKUP_PREFIX" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+local = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+remote = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+prefix = sys.argv[3]
+if local.get("mode") != "local" or local.get("prefix") != prefix:
+    raise SystemExit("local retention report identity mismatch")
+if len(local.get("keep", [])) != 2 or local.get("delete") != []:
+    raise SystemExit("local retention is not exactly two kept pairs with zero eligible deletions")
+if remote.get("mode") != "remote" or remote.get("prefix") != prefix:
+    raise SystemExit("remote retention report identity mismatch")
+if remote.get("delete") != []:
+    raise SystemExit("remote eligible deletions remain after the scheduled run")
+print(f"local_keep_pairs={len(local['keep'])} local_delete_pairs=0")
+print(f"remote_keep_pairs={len(remote['keep'])} remote_delete_pairs=0")
+PY
+
+NEWEST_DUMP=$(sudo python3 - "$LOCAL_PLAN_FILE" <<'PY'
+from pathlib import Path
+import json
+import re
+import sys
+
+plan = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+keep = plan.get("keep", [])
+if len(keep) != 2:
+    raise SystemExit("local report does not contain exactly two kept pairs")
+name = keep[0].get("dump", "")
+if re.fullmatch(r"[A-Za-z0-9._-]+[0-9]{8}T[0-9]{6}Z\.dump", name) is None:
+    raise SystemExit("newest local dump name is unsafe")
+print(name)
+PY
+)
+LOCAL_SIZE=$(sudo stat -c '%s' "$BACKUP_DIR/$NEWEST_DUMP")
 REMOTE_SIZE=$(sudo rclone --config /etc/degen/rclone.conf lsjson \
   "onedrive:backups/degen-db/$NEWEST_DUMP" --stat |
   python3 -c 'import json,sys; print(json.load(sys.stdin)["Size"])')
 test "$REMOTE_SIZE" = "$LOCAL_SIZE"
 sudo rclone --config /etc/degen/rclone.conf cat \
   "onedrive:backups/degen-db/$NEWEST_DUMP.sha256" |
-  sudo cmp -s - "/opt/degen/backups/db/$NEWEST_DUMP.sha256"
+  sudo cmp -s - "$BACKUP_DIR/$NEWEST_DUMP.sha256"
+printf 'remote_final_dump=%s local_bytes=%s remote_bytes=%s sidecar_match=true\n' \
+  "$NEWEST_DUMP" "$LOCAL_SIZE" "$REMOTE_SIZE" |
+  sudo tee "$OBSERVATION_DIR/remote-final-pair.txt"
+sudo find "$OBSERVATION_DIR" -mindepth 1 -maxdepth 1 -type f \
+  -exec chmod 0600 -- {} +
 ```
 
-Rebuild local and remote planner reports with the same `BACKUP_PREFIX` and a fresh UTC `REVIEW_NOW`. The local report must show exactly 2 complete pairs in `keep`, no recognized complete pair in `delete`, and passing local sha256 checks. The remote report must show no object in `delete` after enabled retention, with `keep` implementing the exact 7 distinct UTC dates/4 ISO weeks/3 months union; protected objects may remain. Record remote final-pair size and sidecar equality, disk free bytes, journal exit status, and both reports.
+The fresh-shell block reads only the persisted `BACKUP_PREFIX` key; it never sources or prints the real environment file. The generated local report must prove exactly 2 complete pairs in `keep` and no eligible pair in `delete`. The generated remote report applies the exact 7 distinct UTC dates/4 ISO weeks/3 months policy and must have no remaining eligible pair in `delete`; protected objects may remain. Preserve both JSON reports with the journal exit status, aggregate checksum output, remote final-pair size/sidecar result, and disk-free evidence.
 
 Any nonzero `ExecMainStatus`, missing success line, checksum failure, remote mismatch, unexpected candidate, or retention mismatch is a failed scheduled observation even if a dump file exists.
 
