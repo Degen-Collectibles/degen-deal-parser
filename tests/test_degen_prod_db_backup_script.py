@@ -1438,6 +1438,27 @@ def test_rclone_commands_follow_proceed_and_root_only_token_config_snapshot() ->
     assert not re.search(r"(?:install|cp).*rclone\.conf\.audit", rollback)
 
 
+def test_approval_summary_discloses_rclone_credential_refresh_and_recovery_limits() -> None:
+    runbook = RUNBOOK.read_text(encoding="utf-8")
+    summary = runbook[
+        runbook.index("## Mandatory preflight and approval") : runbook.index(
+            "Run this read-only inventory"
+        )
+    ]
+
+    assert "non-destructive validation" in summary
+    assert "non-mutating" not in summary
+    assert (
+        "`/etc/degen/rclone.conf` (ordinary rclone validation may refresh or rewrite "
+        "this file after approval)"
+    ) in summary
+    assert "audit and emergency-recovery evidence" in summary
+    assert (
+        "not automatically restored because rotated refresh tokens may invalidate the old copy"
+        in summary
+    )
+
+
 @pytest.mark.parametrize(
     ("scenario", "fresh", "expected_success"),
     [

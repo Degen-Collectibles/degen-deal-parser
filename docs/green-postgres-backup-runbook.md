@@ -31,9 +31,9 @@ The standard snapshot location is `/opt/degen/backups/config/<UTC timestamp>/`. 
 
 Before any write, state this preflight and wait for Jeffrey's explicit `proceed`:
 
-- **Exact targets:** the two `/usr/local/sbin/degen-prod-db-*` executables, the two `/etc/systemd/system/degen-prod-db-backup.*` units, selected policy keys in `/etc/degen/prod-db-backup.env`, and one new root-only snapshot directory.
-- **What changes:** install reviewed bytes, leave pruning disabled, reload systemd metadata, and run non-mutating validation. Existing timer enablement is inspected, not changed.
-- **Reversible effects:** installed local files, policy-key edits, and metadata reload can be restored from the snapshot.
+- **Exact targets:** the two `/usr/local/sbin/degen-prod-db-*` executables, the two `/etc/systemd/system/degen-prod-db-backup.*` units, selected policy keys in `/etc/degen/prod-db-backup.env`, `/etc/degen/rclone.conf` (ordinary rclone validation may refresh or rewrite this file after approval), and one new root-only snapshot directory.
+- **What changes:** install reviewed bytes, leave pruning disabled, reload systemd metadata, and run non-destructive validation. Existing timer enablement is inspected, not changed.
+- **Reversible effects:** installed local files, policy-key edits, and metadata reload can be restored from the snapshot. The root-only `rclone.conf.audit` snapshot is audit and emergency-recovery evidence and is not automatically restored because rotated refresh tokens may invalidate the old copy.
 - **Irreversible effects:** none before the flag gate. After the flag becomes `1`, remote deletion is potentially irreversible except for provider recycle behavior.
 - **Rollback:** restore exact saved files and the real environment file, conditionally remove a first-install planner, and reload metadata.
 - **Post-action verification:** hashes, owners, modes, next trigger, environment variable names only, unchanged MainPID values, Windows OneDrive remaining off, and rollback readiness.
