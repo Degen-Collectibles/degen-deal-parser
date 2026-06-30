@@ -15,6 +15,10 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "deploy" / "linux" / "degen-prod-db-backup.sh"
 PLANNER = ROOT / "deploy" / "linux" / "degen-prod-db-retention.py"
+SERVICE = ROOT / "deploy" / "systemd" / "degen-prod-db-backup.service"
+TIMER = ROOT / "deploy" / "systemd" / "degen-prod-db-backup.timer"
+ENV_TEMPLATE = ROOT / "deploy" / "systemd" / "degen-prod-db-backup.env.example"
+RUNBOOK = ROOT / "docs" / "green-postgres-backup-runbook.md"
 STAMP = "20260629T230000Z"
 PREFIX = "degen_green_prod_green_"
 SECRET = "postgresql://degen:do-not-log-this@db.internal/degen_green_prod"
@@ -668,6 +672,42 @@ def _cleanup_warning(category: str, basename: str) -> str:
     return f"[2026-06-29T23:00:00Z] WARNING: backup cleanup failed ({category}): {basename}"
 
 
+def _parse_unit(source: str) -> dict[str, dict[str, str]]:
+    sections: dict[str, dict[str, str]] = {}
+    current: dict[str, str] | None = None
+    for raw_line in source.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1]
+            assert section not in sections, f"duplicate unit section: {section}"
+            current = sections.setdefault(section, {})
+            continue
+        assert current is not None and "=" in line, f"invalid unit line: {raw_line}"
+        key, value = line.split("=", 1)
+        assert key not in current, f"duplicate unit directive: {key}"
+        current[key] = value
+    return sections
+
+
+def _systemd_analyze_prefix() -> list[str] | None:
+    if os.name == "nt":
+        wsl = shutil.which("wsl.exe")
+        if wsl is None:
+            return None
+        probe = subprocess.run(
+            [wsl, "-e", "sh", "-lc", "command -v systemd-analyze >/dev/null 2>&1"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        return [wsl, "-e", "systemd-analyze"] if probe.returncode == 0 else None
+    executable = shutil.which("systemd-analyze")
+    return [executable] if executable is not None else None
+
+
 def test_source_declares_safe_shell_contract_and_live_defaults() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
 
@@ -701,6 +741,209 @@ def test_source_declares_safe_shell_contract_and_live_defaults() -> None:
         'LOG_FILE=${LOG_FILE:-$LOG_DIR/prod-db-backup.log}',
     ):
         assert expected in source
+
+
+def test_systemd_service_is_exact_oneshot_with_postgres_compatible_hardening() -> None:
+    unit = SERVICE.read_text(encoding="utf-8")
+
+    assert _parse_unit(unit) == {
+        "Unit": {
+            "Description": "Degen PostgreSQL verified backup",
+            "After": "network-online.target postgresql.service",
+            "Wants": "network-online.target",
+        },
+        "Service": {
+            "Type": "oneshot",
+            "User": "root",
+            "Group": "root",
+            "EnvironmentFile": "/etc/degen/prod-db-backup.env",
+            "ExecStart": "/usr/local/sbin/degen-prod-db-backup",
+            "TimeoutStartSec": "infinity",
+            "TimeoutStopSec": "90",
+            "KillMode": "control-group",
+            "Nice": "10",
+            "IOSchedulingClass": "best-effort",
+            "IOSchedulingPriority": "7",
+            "UMask": "0077",
+            "NoNewPrivileges": "true",
+            "PrivateTmp": "true",
+            "PrivateDevices": "true",
+            "ProtectHome": "true",
+            "ProtectSystem": "full",
+            "ReadWritePaths": "/etc/degen",
+            "ProtectKernelTunables": "true",
+            "ProtectKernelModules": "true",
+            "ProtectControlGroups": "true",
+            "RestrictSUIDSGID": "true",
+            "LockPersonality": "true",
+            "RestrictAddressFamilies": "AF_UNIX AF_INET AF_INET6",
+        },
+    }
+    assert "[Install]" not in unit
+    assert not re.search(r"^Restart(?:Sec)?=", unit, re.MULTILINE)
+    assert "StandardOutput=" not in unit and "StandardError=" not in unit
+    for unrelated_service in ("degen-web.service", "degen-worker.service", "degen-ops-discord-bot.service"):
+        assert unrelated_service not in unit
+    assert not re.search(r"^Exec\w*=.*\bsystemctl\b", unit, re.MULTILINE)
+
+
+def test_timer_preserves_exact_green_schedule_and_persistence() -> None:
+    timer = TIMER.read_text(encoding="utf-8")
+
+    assert _parse_unit(timer) == {
+        "Unit": {"Description": "Nightly Degen PostgreSQL verified backup"},
+        "Timer": {
+            "Unit": "degen-prod-db-backup.service",
+            "OnCalendar": "*-*-* 03:15:00 America/Los_Angeles",
+            "RandomizedDelaySec": "20m",
+            "AccuracySec": "1m",
+            "Persistent": "true",
+        },
+        "Install": {"WantedBy": "timers.target"},
+    }
+
+
+def test_env_template_has_exact_secret_free_defaults_and_preservation_warning() -> None:
+    template = ENV_TEMPLATE.read_text(encoding="utf-8")
+    assignments = {
+        key: value
+        for line in template.splitlines()
+        if (stripped := line.strip()) and not stripped.startswith("#")
+        for key, value in [stripped.split("=", 1)]
+    }
+
+    assert assignments == {
+        "APP_ENV_FILE": "/opt/degen/web.env",
+        "BACKUP_DIR": "/opt/degen/backups/db",
+        "LOG_DIR": "/var/log/degen",
+        "RCLONE_CONFIG": "/etc/degen/rclone.conf",
+        "RCLONE_REMOTE_PATH": "onedrive:backups/degen-db",
+        "KEEP_LOCAL_COUNT": "2",
+        "KEEP_REMOTE_DAILY": "7",
+        "KEEP_REMOTE_WEEKLY": "4",
+        "KEEP_REMOTE_MONTHLY": "3",
+        "REMOTE_PRUNE_ENABLED": "0",
+        "MIN_FREE_AFTER_BYTES": "10737418240",
+        "RETENTION_PLANNER": "/usr/local/sbin/degen-prod-db-retention",
+        "LOCK_FILE": "/run/lock/degen-prod-db-backup.lock",
+    }
+    lowered = template.lower()
+    for forbidden in ("database_url", "token", "password", "secret", "openclaw-9902ae", "brev"):
+        assert forbidden not in lowered
+    assert not re.search(r"^KEEP_[A-Z0-9_]*_DAYS=", template, re.MULTILINE)
+    assert "Never overwrite /etc/degen/prod-db-backup.env from this template." in template
+    assert "root:root mode 0600" in template
+    assert "edit and preserve" in lowered
+
+
+def test_runbook_covers_green_backup_policy_mapping_and_safety_gates() -> None:
+    runbook = RUNBOOK.read_text(encoding="utf-8")
+    lowered = runbook.lower()
+
+    for required in (
+        "2026-06-29",
+        "Green",
+        "unique timestamped",
+        "newest 2",
+        "7 distinct UTC dates",
+        "4 ISO weeks",
+        "3 months",
+        "unknown",
+        "incomplete",
+        "manual",
+        "temporary",
+        "REMOTE_PRUNE_ENABLED=0",
+        "REMOTE_PRUNE_ENABLED=1",
+        "deploy/linux/degen-prod-db-backup.sh",
+        "/usr/local/sbin/degen-prod-db-backup",
+        "deploy/linux/degen-prod-db-retention.py",
+        "/usr/local/sbin/degen-prod-db-retention",
+        "deploy/systemd/degen-prod-db-backup.service",
+        "/etc/systemd/system/degen-prod-db-backup.service",
+        "deploy/systemd/degen-prod-db-backup.timer",
+        "/etc/systemd/system/degen-prod-db-backup.timer",
+        "deploy/systemd/degen-prod-db-backup.env.example",
+        "/etc/degen/prod-db-backup.env",
+        "/opt/degen/backups/config/<UTC timestamp>/",
+        "/opt/degen/backups/manual/",
+        "root:root 0755",
+        "root:root 0644",
+        "root:root 0600",
+        "systemd-analyze verify",
+        "systemctl daemon-reload",
+        "systemctl is-enabled",
+        "systemctl list-timers",
+        "preflight",
+        "remote-retention-dry-run",
+        "MainPID",
+        "sha256sum",
+        "rollback",
+        "next scheduled run",
+        "OneDrive",
+        "recycle bin",
+        "WARNING: backup cleanup failed",
+        "identical-byte",
+    ):
+        assert required in runbook
+    for boundary in (
+        "never overwrite the real environment file from the template",
+        "do not start or restart PostgreSQL, the web service, the worker, or the bot",
+        "do not run a manual full backup without Jeffrey's explicit approval",
+        "does not delete even when REMOTE_PRUNE_ENABLED=1",
+        "do not claim success before this scheduled observation",
+        "remote deletion is potentially irreversible",
+    ):
+        assert boundary.lower() in lowered
+    assert "exact targets" in lowered
+    assert "reversible" in lowered and "irreversible" in lowered
+    assert "missing planner" in lowered and "expected on the first install" in lowered
+    assert "environment variable names only" in lowered
+    assert "every candidate" in lowered and "outside the keep set" in lowered
+    assert "zero candidates" in lowered and "enable the reviewed future policy" in lowered
+    assert "unchanged MainPID" in runbook
+    assert "no secret output" in lowered
+    assert "no placeholders" not in lowered
+    assert "TBD" not in runbook
+    assert "systemctl restart" not in lowered
+    assert "systemctl start" not in lowered
+
+
+def test_systemd_units_and_calendar_validate_when_systemd_analyze_is_available(tmp_path: Path) -> None:
+    command = _systemd_analyze_prefix()
+    if command is None:
+        pytest.skip("systemd-analyze is unavailable")
+
+    service_copy = tmp_path / SERVICE.name
+    timer_copy = tmp_path / TIMER.name
+    service_copy.write_text(
+        SERVICE.read_text(encoding="utf-8").replace(
+            "ExecStart=/usr/local/sbin/degen-prod-db-backup",
+            "ExecStart=/bin/true",
+        ),
+        encoding="utf-8",
+    )
+    timer_copy.write_text(TIMER.read_text(encoding="utf-8"), encoding="utf-8")
+    service_arg = _posix_path(service_copy) if os.name == "nt" else str(service_copy)
+    timer_arg = _posix_path(timer_copy) if os.name == "nt" else str(timer_copy)
+    verify = subprocess.run(
+        [*command, "verify", service_arg, timer_arg],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert verify.returncode == 0, verify.stdout + verify.stderr
+
+    expression = "*-*-* 03:15:00 America/Los_Angeles"
+    calendar = subprocess.run(
+        [*command, "calendar", "--iterations=2", expression],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert calendar.returncode == 0, calendar.stdout + calendar.stderr
+    assert "America/Los_Angeles" in calendar.stdout
 
 
 def test_script_passes_bash_syntax_check() -> None:
