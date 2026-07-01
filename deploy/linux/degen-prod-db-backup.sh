@@ -37,6 +37,9 @@ logger_write_fd=""
 logger_read_fd=""
 original_stdout_fd=""
 original_stderr_fd=""
+rclone_receipt_started=0
+rclone_receipt_finished=0
+rclone_receipt_before_metadata=""
 
 
 die() {
@@ -242,6 +245,7 @@ warn_cleanup_failure() {
 cleanup_on_exit() {
     local status=$?
     local logger_status=0
+    local receipt_status=0
     trap - EXIT HUP INT TERM
     set +e
     if (( status != 0 )); then
@@ -269,6 +273,11 @@ cleanup_on_exit() {
             fi
         fi
     fi
+    if (( rclone_receipt_started == 1 && rclone_receipt_finished == 0 )); then
+        if ! finish_rclone_config_receipts; then
+            receipt_status=1
+        fi
+    fi
     if [[ -n "$original_stdout_fd" && -n "$original_stderr_fd" ]]; then
         exec 1>&${original_stdout_fd} 2>&${original_stderr_fd}
     fi
@@ -278,6 +287,9 @@ cleanup_on_exit() {
     fi
     if (( status == 0 && logger_status != 0 )); then
         status=$logger_status
+    fi
+    if (( status == 0 && receipt_status != 0 )); then
+        status=$receipt_status
     fi
     if [[ -n "$original_stdout_fd" ]]; then
         exec {original_stdout_fd}>&-
@@ -470,6 +482,132 @@ validate_rclone_configuration() {
 }
 
 
+read_rclone_config_receipt() {
+    python3 - "$RCLONE_CONFIG" 2>/dev/null <<'PY'
+import hashlib
+import os
+import stat
+import sys
+
+
+path = sys.argv[1]
+parent_path = os.path.dirname(path) or "/"
+parent_before = os.lstat(parent_path)
+if (
+    not stat.S_ISDIR(parent_before.st_mode)
+    or parent_before.st_uid != os.geteuid()
+    or stat.S_IMODE(parent_before.st_mode) & 0o022
+):
+    raise SystemExit(1)
+
+try:
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+except AttributeError:
+    raise SystemExit(1)
+fd = os.open(path, flags)
+try:
+    before = os.fstat(fd)
+    path_before = os.lstat(path)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or stat.S_ISLNK(path_before.st_mode)
+        or (before.st_dev, before.st_ino) != (path_before.st_dev, path_before.st_ino)
+        or before.st_uid != os.geteuid()
+        or stat.S_IMODE(before.st_mode) != 0o600
+        or before.st_nlink != 1
+    ):
+        raise SystemExit(1)
+    digest = hashlib.sha256()
+    while True:
+        chunk = os.read(fd, 1024 * 1024)
+        if not chunk:
+            break
+        digest.update(chunk)
+    after = os.fstat(fd)
+    path_after = os.lstat(path)
+    parent_after = os.lstat(parent_path)
+    stable_fields = (
+        "st_dev",
+        "st_ino",
+        "st_uid",
+        "st_gid",
+        "st_mode",
+        "st_nlink",
+        "st_size",
+        "st_mtime_ns",
+        "st_ctime_ns",
+    )
+    if (
+        any(getattr(before, field) != getattr(after, field) for field in stable_fields)
+        or (after.st_dev, after.st_ino) != (path_after.st_dev, path_after.st_ino)
+        or any(
+            getattr(parent_before, field) != getattr(parent_after, field)
+            for field in ("st_dev", "st_ino", "st_uid", "st_gid", "st_mode")
+        )
+    ):
+        raise SystemExit(1)
+    print(
+        f"sha256={digest.hexdigest()} "
+        f"device={after.st_dev} inode={after.st_ino} "
+        f"uid={after.st_uid} gid={after.st_gid} "
+        f"mode={stat.S_IMODE(after.st_mode):04o} links={after.st_nlink} "
+        f"size={after.st_size} mtime_ns={after.st_mtime_ns}"
+    )
+finally:
+    os.close(fd)
+PY
+}
+
+
+begin_rclone_config_receipts() {
+    local metadata hash mtime_ns
+    if ! metadata=$(read_rclone_config_receipt); then
+        die "Unable to record rclone configuration metadata"
+    fi
+    hash=${metadata#sha256=}
+    hash=${hash%% *}
+    mtime_ns=${metadata##* mtime_ns=}
+    if [[ ! "$hash" =~ ^[0-9a-f]{64}$ || ! "$mtime_ns" =~ ^[0-9]+$ ]]; then
+        die "Unable to record rclone configuration metadata"
+    fi
+    if ! log "RCLONE_CONFIG_RECEIPT phase=before status=ok path=$RCLONE_CONFIG $metadata change=baseline"; then
+        die "Unable to log rclone configuration metadata"
+    fi
+    rclone_receipt_before_metadata=$metadata
+    rclone_receipt_started=1
+}
+
+
+finish_rclone_config_receipts() {
+    local metadata hash mtime_ns change
+    if (( rclone_receipt_finished == 1 )); then
+        return 0
+    fi
+    if ! metadata=$(read_rclone_config_receipt); then
+        rclone_receipt_finished=1
+        log "RCLONE_CONFIG_RECEIPT phase=final status=error reason=metadata-unavailable" || true
+        return 1
+    fi
+    hash=${metadata#sha256=}
+    hash=${hash%% *}
+    mtime_ns=${metadata##* mtime_ns=}
+    if [[ ! "$hash" =~ ^[0-9a-f]{64}$ || ! "$mtime_ns" =~ ^[0-9]+$ ]]; then
+        rclone_receipt_finished=1
+        log "RCLONE_CONFIG_RECEIPT phase=final status=error reason=metadata-unavailable" || true
+        return 1
+    fi
+    change=unchanged
+    if [[ "$metadata" != "$rclone_receipt_before_metadata" ]]; then
+        change=possible-oauth-refresh
+    fi
+    if ! log "RCLONE_CONFIG_RECEIPT phase=final status=ok path=$RCLONE_CONFIG $metadata change=$change"; then
+        rclone_receipt_finished=1
+        return 1
+    fi
+    rclone_receipt_finished=1
+}
+
+
 require_tools() {
     local tool
     local -a tools=(
@@ -541,12 +679,7 @@ validate_label() {
 
 
 derive_backup_prefix() {
-    local database_name host
-    if [[ -n "${BACKUP_PREFIX:-}" ]]; then
-        validate_label "$BACKUP_PREFIX"
-        backup_prefix=$BACKUP_PREFIX
-        return
-    fi
+    local database_name host expected_prefix
     if ! database_name=$(PGDATABASE="$database_url" psql --no-psqlrc --tuples-only --no-align --command 'SELECT current_database();' 2>/dev/null); then
         die "Unable to query the PostgreSQL database name"
     fi
@@ -557,7 +690,11 @@ derive_backup_prefix() {
     host=${host//$'\r'/}
     validate_label "$database_name"
     validate_label "$host"
-    backup_prefix="${database_name}_${host}_"
+    expected_prefix="${database_name}_${host}_"
+    if [[ -v BACKUP_PREFIX && "$BACKUP_PREFIX" != "$expected_prefix" ]]; then
+        die "Configured backup prefix does not match live database and host identity"
+    fi
+    backup_prefix=$expected_prefix
 }
 
 
@@ -594,6 +731,7 @@ run_preflight() {
     validate_backup_directory
     load_database_url
     derive_backup_prefix
+    begin_rclone_config_receipts
     check_remote_access
     if [[ "$mode" != "remote-retention-dry-run" ]]; then
         check_capacity
@@ -702,17 +840,17 @@ publish_remote_pair() {
     assert_remote_names_absent remote_inventory "Pre-upload" \
         "$temp_dump_name" "$temp_sidecar_name" "$dump_name" "$sidecar_name"
 
-    if ! rclone --config "$RCLONE_CONFIG" --immutable copyto "$dump_path" "$owned_remote_dump_temp" >/dev/null 2>&1; then
+    if ! rclone --config "$RCLONE_CONFIG" --ignore-existing --error-on-no-transfer \
+        copyto "$dump_path" "$owned_remote_dump_temp" >/dev/null 2>&1; then
         log "Remote dump temp was not cleanup-owned after failed upload and remains protected: $temp_dump_name"
         die "Remote dump temporary upload failed"
     fi
-    # Accepted caveat: immutable success cannot distinguish a raced identical-byte object.
     owns_remote_dump_temp=1
-    if ! rclone --config "$RCLONE_CONFIG" --immutable copyto "$sidecar_path" "$owned_remote_sidecar_temp" >/dev/null 2>&1; then
+    if ! rclone --config "$RCLONE_CONFIG" --ignore-existing --error-on-no-transfer \
+        copyto "$sidecar_path" "$owned_remote_sidecar_temp" >/dev/null 2>&1; then
         log "Remote checksum temp was not cleanup-owned after failed upload and remains protected: $temp_sidecar_name"
         die "Remote checksum temporary upload failed"
     fi
-    # Accepted caveat: immutable success cannot distinguish a raced identical-byte object.
     owns_remote_sidecar_temp=1
 
     verify_remote_size "$owned_remote_dump_temp" "$local_size" "Temporary"
@@ -721,13 +859,15 @@ publish_remote_pair() {
     load_remote_inventory remote_inventory
     assert_remote_names_absent remote_inventory "Pre-publish" "$dump_name" "$sidecar_name"
 
-    if ! rclone --config "$RCLONE_CONFIG" --immutable moveto "$owned_remote_dump_temp" "$final_dump" >/dev/null 2>&1; then
+    if ! rclone --config "$RCLONE_CONFIG" --ignore-existing --error-on-no-transfer \
+        moveto "$owned_remote_dump_temp" "$final_dump" >/dev/null 2>&1; then
         die "Remote dump publish move failed"
     fi
     load_remote_inventory remote_inventory
     assert_remote_names_absent remote_inventory "Post-move temp source" "$temp_dump_name"
     owns_remote_dump_temp=0
-    if ! rclone --config "$RCLONE_CONFIG" --immutable moveto "$owned_remote_sidecar_temp" "$final_sidecar" >/dev/null 2>&1; then
+    if ! rclone --config "$RCLONE_CONFIG" --ignore-existing --error-on-no-transfer \
+        moveto "$owned_remote_sidecar_temp" "$final_sidecar" >/dev/null 2>&1; then
         die "Remote checksum publish move failed"
     fi
     load_remote_inventory remote_inventory

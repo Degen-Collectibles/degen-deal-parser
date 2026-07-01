@@ -366,13 +366,17 @@ elif name == "flock":
     os.execv("/usr/bin/flock", ["flock", *args])
 elif name == "rclone":
     immutable = "--immutable" in args
+    ignore_existing = "--ignore-existing" in args
+    error_on_no_transfer = "--error-on-no-transfer" in args
+    config_path = None
     filtered = []
     index = 0
     while index < len(args):
         if args[index] == "--config" and index + 1 < len(args):
+            config_path = args[index + 1]
             index += 2
             continue
-        if args[index] == "--immutable":
+        if args[index] in {"--immutable", "--ignore-existing", "--error-on-no-transfer"}:
             index += 1
             continue
         filtered.append(args[index])
@@ -381,6 +385,32 @@ elif name == "rclone":
     if not args:
         raise SystemExit(77)
     operation = args[0]
+    if os.environ.get("FAKE_RCLONE_REFRESH_CONFIG") == "1":
+        if config_path is None:
+            raise SystemExit(86)
+        prior_calls = sum(
+            line.startswith("rclone:")
+            for line in trace_path.read_text(encoding="utf-8").splitlines()
+        )
+        config = Path(config_path)
+        config_stat = config.stat()
+        config_bytes = config.read_bytes()
+        archive = config.with_name(config.name + f".prior-{prior_calls + 1}")
+        os.link(config, archive)
+        refreshed = config.with_name(config.name + ".refreshed")
+        if os.environ.get("FAKE_RCLONE_REFRESH_PRESERVE_CONTENT") == "1":
+            refreshed.write_bytes(config_bytes)
+            os.utime(
+                refreshed,
+                ns=(config_stat.st_atime_ns, config_stat.st_mtime_ns),
+            )
+        else:
+            refreshed.write_text(
+                f"token = refreshed-rclone-secret-{prior_calls + 1}\n",
+                encoding="utf-8",
+            )
+        refreshed.chmod(0o600)
+        refreshed.replace(config)
     if operation == "lsf":
         trace("rclone:lsf")
         root = remote_path(args[1])
@@ -392,6 +422,15 @@ elif name == "rclone":
         target = remote_path(args[2])
         kind = "sidecar" if ".sha256" in source.name else "dump"
         trace(f"rclone:copy:{kind}")
+        trace(
+            f"rclone:publication-flags:copy:{kind}:"
+            f"ignore-existing={int(ignore_existing)}:"
+            f"error-on-no-transfer={int(error_on_no_transfer)}"
+        )
+        if os.environ.get("FAKE_REQUIRE_STRICT_PUBLICATION_FLAGS") == "1" and not (
+            ignore_existing and error_on_no_transfer
+        ):
+            raise SystemExit(84)
         if os.environ.get("FAKE_RACE_TEMP_ON") == kind:
             remote_root = Path(os.environ["FAKE_REMOTE_ROOT"])
             remote_prefix = os.environ["FAKE_RCLONE_REMOTE_PATH"].rstrip("/") + "/"
@@ -400,8 +439,8 @@ elif name == "rclone":
             (remote_root / race_name).write_bytes(b"foreign-raced-temp")
             trace(f"rclone:race:{kind}:{race_name}")
             target = remote_path(args[2])
-        if immutable and target.exists():
-            raise SystemExit(83)
+        if ignore_existing and target.exists():
+            raise SystemExit(9 if error_on_no_transfer else 0)
         target.write_bytes(source.read_bytes())
         if os.environ.get("FAKE_CREATE_REMOTE_FINAL_ON") == kind:
             race_name = os.environ["FAKE_REMOTE_RACE_NAME"]
@@ -430,11 +469,21 @@ elif name == "rclone":
         target = remote_path(args[2])
         kind = "sidecar" if ".sha256" in source.name else "dump"
         trace(f"rclone:move:{kind}")
+        trace(
+            f"rclone:publication-flags:move:{kind}:"
+            f"ignore-existing={int(ignore_existing)}:"
+            f"error-on-no-transfer={int(error_on_no_transfer)}"
+        )
         fail_if(f"move_{kind}")
-        if os.environ.get("FAKE_REQUIRE_IMMUTABLE") == "1" and not immutable:
+        if os.environ.get("FAKE_REQUIRE_STRICT_PUBLICATION_FLAGS") == "1" and not (
+            ignore_existing and error_on_no_transfer
+        ):
             raise SystemExit(84)
-        if immutable and target.exists():
-            raise SystemExit(85)
+        if os.environ.get("FAKE_RACE_FINAL_ON") == kind:
+            target.write_bytes(b"foreign-raced-final")
+            trace(f"rclone:race-final:{kind}:{target.name}")
+        if ignore_existing and target.exists():
+            raise SystemExit(9 if error_on_no_transfer else 0)
         if os.environ.get("FAKE_MOVE_LEAVES_SOURCE") == kind:
             target.write_bytes(source.read_bytes())
         else:
@@ -456,6 +505,11 @@ elif name == "rclone":
     else:
         print(f"unexpected rclone operation: {operation}", file=sys.stderr)
         raise SystemExit(78)
+    if os.environ.get("FAKE_RCLONE_REMOVE_CONFIG_AFTER") == operation:
+        try:
+            Path(config_path).unlink()
+        except FileNotFoundError:
+            pass
 else:
     print(f"unexpected fake command: {name}", file=sys.stderr)
     raise SystemExit(79)
@@ -851,6 +905,42 @@ def _cleanup_warning(category: str, basename: str) -> str:
     return f"[2026-06-29T23:00:00Z] WARNING: backup cleanup failed ({category}): {basename}"
 
 
+def _run_fake_rclone(
+    harness: BackupHarness,
+    *arguments: str,
+) -> subprocess.CompletedProcess[str]:
+    env = harness.environment()
+    runner = harness.root / "run-fake-rclone.sh"
+    _write_executable(
+        runner,
+        '''#!/usr/bin/env bash
+set -eu
+export PATH="$FAKE_BIN:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+exec rclone "$@"
+''',
+    )
+    return subprocess.run(
+        [harness.bash, _posix_path(runner), *arguments],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+
+def _receipt_records(harness: BackupHarness) -> list[dict[str, str]]:
+    records: list[dict[str, str]] = []
+    for line in harness.log_file.read_text(encoding="utf-8").splitlines():
+        marker = "RCLONE_CONFIG_RECEIPT "
+        if marker not in line:
+            continue
+        payload = line.split(marker, 1)[1]
+        records.append(dict(field.split("=", 1) for field in payload.split()))
+    return records
+
+
 def _assert_no_backup_side_effects(
     harness: BackupHarness, *, helper_may_run: bool
 ) -> None:
@@ -1026,7 +1116,10 @@ def test_source_declares_safe_shell_contract_and_live_defaults() -> None:
     assert "set -euo pipefail" in source
     assert re.search(r"^umask 077$", source, re.MULTILINE)
     assert "set -x" not in source
-    assert "--ignore-existing" not in source
+    assert source.count("--ignore-existing --error-on-no-transfer") == 4
+    assert "--immutable" not in source
+    assert "os.O_NOFOLLOW" in source
+    assert 'getattr(os, name, 0)' not in source
     assert "trap 'exit 129' HUP" in source
     assert "trap 'exit 130' INT" in source
     assert "trap 'exit 143' TERM" in source
@@ -1526,7 +1619,8 @@ def test_runbook_persists_derived_prefix_without_putting_host_identity_in_templa
     assert 'sudo env BACKUP_PREFIX="$BACKUP_PREFIX" python3' in runbook
     assert 'backup_prefix = os.environ.get("BACKUP_PREFIX", "")' in runbook
     assert '"BACKUP_PREFIX": backup_prefix,' in runbook
-    assert 'if [[ -n "${BACKUP_PREFIX:-}" ]]' in source
+    assert 'if [[ -v BACKUP_PREFIX && "$BACKUP_PREFIX" != "$expected_prefix" ]]' in source
+    assert "backup_prefix=$expected_prefix" in source
     assert 'validate_label "$BACKUP_PREFIX"' in source
     assert not re.search(r"^BACKUP_PREFIX=", template, re.MULTILINE)
 
@@ -2030,6 +2124,200 @@ def test_success_verifies_before_pruning_and_preserves_non_candidates(harness: B
     assert all(re.match(r"^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\] ", line) for line in log_lines)
 
 
+@pytest.mark.parametrize("mode", [None, "preflight", "remote-retention-dry-run"])
+def test_every_rclone_mode_brackets_all_commands_with_safe_config_receipts(
+    harness: BackupHarness,
+    mode: str | None,
+) -> None:
+    original_bytes = harness.rclone_config.read_bytes()
+
+    result = harness.run(mode, overrides={"FAKE_RCLONE_REFRESH_CONFIG": "1"})
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    records = _receipt_records(harness)
+    assert [record["phase"] for record in records] == ["before", "final"]
+    required = {
+        "phase",
+        "status",
+        "path",
+        "sha256",
+        "device",
+        "inode",
+        "uid",
+        "gid",
+        "mode",
+        "links",
+        "size",
+        "mtime_ns",
+        "change",
+    }
+    assert all(required <= record.keys() for record in records)
+    assert all(record["status"] == "ok" for record in records)
+    assert records[0]["sha256"] == hashlib.sha256(original_bytes).hexdigest()
+    assert records[1]["sha256"] == hashlib.sha256(harness.rclone_config.read_bytes()).hexdigest()
+    assert records[0]["change"] == "baseline"
+    assert records[1]["change"] == "possible-oauth-refresh"
+    assert records[0]["inode"] != records[1]["inode"]
+    assert records[0]["mode"] == records[1]["mode"] == "0600"
+    assert records[0]["links"] == records[1]["links"] == "1"
+    assert all(re.fullmatch(r"\d+", record["mtime_ns"]) for record in records)
+    combined = result.stdout + result.stderr + harness.log_file.read_text(encoding="utf-8")
+    assert "do-not-log-rclone-secret" not in combined
+    assert "refreshed-rclone-secret" not in combined
+
+
+def test_safe_atomic_config_replacement_is_recorded_even_when_hash_and_mtime_match(
+    harness: BackupHarness,
+) -> None:
+    result = harness.run(
+        "preflight",
+        overrides={
+            "FAKE_RCLONE_REFRESH_CONFIG": "1",
+            "FAKE_RCLONE_REFRESH_PRESERVE_CONTENT": "1",
+        },
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    before, final = _receipt_records(harness)
+    assert before["sha256"] == final["sha256"]
+    assert before["mtime_ns"] == final["mtime_ns"]
+    assert before["inode"] != final["inode"]
+    assert final["change"] == "possible-oauth-refresh"
+
+
+def test_receipt_rejects_in_place_rewrite_that_restores_size_and_mtime(
+    harness: BackupHarness,
+) -> None:
+    driver = harness.root / "exercise-receipt-race.py"
+    _write_executable(
+        driver,
+        r'''#!/usr/bin/env python3
+import os
+from pathlib import Path
+import sys
+
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+body = source.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+config = Path(sys.argv[2])
+original_read = os.read
+mutated = False
+
+
+def racing_read(fd, size):
+    global mutated
+    chunk = original_read(fd, size)
+    if chunk and not mutated:
+        metadata = config.stat()
+        with config.open("r+b", buffering=0) as handle:
+            handle.seek(0)
+            first = handle.read(1)
+            handle.seek(0)
+            handle.write(b"X" if first != b"X" else b"Y")
+        os.utime(config, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+        mutated = True
+    return chunk
+
+
+os.read = racing_read
+sys.argv = ["receipt-race", str(config)]
+status = 0
+try:
+    exec(compile(body, "embedded-rclone-receipt", "exec"), {})
+except SystemExit as exc:
+    status = int(exc.code or 0)
+finally:
+    print(f"receipt-race-mutated={int(mutated)}", file=sys.stderr)
+raise SystemExit(status)
+''',
+    )
+    runner = harness.root / "run-receipt-race.sh"
+    _write_executable(
+        runner,
+        '''#!/usr/bin/env bash
+set -eu
+exec /usr/bin/python3 "$@"
+''',
+    )
+
+    result = subprocess.run(
+        [
+            harness.bash,
+            _posix_path(runner),
+            _posix_path(driver),
+            _posix_path(SCRIPT),
+            _posix_path(harness.rclone_config),
+        ],
+        cwd=ROOT,
+        env=harness.environment(),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert "receipt-race-mutated=1" in result.stderr
+    assert result.returncode != 0
+
+
+def test_final_config_receipt_follows_cleanup_rclone_calls_and_preserves_primary_error(
+    harness: BackupHarness,
+) -> None:
+    result = harness.run(
+        overrides={
+            "FAKE_FAIL": "move_dump",
+            "FAKE_DELETEFILE_MODE": "fail-before",
+            "FAKE_RCLONE_REFRESH_CONFIG": "1",
+        }
+    )
+
+    assert result.returncode == 1
+    assert "ERROR: Remote dump publish move failed" in result.stdout
+    assert len(_remote_delete_names(harness.trace_lines())) == 2
+    records = _receipt_records(harness)
+    assert [record["phase"] for record in records] == ["before", "final"]
+    assert records[1]["status"] == "ok"
+    assert records[1]["sha256"] == hashlib.sha256(harness.rclone_config.read_bytes()).hexdigest()
+    assert records[1]["change"] == "possible-oauth-refresh"
+
+
+def test_missing_mandatory_final_receipt_turns_an_otherwise_successful_mode_into_failure(
+    harness: BackupHarness,
+) -> None:
+    result = harness.run(
+        "preflight",
+        overrides={"FAKE_RCLONE_REMOVE_CONFIG_AFTER": "lsf"},
+    )
+
+    assert result.returncode != 0
+    records = _receipt_records(harness)
+    assert records[0]["phase"] == "before"
+    assert records[-1] == {
+        "phase": "final",
+        "status": "error",
+        "reason": "metadata-unavailable",
+    }
+
+
+def test_final_receipt_failure_does_not_replace_an_existing_backup_failure(
+    harness: BackupHarness,
+) -> None:
+    result = harness.run(
+        overrides={
+            "FAKE_FAIL": "copy_dump",
+            "FAKE_RCLONE_REMOVE_CONFIG_AFTER": "lsf",
+        }
+    )
+
+    assert result.returncode == 1
+    assert "ERROR: Remote dump temporary upload failed" in result.stdout
+    assert _receipt_records(harness)[-1] == {
+        "phase": "final",
+        "status": "error",
+        "reason": "metadata-unavailable",
+    }
+
+
 @pytest.mark.parametrize("blocked_operation", ["pg_dump", "copy_dump"])
 def test_process_group_term_cleans_only_current_run_temps(
     harness: BackupHarness,
@@ -2249,13 +2537,111 @@ def test_case_variant_remote_collision_is_never_claimed_or_overwritten(
     assert not any(line.startswith("planner:") for line in trace)
 
 
-def test_remote_moves_use_immutable_no_overwrite_semantics(harness: BackupHarness) -> None:
-    result = harness.run(overrides={"FAKE_REQUIRE_IMMUTABLE": "1"})
+def test_fake_rclone_immutable_overwrites_an_existing_different_destination(
+    harness: BackupHarness,
+) -> None:
+    source = harness.root / "immutable-source.dump"
+    target = harness.remote_dir / "immutable-target.dump"
+    source.write_bytes(b"replacement")
+    target.write_bytes(b"existing-different")
+
+    result = _run_fake_rclone(
+        harness,
+        "--config",
+        _posix_path(harness.rclone_config),
+        "--immutable",
+        "copyto",
+        _posix_path(source),
+        "test:backups/degen-db/immutable-target.dump",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert target.read_bytes() == b"replacement"
+
+
+@pytest.mark.parametrize("existing", [b"source-bytes", b"existing-different"])
+def test_fake_rclone_strict_copy_skips_existing_destination_with_exit_9(
+    harness: BackupHarness,
+    existing: bytes,
+) -> None:
+    source = harness.root / "strict-source.dump"
+    target = harness.remote_dir / "strict-target.dump"
+    source.write_bytes(b"source-bytes")
+    target.write_bytes(existing)
+
+    result = _run_fake_rclone(
+        harness,
+        "--config",
+        _posix_path(harness.rclone_config),
+        "--ignore-existing",
+        "--error-on-no-transfer",
+        "copyto",
+        _posix_path(source),
+        "test:backups/degen-db/strict-target.dump",
+    )
+
+    assert result.returncode == 9, result.stdout + result.stderr
+    assert target.read_bytes() == existing
+
+
+def test_fake_rclone_strict_move_skip_leaves_source_and_destination_unchanged(
+    harness: BackupHarness,
+) -> None:
+    source = harness.remote_dir / "strict-move-source.dump"
+    target = harness.remote_dir / "strict-move-target.dump"
+    source.write_bytes(b"source-bytes")
+    target.write_bytes(b"foreign-destination")
+
+    result = _run_fake_rclone(
+        harness,
+        "--config",
+        _posix_path(harness.rclone_config),
+        "--ignore-existing",
+        "--error-on-no-transfer",
+        "moveto",
+        "test:backups/degen-db/strict-move-source.dump",
+        "test:backups/degen-db/strict-move-target.dump",
+    )
+
+    assert result.returncode == 9, result.stdout + result.stderr
+    assert source.read_bytes() == b"source-bytes"
+    assert target.read_bytes() == b"foreign-destination"
+
+
+def test_all_remote_publication_operations_use_strict_no_existing_flags(
+    harness: BackupHarness,
+) -> None:
+    result = harness.run(overrides={"FAKE_REQUIRE_STRICT_PUBLICATION_FLAGS": "1"})
 
     assert result.returncode == 0, result.stdout + result.stderr
     current_dump, current_sidecar = _pair_names()
     assert (harness.remote_dir / current_dump).exists()
     assert (harness.remote_dir / current_sidecar).exists()
+    assert [
+        line
+        for line in harness.trace_lines()
+        if line.startswith("rclone:publication-flags:")
+    ] == [
+        "rclone:publication-flags:copy:dump:ignore-existing=1:error-on-no-transfer=1",
+        "rclone:publication-flags:copy:sidecar:ignore-existing=1:error-on-no-transfer=1",
+        "rclone:publication-flags:move:dump:ignore-existing=1:error-on-no-transfer=1",
+        "rclone:publication-flags:move:sidecar:ignore-existing=1:error-on-no-transfer=1",
+    ]
+
+
+@pytest.mark.parametrize("kind", ["dump", "sidecar"])
+def test_command_time_final_race_preserves_foreign_destination_bytes(
+    harness: BackupHarness,
+    kind: str,
+) -> None:
+    result = harness.run(overrides={"FAKE_RACE_FINAL_ON": kind})
+
+    assert result.returncode != 0
+    current_dump, current_sidecar = _pair_names()
+    raced_name = current_dump if kind == "dump" else current_sidecar
+    assert (harness.remote_dir / raced_name).read_bytes() == b"foreign-raced-final"
+    assert f"rclone:race-final:{kind}:{raced_name}" in harness.trace_lines()
+    assert not any(line.startswith("planner:") for line in harness.trace_lines())
 
 
 @pytest.mark.parametrize("kind", ["dump", "sidecar"])
@@ -3210,17 +3596,35 @@ def test_planner_candidates_must_be_inventory_members_unique_complete_pairs(
     assert "Unsafe retention candidate" in result.stdout
 
 
-def test_backup_prefix_override_is_the_complete_owned_prefix(harness: BackupHarness) -> None:
-    result = harness.run(overrides={"BACKUP_PREFIX": "manual_"})
+@pytest.mark.parametrize("configured_prefix", ["manual_", "Degen_green_prod_green_"])
+def test_configured_backup_prefix_must_exactly_match_live_database_and_host_identity(
+    harness: BackupHarness,
+    configured_prefix: str,
+) -> None:
+    result = harness.run(overrides={"BACKUP_PREFIX": configured_prefix})
+
+    assert result.returncode != 0
+    assert "Configured backup prefix does not match live database and host identity" in (
+        result.stdout + result.stderr
+    )
+    trace = harness.trace_lines()
+    assert "psql:database" in trace
+    assert "hostname" in trace
+    assert "pg_dump" not in trace
+    assert not any(line.startswith("rclone:") for line in trace)
+
+
+def test_matching_configured_backup_prefix_still_queries_live_identity(
+    harness: BackupHarness,
+) -> None:
+    result = harness.run(overrides={"BACKUP_PREFIX": PREFIX})
 
     assert result.returncode == 0, result.stdout + result.stderr
-    dump_name = f"manual_{STAMP}.dump"
-    sidecar_name = f"{dump_name}.sha256"
-    assert (harness.backup_dir / dump_name).exists()
-    assert (harness.backup_dir / sidecar_name).exists()
-    assert (harness.remote_dir / dump_name).exists()
-    assert (harness.remote_dir / sidecar_name).exists()
-    assert not any(path.name.startswith("manual__green_") for path in harness.backup_dir.iterdir())
+    trace = harness.trace_lines()
+    assert trace.index("psql:database") < trace.index("hostname") < trace.index("rclone:lsf")
+    current_dump, current_sidecar = _pair_names()
+    assert (harness.backup_dir / current_dump).exists()
+    assert (harness.backup_dir / current_sidecar).exists()
 
 
 @pytest.mark.parametrize(
