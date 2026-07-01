@@ -15,6 +15,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "deploy" / "linux" / "degen-prod-db-backup.sh"
+ENV_HELPER = ROOT / "deploy" / "linux" / "degen-prod-db-backup-env.py"
 PLANNER = ROOT / "deploy" / "linux" / "degen-prod-db-retention.py"
 SERVICE = ROOT / "deploy" / "systemd" / "degen-prod-db-backup.service"
 TIMER = ROOT / "deploy" / "systemd" / "degen-prod-db-backup.timer"
@@ -23,6 +24,24 @@ RUNBOOK = ROOT / "docs" / "green-postgres-backup-runbook.md"
 STAMP = "20260629T230000Z"
 PREFIX = "degen_green_prod_green_"
 SECRET = "postgresql://degen:do-not-log-this@db.internal/degen_green_prod"
+FIXED_BACKUP_ENV_FILE = "/etc/degen/prod-db-backup.env"
+FIXED_ENV_HELPER = "/usr/local/sbin/degen-prod-db-backup-env"
+MANAGED_DEFAULT_KEYS = (
+    "APP_ENV_FILE",
+    "BACKUP_DIR",
+    "LOG_DIR",
+    "RCLONE_CONFIG",
+    "RCLONE_REMOTE_PATH",
+    "KEEP_LOCAL_COUNT",
+    "KEEP_REMOTE_DAILY",
+    "KEEP_REMOTE_WEEKLY",
+    "KEEP_REMOTE_MONTHLY",
+    "REMOTE_PRUNE_ENABLED",
+    "MIN_FREE_AFTER_BYTES",
+    "RETENTION_PLANNER",
+    "LOCK_FILE",
+)
+MANAGED_KEYS = frozenset((*MANAGED_DEFAULT_KEYS, "BACKUP_PREFIX"))
 
 
 def _usable_bash() -> str | None:
@@ -71,6 +90,19 @@ def _symlink(target: Path, link: Path) -> None:
         )
     else:
         link.symlink_to(target, target_is_directory=target.is_dir())
+
+
+def _hardlink(target: Path, link: Path) -> None:
+    if os.name == "nt":
+        subprocess.run(
+            ["wsl.exe", "-e", "ln", _posix_path(target), _posix_path(link)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+    else:
+        os.link(target, link)
 
 
 def _is_symlink(path: Path) -> bool:
@@ -203,7 +235,7 @@ def ascii_fold(value):
 
 
 def remote_path(value):
-    root_name = os.environ["RCLONE_REMOTE_PATH"]
+    root_name = os.environ["FAKE_RCLONE_REMOTE_PATH"]
     root = Path(os.environ["FAKE_REMOTE_ROOT"])
     if value == root_name:
         return root
@@ -322,6 +354,16 @@ elif name == "rm":
         except FileNotFoundError:
             if not force:
                 raise
+elif name == "flock":
+    trace("flock")
+    race_path = os.environ.get("FAKE_FLOCK_REPLACE_LOCK")
+    if race_path:
+        target = Path(race_path)
+        renamed = Path(os.environ["FAKE_FLOCK_RENAMED_LOCK"])
+        target.replace(renamed)
+        target.touch(mode=0o600)
+        target.chmod(0o600)
+    os.execv("/usr/bin/flock", ["flock", *args])
 elif name == "rclone":
     immutable = "--immutable" in args
     filtered = []
@@ -352,7 +394,7 @@ elif name == "rclone":
         trace(f"rclone:copy:{kind}")
         if os.environ.get("FAKE_RACE_TEMP_ON") == kind:
             remote_root = Path(os.environ["FAKE_REMOTE_ROOT"])
-            remote_prefix = os.environ["RCLONE_REMOTE_PATH"].rstrip("/") + "/"
+            remote_prefix = os.environ["FAKE_RCLONE_REMOTE_PATH"].rstrip("/") + "/"
             requested_name = args[2][len(remote_prefix):]
             race_name = requested_name if os.environ.get("FAKE_RACE_TEMP_CASE") == "exact" else requested_name.swapcase()
             (remote_root / race_name).write_bytes(b"foreign-raced-temp")
@@ -439,6 +481,20 @@ def _planner_wrapper(real_planner: str) -> str:
     )
 
 
+TEST_ENV_HELPER = r'''#!/usr/bin/env python3
+import os
+from pathlib import Path
+import sys
+
+if len(sys.argv) != 4 or sys.argv[1:3] != ["emit", "--file"]:
+    raise SystemExit(64)
+source = Path(sys.argv[3])
+with Path(os.environ["FAKE_TRACE"]).open("a", encoding="utf-8") as handle:
+    handle.write(f"env-helper:emit:{source}\n")
+sys.stdout.buffer.write(source.read_bytes())
+'''
+
+
 @dataclass
 class BackupHarness:
     root: Path
@@ -448,12 +504,15 @@ class BackupHarness:
     remote_dir: Path
     fake_bin: Path
     app_env: Path
+    managed_env: Path
+    env_helper: Path
     rclone_config: Path
     planner: Path
     trace: Path
     lock_file: Path
     runner: Path
     lock_holder: Path
+    lock_fd_runner: Path
     signal_runner: Path
 
     @classmethod
@@ -463,19 +522,24 @@ class BackupHarness:
         log_dir = root / "logs"
         remote_dir = root / "remote"
         fake_bin = root / "fake-bin"
-        for path in (backup_dir, log_dir, remote_dir, fake_bin):
+        config_dir = root / "config"
+        lock_dir = root / "run"
+        for path in (backup_dir, log_dir, remote_dir, fake_bin, config_dir, lock_dir):
             path.mkdir(parents=True, mode=0o700)
             _chmod(path, 0o700)
 
-        for command in ("date", "df", "hostname", "mktemp", "pg_dump", "pg_restore", "psql", "rclone", "rm", "sha256sum"):
+        for command in ("date", "df", "flock", "hostname", "mktemp", "pg_dump", "pg_restore", "psql", "rclone", "rm", "sha256sum"):
             _write_executable(fake_bin / command, FAKE_COMMAND)
 
         app_env = root / "web.env"
         app_env.write_text(f"DATABASE_URL='{SECRET}'\n", encoding="utf-8")
         _chmod(app_env, 0o600)
-        rclone_config = root / "rclone.conf"
+        rclone_config = config_dir / "rclone.conf"
         rclone_config.write_text("token = do-not-log-rclone-secret\n", encoding="utf-8")
         _chmod(rclone_config, 0o600)
+        managed_env = root / "prod-db-backup.env"
+        env_helper = root / "degen-prod-db-backup-env-test"
+        _write_executable(env_helper, TEST_ENV_HELPER)
         planner = root / "retention-planner"
         _write_executable(planner, _planner_wrapper(_posix_path(PLANNER)))
         runner = root / "run-backup.sh"
@@ -492,10 +556,39 @@ exec "$BACKUP_SCRIPT" "$@"
             lock_holder,
             '''#!/usr/bin/env bash
 set -eu
-exec 9>"$1"
+umask 077
+exec 9<>"$1"
 /usr/bin/flock -n 9
 printf 'READY\\n'
 IFS= read -r _
+''',
+        )
+        lock_fd_runner = root / "run-backup-with-lock-fd.sh"
+        _write_executable(
+            lock_fd_runner,
+            '''#!/usr/bin/env bash
+set -eu
+export PATH="$FAKE_BIN:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+case "${FAKE_LOCK_FD_CASE:-valid}" in
+    valid)
+        exec 8<>"$FAKE_LOCK_FD_PATH"
+        ;;
+    closed)
+        ;;
+    wrong-file)
+        exec 8<>"$FAKE_WRONG_LOCK_FD_PATH"
+        ;;
+    replaced-path)
+        exec 8<>"$FAKE_LOCK_FD_PATH"
+        mv -- "$FAKE_LOCK_FD_PATH" "$FAKE_LOCK_FD_RENAMED_PATH"
+        : > "$FAKE_LOCK_FD_PATH"
+        chmod 0600 "$FAKE_LOCK_FD_PATH"
+        ;;
+    *)
+        exit 65
+        ;;
+esac
+exec "$BACKUP_SCRIPT" "$FAKE_LOCK_FD_MODE" --lock-fd 8
 ''',
         )
         signal_runner = root / "signal-backup.sh"
@@ -530,7 +623,7 @@ exit "$status"
         trace = root / "trace.log"
         trace.write_text("", encoding="utf-8")
         _chmod(trace, 0o600)
-        return cls(
+        instance = cls(
             root=root,
             bash=bash,
             backup_dir=backup_dir,
@@ -538,64 +631,148 @@ exit "$status"
             remote_dir=remote_dir,
             fake_bin=fake_bin,
             app_env=app_env,
+            managed_env=managed_env,
+            env_helper=env_helper,
             rclone_config=rclone_config,
             planner=planner,
             trace=trace,
-            lock_file=root / "backup.lock",
+            lock_file=lock_dir / "backup.lock",
             runner=runner,
             lock_holder=lock_holder,
+            lock_fd_runner=lock_fd_runner,
             signal_runner=signal_runner,
         )
+        instance.write_managed_environment(instance.managed_values())
+        return instance
 
     @property
     def log_file(self) -> Path:
         return self.log_dir / "prod-db-backup.log"
 
-    def environment(self, overrides: dict[str, str | None] | None = None) -> dict[str, str]:
-        values: dict[str, str] = {
+    def managed_values(self) -> dict[str, str]:
+        return {
             "APP_ENV_FILE": _posix_path(self.app_env),
             "BACKUP_DIR": _posix_path(self.backup_dir),
             "LOG_DIR": _posix_path(self.log_dir),
-            "LOG_FILE": _posix_path(self.log_file),
             "RCLONE_CONFIG": _posix_path(self.rclone_config),
             "RCLONE_REMOTE_PATH": "test:backups/degen-db",
+            "KEEP_LOCAL_COUNT": "2",
+            "KEEP_REMOTE_DAILY": "7",
+            "KEEP_REMOTE_WEEKLY": "4",
+            "KEEP_REMOTE_MONTHLY": "3",
+            "REMOTE_PRUNE_ENABLED": "0",
+            "MIN_FREE_AFTER_BYTES": "100",
             "RETENTION_PLANNER": _posix_path(self.planner),
             "LOCK_FILE": _posix_path(self.lock_file),
-            "MIN_FREE_AFTER_BYTES": "100",
+        }
+
+    def write_managed_environment(self, values: dict[str, str]) -> None:
+        content = "".join(f"{key}={value}\n" for key, value in values.items())
+        self.managed_env.write_text(content, encoding="utf-8", newline="\n")
+        _chmod(self.managed_env, 0o600)
+
+    def environment(
+        self,
+        overrides: dict[str, str | None] | None = None,
+        *,
+        inherited_managed: dict[str, str] | None = None,
+        managed_raw: str | None = None,
+    ) -> dict[str, str]:
+        managed_values = self.managed_values()
+        values: dict[str, str] = {
             "FAKE_BIN": _posix_path(self.fake_bin),
             "FAKE_TRACE": _posix_path(self.trace),
             "FAKE_REMOTE_ROOT": _posix_path(self.remote_dir),
+            "FAKE_RCLONE_REMOTE_PATH": managed_values["RCLONE_REMOTE_PATH"],
             "FAKE_DB_SIZE": "4096",
             "FAKE_DF_AVAILABLE": "1000000000",
             "FAKE_DB_NAME": "degen_green_prod",
             "FAKE_HOST": "green",
             "FAKE_NOW": STAMP,
             "BACKUP_SCRIPT": _posix_path(SCRIPT),
+            "DEGEN_BACKUP_TEST_MODE": "1",
+            "DEGEN_BACKUP_TEST_ENV_FILE": _posix_path(self.managed_env),
+            "DEGEN_BACKUP_TEST_ENV_HELPER": _posix_path(self.env_helper),
         }
         if overrides:
             for key, value in overrides.items():
+                target = managed_values if key in MANAGED_KEYS else values
                 if value is None:
-                    values.pop(key, None)
+                    target.pop(key, None)
                 else:
-                    values[key] = value
+                    target[key] = value
+        values.setdefault("FAKE_RCLONE_REMOTE_PATH", managed_values.get("RCLONE_REMOTE_PATH", ""))
+        if managed_raw is None:
+            self.write_managed_environment(managed_values)
+        else:
+            self.managed_env.write_text(managed_raw, encoding="utf-8", newline="\n")
+            _chmod(self.managed_env, 0o600)
 
         env = os.environ.copy()
         env.pop("DATABASE_URL", None)
+        env.pop("BACKUP_ENV_FILE", None)
+        env.pop("ENV_HELPER", None)
+        env.pop("LOG_FILE", None)
+        for key in MANAGED_KEYS:
+            env.pop(key, None)
         env.update(values)
+        if inherited_managed:
+            env.update(inherited_managed)
         if os.name == "nt":
-            env["WSLENV"] = ":".join(sorted(values))
+            env["WSLENV"] = ":".join(sorted({*values, *(inherited_managed or {})}))
         else:
             env["PATH"] = f"{values['FAKE_BIN']}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         return env
+
+    def run_with_lock_fd(
+        self,
+        mode: str,
+        *,
+        fd_case: str = "valid",
+        overrides: dict[str, str | None] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        if not self.lock_file.exists() and not _is_symlink(self.lock_file):
+            self.lock_file.touch(mode=0o600)
+            _chmod(self.lock_file, 0o600)
+        wrong_file = self.root / "wrong.lock"
+        wrong_file.touch(mode=0o600, exist_ok=True)
+        _chmod(wrong_file, 0o600)
+        renamed_file = self.root / "renamed.lock"
+        env = self.environment(
+            {
+                **(overrides or {}),
+                "FAKE_LOCK_FD_MODE": mode,
+                "FAKE_LOCK_FD_CASE": fd_case,
+                "FAKE_LOCK_FD_PATH": _posix_path(self.lock_file),
+                "FAKE_WRONG_LOCK_FD_PATH": _posix_path(wrong_file),
+                "FAKE_LOCK_FD_RENAMED_PATH": _posix_path(renamed_file),
+            }
+        )
+        return subprocess.run(
+            [self.bash, _posix_path(self.lock_fd_runner)],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
 
     def run(
         self,
         mode: str | None = None,
         *,
         overrides: dict[str, str | None] | None = None,
+        inherited_managed: dict[str, str] | None = None,
+        managed_raw: str | None = None,
+        extra_args: tuple[str, ...] = (),
     ) -> subprocess.CompletedProcess[str]:
-        env = self.environment(overrides)
-        arguments = [] if mode is None else [mode]
+        env = self.environment(
+            overrides,
+            inherited_managed=inherited_managed,
+            managed_raw=managed_raw,
+        )
+        arguments = ([] if mode is None else [mode]) + list(extra_args)
         command = [self.bash, _posix_path(self.runner), *arguments]
         return subprocess.run(
             command,
@@ -672,6 +849,33 @@ def _remote_delete_names(trace: list[str]) -> list[str]:
 
 def _cleanup_warning(category: str, basename: str) -> str:
     return f"[2026-06-29T23:00:00Z] WARNING: backup cleanup failed ({category}): {basename}"
+
+
+def _assert_no_backup_side_effects(
+    harness: BackupHarness, *, helper_may_run: bool
+) -> None:
+    trace = harness.trace_lines()
+    allowed_prefixes = ("env-helper:",) if helper_may_run else ()
+    assert all(line.startswith(allowed_prefixes) for line in trace)
+    assert not harness.log_file.exists()
+    assert not harness.lock_file.exists()
+
+
+def _assert_lock_rejected_before_external_work(
+    harness: BackupHarness, result: subprocess.CompletedProcess[str]
+) -> None:
+    assert "Invalid backup lock" in result.stdout + result.stderr
+    assert f"env-helper:emit:{_posix_path(harness.managed_env)}" in harness.trace_lines()
+    assert "psql:database" not in harness.trace_lines()
+    assert not any(line.startswith("rclone:") for line in harness.trace_lines())
+
+
+def _assert_rclone_config_rejected_before_rclone(
+    harness: BackupHarness, result: subprocess.CompletedProcess[str]
+) -> None:
+    assert "Invalid rclone configuration" in result.stdout + result.stderr
+    assert f"env-helper:emit:{_posix_path(harness.managed_env)}" in harness.trace_lines()
+    assert not any(line.startswith("rclone:") for line in harness.trace_lines())
 
 
 def _parse_unit(source: str) -> dict[str, dict[str, str]]:
@@ -831,23 +1035,14 @@ def test_source_declares_safe_shell_contract_and_live_defaults() -> None:
     assert "owned_upload_token_file=$(mktemp" in source
     assert not re.search(r"if ! dump_partial=\$\(mktemp", source)
     assert not re.search(r"if ! sidecar_partial=\$\(mktemp", source)
-    for expected in (
-        "APP_ENV_FILE=${APP_ENV_FILE:-/opt/degen/web.env}",
-        "BACKUP_DIR=${BACKUP_DIR:-/opt/degen/backups/db}",
-        "LOG_DIR=${LOG_DIR:-/var/log/degen}",
-        "RCLONE_CONFIG=${RCLONE_CONFIG:-/etc/degen/rclone.conf}",
-        "RCLONE_REMOTE_PATH=${RCLONE_REMOTE_PATH:-onedrive:backups/degen-db}",
-        "KEEP_LOCAL_COUNT=${KEEP_LOCAL_COUNT:-2}",
-        "KEEP_REMOTE_DAILY=${KEEP_REMOTE_DAILY:-7}",
-        "KEEP_REMOTE_WEEKLY=${KEEP_REMOTE_WEEKLY:-4}",
-        "KEEP_REMOTE_MONTHLY=${KEEP_REMOTE_MONTHLY:-3}",
-        "REMOTE_PRUNE_ENABLED=${REMOTE_PRUNE_ENABLED:-0}",
-        "MIN_FREE_AFTER_BYTES=${MIN_FREE_AFTER_BYTES:-10737418240}",
-        "RETENTION_PLANNER=${RETENTION_PLANNER:-/usr/local/sbin/degen-prod-db-retention}",
-        "LOCK_FILE=${LOCK_FILE:-/run/lock/degen-prod-db-backup.lock}",
-        'LOG_FILE=${LOG_FILE:-$LOG_DIR/prod-db-backup.log}',
-    ):
-        assert expected in source
+    assert f'FIXED_BACKUP_ENV_FILE="{FIXED_BACKUP_ENV_FILE}"' in source
+    assert f'FIXED_ENV_HELPER="{FIXED_ENV_HELPER}"' in source
+    assert 'LOG_FILE="$LOG_DIR/prod-db-backup.log"' in source
+    for key in MANAGED_KEYS:
+        assert not re.search(rf"^{key}=\$\{{{key}:-", source, re.MULTILINE)
+    assert not re.search(r"^LOG_FILE=\$\{LOG_FILE:-", source, re.MULTILINE)
+    assert not re.search(r"^\s*(?:source|\.)\s", source, re.MULTILINE)
+    assert not re.search(r"\beval\s", source)
 
 
 def test_systemd_service_is_exact_oneshot_with_postgres_compatible_hardening() -> None:
@@ -863,8 +1058,11 @@ def test_systemd_service_is_exact_oneshot_with_postgres_compatible_hardening() -
             "Type": "oneshot",
             "User": "root",
             "Group": "root",
-            "EnvironmentFile": "/etc/degen/prod-db-backup.env",
+            "Environment": "BACKUP_ENV_FILE=/etc/degen/prod-db-backup.env",
             "ExecStart": "/usr/local/sbin/degen-prod-db-backup",
+            "RuntimeDirectory": "degen-prod-db-backup",
+            "RuntimeDirectoryMode": "0700",
+            "RuntimeDirectoryPreserve": "yes",
             "TimeoutStartSec": "infinity",
             "TimeoutStopSec": "90",
             "KillMode": "control-group",
@@ -932,7 +1130,7 @@ def test_env_template_has_exact_secret_free_defaults_and_preservation_warning() 
         "REMOTE_PRUNE_ENABLED": "0",
         "MIN_FREE_AFTER_BYTES": "10737418240",
         "RETENTION_PLANNER": "/usr/local/sbin/degen-prod-db-retention",
-        "LOCK_FILE": "/run/lock/degen-prod-db-backup.lock",
+        "LOCK_FILE": "/run/degen-prod-db-backup/backup.lock",
     }
     lowered = template.lower()
     for forbidden in ("database_url", "token", "password", "secret", "openclaw-9902ae", "brev"):
@@ -941,6 +1139,200 @@ def test_env_template_has_exact_secret_free_defaults_and_preservation_warning() 
     assert "Never overwrite /etc/degen/prod-db-backup.env from this template." in template
     assert "root:root mode 0600" in template
     assert "edit and preserve" in lowered
+    assert "BACKUP_PREFIX is host-derived" in template
+    assert "not a tracked default" in template
+
+
+@pytest.mark.parametrize("mode", ["preflight", "remote-retention-dry-run"])
+def test_direct_modes_load_the_same_single_managed_configuration(
+    harness: BackupHarness, mode: str
+) -> None:
+    result = harness.run(mode)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert harness.trace_lines().count(
+        f"env-helper:emit:{_posix_path(harness.managed_env)}"
+    ) == 1
+
+
+@pytest.mark.parametrize("variable", ["BACKUP_ENV_FILE", "ENV_HELPER"])
+def test_fixed_runtime_config_paths_accept_absent_or_identical_values(
+    harness: BackupHarness, variable: str
+) -> None:
+    fixed = FIXED_BACKUP_ENV_FILE if variable == "BACKUP_ENV_FILE" else FIXED_ENV_HELPER
+
+    absent = harness.run("preflight")
+    harness.trace.write_text("", encoding="utf-8")
+    identical = harness.run("preflight", overrides={variable: fixed})
+
+    assert absent.returncode == 0, absent.stdout + absent.stderr
+    assert identical.returncode == 0, identical.stdout + identical.stderr
+
+
+@pytest.mark.parametrize("variable", ["BACKUP_ENV_FILE", "ENV_HELPER"])
+def test_alternate_production_runtime_config_paths_fail_before_side_effects(
+    harness: BackupHarness, variable: str
+) -> None:
+    harness.backup_dir.rmdir()
+    harness.log_dir.rmdir()
+    alternate = f"/tmp/attacker-{variable.lower()}-must-not-leak"
+
+    result = harness.run("preflight", overrides={variable: alternate})
+
+    assert result.returncode != 0
+    assert "Invalid backup runtime configuration" in result.stdout + result.stderr
+    assert alternate not in result.stdout + result.stderr
+    assert not harness.backup_dir.exists()
+    assert not harness.log_dir.exists()
+    _assert_no_backup_side_effects(harness, helper_may_run=False)
+
+
+@pytest.mark.parametrize(
+    ("inherited", "expected_success"),
+    [
+        ({"KEEP_LOCAL_COUNT": "2"}, True),
+        ({"KEEP_LOCAL_COUNT": "99"}, False),
+        ({"APP_ENV_FILE": "/tmp/different-web.env"}, False),
+        ({"BACKUP_PREFIX": PREFIX}, False),
+    ],
+)
+def test_inherited_managed_values_must_match_helper_output(
+    harness: BackupHarness,
+    inherited: dict[str, str],
+    expected_success: bool,
+) -> None:
+    result = harness.run("preflight", inherited_managed=inherited)
+
+    assert (result.returncode == 0) is expected_success, result.stdout + result.stderr
+    if not expected_success:
+        combined = result.stdout + result.stderr
+        assert "Invalid managed backup configuration" in combined
+        assert not any(value in combined for value in inherited.values())
+        assert "psql:database" not in harness.trace_lines()
+        assert not any(line.startswith("rclone:") for line in harness.trace_lines())
+
+
+def test_inherited_backup_prefix_is_accepted_only_when_helper_emits_same_value(
+    harness: BackupHarness,
+) -> None:
+    values = harness.managed_values()
+    values["BACKUP_PREFIX"] = PREFIX
+    raw = "".join(f"{key}={value}\n" for key, value in values.items())
+
+    result = harness.run(
+        "preflight",
+        inherited_managed={"BACKUP_PREFIX": PREFIX},
+        managed_raw=raw,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "UNKNOWN=value\n",
+        "KEEP_LOCAL_COUNT=2\n",
+        "\n",
+        "BACKUP_PREFIX=one_\nBACKUP_PREFIX=two_\n",
+    ],
+)
+def test_unsupported_blank_or_duplicate_helper_output_fails_before_side_effects(
+    harness: BackupHarness, mutation: str
+) -> None:
+    raw = "".join(
+        f"{key}={value}\n" for key, value in harness.managed_values().items()
+    ) + mutation
+    harness.backup_dir.rmdir()
+    harness.log_dir.rmdir()
+
+    result = harness.run("preflight", managed_raw=raw)
+
+    assert result.returncode != 0
+    assert "Invalid managed backup configuration" in result.stdout + result.stderr
+    assert not harness.backup_dir.exists()
+    assert not harness.log_dir.exists()
+    _assert_no_backup_side_effects(harness, helper_may_run=True)
+
+
+def test_helper_output_is_never_evaluated_or_sourced(
+    harness: BackupHarness,
+) -> None:
+    marker = harness.root / "must-not-run"
+    raw = "".join(
+        f"{key}={value}\n" for key, value in harness.managed_values().items()
+    ) + f"BACKUP_DIR=$(touch {_posix_path(marker)})\n"
+
+    result = harness.run("preflight", managed_raw=raw)
+
+    assert result.returncode != 0
+    assert "Invalid managed backup configuration" in result.stdout + result.stderr
+    assert not marker.exists()
+    assert "must-not-run" not in result.stdout + result.stderr
+    assert "psql:database" not in harness.trace_lines()
+    assert not any(line.startswith("rclone:") for line in harness.trace_lines())
+
+
+@pytest.mark.parametrize("mutation", ["missing-default", "missing-final-newline"])
+def test_incomplete_helper_output_is_rejected_before_side_effects(
+    harness: BackupHarness, mutation: str
+) -> None:
+    values = harness.managed_values()
+    if mutation == "missing-default":
+        values.pop("LOCK_FILE")
+    raw = "".join(f"{key}={value}\n" for key, value in values.items())
+    if mutation == "missing-final-newline":
+        raw = raw.rstrip("\n")
+
+    result = harness.run("preflight", managed_raw=raw)
+
+    assert result.returncode != 0
+    assert "Invalid managed backup configuration" in result.stdout + result.stderr
+    _assert_no_backup_side_effects(harness, helper_may_run=True)
+
+
+def test_arbitrary_inherited_log_file_is_rejected_before_logging(
+    harness: BackupHarness,
+) -> None:
+    alternate = _posix_path(harness.root / "attacker.log")
+
+    result = harness.run("preflight", overrides={"LOG_FILE": alternate})
+
+    assert result.returncode != 0
+    assert "Invalid managed backup configuration" in result.stdout + result.stderr
+    assert not (harness.root / "attacker.log").exists()
+    assert not harness.log_file.exists()
+    assert "psql:database" not in harness.trace_lines()
+
+
+def test_root_execution_rejects_explicit_harness_injection(
+    harness: BackupHarness,
+) -> None:
+    if os.name != "nt":
+        pytest.skip("root test-mode rejection is exercised through WSL on Windows")
+    env = harness.environment()
+
+    result = subprocess.run(
+        [
+            "wsl.exe",
+            "-u",
+            "root",
+            "-e",
+            "bash",
+            _posix_path(harness.runner),
+            "preflight",
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "Test backup configuration is not permitted" in result.stdout + result.stderr
+    _assert_no_backup_side_effects(harness, helper_may_run=False)
 
 
 def test_runbook_covers_green_backup_policy_mapping_and_safety_gates() -> None:
@@ -2243,6 +2635,333 @@ def test_local_publish_race_never_overwrites_existing_final(
     assert not any(line.startswith("planner:") for line in harness.trace_lines())
 
 
+def test_rclone_config_symlink_is_rejected_without_reading_target(
+    harness: BackupHarness,
+) -> None:
+    sentinel = harness.root / "rclone-config-sentinel"
+    sentinel.write_bytes(b"token = preserve-target-secret\n")
+    _chmod(sentinel, 0o600)
+    harness.rclone_config.unlink()
+    _symlink(sentinel, harness.rclone_config)
+
+    result = harness.run("preflight")
+
+    assert result.returncode != 0
+    assert _is_symlink(harness.rclone_config)
+    assert sentinel.read_bytes() == b"token = preserve-target-secret\n"
+    assert "preserve-target-secret" not in result.stdout + result.stderr
+    _assert_rclone_config_rejected_before_rclone(harness, result)
+
+
+@pytest.mark.parametrize("mode", [0o640, 0o400, 0o660])
+def test_rclone_config_requires_exact_mode_0600(
+    harness: BackupHarness, mode: int
+) -> None:
+    _chmod(harness.rclone_config, mode)
+
+    result = harness.run("preflight")
+
+    assert result.returncode != 0
+    _assert_rclone_config_rejected_before_rclone(harness, result)
+
+
+def test_rclone_config_requires_single_link(
+    harness: BackupHarness,
+) -> None:
+    alias = harness.root / "rclone-config-alias"
+    _hardlink(harness.rclone_config, alias)
+
+    result = harness.run("preflight")
+
+    assert result.returncode != 0
+    _assert_rclone_config_rejected_before_rclone(harness, result)
+
+
+def test_rclone_config_requires_effective_uid_ownership(
+    harness: BackupHarness,
+) -> None:
+    effective_uid = _effective_uid()
+    other_uid = 0 if effective_uid != 0 else 1
+    _chown(harness.rclone_config, other_uid)
+    try:
+        result = harness.run("preflight")
+    finally:
+        _chown(harness.rclone_config, effective_uid)
+
+    assert result.returncode != 0
+    _assert_rclone_config_rejected_before_rclone(harness, result)
+
+
+def test_rclone_config_parent_must_not_be_group_or_world_writable(
+    harness: BackupHarness,
+) -> None:
+    _chmod(harness.rclone_config.parent, 0o770)
+
+    result = harness.run("preflight")
+
+    assert result.returncode != 0
+    _assert_rclone_config_rejected_before_rclone(harness, result)
+
+
+def test_rclone_config_parent_must_be_real_non_symlink_directory(
+    harness: BackupHarness,
+) -> None:
+    parent = harness.rclone_config.parent
+    target = harness.root / "rclone-parent-target"
+    target.mkdir(mode=0o700)
+    _chmod(target, 0o700)
+    target_config = target / harness.rclone_config.name
+    target_config.write_bytes(harness.rclone_config.read_bytes())
+    _chmod(target_config, 0o600)
+    harness.rclone_config.unlink()
+    parent.rmdir()
+    _symlink(target, parent)
+
+    result = harness.run("preflight")
+
+    assert result.returncode != 0
+    assert _is_symlink(parent)
+    _assert_rclone_config_rejected_before_rclone(harness, result)
+
+
+def test_rclone_config_parent_requires_effective_uid_ownership(
+    harness: BackupHarness,
+) -> None:
+    effective_uid = _effective_uid()
+    other_uid = 0 if effective_uid != 0 else 1
+    _chown(harness.rclone_config.parent, other_uid)
+    try:
+        result = harness.run("preflight")
+    finally:
+        _chown(harness.rclone_config.parent, effective_uid)
+
+    assert result.returncode != 0
+    _assert_rclone_config_rejected_before_rclone(harness, result)
+
+
+@pytest.mark.parametrize("mode", [0o750, 0o711, 0o770])
+def test_lock_parent_requires_exact_mode_0700(
+    harness: BackupHarness, mode: int
+) -> None:
+    _chmod(harness.lock_file.parent, mode)
+
+    result = harness.run("preflight")
+
+    assert result.returncode != 0
+    assert not harness.lock_file.exists()
+    _assert_lock_rejected_before_external_work(harness, result)
+
+
+def test_lock_parent_must_be_real_non_symlink_directory(
+    harness: BackupHarness,
+) -> None:
+    lock_parent = harness.lock_file.parent
+    target = harness.root / "lock-parent-target"
+    target.mkdir(mode=0o700)
+    _chmod(target, 0o700)
+    lock_parent.rmdir()
+    _symlink(target, lock_parent)
+
+    result = harness.run("preflight")
+
+    assert result.returncode != 0
+    assert _is_symlink(lock_parent)
+    assert list(target.iterdir()) == []
+    _assert_lock_rejected_before_external_work(harness, result)
+
+
+def test_lock_parent_must_be_owned_by_effective_uid(
+    harness: BackupHarness,
+) -> None:
+    effective_uid = _effective_uid()
+    other_uid = 0 if effective_uid != 0 else 1
+    _chown(harness.lock_file.parent, other_uid)
+    try:
+        result = harness.run("preflight")
+    finally:
+        _chown(harness.lock_file.parent, effective_uid)
+
+    assert result.returncode != 0
+    assert not harness.lock_file.exists()
+    _assert_lock_rejected_before_external_work(harness, result)
+
+
+def test_lock_symlink_is_rejected_without_changing_target_sentinel(
+    harness: BackupHarness,
+) -> None:
+    sentinel = harness.root / "lock-target-sentinel"
+    sentinel.write_bytes(b"preserve-lock-target-bytes")
+    _chmod(sentinel, 0o600)
+    _symlink(sentinel, harness.lock_file)
+
+    result = harness.run("preflight")
+
+    assert result.returncode != 0
+    assert _is_symlink(harness.lock_file)
+    assert sentinel.read_bytes() == b"preserve-lock-target-bytes"
+    _assert_lock_rejected_before_external_work(harness, result)
+
+
+@pytest.mark.parametrize("mode", [0o640, 0o606])
+def test_existing_lock_rejects_group_or_world_permission_bits(
+    harness: BackupHarness, mode: int
+) -> None:
+    harness.lock_file.write_bytes(b"preserve-private-lock")
+    _chmod(harness.lock_file, mode)
+
+    result = harness.run("preflight")
+
+    assert result.returncode != 0
+    assert harness.lock_file.read_bytes() == b"preserve-private-lock"
+    _assert_lock_rejected_before_external_work(harness, result)
+
+
+def test_existing_lock_requires_single_link_and_preserves_bytes(
+    harness: BackupHarness,
+) -> None:
+    harness.lock_file.write_bytes(b"preserve-linked-lock")
+    _chmod(harness.lock_file, 0o600)
+    alias = harness.root / "backup-lock-alias"
+    _hardlink(harness.lock_file, alias)
+
+    result = harness.run("preflight")
+
+    assert result.returncode != 0
+    assert harness.lock_file.read_bytes() == b"preserve-linked-lock"
+    assert alias.read_bytes() == b"preserve-linked-lock"
+    _assert_lock_rejected_before_external_work(harness, result)
+
+
+def test_existing_lock_requires_effective_uid_ownership(
+    harness: BackupHarness,
+) -> None:
+    harness.lock_file.write_bytes(b"preserve-owned-lock")
+    _chmod(harness.lock_file, 0o600)
+    effective_uid = _effective_uid()
+    other_uid = 0 if effective_uid != 0 else 1
+    _chown(harness.lock_file, other_uid)
+    try:
+        result = harness.run("preflight")
+    finally:
+        _chown(harness.lock_file, effective_uid)
+
+    assert result.returncode != 0
+    assert harness.lock_file.read_bytes() == b"preserve-owned-lock"
+    _assert_lock_rejected_before_external_work(harness, result)
+
+
+def test_lock_path_replacement_during_flock_fails_identity_revalidation(
+    harness: BackupHarness,
+) -> None:
+    harness.lock_file.write_bytes(b"original-lock")
+    _chmod(harness.lock_file, 0o600)
+    renamed = harness.root / "raced-original-lock"
+
+    result = harness.run(
+        "preflight",
+        overrides={
+            "FAKE_FLOCK_REPLACE_LOCK": _posix_path(harness.lock_file),
+            "FAKE_FLOCK_RENAMED_LOCK": _posix_path(renamed),
+        },
+    )
+
+    assert result.returncode != 0
+    assert renamed.read_bytes() == b"original-lock"
+    _assert_lock_rejected_before_external_work(harness, result)
+
+
+def test_private_existing_lock_preserves_bytes_and_nonblocking_overlap(
+    harness: BackupHarness,
+) -> None:
+    harness.lock_file.write_bytes(b"private-lock-sentinel")
+    _chmod(harness.lock_file, 0o600)
+    lock_path = _posix_path(harness.lock_file)
+    holder = subprocess.Popen(
+        [harness.bash, _posix_path(harness.lock_holder), lock_path],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "READY"
+        result = harness.run("preflight")
+    finally:
+        if holder.stdin is not None:
+            holder.stdin.write("\n")
+            holder.stdin.flush()
+        holder.wait(timeout=10)
+
+    assert result.returncode != 0
+    assert harness.lock_file.read_bytes() == b"private-lock-sentinel"
+    assert "already running" in (result.stdout + result.stderr).lower()
+    assert "psql:database" not in harness.trace_lines()
+
+
+@pytest.mark.parametrize("mode", ["preflight", "remote-retention-dry-run"])
+def test_inherited_lock_fd_is_validated_flocked_and_kept_for_allowed_modes(
+    harness: BackupHarness, mode: str
+) -> None:
+    result = harness.run_with_lock_fd(mode)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "flock" in harness.trace_lines()
+
+
+@pytest.mark.parametrize("fd_case", ["closed", "wrong-file", "replaced-path"])
+def test_inherited_lock_fd_rejects_closed_wrong_or_path_mismatched_descriptors(
+    harness: BackupHarness, fd_case: str
+) -> None:
+    result = harness.run_with_lock_fd("preflight", fd_case=fd_case)
+
+    assert result.returncode != 0
+    assert "psql:database" not in harness.trace_lines()
+    assert not any(line.startswith("rclone:") for line in harness.trace_lines())
+
+
+def test_inherited_lock_fd_rejects_mismatched_metadata(
+    harness: BackupHarness,
+) -> None:
+    harness.lock_file.write_bytes(b"metadata-lock")
+    _chmod(harness.lock_file, 0o640)
+
+    result = harness.run_with_lock_fd("preflight")
+
+    assert result.returncode != 0
+    assert harness.lock_file.read_bytes() == b"metadata-lock"
+    _assert_lock_rejected_before_external_work(harness, result)
+
+
+def test_inherited_lock_fd_is_rejected_for_run_mode(
+    harness: BackupHarness,
+) -> None:
+    result = harness.run_with_lock_fd("run")
+
+    assert result.returncode != 0
+    assert "psql:database" not in harness.trace_lines()
+    assert not any(line.startswith("rclone:") for line in harness.trace_lines())
+
+
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        ("--lock-fd",),
+        ("--lock-fd", "not-a-number"),
+        ("--lock-fd", "-1"),
+        ("--lock-fd", "8", "extra"),
+    ],
+)
+def test_lock_fd_option_rejects_missing_invalid_or_extra_arguments(
+    harness: BackupHarness, extra_args: tuple[str, ...]
+) -> None:
+    result = harness.run("preflight", extra_args=extra_args)
+
+    assert result.returncode != 0
+    assert "psql:database" not in harness.trace_lines()
+    assert not any(line.startswith("rclone:") for line in harness.trace_lines())
+
+
 def test_lock_overlap_fails_before_preflight_or_dump(harness: BackupHarness) -> None:
     lock_path = _posix_path(harness.lock_file)
     holder = subprocess.Popen(
@@ -2524,7 +3243,7 @@ def test_invalid_numeric_configuration_is_rejected(
     result = harness.run("preflight", overrides={variable: value})
 
     assert result.returncode != 0
-    assert "Invalid configuration" in result.stdout
+    assert "Invalid configuration" in result.stdout + result.stderr
     assert "pg_dump" not in harness.trace_lines()
 
 
@@ -2533,7 +3252,7 @@ def test_unknown_mode_is_rejected(harness: BackupHarness, mode: str) -> None:
     result = harness.run(mode)
 
     assert result.returncode != 0
-    assert "Unsupported mode" in result.stdout
+    assert "Unsupported mode" in result.stdout + result.stderr
     assert "pg_dump" not in harness.trace_lines()
 
 
@@ -2549,5 +3268,5 @@ def test_unsafe_backup_labels_are_rejected(harness: BackupHarness, overrides: di
     result = harness.run("preflight", overrides=overrides)
 
     assert result.returncode != 0
-    assert "Unsafe backup label" in result.stdout
+    assert "Unsafe backup label" in result.stdout + result.stderr
     assert "pg_dump" not in harness.trace_lines()

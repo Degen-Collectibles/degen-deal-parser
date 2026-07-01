@@ -7,8 +7,11 @@ Wants=network-online.target
 Type=oneshot
 User=root
 Group=root
-EnvironmentFile=/etc/degen/prod-db-backup.env
+Environment=BACKUP_ENV_FILE=/etc/degen/prod-db-backup.env
 ExecStart=/usr/local/sbin/degen-prod-db-backup
+RuntimeDirectory=degen-prod-db-backup
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
 TimeoutStartSec=infinity
 TimeoutStopSec=90
 KillMode=control-group

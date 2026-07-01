@@ -2,23 +2,29 @@
 set -euo pipefail
 umask 077
 
-APP_ENV_FILE=${APP_ENV_FILE:-/opt/degen/web.env}
-BACKUP_DIR=${BACKUP_DIR:-/opt/degen/backups/db}
-LOG_DIR=${LOG_DIR:-/var/log/degen}
-RCLONE_CONFIG=${RCLONE_CONFIG:-/etc/degen/rclone.conf}
-RCLONE_REMOTE_PATH=${RCLONE_REMOTE_PATH:-onedrive:backups/degen-db}
-KEEP_LOCAL_COUNT=${KEEP_LOCAL_COUNT:-2}
-KEEP_REMOTE_DAILY=${KEEP_REMOTE_DAILY:-7}
-KEEP_REMOTE_WEEKLY=${KEEP_REMOTE_WEEKLY:-4}
-KEEP_REMOTE_MONTHLY=${KEEP_REMOTE_MONTHLY:-3}
-REMOTE_PRUNE_ENABLED=${REMOTE_PRUNE_ENABLED:-0}
-MIN_FREE_AFTER_BYTES=${MIN_FREE_AFTER_BYTES:-10737418240}
-RETENTION_PLANNER=${RETENTION_PLANNER:-/usr/local/sbin/degen-prod-db-retention}
-LOCK_FILE=${LOCK_FILE:-/run/lock/degen-prod-db-backup.lock}
-LOG_FILE=${LOG_FILE:-$LOG_DIR/prod-db-backup.log}
+readonly FIXED_BACKUP_ENV_FILE="/etc/degen/prod-db-backup.env"
+readonly FIXED_ENV_HELPER="/usr/local/sbin/degen-prod-db-backup-env"
+readonly -a MANAGED_DEFAULT_KEYS=(
+    APP_ENV_FILE
+    BACKUP_DIR
+    LOG_DIR
+    RCLONE_CONFIG
+    RCLONE_REMOTE_PATH
+    KEEP_LOCAL_COUNT
+    KEEP_REMOTE_DAILY
+    KEEP_REMOTE_WEEKLY
+    KEEP_REMOTE_MONTHLY
+    REMOTE_PRUNE_ENABLED
+    MIN_FREE_AFTER_BYTES
+    RETENTION_PLANNER
+    LOCK_FILE
+)
+readonly -a MANAGED_KEYS=("${MANAGED_DEFAULT_KEYS[@]}" BACKUP_PREFIX)
 
 database_url=""
 backup_prefix=""
+runtime_env_file=""
+runtime_env_helper=""
 owned_local_dump_partial=""
 owned_local_sidecar_partial=""
 owned_upload_token_file=""
@@ -41,6 +47,155 @@ die() {
 
 log() {
     printf '%s\n' "$*"
+}
+
+
+resolve_runtime_configuration_paths() {
+    local test_variable_present=0
+    local variable
+
+    if [[ -v BACKUP_ENV_FILE && "$BACKUP_ENV_FILE" != "$FIXED_BACKUP_ENV_FILE" ]]; then
+        die "Invalid backup runtime configuration"
+    fi
+    if [[ -v ENV_HELPER && "$ENV_HELPER" != "$FIXED_ENV_HELPER" ]]; then
+        die "Invalid backup runtime configuration"
+    fi
+
+    runtime_env_file=$FIXED_BACKUP_ENV_FILE
+    runtime_env_helper=$FIXED_ENV_HELPER
+    for variable in \
+        DEGEN_BACKUP_TEST_MODE \
+        DEGEN_BACKUP_TEST_ENV_FILE \
+        DEGEN_BACKUP_TEST_ENV_HELPER; do
+        if [[ -v "$variable" ]]; then
+            test_variable_present=1
+        fi
+    done
+    if (( test_variable_present == 0 )); then
+        return
+    fi
+    if (( EUID == 0 )); then
+        die "Test backup configuration is not permitted"
+    fi
+    if [[ "${DEGEN_BACKUP_TEST_MODE:-}" != "1" || \
+          -z "${DEGEN_BACKUP_TEST_ENV_FILE:-}" || \
+          -z "${DEGEN_BACKUP_TEST_ENV_HELPER:-}" ]]; then
+        die "Invalid backup runtime configuration"
+    fi
+    runtime_env_file=$DEGEN_BACKUP_TEST_ENV_FILE
+    runtime_env_helper=$DEGEN_BACKUP_TEST_ENV_HELPER
+}
+
+
+managed_key_from_line() {
+    local line=$1
+    case "$line" in
+        APP_ENV_FILE=*) printf 'APP_ENV_FILE\n' ;;
+        BACKUP_DIR=*) printf 'BACKUP_DIR\n' ;;
+        LOG_DIR=*) printf 'LOG_DIR\n' ;;
+        RCLONE_CONFIG=*) printf 'RCLONE_CONFIG\n' ;;
+        RCLONE_REMOTE_PATH=*) printf 'RCLONE_REMOTE_PATH\n' ;;
+        KEEP_LOCAL_COUNT=*) printf 'KEEP_LOCAL_COUNT\n' ;;
+        KEEP_REMOTE_DAILY=*) printf 'KEEP_REMOTE_DAILY\n' ;;
+        KEEP_REMOTE_WEEKLY=*) printf 'KEEP_REMOTE_WEEKLY\n' ;;
+        KEEP_REMOTE_MONTHLY=*) printf 'KEEP_REMOTE_MONTHLY\n' ;;
+        REMOTE_PRUNE_ENABLED=*) printf 'REMOTE_PRUNE_ENABLED\n' ;;
+        MIN_FREE_AFTER_BYTES=*) printf 'MIN_FREE_AFTER_BYTES\n' ;;
+        RETENTION_PLANNER=*) printf 'RETENTION_PLANNER\n' ;;
+        LOCK_FILE=*) printf 'LOCK_FILE\n' ;;
+        BACKUP_PREFIX=*) printf 'BACKUP_PREFIX\n' ;;
+        *) return 1 ;;
+    esac
+}
+
+
+load_managed_configuration() {
+    local key line value remaining helper_capture helper_output helper_status
+    local inherited_log_file_present=0
+    local inherited_log_file=""
+    local -A inherited_present=()
+    local -A inherited_values=()
+    local -A parsed_present=()
+    local -A parsed_values=()
+
+    for key in "${MANAGED_KEYS[@]}"; do
+        if [[ -v "$key" ]]; then
+            inherited_present["$key"]=1
+            inherited_values["$key"]=${!key}
+        fi
+    done
+    if [[ -v LOG_FILE ]]; then
+        inherited_log_file_present=1
+        inherited_log_file=$LOG_FILE
+    fi
+
+    helper_capture=$(
+        set +e
+        "$runtime_env_helper" emit --file "$runtime_env_file" 2>/dev/null
+        helper_status=$?
+        printf '\037%s' "$helper_status"
+        exit 0
+    )
+    if [[ "$helper_capture" != *$'\037'* ]]; then
+        die "Invalid managed backup configuration"
+    fi
+    helper_status=${helper_capture##*$'\037'}
+    helper_output=${helper_capture%$'\037'*}
+    if [[ ! "$helper_status" =~ ^[0-9]+$ || "$helper_status" != "0" || \
+          -z "$helper_output" || "$helper_output" != *$'\n' ]]; then
+        die "Invalid managed backup configuration"
+    fi
+
+    remaining=$helper_output
+    while [[ -n "$remaining" ]]; do
+        if [[ "$remaining" != *$'\n'* ]]; then
+            die "Invalid managed backup configuration"
+        fi
+        line=${remaining%%$'\n'*}
+        remaining=${remaining#*$'\n'}
+        if [[ -z "$line" || "$line" == *$'\r'* ]]; then
+            die "Invalid managed backup configuration"
+        fi
+        if ! key=$(managed_key_from_line "$line"); then
+            die "Invalid managed backup configuration"
+        fi
+        if [[ -v "parsed_present[$key]" ]]; then
+            die "Invalid managed backup configuration"
+        fi
+        value=${line#*=}
+        if [[ -z "$value" || ! "$value" =~ ^[A-Za-z0-9_./:@%+,?=-]+$ ]]; then
+            die "Invalid managed backup configuration"
+        fi
+        parsed_present["$key"]=1
+        parsed_values["$key"]=$value
+    done
+
+    for key in "${MANAGED_DEFAULT_KEYS[@]}"; do
+        if [[ ! -v "parsed_present[$key]" ]]; then
+            die "Invalid managed backup configuration"
+        fi
+    done
+    for key in "${MANAGED_KEYS[@]}"; do
+        if [[ -v "inherited_present[$key]" ]]; then
+            if [[ ! -v "parsed_present[$key]" || \
+                  "${inherited_values[$key]}" != "${parsed_values[$key]}" ]]; then
+                die "Invalid managed backup configuration"
+            fi
+        fi
+    done
+
+    for key in "${MANAGED_DEFAULT_KEYS[@]}"; do
+        printf -v "$key" '%s' "${parsed_values[$key]}"
+    done
+    if [[ -v 'parsed_present[BACKUP_PREFIX]' ]]; then
+        printf -v BACKUP_PREFIX '%s' "${parsed_values[BACKUP_PREFIX]}"
+    else
+        unset BACKUP_PREFIX
+    fi
+    LOG_FILE="$LOG_DIR/prod-db-backup.log"
+    if (( inherited_log_file_present == 1 )) && [[ "$inherited_log_file" != "$LOG_FILE" ]]; then
+        die "Invalid managed backup configuration"
+    fi
 }
 
 
@@ -150,6 +305,168 @@ validate_configuration() {
     if [[ "$REMOTE_PRUNE_ENABLED" != "0" && "$REMOTE_PRUNE_ENABLED" != "1" ]]; then
         die "Invalid configuration: REMOTE_PRUNE_ENABLED must be exactly 0 or 1"
     fi
+    if [[ -v BACKUP_PREFIX ]]; then
+        validate_label "$BACKUP_PREFIX"
+        [[ "$BACKUP_PREFIX" =~ _$ ]] || die "Invalid managed backup configuration"
+    fi
+}
+
+
+read_lock_path_metadata() {
+    local metadata owner mode links device inode
+    [[ ! -L "$LOCK_FILE" && -f "$LOCK_FILE" ]] || return 1
+    if ! metadata=$(stat -c '%u|%a|%h|%d|%i' -- "$LOCK_FILE" 2>/dev/null); then
+        return 1
+    fi
+    IFS='|' read -r owner mode links device inode <<< "$metadata"
+    [[ "$owner" == "$EUID" && "$links" == "1" && \
+       "$mode" =~ ^[0-7]{3,4}$ && "$device" =~ ^[0-9]+$ && "$inode" =~ ^[0-9]+$ ]] || return 1
+    (( (8#$mode & 0077) == 0 )) || return 1
+    printf '%s\n' "$metadata"
+}
+
+
+read_lock_fd_metadata() {
+    local fd=$1
+    local fd_path="/proc/$$/fd/$fd"
+    local metadata owner mode links device inode
+    [[ -e "$fd_path" && -f "$fd_path" ]] || return 1
+    if ! metadata=$(stat -Lc '%u|%a|%h|%d|%i' -- "$fd_path" 2>/dev/null); then
+        return 1
+    fi
+    IFS='|' read -r owner mode links device inode <<< "$metadata"
+    [[ "$owner" == "$EUID" && "$links" == "1" && \
+       "$mode" =~ ^[0-7]{3,4}$ && "$device" =~ ^[0-9]+$ && "$inode" =~ ^[0-9]+$ ]] || return 1
+    (( (8#$mode & 0077) == 0 )) || return 1
+    printf '%s\n' "$metadata"
+}
+
+
+validate_lock_parent() {
+    local metadata owner mode device inode
+    lock_parent=${LOCK_FILE%/*}
+    if [[ -z "$lock_parent" ]]; then
+        lock_parent=/
+    fi
+    [[ "$LOCK_FILE" == /* && ! -L "$lock_parent" && -d "$lock_parent" ]] || \
+        die "Invalid backup lock"
+    if ! metadata=$(stat -c '%u|%a|%d|%i' -- "$lock_parent" 2>/dev/null); then
+        die "Invalid backup lock"
+    fi
+    IFS='|' read -r owner mode device inode <<< "$metadata"
+    if [[ "$owner" != "$EUID" || "$mode" != "700" || \
+          ! "$device" =~ ^[0-9]+$ || ! "$inode" =~ ^[0-9]+$ ]]; then
+        die "Invalid backup lock"
+    fi
+    lock_parent_metadata=$metadata
+}
+
+
+revalidate_lock_parent() {
+    local metadata
+    [[ ! -L "$lock_parent" && -d "$lock_parent" ]] || die "Invalid backup lock"
+    if ! metadata=$(stat -c '%u|%a|%d|%i' -- "$lock_parent" 2>/dev/null); then
+        die "Invalid backup lock"
+    fi
+    [[ "$metadata" == "$lock_parent_metadata" ]] || die "Invalid backup lock"
+}
+
+
+acquire_normal_lock() {
+    local before_metadata=""
+    local path_metadata fd_metadata final_path_metadata final_fd_metadata
+    validate_lock_parent
+    if [[ -e "$LOCK_FILE" || -L "$LOCK_FILE" ]]; then
+        if ! before_metadata=$(read_lock_path_metadata); then
+            die "Invalid backup lock"
+        fi
+    fi
+    revalidate_lock_parent
+    if ! { exec 9<>"$LOCK_FILE"; } 2>/dev/null; then
+        die "Invalid backup lock"
+    fi
+    if ! path_metadata=$(read_lock_path_metadata) || \
+       ! fd_metadata=$(read_lock_fd_metadata 9) || \
+       [[ "$path_metadata" != "$fd_metadata" ]]; then
+        die "Invalid backup lock"
+    fi
+    if [[ -n "$before_metadata" && "$before_metadata" != "$path_metadata" ]]; then
+        die "Invalid backup lock"
+    fi
+    revalidate_lock_parent
+    if ! flock -n 9 >/dev/null 2>&1; then
+        die "Backup is already running; lock unavailable"
+    fi
+    if ! final_path_metadata=$(read_lock_path_metadata) || \
+       ! final_fd_metadata=$(read_lock_fd_metadata 9) || \
+       [[ "$final_path_metadata" != "$path_metadata" || \
+          "$final_fd_metadata" != "$fd_metadata" || \
+          "$final_path_metadata" != "$final_fd_metadata" ]]; then
+        die "Invalid backup lock"
+    fi
+    revalidate_lock_parent
+}
+
+
+acquire_inherited_lock() {
+    local fd=$1
+    local path_metadata fd_metadata final_path_metadata final_fd_metadata
+    validate_lock_parent
+    if ! path_metadata=$(read_lock_path_metadata) || \
+       ! fd_metadata=$(read_lock_fd_metadata "$fd") || \
+       [[ "$path_metadata" != "$fd_metadata" ]]; then
+        die "Invalid backup lock"
+    fi
+    revalidate_lock_parent
+    if ! flock -n "$fd" >/dev/null 2>&1; then
+        die "Backup is already running; lock unavailable"
+    fi
+    if ! final_path_metadata=$(read_lock_path_metadata) || \
+       ! final_fd_metadata=$(read_lock_fd_metadata "$fd") || \
+       [[ "$final_path_metadata" != "$path_metadata" || \
+          "$final_fd_metadata" != "$fd_metadata" || \
+          "$final_path_metadata" != "$final_fd_metadata" ]]; then
+        die "Invalid backup lock"
+    fi
+    revalidate_lock_parent
+}
+
+
+validate_rclone_configuration() {
+    local parent parent_before parent_after parent_owner parent_mode parent_device parent_inode
+    local file_metadata file_owner file_mode file_links file_device file_inode
+    parent=${RCLONE_CONFIG%/*}
+    if [[ -z "$parent" ]]; then
+        parent=/
+    fi
+    if [[ "$RCLONE_CONFIG" != /* || -L "$parent" || ! -d "$parent" ]]; then
+        die "Invalid rclone configuration"
+    fi
+    if ! parent_before=$(stat -c '%u|%a|%d|%i' -- "$parent" 2>/dev/null); then
+        die "Invalid rclone configuration"
+    fi
+    IFS='|' read -r parent_owner parent_mode parent_device parent_inode <<< "$parent_before"
+    if [[ "$parent_owner" != "$EUID" || ! "$parent_mode" =~ ^[0-7]{3,4}$ || \
+          ! "$parent_device" =~ ^[0-9]+$ || ! "$parent_inode" =~ ^[0-9]+$ ]] || \
+       (( (8#$parent_mode & 0022) != 0 )); then
+        die "Invalid rclone configuration"
+    fi
+    if [[ -L "$RCLONE_CONFIG" || ! -f "$RCLONE_CONFIG" || ! -r "$RCLONE_CONFIG" ]]; then
+        die "Invalid rclone configuration"
+    fi
+    if ! file_metadata=$(stat -c '%u|%a|%h|%d|%i' -- "$RCLONE_CONFIG" 2>/dev/null); then
+        die "Invalid rclone configuration"
+    fi
+    IFS='|' read -r file_owner file_mode file_links file_device file_inode <<< "$file_metadata"
+    if [[ "$file_owner" != "$EUID" || "$file_mode" != "600" || "$file_links" != "1" || \
+          ! "$file_device" =~ ^[0-9]+$ || ! "$file_inode" =~ ^[0-9]+$ ]]; then
+        die "Invalid rclone configuration"
+    fi
+    if [[ -L "$parent" || ! -d "$parent" ]] || \
+       ! parent_after=$(stat -c '%u|%a|%d|%i' -- "$parent" 2>/dev/null) || \
+       [[ "$parent_after" != "$parent_before" ]]; then
+        die "Invalid rclone configuration"
+    fi
 }
 
 
@@ -163,7 +480,6 @@ require_tools() {
         command -v "$tool" >/dev/null 2>&1 || die "Required tool is unavailable: $tool"
     done
     [[ -x "$RETENTION_PLANNER" ]] || die "Retention planner is not executable: $RETENTION_PLANNER"
-    [[ -r "$RCLONE_CONFIG" ]] || die "Rclone config is not readable"
 }
 
 
@@ -273,6 +589,7 @@ check_capacity() {
 
 run_preflight() {
     local mode=$1
+    validate_rclone_configuration
     require_tools
     validate_backup_directory
     load_database_url
@@ -426,16 +743,25 @@ publish_remote_pair() {
 collect_local_names() {
     local -n destination=$1
     local path
-    local restore_dotglob restore_nullglob
-    restore_dotglob=$(shopt -p dotglob || true)
-    restore_nullglob=$(shopt -p nullglob || true)
+    local had_dotglob=0
+    local had_nullglob=0
+    if shopt -q dotglob; then
+        had_dotglob=1
+    fi
+    if shopt -q nullglob; then
+        had_nullglob=1
+    fi
     shopt -s dotglob nullglob
     for path in "$BACKUP_DIR"/*; do
         [[ -f "$path" ]] || continue
         destination+=("${path##*/}")
     done
-    eval "$restore_dotglob"
-    eval "$restore_nullglob"
+    if (( had_dotglob == 0 )); then
+        shopt -u dotglob
+    fi
+    if (( had_nullglob == 0 )); then
+        shopt -u nullglob
+    fi
 }
 
 
@@ -650,31 +976,55 @@ create_backup() {
 }
 
 
+parse_arguments() {
+    mode=run
+    inherited_lock_fd=""
+    case $# in
+        0)
+            ;;
+        1)
+            mode=$1
+            ;;
+        3)
+            mode=$1
+            if [[ "$2" != "--lock-fd" || ! "$3" =~ ^[0-9]+$ ]]; then
+                die "Unsupported mode or extra arguments"
+            fi
+            inherited_lock_fd=$3
+            ;;
+        *)
+            die "Unsupported mode or extra arguments"
+            ;;
+    esac
+    case "$mode" in
+        run|preflight|remote-retention-dry-run) ;;
+        *) die "Unsupported mode: $mode" ;;
+    esac
+    if [[ -n "$inherited_lock_fd" && "$mode" == "run" ]]; then
+        die "--lock-fd is not permitted for run mode"
+    fi
+}
+
+
 main() {
-    local mode now remote_delete_allowed
+    local now remote_delete_allowed
+    parse_arguments "$@"
+    resolve_runtime_configuration_paths
+    load_managed_configuration
+    validate_configuration
+
+    mkdir -p -- "$BACKUP_DIR" "$LOG_DIR"
     trap cleanup_on_exit EXIT
     trap 'exit 129' HUP
     trap 'exit 130' INT
     trap 'exit 143' TERM
     trap '' PIPE
+    start_logging
 
-    if (( $# > 1 )); then
-        die "Unsupported mode or extra arguments"
-    fi
-    if (( $# == 0 )); then
-        mode=run
+    if [[ -n "$inherited_lock_fd" ]]; then
+        acquire_inherited_lock "$inherited_lock_fd"
     else
-        mode=$1
-    fi
-    case "$mode" in
-        run|preflight|remote-retention-dry-run) ;;
-        *) die "Unsupported mode: $mode" ;;
-    esac
-
-    validate_configuration
-    exec 9>"$LOCK_FILE"
-    if ! flock -n 9; then
-        die "Backup is already running; lock unavailable: $LOCK_FILE"
+        acquire_normal_lock
     fi
 
     run_preflight "$mode"
@@ -703,6 +1053,4 @@ main() {
 }
 
 
-mkdir -p -- "$BACKUP_DIR" "$LOG_DIR"
-start_logging
 main "$@"

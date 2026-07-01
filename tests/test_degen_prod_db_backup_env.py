@@ -846,7 +846,13 @@ def test_emit_runtime_configuration_contains_only_allowlisted_non_secret_keys(
     assert output == canonical(effective)
     assert "UNRELATED_SECRET" not in output
     assert "never-print-this" not in output
-    assert set(line.split("=", 1)[0] for line in output.splitlines()) == set(effective)
+    lines = output.splitlines()
+    emitted_keys = [line.split("=", 1)[0] for line in lines]
+    assert all(line and "=" in line for line in lines)
+    assert set(emitted_keys) == set(effective)
+    assert len(emitted_keys) == len(effective)
+    assert all(emitted_keys.count(key) == 1 for key in MANAGED_DEFAULTS)
+    assert emitted_keys.count("BACKUP_PREFIX") == 1
 
 
 def test_emit_rejects_wrong_owner_or_mode_through_linux_metadata_contract(
