@@ -428,7 +428,11 @@ fix: revalidate retained Green backup before pruning
 - Create: `deploy/linux/degen-prod-db-backup-ops.py`
 - Create: `tests/test_degen_prod_db_backup_ops.py`
 
-- [ ] **Step 1: Write failing source/state tests**
+Task 6 is intentionally executed as four independently reviewed TDD slices. For each slice: write the named failing tests first and observe the expected RED result; implement only that slice; run its focused tests; obtain fresh spec-compliance and security/code-quality reviews; resolve every Critical and Important issue; run the full repository suite; and only then commit the two Task 6 files with the slice-specific message. Do not start Task 7 until Task 6D is committed and all four Task 6 reviews are clean.
+
+#### Task 6A: Add strict operation paths and state
+
+- [ ] **Step 1: Write failing path/state tests**
 
 Define and test these Python 3.10 interfaces:
 
@@ -471,14 +475,26 @@ class OperationsContext:
 
 
 def validate_operation_dir(path: Path, *, effective_uid: int) -> None: ...
-def verify_source_archive(archive: Path, expected_commit: str, expected_sha256: str,
-                          asset_manifest: Path, destination: Path) -> dict[str, str]: ...
 def load_operation_state(path: Path, *, effective_uid: int) -> dict[str, object]: ...
 def atomic_write_operation_state(path: Path, state: dict[str, object], *, effective_uid: int) -> None: ...
-def snapshot_host_state(context: OperationsContext) -> dict[str, object]: ...
+def build_operation_paths(operation_dir: Path) -> OperationPaths: ...
+def validate_operation_state(
+    state: object,
+    operation_dir: Path,
+    previous_state: dict[str, object] | None = None,
+) -> None: ...
+def validate_operation_state_for_context(
+    state: dict[str, object],
+    context: OperationsContext,
+) -> None: ...
+def sanitize_error_text(value: object) -> str: ...
 ```
 
-The production CLI always constructs `host_root=Path("/")`; no production argument may override it. Tests may construct a context with a private temporary host root. `command_runner` receives the argv and an explicit tuple of inherited file descriptors, and `clock` is the sole source of operation epochs.
+The approved `load_operation_state()` and `atomic_write_operation_state()` signatures remain context-free storage primitives. `validate_operation_state_for_context()` is the mandatory 6B-6D boundary that additionally binds `operation_id`, `operation_dir`, and the reviewed commit/archive/manifest digests to one `OperationsContext`; no later command may treat a context-free load as sufficient provenance validation. `build_operation_paths()` derives the fixed `source.tar`, `source`, `snapshot`, `staged`, and `operation-state.json` paths from one operation directory. `sanitize_error_text()` is the only constructor boundary for exception-derived receipt text.
+
+The production CLI always constructs `host_root=Path("/")`; no production argument, environment variable, or test-mode switch may override it. It separately requires the exact lexical production path `/opt/degen/backups/config/<YYYYMMDDTHHMMSSZ>`. Direct test APIs may validate a private temporary operation tree and tests may construct a context with a private temporary host root, but that testability creates no production CLI override. `validate_operation_dir()` and every state-file operation walk the absolute path root-to-leaf with held no-follow directory descriptors, compare named-component and opened-FD identities, and require the final operation directory to be effective-UID-owned mode `0700`; they never trust `Path.resolve()`. Production fails closed if the required POSIX no-follow/directory/close-on-exec primitives are unavailable. `command_runner` retains the exact two-argument `CommandRunner(argv, pass_fds)` contract above, receives argv without a shell and an explicit tuple of inherited file descriptors, and `clock` is the sole source of operation epochs.
+
+Use one fixed no-shell inherited-FD shim for the two commands that need data which must not appear in argv. For `git get-tar-commit-id`, open the verified archive with no-follow semantics, inherit only that archive FD, and have the fixed child shim duplicate it to stdin before `execve()` of Git. For `psql`, place the validated `DATABASE_URL` in a bounded inherited pipe FD, have the same fixed shim read it, set only child-process `PGDATABASE`, close the FD, and `execve()` psql. The secret value must never appear in argv, state, logs, exception text, or any field of the returned `CompletedProcess`; raw command stderr/stdout must be sanitized before operator output or persistence. All other commands pass `pass_fds=()` unless a later task explicitly requires an inherited lock FD.
 
 Use this exact strict JSON top-level contract. Every listed object has exactly the stated keys, rejects extras, and uses JSON `null` only where shown:
 
@@ -536,54 +552,13 @@ failure: null|{phase: str, primary_error: sanitized/redacted str, epoch: int, ev
 secondary_errors: list[{stage: str, error: sanitized/redacted str, epoch: int, evidence_sha256: str}]
 recovery: null|{
   kind: "install"|"policy"|"manual_rollback"|"probe"|"guard",
-  next_target_index: int, started_epoch: int, completed_epoch: int|null, evidence_sha256: str
+  next_target_index: int, current_target: str|null,
+  previous_sha256: str|null, intended_sha256: str|null,
+  started_epoch: int, completed_epoch: int|null, evidence_sha256: str
 }
 ```
 
-Use these phase-valid receipt invariants. `reviewed_source` is required from `source_verified`; `effective_config` and `host_stage` become required at `staging_prepared`; `snapshot` and `prior_runtime` become required at `snapshotted`; and `install` start/progress becomes required at `installing`. `install.installed_hashes` must remain empty and `completed_epoch` null until `installed`, when complete exact hashes and the epoch become required. `probe` remains null through `probing` and becomes required at `probed`; `dry_run` remains null through `dry_run_recording` and becomes required at `dry_run_recorded`; `policy` remains null through `policy_enabling` and becomes required at `policy_enabled`; `observation` remains null through `observing` and becomes required at `observed`. Earlier phases require every later receipt to be null, never fabricated. Stable later phases preserve all earlier receipts. `rclone_evidence_groups` and `secondary_errors` are empty lists until evidence or a secondary failure exists; they are never replaced with synthetic entries. Tests construct every phase and reject a missing required receipt, an early non-null later receipt, premature installed hashes/epochs, and a receipt that regresses to null.
-
-Allow only these forward transitions: `source_verified -> staging_prepared -> snapshotted -> installing -> installed -> probing -> probed -> dry_run_recording -> dry_run_recorded -> policy_enabling -> policy_enabled -> observing -> observed`; `installing -> recovering -> rolled_back|recovery_required`; `policy_enabling -> recovering_policy -> installed|recovery_required`; `probing|dry_run_recording|observing -> recovery_required`; and, after separate explicit manual-rollback approval, `installed|probed|dry_run_recorded|policy_enabled|observed -> manual_rollback -> rolled_back|recovery_required`. A `recovery_required` state transitions only to the phase matching recorded recovery kind: `recovering` for `install`, `recovering_policy` for `policy`, `manual_rollback` for `manual_rollback`, `recovering_probe` for `probe`, or `recovering_guard` for `guard`. `recovering_probe -> installed|recovery_required`; `recovering_guard -> active_transaction.prior_stable_phase|recovery_required`; and `rolled_back` is terminal.
-
-Require `active_transaction` to be non-null throughout `probing`, `dry_run_recording`, `policy_enabling`, `observing`, and their `recovery_required`/recovery phases, with a kind and prior stable phase matching the transition; require it null in stable phases after successful cleanup and timer restoration. Require the final `phase_history` entry to equal `phase`, phase history, rclone evidence, and `secondary_errors` to be append-only with stable evidence digests, all epochs to be monotonic, and `operation_id`/`operation_dir` plus reviewed source digests to remain bound to `OperationsContext`. The first `failure.primary_error` is immutable once written. Sanitize/redact every error before serialization; rollback, recovery, cleanup, and timer-restoration errors append to `secondary_errors` in occurrence order and can never replace the primary error. Schema validation rejects secret-like keys, values, primary error text, or secondary error text and never serializes database URLs, tokens, passwords, environment-file contents, or rclone contents.
-
-Tests reject wrong operation roots, symlinks, owner/mode mismatch, extra/missing/archive symlink entries, wrong embedded Git commit, wrong archive/asset hashes, state secrets, corrupt JSON, non-atomic state writes, and ambiguous saved-or-absent target state. They also reject missing or extra fields at every schema level, operation-path rebinding, altered or truncated phase/evidence/error history, replacement or reordering of `secondary_errors`, mutation of the first primary error, regressed phases, phase-invalid nullability, forbidden transitions, secret-like error content, and impossible epoch ordering.
-
-- [ ] **Step 2: Verify RED**
-
-Run:
-
-```powershell
-& 'C:\Users\jeffr\OneDrive\Apps\Documents\Degen App\.venv\Scripts\python.exe' -m pytest tests/test_degen_prod_db_backup_ops.py --tb=short -q -p no:cacheprovider
-```
-
-Expected: collection fails because `deploy/linux/degen-prod-db-backup-ops.py`, `OperationsContext`, strict phase-valid state loading, and source/state commands do not exist.
-
-- [ ] **Step 3: Implement source verification and atomic state**
-
-Add CLI subcommands:
-
-```text
-verify-source --operation-dir DIR --archive FILE --expected-commit SHA --expected-archive-sha256 DIGEST
-prepare-staging --operation-dir DIR
-snapshot --operation-dir DIR
-show-state --operation-dir DIR
-```
-
-Require `/opt/degen/backups/config/<YYYYMMDDTHHMMSSZ>` in production, root ownership, mode `0700`, no symlink, and `operation-state.json` mode `0600`. Use `git get-tar-commit-id`, reject any archive member outside the exact manifest plus manifest file, and extract without following links.
-
-Avoid circular trust with this bootstrap sequence before executing the new helper:
-
-1. Locally create a path-limited uncompressed `git archive` containing only the fixed manifest and seven reviewed assets; record archive SHA-256, embedded commit, and manifest SHA-256.
-2. After production approval, set `UTC_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"`, `OPERATION_DIR="/opt/degen/backups/config/$UTC_STAMP"`, and `SOURCE_OPS="$OPERATION_DIR/source/deploy/linux/degen-prod-db-backup-ops.py"`; create the root-only operation directory and transfer the archive without touching `/opt/degen/app`.
-3. With existing Green tools only, verify the expected archive SHA-256 and `git get-tar-commit-id`, list the exact expected member names/types, reject links or extras, and extract into a new root-only source directory.
-4. Verify the extracted manifest SHA-256 supplied in the approved preflight.
-5. Only then invoke `/usr/bin/python3 "$SOURCE_OPS" verify-source --operation-dir "$OPERATION_DIR" --archive "$OPERATION_DIR/source.tar" --expected-commit "$REVIEWED_SHA" --expected-archive-sha256 "$ARCHIVE_SHA256"` for the full manifest and state validation.
-
-Before installed-helper verification, invoke `/usr/bin/python3 "$SOURCE_OPS"` for every `verify-source`, `prepare-staging`, `snapshot`, and `install` command. Every `recover` or automatic/resumed recovery invocation remains source-routed even after install, because a crash may leave the installed target mixed. Only after `install` succeeds and the installed helper's SHA-256 matches its reviewed manifest entry may the later non-recovery stable-phase commands use the installed path.
-
-`prepare-staging` validates the newest existing complete local pair with canonical sidecar grammar, recomputed SHA-256, and `pg_restore --list`; derives its prefix; independently queries `current_database()` and `hostname -s`; requires the two identities to match; renders every managed key with `REMOTE_PRUNE_ENABLED=0`; and creates a separate host-stage manifest. It fails on no verified existing pair or any identity/path/policy mismatch.
-
-Snapshot every install target below plus a root-only rclone audit copy. For each install target, save exact bytes/mode/owner or an explicit absence marker. Build and immediately verify `SHA256SUMS`; never store credential contents in JSON and never designate `rclone.conf.audit` for automatic rollback.
+When phase history has reached `installed`, `install.installed_hashes` has exactly these seven logical path keys with lowercase SHA-256 values, and the original non-null `install.completed_epoch` remains immutable in every later state, including a later manual-rollback `rolled_back` state. Before history reaches `installed`, `install.installed_hashes` is exactly empty and `install.completed_epoch` is null; therefore a failed initial `installing -> recovering -> rolled_back` history preserves the incomplete install receipt rather than fabricating installed evidence. For the six repo-managed executable/unit targets, each installed hash equals the corresponding reviewed-source asset hash and its corresponding host-stage asset hash. `/etc/degen/prod-db-backup.env` instead equals `host_stage.environment_sha256`; it is host-derived and must never be attributed to `reviewed_source.asset_hashes`.
 
 ```text
 /usr/local/sbin/degen-prod-db-backup
@@ -595,13 +570,191 @@ Snapshot every install target below plus a root-only rclone audit copy. For each
 /etc/degen/prod-db-backup.env
 ```
 
-- [ ] **Step 4: Run focused/Python3.10/full verification and commit**
+Every `phase_history.evidence_sha256` is an opaque digest of the phase-command evidence bytes whose exact construction is owned by the later command that produces that phase. Task 6A validates only exact lowercase SHA-256 syntax and append-only stability; it never fabricates an entry or recomputes a digest without the producing command's evidence bytes.
 
-Commit:
+Use these phase-valid receipt invariants. `reviewed_source` is required from `source_verified`; `effective_config` and `host_stage` become required at `staging_prepared`; `snapshot` and `prior_runtime` become required at `snapshotted`; and `install` start/progress becomes required at `installing`. `install.installed_hashes` remains empty and `completed_epoch` null until history first reaches `installed`, when the provenance-bound exact seven hashes and completion epoch become required and immutable thereafter. A terminal `rolled_back` validates the install receipt against its actual history: an initial-install recovery history without `installed` keeps empty hashes/null completion, while a manual-rollback history containing `installed` keeps the complete hashes/original install completion and uses `recovery.completed_epoch` for rollback completion. `probe` remains null through `probing` and becomes required at `probed`; `dry_run` remains null through `dry_run_recording` and becomes required at `dry_run_recorded`; `policy` remains null through `policy_enabling` and becomes required at `policy_enabled`; `observation` remains null through `observing` and becomes required at `observed`. Earlier phases require every later receipt to be null, never fabricated. Stable later phases preserve all earlier receipts except for the single authorized policy-recovery reset defined below. `rclone_evidence_groups` and `secondary_errors` are empty lists until evidence or a secondary failure exists; they are never replaced with synthetic entries. Tests construct every phase and reject a missing required receipt, an early non-null later receipt, premature or wrong-provenance installed hashes/epochs, incoherent write-ahead cursor tuples, and every receipt regression other than that exact reset.
+
+An absent state may become only one fully valid `source_verified` state whose history contains that initial phase. An exact no-op write is allowed and returns without creating a temporary or replacing the state file. Same-phase durable progress is allowed only in `installing`, `recovering`, `manual_rollback`, `probing`, `dry_run_recording`, `policy_enabling`, `observing`, `recovery_required`, `recovering_policy`, `recovering_probe`, and `recovering_guard`. A same-phase write does not append a duplicate `phase_history` entry; it may only advance phase-specific indices, completion fields, active-transaction guard/object booleans, and append-only evidence/error streams monotonically. During `installing`, the four `install` cursor fields form one coherent write-ahead cursor over the exact seven-target order listed above: entry records index zero with the exact first install-target tuple before mutation, and after target `i` plus its parent directory are fsynced one atomic state write advances to `i + 1` and either records the exact next tuple or clears all three tuple fields after the final target. The install cursor cannot skip, regress, reorder, rebind, or change tuple values at an unchanged index.
+
+Every recovery attempt uses the independent four-field cursor inside `recovery`; an install receipt and its cursor remain immutable throughout `recovering` or `manual_rollback`, including the failed initial-install progress already recorded before recovery began. A newly started `kind="install"` or `kind="manual_rollback"` attempt initializes recovery index zero with the exact first restore target and previous/intended hashes before mutation. A newly started `kind="policy"` attempt uses index zero and the fixed `/etc/degen/prod-db-backup.env` previous/intended hash tuple when environment mutation or restoration is pending; after that single target is durable it advances to index one and clears the tuple. `kind="probe"` and `kind="guard"` never restore host files and require index zero with all three tuple fields null. After every restored target and its parent directory are fsynced, one atomic state write advances the recovery cursor in exact restore order and either records the next exact tuple or clears the tuple after the final target. A `recovery_required -> recovering|recovering_policy|manual_rollback|recovering_probe|recovering_guard` transition resumes the same attempt and must preserve and continue its existing cursor, `started_epoch`, and evidence digest; it never reinitializes, skips, or regresses them. `recovery.completed_epoch` remains null until all required recovery work, lock release, and exact timer restoration required by the later owning task have succeeded. Stable phases are otherwise immutable until an allowed forward transition.
+
+Allow only these phase-changing transitions: `source_verified -> staging_prepared -> snapshotted -> installing -> installed -> probing -> probed -> dry_run_recording -> dry_run_recorded -> policy_enabling -> policy_enabled -> observing -> observed`; `installing -> recovering -> rolled_back|recovery_required`; `policy_enabling -> recovering_policy -> installed|recovery_required`; `probing|dry_run_recording|observing -> recovery_required`; and, after separate explicit manual-rollback approval, `installed|probed|dry_run_recorded|policy_enabled|observed -> manual_rollback -> rolled_back|recovery_required`. Every permitted phase change appends exactly one history entry whose phase equals the new state phase; every other existing history entry remains byte-for-byte stable. A `recovery_required` state transitions only to the phase matching recorded recovery kind: `recovering` for `install`, `recovering_policy` for `policy`, `manual_rollback` for `manual_rollback`, `recovering_probe` for `probe`, or `recovering_guard` for `guard`. A probe failure records `recovery.kind="probe"` and retains `active_transaction.kind="probe"` through `recovering_probe`. Guard recovery records `recovery.kind="guard"` while `active_transaction` retains the original `dry_run` or `observe` kind and its recorded prior stable phase; `recovering_guard` may return only to that recorded phase or to `recovery_required`. `recovering_probe -> installed|recovery_required`; `rolled_back` is terminal. The external Task 7 operator preflight and approval authorizes a manual rollback; Task 6A validates only the resulting transition structure and cannot grant that authorization.
+
+The only authorized receipt regression is the successful `recovering_policy -> installed` reset after a failed prune-enablement environment mutation. That transition atomically clears `probe`, `dry_run`, `policy`, and `observation` to JSON null, clears `active_transaction`, preserves the earlier reviewed source, staging, snapshot, prior-runtime, install, append-only phase history, rclone evidence, failure, secondary-error, and recovery evidence, and records the reset transition in phase history. All four later receipts must clear together; a partial clear or the same regression on any other transition is invalid. Returning to `installed` deliberately invalidates the old probe/dry-run approval chain, so a new probe, dry run, review, and explicit prune approval are required before enablement can be retried.
+
+Require `active_transaction` to be non-null throughout `probing`, `dry_run_recording`, `policy_enabling`, `observing`, and their applicable `recovery_required`/recovery phases, with a kind and prior stable phase matching the transition; require it null in stable phases after successful cleanup and timer restoration. Require the final `phase_history` entry to equal `phase`, and require phase history, rclone evidence, and `secondary_errors` to be append-only with stable evidence digests. Epochs are nondecreasing within each ordered stream (`phase_history`, `secondary_errors`, and successive attempts). Enforce explicit lifecycle ordering: install start is no later than install completion; recovery start is no later than recovery completion; active-transaction start is no earlier than its entering phase; policy enablement is no earlier than completed installation and its `policy_enabling` phase; and an observation run is strictly newer than the recorded policy enablement/cutoff and no earlier than its `observing` phase. `prior_runtime.preinstall_trigger_epoch` may predate operation history and is compared only by the later runtime checks that consume it, not against every operation epoch.
+
+`recovery` is the current/latest recovery-attempt receipt, not an append-only recovery history. Within one attempt its `kind` and `started_epoch` are immutable; its index and tuple advance only through the kind-specific rules above; `completed_epoch` changes only from null to a valid later epoch after its required completion boundary; and its evidence digest remains bound to that attempt. A completed receipt remains preserved in later stable state. It may be replaced only when a later separately authorized recovery transition starts after the prior attempt has been summarized by the append-only phase history and evidence streams; replacement during an existing attempt, a `recovery_required` resume, or an ordinary same-phase write is invalid.
+
+Require `operation_id`/`operation_dir` plus reviewed source digests to remain bound to `OperationsContext`. The first `failure.primary_error` is immutable once written. Callers must run exception-derived text through `sanitize_error_text()` before constructing `failure` or `secondary_errors`; the state validator then rejects any residual secret-like key, value, primary-error text, or secondary-error text and never silently rewrites supplied state. Rollback, recovery, cleanup, and timer-restoration errors append to `secondary_errors` in occurrence order and can never replace the primary error. State never serializes database URLs, tokens, passwords, environment-file contents, or rclone contents.
+
+Task 6A tests reject wrong operation roots, symlink path components, owner/mode mismatch, state-file symlinks or hard links, state secrets, duplicate keys at every JSON depth, corrupt/trailing JSON, non-atomic state writes, missing or extra fields at every schema level, operation-path rebinding, altered or truncated phase/evidence/error history, replacement or reordering of `secondary_errors`, mutation of the first primary error, regressed phases, phase-invalid nullability, forbidden transitions, unauthorized or partial receipt resets, secret-like error content, bool-as-int values, finite floats, non-finite numbers, and impossible lifecycle ordering. Tests separately construct and accept both legal terminal histories: failed initial install recovery with empty installed hashes/null install completion, and manual rollback after `installed` with the exact seven provenance-bound hashes/original install completion plus a distinct recovery completion. They reject every reordered/skipped/rebound install or recovery cursor; missing/extra recovery tuple fields; a reset of cursor, start epoch, or evidence on `recovery_required` resume; non-null probe/guard tuples; a policy tuple targeting anything except the fixed environment path; mutation of the frozen install receipt during recovery/manual rollback; premature recovery completion; and any environment hash sourced from the reviewed asset manifest instead of `host_stage.environment_sha256`. Develop the one reviewed Task 6A commit in this focused TDD order without intermediate partial commits: interfaces/Python 3.10 grammar/CLI surface; operation-directory and state-file descriptor/metadata checks; strict JSON decoding and primitive schema types; exact recursive object schemas; the phase receipt/nullability matrix; active-transaction/recovery and transition/history invariants; the authorized policy reset; sanitization/secret rejection; atomic write ordering/failure/race cases; then exact `show-state` output and sanitized errors.
+
+- [ ] **Step 2: Verify RED**
+
+Run:
+
+```powershell
+& 'C:\Users\jeffr\OneDrive\Apps\Documents\Degen App\.venv\Scripts\python.exe' -m pytest tests/test_degen_prod_db_backup_ops.py --tb=short -q -p no:cacheprovider
+```
+
+Expected: collection fails because `deploy/linux/degen-prod-db-backup-ops.py`, `OperationsContext`, strict phase-valid state loading, and atomic state commands do not exist.
+
+- [ ] **Step 3: Implement strict paths and atomic state**
+
+Expose only `show-state --operation-dir DIR` in this slice. Require `/opt/degen/backups/config/<YYYYMMDDTHHMMSSZ>` in production, effective UID zero, a real root-owned operation directory with exact mode `0700`, no symlink in any validated path component, and `operation-state.json` as a root-owned regular single-link file with exact mode `0600`. Open and bind directories/files with no-follow descriptors instead of trusting `Path.resolve()`. `show-state` performs the production lexical-root check, descriptor/metadata validation, exact schema and operation-path binding, and residual-secret rejection before emitting the exact canonical state JSON plus one LF; failures use concise sanitized stderr, emit no stdout or traceback, and never print untrusted state contents.
+
+Validate the exact recursive schema and phase rules above before serialization and after every read. Load JSON with an all-depth duplicate-pair hook and non-finite-value rejection; finite floats also fail the integer-only schema. Canonical bytes are UTF-8 `json.dumps(..., sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)` plus one LF.
+
+Before creating a temporary, validate the replacement, require caller-derived receipt errors already sanitized through `sanitize_error_text()`, reject residual secret-like keys/values without rewriting them, and load/validate the existing state through the held operation-directory descriptor. Write through an unpredictable exclusive same-directory `0600` temporary, verify its path/FD binding, write all canonical bytes, and fsync the file. Immediately before replacement, compare the destination's identity and exact old bytes with the originally loaded state as a compare-and-swap guard. Atomically replace via the validated directory FD, fsync the parent, then reopen the destination no-follow and revalidate exact canonical bytes, metadata, inode binding, and parent binding. A failure before replacement leaves the old destination byte-for-byte unchanged; cleanup never unlinks by name after an inode race. These checks ensure immutable bindings, append-only histories, first-failure immutability, no-op/same-phase rules, and transition legality cannot be bypassed.
+
+- [ ] **Step 4: Review, run the full suite, and commit Task 6A**
+
+After focused tests and Python 3.10 grammar checks pass, follow the shared independent-review gate, then run:
+
+```powershell
+& 'C:\Users\jeffr\OneDrive\Apps\Documents\Degen App\.venv\Scripts\python.exe' -m pytest --tb=short -q -p no:cacheprovider
+```
+
+Commit only the two Task 6 files:
 
 ```text
-feat: add immutable Green backup operation state
+feat: add strict Green backup operation state
 ```
+
+#### Task 6B: Verify immutable reviewed source
+
+- [ ] **Step 1: Write failing source-verification tests**
+
+Add focused tests named for these contracts: archive digest fails before Git or tree access; expected commit, archive digest, and independently approved manifest digest all bind to `OperationsContext` and state; archive member names/types are exact; duplicate, extra, missing, traversal, absolute, backslash, symlink, hard-link, sparse, device, FIFO, and unknown entries fail; required Git-archive parent directory entries are accepted only when they are exact real directories; every asset hash matches; and the already extracted source tree contains exactly the reviewed regular files with no links or extras. No failure may create `operation-state.json`.
+
+- [ ] **Step 2: Verify Task 6B RED**
+
+Run:
+
+```powershell
+& 'C:\Users\jeffr\OneDrive\Apps\Documents\Degen App\.venv\Scripts\python.exe' -m pytest tests/test_degen_prod_db_backup_ops.py --tb=short -q -p no:cacheprovider -k "source or archive or manifest"
+```
+
+Expected: failures identify the missing `verify-source` command, approved manifest-digest binding, archive/member verification, and exact extracted-tree validation.
+
+- [ ] **Step 3: Implement source verification without rewriting the running source tree**
+
+Define the source-verification interface in this slice:
+
+```python
+def verify_source_archive(
+    context: OperationsContext,
+    *,
+    source_dir: Path,
+) -> dict[str, str]: ...
+```
+
+`source_dir` is a read-only view of the already extracted tree and must equal `context.paths.source_dir`. The function obtains the archive path from `context.paths.source_archive` and binds the expected commit, archive SHA-256, and manifest SHA-256 exclusively from the same `OperationsContext`; callers cannot pass a second conflicting digest or destination.
+
+Expose:
+
+```text
+verify-source --operation-dir DIR --archive FILE --expected-commit SHA --expected-archive-sha256 DIGEST --expected-manifest-sha256 DIGEST
+```
+
+The manifest digest argument is mandatory, is copied into `OperationsContext.expected_manifest_sha256`, and must exactly match both `reviewed_source.manifest_sha256` and the verified extracted manifest. Do not self-derive an approval anchor from untrusted archive content.
+
+Avoid circular trust with this bootstrap sequence before executing the new helper:
+
+1. Locally create a path-limited uncompressed `git archive` containing only the fixed manifest and seven reviewed assets; record archive SHA-256, embedded commit, and manifest SHA-256.
+2. After production approval, set `UTC_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"`, `OPERATION_DIR="/opt/degen/backups/config/$UTC_STAMP"`, and `SOURCE_OPS="$OPERATION_DIR/source/deploy/linux/degen-prod-db-backup-ops.py"`; create the root-only operation directory and transfer the archive without touching `/opt/degen/app`.
+3. With existing Green tools only, verify the expected archive SHA-256 and `git get-tar-commit-id`, list the exact expected member names/types, reject links or extras, and extract once, without following links, into the new root-only `$OPERATION_DIR/source` directory.
+4. Verify the extracted manifest SHA-256 supplied in the approved preflight.
+5. Only then invoke `/usr/bin/python3 "$SOURCE_OPS" verify-source --operation-dir "$OPERATION_DIR" --archive "$OPERATION_DIR/source.tar" --expected-commit "$REVIEWED_SHA" --expected-archive-sha256 "$ARCHIVE_SHA256" --expected-manifest-sha256 "$MANIFEST_SHA256"`.
+
+The helper independently re-hashes the archive, sends the no-follow archive FD to `git get-tar-commit-id` through the fixed inherited-FD shim, parses the strict manifest, verifies exact archive members/types/hashes, and validates the exact already extracted `$OPERATION_DIR/source` tree. It never calls a general-purpose archive extraction API and never rewrites, renames, or replaces the directory containing the running helper. Only after every check succeeds may it atomically create the initial `source_verified` state.
+
+Task 9 owns the real fixed manifest. Task 6B tests create exact fixture manifests, but production bootstrap and `verify-source` must fail closed while the tracked manifest is absent or its approved digest is unavailable. This dependency does not authorize archive transfer, operation-directory creation, or any other production action before Tasks 9-10 and the explicit production approval gate.
+
+- [ ] **Step 4: Review, run the full suite, and commit Task 6B**
+
+Follow the shared independent-review gate and full-suite command, then commit only the two Task 6 files:
+
+```text
+feat: verify immutable Green backup source
+```
+
+#### Task 6C: Prepare verified host staging
+
+- [ ] **Step 1: Write failing host-staging tests**
+
+Add focused tests proving: no verified existing local pair fails before staging; canonical lowercase one-record sidecar grammar, recomputed SHA-256, and `pg_restore --list` run in that order; the filename-derived prefix exactly matches independently queried `current_database()` and `hostname -s`; the database URL travels only through the bounded inherited FD and child-only `PGDATABASE`; the manifest-verified environment helper remains the sole managed-environment parser/renderer; `REMOTE_PRUNE_ENABLED=0` is forced; staged assets/modes and the host-stage manifest are exact; and no database URL or environment/rclone content reaches argv, state, logs, exceptions, or `CompletedProcess`.
+
+- [ ] **Step 2: Verify Task 6C RED**
+
+Run:
+
+```powershell
+& 'C:\Users\jeffr\OneDrive\Apps\Documents\Degen App\.venv\Scripts\python.exe' -m pytest tests/test_degen_prod_db_backup_ops.py --tb=short -q -p no:cacheprovider -k "staging or existing_pair or pgdatabase or host_stage"
+```
+
+Expected: failures identify the missing `prepare-staging` command, inherited-FD database transport, verified pair/identity checks, environment rendering, and staged manifest.
+
+- [ ] **Step 3: Implement host staging**
+
+Expose `prepare-staging --operation-dir DIR`. Revalidate source, strict state, and context binding first. Validate the newest existing complete local pair, derive its prefix, query database and host identity independently, and stop on no verified pair or any identity/path/policy mismatch. Load the environment helper only from the manifest-verified source tree and render every managed key into a new root-only staged file with pruning disabled. Stage exact reviewed bytes and final modes separately from installed paths, generate and immediately verify a strict host-stage manifest, persist only non-secret effective configuration/hashes, and atomically transition `source_verified -> staging_prepared` after all checks succeed.
+
+- [ ] **Step 4: Review, run the full suite, and commit Task 6C**
+
+Follow the shared independent-review gate and full-suite command, then commit only the two Task 6 files:
+
+```text
+feat: stage verified Green backup assets
+```
+
+#### Task 6D: Snapshot current host state safely
+
+- [ ] **Step 1: Write failing snapshot tests**
+
+Add focused tests proving: each exact target is represented by saved regular-file bytes plus mode/uid/gid/hash or by one mutually exclusive explicit absence marker; symlink, nonregular, hard-linked, unstable, or replaced sources fail; the rclone audit copy is created before any later rclone use but is never a rollback target; JSON contains only rclone metadata/hash and never credential bytes; sorted `SHA256SUMS` covers every and only saved files/absence markers/audit evidence and is reverified before state transition; timer enabled/active state, trigger epoch, and protected service PIDs are exact; and a private test `host_root` cannot escape while production still has no override.
+
+- [ ] **Step 2: Verify Task 6D RED**
+
+Run:
+
+```powershell
+& 'C:\Users\jeffr\OneDrive\Apps\Documents\Degen App\.venv\Scripts\python.exe' -m pytest tests/test_degen_prod_db_backup_ops.py --tb=short -q -p no:cacheprovider -k "snapshot or absence or rclone_audit or prior_runtime"
+```
+
+Expected: failures identify the missing `snapshot` command, safe saved-or-absent representation, rclone audit boundary, exact manifest, and prior-runtime evidence.
+
+- [ ] **Step 3: Implement safe snapshot capture**
+
+Define the snapshot interface in this slice:
+
+```python
+def snapshot_host_state(context: OperationsContext) -> dict[str, object]: ...
+```
+
+Expose `snapshot --operation-dir DIR`. Snapshot every install target below plus a root-only rclone audit copy. For each install target, save exact bytes/mode/owner or an explicit mutually exclusive absence marker. Build and immediately verify `SHA256SUMS`; never store credential contents in JSON and never designate `rclone.conf.audit` for automatic rollback.
+
+```text
+/usr/local/sbin/degen-prod-db-backup
+/usr/local/sbin/degen-prod-db-retention
+/usr/local/sbin/degen-prod-db-backup-env
+/usr/local/sbin/degen-prod-db-backup-ops
+/etc/systemd/system/degen-prod-db-backup.service
+/etc/systemd/system/degen-prod-db-backup.timer
+/etc/degen/prod-db-backup.env
+```
+
+Revalidate source, staging, state, and host-root bindings before reading host targets. Use no-follow descriptors and stable path/FD metadata, write every snapshot artifact exclusively below the root-only snapshot directory, and verify the complete manifest before atomically transitioning `staging_prepared -> snapshotted`. Capture prior timer state, the pre-install trigger, and application/PostgreSQL/web/worker/bot PID evidence without restarting or mutating any service. If an owning account, unit, or unique active PostgreSQL service cannot be identified, fail rather than guess.
+
+- [ ] **Step 4: Review, run the full suite, and commit Task 6D**
+
+Follow the shared independent-review gate and full-suite command, then commit only the two Task 6 files:
+
+```text
+feat: snapshot Green backup host state
+```
+
+Task 7 consumes the Task 6 atomic state store, exact snapshot representation, immutable source/staging bindings, no-shell command runner, inherited-FD contract, failure sanitization, and phase validator without weakening them. Task 8 consumes the predeclared active-transaction/rclone/probe/dry-run/policy/observation schema and the exact policy-recovery reset above. Neither later task may change the state format silently; any required schema change starts with a new failing compatibility test and independent review.
 
 ---
 
@@ -637,6 +790,11 @@ crash/restart recovery succeeds after every state-write, stage-fsync, rename, pa
 fresh install refuses incomplete state and directs the operator to source-helper recovery
 timer-restoration failure enters durable recovery before any quiesced recovery result
 rollback and recovery reacquire the same dual migration guard whenever legacy bytes may be restored
+write-ahead cursors follow the exact fixed seven-target order with coherent index/current/previous/intended tuples
+recovery uses its independent cursor and recovery_required resume never resets its cursor/start/evidence
+manual rollback and initial-install recovery leave the historical install receipt/cursor immutable
+failed initial-install rollback and later manual rollback preserve their distinct history-sensitive install receipts
+all six repo-managed installed hashes bind to reviewed-source and host-stage assets, while the environment binds only to host_stage.environment_sha256
 ```
 
 - [ ] **Step 2: Verify RED**
@@ -675,15 +833,15 @@ def acquire_migration_locks(context: OperationsContext) -> MigrationLocks: ...
 
 Before the first replacement, fully validate source, host stage, snapshot, state, and manifests; capture timer state; stop only the timer; require the service inactive; acquire both migration locks; and atomically fsync a write-ahead `installing` state. A fresh `install` refuses `installing`, `recovering`, `recovery_required`, or any other incomplete phase and prints the exact verified-source `recover --operation-dir` command instead of guessing or continuing.
 
-Replace each target transactionally. Create a same-directory owned staging file with `O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC`, write exact reviewed bytes, set and verify exact owner/mode, fsync the file, and close it. Before the first host mutation and immediately before each target rename, atomically write and fsync state containing `phase`, `next_target_index`, `current_target`, and the intended and previous hashes. Then use `os.replace(staged, target)` and fsync an open descriptor for the target's parent directory. For a snapshot absence marker, recovery records the same write-ahead progress before unlinking an owned target and fsyncing its parent. State-file replacement itself uses a same-directory exclusive temporary file, file fsync, `os.replace`, and parent-directory fsync. Tests inject process death and reconstruct a fresh helper after every state write, staged-file fsync, target rename/unlink, parent fsync, daemon reload, validation, lock release, and timer restoration.
+Replace each target transactionally in the exact seven-target order declared by Task 6A. Create a same-directory owned staging file with `O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC`, write exact reviewed bytes, set and verify exact owner/mode, fsync the file, and close it. Entry into a new `installing` phase atomically records index zero and the exact first-target tuple in the `install` cursor before mutation. Entry into a new install-recovery or `manual_rollback` attempt instead freezes the entire historical install receipt and atomically creates an independent `recovery` cursor at index zero with the exact first restore-target tuple. A resumed `recovery_required` attempt reuses its existing recovery cursor, `started_epoch`, and evidence digest without resetting any of them. The persisted active cursor for target `i` remains unchanged while that target is renamed or unlinked and its parent is fsynced. Only after both target and parent durability succeed may one atomic state write advance the active index to `i + 1` and replace its tuple with the exact next target, or clear the tuple after the seventh target. Recovery uses the verified current/snapshot hash or null absence marker for the exact previous/intended values. Refuse any cursor whose index, target, previous hash, or intended hash is reordered, skipped, reset, rebound, or inconsistent with the verified snapshot/staging manifests. State-file replacement itself uses a same-directory exclusive temporary file, file fsync, `os.replace`, and parent-directory fsync. Tests inject process death and reconstruct a fresh helper after every state write, staged-file fsync, target rename/unlink, parent fsync, daemon reload, validation, lock release, and timer restoration.
 
-Install the four executable targets `0755`, the two units `0644`, and the host-derived environment `0600`; do not install the tracked environment example. Reload systemd, then run `/usr/local/sbin/degen-prod-db-backup preflight --lock-fd N`, where `N` is `MigrationLocks.runtime_fd` explicitly inherited through `pass_fds` while the parent continues holding `legacy_fd`. The child validates and shares the inherited new-lock open-file description rather than opening a competing lock. Never start the oneshot unit during install validation, and tests must prove no dump, prune, delete, or normal `ExecStart` occurs. Verify hashes/modes, but while phase remains `installing` keep `install.installed_hashes` empty and `install.completed_epoch` null.
+Install the four executable targets `0755`, the two units `0644`, and the host-derived environment `0600`; do not install the tracked environment example. The six executable/unit destination hashes must equal their corresponding reviewed-source and host-stage asset hashes. The environment destination must equal `host_stage.environment_sha256` and is never validated against `reviewed_source.asset_hashes`. Reload systemd, then run `/usr/local/sbin/degen-prod-db-backup preflight --lock-fd N`, where `N` is `MigrationLocks.runtime_fd` explicitly inherited through `pass_fds` while the parent continues holding `legacy_fd`. The child validates and shares the inherited new-lock open-file description rather than opening a competing lock. Never start the oneshot unit during install validation, and tests must prove no dump, prune, delete, or normal `ExecStart` occurs. Verify hashes/modes, but while phase remains `installing` keep `install.installed_hashes` empty and `install.completed_epoch` null.
 
-`recover` must be invoked with the helper under the previously verified `context.paths.source_dir`, never whichever installed helper may be mixed after a crash. It revalidates the archive, reviewed source, host stage, snapshot manifest, strict state, and operation binding; captures or reuses the exact prior timer state; quiesces the timer; requires service inactivity; acquires both migration locks; and atomically restores every snapshot target or absence marker with the same write-ahead and fsync protocol. It then runs `daemon-reload`, verifies target bytes/modes/owners/absence and unchanged application/database PIDs, removes only operation-owned staging temporaries, and persists restored-but-incomplete `recovering` evidence. Only after releasing both locks and restoring the timer's exact prior enabled/active state may it append the terminal `rolled_back` phase and `completed_epoch`. If target restoration, lock release, timer restoration, or final state persistence cannot complete, stop/quiesce the timer when possible, preserve the first immutable `failure.primary_error`, append each sanitized recovery failure to `secondary_errors` in occurrence order, persist `recovery_required`, and do not claim rollback complete.
+`recover` must be invoked with the helper under the previously verified `context.paths.source_dir`, never whichever installed helper may be mixed after a crash. It revalidates the archive, reviewed source, host stage, snapshot manifest, strict state, and operation binding; captures or reuses the exact prior timer state; quiesces the timer; requires service inactivity; acquires both migration locks; and atomically restores every snapshot target or absence marker with the independent recovery cursor and the same write-ahead/fsync protocol. A newly entered install-recovery attempt initializes that cursor once; a `recovery_required -> recovering` resume preserves and continues its recorded cursor, `started_epoch`, and evidence digest. The historical install receipt/cursor never changes during either path. Recovery then runs `daemon-reload`, verifies target bytes/modes/owners/absence and unchanged application/database PIDs, removes only operation-owned staging temporaries, and persists restored-but-incomplete `recovering` evidence. Only after releasing both locks and restoring the timer's exact prior enabled/active state may it append terminal `rolled_back` and set `recovery.completed_epoch`. A failed initial installation whose history never reached `installed` keeps its frozen historical install progress, `install.installed_hashes` empty, and `install.completed_epoch` null in `rolled_back`; rollback completion must not fabricate installation completion. If target restoration, lock release, timer restoration, or final state persistence cannot complete, stop/quiesce the timer when possible, preserve the first immutable `failure.primary_error`, append each sanitized recovery failure to `secondary_errors` in occurrence order, persist `recovery_required`, and do not claim rollback complete.
 
-Before restoring an active persistent timer after install, atomically record provisional install evidence, release both migration locks, revalidate that the backup service remains inactive, and restore the timer's exact prior state. Only after exact timer restoration may state atomically populate complete `install.installed_hashes` and `install.completed_epoch` and transition from `installing` to `installed`. Any timer-restoration failure creates `failure.primary_error` only when no failure exists; otherwise it appends a sanitized `secondary_errors` entry without changing the first failure, then enters the same verified-source recovery flow. It does not attempt an ad hoc in-process rollback. The initial install/enable approval explicitly authorizes automatic or resumed recovery of that transaction. An unrelated later manual `rollback` still requires its own mutation preflight and approval.
+Before restoring an active persistent timer after install, atomically record provisional install evidence, release both migration locks, revalidate that the backup service remains inactive, and restore the timer's exact prior state. Only after exact timer restoration may state atomically populate all seven `install.installed_hashes` with the six reviewed-source/host-stage asset hashes plus `host_stage.environment_sha256`, set `install.completed_epoch`, and transition from `installing` to `installed`. Any timer-restoration failure creates `failure.primary_error` only when no failure exists; otherwise it appends a sanitized `secondary_errors` entry without changing the first failure, then enters the same verified-source recovery flow. It does not attempt an ad hoc in-process rollback. The initial install/enable approval explicitly authorizes automatic or resumed recovery of that transaction. An unrelated later manual `rollback` still requires its own mutation preflight and approval.
 
-Manual `rollback` revalidates the snapshot and state, quiesces the timer, requires service inactivity, acquires both migration locks, restores with the same atomic protocol, reloads systemd, verifies destinations and PIDs, persists provisional recovery evidence, releases both locks, and restores the exact prior timer state before recording terminal `rolled_back`. Locally pruned and remotely deleted backup objects remain explicitly unrecoverable.
+Manual `rollback` revalidates the snapshot and state, quiesces the timer, requires service inactivity, acquires both migration locks, initializes and advances only the independent manual-rollback recovery cursor, restores with the same atomic protocol, reloads systemd, verifies destinations and PIDs, persists provisional recovery evidence, releases both locks, and restores the exact prior timer state before recording terminal `rolled_back` with `recovery.completed_epoch`. Because this history already contains `installed`, manual rollback preserves the complete historical install receipt/cursor, including all seven exact `install.installed_hashes` and the original `install.completed_epoch`; it never replaces the install completion with the rollback epoch. A resumed manual rollback continues the existing recovery cursor and never reinitializes it. Locally pruned and remotely deleted backup objects remain explicitly unrecoverable.
 
 - [ ] **Step 4: Run focused/full verification and commit**
 
@@ -782,22 +940,44 @@ feat: gate Green pruning on probe and fresh state
 
 - [ ] **Step 1: Write failing documentation/manifest contract tests**
 
-Tests require the old plan's superseded banner, exact reviewed-SHA push-before-install ordering, standard-tool archive bootstrap, archive manifest parity, separate push and production approvals plus the later prune approval, explicit timer/rclone mutation disclosure, exact `OPERATION_DIR`/`SOURCE_OPS` construction, source-helper routing for verification/staging/snapshot/install/recovery, installed-helper use only after reviewed-manifest hash verification, no direct inline environment editor/install/rollback algorithms, and no rclone command before audit snapshot.
+Tests require the old plan's superseded banner, exact reviewed-SHA push-before-install ordering, definitions of `UTC_STAMP`, `OPERATION_DIR`, `SOURCE_OPS`, and `MANIFEST_SHA256` before transfer/bootstrap, standard-tool archive transfer/bootstrap/extraction/verification before `verify-source`, archive manifest parity, the mandatory approved `--expected-manifest-sha256` binding, separate push and production approvals plus the later prune approval, explicit timer/rclone mutation disclosure, exact `OPERATION_DIR`/`SOURCE_OPS` construction, source-helper routing for verification/staging/snapshot/install and conditional recovery, absence of `recover` from the normal success block, installed-helper use only after reviewed-manifest hash verification, no direct inline environment editor/install/rollback algorithms, and no rclone command before audit snapshot.
 
 - [ ] **Step 2: Rewrite the runbook around tested helpers**
 
-After the standard-tool bootstrap, the runbook defines the exact operation-local helper path and uses it for every phase that may run before the installed helper is proven:
+The runbook first defines and validates the exact operation-local values before any operation-directory creation, archive transfer, bootstrap, extraction, or helper invocation:
 
 ```bash
 UTC_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 OPERATION_DIR="/opt/degen/backups/config/$UTC_STAMP"
 SOURCE_OPS="$OPERATION_DIR/source/deploy/linux/degen-prod-db-backup-ops.py"
+MANIFEST_SHA256="${APPROVED_MANIFEST_SHA256:?set the approved reviewed-manifest SHA-256}"
+```
 
-/usr/bin/python3 "$SOURCE_OPS" verify-source --operation-dir "$OPERATION_DIR" --archive "$OPERATION_DIR/source.tar" --expected-commit "$REVIEWED_SHA" --expected-archive-sha256 "$ARCHIVE_SHA256"
+Only after those four values are fixed and the production approval is active may the runbook create the root-only operation directory and transfer `source.tar`. It then uses existing standard tools to verify the approved archive SHA-256 and embedded commit, enumerate the exact member names/types, reject links or extras, extract once without following links into `$OPERATION_DIR/source`, and verify the extracted manifest against `$MANIFEST_SHA256`. Only after every bootstrap check succeeds may the normal source-routed success path invoke:
+
+```bash
+/usr/bin/python3 "$SOURCE_OPS" verify-source --operation-dir "$OPERATION_DIR" --archive "$OPERATION_DIR/source.tar" --expected-commit "$REVIEWED_SHA" --expected-archive-sha256 "$ARCHIVE_SHA256" --expected-manifest-sha256 "$MANIFEST_SHA256"
 /usr/bin/python3 "$SOURCE_OPS" prepare-staging --operation-dir "$OPERATION_DIR"
 /usr/bin/python3 "$SOURCE_OPS" snapshot --operation-dir "$OPERATION_DIR"
 /usr/bin/python3 "$SOURCE_OPS" install --operation-dir "$OPERATION_DIR"
-/usr/bin/python3 "$SOURCE_OPS" recover --operation-dir "$OPERATION_DIR"
+```
+
+`recover` is not a normal success-path command. The runbook puts it in a separate conditional interruption block and invokes it only when strict source-routed state inspection reports an in-progress or `recovery_required` transaction:
+
+```bash
+RECORDED_PHASE="$(
+  /usr/bin/python3 "$SOURCE_OPS" show-state --operation-dir "$OPERATION_DIR" |
+    /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["phase"])'
+)"
+case "$RECORDED_PHASE" in
+  installing|recovering|probing|dry_run_recording|policy_enabling|observing|recovery_required|recovering_policy|manual_rollback|recovering_probe|recovering_guard)
+    /usr/bin/python3 "$SOURCE_OPS" recover --operation-dir "$OPERATION_DIR"
+    ;;
+  *)
+    printf '%s\n' "ERROR: recovery refused for non-interrupted phase: $RECORDED_PHASE" >&2
+    exit 1
+    ;;
+esac
 ```
 
 After install succeeds, the runbook compares `/usr/local/sbin/degen-prod-db-backup-ops` to the exact reviewed manifest hash. Only on an exact match may it use these installed-helper commands:
@@ -809,7 +989,7 @@ After install succeeds, the runbook compares `/usr/local/sbin/degen-prod-db-back
 /usr/local/sbin/degen-prod-db-backup-ops observe --operation-dir "$OPERATION_DIR"
 ```
 
-Every recovery from an already interrupted install, probe, dry run, policy enablement, observation, timer restoration, rollback, or recovery transaction with matching durable state uses `/usr/bin/python3 "$SOURCE_OPS" recover --operation-dir "$OPERATION_DIR"`; `recover` refuses absent or mismatched interrupted state and never resolves through a possibly mixed installed binary. A newly approved stable-phase manual rollback instead invokes `/usr/bin/python3 "$SOURCE_OPS" rollback --operation-dir "$OPERATION_DIR"` after its separate mutation preflight and approval. The runbook documents exact expected evidence, the standard-tool bootstrap, separate push/install/prune gates, source transfer, timer/rclone effects, operation-directory recovery, and irreversible local/remote deletion limits. It explains incomplete-phase refusal, automatic/resumed recovery authorized by the original transaction approval, and the verified-source recovery command. The runbook does not duplicate parser, transaction, or rollback logic. `pg_restore --list` proves archive readability only; the canceled full logical restore rehearsal remains an accepted recovery risk, and this work must not claim end-to-end restore proof.
+Only recovery from an already interrupted install, probe, dry run, policy enablement, observation, timer restoration, rollback, or recovery transaction with matching durable state uses the conditional source-routed command above; `recover` refuses absent, stable, or mismatched state and never resolves through a possibly mixed installed binary. A newly approved stable-phase manual rollback instead invokes `/usr/bin/python3 "$SOURCE_OPS" rollback --operation-dir "$OPERATION_DIR"` after its separate mutation preflight and approval. The runbook documents exact expected evidence, the standard-tool bootstrap, separate push/install/prune gates, source transfer, timer/rclone effects, operation-directory recovery, and irreversible local/remote deletion limits. It explains incomplete-phase refusal, automatic/resumed recovery authorized by the original transaction approval, and the verified-source recovery command. The runbook does not duplicate parser, transaction, or rollback logic. `pg_restore --list` proves archive readability only; the canceled full logical restore rehearsal remains an accepted recovery risk, and this work must not claim end-to-end restore proof.
 
 - [ ] **Step 3: Generate the fixed asset manifest**
 
@@ -886,7 +1066,7 @@ Report the exact reviewed SHA, archive/manifest digests, operation directory, se
 
 - [ ] **Step 1: Install transactionally**
 
-After the production `proceed`, perform the standard-tool archive bootstrap, define `OPERATION_DIR` and `SOURCE_OPS`, then invoke `/usr/bin/python3 "$SOURCE_OPS"` for `verify-source`, `prepare-staging`, `snapshot`, and `install`. Any incomplete phase or recovery before installed-helper verification also invokes `/usr/bin/python3 "$SOURCE_OPS" recover`. Verify exact installed hashes/modes, timer state restoration, inactive backup service, unchanged application/PostgreSQL/web/worker/bot PIDs, operation-state completeness, and an exact SHA-256 match between `/usr/local/sbin/degen-prod-db-backup-ops` and its reviewed manifest entry.
+After the production `proceed`, first define `UTC_STAMP`, `OPERATION_DIR`, `SOURCE_OPS`, and `MANIFEST_SHA256` from the approved immutable-publication evidence. Then perform the standard-tool archive transfer/bootstrap/extraction/verification, and only after those checks invoke `/usr/bin/python3 "$SOURCE_OPS"` for `verify-source`, `prepare-staging`, `snapshot`, and `install`. An incomplete or `recovery_required` transaction before installed-helper verification uses the separate conditional source-routed `/usr/bin/python3 "$SOURCE_OPS" recover` path; recovery is never appended to the normal success sequence. Verify exact installed hashes/modes, timer state restoration, inactive backup service, unchanged application/PostgreSQL/web/worker/bot PIDs, operation-state completeness, and an exact SHA-256 match between `/usr/local/sbin/degen-prod-db-backup-ops` and its reviewed manifest entry.
 
 - [ ] **Step 2: Run the disposable probe and production dry-run**
 
