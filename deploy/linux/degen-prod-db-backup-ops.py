@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -12,9 +13,10 @@ import secrets
 import stat
 import subprocess
 import sys
+import tarfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -23,6 +25,14 @@ CommandRunner = Callable[
     subprocess.CompletedProcess[str],
 ]
 Clock = Callable[[], datetime]
+PreReplaceValidator = Callable[[], None]
+
+
+@dataclass(frozen=True)
+class _OperationDirectoryBinding:
+    path: Path
+    descriptor: int | None
+    metadata: os.stat_result
 
 _PRODUCTION_OPERATION_RE = re.compile(
     r"\A/opt/degen/backups/config/[0-9]{8}T[0-9]{6}Z\Z"
@@ -59,6 +69,24 @@ _RCLONE_CONTENT_RE = re.compile(
 _MAX_STATE_BYTES = 8 * 1024 * 1024
 _PRODUCTION_HOST_ROOT = Path("/")
 _SHA256_RE = re.compile(r"\A[0-9a-f]{64}\Z")
+_GIT_COMMIT_RE = re.compile(r"\A[0-9a-f]{40}\Z")
+_SOURCE_MANIFEST = "deploy/linux/degen-prod-db-backup-assets.sha256"
+_MAX_SOURCE_ARCHIVE_BYTES = 16 * 1024 * 1024
+_MAX_SOURCE_FILE_BYTES = 8 * 1024 * 1024
+_MAX_SOURCE_MANIFEST_BYTES = 64 * 1024
+_TAR_BLOCK_BYTES = 512
+_GIT_TAR_RECORD_BYTES = 20 * _TAR_BLOCK_BYTES
+_GIT_EXECUTABLE = "/usr/bin/git"
+_FD_STDIN_EXEC_SHIM = """import os
+import sys
+fd = int(sys.argv[1])
+executable = sys.argv[2]
+argv = sys.argv[3:]
+os.dup2(fd, 0)
+if fd != 0:
+    os.close(fd)
+os.execv(executable, argv)
+"""
 _TOP_LEVEL_KEYS = frozenset(
     {
         "schema_version",
@@ -136,6 +164,11 @@ _SOURCE_ASSETS = frozenset(
         *(source for source, _ in _SOURCE_TO_TARGET),
         "deploy/systemd/degen-prod-db-backup.env.example",
     }
+)
+_SOURCE_FILES = frozenset({*_SOURCE_ASSETS, _SOURCE_MANIFEST})
+_SOURCE_DIRECTORIES = frozenset({"deploy", "deploy/linux", "deploy/systemd"})
+_EXECUTABLE_SOURCE_ASSETS = frozenset(
+    source for source in _SOURCE_ASSETS if source.startswith("deploy/linux/")
 )
 _NORMAL_PHASE_ORDER = (
     "source_verified",
@@ -338,21 +371,19 @@ def _revalidate_operation_dir_binding(
         if directory_fd is None:
             fresh_metadata = _walk_operation_dir_fallback(path, effective_uid)
             if not _same_identity(fresh_metadata, original_metadata):
-                raise OperationStateError("operation directory binding changed after replacement")
+                raise OperationStateError("operation directory binding changed")
             return
 
         held_metadata = os.fstat(directory_fd)
         _validate_operation_dir_metadata(held_metadata, effective_uid)
         if not _same_identity(held_metadata, original_metadata):
-            raise OperationStateError("operation directory binding changed after replacement")
+            raise OperationStateError("operation directory binding changed")
         with _open_operation_dir_posix(path, effective_uid) as fresh_fd:
             fresh_metadata = os.fstat(fresh_fd)
             if not _same_identity(fresh_metadata, held_metadata):
-                raise OperationStateError("operation directory binding changed after replacement")
+                raise OperationStateError("operation directory binding changed")
     except (OSError, OperationStateError) as exc:
-        raise OperationStateError(
-            "operation directory binding revalidation failed after replacement"
-        ) from exc
+        raise OperationStateError("operation directory binding revalidation failed") from exc
 
 
 def validate_operation_dir(path: Path, *, effective_uid: int) -> None:
@@ -495,6 +526,22 @@ def atomic_write_operation_state(
     *,
     effective_uid: int,
 ) -> None:
+    _atomic_write_operation_state_internal(
+        path,
+        state,
+        effective_uid=effective_uid,
+        pre_replace_validator=None,
+    )
+
+
+def _atomic_write_operation_state_internal(
+    path: Path,
+    state: dict[str, object],
+    *,
+    effective_uid: int,
+    pre_replace_validator: PreReplaceValidator | None,
+    operation_directory_binding: _OperationDirectoryBinding | None = None,
+) -> None:
     if path.name != "operation-state.json":
         raise OperationStateError("operation state path must end in operation-state.json")
     operation_dir = path.parent
@@ -502,15 +549,67 @@ def atomic_write_operation_state(
     canonical = _canonical_state_bytes(state)
     if len(canonical) > _MAX_STATE_BYTES:
         raise OperationStateError("operation state exceeds the size limit")
+    if operation_directory_binding is not None:
+        _atomic_write_with_operation_directory_binding(
+            path,
+            state,
+            canonical,
+            effective_uid,
+            operation_directory_binding,
+            pre_replace_validator,
+        )
+        return
     with _open_validated_operation_dir(operation_dir, effective_uid) as directory_fd:
-        with _exclusive_operation_state_lock(directory_fd):
-            _atomic_write_under_lock(
-                path,
-                state,
-                canonical,
-                effective_uid,
-                directory_fd,
-            )
+        operation_metadata = (
+            operation_dir.lstat() if directory_fd is None else os.fstat(directory_fd)
+        )
+        binding = _OperationDirectoryBinding(
+            operation_dir,
+            directory_fd,
+            operation_metadata,
+        )
+        _atomic_write_with_operation_directory_binding(
+            path,
+            state,
+            canonical,
+            effective_uid,
+            binding,
+            pre_replace_validator,
+        )
+
+
+def _atomic_write_with_operation_directory_binding(
+    path: Path,
+    state: dict[str, object],
+    canonical: bytes,
+    effective_uid: int,
+    binding: _OperationDirectoryBinding,
+    pre_replace_validator: PreReplaceValidator | None,
+) -> None:
+    if binding.path != path.parent:
+        raise OperationStateError("operation directory binding path does not match state path")
+    _revalidate_operation_dir_binding(
+        binding.path,
+        binding.descriptor,
+        binding.metadata,
+        effective_uid,
+    )
+    with _exclusive_operation_state_lock(binding.descriptor):
+        _revalidate_operation_dir_binding(
+            binding.path,
+            binding.descriptor,
+            binding.metadata,
+            effective_uid,
+        )
+        _atomic_write_under_lock(
+            path,
+            state,
+            canonical,
+            effective_uid,
+            binding.descriptor,
+            binding.metadata,
+            pre_replace_validator,
+        )
 
 
 @contextlib.contextmanager
@@ -540,10 +639,15 @@ def _atomic_write_under_lock(
     canonical: bytes,
     effective_uid: int,
     directory_fd: int | None,
+    operation_metadata: os.stat_result,
+    pre_replace_validator: PreReplaceValidator | None,
 ) -> None:
     operation_dir = path.parent
-    operation_metadata = (
-        operation_dir.lstat() if directory_fd is None else os.fstat(directory_fd)
+    _revalidate_operation_dir_binding(
+        operation_dir,
+        directory_fd,
+        operation_metadata,
+        effective_uid,
     )
     if directory_fd is None:
         existing = _capture_existing_fallback(path, effective_uid)
@@ -566,6 +670,7 @@ def _atomic_write_under_lock(
             existing,
             effective_uid,
             operation_metadata,
+            pre_replace_validator,
         )
     else:
         _atomic_write_posix(
@@ -575,6 +680,7 @@ def _atomic_write_under_lock(
             existing,
             effective_uid,
             operation_metadata,
+            pre_replace_validator,
         )
 
 
@@ -653,11 +759,60 @@ def _temp_identity_matches_posix(directory_fd: int, name: str, metadata: os.stat
         current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
     except OSError:
         return False
-    return _same_identity(current, metadata)
+    return _same_identity(current, metadata) and _stable_file_metadata(
+        current
+    ) == _stable_file_metadata(metadata)
+
+
+def _temp_contents_match_posix(
+    directory_fd: int,
+    name: str,
+    metadata: os.stat_result,
+    canonical: bytes,
+    effective_uid: int,
+) -> bool:
+    descriptor: int | None = None
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        named_before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        _validate_state_file_metadata(named_before, effective_uid)
+        if not _same_identity(named_before, metadata):
+            return False
+        descriptor = os.open(name, flags, dir_fd=directory_fd)
+        opened_before = os.fstat(descriptor)
+        _validate_state_file_metadata(opened_before, effective_uid)
+        if not _same_identity(metadata, opened_before):
+            return False
+        raw = _read_bounded(descriptor)
+        opened_after = os.fstat(descriptor)
+        named_after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        _validate_state_file_metadata(opened_after, effective_uid)
+        _validate_state_file_metadata(named_after, effective_uid)
+        if (
+            opened_after.st_size != len(canonical)
+            or not _same_identity(metadata, opened_after)
+            or not _same_identity(opened_after, named_after)
+        ):
+            return False
+        return raw == canonical
+    except (OSError, OperationStateError):
+        return False
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
 
 def _cleanup_temp_posix(directory_fd: int, name: str, metadata: os.stat_result | None) -> None:
-    if metadata is None or not _temp_identity_matches_posix(directory_fd, name, metadata):
+    if metadata is None:
+        return
+    try:
+        current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except OSError:
+        return
+    if not _same_identity(current, metadata):
         return
     try:
         os.unlink(name, dir_fd=directory_fd)
@@ -684,9 +839,16 @@ def _atomic_write_posix(
     existing: tuple[dict[str, object], bytes, os.stat_result] | None,
     effective_uid: int,
     operation_metadata: os.stat_result,
+    pre_replace_validator: PreReplaceValidator | None,
 ) -> None:
     if not _write_descriptor_primitives_available():
         raise OperationStateError("required POSIX atomic-write primitives are unavailable")
+    _revalidate_operation_dir_binding(
+        operation_dir,
+        directory_fd,
+        operation_metadata,
+        effective_uid,
+    )
     name = _new_temp_name()
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
     descriptor: int | None = None
@@ -708,12 +870,38 @@ def _atomic_write_posix(
             raise OperationStateError("temporary operation state changed while writing")
         temp_metadata = written
         _atomic_event_hook("after_temp_fsync", temp_path=str(operation_dir / name))
-        os.close(descriptor)
-        descriptor = None
         _atomic_event_hook("before_cas", temp_path=str(operation_dir / name))
         _atomic_event_hook("before_replace", temp_path=str(operation_dir / name))
         if not _temp_identity_matches_posix(directory_fd, name, temp_metadata):
             raise OperationStateError("temporary operation state binding changed before replacement")
+        if not _temp_contents_match_posix(
+            directory_fd,
+            name,
+            temp_metadata,
+            canonical,
+            effective_uid,
+        ):
+            raise OperationStateError("temporary operation state bytes changed before replacement")
+        if not _cas_matches_posix(directory_fd, operation_dir, effective_uid, existing):
+            raise OperationStateError("operation state compare-and-swap check failed")
+        if pre_replace_validator is not None:
+            pre_replace_validator()
+        _revalidate_operation_dir_binding(
+            operation_dir,
+            directory_fd,
+            operation_metadata,
+            effective_uid,
+        )
+        if not _temp_identity_matches_posix(directory_fd, name, temp_metadata):
+            raise OperationStateError("temporary operation state binding changed before replacement")
+        if not _temp_contents_match_posix(
+            directory_fd,
+            name,
+            temp_metadata,
+            canonical,
+            effective_uid,
+        ):
+            raise OperationStateError("temporary operation state bytes changed before replacement")
         if not _cas_matches_posix(directory_fd, operation_dir, effective_uid, existing):
             raise OperationStateError("operation state compare-and-swap check failed")
         os.replace(
@@ -784,11 +972,80 @@ def _temp_identity_matches_fallback(path: Path, metadata: os.stat_result) -> boo
         current = path.lstat()
     except OSError:
         return False
-    return _same_identity(current, metadata)
+    return _same_identity(current, metadata) and _stable_file_metadata(
+        current
+    ) == _stable_file_metadata(metadata)
+
+
+def _temp_contents_match_fallback(
+    path: Path,
+    metadata: os.stat_result,
+    canonical: bytes,
+    effective_uid: int,
+) -> bool:
+    descriptor: int | None = None
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        named_before = path.lstat()
+        _validate_state_file_metadata(
+            named_before,
+            effective_uid,
+            direct_test_fallback=True,
+        )
+        if not _same_identity(named_before, metadata):
+            return False
+        descriptor = os.open(path, flags)
+        opened_before = os.fstat(descriptor)
+        _validate_state_file_metadata(
+            opened_before,
+            effective_uid,
+            direct_test_fallback=True,
+        )
+        if not _same_identity(metadata, opened_before):
+            return False
+        raw = _read_bounded(descriptor)
+        opened_after = os.fstat(descriptor)
+        named_after = path.lstat()
+        _validate_state_file_metadata(
+            opened_after,
+            effective_uid,
+            direct_test_fallback=True,
+        )
+        _validate_state_file_metadata(
+            named_after,
+            effective_uid,
+            direct_test_fallback=True,
+        )
+        if (
+            opened_after.st_size != len(canonical)
+            or not _same_identity(metadata, opened_after)
+            or not _same_identity(opened_after, named_after)
+        ):
+            return False
+        return raw == canonical
+    except (OSError, OperationStateError):
+        return False
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
 
 def _cleanup_temp_fallback(path: Path, metadata: os.stat_result | None) -> None:
-    if metadata is None or not _temp_identity_matches_fallback(path, metadata):
+    if metadata is None:
+        return
+    try:
+        current = path.lstat()
+    except OSError:
+        return
+    if not _same_identity(current, metadata):
         return
     try:
         path.unlink()
@@ -813,7 +1070,14 @@ def _atomic_write_fallback(
     existing: tuple[dict[str, object], bytes, os.stat_result] | None,
     effective_uid: int,
     operation_metadata: os.stat_result,
+    pre_replace_validator: PreReplaceValidator | None,
 ) -> None:
+    _revalidate_operation_dir_binding(
+        path.parent,
+        None,
+        operation_metadata,
+        effective_uid,
+    )
     name = _new_temp_name()
     temp_path = path.parent / name
     flags = (
@@ -850,10 +1114,55 @@ def _atomic_write_fallback(
         _atomic_event_hook("after_temp_fsync", temp_path=str(temp_path))
         os.close(descriptor)
         descriptor = None
+        try:
+            closed_metadata = temp_path.lstat()
+        except OSError as exc:
+            raise OperationStateError(
+                "temporary operation state metadata read failed after close"
+            ) from exc
+        if (
+            not _same_identity(temp_metadata, closed_metadata)
+            or closed_metadata.st_size != len(canonical)
+        ):
+            raise OperationStateError(
+                "temporary operation state binding changed while closing"
+            )
+        _validate_state_file_metadata(
+            closed_metadata,
+            effective_uid,
+            direct_test_fallback=True,
+        )
+        temp_metadata = closed_metadata
         _atomic_event_hook("before_cas", temp_path=str(temp_path))
         _atomic_event_hook("before_replace", temp_path=str(temp_path))
         if not _temp_identity_matches_fallback(temp_path, temp_metadata):
             raise OperationStateError("temporary operation state binding changed before replacement")
+        if not _temp_contents_match_fallback(
+            temp_path,
+            temp_metadata,
+            canonical,
+            effective_uid,
+        ):
+            raise OperationStateError("temporary operation state bytes changed before replacement")
+        if not _cas_matches_fallback(path, effective_uid, existing):
+            raise OperationStateError("operation state compare-and-swap check failed")
+        if pre_replace_validator is not None:
+            pre_replace_validator()
+        _revalidate_operation_dir_binding(
+            path.parent,
+            None,
+            operation_metadata,
+            effective_uid,
+        )
+        if not _temp_identity_matches_fallback(temp_path, temp_metadata):
+            raise OperationStateError("temporary operation state binding changed before replacement")
+        if not _temp_contents_match_fallback(
+            temp_path,
+            temp_metadata,
+            canonical,
+            effective_uid,
+        ):
+            raise OperationStateError("temporary operation state bytes changed before replacement")
         if not _cas_matches_fallback(path, effective_uid, existing):
             raise OperationStateError("operation state compare-and-swap check failed")
         os.replace(temp_path, path)
@@ -2352,6 +2661,1115 @@ def validate_operation_state_for_context(
             raise OperationStateError(f"reviewed_source.{field} does not match the operations context")
 
 
+def _validate_source_context(context: OperationsContext, source_dir: Path) -> None:
+    expected_paths = build_operation_paths(context.paths.operation_dir)
+    for field in (
+        "operation_dir",
+        "source_archive",
+        "source_dir",
+        "snapshot_dir",
+        "staged_dir",
+        "state_file",
+    ):
+        if str(getattr(context.paths, field)) != str(getattr(expected_paths, field)):
+            raise OperationStateError("operations context paths do not match the fixed operation paths")
+    if str(source_dir) != str(context.paths.source_dir):
+        raise OperationStateError("source directory does not match the operations context")
+    if context.operation_id != context.paths.operation_dir.name:
+        raise OperationStateError("operation_id does not match the operation directory")
+    if _GIT_COMMIT_RE.fullmatch(context.expected_commit) is None:
+        raise OperationStateError("expected Git commit is not a lowercase 40-hex object ID")
+    if _SHA256_RE.fullmatch(context.expected_archive_sha256) is None:
+        raise OperationStateError("expected archive SHA-256 is invalid")
+    if _SHA256_RE.fullmatch(context.expected_manifest_sha256) is None:
+        raise OperationStateError("expected manifest SHA-256 is invalid")
+
+
+def _validate_source_archive_metadata(metadata: os.stat_result, effective_uid: int) -> None:
+    if not stat.S_ISREG(metadata.st_mode):
+        raise OperationStateError("source archive is not a regular file")
+    if metadata.st_uid != effective_uid:
+        raise OperationStateError("source archive is not owned by the effective UID")
+    if metadata.st_nlink != 1:
+        raise OperationStateError("source archive must have a single link")
+    if os.name == "posix" and stat.S_IMODE(metadata.st_mode) & 0o022:
+        raise OperationStateError("source archive mode permits untrusted writes")
+    if metadata.st_size <= 0 or metadata.st_size > _MAX_SOURCE_ARCHIVE_BYTES:
+        raise OperationStateError("source archive size is invalid")
+
+
+def _source_binding_metadata(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_mode,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_nlink,
+    )
+
+
+@contextlib.contextmanager
+def _open_source_archive(
+    context: OperationsContext,
+    directory_fd: int | None,
+):
+    descriptor: int | None = None
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        if directory_fd is None:
+            named_before = context.paths.source_archive.lstat()
+            _validate_source_archive_metadata(named_before, context.effective_uid)
+            descriptor = os.open(context.paths.source_archive, flags)
+            opened = os.fstat(descriptor)
+            named_after = context.paths.source_archive.lstat()
+        else:
+            named_before = os.stat("source.tar", dir_fd=directory_fd, follow_symlinks=False)
+            _validate_source_archive_metadata(named_before, context.effective_uid)
+            descriptor = os.open("source.tar", flags, dir_fd=directory_fd)
+            opened = os.fstat(descriptor)
+            named_after = os.stat("source.tar", dir_fd=directory_fd, follow_symlinks=False)
+    except OSError as exc:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise OperationStateError("source archive open failed") from exc
+    try:
+        _validate_source_archive_metadata(opened, context.effective_uid)
+        if not _same_identity(named_before, opened) or not _same_identity(opened, named_after):
+            raise OperationStateError("source archive path changed while opening")
+        if _stable_file_metadata(named_before) != _stable_file_metadata(named_after):
+            raise OperationStateError("source archive path metadata changed while opening")
+        if _source_binding_metadata(opened) != _source_binding_metadata(named_after):
+            raise OperationStateError("source archive metadata changed while opening")
+        yield descriptor, opened
+    finally:
+        os.close(descriptor)
+
+
+def _revalidate_source_archive(
+    context: OperationsContext,
+    directory_fd: int | None,
+    descriptor: int,
+    initial: os.stat_result,
+) -> None:
+    try:
+        opened = os.fstat(descriptor)
+        if directory_fd is None:
+            named = context.paths.source_archive.lstat()
+        else:
+            named = os.stat("source.tar", dir_fd=directory_fd, follow_symlinks=False)
+    except OSError as exc:
+        raise OperationStateError("source archive revalidation failed") from exc
+    _validate_source_archive_metadata(opened, context.effective_uid)
+    _validate_source_archive_metadata(named, context.effective_uid)
+    if _stable_file_metadata(opened) != _stable_file_metadata(initial):
+        raise OperationStateError("source archive changed during verification")
+    if not _same_identity(opened, named):
+        raise OperationStateError("source archive path changed during verification")
+    if _source_binding_metadata(opened) != _source_binding_metadata(named):
+        raise OperationStateError("source archive metadata changed during verification")
+
+
+def _hash_source_archive(descriptor: int) -> str:
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        while True:
+            chunk = os.read(descriptor, 64 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > _MAX_SOURCE_ARCHIVE_BYTES:
+                raise OperationStateError("source archive exceeds the size limit")
+            digest.update(chunk)
+    except OSError as exc:
+        raise OperationStateError("source archive hash failed") from exc
+    return digest.hexdigest()
+
+
+def _default_command_runner(
+    argv: Sequence[str],
+    pass_fds: tuple[int, ...],
+) -> subprocess.CompletedProcess[str]:
+    if pass_fds and os.name != "posix":
+        raise OperationStateError("inherited file descriptors require POSIX")
+    return subprocess.run(
+        list(argv),
+        check=False,
+        shell=False,
+        text=True,
+        capture_output=True,
+        close_fds=True,
+        pass_fds=pass_fds,
+    )
+
+
+def _verify_git_archive_commit(context: OperationsContext, descriptor: int) -> None:
+    argv = (
+        sys.executable,
+        "-c",
+        _FD_STDIN_EXEC_SHIM,
+        str(descriptor),
+        _GIT_EXECUTABLE,
+        "git",
+        "get-tar-commit-id",
+    )
+    try:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        completed = context.command_runner(argv, (descriptor,))
+        os.lseek(descriptor, 0, os.SEEK_SET)
+    except OperationStateError:
+        raise
+    except Exception as exc:
+        raise OperationStateError("Git archive commit verification failed") from exc
+    if type(completed) is not subprocess.CompletedProcess:
+        raise OperationStateError("Git archive commit verifier returned an invalid result")
+    if type(completed.returncode) is not int or completed.returncode != 0:
+        raise OperationStateError("Git archive commit verification failed")
+    if type(completed.stdout) is not str:
+        raise OperationStateError("Git archive commit verifier returned invalid output")
+    if completed.stdout != context.expected_commit + "\n":
+        raise OperationStateError("Git archive commit does not match the expected commit")
+
+
+def _read_exact_descriptor(descriptor: int, size: int, label: str) -> bytes:
+    chunks: list[bytes] = []
+    remaining = size
+    while remaining:
+        try:
+            chunk = os.read(descriptor, min(remaining, 64 * 1024))
+        except OSError as exc:
+            raise OperationStateError(f"{label} read failed") from exc
+        if not chunk:
+            raise OperationStateError(f"{label} is truncated")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _tar_octal(field: bytes, label: str) -> int:
+    if len(field) < 2 or field[-1:] != b"\0":
+        raise OperationStateError(f"source archive {label} is not canonical octal")
+    digits = field[:-1]
+    if any(value < ord("0") or value > ord("7") for value in digits):
+        raise OperationStateError(f"source archive {label} is not canonical octal")
+    return int(digits, 8)
+
+
+def _tar_checksum(field: bytes) -> int:
+    if len(field) != 8 or field[-1:] != b"\0":
+        raise OperationStateError("source archive checksum is not canonical octal")
+    digits = field[:7]
+    if any(value < ord("0") or value > ord("7") for value in digits):
+        raise OperationStateError("source archive checksum is not canonical octal")
+    return int(digits, 8)
+
+
+def _tar_text_field(field: bytes, label: str) -> str:
+    head, separator, tail = field.partition(b"\0")
+    if separator and any(tail):
+        raise OperationStateError(f"source archive {label} has nonzero padding")
+    try:
+        value = head.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise OperationStateError(f"source archive {label} is not ASCII") from exc
+    return value
+
+
+def _canonical_pax_commit_record(commit: str) -> bytes:
+    body = f"comment={commit}\n".encode("ascii")
+    length = len(body) + 2
+    while True:
+        record = str(length).encode("ascii") + b" " + body
+        if len(record) == length:
+            return record
+        length = len(record)
+
+
+def _expected_git_archive_mode(name: str, member_type: bytes) -> int:
+    if member_type == tarfile.XGLTYPE:
+        return 0o666
+    normalized = name[:-1] if name.endswith("/") else name
+    if member_type == tarfile.DIRTYPE or normalized in _EXECUTABLE_SOURCE_ASSETS:
+        return 0o775
+    return 0o664
+
+
+def _validate_git_tar_header_metadata(
+    block: bytes,
+    name: str,
+    member_type: bytes,
+    expected_mtime: int | None,
+) -> int:
+    mode = _tar_octal(block[100:108], "member mode")
+    uid = _tar_octal(block[108:116], "member UID")
+    gid = _tar_octal(block[116:124], "member GID")
+    mtime = _tar_octal(block[136:148], "member mtime")
+    device_major = _tar_octal(block[329:337], "device major")
+    device_minor = _tar_octal(block[337:345], "device minor")
+    if mode != _expected_git_archive_mode(name, member_type):
+        raise OperationStateError("source archive mode metadata is not canonical Git tar")
+    if uid != 0 or gid != 0:
+        raise OperationStateError("source archive owner metadata is not canonical Git tar")
+    if block[265:297] != b"root".ljust(32, b"\0"):
+        raise OperationStateError("source archive user metadata is not canonical Git tar")
+    if block[297:329] != b"root".ljust(32, b"\0"):
+        raise OperationStateError("source archive group metadata is not canonical Git tar")
+    if device_major != 0 or device_minor != 0:
+        raise OperationStateError("source archive device metadata is not canonical Git tar")
+    if any(block[345:512]):
+        raise OperationStateError("source archive extension metadata is not canonical Git tar")
+    if expected_mtime is not None and mtime != expected_mtime:
+        raise OperationStateError("source archive mtime metadata is not commit-bound")
+    return mtime
+
+
+def _verify_raw_git_archive(
+    descriptor: int,
+    expected_commit: str,
+    expected_manifest_sha256: str,
+) -> tuple[dict[str, str], bytes]:
+    expected_raw_names = {
+        *(name + "/" for name in _SOURCE_DIRECTORIES),
+        *_SOURCE_FILES,
+    }
+    observed: set[str] = set()
+    asset_hashes: dict[str, str] = {}
+    manifest_bytes: bytes | None = None
+    global_header_seen = False
+    archive_mtime: int | None = None
+    material_end = 0
+    total = 0
+    zero_blocks = 0
+    try:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+    except OSError as exc:
+        raise OperationStateError("source archive seek failed") from exc
+    while True:
+        block = _read_exact_descriptor(descriptor, _TAR_BLOCK_BYTES, "source archive header")
+        total += len(block)
+        if not any(block):
+            zero_blocks += 1
+            if zero_blocks < 2:
+                continue
+            while True:
+                try:
+                    trailing = os.read(descriptor, 64 * 1024)
+                except OSError as exc:
+                    raise OperationStateError("source archive trailer read failed") from exc
+                if not trailing:
+                    break
+                total += len(trailing)
+                if total > _MAX_SOURCE_ARCHIVE_BYTES:
+                    raise OperationStateError("source archive exceeds the size limit")
+                if any(trailing):
+                    raise OperationStateError("source archive has a trailing or concatenated payload")
+            canonical_size = (
+                (material_end + 2 * _TAR_BLOCK_BYTES + _GIT_TAR_RECORD_BYTES - 1)
+                // _GIT_TAR_RECORD_BYTES
+            ) * _GIT_TAR_RECORD_BYTES
+            if total != canonical_size:
+                raise OperationStateError("source archive padding exceeds the canonical Git tar record")
+            break
+        if zero_blocks:
+            raise OperationStateError("source archive has only one end-of-archive block")
+        checksum = _tar_checksum(block[148:156])
+        checksum_block = bytearray(block)
+        checksum_block[148:156] = b"        "
+        if sum(checksum_block) != checksum:
+            raise OperationStateError("source archive header checksum is invalid")
+        if block[257:263] != b"ustar\0" or block[263:265] != b"00":
+            raise OperationStateError("source archive header format is not canonical Git tar")
+        name = _tar_text_field(block[0:100], "member name")
+        linkname = _tar_text_field(block[157:257], "link name")
+        member_type = block[156:157]
+        size = _tar_octal(block[124:136], "member size")
+        archive_mtime = _validate_git_tar_header_metadata(
+            block,
+            name,
+            member_type,
+            archive_mtime,
+        )
+        if size > _MAX_SOURCE_FILE_BYTES:
+            raise OperationStateError("source archive member exceeds the size limit")
+        padded_size = ((size + _TAR_BLOCK_BYTES - 1) // _TAR_BLOCK_BYTES) * _TAR_BLOCK_BYTES
+        payload = _read_exact_descriptor(descriptor, padded_size, "source archive member")
+        total += padded_size
+        if total > _MAX_SOURCE_ARCHIVE_BYTES:
+            raise OperationStateError("source archive exceeds the size limit")
+        if any(payload[size:]):
+            raise OperationStateError("source archive member padding is nonzero")
+        contents = payload[:size]
+        if not global_header_seen:
+            if member_type != tarfile.XGLTYPE or name != "pax_global_header" or linkname:
+                raise OperationStateError("source archive is missing the canonical Git commit header")
+            if contents != _canonical_pax_commit_record(expected_commit):
+                raise OperationStateError("source archive Git commit metadata is not canonical")
+            global_header_seen = True
+            material_end = total
+            continue
+        if member_type not in (tarfile.REGTYPE, tarfile.DIRTYPE):
+            raise OperationStateError("source archive contains a forbidden member type")
+        if linkname:
+            raise OperationStateError("source archive contains a link target")
+        if name in observed:
+            raise OperationStateError("source archive contains duplicate member names")
+        if name not in expected_raw_names:
+            raise OperationStateError("source archive contains an unexpected or unsafe member name")
+        if name.endswith("/"):
+            if member_type != tarfile.DIRTYPE or size != 0:
+                raise OperationStateError("source archive parent entry is not an exact directory")
+        elif member_type != tarfile.REGTYPE:
+            raise OperationStateError("source archive reviewed asset is not a regular file")
+        else:
+            digest = hashlib.sha256(contents).hexdigest()
+            if name == _SOURCE_MANIFEST:
+                manifest_bytes = contents
+                if digest != expected_manifest_sha256:
+                    raise OperationStateError(
+                        "source archive manifest does not match the approved SHA-256"
+                    )
+            else:
+                asset_hashes[name] = digest
+        observed.add(name)
+        material_end = total
+    if not global_header_seen or observed != expected_raw_names or manifest_bytes is None:
+        raise OperationStateError("source archive members do not match the reviewed source set")
+    manifest_hashes = _parse_source_manifest(manifest_bytes)
+    if asset_hashes != manifest_hashes:
+        raise OperationStateError("source archive asset hashes do not match the strict manifest")
+    return manifest_hashes, manifest_bytes
+
+
+def _safe_manifest_path(path: str) -> bool:
+    if not path or path.startswith("/") or "\\" in path or "\0" in path:
+        return False
+    components = path.split("/")
+    return all(component not in ("", ".", "..") for component in components)
+
+
+def _parse_source_manifest(raw: bytes) -> dict[str, str]:
+    if not raw or len(raw) > _MAX_SOURCE_MANIFEST_BYTES:
+        raise OperationStateError("source manifest size is invalid")
+    if not raw.endswith(b"\n") or b"\r" in raw or b"\0" in raw:
+        raise OperationStateError("source manifest must use exact LF records")
+    lines = raw[:-1].split(b"\n")
+    if not lines or any(not line for line in lines):
+        raise OperationStateError("source manifest contains a blank record")
+    records: dict[str, str] = {}
+    for line in lines:
+        if len(line) <= 66 or line[64:66] != b"  ":
+            raise OperationStateError("source manifest record grammar is invalid")
+        try:
+            digest = line[:64].decode("ascii")
+            path = line[66:].decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise OperationStateError("source manifest records must be ASCII") from exc
+        if _SHA256_RE.fullmatch(digest) is None:
+            raise OperationStateError("source manifest digest is invalid")
+        if not _safe_manifest_path(path):
+            raise OperationStateError("source manifest path is unsafe")
+        if path == _SOURCE_MANIFEST:
+            raise OperationStateError("source manifest cannot contain a self-entry")
+        if path in records:
+            raise OperationStateError("source manifest paths must be unique")
+        records[path] = digest
+    if frozenset(records) != _SOURCE_ASSETS:
+        raise OperationStateError("source manifest must contain the exact reviewed asset set")
+    return records
+
+
+def _validate_source_directory_metadata(
+    metadata: os.stat_result,
+    effective_uid: int,
+    label: str,
+) -> None:
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise OperationStateError(f"{label} is not a real directory")
+    if metadata.st_uid != effective_uid:
+        raise OperationStateError(f"{label} is not owned by the effective UID")
+    if os.name == "posix" and stat.S_IMODE(metadata.st_mode) & 0o7022:
+        raise OperationStateError(f"{label} mode is unsafe")
+
+
+def _validate_source_file_metadata(
+    metadata: os.stat_result,
+    effective_uid: int,
+    label: str,
+) -> None:
+    if not stat.S_ISREG(metadata.st_mode):
+        raise OperationStateError(f"{label} is not a regular file")
+    if metadata.st_uid != effective_uid:
+        raise OperationStateError(f"{label} is not owned by the effective UID")
+    if metadata.st_nlink != 1:
+        raise OperationStateError(f"{label} must have a single link")
+    if os.name == "posix" and stat.S_IMODE(metadata.st_mode) & 0o7022:
+        raise OperationStateError(f"{label} mode is unsafe")
+    if metadata.st_size < 0 or metadata.st_size > _MAX_SOURCE_FILE_BYTES:
+        raise OperationStateError(f"{label} size is invalid")
+
+
+def _hash_open_source_file(
+    descriptor: int,
+    initial: os.stat_result,
+    label: str,
+    *,
+    capture: bool,
+) -> tuple[str, bytes | None]:
+    digest = hashlib.sha256()
+    contents = bytearray() if capture else None
+    total = 0
+    try:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        while True:
+            chunk = os.read(descriptor, 64 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > _MAX_SOURCE_FILE_BYTES:
+                raise OperationStateError(f"{label} exceeds the size limit")
+            digest.update(chunk)
+            if contents is not None:
+                contents.extend(chunk)
+        final = os.fstat(descriptor)
+    except OSError as exc:
+        raise OperationStateError(f"{label} read failed") from exc
+    if total != initial.st_size or _stable_file_metadata(final) != _stable_file_metadata(initial):
+        raise OperationStateError(f"{label} changed while reading")
+    return digest.hexdigest(), bytes(contents) if contents is not None else None
+
+
+def _validate_source_basename(name: str) -> None:
+    if not name or name in (".", "..") or "/" in name or "\\" in name or "\0" in name:
+        raise OperationStateError("source tree contains an unsafe entry name")
+
+
+@dataclass
+class _SourceDirectoryProof:
+    relative: str
+    descriptor: int | None
+    parent_descriptor: int | None
+    name: str
+    path: Path | None
+    metadata: os.stat_result
+
+
+@dataclass
+class _SourceFileProof:
+    relative: str
+    descriptor: int
+    parent_descriptor: int | None
+    name: str
+    path: Path | None
+    metadata: os.stat_result
+    sha256: str
+    contents: bytes | None
+
+
+@dataclass
+class _SourceTreeProof:
+    context: OperationsContext
+    directories: list[_SourceDirectoryProof]
+    files: list[_SourceFileProof]
+    asset_hashes: dict[str, str]
+    manifest_bytes: bytes
+
+
+def _close_source_tree_proof(proof: _SourceTreeProof) -> None:
+    for item in reversed(proof.files):
+        try:
+            os.close(item.descriptor)
+        except OSError:
+            pass
+    for item in reversed(proof.directories):
+        if item.descriptor is not None:
+            try:
+                os.close(item.descriptor)
+            except OSError:
+                pass
+
+
+def _expected_source_children(relative_parent: str) -> frozenset[str]:
+    children: set[str] = set()
+    for path in _SOURCE_DIRECTORIES | _SOURCE_FILES:
+        parent, separator, name = path.rpartition("/")
+        if (parent if separator else "") == relative_parent:
+            children.add(name)
+    return frozenset(children)
+
+
+def _collect_source_directory(
+    proof: _SourceTreeProof,
+    directory_fd: int | None,
+    directory_path: Path | None,
+    relative_parent: str,
+) -> None:
+    expected_children = _expected_source_children(relative_parent)
+    scan_target: int | Path
+    scan_target = directory_fd if directory_fd is not None else directory_path  # type: ignore[assignment]
+    if scan_target is None:
+        raise OperationStateError("source directory proof is incomplete")
+    try:
+        iterator = os.scandir(scan_target)
+    except OSError as exc:
+        raise OperationStateError("source directory listing failed") from exc
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    file_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
+    seen: set[str] = set()
+    try:
+        with iterator:
+            for entry in iterator:
+                if len(seen) >= len(expected_children):
+                    raise OperationStateError("source directory entries exceed the fixed child bound")
+                name = entry.name
+                _validate_source_basename(name)
+                if name not in expected_children or name in seen:
+                    raise OperationStateError("source tree contains an extra or duplicate entry")
+                seen.add(name)
+                relative = f"{relative_parent}/{name}" if relative_parent else name
+                path = None if directory_path is None else directory_path / name
+                try:
+                    named = (
+                        os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                        if directory_fd is not None
+                        else path.lstat()  # type: ignore[union-attr]
+                    )
+                except OSError as exc:
+                    raise OperationStateError("source tree metadata read failed") from exc
+                if relative in _SOURCE_DIRECTORIES:
+                    _validate_source_directory_metadata(
+                        named,
+                        proof.context.effective_uid,
+                        f"source directory {relative}",
+                    )
+                    if directory_fd is None:
+                        proof.directories.append(
+                            _SourceDirectoryProof(relative, None, None, name, path, named)
+                        )
+                        _collect_source_directory(proof, None, path, relative)
+                    else:
+                        try:
+                            child_fd = os.open(name, directory_flags, dir_fd=directory_fd)
+                        except OSError as exc:
+                            raise OperationStateError("source directory open failed") from exc
+                        try:
+                            opened = os.fstat(child_fd)
+                            if not _same_identity(named, opened):
+                                raise OperationStateError("source directory changed while opening")
+                            _validate_source_directory_metadata(
+                                opened,
+                                proof.context.effective_uid,
+                                f"source directory {relative}",
+                            )
+                            proof.directories.append(
+                                _SourceDirectoryProof(
+                                    relative,
+                                    child_fd,
+                                    directory_fd,
+                                    name,
+                                    None,
+                                    opened,
+                                )
+                            )
+                        except BaseException:
+                            try:
+                                os.close(child_fd)
+                            except OSError:
+                                pass
+                            raise
+                        _collect_source_directory(proof, child_fd, None, relative)
+                    continue
+                _validate_source_file_metadata(
+                    named,
+                    proof.context.effective_uid,
+                    f"source file {relative}",
+                )
+                try:
+                    file_fd = (
+                        os.open(name, file_flags, dir_fd=directory_fd)
+                        if directory_fd is not None
+                        else os.open(path, file_flags)  # type: ignore[arg-type]
+                    )
+                except OSError as exc:
+                    raise OperationStateError("source file open failed") from exc
+                try:
+                    opened = os.fstat(file_fd)
+                    if not _same_identity(named, opened):
+                        raise OperationStateError("source file changed while opening")
+                    _validate_source_file_metadata(
+                        opened,
+                        proof.context.effective_uid,
+                        f"source file {relative}",
+                    )
+                    digest, contents = _hash_open_source_file(
+                        file_fd,
+                        opened,
+                        f"source file {relative}",
+                        capture=relative == _SOURCE_MANIFEST,
+                    )
+                except Exception:
+                    os.close(file_fd)
+                    raise
+                proof.files.append(
+                    _SourceFileProof(
+                        relative,
+                        file_fd,
+                        directory_fd,
+                        name,
+                        path,
+                        opened,
+                        digest,
+                        contents,
+                    )
+                )
+    except OSError as exc:
+        raise OperationStateError("source directory enumeration failed") from exc
+    if seen != set(expected_children):
+        raise OperationStateError("source directory is missing reviewed entries")
+
+
+def _named_source_proof_metadata(
+    parent_descriptor: int | None,
+    name: str,
+    path: Path | None,
+) -> os.stat_result:
+    try:
+        if parent_descriptor is not None:
+            return os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+        if path is None:
+            raise OperationStateError("source proof path binding is missing")
+        return path.lstat()
+    except OSError as exc:
+        raise OperationStateError("source proof path revalidation failed") from exc
+
+
+def _validate_source_directory_proof(
+    proof: _SourceTreeProof,
+    item: _SourceDirectoryProof,
+) -> None:
+    opened = os.fstat(item.descriptor) if item.descriptor is not None else item.path.lstat()  # type: ignore[union-attr]
+    named = _named_source_proof_metadata(
+        item.parent_descriptor,
+        item.name,
+        item.path,
+    )
+    _validate_source_directory_metadata(
+        opened,
+        proof.context.effective_uid,
+        f"source proof directory {item.relative or '.'}",
+    )
+    if _stable_file_metadata(opened) != _stable_file_metadata(item.metadata):
+        raise OperationStateError("source proof directory changed after verification")
+    if not _same_identity(opened, named):
+        raise OperationStateError("source proof directory path changed after verification")
+    if _source_binding_metadata(opened) != _source_binding_metadata(named):
+        raise OperationStateError("source proof directory metadata changed after verification")
+
+
+def _validate_source_file_proof(
+    proof: _SourceTreeProof,
+    item: _SourceFileProof,
+    *,
+    rehash: bool,
+) -> None:
+    opened = os.fstat(item.descriptor)
+    named = _named_source_proof_metadata(
+        item.parent_descriptor,
+        item.name,
+        item.path,
+    )
+    _validate_source_file_metadata(
+        opened,
+        proof.context.effective_uid,
+        f"source proof file {item.relative}",
+    )
+    if _stable_file_metadata(opened) != _stable_file_metadata(item.metadata):
+        raise OperationStateError("source proof file changed after verification")
+    if not _same_identity(opened, named):
+        raise OperationStateError("source proof file path changed after verification")
+    if _source_binding_metadata(opened) != _source_binding_metadata(named):
+        raise OperationStateError("source proof file metadata changed after verification")
+    if rehash:
+        digest, _ = _hash_open_source_file(
+            item.descriptor,
+            item.metadata,
+            f"source proof file {item.relative}",
+            capture=False,
+        )
+        if digest != item.sha256:
+            raise OperationStateError("source proof file hash changed after verification")
+
+
+def _revalidate_source_tree_proof(proof: _SourceTreeProof) -> None:
+    for item in proof.directories:
+        _validate_source_directory_proof(proof, item)
+    for item in proof.files:
+        _validate_source_file_proof(proof, item, rehash=True)
+    for item in proof.directories:
+        _validate_source_directory_proof(proof, item)
+    for item in proof.files:
+        _validate_source_file_proof(proof, item, rehash=False)
+
+
+def _verify_extracted_source_tree(
+    context: OperationsContext,
+    directory_fd: int | None,
+    archive_hashes: dict[str, str],
+    archive_manifest: bytes,
+) -> _SourceTreeProof:
+    proof = _SourceTreeProof(context, [], [], {}, b"")
+    try:
+        if directory_fd is None:
+            root_named = context.paths.source_dir.lstat()
+            _validate_source_directory_metadata(
+                root_named,
+                context.effective_uid,
+                "source directory",
+            )
+            proof.directories.append(
+                _SourceDirectoryProof(
+                    "",
+                    None,
+                    None,
+                    context.paths.source_dir.name,
+                    context.paths.source_dir,
+                    root_named,
+                )
+            )
+            _collect_source_directory(proof, None, context.paths.source_dir, "")
+        else:
+            directory_flags = (
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            root_named = os.stat("source", dir_fd=directory_fd, follow_symlinks=False)
+            source_fd = os.open("source", directory_flags, dir_fd=directory_fd)
+            try:
+                root_opened = os.fstat(source_fd)
+                if not _same_identity(root_named, root_opened):
+                    raise OperationStateError("source directory changed while opening")
+                _validate_source_directory_metadata(
+                    root_opened,
+                    context.effective_uid,
+                    "source directory",
+                )
+                proof.directories.append(
+                    _SourceDirectoryProof(
+                        "",
+                        source_fd,
+                        directory_fd,
+                        "source",
+                        None,
+                        root_opened,
+                    )
+                )
+            except BaseException:
+                try:
+                    os.close(source_fd)
+                except OSError:
+                    pass
+                raise
+            _collect_source_directory(proof, source_fd, None, "")
+        hashes = {item.relative: item.sha256 for item in proof.files}
+        manifest_items = [item for item in proof.files if item.relative == _SOURCE_MANIFEST]
+        if len(manifest_items) != 1 or manifest_items[0].contents is None:
+            raise OperationStateError("source tree manifest is missing or ambiguous")
+        extracted_manifest = manifest_items[0].contents
+        if hashlib.sha256(extracted_manifest).hexdigest() != context.expected_manifest_sha256:
+            raise OperationStateError("source tree manifest does not match the approved SHA-256")
+        if extracted_manifest != archive_manifest:
+            raise OperationStateError("source tree manifest differs from the reviewed archive manifest")
+        extracted_manifest_hashes = _parse_source_manifest(extracted_manifest)
+        extracted_asset_hashes = {
+            name: digest for name, digest in hashes.items() if name != _SOURCE_MANIFEST
+        }
+        if extracted_manifest_hashes != archive_hashes or extracted_asset_hashes != archive_hashes:
+            raise OperationStateError("source tree asset hashes do not match the reviewed manifest")
+        proof.asset_hashes = extracted_asset_hashes
+        proof.manifest_bytes = extracted_manifest
+        return proof
+    except Exception:
+        _close_source_tree_proof(proof)
+        raise
+
+
+def _load_existing_verified_source_state(
+    context: OperationsContext,
+    directory_fd: int | None,
+) -> dict[str, object] | None:
+    try:
+        if directory_fd is None:
+            context.paths.state_file.lstat()
+            raw = _read_state_file_fallback(context.paths.state_file, context.effective_uid)
+        else:
+            os.stat("operation-state.json", dir_fd=directory_fd, follow_symlinks=False)
+            raw = _read_state_file_posix(directory_fd, context.effective_uid)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise OperationStateError("operation state existence check failed") from exc
+    state = _decode_operation_state(raw)
+    validate_operation_state_for_context(state, context)
+    return state
+
+
+def _source_verification_evidence(reviewed_source: dict[str, object]) -> bytes:
+    canonical = json.dumps(
+        reviewed_source,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("ascii")
+    return b"degen-source-verification-v1\n" + canonical + b"\n"
+
+
+def _source_verified_state(
+    context: OperationsContext,
+    asset_hashes: dict[str, str],
+) -> dict[str, object]:
+    now = context.clock()
+    if type(now) is not datetime or now.tzinfo is None or now.utcoffset() != timedelta(0):
+        raise OperationStateError("operations clock must return an aware UTC datetime")
+    epoch = int(now.astimezone(timezone.utc).timestamp())
+    reviewed_source: dict[str, object] = {
+        "commit": context.expected_commit,
+        "archive_sha256": context.expected_archive_sha256,
+        "manifest_sha256": context.expected_manifest_sha256,
+        "asset_hashes": dict(asset_hashes),
+    }
+    evidence_sha256 = hashlib.sha256(_source_verification_evidence(reviewed_source)).hexdigest()
+    return {
+        "schema_version": 1,
+        "operation_id": context.operation_id,
+        "operation_dir": str(context.paths.operation_dir),
+        "phase": "source_verified",
+        "phase_history": [
+            {
+                "phase": "source_verified",
+                "epoch": epoch,
+                "evidence_sha256": evidence_sha256,
+            }
+        ],
+        "reviewed_source": reviewed_source,
+        "effective_config": None,
+        "host_stage": None,
+        "snapshot": None,
+        "prior_runtime": None,
+        "install": None,
+        "rclone_evidence_groups": [],
+        "probe": None,
+        "dry_run": None,
+        "policy": None,
+        "observation": None,
+        "active_transaction": None,
+        "failure": None,
+        "secondary_errors": [],
+        "recovery": None,
+    }
+
+
+def _revalidate_source_receipt_proof(
+    context: OperationsContext,
+    directory_fd: int | None,
+    operation_metadata: os.stat_result,
+    archive_fd: int,
+    archive_metadata: os.stat_result,
+    source_proof: _SourceTreeProof,
+) -> None:
+    _revalidate_operation_dir_binding(
+        context.paths.operation_dir,
+        directory_fd,
+        operation_metadata,
+        context.effective_uid,
+    )
+    _revalidate_source_archive(
+        context,
+        directory_fd,
+        archive_fd,
+        archive_metadata,
+    )
+    if _hash_source_archive(archive_fd) != context.expected_archive_sha256:
+        raise OperationStateError(
+            "source archive SHA-256 changed before operation state replacement"
+        )
+    _revalidate_source_archive(
+        context,
+        directory_fd,
+        archive_fd,
+        archive_metadata,
+    )
+    _revalidate_source_tree_proof(source_proof)
+    _revalidate_source_archive(
+        context,
+        directory_fd,
+        archive_fd,
+        archive_metadata,
+    )
+    if _hash_source_archive(archive_fd) != context.expected_archive_sha256:
+        raise OperationStateError(
+            "source archive SHA-256 changed before operation state replacement"
+        )
+    _revalidate_source_archive(
+        context,
+        directory_fd,
+        archive_fd,
+        archive_metadata,
+    )
+    _revalidate_operation_dir_binding(
+        context.paths.operation_dir,
+        directory_fd,
+        operation_metadata,
+        context.effective_uid,
+    )
+
+
+def verify_source_archive(
+    context: OperationsContext,
+    *,
+    source_dir: Path,
+) -> dict[str, str]:
+    _validate_source_context(context, source_dir)
+    source_proof: _SourceTreeProof | None = None
+    try:
+        with _open_validated_operation_dir(
+            context.paths.operation_dir,
+            context.effective_uid,
+        ) as directory_fd:
+            operation_metadata = (
+                context.paths.operation_dir.lstat()
+                if directory_fd is None
+                else os.fstat(directory_fd)
+            )
+            with _open_source_archive(context, directory_fd) as (archive_fd, archive_metadata):
+                archive_sha256 = _hash_source_archive(archive_fd)
+                _revalidate_source_archive(
+                    context,
+                    directory_fd,
+                    archive_fd,
+                    archive_metadata,
+                )
+                if archive_sha256 != context.expected_archive_sha256:
+                    raise OperationStateError(
+                        "source archive SHA-256 does not match the approved digest"
+                    )
+                _verify_git_archive_commit(context, archive_fd)
+                _revalidate_source_archive(
+                    context,
+                    directory_fd,
+                    archive_fd,
+                    archive_metadata,
+                )
+                archive_hashes, archive_manifest = _verify_raw_git_archive(
+                    archive_fd,
+                    context.expected_commit,
+                    context.expected_manifest_sha256,
+                )
+                _revalidate_source_archive(
+                    context,
+                    directory_fd,
+                    archive_fd,
+                    archive_metadata,
+                )
+                source_proof = _verify_extracted_source_tree(
+                    context,
+                    directory_fd,
+                    archive_hashes,
+                    archive_manifest,
+                )
+                _revalidate_source_archive(
+                    context,
+                    directory_fd,
+                    archive_fd,
+                    archive_metadata,
+                )
+                _revalidate_source_receipt_proof(
+                    context,
+                    directory_fd,
+                    operation_metadata,
+                    archive_fd,
+                    archive_metadata,
+                    source_proof,
+                )
+                existing = _load_existing_verified_source_state(context, directory_fd)
+                if existing is not None:
+                    reviewed = existing["reviewed_source"]
+                    history = existing["phase_history"]
+                    assert isinstance(reviewed, dict) and isinstance(history, list)
+                    expected_reviewed: dict[str, object] = {
+                        "commit": context.expected_commit,
+                        "archive_sha256": context.expected_archive_sha256,
+                        "manifest_sha256": context.expected_manifest_sha256,
+                        "asset_hashes": dict(source_proof.asset_hashes),
+                    }
+                    expected_evidence = hashlib.sha256(
+                        _source_verification_evidence(expected_reviewed)
+                    ).hexdigest()
+                    if (
+                        existing["phase"] != "source_verified"
+                        or reviewed != expected_reviewed
+                        or not history
+                        or history[0]["evidence_sha256"] != expected_evidence
+                    ):
+                        raise OperationStateError(
+                            "existing operation state evidence is not the identical source_verified receipt"
+                        )
+                    _revalidate_source_receipt_proof(
+                        context,
+                        directory_fd,
+                        operation_metadata,
+                        archive_fd,
+                        archive_metadata,
+                        source_proof,
+                    )
+                    return dict(source_proof.asset_hashes)
+                state = _source_verified_state(context, source_proof.asset_hashes)
+                validate_operation_state_for_context(state, context)
+
+                def revalidate_receipt_proof() -> None:
+                    _revalidate_source_receipt_proof(
+                        context,
+                        directory_fd,
+                        operation_metadata,
+                        archive_fd,
+                        archive_metadata,
+                        source_proof,
+                    )
+
+                revalidate_receipt_proof()
+                _atomic_write_operation_state_internal(
+                    context.paths.state_file,
+                    state,
+                    effective_uid=context.effective_uid,
+                    pre_replace_validator=revalidate_receipt_proof,
+                    operation_directory_binding=_OperationDirectoryBinding(
+                        context.paths.operation_dir,
+                        directory_fd,
+                        operation_metadata,
+                    ),
+                )
+                return dict(source_proof.asset_hashes)
+    finally:
+        if source_proof is not None:
+            _close_source_tree_proof(source_proof)
+
+
 def sanitize_error_text(value: object) -> str:
     try:
         text = str(value)
@@ -2408,11 +3826,38 @@ def _effective_uid() -> int:
     return int(getter())
 
 
+class _StoreOnce(argparse.Action):
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: object,
+        option_string: str | None = None,
+    ) -> None:
+        if getattr(namespace, self.dest, None) is not None:
+            parser.error(f"argument {option_string} may not be repeated")
+        setattr(namespace, self.dest, values)
+
+
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    show_state = subparsers.add_parser("show-state")
+    show_state = subparsers.add_parser("show-state", allow_abbrev=False)
     show_state.add_argument("--operation-dir", required=True)
+    verify_source = subparsers.add_parser("verify-source", allow_abbrev=False)
+    verify_source.add_argument("--operation-dir", required=True, action=_StoreOnce)
+    verify_source.add_argument("--archive", required=True, action=_StoreOnce)
+    verify_source.add_argument("--expected-commit", required=True, action=_StoreOnce)
+    verify_source.add_argument(
+        "--expected-archive-sha256",
+        required=True,
+        action=_StoreOnce,
+    )
+    verify_source.add_argument(
+        "--expected-manifest-sha256",
+        required=True,
+        action=_StoreOnce,
+    )
     return parser
 
 
@@ -2438,12 +3883,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         _require_posix_descriptor_primitives()
         operation_dir = _PRODUCTION_HOST_ROOT / args.operation_dir.lstrip("/")
-        state = load_operation_state(
-            operation_dir / "operation-state.json",
-            effective_uid=effective_uid,
-        )
-        validate_operation_state(state, operation_dir)
-        sys.stdout.write(_canonical_state_bytes(state).decode("utf-8"))
+        if args.command == "show-state":
+            state = load_operation_state(
+                operation_dir / "operation-state.json",
+                effective_uid=effective_uid,
+            )
+            validate_operation_state(state, operation_dir)
+            sys.stdout.write(_canonical_state_bytes(state).decode("utf-8"))
+        else:
+            if args.archive != f"{args.operation_dir}/source.tar":
+                raise OperationStateError("archive must equal the fixed operation source.tar path")
+            paths = build_operation_paths(operation_dir)
+            context = OperationsContext(
+                operation_id=operation_dir.name,
+                paths=paths,
+                effective_uid=effective_uid,
+                command_runner=_default_command_runner,
+                clock=lambda: datetime.now(timezone.utc),
+                expected_commit=args.expected_commit,
+                expected_archive_sha256=args.expected_archive_sha256,
+                expected_manifest_sha256=args.expected_manifest_sha256,
+                host_root=_PRODUCTION_HOST_ROOT,
+            )
+            verify_source_archive(context, source_dir=paths.source_dir)
     except Exception as exc:
         message = sanitize_error_text(exc)
         if _string_contains_secret(message):

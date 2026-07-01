@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import ast
 import copy
+import contextlib
 import dataclasses
+import hashlib
 import importlib.util
 import inspect
+import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,6 +45,8 @@ SOURCE_ASSETS = (
     "deploy/systemd/degen-prod-db-backup.timer",
     "deploy/systemd/degen-prod-db-backup.env.example",
 )
+SOURCE_MANIFEST = "deploy/linux/degen-prod-db-backup-assets.sha256"
+SOURCE_COMMIT = "1" * 40
 
 
 def load_ops_helper():
@@ -88,6 +95,223 @@ def private_operation_dir(tmp_path: Path) -> tuple[Path, int]:
     operation_dir.mkdir(mode=0o700)
     operation_dir.chmod(0o700)
     return operation_dir, operation_dir.stat().st_uid
+
+
+def source_asset_bytes() -> dict[str, bytes]:
+    return {
+        asset: f"reviewed fixture bytes for {asset}\n".encode("ascii")
+        for asset in SOURCE_ASSETS
+    }
+
+
+def source_manifest_bytes(asset_bytes: dict[str, bytes]) -> bytes:
+    return b"".join(
+        hashlib.sha256(asset_bytes[asset]).hexdigest().encode("ascii")
+        + b"  "
+        + asset.encode("ascii")
+        + b"\n"
+        for asset in sorted(asset_bytes)
+    )
+
+
+def required_source_directories() -> tuple[str, ...]:
+    directories: set[str] = set()
+    for name in (*SOURCE_ASSETS, SOURCE_MANIFEST):
+        parent = Path(name).parent
+        while str(parent) not in ("", "."):
+            directories.add(parent.as_posix())
+            parent = parent.parent
+    return tuple(sorted(directories, key=lambda value: (value.count("/"), value)))
+
+
+def valid_archive_entries(
+    asset_bytes: dict[str, bytes],
+    manifest_bytes: bytes,
+) -> list[dict[str, object]]:
+    entries: list[dict[str, object]] = [
+        {"name": name, "type": tarfile.DIRTYPE, "data": b"", "linkname": ""}
+        for name in required_source_directories()
+    ]
+    entries.extend(
+        {"name": name, "type": tarfile.REGTYPE, "data": data, "linkname": ""}
+        for name, data in sorted({**asset_bytes, SOURCE_MANIFEST: manifest_bytes}.items())
+    )
+    return entries
+
+
+def write_source_archive(
+    path: Path,
+    entries: list[dict[str, object]],
+    *,
+    pax_headers: dict[str, str] | None = None,
+) -> None:
+    headers = {"comment": SOURCE_COMMIT} if pax_headers is None else pax_headers
+    with tarfile.open(path, "w", format=tarfile.PAX_FORMAT, pax_headers=headers) as archive:
+        for entry in entries:
+            name = str(entry["name"])
+            member_type = entry["type"]
+            assert isinstance(member_type, bytes)
+            data = entry.get("data", b"")
+            assert isinstance(data, bytes)
+            info = tarfile.TarInfo(name)
+            info.type = member_type
+            info.mode = (
+                0o775
+                if member_type == tarfile.DIRTYPE
+                or name in SOURCE_ASSETS[:4]
+                else 0o664
+            )
+            info.uid = 0
+            info.gid = 0
+            info.uname = "root"
+            info.gname = "root"
+            info.mtime = 1_700_000_000
+            info.linkname = str(entry.get("linkname", ""))
+            if member_type == tarfile.REGTYPE:
+                info.size = len(data)
+                archive.addfile(info, io.BytesIO(data))
+            else:
+                info.size = 0
+                if member_type in (tarfile.CHRTYPE, tarfile.BLKTYPE):
+                    info.devmajor = 1
+                    info.devminor = 3
+                archive.addfile(info)
+    raw = bytearray(path.read_bytes())
+    assert raw[156:157] == tarfile.XGLTYPE
+    raw[0:100] = b"pax_global_header".ljust(100, b"\0")
+    raw[100:108] = b"0000666\0"
+    raw[108:116] = b"0000000\0"
+    raw[116:124] = b"0000000\0"
+    raw[136:148] = f"{1_700_000_000:011o}\0".encode("ascii")
+    raw[265:297] = b"root".ljust(32, b"\0")
+    raw[297:329] = b"root".ljust(32, b"\0")
+    raw[329:337] = b"0000000\0"
+    raw[337:345] = b"0000000\0"
+    offset = 0
+    while offset < len(raw):
+        header = raw[offset : offset + 512]
+        if not any(header):
+            break
+        size_field = header[124:136].rstrip(b"\0 ").lstrip(b" ") or b"0"
+        size = int(size_field, 8)
+        raw[offset + 329 : offset + 337] = b"0000000\0"
+        raw[offset + 337 : offset + 345] = b"0000000\0"
+        raw[offset + 148 : offset + 156] = b"        "
+        checksum = sum(raw[offset : offset + 512])
+        raw[offset + 148 : offset + 156] = f"{checksum:07o}\0".encode("ascii")
+        offset += 512 + ((size + 511) // 512) * 512
+    path.write_bytes(raw)
+    path.chmod(0o600)
+
+
+def mutate_source_tar_header(
+    path: Path,
+    member_name: str,
+    start: int,
+    replacement: bytes,
+) -> None:
+    raw = bytearray(path.read_bytes())
+    offset = 0
+    while offset < len(raw):
+        header = raw[offset : offset + 512]
+        if not any(header):
+            break
+        name = header[:100].split(b"\0", 1)[0].decode("ascii")
+        size_field = header[124:136].rstrip(b"\0 ").lstrip(b" ") or b"0"
+        size = int(size_field, 8)
+        if name == member_name:
+            raw[offset + start : offset + start + len(replacement)] = replacement
+            raw[offset + 148 : offset + 156] = b"        "
+            checksum = sum(raw[offset : offset + 512])
+            raw[offset + 148 : offset + 156] = f"{checksum:07o}\0".encode("ascii")
+            path.write_bytes(raw)
+            path.chmod(0o600)
+            return
+        offset += 512 + ((size + 511) // 512) * 512
+    raise AssertionError(f"missing tar member {member_name}")
+
+
+def write_extracted_source(
+    source_dir: Path,
+    asset_bytes: dict[str, bytes],
+    manifest_bytes: bytes,
+) -> None:
+    source_dir.mkdir(mode=0o700)
+    source_dir.chmod(0o700)
+    for directory in required_source_directories():
+        path = source_dir / directory
+        path.mkdir(exist_ok=True)
+        if os.name == "posix":
+            path.chmod(0o755)
+    for name, data in {**asset_bytes, SOURCE_MANIFEST: manifest_bytes}.items():
+        path = source_dir / name
+        path.write_bytes(data)
+        if os.name == "posix":
+            path.chmod(0o644)
+
+
+def source_verification_fixture(
+    module: object,
+    tmp_path: Path,
+    *,
+    manifest_bytes: bytes | None = None,
+    mutate_entries: object | None = None,
+    archive_suffix: bytes = b"",
+    pax_headers: dict[str, str] | None = None,
+    mutate_archive: object | None = None,
+) -> tuple[object, dict[str, bytes], bytes, list[tuple[tuple[str, ...], tuple[int, ...]]]]:
+    operation_dir, uid = private_operation_dir(tmp_path)
+    paths = module.build_operation_paths(operation_dir)
+    assets = source_asset_bytes()
+    manifest = source_manifest_bytes(assets) if manifest_bytes is None else manifest_bytes
+    write_extracted_source(paths.source_dir, assets, manifest)
+    entries = valid_archive_entries(assets, manifest)
+    if mutate_entries is not None:
+        mutate_entries(entries)
+    write_source_archive(paths.source_archive, entries, pax_headers=pax_headers)
+    if archive_suffix:
+        with paths.source_archive.open("ab") as stream:
+            stream.write(archive_suffix)
+    if mutate_archive is not None:
+        mutate_archive(paths.source_archive)
+    archive_bytes = paths.source_archive.read_bytes()
+    calls: list[tuple[tuple[str, ...], tuple[int, ...]]] = []
+
+    def command_runner(
+        argv: object,
+        pass_fds: tuple[int, ...],
+    ) -> subprocess.CompletedProcess[str]:
+        argv_tuple = tuple(str(value) for value in argv)
+        calls.append((argv_tuple, pass_fds))
+        assert len(pass_fds) == 1
+        assert "get-tar-commit-id" in argv_tuple
+        assert str(paths.source_archive) not in argv_tuple
+        assert SOURCE_COMMIT not in argv_tuple
+        assert hashlib.sha256(archive_bytes).hexdigest() not in argv_tuple
+        position = os.lseek(pass_fds[0], 0, os.SEEK_CUR)
+        os.lseek(pass_fds[0], 0, os.SEEK_SET)
+        observed = bytearray()
+        while True:
+            chunk = os.read(pass_fds[0], 64 * 1024)
+            if not chunk:
+                break
+            observed.extend(chunk)
+        os.lseek(pass_fds[0], position, os.SEEK_SET)
+        assert bytes(observed) == archive_bytes
+        return subprocess.CompletedProcess(argv_tuple, 0, SOURCE_COMMIT + "\n", "")
+
+    context = module.OperationsContext(
+        operation_id=operation_dir.name,
+        paths=paths,
+        effective_uid=uid,
+        command_runner=command_runner,
+        clock=lambda: datetime(2026, 7, 1, 12, 34, 56, tzinfo=timezone.utc),
+        expected_commit=SOURCE_COMMIT,
+        expected_archive_sha256=hashlib.sha256(archive_bytes).hexdigest(),
+        expected_manifest_sha256=hashlib.sha256(manifest).hexdigest(),
+        host_root=tmp_path,
+    )
+    return context, assets, manifest, calls
 
 
 def write_state_file(operation_dir: Path, state: dict[str, object]) -> Path:
@@ -570,12 +794,13 @@ def test_public_interface_names_exist() -> None:
         "build_operation_paths",
         "validate_operation_state",
         "validate_operation_state_for_context",
+        "verify_source_archive",
         "sanitize_error_text",
     ):
         assert callable(getattr(module, name))
 
 
-def test_cli_exposes_only_show_state_subcommand() -> None:
+def test_cli_exposes_exact_show_state_and_verify_source_subcommands() -> None:
     help_result = subprocess.run(
         [sys.executable, str(OPS_HELPER), "--help"],
         text=True,
@@ -583,7 +808,7 @@ def test_cli_exposes_only_show_state_subcommand() -> None:
         check=False,
     )
     unknown_result = subprocess.run(
-        [sys.executable, str(OPS_HELPER), "verify-source", "--operation-dir", "/tmp/nope"],
+        [sys.executable, str(OPS_HELPER), "unknown-command", "--operation-dir", "/tmp/nope"],
         text=True,
         capture_output=True,
         check=False,
@@ -591,9 +816,1307 @@ def test_cli_exposes_only_show_state_subcommand() -> None:
 
     assert help_result.returncode == 0
     assert "show-state" in help_result.stdout
-    assert "verify-source" not in help_result.stdout
+    assert "verify-source" in help_result.stdout
     assert unknown_result.returncode == 2
     assert unknown_result.stdout == ""
+
+
+def test_verify_source_cli_has_exact_required_approval_shape_and_no_override() -> None:
+    help_result = subprocess.run(
+        [sys.executable, str(OPS_HELPER), "verify-source", "--help"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert help_result.returncode == 0
+    for option in (
+        "--operation-dir",
+        "--archive",
+        "--expected-commit",
+        "--expected-archive-sha256",
+        "--expected-manifest-sha256",
+    ):
+        assert option in help_result.stdout
+    assert "host-root" not in help_result.stdout
+    assert "test" not in help_result.stdout.lower()
+
+
+def test_verify_source_cli_rejects_duplicate_approval_flags() -> None:
+    module = load_ops_helper()
+    operation_dir = "/opt/degen/backups/config/20260701T123456Z"
+
+    with pytest.raises(SystemExit) as raised:
+        module._build_parser().parse_args(
+            [
+                "verify-source",
+                "--operation-dir",
+                operation_dir,
+                "--archive",
+                operation_dir + "/source.tar",
+                "--expected-commit",
+                SOURCE_COMMIT,
+                "--expected-commit",
+                "2" * 40,
+                "--expected-archive-sha256",
+                HASH_A,
+                "--expected-manifest-sha256",
+                HASH_B,
+            ]
+        )
+
+    assert raised.value.code == 2
+
+
+def test_verify_source_cli_binds_all_approvals_to_one_context(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = load_ops_helper()
+    operation_dir = "/opt/degen/backups/config/20260701T123456Z"
+    archive = operation_dir + "/source.tar"
+    observed: list[tuple[object, Path]] = []
+    monkeypatch.setattr(module, "_effective_uid", lambda: 0)
+    monkeypatch.setattr(module, "_require_posix_descriptor_primitives", lambda: None)
+    monkeypatch.setattr(
+        module,
+        "verify_source_archive",
+        lambda context, *, source_dir: observed.append((context, source_dir)) or {},
+    )
+
+    result = module.main(
+        [
+            "verify-source",
+            "--operation-dir",
+            operation_dir,
+            "--archive",
+            archive,
+            "--expected-commit",
+            SOURCE_COMMIT,
+            "--expected-archive-sha256",
+            HASH_A,
+            "--expected-manifest-sha256",
+            HASH_B,
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert captured.out == ""
+    assert captured.err == ""
+    assert len(observed) == 1
+    context, source_dir = observed[0]
+    assert context.paths == module.build_operation_paths(Path(operation_dir))
+    assert context.expected_commit == SOURCE_COMMIT
+    assert context.expected_archive_sha256 == HASH_A
+    assert context.expected_manifest_sha256 == HASH_B
+    assert context.host_root == Path("/")
+    assert source_dir == context.paths.source_dir
+
+
+def test_verify_source_cli_rejects_archive_path_rebinding_before_verification(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = load_ops_helper()
+    operation_dir = "/opt/degen/backups/config/20260701T123456Z"
+    called = False
+    monkeypatch.setattr(module, "_effective_uid", lambda: 0)
+    monkeypatch.setattr(module, "_require_posix_descriptor_primitives", lambda: None)
+
+    def verify(*args: object, **kwargs: object) -> dict[str, str]:
+        nonlocal called
+        called = True
+        return {}
+
+    monkeypatch.setattr(module, "verify_source_archive", verify)
+
+    result = module.main(
+        [
+            "verify-source",
+            "--operation-dir",
+            operation_dir,
+            "--archive",
+            operation_dir + "/other.tar",
+            "--expected-commit",
+            SOURCE_COMMIT,
+            "--expected-archive-sha256",
+            HASH_A,
+            "--expected-manifest-sha256",
+            HASH_B,
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert not called
+    assert captured.out == ""
+    assert "archive" in captured.err.lower()
+
+
+def test_archive_digest_failure_happens_before_git_or_extracted_tree_access(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, _, _, calls = source_verification_fixture(module, tmp_path)
+    shutil.rmtree(context.paths.source_dir)
+    context = dataclasses.replace(context, expected_archive_sha256="0" * 64)
+
+    with pytest.raises(module.OperationStateError, match="archive.*SHA-256|archive.*digest"):
+        module.verify_source_archive(context, source_dir=context.paths.source_dir)
+
+    assert calls == []
+    assert not context.paths.state_file.exists()
+
+
+def test_source_directory_argument_cannot_rebind_the_context_destination(tmp_path: Path) -> None:
+    module = load_ops_helper()
+    context, _, _, calls = source_verification_fixture(module, tmp_path)
+
+    with pytest.raises(module.OperationStateError, match="source.*directory|source_dir"):
+        module.verify_source_archive(context, source_dir=tmp_path / "other-source")
+
+    assert calls == []
+    assert not context.paths.state_file.exists()
+
+
+def test_source_verification_binds_commit_archive_and_approved_manifest_to_state(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, assets, _, calls = source_verification_fixture(module, tmp_path)
+    expected_hashes = {
+        name: hashlib.sha256(contents).hexdigest() for name, contents in assets.items()
+    }
+
+    result = module.verify_source_archive(context, source_dir=context.paths.source_dir)
+
+    assert result == expected_hashes
+    assert len(calls) == 1
+    state = module.load_operation_state(context.paths.state_file, effective_uid=context.effective_uid)
+    reviewed_source = state["reviewed_source"]
+    assert reviewed_source == {
+        "commit": context.expected_commit,
+        "archive_sha256": context.expected_archive_sha256,
+        "manifest_sha256": context.expected_manifest_sha256,
+        "asset_hashes": expected_hashes,
+    }
+    evidence = (
+        b"degen-source-verification-v1\n"
+        + json.dumps(
+            reviewed_source,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("ascii")
+        + b"\n"
+    )
+    assert state["phase_history"] == [
+        {
+            "phase": "source_verified",
+            "epoch": 1_782_909_296,
+            "evidence_sha256": hashlib.sha256(evidence).hexdigest(),
+        }
+    ]
+    module.validate_operation_state_for_context(state, context)
+
+
+def test_source_verification_repeat_revalidates_then_returns_without_clock_or_rewrite(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, assets, _, calls = source_verification_fixture(module, tmp_path)
+    expected = {
+        name: hashlib.sha256(contents).hexdigest() for name, contents in assets.items()
+    }
+    module.verify_source_archive(context, source_dir=context.paths.source_dir)
+    before = context.paths.state_file.read_bytes()
+
+    def clock_must_not_run() -> datetime:
+        raise AssertionError("repeat source verification must preserve the existing receipt epoch")
+
+    repeated_context = dataclasses.replace(context, clock=clock_must_not_run)
+    result = module.verify_source_archive(
+        repeated_context,
+        source_dir=repeated_context.paths.source_dir,
+    )
+
+    assert result == expected
+    assert len(calls) == 2
+    assert repeated_context.paths.state_file.read_bytes() == before
+
+
+def test_source_verification_repeat_rejects_forged_evidence_without_rewrite(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, _, _, _ = source_verification_fixture(module, tmp_path)
+    module.verify_source_archive(context, source_dir=context.paths.source_dir)
+    state = module.load_operation_state(context.paths.state_file, effective_uid=context.effective_uid)
+    history = state["phase_history"]
+    assert isinstance(history, list) and isinstance(history[0], dict)
+    assert history[0]["evidence_sha256"] != HASH_A
+    history[0]["evidence_sha256"] = HASH_A
+    write_state_file(context.paths.operation_dir, state)
+    before = context.paths.state_file.read_bytes()
+
+    with pytest.raises(module.OperationStateError, match="evidence"):
+        module.verify_source_archive(context, source_dir=context.paths.source_dir)
+
+    assert context.paths.state_file.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [
+        ("expected_commit", "2" * 40),
+        ("expected_archive_sha256", "0" * 64),
+        ("expected_manifest_sha256", "f" * 64),
+    ],
+)
+def test_source_verification_rejects_any_context_approval_mismatch_without_state(
+    tmp_path: Path,
+    field: str,
+    bad_value: str,
+) -> None:
+    module = load_ops_helper()
+    context, _, _, _ = source_verification_fixture(module, tmp_path)
+    context = dataclasses.replace(context, **{field: bad_value})
+
+    with pytest.raises(module.OperationStateError):
+        module.verify_source_archive(context, source_dir=context.paths.source_dir)
+
+    assert not context.paths.state_file.exists()
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "duplicate",
+        "extra",
+        "missing",
+        "traversal",
+        "absolute",
+        "backslash",
+    ],
+)
+def test_archive_rejects_duplicate_extra_missing_and_unsafe_member_names_without_state(
+    tmp_path: Path,
+    case: str,
+) -> None:
+    module = load_ops_helper()
+
+    def mutate(entries: list[dict[str, object]]) -> None:
+        if case == "duplicate":
+            duplicate = next(entry for entry in entries if entry["name"] == SOURCE_ASSETS[0])
+            entries.append(copy.deepcopy(duplicate))
+        elif case == "extra":
+            entries.append(
+                {"name": "deploy/linux/extra.py", "type": tarfile.REGTYPE, "data": b"x", "linkname": ""}
+            )
+        elif case == "missing":
+            entries[:] = [entry for entry in entries if entry["name"] != SOURCE_ASSETS[0]]
+        else:
+            unsafe = {
+                "traversal": "../escape",
+                "absolute": "/etc/shadow",
+                "backslash": r"deploy\linux\escape.py",
+            }[case]
+            entries.append(
+                {"name": unsafe, "type": tarfile.REGTYPE, "data": b"x", "linkname": ""}
+            )
+
+    context, _, _, _ = source_verification_fixture(module, tmp_path, mutate_entries=mutate)
+
+    with pytest.raises(module.OperationStateError, match="archive"):
+        module.verify_source_archive(context, source_dir=context.paths.source_dir)
+
+    assert not context.paths.state_file.exists()
+
+
+@pytest.mark.parametrize(
+    ("label", "member_type"),
+    [
+        ("symlink", tarfile.SYMTYPE),
+        ("hard-link", tarfile.LNKTYPE),
+        ("sparse", tarfile.GNUTYPE_SPARSE),
+        ("character-device", tarfile.CHRTYPE),
+        ("block-device", tarfile.BLKTYPE),
+        ("fifo", tarfile.FIFOTYPE),
+        ("unknown", b"Z"),
+    ],
+)
+def test_archive_rejects_every_nonregular_reviewed_asset_type_without_state(
+    tmp_path: Path,
+    label: str,
+    member_type: bytes,
+) -> None:
+    module = load_ops_helper()
+
+    def mutate(entries: list[dict[str, object]]) -> None:
+        target = next(entry for entry in entries if entry["name"] == SOURCE_ASSETS[0])
+        target["type"] = member_type
+        target["data"] = b""
+        if member_type in (tarfile.SYMTYPE, tarfile.LNKTYPE):
+            target["linkname"] = SOURCE_ASSETS[1]
+
+    context, _, _, _ = source_verification_fixture(module, tmp_path, mutate_entries=mutate)
+
+    with pytest.raises(module.OperationStateError, match="archive"):
+        module.verify_source_archive(context, source_dir=context.paths.source_dir)
+
+    assert label
+    assert not context.paths.state_file.exists()
+
+
+@pytest.mark.parametrize("case", ["missing", "regular", "link"])
+def test_archive_accepts_required_parent_entries_only_as_exact_real_directories(
+    tmp_path: Path,
+    case: str,
+) -> None:
+    module = load_ops_helper()
+
+    def mutate(entries: list[dict[str, object]]) -> None:
+        if case == "missing":
+            entries[:] = [entry for entry in entries if entry["name"] != "deploy/linux"]
+            return
+        target = next(entry for entry in entries if entry["name"] == "deploy/linux")
+        target["type"] = tarfile.REGTYPE if case == "regular" else tarfile.SYMTYPE
+        target["linkname"] = "deploy/systemd" if case == "link" else ""
+
+    context, _, _, _ = source_verification_fixture(module, tmp_path, mutate_entries=mutate)
+
+    with pytest.raises(module.OperationStateError, match="archive"):
+        module.verify_source_archive(context, source_dir=context.paths.source_dir)
+
+    assert not context.paths.state_file.exists()
+
+
+def test_archive_rejects_asset_bytes_that_do_not_match_the_strict_manifest(tmp_path: Path) -> None:
+    module = load_ops_helper()
+
+    def mutate(entries: list[dict[str, object]]) -> None:
+        target = next(entry for entry in entries if entry["name"] == SOURCE_ASSETS[0])
+        target["data"] = b"unreviewed bytes\n"
+
+    context, _, _, _ = source_verification_fixture(module, tmp_path, mutate_entries=mutate)
+
+    with pytest.raises(module.OperationStateError, match="archive.*hash|manifest"):
+        module.verify_source_archive(context, source_dir=context.paths.source_dir)
+
+    assert not context.paths.state_file.exists()
+
+
+def test_archive_rejects_trailing_or_concatenated_payload_without_state(tmp_path: Path) -> None:
+    module = load_ops_helper()
+    context, _, _, _ = source_verification_fixture(
+        module,
+        tmp_path,
+        archive_suffix=b"nonzero concatenated archive payload",
+    )
+
+    with pytest.raises(module.OperationStateError, match="archive"):
+        module.verify_source_archive(context, source_dir=context.paths.source_dir)
+
+    assert not context.paths.state_file.exists()
+
+
+@pytest.mark.parametrize("suffix_size", [512, 10_240])
+def test_archive_rejects_extra_zero_padding_beyond_canonical_git_record(
+    tmp_path: Path,
+    suffix_size: int,
+) -> None:
+    module = load_ops_helper()
+    context, _, _, _ = source_verification_fixture(
+        module,
+        tmp_path,
+        archive_suffix=b"\0" * suffix_size,
+    )
+
+    with pytest.raises(module.OperationStateError, match="archive.*padding|archive.*record"):
+        module.verify_source_archive(context, source_dir=context.paths.source_dir)
+
+    assert not context.paths.state_file.exists()
+
+
+@pytest.mark.parametrize(
+    ("label", "start", "replacement"),
+    [
+        ("mode", 100, b"0000755\0"),
+        ("uid value", 108, b"0000001\0"),
+        ("uid grammar", 108, b" 000000\0"),
+        ("gid", 116, b"0000001\0"),
+        ("mtime binding", 136, b"00000000001\0"),
+        ("user", 265, b"admin".ljust(32, b"\0")),
+        ("group", 297, b"admin".ljust(32, b"\0")),
+        ("device major", 329, b"0000001\0"),
+        ("device minor", 337, b"0000001\0"),
+    ],
+)
+def test_archive_rejects_rechecksummed_noncanonical_git_header_metadata(
+    tmp_path: Path,
+    label: str,
+    start: int,
+    replacement: bytes,
+) -> None:
+    module = load_ops_helper()
+
+    def mutate(path: Path) -> None:
+        mutate_source_tar_header(path, SOURCE_ASSETS[0], start, replacement)
+
+    context, _, _, _ = source_verification_fixture(
+        module,
+        tmp_path,
+        mutate_archive=mutate,
+    )
+
+    with pytest.raises(module.OperationStateError, match="archive.*metadata|archive.*canonical"):
+        module.verify_source_archive(context, source_dir=context.paths.source_dir)
+
+    assert label
+    assert not context.paths.state_file.exists()
+
+
+@pytest.mark.parametrize(
+    "pax_headers",
+    [
+        {"comment": "2" * 40},
+        {"comment": SOURCE_COMMIT, "unexpected": "metadata"},
+    ],
+)
+def test_archive_rejects_noncanonical_global_pax_metadata_without_state(
+    tmp_path: Path,
+    pax_headers: dict[str, str],
+) -> None:
+    module = load_ops_helper()
+    context, _, _, _ = source_verification_fixture(module, tmp_path, pax_headers=pax_headers)
+
+    with pytest.raises(module.OperationStateError, match="archive|commit"):
+        module.verify_source_archive(context, source_dir=context.paths.source_dir)
+
+    assert not context.paths.state_file.exists()
+
+
+def _invalid_source_manifests() -> list[tuple[str, bytes]]:
+    assets = source_asset_bytes()
+    valid = source_manifest_bytes(assets)
+    first, remainder = valid.split(b"\n", 1)
+    digest, path = first.split(b"  ", 1)
+    return [
+        ("uppercase digest", digest.upper() + b"  " + path + b"\n" + remainder),
+        ("one space", digest + b" " + path + b"\n" + remainder),
+        ("three spaces", digest + b"   " + path + b"\n" + remainder),
+        ("CRLF", valid.replace(b"\n", b"\r\n")),
+        ("duplicate", first + b"\n" + first + b"\n" + remainder),
+        ("traversal", digest + b"  ../escape\n" + remainder),
+        ("absolute", digest + b"  /etc/shadow\n" + remainder),
+        ("backslash", digest + b"  deploy\\linux\\file\n" + remainder),
+        ("self entry", digest + b"  " + SOURCE_MANIFEST.encode("ascii") + b"\n" + remainder),
+        ("blank record", b"\n" + valid),
+        ("missing final LF", valid[:-1]),
+    ]
+
+
+@pytest.mark.parametrize(("label", "manifest_bytes"), _invalid_source_manifests())
+def test_manifest_parser_rejects_noncanonical_or_unsafe_records_without_state(
+    tmp_path: Path,
+    label: str,
+    manifest_bytes: bytes,
+) -> None:
+    module = load_ops_helper()
+    context, _, _, _ = source_verification_fixture(
+        module,
+        tmp_path,
+        manifest_bytes=manifest_bytes,
+    )
+
+    with pytest.raises(module.OperationStateError, match="manifest"):
+        module.verify_source_archive(context, source_dir=context.paths.source_dir)
+
+    assert label
+    assert not context.paths.state_file.exists()
+
+
+@pytest.mark.parametrize("case", ["extra_file", "extra_directory", "missing", "changed"])
+def test_source_tree_must_contain_exact_reviewed_regular_file_bytes_without_state(
+    tmp_path: Path,
+    case: str,
+) -> None:
+    module = load_ops_helper()
+    context, _, _, _ = source_verification_fixture(module, tmp_path)
+    source_dir = context.paths.source_dir
+    if case == "extra_file":
+        (source_dir / "extra").write_bytes(b"extra")
+    elif case == "extra_directory":
+        (source_dir / "extra-dir").mkdir()
+    elif case == "missing":
+        (source_dir / SOURCE_ASSETS[0]).unlink()
+    else:
+        (source_dir / SOURCE_ASSETS[0]).write_bytes(b"changed bytes\n")
+
+    with pytest.raises(module.OperationStateError, match="source"):
+        module.verify_source_archive(context, source_dir=source_dir)
+
+    assert not context.paths.state_file.exists()
+
+
+def test_source_tree_rejects_symlinked_reviewed_file_without_state(tmp_path: Path) -> None:
+    module = load_ops_helper()
+    context, _, _, _ = source_verification_fixture(module, tmp_path)
+    target = context.paths.source_dir / SOURCE_ASSETS[0]
+    target.unlink()
+    try:
+        target.symlink_to(context.paths.source_dir / SOURCE_ASSETS[1])
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+
+    with pytest.raises(module.OperationStateError, match="source.*link|source.*regular"):
+        module.verify_source_archive(context, source_dir=context.paths.source_dir)
+
+    assert not context.paths.state_file.exists()
+
+
+def test_source_tree_rejects_hard_linked_reviewed_files_without_state(tmp_path: Path) -> None:
+    module = load_ops_helper()
+    context, _, _, _ = source_verification_fixture(module, tmp_path)
+    first = context.paths.source_dir / SOURCE_ASSETS[0]
+    second = context.paths.source_dir / SOURCE_ASSETS[1]
+    first.unlink()
+    os.link(second, first)
+
+    with pytest.raises(module.OperationStateError, match="source.*link"):
+        module.verify_source_archive(context, source_dir=context.paths.source_dir)
+
+    assert not context.paths.state_file.exists()
+
+
+def test_source_tree_rejects_unapproved_manifest_bytes_without_state(tmp_path: Path) -> None:
+    module = load_ops_helper()
+    context, _, _, _ = source_verification_fixture(module, tmp_path)
+    manifest_path = context.paths.source_dir / SOURCE_MANIFEST
+    manifest_path.write_bytes(manifest_path.read_bytes() + b"\n")
+
+    with pytest.raises(module.OperationStateError, match="manifest|source"):
+        module.verify_source_archive(context, source_dir=context.paths.source_dir)
+
+    assert not context.paths.state_file.exists()
+
+
+def test_source_tree_final_proof_rejects_earlier_file_mutation_after_initial_hash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, _, _, _ = source_verification_fixture(module, tmp_path)
+    reviewed_paths = {
+        Path(name).name: context.paths.source_dir / name
+        for name in (*SOURCE_ASSETS, SOURCE_MANIFEST)
+    }
+    original_open = module.os.open
+    first_reviewed_path: Path | None = None
+    mutated = False
+
+    def racing_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        nonlocal first_reviewed_path, mutated
+        name = Path(os.fspath(path)).name
+        reviewed_path = reviewed_paths.get(name)
+        if reviewed_path is not None and first_reviewed_path is None:
+            first_reviewed_path = reviewed_path
+        elif reviewed_path is not None and not mutated and reviewed_path != first_reviewed_path:
+            assert first_reviewed_path is not None
+            changed = bytearray(first_reviewed_path.read_bytes())
+            changed[0] = ord("0") if changed[0] != ord("0") else ord("1")
+            first_reviewed_path.write_bytes(changed)
+            mutated = True
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "open", racing_open)
+
+    with pytest.raises(module.OperationStateError, match="source.*changed|source.*proof"):
+        module.verify_source_archive(context, source_dir=context.paths.source_dir)
+
+    assert mutated
+    assert not context.paths.state_file.exists()
+
+
+def test_source_verification_revalidates_held_proof_at_atomic_before_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, _, _, _ = source_verification_fixture(module, tmp_path)
+    manifest_path = context.paths.source_dir / SOURCE_MANIFEST
+    original = manifest_path.read_bytes()
+    mutated = False
+
+    def race(event: str, **details: object) -> None:
+        nonlocal mutated
+        if event == "before_replace":
+            changed = bytearray(original)
+            changed[0] = ord("0") if changed[0] != ord("0") else ord("1")
+            manifest_path.write_bytes(changed)
+            mutated = True
+
+    monkeypatch.setattr(module, "_atomic_event_hook", race)
+
+    with pytest.raises(module.OperationStateError, match="source proof.*changed"):
+        module.verify_source_archive(context, source_dir=context.paths.source_dir)
+
+    assert mutated
+    assert not context.paths.state_file.exists()
+    assert not any(
+        path.name.startswith(".operation-state.json.")
+        for path in context.paths.operation_dir.iterdir()
+    )
+
+
+def test_source_state_private_pre_replace_validator_failure_preserves_absence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    operation_dir, uid = private_operation_dir(tmp_path)
+    state = source_verified_state(operation_dir)
+    state_file = operation_dir / "operation-state.json"
+    events: list[str] = []
+    monkeypatch.setattr(
+        module,
+        "_atomic_event_hook",
+        lambda event, **details: events.append(event),
+    )
+
+    def reject() -> None:
+        events.append("pre_replace_validator")
+        assert not state_file.exists()
+        raise module.OperationStateError("trusted pre-replace validation failed")
+
+    with pytest.raises(module.OperationStateError, match="pre-replace validation"):
+        module._atomic_write_operation_state_internal(
+            state_file,
+            state,
+            effective_uid=uid,
+            pre_replace_validator=reject,
+        )
+
+    assert events[-2:] == ["before_replace", "pre_replace_validator"]
+    assert "after_replace" not in events
+    assert not state_file.exists()
+    assert list(operation_dir.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("function_name", "temp_binding_name", "temp_contents_name", "cas_name"),
+    [
+        (
+            "_atomic_write_posix",
+            "_temp_identity_matches_posix",
+            "_temp_contents_match_posix",
+            "_cas_matches_posix",
+        ),
+        (
+            "_atomic_write_fallback",
+            "_temp_identity_matches_fallback",
+            "_temp_contents_match_fallback",
+            "_cas_matches_fallback",
+        ),
+    ],
+)
+def test_source_state_pre_replace_validator_is_followed_by_fresh_binding_and_cas_checks(
+    function_name: str,
+    temp_binding_name: str,
+    temp_contents_name: str,
+    cas_name: str,
+) -> None:
+    module = load_ops_helper()
+    source = inspect.getsource(getattr(module, function_name))
+    validator_index = source.index("pre_replace_validator()")
+    replace_index = source.index("os.replace", validator_index)
+    final_window = source[validator_index:replace_index]
+
+    assert source.index(cas_name) < validator_index
+    assert temp_binding_name in final_window
+    assert temp_contents_name in final_window
+    assert cas_name in final_window
+    assert "_revalidate_operation_dir_binding" in final_window
+    assert (
+        final_window.index("_revalidate_operation_dir_binding")
+        < final_window.index(temp_binding_name)
+        < final_window.index(temp_contents_name)
+        < final_window.index(cas_name)
+    )
+
+
+def test_source_state_callback_destination_creation_rechecks_cas_before_replace(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    operation_dir, uid = private_operation_dir(tmp_path)
+    state_file = operation_dir / "operation-state.json"
+    desired = source_verified_state(operation_dir)
+    attacker = copy.deepcopy(desired)
+    attacker["reviewed_source"]["commit"] = "2" * 40
+    attacker_raw = canonical_state_bytes(attacker)
+
+    def create_destination() -> None:
+        state_file.write_bytes(attacker_raw)
+        state_file.chmod(0o600)
+
+    with pytest.raises(module.OperationStateError, match="compare-and-swap"):
+        module._atomic_write_operation_state_internal(
+            state_file,
+            desired,
+            effective_uid=uid,
+            pre_replace_validator=create_destination,
+        )
+
+    assert state_file.read_bytes() == attacker_raw
+    assert not any(
+        path.name.startswith(".operation-state.json.")
+        for path in operation_dir.iterdir()
+    )
+
+
+def test_source_state_callback_destination_replacement_rechecks_cas_before_replace(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    operation_dir, uid = private_operation_dir(tmp_path)
+    old = source_verified_state(operation_dir)
+    state_file = write_state_file(operation_dir, old)
+    desired = state_at_phase(operation_dir, "staging_prepared")
+    attacker_raw = canonical_state_bytes(old)
+    attacker_inode: int | None = None
+
+    def replace_destination() -> None:
+        nonlocal attacker_inode
+        attacker = operation_dir / "attacker-state.json"
+        attacker.write_bytes(attacker_raw)
+        attacker.chmod(0o600)
+        os.replace(attacker, state_file)
+        attacker_inode = state_file.stat().st_ino
+
+    with pytest.raises(module.OperationStateError, match="compare-and-swap"):
+        module._atomic_write_operation_state_internal(
+            state_file,
+            desired,
+            effective_uid=uid,
+            pre_replace_validator=replace_destination,
+        )
+
+    assert attacker_inode is not None
+    assert state_file.stat().st_ino == attacker_inode
+    assert state_file.read_bytes() == attacker_raw
+    assert not any(
+        path.name.startswith(".operation-state.json.")
+        for path in operation_dir.iterdir()
+    )
+
+
+def test_source_state_callback_temp_name_swap_rechecks_binding_before_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    operation_dir, uid = private_operation_dir(tmp_path)
+    state_file = operation_dir / "operation-state.json"
+    desired = source_verified_state(operation_dir)
+    attacker_raw = b'{"attacker":true}\n'
+    temp_path: Path | None = None
+
+    def capture_temp(event: str, **details: object) -> None:
+        nonlocal temp_path
+        if event == "before_replace":
+            temp_path = Path(str(details["temp_path"]))
+
+    def swap_temp_name() -> None:
+        assert temp_path is not None
+        temp_path.unlink()
+        temp_path.write_bytes(attacker_raw)
+        temp_path.chmod(0o600)
+
+    monkeypatch.setattr(module, "_atomic_event_hook", capture_temp)
+
+    with pytest.raises(module.OperationStateError):
+        module._atomic_write_operation_state_internal(
+            state_file,
+            desired,
+            effective_uid=uid,
+            pre_replace_validator=swap_temp_name,
+        )
+
+    assert not state_file.exists()
+    assert temp_path is not None
+    assert temp_path.read_bytes() == attacker_raw
+
+
+def test_source_state_callback_same_inode_temp_overwrite_rechecks_canonical_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    operation_dir, uid = private_operation_dir(tmp_path)
+    state_file = operation_dir / "operation-state.json"
+    desired = source_verified_state(operation_dir)
+    attacker = copy.deepcopy(desired)
+    attacker["reviewed_source"]["commit"] = "2" * 40
+    attacker_raw = canonical_state_bytes(attacker)
+    assert len(attacker_raw) == len(canonical_state_bytes(desired))
+    temp_path: Path | None = None
+
+    def capture_temp(event: str, **details: object) -> None:
+        nonlocal temp_path
+        if event == "before_replace":
+            temp_path = Path(str(details["temp_path"]))
+
+    def overwrite_temp_contents() -> None:
+        assert temp_path is not None
+        original = temp_path.stat()
+        temp_path.write_bytes(attacker_raw)
+        temp_path.chmod(0o600)
+        os.utime(
+            temp_path,
+            ns=(original.st_atime_ns, original.st_mtime_ns),
+        )
+
+    monkeypatch.setattr(module, "_atomic_event_hook", capture_temp)
+
+    with pytest.raises(module.OperationStateError, match="temporary.*bytes|temporary.*binding"):
+        module._atomic_write_operation_state_internal(
+            state_file,
+            desired,
+            effective_uid=uid,
+            pre_replace_validator=overwrite_temp_contents,
+        )
+
+    assert not state_file.exists()
+    assert not any(
+        path.name.startswith(".operation-state.json.")
+        for path in operation_dir.iterdir()
+    )
+
+
+@pytest.mark.parametrize("race", ["mutate", "replace", "unlink_recreate"])
+def test_source_verification_revalidates_archive_at_atomic_before_replace(
+    race: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, _, _, _ = source_verification_fixture(module, tmp_path)
+    archive = context.paths.source_archive
+    original = archive.read_bytes()
+    raced = False
+
+    def race_archive(event: str, **details: object) -> None:
+        nonlocal raced
+        if event != "before_replace":
+            return
+        raced = True
+        try:
+            if race == "mutate":
+                changed = bytearray(original)
+                changed[-1] = 1
+                archive.write_bytes(changed)
+                archive.chmod(0o600)
+            elif race == "replace":
+                replacement = archive.with_name("replacement-source.tar")
+                replacement.write_bytes(original)
+                replacement.chmod(0o600)
+                os.replace(replacement, archive)
+            else:
+                archive.unlink()
+                archive.write_bytes(original)
+                archive.chmod(0o600)
+        except PermissionError as exc:
+            raise module.OperationStateError(
+                "source archive race was blocked while the proof descriptor was held"
+            ) from exc
+
+    monkeypatch.setattr(module, "_atomic_event_hook", race_archive)
+
+    with pytest.raises(module.OperationStateError, match="source archive"):
+        module.verify_source_archive(context, source_dir=context.paths.source_dir)
+
+    assert raced
+    assert not context.paths.state_file.exists()
+    assert not any(
+        path.name.startswith(".operation-state.json.")
+        for path in context.paths.operation_dir.iterdir()
+    )
+
+
+def test_source_verification_private_writer_reuses_held_operation_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, _, _, _ = source_verification_fixture(module, tmp_path)
+    original = module._open_validated_operation_dir
+    opens = 0
+
+    @contextlib.contextmanager
+    def count_opens(path: Path, effective_uid: int):
+        nonlocal opens
+        opens += 1
+        with original(path, effective_uid) as directory_fd:
+            yield directory_fd
+
+    monkeypatch.setattr(module, "_open_validated_operation_dir", count_opens)
+
+    module.verify_source_archive(context, source_dir=context.paths.source_dir)
+
+    assert opens == 1
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX directory descriptors")
+def test_source_verification_held_operation_directory_rejects_path_inode_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, _, _, _ = source_verification_fixture(module, tmp_path)
+    operation_dir = context.paths.operation_dir
+    detached = tmp_path / "detached-operation"
+    raced = False
+
+    def replace_operation_directory(event: str, **details: object) -> None:
+        nonlocal raced
+        if event == "before_replace":
+            raced = True
+            operation_dir.rename(detached)
+            operation_dir.mkdir(mode=0o700)
+            operation_dir.chmod(0o700)
+
+    monkeypatch.setattr(module, "_atomic_event_hook", replace_operation_directory)
+
+    with pytest.raises(module.OperationStateError, match="operation directory.*binding"):
+        module.verify_source_archive(context, source_dir=context.paths.source_dir)
+
+    assert raced
+    assert not (detached / "operation-state.json").exists()
+    assert not (operation_dir / "operation-state.json").exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX directory descriptors")
+def test_source_verification_rejects_operation_directory_rebind_before_private_writer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, _, _, _ = source_verification_fixture(module, tmp_path)
+    operation_dir = context.paths.operation_dir
+    detached = tmp_path / "detached-before-writer"
+    original_writer = module._atomic_write_operation_state_internal
+    raced = False
+
+    def rebind_then_write(*args: object, **kwargs: object) -> None:
+        nonlocal raced
+        raced = True
+        operation_dir.rename(detached)
+        operation_dir.mkdir(mode=0o700)
+        operation_dir.chmod(0o700)
+        original_writer(*args, **kwargs)
+
+    monkeypatch.setattr(module, "_atomic_write_operation_state_internal", rebind_then_write)
+
+    with pytest.raises(module.OperationStateError, match="operation directory.*binding"):
+        module.verify_source_archive(context, source_dir=context.paths.source_dir)
+
+    assert raced
+    assert not (detached / "operation-state.json").exists()
+    assert not (operation_dir / "operation-state.json").exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX directory descriptors")
+def test_private_writer_does_not_close_borrowed_operation_directory_descriptor(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    operation_dir, uid = private_operation_dir(tmp_path)
+    state_file = operation_dir / "operation-state.json"
+    state = source_verified_state(operation_dir)
+
+    with module._open_validated_operation_dir(operation_dir, uid) as directory_fd:
+        assert directory_fd is not None
+        metadata = os.fstat(directory_fd)
+        module._atomic_write_operation_state_internal(
+            state_file,
+            state,
+            effective_uid=uid,
+            pre_replace_validator=None,
+            operation_directory_binding=module._OperationDirectoryBinding(
+                operation_dir,
+                directory_fd,
+                metadata,
+            ),
+        )
+        assert module._same_identity(os.fstat(directory_fd), metadata)
+
+    assert state_file.read_bytes() == canonical_state_bytes(state)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires observable POSIX descriptors")
+@pytest.mark.parametrize("target", ["source", "deploy"])
+def test_source_directory_descriptor_closes_when_initial_fstat_fails(
+    target: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, _, _, _ = source_verification_fixture(module, tmp_path)
+    real_open = module.os.open
+    real_fstat = module.os.fstat
+    target_fd: int | None = None
+
+    def tracking_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        nonlocal target_fd
+        descriptor = real_open(path, flags, *args, **kwargs)
+        if os.fspath(path) == target and target_fd is None:
+            target_fd = descriptor
+        return descriptor
+
+    def failing_fstat(descriptor: int) -> os.stat_result:
+        if target_fd is not None and descriptor == target_fd:
+            raise OSError("injected source-directory fstat failure")
+        return real_fstat(descriptor)
+
+    monkeypatch.setattr(module.os, "open", tracking_open)
+    monkeypatch.setattr(module.os, "fstat", failing_fstat)
+    monkeypatch.setattr(module, "_descriptor_primitives_available", lambda: True)
+
+    with pytest.raises(
+        module.OperationStateError,
+        match="operation directory descriptor validation|source directory enumeration",
+    ):
+        module.verify_source_archive(context, source_dir=context.paths.source_dir)
+
+    assert target_fd is not None
+    with pytest.raises(OSError):
+        real_fstat(target_fd)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires observable POSIX descriptors")
+@pytest.mark.parametrize(
+    ("target", "label", "failure_call"),
+    [("source", "source directory", 1), ("deploy", "source directory deploy", 2)],
+)
+def test_source_directory_descriptor_closes_when_metadata_validation_fails(
+    target: str,
+    label: str,
+    failure_call: int,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, _, _, _ = source_verification_fixture(module, tmp_path)
+    real_open = module.os.open
+    real_fstat = module.os.fstat
+    real_validate = module._validate_source_directory_metadata
+    target_fd: int | None = None
+    label_calls = 0
+
+    def tracking_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        nonlocal target_fd
+        descriptor = real_open(path, flags, *args, **kwargs)
+        if os.fspath(path) == target and target_fd is None:
+            target_fd = descriptor
+        return descriptor
+
+    def failing_validation(metadata: os.stat_result, effective_uid: int, observed: str) -> None:
+        nonlocal label_calls
+        if observed == label:
+            label_calls += 1
+            if label_calls == failure_call:
+                assert target_fd is not None
+                raise module.OperationStateError(
+                    "injected source-directory metadata validation failure"
+                )
+        real_validate(metadata, effective_uid, observed)
+
+    monkeypatch.setattr(module.os, "open", tracking_open)
+    monkeypatch.setattr(module, "_validate_source_directory_metadata", failing_validation)
+    monkeypatch.setattr(module, "_descriptor_primitives_available", lambda: True)
+
+    with pytest.raises(
+        module.OperationStateError,
+        match="injected source-directory metadata validation failure",
+    ):
+        module.verify_source_archive(context, source_dir=context.paths.source_dir)
+
+    assert target_fd is not None
+    with pytest.raises(OSError):
+        real_fstat(target_fd)
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not Path("/usr/bin/git").is_file(),
+    reason="requires POSIX and fixed /usr/bin/git",
+)
+def test_source_verification_real_git_archive_uses_default_inherited_fd_transport(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    repository = tmp_path / "reviewed-repository"
+    repository.mkdir()
+    assets = source_asset_bytes()
+    manifest = source_manifest_bytes(assets)
+    for name, contents in {**assets, SOURCE_MANIFEST: manifest}.items():
+        path = repository / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(contents)
+
+    git = "/usr/bin/git"
+    subprocess.run([git, "init", "--quiet"], cwd=repository, check=True)
+    subprocess.run([git, "config", "user.name", "Degen Test"], cwd=repository, check=True)
+    subprocess.run(
+        [git, "config", "user.email", "degen-test@example.invalid"],
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run([git, "config", "core.autocrlf", "false"], cwd=repository, check=True)
+    subprocess.run([git, "config", "tar.umask", "0002"], cwd=repository, check=True)
+    subprocess.run([git, "add", "--", *SOURCE_ASSETS, SOURCE_MANIFEST], cwd=repository, check=True)
+    subprocess.run(
+        [git, "update-index", "--chmod=+x", "--", *SOURCE_ASSETS[:4]],
+        cwd=repository,
+        check=True,
+    )
+    commit_environment = {
+        **os.environ,
+        "GIT_AUTHOR_DATE": "2026-07-01T12:00:00+00:00",
+        "GIT_COMMITTER_DATE": "2026-07-01T12:00:00+00:00",
+    }
+    subprocess.run(
+        [git, "commit", "--quiet", "-m", "reviewed backup assets"],
+        cwd=repository,
+        env=commit_environment,
+        check=True,
+    )
+    commit = subprocess.run(
+        [git, "rev-parse", "HEAD"],
+        cwd=repository,
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
+
+    operation_dir, uid = private_operation_dir(tmp_path)
+    paths = module.build_operation_paths(operation_dir)
+    write_extracted_source(paths.source_dir, assets, manifest)
+    subprocess.run(
+        [
+            git,
+            "-c",
+            "core.autocrlf=false",
+            "-c",
+            "tar.umask=0002",
+            "archive",
+            "--format=tar",
+            f"--output={paths.source_archive}",
+            commit,
+            "--",
+            *SOURCE_ASSETS,
+            SOURCE_MANIFEST,
+        ],
+        cwd=repository,
+        check=True,
+    )
+    paths.source_archive.chmod(0o600)
+    archive_sha256 = hashlib.sha256(paths.source_archive.read_bytes()).hexdigest()
+    context = module.OperationsContext(
+        operation_id=operation_dir.name,
+        paths=paths,
+        effective_uid=uid,
+        command_runner=module._default_command_runner,
+        clock=lambda: datetime(2026, 7, 1, 12, 34, 56, tzinfo=timezone.utc),
+        expected_commit=commit,
+        expected_archive_sha256=archive_sha256,
+        expected_manifest_sha256=hashlib.sha256(manifest).hexdigest(),
+        host_root=tmp_path,
+    )
+
+    observed = module.verify_source_archive(context, source_dir=paths.source_dir)
+
+    assert observed == {name: hashlib.sha256(contents).hexdigest() for name, contents in assets.items()}
+    assert paths.state_file.exists()
+
+
+def test_source_tree_enumeration_stops_at_the_fixed_child_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, _, _, _ = source_verification_fixture(module, tmp_path)
+    real_scandir = module.os.scandir
+    with real_scandir(context.paths.source_dir) as iterator:
+        deploy_entry = next(iterator)
+    requests = 0
+    injected = False
+
+    class ExtraEntry:
+        name = "unreviewed-extra"
+
+    class BombingEntries:
+        def __init__(self) -> None:
+            self._entries = iter((deploy_entry, ExtraEntry()))
+
+        def __iter__(self) -> object:
+            return self
+
+        def __next__(self) -> object:
+            nonlocal requests
+            requests += 1
+            if requests > 2:
+                raise AssertionError("source enumeration consumed beyond the fixed root child bound")
+            return next(self._entries)
+
+        def __enter__(self) -> object:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    def bounded_scandir(path: object) -> object:
+        nonlocal injected
+        is_source_root = (
+            isinstance(path, int) and not injected
+        ) or (
+            not isinstance(path, int)
+            and os.fspath(path) == os.fspath(context.paths.source_dir)
+        )
+        if is_source_root:
+            injected = True
+            return BombingEntries()
+        return real_scandir(path)
+
+    monkeypatch.setattr(module.os, "scandir", bounded_scandir)
+
+    with pytest.raises(module.OperationStateError, match="source.*entries|source.*extra"):
+        module.verify_source_archive(context, source_dir=context.paths.source_dir)
+
+    assert requests == 2
+    assert not context.paths.state_file.exists()
+
+
+def test_source_verifier_never_uses_general_tar_extraction_apis() -> None:
+    source = OPS_HELPER.read_text(encoding="utf-8")
+
+    for forbidden in (".extractfile(", ".extract(", ".extractall("):
+        assert forbidden not in source
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mode semantics are required")
+def test_source_tree_rejects_group_writable_reviewed_file_without_state(tmp_path: Path) -> None:
+    module = load_ops_helper()
+    context, _, _, _ = source_verification_fixture(module, tmp_path)
+    target = context.paths.source_dir / SOURCE_ASSETS[0]
+    target.chmod(0o664)
+
+    with pytest.raises(module.OperationStateError, match="source.*mode"):
+        module.verify_source_archive(context, source_dir=context.paths.source_dir)
+
+    assert not context.paths.state_file.exists()
 
 
 def test_cli_rejects_non_root_without_path_access(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
