@@ -24,6 +24,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 OPS_HELPER = ROOT / "deploy" / "linux" / "degen-prod-db-backup-ops.py"
+ENV_HELPER = ROOT / "deploy" / "linux" / "degen-prod-db-backup-env.py"
+ENV_EXAMPLE = ROOT / "deploy" / "systemd" / "degen-prod-db-backup.env.example"
 HASH_A = "a" * 64
 HASH_B = "b" * 64
 HASH_C = "c" * 64
@@ -47,6 +49,22 @@ SOURCE_ASSETS = (
 )
 SOURCE_MANIFEST = "deploy/linux/degen-prod-db-backup-assets.sha256"
 SOURCE_COMMIT = "1" * 40
+EFFECTIVE_CONFIG = {
+    "APP_ENV_FILE": "/opt/degen/web.env",
+    "BACKUP_DIR": "/opt/degen/backups/db",
+    "LOG_DIR": "/var/log/degen",
+    "RCLONE_CONFIG": "/etc/degen/rclone.conf",
+    "RCLONE_REMOTE_PATH": "onedrive:backups/degen-db",
+    "KEEP_LOCAL_COUNT": "2",
+    "KEEP_REMOTE_DAILY": "7",
+    "KEEP_REMOTE_WEEKLY": "4",
+    "KEEP_REMOTE_MONTHLY": "3",
+    "REMOTE_PRUNE_ENABLED": "0",
+    "MIN_FREE_AFTER_BYTES": "10737418240",
+    "RETENTION_PLANNER": "/usr/local/sbin/degen-prod-db-retention",
+    "LOCK_FILE": "/run/degen-prod-db-backup/backup.lock",
+    "BACKUP_PREFIX": "degen_green_",
+}
 
 
 def load_ops_helper():
@@ -254,6 +272,7 @@ def source_verification_fixture(
     module: object,
     tmp_path: Path,
     *,
+    asset_bytes: dict[str, bytes] | None = None,
     manifest_bytes: bytes | None = None,
     mutate_entries: object | None = None,
     archive_suffix: bytes = b"",
@@ -262,7 +281,7 @@ def source_verification_fixture(
 ) -> tuple[object, dict[str, bytes], bytes, list[tuple[tuple[str, ...], tuple[int, ...]]]]:
     operation_dir, uid = private_operation_dir(tmp_path)
     paths = module.build_operation_paths(operation_dir)
-    assets = source_asset_bytes()
+    assets = source_asset_bytes() if asset_bytes is None else dict(asset_bytes)
     manifest = source_manifest_bytes(assets) if manifest_bytes is None else manifest_bytes
     write_extracted_source(paths.source_dir, assets, manifest)
     entries = valid_archive_entries(assets, manifest)
@@ -331,7 +350,7 @@ def append_phase(state: dict[str, object], phase: str, epoch: int) -> None:
 def observed_state(operation_dir: Path) -> dict[str, object]:
     state = source_verified_state(operation_dir)
     append_phase(state, "staging_prepared", 1_750_000_010)
-    state["effective_config"] = {"BACKUP_DIR": "/opt/degen/backups/db"}
+    state["effective_config"] = dict(EFFECTIVE_CONFIG)
     state["host_stage"] = {
         "manifest_sha256": HASH_A,
         "asset_hashes": {asset: HASH_A for asset in SOURCE_ASSETS},
@@ -800,7 +819,7 @@ def test_public_interface_names_exist() -> None:
         assert callable(getattr(module, name))
 
 
-def test_cli_exposes_exact_show_state_and_verify_source_subcommands() -> None:
+def test_cli_exposes_exact_show_state_verify_source_and_prepare_staging_subcommands() -> None:
     help_result = subprocess.run(
         [sys.executable, str(OPS_HELPER), "--help"],
         text=True,
@@ -817,6 +836,7 @@ def test_cli_exposes_exact_show_state_and_verify_source_subcommands() -> None:
     assert help_result.returncode == 0
     assert "show-state" in help_result.stdout
     assert "verify-source" in help_result.stdout
+    assert "prepare-staging" in help_result.stdout
     assert unknown_result.returncode == 2
     assert unknown_result.stdout == ""
 
@@ -4087,7 +4107,7 @@ def test_atomic_writer_rejects_oversized_state_before_any_temp_or_replacement(
     state_file = write_state_file(operation_dir, old)
     old_bytes = state_file.read_bytes()
     oversized = state_at_phase(operation_dir, "staging_prepared")
-    oversized["effective_config"]["SAFE_PADDING"] = "x" * (module._MAX_STATE_BYTES + 1)
+    oversized["effective_config"]["LOG_DIR"] = "x" * (module._MAX_STATE_BYTES + 1)
     events: list[str] = []
     monkeypatch.setattr(module, "_atomic_event_hook", lambda event, **kwargs: events.append(event))
 
@@ -4296,3 +4316,1177 @@ def test_install_completion_preserves_original_started_epoch(tmp_path: Path) -> 
 
     with pytest.raises(module.OperationStateError, match="install.*start|started_epoch|immutable"):
         module.validate_operation_state(current, operation_dir, previous)
+
+
+def staging_source_asset_bytes() -> dict[str, bytes]:
+    assets = source_asset_bytes()
+    assets["deploy/linux/degen-prod-db-backup-env.py"] = ENV_HELPER.read_bytes()
+    assets["deploy/systemd/degen-prod-db-backup.env.example"] = ENV_EXAMPLE.read_bytes()
+    return assets
+
+
+def host_root_path(host_root: Path, absolute_path: str) -> Path:
+    assert absolute_path.startswith("/")
+    return host_root.joinpath(*absolute_path.split("/")[1:])
+
+
+def write_private_host_file(path: Path, contents: bytes, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(contents)
+    path.chmod(mode)
+
+
+def host_staging_fixture(
+    module: object,
+    tmp_path: Path,
+    *,
+    include_pair: bool = True,
+    pair_prefix: str = "degen_green_",
+    configured_prefix: str | None = None,
+    database_name: str = "degen",
+    hostname: str = "green",
+    database_url: str = "postgresql+psycopg://degen:DB_URL_SENTINEL@db.internal/degen?sslmode=require",
+) -> tuple[object, dict[str, object]]:
+    context, assets, _manifest, _source_calls = source_verification_fixture(
+        module,
+        tmp_path,
+        asset_bytes=staging_source_asset_bytes(),
+    )
+    module.verify_source_archive(context, source_dir=context.paths.source_dir)
+
+    managed = ENV_EXAMPLE.read_bytes() + b"UNMANAGED_SAFE=keep-me\n"
+    if configured_prefix is not None:
+        managed += f"BACKUP_PREFIX={configured_prefix}\n".encode("ascii")
+    managed_path = host_root_path(context.host_root, "/etc/degen/prod-db-backup.env")
+    write_private_host_file(managed_path, managed)
+
+    app_env = (
+        b"APP_SETTING=ENV_CONTENT_SENTINEL\n"
+        + f"DATABASE_URL='{database_url}'\n".encode("ascii")
+    )
+    app_env_path = host_root_path(context.host_root, "/opt/degen/web.env")
+    write_private_host_file(app_env_path, app_env)
+
+    rclone_path = host_root_path(context.host_root, "/etc/degen/rclone.conf")
+    write_private_host_file(
+        rclone_path,
+        b"[onedrive]\ntype=onedrive\ntoken=RCLONE_CONTENT_SENTINEL\n",
+    )
+
+    backup_dir = host_root_path(context.host_root, "/opt/degen/backups/db")
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup_dir.chmod(0o700)
+    dump_name = f"{pair_prefix}20260630T235959Z.dump"
+    dump_path = backup_dir / dump_name
+    sidecar_path = backup_dir / f"{dump_name}.sha256"
+    dump_bytes = b"controlled PostgreSQL custom-format dump fixture\n"
+    if include_pair:
+        write_private_host_file(dump_path, dump_bytes)
+        sidecar_path.write_bytes(
+            hashlib.sha256(dump_bytes).hexdigest().encode("ascii")
+            + b"  "
+            + dump_name.encode("ascii")
+            + b"\n"
+        )
+        sidecar_path.chmod(0o600)
+
+    calls: list[dict[str, object]] = []
+    events: list[str] = []
+    inherited_fds: list[int] = []
+    completed_processes: list[subprocess.CompletedProcess[str]] = []
+    source_runner = context.command_runner
+
+    def command_runner(
+        argv: object,
+        pass_fds: tuple[int, ...],
+    ) -> subprocess.CompletedProcess[str]:
+        argv_tuple = tuple(str(value) for value in argv)
+        if "get-tar-commit-id" in argv_tuple:
+            return source_runner(argv_tuple, pass_fds)
+        calls.append({"argv": argv_tuple, "pass_fds": pass_fds})
+        if argv_tuple and argv_tuple[0] == "/usr/bin/pg_restore":
+            events.append("pg_restore")
+            assert argv_tuple == ("/usr/bin/pg_restore", "--list", str(dump_path))
+            assert pass_fds == ()
+            assert dump_path.read_bytes() == dump_bytes
+            completed = subprocess.CompletedProcess(argv_tuple, 0, "archive listing\n", "")
+        elif len(argv_tuple) > 4 and argv_tuple[3] == "pgdatabase":
+            events.append("psql")
+            assert len(pass_fds) == 1
+            inherited_fds.append(pass_fds[0])
+            payload = bytearray()
+            while True:
+                chunk = os.read(pass_fds[0], 4096)
+                if not chunk:
+                    break
+                payload.extend(chunk)
+            assert bytes(payload).decode("utf-8") == database_url.replace(
+                "postgresql+psycopg://", "postgresql://", 1
+            )
+            completed = subprocess.CompletedProcess(argv_tuple, 0, database_name + "\n", "")
+        elif argv_tuple == ("/bin/hostname", "-s"):
+            events.append("hostname")
+            assert pass_fds == ()
+            completed = subprocess.CompletedProcess(argv_tuple, 0, hostname + "\n", "")
+        else:
+            raise AssertionError(f"unexpected staging command: {argv_tuple!r}")
+        completed_processes.append(completed)
+        return completed
+
+    context = dataclasses.replace(context, command_runner=command_runner)
+    return context, {
+        "app_env": app_env,
+        "assets": assets,
+        "backup_dir": backup_dir,
+        "calls": calls,
+        "completed_processes": completed_processes,
+        "database_url": database_url,
+        "dump_bytes": dump_bytes,
+        "dump_name": dump_name,
+        "dump_path": dump_path,
+        "events": events,
+        "inherited_fds": inherited_fds,
+        "managed_path": managed_path,
+        "rclone_path": rclone_path,
+        "sidecar_path": sidecar_path,
+    }
+
+
+def expected_host_stage_manifest(
+    context: object,
+    assets: dict[str, bytes],
+    environment_sha256: str,
+    dump_name: str,
+    dump_sha256: str,
+) -> dict[str, object]:
+    target_by_source = dict(zip(SOURCE_ASSETS[:6], TARGETS[:6]))
+    return {
+        "schema_version": 1,
+        "operation": {
+            "archive_sha256": context.expected_archive_sha256,
+            "commit": context.expected_commit,
+            "manifest_sha256": context.expected_manifest_sha256,
+            "operation_dir": str(context.paths.operation_dir),
+            "operation_id": context.operation_id,
+        },
+        "selected_pair": {
+            "dump_basename": dump_name,
+            "dump_sha256": dump_sha256,
+        },
+        "reviewed_assets": [
+            {
+                "mode": 0o755 if source.startswith("deploy/linux/") else 0o644,
+                "sha256": hashlib.sha256(assets[source]).hexdigest(),
+                "source": source,
+                "staged_path": f"reviewed/{source}",
+                "target": target_by_source.get(source),
+            }
+            for source in sorted(SOURCE_ASSETS)
+        ],
+        "host_environment": {
+            "mode": 0o600,
+            "sha256": environment_sha256,
+            "staged_path": "host/etc/degen/prod-db-backup.env",
+            "target": "/etc/degen/prod-db-backup.env",
+        },
+    }
+
+
+def test_prepare_host_staging_builds_exact_assets_manifest_and_state(tmp_path: Path) -> None:
+    module = load_ops_helper()
+    context, fixture = host_staging_fixture(module, tmp_path)
+
+    result = module.prepare_host_staging(context)
+
+    assert set(result) == {"effective_config", "host_stage"}
+    effective = result["effective_config"]
+    assert isinstance(effective, dict)
+    assert effective["BACKUP_PREFIX"] == "degen_green_"
+    assert effective["REMOTE_PRUNE_ENABLED"] == "0"
+    assert set(effective) == {
+        "APP_ENV_FILE",
+        "BACKUP_DIR",
+        "LOG_DIR",
+        "RCLONE_CONFIG",
+        "RCLONE_REMOTE_PATH",
+        "KEEP_LOCAL_COUNT",
+        "KEEP_REMOTE_DAILY",
+        "KEEP_REMOTE_WEEKLY",
+        "KEEP_REMOTE_MONTHLY",
+        "REMOTE_PRUNE_ENABLED",
+        "MIN_FREE_AFTER_BYTES",
+        "RETENTION_PLANNER",
+        "LOCK_FILE",
+        "BACKUP_PREFIX",
+    }
+    staged_environment = context.paths.staged_dir / "host/etc/degen/prod-db-backup.env"
+    environment_bytes = staged_environment.read_bytes()
+    assert b"BACKUP_PREFIX=degen_green_\n" in environment_bytes
+    assert b"REMOTE_PRUNE_ENABLED=0\n" in environment_bytes
+    assert b"UNMANAGED_SAFE=keep-me\n" in environment_bytes
+    assert fixture["database_url"].encode("ascii") not in environment_bytes
+    assert b"ENV_CONTENT_SENTINEL" not in environment_bytes
+    assert b"RCLONE_CONTENT_SENTINEL" not in environment_bytes
+
+    for source, expected_bytes in fixture["assets"].items():
+        staged = context.paths.staged_dir / "reviewed" / source
+        assert staged.read_bytes() == expected_bytes
+        if os.name == "posix":
+            expected_mode = 0o755 if source.startswith("deploy/linux/") else 0o644
+            assert stat.S_IMODE(staged.stat().st_mode) == expected_mode
+    if os.name == "posix":
+        assert stat.S_IMODE(context.paths.staged_dir.stat().st_mode) == 0o700
+        assert stat.S_IMODE(staged_environment.stat().st_mode) == 0o600
+
+    environment_sha256 = hashlib.sha256(environment_bytes).hexdigest()
+    expected_manifest = expected_host_stage_manifest(
+        context,
+        fixture["assets"],
+        environment_sha256,
+        fixture["dump_name"],
+        hashlib.sha256(fixture["dump_bytes"]).hexdigest(),
+    )
+    expected_manifest_bytes = (
+        json.dumps(expected_manifest, sort_keys=True, separators=(",", ":")).encode("ascii")
+        + b"\n"
+    )
+    manifest_path = context.paths.staged_dir / "host-stage-manifest.json"
+    assert manifest_path.read_bytes() == expected_manifest_bytes
+    expected_host_stage = {
+        "manifest_sha256": hashlib.sha256(expected_manifest_bytes).hexdigest(),
+        "asset_hashes": {
+            source: hashlib.sha256(contents).hexdigest()
+            for source, contents in fixture["assets"].items()
+        },
+        "environment_sha256": environment_sha256,
+    }
+    assert result["host_stage"] == expected_host_stage
+
+    state = module.load_operation_state(
+        context.paths.state_file, effective_uid=context.effective_uid
+    )
+    module.validate_operation_state_for_context(state, context)
+    assert state["phase"] == "staging_prepared"
+    assert state["effective_config"] == effective
+    assert state["host_stage"] == expected_host_stage
+    assert [entry["phase"] for entry in state["phase_history"]] == [
+        "source_verified",
+        "staging_prepared",
+    ]
+    for field in (
+        "snapshot",
+        "prior_runtime",
+        "install",
+        "probe",
+        "dry_run",
+        "policy",
+        "observation",
+        "active_transaction",
+        "failure",
+        "recovery",
+    ):
+        assert state[field] is None
+
+
+def test_prepare_host_staging_no_existing_pair_fails_before_staging_or_state(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = host_staging_fixture(module, tmp_path, include_pair=False)
+    before = context.paths.state_file.read_bytes()
+
+    with pytest.raises(module.OperationStateError, match="verified local backup pair"):
+        module.prepare_host_staging(context)
+
+    assert fixture["events"] == []
+    assert context.paths.state_file.read_bytes() == before
+    assert not context.paths.staged_dir.exists()
+
+
+def test_host_stage_refuses_to_reverse_live_enabled_prune_policy(tmp_path: Path) -> None:
+    module = load_ops_helper()
+    context, fixture = host_staging_fixture(module, tmp_path)
+    managed_path = fixture["managed_path"]
+    managed_path.write_bytes(
+        managed_path.read_bytes().replace(
+            b"REMOTE_PRUNE_ENABLED=0\n", b"REMOTE_PRUNE_ENABLED=1\n"
+        )
+    )
+    managed_path.chmod(0o600)
+    before = context.paths.state_file.read_bytes()
+
+    with pytest.raises(module.OperationStateError, match="prune|enabled"):
+        module.prepare_host_staging(context)
+
+    assert context.paths.state_file.read_bytes() == before
+    assert not context.paths.staged_dir.exists()
+
+
+@pytest.mark.parametrize(
+    "secret_key",
+    ["AWS_SECRET_ACCESS_KEY", "API_KEY", "PASSWORD", "PGPASSWORD"],
+)
+def test_host_stage_rejects_unmanaged_secret_assignment_before_persistent_stage(
+    tmp_path: Path, secret_key: str
+) -> None:
+    module = load_ops_helper()
+    context, fixture = host_staging_fixture(module, tmp_path)
+    sentinel = "UNMANAGED_SECRET_ASSIGNMENT_SENTINEL"
+    managed_path = fixture["managed_path"]
+    managed_path.write_bytes(
+        managed_path.read_bytes() + f"{secret_key}={sentinel}\n".encode("ascii")
+    )
+    managed_path.chmod(0o600)
+    before = context.paths.state_file.read_bytes()
+
+    with pytest.raises(module.OperationStateError) as raised:
+        module.prepare_host_staging(context)
+
+    assert sentinel not in str(raised.value)
+    assert secret_key not in str(raised.value)
+    assert context.paths.state_file.read_bytes() == before
+    assert not context.paths.staged_dir.exists()
+
+
+def test_host_stage_resumes_only_an_exact_fully_verified_preexisting_stage(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = host_staging_fixture(module, tmp_path)
+    source_state_bytes = context.paths.state_file.read_bytes()
+    first = module.prepare_host_staging(context)
+    identities = {
+        path.relative_to(context.paths.staged_dir).as_posix(): (path.stat().st_ino, path.stat().st_mtime_ns)
+        for path in context.paths.staged_dir.rglob("*")
+        if path.is_file()
+    }
+    context.paths.state_file.write_bytes(source_state_bytes)
+    context.paths.state_file.chmod(0o600)
+
+    second = module.prepare_host_staging(context)
+
+    assert second == first
+    assert {
+        path.relative_to(context.paths.staged_dir).as_posix(): (path.stat().st_ino, path.stat().st_mtime_ns)
+        for path in context.paths.staged_dir.rglob("*")
+        if path.is_file()
+    } == identities
+
+
+def test_host_stage_exact_resume_does_not_create_or_unlink_render_scratch(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = host_staging_fixture(module, tmp_path)
+    source_state_bytes = context.paths.state_file.read_bytes()
+    first = module.prepare_host_staging(context)
+    context.paths.state_file.write_bytes(source_state_bytes)
+    context.paths.state_file.chmod(0o600)
+    assert not hasattr(module, "_remove_render_scratch")
+
+    assert module.prepare_host_staging(context) == first
+
+
+def test_host_stage_exact_resume_fsyncs_held_files_and_directories_before_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = host_staging_fixture(module, tmp_path)
+    source_state_bytes = context.paths.state_file.read_bytes()
+    module.prepare_host_staging(context)
+    context.paths.state_file.write_bytes(source_state_bytes)
+    context.paths.state_file.chmod(0o600)
+    events: list[str] = []
+    original_fsync = module._fsync_stage_directories
+    original_atomic = module._atomic_write_operation_state_internal
+
+    def record_fsync(*args: object, **kwargs: object) -> None:
+        events.append("stage-fsync")
+        original_fsync(*args, **kwargs)
+
+    def record_atomic(*args: object, **kwargs: object) -> None:
+        events.append("state-atomic")
+        original_atomic(*args, **kwargs)
+
+    monkeypatch.setattr(module, "_fsync_stage_directories", record_fsync)
+    monkeypatch.setattr(module, "_atomic_write_operation_state_internal", record_atomic)
+
+    module.prepare_host_staging(context)
+
+    assert events == ["stage-fsync", "state-atomic"]
+
+
+def test_host_stage_new_write_rejects_parent_directory_inode_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = host_staging_fixture(module, tmp_path)
+    original = module._write_exclusive_staged_file
+    swapped = False
+
+    def swapping_writer(path: Path, *args: object, **kwargs: object):
+        nonlocal swapped
+        if not swapped and path.parent.name == "linux":
+            swapped = True
+            moved = path.parent.with_name("linux-original-inode")
+            path.parent.rename(moved)
+            path.parent.mkdir(mode=0o700)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(module, "_write_exclusive_staged_file", swapping_writer)
+    before = context.paths.state_file.read_bytes()
+
+    with pytest.raises(module.OperationStateError, match="staged|stage|directory|binding"):
+        module.prepare_host_staging(context)
+
+    assert swapped
+    assert context.paths.state_file.read_bytes() == before
+    replacement_parent = context.paths.staged_dir / "reviewed/deploy/linux"
+    assert list(replacement_parent.iterdir()) == []
+
+
+def test_host_stage_closes_held_stage_directories_when_state_construction_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = host_staging_fixture(module, tmp_path)
+    closed: list[object] = []
+    original_close = module._close_stage_directories
+
+    def record_close(proof: object) -> None:
+        closed.append(proof)
+        original_close(proof)
+
+    monkeypatch.setattr(module, "_close_stage_directories", record_close)
+    monkeypatch.setattr(
+        module,
+        "_staging_prepared_state",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            module.OperationStateError("forced state construction failure")
+        ),
+    )
+
+    with pytest.raises(module.OperationStateError, match="forced state"):
+        module.prepare_host_staging(context)
+
+    assert len(closed) == 1
+
+
+@pytest.mark.parametrize("residue_kind", ["partial", "different"])
+def test_host_stage_rejects_partial_or_different_preexisting_residue(
+    tmp_path: Path, residue_kind: str
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = host_staging_fixture(module, tmp_path)
+    context.paths.staged_dir.mkdir(mode=0o700)
+    residue = context.paths.staged_dir / "host-stage-manifest.json"
+    residue.write_bytes(b"{}\n" if residue_kind == "partial" else b"different\n")
+    residue.chmod(0o600)
+    before = context.paths.state_file.read_bytes()
+
+    with pytest.raises(module.OperationStateError, match="staged|stage|residue|manifest"):
+        module.prepare_host_staging(context)
+
+    assert context.paths.state_file.read_bytes() == before
+    assert residue.exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="symlinks unavailable")
+def test_host_stage_rejects_symlinked_preexisting_staged_directory(tmp_path: Path) -> None:
+    module = load_ops_helper()
+    context, _fixture = host_staging_fixture(module, tmp_path)
+    target = context.paths.operation_dir / "not-staged"
+    target.mkdir()
+    try:
+        context.paths.staged_dir.symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation unavailable")
+
+    with pytest.raises(module.OperationStateError, match="staged|stage|symlink"):
+        module.prepare_host_staging(context)
+
+    assert context.paths.staged_dir.is_symlink()
+
+
+def test_host_stage_rejects_host_root_with_symlinked_intermediate(tmp_path: Path) -> None:
+    module = load_ops_helper()
+    context, _fixture = host_staging_fixture(module, tmp_path)
+    real_parent = tmp_path / "real-host-parent"
+    real_parent.mkdir()
+    (real_parent / "root").mkdir()
+    linked_parent = tmp_path / "linked-host-parent"
+    try:
+        linked_parent.symlink_to(real_parent, target_is_directory=True)
+    except OSError:
+        if os.name != "nt":
+            pytest.skip("symlink creation unavailable")
+        junction = subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(linked_parent), str(real_parent)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if junction.returncode != 0:
+            pytest.skip("junction creation unavailable")
+    rebound = dataclasses.replace(context, host_root=linked_parent / "root")
+
+    with pytest.raises(module.OperationStateError, match="host_root|symlink|canonical"):
+        module._host_path(rebound, "/etc/degen/prod-db-backup.env")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX directory rebinding")
+def test_host_stage_atomic_callback_rejects_host_root_intermediate_rebind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = load_ops_helper()
+    context, fixture = host_staging_fixture(module, tmp_path)
+    anchor = tmp_path / "host-anchor"
+    host_root = anchor / "root"
+    host_root.mkdir(parents=True)
+    shutil.copytree(tmp_path / "etc", host_root / "etc")
+    shutil.copytree(tmp_path / "opt", host_root / "opt")
+    new_dump = host_root_path(host_root, "/opt/degen/backups/db") / fixture["dump_name"]
+    original_runner = context.command_runner
+
+    def rooted_runner(argv: object, pass_fds: tuple[int, ...]):
+        argv_tuple = tuple(str(value) for value in argv)
+        if argv_tuple and argv_tuple[0] == "/usr/bin/pg_restore":
+            assert argv_tuple == ("/usr/bin/pg_restore", "--list", str(new_dump))
+            assert pass_fds == ()
+            return subprocess.CompletedProcess(argv_tuple, 0, "archive listing\n", "")
+        return original_runner(argv_tuple, pass_fds)
+
+    context = dataclasses.replace(
+        context,
+        host_root=host_root,
+        command_runner=rooted_runner,
+    )
+    before = context.paths.state_file.read_bytes()
+    swapped = False
+
+    def rebind(event: str, **_details: object) -> None:
+        nonlocal swapped
+        if event == "before_replace":
+            moved = anchor.with_name("host-anchor-original")
+            anchor.rename(moved)
+            anchor.symlink_to(moved, target_is_directory=True)
+            swapped = True
+
+    monkeypatch.setattr(module, "_atomic_event_hook", rebind)
+
+    with pytest.raises(module.OperationStateError, match="host_root|ancestor|binding"):
+        module.prepare_host_staging(context)
+
+    assert swapped
+    assert context.paths.state_file.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "sidecar_bytes",
+    [
+        b"A" * 64 + b"  degen_green_20260630T235959Z.dump\n",
+        b"0" * 64 + b"  degen_green_20260630T235959Z.dump\n",
+        HASH_A.encode("ascii") + b" degen_green_20260630T235959Z.dump\n",
+        HASH_A.encode("ascii") + b"  degen_green_20260630T235959Z.dump\n\n",
+    ],
+    ids=("uppercase", "hash-mismatch", "one-space", "extra-record"),
+)
+def test_existing_pair_requires_canonical_sidecar_then_hash_before_pg_restore(
+    tmp_path: Path, sidecar_bytes: bytes
+) -> None:
+    module = load_ops_helper()
+    context, fixture = host_staging_fixture(module, tmp_path)
+    fixture["sidecar_path"].write_bytes(sidecar_bytes)
+    fixture["sidecar_path"].chmod(0o600)
+    before = context.paths.state_file.read_bytes()
+
+    with pytest.raises(module.OperationStateError):
+        module.prepare_host_staging(context)
+
+    assert "pg_restore" not in fixture["events"]
+    assert context.paths.state_file.read_bytes() == before
+    assert not context.paths.staged_dir.exists()
+
+
+def test_existing_pair_newest_complete_timestamp_wins(tmp_path: Path) -> None:
+    module = load_ops_helper()
+    context, fixture = host_staging_fixture(module, tmp_path)
+    newest_name = "degen_green_20260701T000001Z.dump"
+    newest = fixture["backup_dir"] / newest_name
+    newest_bytes = fixture["dump_bytes"] + b"newest"
+    write_private_host_file(newest, newest_bytes)
+    newest_sidecar = fixture["backup_dir"] / f"{newest_name}.sha256"
+    write_private_host_file(
+        newest_sidecar,
+        hashlib.sha256(newest_bytes).hexdigest().encode("ascii")
+        + b"  "
+        + newest_name.encode("ascii")
+        + b"\n",
+    )
+
+    original_runner = context.command_runner
+
+    def newest_runner(argv: object, pass_fds: tuple[int, ...]):
+        argv_tuple = tuple(str(value) for value in argv)
+        if argv_tuple and argv_tuple[0] == "/usr/bin/pg_restore":
+            assert argv_tuple == ("/usr/bin/pg_restore", "--list", str(newest))
+            assert pass_fds == ()
+            fixture["events"].append("pg_restore")
+            return subprocess.CompletedProcess(argv_tuple, 0, "archive listing\n", "")
+        return original_runner(argv_tuple, pass_fds)
+
+    result = module.prepare_host_staging(dataclasses.replace(context, command_runner=newest_runner))
+
+    assert result["effective_config"]["BACKUP_PREFIX"] == "degen_green_"
+
+
+def test_existing_pair_corrupt_newest_blocks_without_falling_back_to_older(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = host_staging_fixture(module, tmp_path)
+    newest_name = "degen_green_20260701T000001Z.dump"
+    newest = fixture["backup_dir"] / newest_name
+    write_private_host_file(newest, b"corrupt newest dump\n")
+    write_private_host_file(
+        fixture["backup_dir"] / f"{newest_name}.sha256",
+        b"0" * 64 + b"  " + newest_name.encode("ascii") + b"\n",
+    )
+
+    with pytest.raises(module.OperationStateError, match="SHA-256|sidecar|archive"):
+        module.prepare_host_staging(context)
+
+    assert "pg_restore" not in fixture["events"]
+    assert not context.paths.staged_dir.exists()
+
+
+def test_existing_pair_equal_timestamp_with_different_prefix_is_ambiguous(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = host_staging_fixture(module, tmp_path)
+    other_name = "other_green_20260630T235959Z.dump"
+    other = fixture["backup_dir"] / other_name
+    write_private_host_file(other, fixture["dump_bytes"])
+    write_private_host_file(
+        fixture["backup_dir"] / f"{other_name}.sha256",
+        hashlib.sha256(fixture["dump_bytes"]).hexdigest().encode("ascii")
+        + b"  "
+        + other_name.encode("ascii")
+        + b"\n",
+    )
+
+    with pytest.raises(module.OperationStateError, match="ambiguous"):
+        module.prepare_host_staging(context)
+
+    assert "pg_restore" not in fixture["events"]
+
+
+@pytest.mark.parametrize("unsafe_kind", ["incomplete", "unexpected", "directory"])
+def test_existing_pair_rejects_incomplete_or_unsafe_directory_entries(
+    tmp_path: Path, unsafe_kind: str
+) -> None:
+    module = load_ops_helper()
+    context, fixture = host_staging_fixture(module, tmp_path)
+    if unsafe_kind == "incomplete":
+        fixture["sidecar_path"].unlink()
+    elif unsafe_kind == "unexpected":
+        write_private_host_file(fixture["backup_dir"] / "notes.txt", b"unexpected\n")
+    else:
+        (fixture["backup_dir"] / "nested").mkdir()
+
+    with pytest.raises(module.OperationStateError):
+        module.prepare_host_staging(context)
+
+    assert "pg_restore" not in fixture["events"]
+    assert not context.paths.staged_dir.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX link semantics")
+@pytest.mark.parametrize("link_kind", ["symlink", "hardlink"])
+def test_existing_pair_rejects_links_without_pg_restore(
+    tmp_path: Path, link_kind: str
+) -> None:
+    module = load_ops_helper()
+    context, fixture = host_staging_fixture(module, tmp_path)
+    dump_path = fixture["dump_path"]
+    original = dump_path.with_suffix(".original")
+    dump_path.rename(original)
+    if link_kind == "symlink":
+        dump_path.symlink_to(original.name)
+    else:
+        os.link(original, dump_path)
+
+    with pytest.raises(module.OperationStateError):
+        module.prepare_host_staging(context)
+
+    assert "pg_restore" not in fixture["events"]
+    assert not context.paths.staged_dir.exists()
+
+
+def test_existing_pair_replacement_during_pg_restore_fails_before_staged_state(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = host_staging_fixture(module, tmp_path)
+    original_runner = context.command_runner
+
+    def replacing_runner(argv: object, pass_fds: tuple[int, ...]):
+        argv_tuple = tuple(str(value) for value in argv)
+        completed = original_runner(argv_tuple, pass_fds)
+        if argv_tuple and argv_tuple[0] == "/usr/bin/pg_restore":
+            replacement = fixture["dump_path"].with_suffix(".replacement")
+            write_private_host_file(replacement, fixture["dump_bytes"])
+            os.replace(replacement, fixture["dump_path"])
+        return completed
+
+    with pytest.raises(module.OperationStateError):
+        module.prepare_host_staging(dataclasses.replace(context, command_runner=replacing_runner))
+
+    assert not context.paths.staged_dir.exists()
+    state = module.load_operation_state(
+        context.paths.state_file, effective_uid=context.effective_uid
+    )
+    assert state["phase"] == "source_verified"
+
+
+def test_existing_pair_pre_replace_reinventory_rejects_newer_complete_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = load_ops_helper()
+    context, fixture = host_staging_fixture(module, tmp_path)
+    before = context.paths.state_file.read_bytes()
+    monkeypatch.setattr(module, "_revalidate_host_directory_proof", lambda _proof: None)
+
+    def inject_newer(event: str, **_details: object) -> None:
+        if event != "before_replace":
+            return
+        name = "degen_green_20260701T000001Z.dump"
+        contents = fixture["dump_bytes"] + b"newer-before-cas"
+        write_private_host_file(fixture["backup_dir"] / name, contents)
+        write_private_host_file(
+            fixture["backup_dir"] / f"{name}.sha256",
+            hashlib.sha256(contents).hexdigest().encode("ascii")
+            + b"  "
+            + name.encode("ascii")
+            + b"\n",
+        )
+
+    monkeypatch.setattr(module, "_atomic_event_hook", inject_newer)
+
+    with pytest.raises(module.OperationStateError, match="newest|selected|inventory|pair"):
+        module.prepare_host_staging(context)
+
+    assert context.paths.state_file.read_bytes() == before
+
+
+def test_existing_pair_default_pg_restore_discards_unbounded_command_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    observed: list[dict[str, object]] = []
+
+    def fake_run(argv: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        observed.append(kwargs)
+        return subprocess.CompletedProcess(argv, 0, None, None)
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    completed = module._default_command_runner(
+        ("/usr/bin/pg_restore", "--list", "/trusted/backup.dump"),
+        (),
+    )
+
+    assert len(observed) == 1
+    assert observed[0]["stdout"] is subprocess.DEVNULL
+    assert observed[0]["stderr"] is subprocess.DEVNULL
+    assert "capture_output" not in observed[0]
+    assert completed.stdout == ""
+    assert completed.stderr == ""
+
+
+@pytest.mark.parametrize(
+    ("pair_prefix", "configured_prefix"),
+    [("wrong_green_", None), ("degen_green_", "wrong_green_")],
+)
+def test_host_stage_requires_filename_and_config_prefix_to_match_live_identity(
+    tmp_path: Path,
+    pair_prefix: str,
+    configured_prefix: str | None,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = host_staging_fixture(
+        module,
+        tmp_path,
+        pair_prefix=pair_prefix,
+        configured_prefix=configured_prefix,
+    )
+
+    with pytest.raises(module.OperationStateError, match="prefix"):
+        module.prepare_host_staging(context)
+
+    assert fixture["events"] == ["pg_restore", "psql", "hostname"]
+    assert not context.paths.staged_dir.exists()
+
+
+def test_pgdatabase_uses_fresh_bounded_inherited_fd_for_each_fixed_psql_query(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = host_staging_fixture(module, tmp_path)
+
+    module.prepare_host_staging(context)
+
+    psql_calls = [
+        call
+        for call in fixture["calls"]
+        if len(call["argv"]) > 4 and call["argv"][3] == "pgdatabase"
+    ]
+    assert len(psql_calls) == 2
+    for call in psql_calls:
+        argv = call["argv"]
+        assert argv[:4] == (
+            sys.executable,
+            "-c",
+            module._INHERITED_FD_EXEC_SHIM,
+            "pgdatabase",
+        )
+        assert argv[5:] == (
+            "/usr/bin/psql",
+            "psql",
+            "--no-psqlrc",
+            "--tuples-only",
+            "--no-align",
+            "--command",
+            "SELECT current_database();",
+        )
+        assert fixture["database_url"] not in "\n".join(argv)
+        assert len(call["pass_fds"]) == 1
+    for descriptor in fixture["inherited_fds"]:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+
+
+def test_pgdatabase_default_runner_scrubs_ambient_secret_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    observed: list[dict[str, object]] = []
+    monkeypatch.setenv("DATABASE_URL", "postgresql://ambient:SECRET@db/degen")
+    monkeypatch.setenv("PGPASSWORD", "AMBIENT_PGPASSWORD_SENTINEL")
+    monkeypatch.setenv("PGDATABASE", "postgresql://ambient:OTHER@db/degen")
+
+    def fake_run(argv: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        observed.append(kwargs)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    module._default_command_runner(("/bin/hostname", "-s"), ())
+
+    assert len(observed) == 1
+    child_env = observed[0]["env"]
+    assert child_env == {
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+    }
+
+
+def test_pgdatabase_writer_start_failure_is_generic_and_closes_both_pipe_fds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    opened: list[int] = []
+    runner_called = False
+
+    def pipe(_payload: bytes) -> tuple[int, int]:
+        pair = os.pipe()
+        opened.extend(pair)
+        return pair
+
+    class FailingThread:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def start(self) -> None:
+            raise RuntimeError("THREAD_START_SECRET_SENTINEL")
+
+        def join(self, timeout: int) -> None:
+            raise AssertionError("an unstarted writer must never be joined")
+
+        def is_alive(self) -> bool:
+            return False
+
+    def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        nonlocal runner_called
+        runner_called = True
+        raise AssertionError("runner must not be called")
+
+    context = type("Context", (), {"command_runner": runner})()
+    monkeypatch.setattr(module, "_write_secret_pipe", pipe)
+    monkeypatch.setattr(module.threading, "Thread", FailingThread)
+
+    with pytest.raises(module.OperationStateError) as raised:
+        module._query_current_database(context, "postgresql://user:secret@db/degen")
+
+    assert "THREAD_START_SECRET_SENTINEL" not in str(raised.value)
+    assert not runner_called
+    assert len(opened) == 2
+    for descriptor in opened:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+
+
+@pytest.mark.parametrize("changed_identity", ["database", "hostname"])
+def test_host_stage_pre_replace_identity_requery_rejects_change(
+    tmp_path: Path, changed_identity: str
+) -> None:
+    module = load_ops_helper()
+    context, fixture = host_staging_fixture(module, tmp_path)
+    original_runner = context.command_runner
+    counts = {"database": 0, "hostname": 0}
+
+    def changing_runner(argv: object, pass_fds: tuple[int, ...]):
+        argv_tuple = tuple(str(value) for value in argv)
+        completed = original_runner(argv_tuple, pass_fds)
+        if len(argv_tuple) > 4 and argv_tuple[3] == "pgdatabase":
+            counts["database"] += 1
+            if changed_identity == "database" and counts["database"] == 2:
+                return subprocess.CompletedProcess(argv_tuple, 0, "changeddb\n", "")
+        if argv_tuple == ("/bin/hostname", "-s"):
+            counts["hostname"] += 1
+            if changed_identity == "hostname" and counts["hostname"] == 2:
+                return subprocess.CompletedProcess(argv_tuple, 0, "changedhost\n", "")
+        return completed
+
+    before = context.paths.state_file.read_bytes()
+    with pytest.raises(module.OperationStateError, match="identity|prefix|changed"):
+        module.prepare_host_staging(
+            dataclasses.replace(context, command_runner=changing_runner)
+        )
+
+    assert counts[changed_identity] == 2
+    assert context.paths.state_file.read_bytes() == before
+
+
+def test_host_stage_secret_hygiene_excludes_environment_rclone_and_completed_process(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = host_staging_fixture(module, tmp_path)
+
+    result = module.prepare_host_staging(context)
+
+    state_bytes = context.paths.state_file.read_bytes()
+    staged_bytes = b"".join(
+        path.read_bytes()
+        for path in context.paths.staged_dir.rglob("*")
+        if path.is_file()
+    )
+    observable = json.dumps(result, sort_keys=True).encode("utf-8") + state_bytes + staged_bytes
+    for forbidden in (
+        fixture["database_url"].encode("ascii"),
+        b"DB_URL_SENTINEL",
+        b"ENV_CONTENT_SENTINEL",
+        b"RCLONE_CONTENT_SENTINEL",
+    ):
+        assert forbidden not in observable
+    for completed in fixture["completed_processes"]:
+        serialized = f"{completed.args!r}\n{completed.stdout}\n{completed.stderr}"
+        assert fixture["database_url"] not in serialized
+        assert "DB_URL_SENTINEL" not in serialized
+
+
+def test_pgdatabase_failure_scrubs_completed_process_and_exception_text(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = host_staging_fixture(module, tmp_path)
+    original_runner = context.command_runner
+    captured: list[subprocess.CompletedProcess[str]] = []
+
+    def leaking_runner(argv: object, pass_fds: tuple[int, ...]):
+        argv_tuple = tuple(str(value) for value in argv)
+        if len(argv_tuple) > 4 and argv_tuple[3] == "pgdatabase":
+            completed = subprocess.CompletedProcess(
+                (fixture["database_url"],),
+                1,
+                fixture["database_url"],
+                "DATABASE_URL=" + fixture["database_url"],
+            )
+            captured.append(completed)
+            return completed
+        return original_runner(argv_tuple, pass_fds)
+
+    with pytest.raises(module.OperationStateError) as raised:
+        module.prepare_host_staging(dataclasses.replace(context, command_runner=leaking_runner))
+
+    assert fixture["database_url"] not in str(raised.value)
+    assert "DB_URL_SENTINEL" not in str(raised.value)
+    assert len(captured) == 1
+    state_observable = context.paths.state_file.read_text(encoding="utf-8")
+    assert fixture["database_url"] not in state_observable
+    assert "DB_URL_SENTINEL" not in state_observable
+    assert not context.paths.staged_dir.exists()
+
+
+def test_host_stage_atomic_pre_replace_revalidates_source_and_staged_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = host_staging_fixture(module, tmp_path)
+    before = context.paths.state_file.read_bytes()
+
+    def tamper(event: str, **_details: object) -> None:
+        if event == "before_replace":
+            path = context.paths.staged_dir / "host/etc/degen/prod-db-backup.env"
+            path.write_bytes(path.read_bytes() + b"TAMPERED=1\n")
+
+    monkeypatch.setattr(module, "_atomic_event_hook", tamper)
+
+    with pytest.raises(module.OperationStateError):
+        module.prepare_host_staging(context)
+
+    assert context.paths.state_file.read_bytes() == before
+
+
+def test_host_stage_atomic_pre_replace_rejects_same_inode_identical_rewrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = host_staging_fixture(module, tmp_path)
+    before = context.paths.state_file.read_bytes()
+
+    def rewrite(event: str, **_details: object) -> None:
+        if event == "before_replace":
+            path = context.paths.staged_dir / "host-stage-manifest.json"
+            raw = path.read_bytes()
+            path.write_bytes(raw)
+            path.chmod(0o600)
+
+    monkeypatch.setattr(module, "_atomic_event_hook", rewrite)
+
+    with pytest.raises(module.OperationStateError, match="stage|staged|changed"):
+        module.prepare_host_staging(context)
+
+    assert context.paths.state_file.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "swap_target",
+    [
+        "archive",
+        "source-helper",
+        "pair",
+        "live-env",
+        "staged-manifest",
+        "staged-asset",
+    ],
+)
+def test_host_stage_atomic_pre_replace_rejects_same_bytes_inode_swaps(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    swap_target: str,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = host_staging_fixture(module, tmp_path)
+    before = context.paths.state_file.read_bytes()
+
+    def replace_same_bytes(path: Path) -> None:
+        replacement = path.with_name(path.name + ".same-bytes-replacement")
+        replacement.write_bytes(path.read_bytes())
+        replacement.chmod(stat.S_IMODE(path.stat().st_mode))
+        os.replace(replacement, path)
+
+    def swap(event: str, **_details: object) -> None:
+        if event != "before_replace":
+            return
+        targets = {
+            "archive": context.paths.source_archive,
+            "source-helper": context.paths.source_dir
+            / "deploy/linux/degen-prod-db-backup-env.py",
+            "pair": fixture["dump_path"],
+            "live-env": fixture["managed_path"],
+            "staged-manifest": context.paths.staged_dir / "host-stage-manifest.json",
+            "staged-asset": context.paths.staged_dir
+            / "reviewed/deploy/linux/degen-prod-db-backup.sh",
+        }
+        replace_same_bytes(targets[swap_target])
+
+    monkeypatch.setattr(module, "_atomic_event_hook", swap)
+
+    with pytest.raises(module.OperationStateError):
+        module.prepare_host_staging(context)
+
+    assert context.paths.state_file.read_bytes() == before
+
+
+def test_prepare_staging_cli_has_only_operation_dir_and_reconstructs_sealed_context(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = load_ops_helper()
+    operation_dir_raw = "/opt/degen/backups/config/20260701T123456Z"
+    operation_dir = Path(operation_dir_raw)
+    state = source_verified_state(operation_dir)
+    observed: list[object] = []
+    monkeypatch.setattr(module, "_effective_uid", lambda: 0)
+    monkeypatch.setattr(module, "_require_posix_descriptor_primitives", lambda: None)
+    monkeypatch.setattr(module, "load_operation_state", lambda path, *, effective_uid: state)
+    if os.name != "posix":
+        # The production path is POSIX-absolute but pathlib intentionally treats
+        # it as drive-relative on Windows; real context validation is covered by
+        # the direct API tests and by the Linux follow-up.
+        monkeypatch.setattr(module, "validate_operation_state_for_context", lambda *_: None)
+    monkeypatch.setattr(
+        module,
+        "prepare_host_staging",
+        lambda context: observed.append(context)
+        or {"effective_config": {}, "host_stage": {}},
+    )
+
+    help_result = subprocess.run(
+        [sys.executable, str(OPS_HELPER), "prepare-staging", "--help"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    result = module.main(["prepare-staging", "--operation-dir", operation_dir_raw])
+
+    captured = capsys.readouterr()
+    assert help_result.returncode == 0
+    assert "--operation-dir" in help_result.stdout
+    for forbidden in ("archive", "digest", "commit", "manifest", "host-root", "runner"):
+        assert forbidden not in help_result.stdout.lower()
+    assert result == 0
+    assert captured.out == ""
+    assert captured.err == ""
+    assert len(observed) == 1
+    context = observed[0]
+    assert context.paths == module.build_operation_paths(operation_dir)
+    assert context.operation_id == operation_dir.name
+    assert context.expected_commit == state["reviewed_source"]["commit"]
+    assert context.expected_archive_sha256 == state["reviewed_source"]["archive_sha256"]
+    assert context.expected_manifest_sha256 == state["reviewed_source"]["manifest_sha256"]
+    assert context.host_root == Path("/")
+
+
+@pytest.mark.parametrize("invalid_kind", ["missing", "extra", "enabled-prune", "bad-prefix"])
+def test_host_stage_state_requires_exact_disabled_managed_configuration(
+    tmp_path: Path, invalid_kind: str
+) -> None:
+    module = load_ops_helper()
+    operation_dir, _uid = private_operation_dir(tmp_path)
+    state = state_at_phase(operation_dir, "staging_prepared")
+    if invalid_kind == "missing":
+        state["effective_config"].pop("LOCK_FILE")
+    elif invalid_kind == "extra":
+        state["effective_config"]["UNREVIEWED"] = "value"
+    elif invalid_kind == "enabled-prune":
+        state["effective_config"]["REMOTE_PRUNE_ENABLED"] = "1"
+    else:
+        state["effective_config"]["BACKUP_PREFIX"] = "unsafe prefix"
+
+    with pytest.raises(module.OperationStateError, match="effective_config|managed|prefix|prune"):
+        module.validate_operation_state(state, operation_dir)

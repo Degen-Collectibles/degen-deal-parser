@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import copy
 import hashlib
 import json
 import os
@@ -14,10 +15,12 @@ import stat
 import subprocess
 import sys
 import tarfile
+import threading
+import types
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 CommandRunner = Callable[
@@ -77,15 +80,72 @@ _MAX_SOURCE_MANIFEST_BYTES = 64 * 1024
 _TAR_BLOCK_BYTES = 512
 _GIT_TAR_RECORD_BYTES = 20 * _TAR_BLOCK_BYTES
 _GIT_EXECUTABLE = "/usr/bin/git"
-_FD_STDIN_EXEC_SHIM = """import os
+_PSQL_EXECUTABLE = "/usr/bin/psql"
+_PG_RESTORE_EXECUTABLE = "/usr/bin/pg_restore"
+_HOSTNAME_EXECUTABLE = "/bin/hostname"
+_MAX_COMMAND_OUTPUT_BYTES = 4096
+_MAX_DATABASE_URL_BYTES = 4096
+_MAX_APP_ENV_BYTES = 256 * 1024
+_MAX_BACKUP_ENTRIES = 4096
+_MAX_BACKUP_DUMP_BYTES = 1 << 50
+_MAX_STAGED_MANIFEST_BYTES = 64 * 1024
+_BACKUP_NAME_RE = re.compile(
+    r"\A(?P<prefix>[A-Za-z0-9._-]+_)(?P<stamp>[0-9]{8}T[0-9]{6}Z)"
+    r"\.dump(?P<sidecar>\.sha256)?\Z",
+    re.ASCII,
+)
+_SAFE_LABEL_RE = re.compile(r"\A[A-Za-z0-9._-]{1,128}\Z", re.ASCII)
+_BACKUP_PREFIX_RE = re.compile(r"\A[A-Za-z0-9._-]+_\Z", re.ASCII)
+_EFFECTIVE_CONFIG_KEYS = frozenset(
+    {
+        "APP_ENV_FILE",
+        "BACKUP_DIR",
+        "LOG_DIR",
+        "RCLONE_CONFIG",
+        "RCLONE_REMOTE_PATH",
+        "KEEP_LOCAL_COUNT",
+        "KEEP_REMOTE_DAILY",
+        "KEEP_REMOTE_WEEKLY",
+        "KEEP_REMOTE_MONTHLY",
+        "REMOTE_PRUNE_ENABLED",
+        "MIN_FREE_AFTER_BYTES",
+        "RETENTION_PLANNER",
+        "LOCK_FILE",
+        "BACKUP_PREFIX",
+    }
+)
+_APP_ENV_ASSIGNMENT_RE = re.compile(
+    r"\A(?P<key>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>[^\r\n]*)\Z",
+    re.ASCII,
+)
+_INHERITED_FD_EXEC_SHIM = """import os
 import sys
-fd = int(sys.argv[1])
-executable = sys.argv[2]
-argv = sys.argv[3:]
-os.dup2(fd, 0)
-if fd != 0:
+mode = sys.argv[1]
+fd = int(sys.argv[2])
+executable = sys.argv[3]
+argv = sys.argv[4:]
+if mode == "git-stdin":
+    os.dup2(fd, 0)
+    if fd != 0:
+        os.close(fd)
+    os.execve(executable, argv, {})
+if mode == "pgdatabase":
+    chunks = []
+    total = 0
+    while True:
+        chunk = os.read(fd, 4096)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > 4096:
+            raise SystemExit(125)
+        chunks.append(chunk)
     os.close(fd)
-os.execv(executable, argv)
+    value = b"".join(chunks).decode("utf-8", errors="strict")
+    if not value or "\\x00" in value or "\\r" in value or "\\n" in value:
+        raise SystemExit(125)
+    os.execve(executable, argv, {"PGDATABASE": value})
+raise SystemExit(125)
 """
 _TOP_LEVEL_KEYS = frozenset(
     {
@@ -1207,9 +1267,9 @@ def validate_operation_state(
     operation_dir: Path,
     previous_state: dict[str, object] | None = None,
 ) -> None:
+    _reject_residual_secrets(state)
     _validate_state_schema(state)
     assert isinstance(state, dict)
-    _reject_residual_secrets(state)
     if not operation_dir.is_absolute():
         raise OperationStateError("operation_dir validation root must be absolute")
     if any(component in (".", "..") for component in operation_dir.parts):
@@ -1297,6 +1357,18 @@ def _require_string_map(
         else:
             _require_string(item, f"{label} value")
     return value
+
+
+def _validate_effective_config_receipt(value: object) -> None:
+    item = _require_string_map(value, "effective_config")
+    if frozenset(item) != _EFFECTIVE_CONFIG_KEYS:
+        raise OperationStateError("effective_config must contain the exact managed key set")
+    if any(not configured for configured in item.values()):
+        raise OperationStateError("effective_config values must be nonempty")
+    if item["REMOTE_PRUNE_ENABLED"] != "0":
+        raise OperationStateError("effective_config remote prune must remain disabled")
+    if _BACKUP_PREFIX_RE.fullmatch(item["BACKUP_PREFIX"]) is None:
+        raise OperationStateError("effective_config backup prefix is invalid")
 
 
 def _validate_history_entry(value: object, label: str) -> None:
@@ -1672,7 +1744,7 @@ def _validate_state_schema(state: object) -> None:
         _validate_history_entry(entry, f"phase_history[{index}]")
     _validate_reviewed_source(item["reviewed_source"])
     if item["effective_config"] is not None:
-        _require_string_map(item["effective_config"], "effective_config")
+        _validate_effective_config_receipt(item["effective_config"])
     if item["host_stage"] is not None:
         _validate_host_stage(item["host_stage"])
     if item["snapshot"] is not None:
@@ -2797,22 +2869,37 @@ def _default_command_runner(
 ) -> subprocess.CompletedProcess[str]:
     if pass_fds and os.name != "posix":
         raise OperationStateError("inherited file descriptors require POSIX")
-    return subprocess.run(
-        list(argv),
-        check=False,
-        shell=False,
-        text=True,
-        capture_output=True,
-        close_fds=True,
-        pass_fds=pass_fds,
-    )
+    common: dict[str, object] = {
+        "check": False,
+        "shell": False,
+        "text": True,
+        "close_fds": True,
+        "pass_fds": pass_fds,
+        "env": {
+            "LANG": "C",
+            "LC_ALL": "C",
+            "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+        },
+    }
+    if tuple(argv[:1]) == (_PG_RESTORE_EXECUTABLE,):
+        completed = subprocess.run(
+            list(argv),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **common,
+        )
+        completed.stdout = ""
+        completed.stderr = ""
+        return completed
+    return subprocess.run(list(argv), capture_output=True, **common)
 
 
 def _verify_git_archive_commit(context: OperationsContext, descriptor: int) -> None:
     argv = (
         sys.executable,
         "-c",
-        _FD_STDIN_EXEC_SHIM,
+        _INHERITED_FD_EXEC_SHIM,
+        "git-stdin",
         str(descriptor),
         _GIT_EXECUTABLE,
         "git",
@@ -3770,6 +3857,2100 @@ def verify_source_archive(
             _close_source_tree_proof(source_proof)
 
 
+@dataclass
+class _VerifiedSourceMaterial:
+    context: OperationsContext
+    directory_fd: int | None
+    operation_metadata: os.stat_result
+    archive_fd: int
+    archive_metadata: os.stat_result
+    source_proof: _SourceTreeProof
+    state: dict[str, object]
+
+
+@contextlib.contextmanager
+def _open_verified_source_material(context: OperationsContext):
+    """Hold the complete source proof while a later receipt is prepared."""
+    _validate_source_context(context, context.paths.source_dir)
+    source_proof: _SourceTreeProof | None = None
+    with _open_validated_operation_dir(
+        context.paths.operation_dir,
+        context.effective_uid,
+    ) as directory_fd:
+        operation_metadata = (
+            context.paths.operation_dir.lstat()
+            if directory_fd is None
+            else os.fstat(directory_fd)
+        )
+        with _open_source_archive(context, directory_fd) as (archive_fd, archive_metadata):
+            try:
+                if _hash_source_archive(archive_fd) != context.expected_archive_sha256:
+                    raise OperationStateError(
+                        "source archive SHA-256 does not match the approved digest"
+                    )
+                _revalidate_source_archive(
+                    context, directory_fd, archive_fd, archive_metadata
+                )
+                _verify_git_archive_commit(context, archive_fd)
+                _revalidate_source_archive(
+                    context, directory_fd, archive_fd, archive_metadata
+                )
+                archive_hashes, archive_manifest = _verify_raw_git_archive(
+                    archive_fd,
+                    context.expected_commit,
+                    context.expected_manifest_sha256,
+                )
+                source_proof = _verify_extracted_source_tree(
+                    context,
+                    directory_fd,
+                    archive_hashes,
+                    archive_manifest,
+                )
+                _revalidate_source_receipt_proof(
+                    context,
+                    directory_fd,
+                    operation_metadata,
+                    archive_fd,
+                    archive_metadata,
+                    source_proof,
+                )
+                state = _load_existing_verified_source_state(context, directory_fd)
+                if state is None or state["phase"] != "source_verified":
+                    raise OperationStateError(
+                        "prepare-staging requires strict source_verified operation state"
+                    )
+                reviewed = state["reviewed_source"]
+                history = state["phase_history"]
+                assert isinstance(reviewed, dict) and isinstance(history, list)
+                expected_reviewed: dict[str, object] = {
+                    "commit": context.expected_commit,
+                    "archive_sha256": context.expected_archive_sha256,
+                    "manifest_sha256": context.expected_manifest_sha256,
+                    "asset_hashes": dict(source_proof.asset_hashes),
+                }
+                expected_evidence = hashlib.sha256(
+                    _source_verification_evidence(expected_reviewed)
+                ).hexdigest()
+                if (
+                    reviewed != expected_reviewed
+                    or len(history) != 1
+                    or history[0]["phase"] != "source_verified"
+                    or history[0]["evidence_sha256"] != expected_evidence
+                ):
+                    raise OperationStateError(
+                        "operation state is not the immutable source_verified receipt"
+                    )
+                yield _VerifiedSourceMaterial(
+                    context,
+                    directory_fd,
+                    operation_metadata,
+                    archive_fd,
+                    archive_metadata,
+                    source_proof,
+                    state,
+                )
+            finally:
+                if source_proof is not None:
+                    _close_source_tree_proof(source_proof)
+
+
+def _revalidate_verified_source_material(material: _VerifiedSourceMaterial) -> None:
+    _revalidate_source_receipt_proof(
+        material.context,
+        material.directory_fd,
+        material.operation_metadata,
+        material.archive_fd,
+        material.archive_metadata,
+        material.source_proof,
+    )
+
+
+def _capture_reviewed_asset_bytes(
+    proof: _SourceTreeProof,
+) -> dict[str, bytes]:
+    captured: dict[str, bytes] = {}
+    for item in proof.files:
+        if item.relative not in _SOURCE_ASSETS:
+            continue
+        digest, contents = _hash_open_source_file(
+            item.descriptor,
+            item.metadata,
+            f"source proof file {item.relative}",
+            capture=True,
+        )
+        if contents is None or digest != proof.asset_hashes[item.relative]:
+            raise OperationStateError("reviewed source asset changed while staging")
+        captured[item.relative] = contents
+    if frozenset(captured) != _SOURCE_ASSETS:
+        raise OperationStateError("reviewed source asset capture is incomplete")
+    _revalidate_source_tree_proof(proof)
+    return captured
+
+
+def _host_path(context: OperationsContext, logical_path: str) -> Path:
+    if not isinstance(logical_path, str) or not logical_path.startswith("/"):
+        raise OperationStateError("managed host path must be absolute")
+    if "\\" in logical_path or "\0" in logical_path:
+        raise OperationStateError("managed host path is unsafe")
+    pure = PurePosixPath(logical_path)
+    if str(pure) != logical_path or any(part in ("", ".", "..") for part in pure.parts[1:]):
+        raise OperationStateError("managed host path is not canonical")
+    if not context.host_root.is_absolute():
+        raise OperationStateError("host_root must be absolute")
+    try:
+        resolved_root = context.host_root.resolve(strict=True)
+    except OSError as exc:
+        raise OperationStateError("host_root cannot be resolved safely") from exc
+    lexical_root = Path(os.path.abspath(str(context.host_root)))
+    if os.path.normcase(str(resolved_root)) != os.path.normcase(str(lexical_root)):
+        raise OperationStateError("host_root contains a symlinked intermediate component")
+    root_metadata = context.host_root.lstat()
+    _validate_host_directory_metadata(
+        root_metadata,
+        context.effective_uid,
+        "host_root",
+    )
+    return context.host_root.joinpath(*pure.parts[1:])
+
+
+def _validate_host_directory_metadata(
+    metadata: os.stat_result,
+    effective_uid: int,
+    label: str,
+) -> None:
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise OperationStateError(f"{label} is not a real directory")
+    if metadata.st_uid != effective_uid:
+        raise OperationStateError(f"{label} is not owned by the effective UID")
+    if os.name == "posix" and stat.S_IMODE(metadata.st_mode) & 0o022:
+        raise OperationStateError(f"{label} permits untrusted writes")
+
+
+def _validate_host_file_metadata(
+    metadata: os.stat_result,
+    effective_uid: int,
+    label: str,
+    *,
+    maximum_size: int,
+    exact_mode: int = 0o600,
+) -> None:
+    if not stat.S_ISREG(metadata.st_mode):
+        raise OperationStateError(f"{label} is not a regular file")
+    if metadata.st_uid != effective_uid:
+        raise OperationStateError(f"{label} is not owned by the effective UID")
+    if metadata.st_nlink != 1:
+        raise OperationStateError(f"{label} must have a single link")
+    if os.name == "posix" and stat.S_IMODE(metadata.st_mode) != exact_mode:
+        raise OperationStateError(f"{label} has an unsafe mode")
+    if metadata.st_size < 0 or metadata.st_size > maximum_size:
+        raise OperationStateError(f"{label} size is invalid")
+
+
+@dataclass
+class _HostRootProof:
+    context: OperationsContext
+    descriptors: list[int]
+    names: list[str]
+    metadata: list[os.stat_result]
+    fallback_metadata: os.stat_result | None
+
+
+def _revalidate_host_root_proof(proof: _HostRootProof) -> None:
+    context = proof.context
+    if not proof.descriptors:
+        resolved = context.host_root.resolve(strict=True)
+        lexical = Path(os.path.abspath(str(context.host_root)))
+        if os.path.normcase(str(resolved)) != os.path.normcase(str(lexical)):
+            raise OperationStateError("host_root contains a symlinked intermediate component")
+        named = context.host_root.lstat()
+        _validate_host_directory_metadata(named, context.effective_uid, "host_root")
+        if proof.fallback_metadata is None or not _same_identity(
+            named, proof.fallback_metadata
+        ):
+            raise OperationStateError("host_root binding changed during staging")
+        return
+    for index, descriptor in enumerate(proof.descriptors):
+        opened = os.fstat(descriptor)
+        if not stat.S_ISDIR(opened.st_mode):
+            raise OperationStateError("host_root ancestor is not a directory")
+        if not _same_identity(opened, proof.metadata[index]):
+            raise OperationStateError("host_root ancestor identity changed")
+        if index:
+            named = os.stat(
+                proof.names[index - 1],
+                dir_fd=proof.descriptors[index - 1],
+                follow_symlinks=False,
+            )
+            if not _same_identity(opened, named):
+                raise OperationStateError("host_root ancestor binding changed")
+    _validate_host_directory_metadata(
+        os.fstat(proof.descriptors[-1]),
+        context.effective_uid,
+        "host_root",
+    )
+
+
+def _open_host_root_proof(context: OperationsContext) -> _HostRootProof:
+    if os.name != "posix" or not _descriptor_primitives_available():
+        _host_path(context, "/")
+        metadata = context.host_root.lstat()
+        proof = _HostRootProof(context, [], [], [], metadata)
+        _revalidate_host_root_proof(proof)
+        return proof
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    descriptors: list[int] = []
+    names: list[str] = []
+    metadata: list[os.stat_result] = []
+    try:
+        parts = context.host_root.parts
+        root_fd = os.open(parts[0], flags)
+        descriptors.append(root_fd)
+        metadata.append(os.fstat(root_fd))
+        for component in parts[1:]:
+            _validate_source_basename(component)
+            named = os.stat(
+                component,
+                dir_fd=descriptors[-1],
+                follow_symlinks=False,
+            )
+            if not stat.S_ISDIR(named.st_mode):
+                raise OperationStateError("host_root ancestor is not a real directory")
+            child_fd = os.open(component, flags, dir_fd=descriptors[-1])
+            opened = os.fstat(child_fd)
+            if not _same_identity(named, opened):
+                os.close(child_fd)
+                raise OperationStateError("host_root ancestor changed while opening")
+            names.append(component)
+            descriptors.append(child_fd)
+            metadata.append(opened)
+        proof = _HostRootProof(context, descriptors, names, metadata, None)
+        _revalidate_host_root_proof(proof)
+        return proof
+    except BaseException:
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise
+
+
+def _close_host_root_proof(proof: _HostRootProof) -> None:
+    for descriptor in reversed(proof.descriptors):
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+    proof.descriptors.clear()
+
+
+@dataclass
+class _HostDirectoryProof:
+    context: OperationsContext
+    host_root_proof: _HostRootProof
+    logical_path: str
+    path: Path
+    descriptors: list[int]
+    names: list[str]
+    metadata: list[os.stat_result]
+
+    @property
+    def descriptor(self) -> int | None:
+        return self.descriptors[-1] if self.descriptors else None
+
+
+def _revalidate_host_directory_proof(proof: _HostDirectoryProof) -> None:
+    context = proof.context
+    _revalidate_host_root_proof(proof.host_root_proof)
+    if not proof.descriptors:
+        current = context.host_root
+        for index, expected in enumerate(proof.metadata):
+            named = current.lstat()
+            _validate_host_directory_metadata(
+                named, context.effective_uid, "host path directory"
+            )
+            if _stable_file_metadata(named) != _stable_file_metadata(expected):
+                raise OperationStateError("host path directory changed during staging")
+            if index < len(proof.names):
+                current = current / proof.names[index]
+        return
+    root_opened = os.fstat(proof.descriptors[0])
+    root_named = os.fstat(proof.host_root_proof.descriptors[-1])
+    _validate_host_directory_metadata(
+        root_opened, context.effective_uid, "host_root"
+    )
+    if not _same_identity(root_opened, root_named):
+        raise OperationStateError("host_root path changed during staging")
+    for index, descriptor in enumerate(proof.descriptors):
+        opened = os.fstat(descriptor)
+        expected = proof.metadata[index]
+        _validate_host_directory_metadata(
+            opened, context.effective_uid, "host path directory"
+        )
+        if _stable_file_metadata(opened) != _stable_file_metadata(expected):
+            raise OperationStateError("host path directory changed during staging")
+        if index:
+            named = os.stat(
+                proof.names[index - 1],
+                dir_fd=proof.descriptors[index - 1],
+                follow_symlinks=False,
+            )
+            if not _same_identity(opened, named):
+                raise OperationStateError("host path binding changed during staging")
+
+
+@contextlib.contextmanager
+def _open_host_directory(context: OperationsContext, logical_path: str):
+    path = _host_path(context, logical_path)
+    components = list(PurePosixPath(logical_path).parts[1:])
+    host_root_proof = _open_host_root_proof(context)
+    if os.name != "posix" or not _descriptor_primitives_available():
+        try:
+            metadata: list[os.stat_result] = []
+            current = context.host_root
+            for component in (None, *components):
+                if component is not None:
+                    current = current / component
+                named = current.lstat()
+                _validate_host_directory_metadata(
+                    named, context.effective_uid, "host path directory"
+                )
+                metadata.append(named)
+            proof = _HostDirectoryProof(
+                context,
+                host_root_proof,
+                logical_path,
+                path,
+                [],
+                components,
+                metadata,
+            )
+            _revalidate_host_directory_proof(proof)
+            yield proof
+            _revalidate_host_directory_proof(proof)
+        finally:
+            _close_host_root_proof(host_root_proof)
+        return
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    descriptors: list[int] = []
+    metadata = []
+    try:
+        root_fd = os.dup(host_root_proof.descriptors[-1])
+        descriptors.append(root_fd)
+        root_metadata = os.fstat(root_fd)
+        _validate_host_directory_metadata(
+            root_metadata, context.effective_uid, "host_root"
+        )
+        metadata.append(root_metadata)
+        for component in components:
+            _validate_source_basename(component)
+            named = os.stat(component, dir_fd=descriptors[-1], follow_symlinks=False)
+            _validate_host_directory_metadata(
+                named, context.effective_uid, "host path directory"
+            )
+            child_fd = os.open(component, flags, dir_fd=descriptors[-1])
+            opened = os.fstat(child_fd)
+            if not _same_identity(named, opened):
+                os.close(child_fd)
+                raise OperationStateError("host path changed while opening")
+            descriptors.append(child_fd)
+            metadata.append(opened)
+        proof = _HostDirectoryProof(
+            context,
+            host_root_proof,
+            logical_path,
+            path,
+            descriptors,
+            components,
+            metadata,
+        )
+        _revalidate_host_directory_proof(proof)
+        yield proof
+        _revalidate_host_directory_proof(proof)
+    except OSError as exc:
+        raise OperationStateError("host directory access failed") from exc
+    finally:
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        _close_host_root_proof(host_root_proof)
+
+
+@dataclass
+class _HostFileProof:
+    directory: _HostDirectoryProof
+    name: str
+    path: Path
+    descriptor: int
+    metadata: os.stat_result
+    label: str
+    maximum_size: int
+    exact_mode: int
+
+
+def _revalidate_host_file_proof(proof: _HostFileProof) -> None:
+    _revalidate_host_directory_proof(proof.directory)
+    opened = os.fstat(proof.descriptor)
+    if proof.directory.descriptor is None:
+        named = proof.path.lstat()
+    else:
+        named = os.stat(
+            proof.name,
+            dir_fd=proof.directory.descriptor,
+            follow_symlinks=False,
+        )
+    for metadata in (opened, named):
+        _validate_host_file_metadata(
+            metadata,
+            proof.directory.context.effective_uid,
+            proof.label,
+            maximum_size=proof.maximum_size,
+            exact_mode=proof.exact_mode,
+        )
+    if (
+        _stable_file_metadata(opened) != _stable_file_metadata(proof.metadata)
+        or not _same_identity(opened, named)
+    ):
+        raise OperationStateError(f"{proof.label} changed during staging")
+
+
+@contextlib.contextmanager
+def _open_host_file_from_directory(
+    directory: _HostDirectoryProof,
+    name: str,
+    label: str,
+    *,
+    maximum_size: int,
+    exact_mode: int = 0o600,
+):
+    _validate_source_basename(name)
+    path = directory.path / name
+    descriptor: int | None = None
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        named = (
+            path.lstat()
+            if directory.descriptor is None
+            else os.stat(name, dir_fd=directory.descriptor, follow_symlinks=False)
+        )
+        _validate_host_file_metadata(
+            named,
+            directory.context.effective_uid,
+            label,
+            maximum_size=maximum_size,
+            exact_mode=exact_mode,
+        )
+        descriptor = (
+            os.open(path, flags)
+            if directory.descriptor is None
+            else os.open(name, flags, dir_fd=directory.descriptor)
+        )
+        opened = os.fstat(descriptor)
+        if not _same_identity(named, opened):
+            raise OperationStateError(f"{label} changed while opening")
+        proof = _HostFileProof(
+            directory,
+            name,
+            path,
+            descriptor,
+            opened,
+            label,
+            maximum_size,
+            exact_mode,
+        )
+        _revalidate_host_file_proof(proof)
+        yield proof
+        _revalidate_host_file_proof(proof)
+    except OSError as exc:
+        raise OperationStateError(f"{label} access failed") from exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+@contextlib.contextmanager
+def _open_host_file(
+    context: OperationsContext,
+    logical_path: str,
+    label: str,
+    *,
+    maximum_size: int,
+    exact_mode: int = 0o600,
+):
+    pure = PurePosixPath(logical_path)
+    parent = str(pure.parent)
+    with _open_host_directory(context, parent) as directory:
+        with _open_host_file_from_directory(
+            directory,
+            pure.name,
+            label,
+            maximum_size=maximum_size,
+            exact_mode=exact_mode,
+        ) as proof:
+            yield proof
+
+
+def _read_host_file(proof: _HostFileProof, maximum_size: int) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        os.lseek(proof.descriptor, 0, os.SEEK_SET)
+        while True:
+            chunk = os.read(proof.descriptor, min(64 * 1024, maximum_size + 1 - total))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > maximum_size:
+                raise OperationStateError(f"{proof.label} exceeds the size limit")
+            chunks.append(chunk)
+    except OSError as exc:
+        raise OperationStateError(f"{proof.label} read failed") from exc
+    _revalidate_host_file_proof(proof)
+    return b"".join(chunks)
+
+
+def _hash_host_file(proof: _HostFileProof) -> str:
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        os.lseek(proof.descriptor, 0, os.SEEK_SET)
+        while True:
+            chunk = os.read(proof.descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > proof.maximum_size:
+                raise OperationStateError(f"{proof.label} exceeds the size limit")
+            digest.update(chunk)
+    except OSError as exc:
+        raise OperationStateError(f"{proof.label} hash failed") from exc
+    _revalidate_host_file_proof(proof)
+    return digest.hexdigest()
+
+
+def _scrub_completed_process(completed: subprocess.CompletedProcess[str]) -> None:
+    completed.args = ("[REDACTED]",)
+    completed.stdout = "[REDACTED]"
+    completed.stderr = "[REDACTED]"
+
+
+def _checked_command(
+    context: OperationsContext,
+    argv: tuple[str, ...],
+    pass_fds: tuple[int, ...],
+    label: str,
+    *,
+    forbidden_values: tuple[str, ...] = (),
+) -> subprocess.CompletedProcess[str]:
+    try:
+        completed = context.command_runner(argv, pass_fds)
+    except Exception:
+        raise OperationStateError(f"{label} failed") from None
+    if type(completed) is not subprocess.CompletedProcess:
+        raise OperationStateError(f"{label} returned an invalid result")
+    fields = (repr(completed.args), completed.stdout, completed.stderr)
+    invalid_types = type(completed.stdout) is not str or type(completed.stderr) is not str
+    if invalid_types:
+        _scrub_completed_process(completed)
+        raise OperationStateError(f"{label} returned invalid output")
+    assert isinstance(completed.stdout, str) and isinstance(completed.stderr, str)
+    combined = "\n".join(str(value) for value in fields)
+    leaked = any(value and value in combined for value in forbidden_values)
+    leaked = leaked or _string_contains_secret(completed.stdout) or _string_contains_secret(
+        completed.stderr
+    )
+    if leaked:
+        _scrub_completed_process(completed)
+        raise OperationStateError(f"{label} returned unsafe output")
+    if tuple(str(value) for value in completed.args) != argv:
+        _scrub_completed_process(completed)
+        raise OperationStateError(f"{label} returned mismatched command evidence")
+    if (
+        len(completed.stdout.encode("utf-8")) > _MAX_COMMAND_OUTPUT_BYTES
+        or len(completed.stderr.encode("utf-8")) > _MAX_COMMAND_OUTPUT_BYTES
+    ):
+        _scrub_completed_process(completed)
+        raise OperationStateError(f"{label} output exceeds the size limit")
+    if type(completed.returncode) is not int or completed.returncode != 0:
+        completed.stdout = ""
+        completed.stderr = ""
+        raise OperationStateError(f"{label} failed")
+    return completed
+
+
+@dataclass
+class _BackupPairProof:
+    directory: _HostDirectoryProof
+    dump: _HostFileProof
+    sidecar: _HostFileProof
+    dump_basename: str
+    sidecar_basename: str
+    timestamp: str
+    prefix: str
+    dump_sha256: str
+    sidecar_bytes: bytes
+
+
+def _revalidate_backup_pair(proof: _BackupPairProof, *, rehash: bool = True) -> None:
+    inventory = _inventory_backup_directory(proof.directory)
+    selected = _select_newest_complete_pair(inventory)
+    if selected != (
+        proof.dump_basename,
+        proof.sidecar_basename,
+        proof.timestamp,
+        proof.prefix,
+    ):
+        raise OperationStateError("selected backup pair is no longer the unique newest pair")
+    _revalidate_host_file_proof(proof.dump)
+    _revalidate_host_file_proof(proof.sidecar)
+    sidecar = _read_host_file(proof.sidecar, 256)
+    if sidecar != proof.sidecar_bytes:
+        raise OperationStateError("backup sidecar changed during staging")
+    if rehash and _hash_host_file(proof.dump) != proof.dump_sha256:
+        raise OperationStateError("backup dump changed during staging")
+    _revalidate_host_file_proof(proof.dump)
+    _revalidate_host_file_proof(proof.sidecar)
+    final_inventory = _inventory_backup_directory(proof.directory)
+    if _select_newest_complete_pair(final_inventory) != selected:
+        raise OperationStateError("backup pair inventory changed during staging")
+    if (
+        not _same_identity(final_inventory[proof.dump_basename], proof.dump.metadata)
+        or not _same_identity(
+            final_inventory[proof.sidecar_basename], proof.sidecar.metadata
+        )
+    ):
+        raise OperationStateError("selected backup pair path binding changed")
+
+
+def _inventory_backup_directory(directory: _HostDirectoryProof) -> dict[str, os.stat_result]:
+    scan_target: int | Path = (
+        directory.descriptor if directory.descriptor is not None else directory.path
+    )
+    try:
+        iterator = os.scandir(scan_target)
+    except OSError as exc:
+        raise OperationStateError("backup directory listing failed") from exc
+    inventory: dict[str, os.stat_result] = {}
+    folded: set[str] = set()
+    try:
+        with iterator:
+            for entry in iterator:
+                if len(inventory) >= _MAX_BACKUP_ENTRIES:
+                    raise OperationStateError("backup directory exceeds the entry bound")
+                name = entry.name
+                _validate_source_basename(name)
+                folded_name = name.casefold()
+                if folded_name in folded:
+                    raise OperationStateError("backup directory contains casefold-colliding names")
+                folded.add(folded_name)
+                if _BACKUP_NAME_RE.fullmatch(name) is None:
+                    raise OperationStateError("backup directory contains an unsafe or ambiguous name")
+                metadata = (
+                    (directory.path / name).lstat()
+                    if directory.descriptor is None
+                    else os.stat(name, dir_fd=directory.descriptor, follow_symlinks=False)
+                )
+                maximum = 256 if name.endswith(".sha256") else _MAX_BACKUP_DUMP_BYTES
+                _validate_host_file_metadata(
+                    metadata,
+                    directory.context.effective_uid,
+                    "backup pair file",
+                    maximum_size=maximum,
+                )
+                inventory[name] = metadata
+    except OSError as exc:
+        raise OperationStateError("backup directory enumeration failed") from exc
+    _revalidate_host_directory_proof(directory)
+    return inventory
+
+
+def _select_newest_complete_pair(
+    inventory: dict[str, os.stat_result],
+) -> tuple[str, str, str, str]:
+    groups: dict[str, set[str]] = {}
+    parsed: dict[str, tuple[str, str]] = {}
+    for name in inventory:
+        match = _BACKUP_NAME_RE.fullmatch(name)
+        assert match is not None
+        dump_name = name[:-7] if name.endswith(".sha256") else name
+        groups.setdefault(dump_name, set()).add(name)
+        parsed[dump_name] = (match.group("stamp"), match.group("prefix"))
+    if not groups:
+        raise OperationStateError("no verified local backup pair exists")
+    for dump_name, names in groups.items():
+        expected = {dump_name, dump_name + ".sha256"}
+        if names != expected:
+            raise OperationStateError("backup directory contains an incomplete pair")
+    ranked: list[tuple[datetime, str, str, str]] = []
+    for dump_name, (stamp, prefix) in parsed.items():
+        try:
+            parsed_stamp = datetime.strptime(stamp, "%Y%m%dT%H%M%SZ")
+        except ValueError as exc:
+            raise OperationStateError("backup filename timestamp is invalid") from exc
+        ranked.append((parsed_stamp, dump_name, stamp, prefix))
+    newest_time = max(item[0] for item in ranked)
+    newest = [item for item in ranked if item[0] == newest_time]
+    if len(newest) != 1:
+        raise OperationStateError("newest backup pair timestamp is ambiguous")
+    _, dump_name, stamp, prefix = newest[0]
+    return dump_name, dump_name + ".sha256", stamp, prefix
+
+
+@contextlib.contextmanager
+def _open_verified_backup_pair(
+    context: OperationsContext,
+    backup_dir: str,
+):
+    with _open_host_directory(context, backup_dir) as directory:
+        inventory = _inventory_backup_directory(directory)
+        dump_name, sidecar_name, timestamp, prefix = _select_newest_complete_pair(
+            inventory
+        )
+        with _open_host_file_from_directory(
+            directory,
+            dump_name,
+            "backup dump",
+            maximum_size=_MAX_BACKUP_DUMP_BYTES,
+        ) as dump:
+            with _open_host_file_from_directory(
+                directory,
+                sidecar_name,
+                "backup sidecar",
+                maximum_size=256,
+            ) as sidecar:
+                sidecar_bytes = _read_host_file(sidecar, 256)
+                expected_sidecar_prefix = b"  " + dump_name.encode("ascii") + b"\n"
+                if (
+                    len(sidecar_bytes) != 64 + len(expected_sidecar_prefix)
+                    or sidecar_bytes[64:] != expected_sidecar_prefix
+                ):
+                    raise OperationStateError("backup sidecar record grammar is invalid")
+                try:
+                    recorded_sha256 = sidecar_bytes[:64].decode("ascii")
+                except UnicodeDecodeError as exc:
+                    raise OperationStateError("backup sidecar record is not ASCII") from exc
+                if _SHA256_RE.fullmatch(recorded_sha256) is None:
+                    raise OperationStateError("backup sidecar digest is invalid")
+                dump_sha256 = _hash_host_file(dump)
+                if dump_sha256 != recorded_sha256:
+                    raise OperationStateError("backup dump SHA-256 does not match its sidecar")
+                _revalidate_host_file_proof(dump)
+                _revalidate_host_file_proof(sidecar)
+                completed = _checked_command(
+                    context,
+                    (_PG_RESTORE_EXECUTABLE, "--list", str(dump.path)),
+                    (),
+                    "PostgreSQL archive verification",
+                )
+                if completed.stderr:
+                    raise OperationStateError("PostgreSQL archive verification returned stderr")
+                proof = _BackupPairProof(
+                    directory,
+                    dump,
+                    sidecar,
+                    dump_name,
+                    sidecar_name,
+                    timestamp,
+                    prefix,
+                    dump_sha256,
+                    sidecar_bytes,
+                )
+                _revalidate_backup_pair(proof)
+                yield proof
+                _revalidate_backup_pair(proof)
+
+
+def _parse_app_environment(raw: bytes) -> str:
+    if not raw or len(raw) > _MAX_APP_ENV_BYTES:
+        raise OperationStateError("application environment size is invalid")
+    if b"\0" in raw or b"\r" in raw:
+        raise OperationStateError("application environment contains unsafe bytes")
+    try:
+        text = raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise OperationStateError("application environment is not strict UTF-8") from exc
+    values: dict[str, str] = {}
+    for line in text.split("\n"):
+        if not line or line.startswith("#"):
+            continue
+        match = _APP_ENV_ASSIGNMENT_RE.fullmatch(line)
+        if match is None:
+            raise OperationStateError("application environment syntax is unsupported")
+        key = match.group("key")
+        value = match.group("value")
+        if key in values:
+            raise OperationStateError("application environment contains a duplicate key")
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        elif value.startswith(("'", '"')) or value.endswith(("'", '"')):
+            raise OperationStateError("application environment quoting is unsafe")
+        if not value or any(ord(character) < 0x21 or ord(character) > 0x7E for character in value):
+            raise OperationStateError("application environment value is unsafe")
+        values[key] = value
+    if "DATABASE_URL" not in values:
+        raise OperationStateError("DATABASE_URL is missing from the application environment")
+    database_url = values["DATABASE_URL"]
+    if database_url.startswith("postgresql+psycopg://"):
+        database_url = "postgresql://" + database_url[len("postgresql+psycopg://") :]
+    elif not database_url.startswith(("postgresql://", "postgres://")):
+        raise OperationStateError("DATABASE_URL uses an unsupported PostgreSQL URI scheme")
+    encoded = database_url.encode("utf-8")
+    if not encoded or len(encoded) > _MAX_DATABASE_URL_BYTES:
+        raise OperationStateError("DATABASE_URL size is invalid")
+    return database_url
+
+
+def _write_secret_pipe(payload: bytes) -> tuple[int, int]:
+    if len(payload) > _MAX_DATABASE_URL_BYTES:
+        raise OperationStateError("database transport payload is oversized")
+    if hasattr(os, "pipe2") and os.name == "posix":
+        return os.pipe2(getattr(os, "O_CLOEXEC", 0))
+    read_fd, write_fd = os.pipe()
+    try:
+        os.set_inheritable(read_fd, False)
+        os.set_inheritable(write_fd, False)
+    except BaseException:
+        for descriptor in (read_fd, write_fd):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise
+    return read_fd, write_fd
+
+
+def _query_current_database(context: OperationsContext, database_url: str) -> str:
+    payload = database_url.encode("utf-8")
+    read_fd: int | None = None
+    write_fd: int | None = None
+    writer: threading.Thread | None = None
+    writer_started = False
+    writer_errors: list[BaseException] = []
+
+    def write_payload(descriptor: int) -> None:
+        try:
+            offset = 0
+            while offset < len(payload):
+                written = os.write(descriptor, payload[offset:])
+                if written <= 0:
+                    raise OperationStateError(
+                        "database transport write made no progress"
+                    )
+                offset += written
+        except BaseException as exc:
+            writer_errors.append(exc)
+        finally:
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                writer_errors.append(exc)
+
+    try:
+        read_fd, write_fd = _write_secret_pipe(payload)
+        writer = threading.Thread(
+            target=write_payload,
+            args=(write_fd,),
+            name="degen-pgdatabase-fd-writer",
+            daemon=True,
+        )
+        writer.start()
+        writer_started = True
+        write_fd = None
+        argv = (
+            sys.executable,
+            "-c",
+            _INHERITED_FD_EXEC_SHIM,
+            "pgdatabase",
+            str(read_fd),
+            _PSQL_EXECUTABLE,
+            "psql",
+            "--no-psqlrc",
+            "--tuples-only",
+            "--no-align",
+            "--command",
+            "SELECT current_database();",
+        )
+        completed = _checked_command(
+            context,
+            argv,
+            (read_fd,),
+            "PostgreSQL identity query",
+            forbidden_values=(database_url,),
+        )
+    except OperationStateError:
+        raise
+    except Exception:
+        raise OperationStateError("PostgreSQL identity query failed") from None
+    finally:
+        for descriptor in (read_fd, write_fd):
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+        if writer is not None and writer_started:
+            writer.join(timeout=5)
+            if writer.is_alive():
+                raise OperationStateError("database transport writer did not terminate")
+    if writer_errors:
+        raise OperationStateError("database transport write failed")
+    if completed.stderr or not completed.stdout.endswith("\n"):
+        raise OperationStateError("PostgreSQL identity query returned invalid output")
+    value = completed.stdout[:-1]
+    if "\n" in value or "\r" in value or _SAFE_LABEL_RE.fullmatch(value) is None:
+        raise OperationStateError("PostgreSQL identity label is unsafe")
+    return value
+
+
+def _query_hostname(context: OperationsContext) -> str:
+    completed = _checked_command(
+        context,
+        (_HOSTNAME_EXECUTABLE, "-s"),
+        (),
+        "hostname query",
+    )
+    if completed.stderr or not completed.stdout.endswith("\n"):
+        raise OperationStateError("hostname query returned invalid output")
+    value = completed.stdout[:-1]
+    if "\n" in value or "\r" in value or _SAFE_LABEL_RE.fullmatch(value) is None:
+        raise OperationStateError("hostname label is unsafe")
+    return value
+
+
+def _load_verified_environment_helper(raw: bytes) -> types.ModuleType:
+    if not raw or len(raw) > _MAX_SOURCE_FILE_BYTES:
+        raise OperationStateError("verified environment helper size is invalid")
+    module_name = "_degen_manifest_verified_backup_environment_helper"
+    module = types.ModuleType(module_name)
+    module.__file__ = "<manifest-verified-degen-prod-db-backup-env.py>"
+    previous = sys.modules.get(module_name)
+    try:
+        code = compile(raw, module.__file__, "exec", dont_inherit=True)
+        sys.modules[module_name] = module
+        exec(code, module.__dict__)
+    except Exception:
+        raise OperationStateError("manifest-verified environment helper failed to load") from None
+    finally:
+        if previous is None:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = previous
+    defaults = getattr(module, "MANAGED_DEFAULTS", None)
+    managed_keys = getattr(module, "MANAGED_KEYS", None)
+    if (
+        type(defaults) is not dict
+        or not isinstance(managed_keys, frozenset)
+        or not callable(getattr(module, "parse_simple_environment", None))
+        or not callable(getattr(module, "validate_effective_configuration", None))
+        or not callable(getattr(module, "render_managed_environment", None))
+        or not callable(getattr(module, "_render_bytes", None))
+    ):
+        raise OperationStateError("manifest-verified environment helper API is invalid")
+    if managed_keys != frozenset((*defaults, "BACKUP_PREFIX")):
+        raise OperationStateError("manifest-verified environment helper managed keys are invalid")
+    return module
+
+
+def _parse_live_managed_environment(
+    helper: types.ModuleType,
+    proof: _HostFileProof,
+    raw: bytes,
+    effective_uid: int,
+) -> tuple[object, dict[str, str]]:
+    try:
+        parsed = helper.parse_simple_environment(proof.path)
+        if parsed.raw_bytes != raw:
+            raise OperationStateError("live managed environment changed while parsing")
+        if not _same_identity(parsed.source_metadata, proof.metadata):
+            raise OperationStateError("live managed environment path changed while parsing")
+        effective = helper.validate_effective_configuration(
+            parsed.values,
+            effective_uid=effective_uid,
+        )
+    except OperationStateError:
+        raise
+    except Exception:
+        raise OperationStateError("live managed environment is invalid") from None
+    if type(effective) is not dict or any(
+        type(key) is not str or type(value) is not str
+        for key, value in effective.items()
+    ):
+        raise OperationStateError("live managed configuration result is invalid")
+    if effective.get("REMOTE_PRUNE_ENABLED") != "0":
+        raise OperationStateError(
+            "live remote prune policy is enabled and cannot be silently reversed"
+        )
+    return parsed, effective
+
+
+def _unsafe_environment_payload(raw: bytes) -> bool:
+    try:
+        text = raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return True
+    return any(
+        pattern.search(text) is not None
+        for pattern in (
+            _DATABASE_URL_RE,
+            _URL_USERINFO_RE,
+            _SECRET_ASSIGNMENT_RE,
+            _PRIVATE_KEY_RE,
+            _RCLONE_CONTENT_RE,
+            _BEARER_RE,
+            _TOKEN_PREFIX_RE,
+        )
+    )
+
+
+def _write_exclusive_staged_file(
+    path: Path,
+    data: bytes,
+    mode: int,
+    *,
+    effective_uid: int,
+    directories: _StageDirectoryProof,
+) -> os.stat_result:
+    if len(data) > _MAX_SOURCE_FILE_BYTES:
+        raise OperationStateError("staged file exceeds the size limit")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor: int | None = None
+    parent_relative = path.parent.relative_to(directories.context.paths.staged_dir).as_posix()
+    if parent_relative == ".":
+        parent_relative = "."
+    basename = path.name
+    try:
+        _revalidate_stage_directories(directories)
+        parent_fd = directories.descriptors.get(parent_relative)
+        descriptor = (
+            os.open(basename, flags, mode, dir_fd=parent_fd)
+            if parent_fd is not None
+            else os.open(path, flags, mode)
+        )
+        if hasattr(os, "fchmod"):
+            os.fchmod(descriptor, mode)
+        _write_all(descriptor, data)
+        os.fsync(descriptor)
+        opened = os.fstat(descriptor)
+        named = (
+            os.stat(basename, dir_fd=parent_fd, follow_symlinks=False)
+            if parent_fd is not None
+            else path.lstat()
+        )
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != effective_uid
+            or opened.st_nlink != 1
+            or not _same_identity(opened, named)
+            or opened.st_size != len(data)
+        ):
+            raise OperationStateError("staged file binding is invalid")
+        if os.name == "posix" and stat.S_IMODE(opened.st_mode) != mode:
+            raise OperationStateError("staged file mode is invalid")
+        _refresh_stage_directory_metadata(directories, parent_relative)
+        _revalidate_stage_directories(directories)
+        return opened
+    except OSError as exc:
+        raise OperationStateError("staged file creation failed") from exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _stage_relative_paths() -> tuple[set[str], set[str]]:
+    files = {f"reviewed/{source}" for source in _SOURCE_ASSETS}
+    files.update(
+        {
+            "host/etc/degen/prod-db-backup.env",
+            "host-stage-manifest.json",
+        }
+    )
+    directories = {"."}
+    for relative in files:
+        parent = PurePosixPath(relative).parent
+        while str(parent) not in ("", "."):
+            directories.add(str(parent))
+            parent = parent.parent
+    return files, directories
+
+
+@dataclass
+class _StageDirectoryProof:
+    context: OperationsContext
+    operation_directory_fd: int | None
+    descriptors: dict[str, int]
+    metadata: dict[str, os.stat_result]
+
+
+def _stage_stable_metadata(metadata: os.stat_result) -> tuple[int, ...]:
+    values = _stable_file_metadata(metadata)
+    if os.name == "posix":
+        return values
+    # Windows fstat/path-stat can disagree on ctime by one filesystem tick
+    # merely from opening a file. mtime still detects content rewrites.
+    return values[:5] + values[6:]
+
+
+def _stage_directory_path(context: OperationsContext, relative: str) -> Path:
+    return (
+        context.paths.staged_dir
+        if relative == "."
+        else context.paths.staged_dir.joinpath(*relative.split("/"))
+    )
+
+
+def _validate_stage_directory_metadata(
+    metadata: os.stat_result,
+    context: OperationsContext,
+) -> None:
+    _validate_host_directory_metadata(metadata, context.effective_uid, "staged directory")
+    if os.name == "posix" and stat.S_IMODE(metadata.st_mode) != 0o700:
+        raise OperationStateError("staged directory must have mode 0700")
+
+
+def _revalidate_stage_directories(proof: _StageDirectoryProof) -> None:
+    context = proof.context
+    for relative, initial in proof.metadata.items():
+        descriptor = proof.descriptors.get(relative)
+        if relative == ".":
+            if descriptor is not None and proof.operation_directory_fd is not None:
+                named = os.stat(
+                    "staged",
+                    dir_fd=proof.operation_directory_fd,
+                    follow_symlinks=False,
+                )
+            else:
+                named = context.paths.staged_dir.lstat()
+        else:
+            parent = PurePosixPath(relative).parent.as_posix()
+            if parent == ".":
+                parent = "."
+            parent_fd = proof.descriptors.get(parent)
+            name = PurePosixPath(relative).name
+            named = (
+                os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                if parent_fd is not None
+                else _stage_directory_path(context, relative).lstat()
+            )
+        opened = os.fstat(descriptor) if descriptor is not None else named
+        _validate_stage_directory_metadata(opened, context)
+        _validate_stage_directory_metadata(named, context)
+        if (
+            _stage_stable_metadata(opened) != _stage_stable_metadata(initial)
+            or not _same_identity(opened, named)
+        ):
+            raise OperationStateError("staged directory binding changed")
+
+
+def _refresh_stage_directory_metadata(
+    proof: _StageDirectoryProof,
+    relative: str,
+) -> None:
+    descriptor = proof.descriptors.get(relative)
+    path = _stage_directory_path(proof.context, relative)
+    if descriptor is not None:
+        opened = os.fstat(descriptor)
+        if relative == ".":
+            assert proof.operation_directory_fd is not None
+            named = os.stat(
+                "staged",
+                dir_fd=proof.operation_directory_fd,
+                follow_symlinks=False,
+            )
+        else:
+            pure = PurePosixPath(relative)
+            parent = pure.parent.as_posix()
+            if parent == ".":
+                parent = "."
+            named = os.stat(
+                pure.name,
+                dir_fd=proof.descriptors[parent],
+                follow_symlinks=False,
+            )
+    else:
+        opened = path.lstat()
+        named = path.lstat()
+    _validate_stage_directory_metadata(opened, proof.context)
+    if not _same_identity(opened, named):
+        raise OperationStateError("staged directory binding changed during mutation")
+    proof.metadata[relative] = opened
+
+
+def _close_stage_directories(proof: _StageDirectoryProof) -> None:
+    for descriptor in reversed(list(proof.descriptors.values())):
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+    proof.descriptors.clear()
+
+
+def _open_stage_directories(
+    context: OperationsContext,
+    operation_directory_fd: int | None,
+    *,
+    create: bool,
+) -> _StageDirectoryProof:
+    _, expected_directories = _stage_relative_paths()
+    ordered = sorted(
+        expected_directories,
+        key=lambda value: (value.count("/"), value),
+    )
+    descriptors: dict[str, int] = {}
+    metadata: dict[str, os.stat_result] = {}
+    use_descriptors = os.name == "posix" and operation_directory_fd is not None
+    try:
+        if use_descriptors:
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+            if create:
+                os.mkdir("staged", 0o700, dir_fd=operation_directory_fd)
+            root_fd = os.open("staged", flags, dir_fd=operation_directory_fd)
+            descriptors["."] = root_fd
+            root_metadata = os.fstat(root_fd)
+            named_root = os.stat(
+                "staged", dir_fd=operation_directory_fd, follow_symlinks=False
+            )
+            if not _same_identity(root_metadata, named_root):
+                raise OperationStateError("staged root changed while opening")
+            if create:
+                os.fchmod(root_fd, 0o700)
+            root_metadata = os.fstat(root_fd)
+            _validate_stage_directory_metadata(root_metadata, context)
+            metadata["."] = root_metadata
+            for relative in (item for item in ordered if item != "."):
+                pure = PurePosixPath(relative)
+                parent = pure.parent.as_posix()
+                if parent == ".":
+                    parent = "."
+                parent_fd = descriptors[parent]
+                if create:
+                    os.mkdir(pure.name, 0o700, dir_fd=parent_fd)
+                child_fd = os.open(pure.name, flags, dir_fd=parent_fd)
+                descriptors[relative] = child_fd
+                opened = os.fstat(child_fd)
+                named = os.stat(
+                    pure.name, dir_fd=parent_fd, follow_symlinks=False
+                )
+                if not _same_identity(opened, named):
+                    raise OperationStateError("staged directory changed while opening")
+                if create:
+                    os.fchmod(child_fd, 0o700)
+                opened = os.fstat(child_fd)
+                _validate_stage_directory_metadata(opened, context)
+                metadata[relative] = opened
+        else:
+            if create:
+                context.paths.staged_dir.mkdir(mode=0o700)
+                if os.name == "posix":
+                    context.paths.staged_dir.chmod(0o700)
+            for relative in ordered:
+                path = _stage_directory_path(context, relative)
+                if create and relative != ".":
+                    path.mkdir(mode=0o700)
+                    if os.name == "posix":
+                        path.chmod(0o700)
+                opened = path.lstat()
+                _validate_stage_directory_metadata(opened, context)
+                metadata[relative] = opened
+        proof = _StageDirectoryProof(
+            context,
+            operation_directory_fd,
+            descriptors,
+            metadata,
+        )
+        for relative in ordered:
+            _refresh_stage_directory_metadata(proof, relative)
+        _revalidate_stage_directories(proof)
+        return proof
+    except BaseException as exc:
+        for descriptor in reversed(list(descriptors.values())):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if isinstance(exc, OperationStateError):
+            raise
+        raise OperationStateError("staged directory cannot be created safely") from exc
+
+
+def _inventory_stage(
+    context: OperationsContext,
+    stage_directories: _StageDirectoryProof,
+) -> tuple[dict[str, os.stat_result], dict[str, os.stat_result]]:
+    _revalidate_stage_directories(stage_directories)
+    if stage_directories.descriptors:
+        files: dict[str, os.stat_result] = {}
+        directories = dict(stage_directories.metadata)
+        for relative_parent, descriptor in stage_directories.descriptors.items():
+            try:
+                iterator = os.scandir(descriptor)
+            except OSError as exc:
+                raise OperationStateError("staged directory inventory failed") from exc
+            with iterator:
+                for entry in iterator:
+                    if len(files) + len(directories) > 128:
+                        raise OperationStateError("staged directory exceeds the entry bound")
+                    _validate_source_basename(entry.name)
+                    relative = (
+                        entry.name
+                        if relative_parent == "."
+                        else f"{relative_parent}/{entry.name}"
+                    )
+                    metadata = os.stat(
+                        entry.name,
+                        dir_fd=descriptor,
+                        follow_symlinks=False,
+                    )
+                    if stat.S_ISDIR(metadata.st_mode):
+                        if relative not in stage_directories.metadata:
+                            directories[relative] = metadata
+                    elif stat.S_ISREG(metadata.st_mode):
+                        if metadata.st_uid != context.effective_uid or metadata.st_nlink != 1:
+                            raise OperationStateError(
+                                "staged file ownership or link count is unsafe"
+                            )
+                        files[relative] = metadata
+                    else:
+                        raise OperationStateError(
+                            "staged inventory contains a link or special file"
+                        )
+        _revalidate_stage_directories(stage_directories)
+        return files, directories
+    root = context.paths.staged_dir
+    try:
+        root_metadata = root.lstat()
+    except OSError as exc:
+        raise OperationStateError("staged directory is unavailable") from exc
+    _validate_host_directory_metadata(
+        root_metadata, context.effective_uid, "staged directory"
+    )
+    if os.name == "posix" and stat.S_IMODE(root_metadata.st_mode) != 0o700:
+        raise OperationStateError("staged directory must have mode 0700")
+    files: dict[str, os.stat_result] = {}
+    directories: dict[str, os.stat_result] = {".": root_metadata}
+
+    def walk(path: Path, relative_parent: str) -> None:
+        try:
+            iterator = os.scandir(path)
+        except OSError as exc:
+            raise OperationStateError("staged directory inventory failed") from exc
+        with iterator:
+            for entry in iterator:
+                if len(files) + len(directories) > 128:
+                    raise OperationStateError("staged directory exceeds the entry bound")
+                _validate_source_basename(entry.name)
+                relative = (
+                    f"{relative_parent}/{entry.name}" if relative_parent else entry.name
+                )
+                metadata = (path / entry.name).lstat()
+                if stat.S_ISDIR(metadata.st_mode):
+                    _validate_host_directory_metadata(
+                        metadata, context.effective_uid, "staged directory"
+                    )
+                    if os.name == "posix" and stat.S_IMODE(metadata.st_mode) != 0o700:
+                        raise OperationStateError("staged subdirectory must have mode 0700")
+                    directories[relative] = metadata
+                    walk(path / entry.name, relative)
+                elif stat.S_ISREG(metadata.st_mode):
+                    if metadata.st_uid != context.effective_uid or metadata.st_nlink != 1:
+                        raise OperationStateError("staged file ownership or link count is unsafe")
+                    files[relative] = metadata
+                else:
+                    raise OperationStateError("staged inventory contains a link or special file")
+
+    walk(root, "")
+    _revalidate_stage_directories(stage_directories)
+    return files, directories
+
+
+@dataclass
+class _HostStageProof:
+    context: OperationsContext
+    stage_directories: _StageDirectoryProof
+    expected_bytes: dict[str, bytes]
+    expected_modes: dict[str, int]
+    file_descriptors: dict[str, int]
+    file_metadata: dict[str, os.stat_result]
+    directory_metadata: dict[str, os.stat_result]
+
+
+def _decode_strict_manifest(raw: bytes) -> dict[str, object]:
+    if not raw or len(raw) > _MAX_STAGED_MANIFEST_BYTES or not raw.endswith(b"\n"):
+        raise OperationStateError("host-stage manifest encoding is invalid")
+    try:
+        value = json.loads(
+            raw,
+            object_pairs_hook=_reject_duplicate_pairs,
+            parse_constant=_reject_nonfinite,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise OperationStateError("host-stage manifest is invalid") from exc
+    if type(value) is not dict:
+        raise OperationStateError("host-stage manifest must be an object")
+    canonical = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("ascii") + b"\n"
+    if canonical != raw:
+        raise OperationStateError("host-stage manifest is not canonical")
+    return value
+
+
+def _capture_host_stage_proof(
+    context: OperationsContext,
+    stage_directories: _StageDirectoryProof,
+    expected_bytes: dict[str, bytes],
+    expected_modes: dict[str, int],
+    expected_manifest: dict[str, object],
+) -> _HostStageProof:
+    expected_files, expected_directories = _stage_relative_paths()
+    if set(expected_bytes) != expected_files or set(expected_modes) != expected_files:
+        raise OperationStateError("host-stage expected inventory is incomplete")
+    files, directories = _inventory_stage(context, stage_directories)
+    if set(files) != expected_files or set(directories) != expected_directories:
+        raise OperationStateError("host-stage inventory contains missing or extra paths")
+    descriptors: dict[str, int] = {}
+    flags = (os.O_RDONLY if os.name == "posix" else os.O_RDWR) | getattr(
+        os, "O_BINARY", 0
+    )
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        for relative in sorted(expected_files):
+            path = context.paths.staged_dir.joinpath(*relative.split("/"))
+            pure = PurePosixPath(relative)
+            parent = pure.parent.as_posix()
+            if parent == ".":
+                parent = "."
+            parent_fd = stage_directories.descriptors.get(parent)
+            descriptor = (
+                os.open(pure.name, flags, dir_fd=parent_fd)
+                if parent_fd is not None
+                else os.open(path, flags)
+            )
+            descriptors[relative] = descriptor
+            opened = os.fstat(descriptor)
+            metadata = files[relative]
+            if not _same_identity(opened, metadata):
+                raise OperationStateError("host-stage file changed while proof opened")
+            if os.name == "posix" and stat.S_IMODE(metadata.st_mode) != expected_modes[relative]:
+                raise OperationStateError("host-stage file mode does not match its manifest")
+        proof = _HostStageProof(
+            context,
+            stage_directories,
+            dict(expected_bytes),
+            dict(expected_modes),
+            descriptors,
+            files,
+            directories,
+        )
+        _revalidate_host_stage_proof(proof, expected_manifest)
+        return proof
+    except BaseException:
+        for descriptor in descriptors.values():
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise
+
+
+def _revalidate_host_stage_proof(
+    proof: _HostStageProof,
+    expected_manifest: dict[str, object],
+) -> None:
+    expected_files, expected_directories = _stage_relative_paths()
+    current_files, current_directories = _inventory_stage(
+        proof.context,
+        proof.stage_directories,
+    )
+    if set(current_files) != expected_files or set(current_directories) != expected_directories:
+        raise OperationStateError("host-stage inventory changed after verification")
+    for relative, initial in proof.file_metadata.items():
+        descriptor = proof.file_descriptors[relative]
+        opened_before = os.fstat(descriptor)
+        current = current_files[relative]
+        if (
+            not _same_identity(initial, opened_before)
+            or not _same_identity(opened_before, current)
+            or _stage_stable_metadata(initial)
+            != _stage_stable_metadata(opened_before)
+            or _stage_stable_metadata(opened_before) != _stage_stable_metadata(current)
+        ):
+            raise OperationStateError("host-stage file path changed after verification")
+        maximum = (
+            _MAX_STAGED_MANIFEST_BYTES
+            if relative == "host-stage-manifest.json"
+            else _MAX_SOURCE_FILE_BYTES
+        )
+        try:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = os.read(descriptor, min(64 * 1024, maximum + 1 - total))
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > maximum:
+                    raise OperationStateError("host-stage file exceeds the size limit")
+                chunks.append(chunk)
+            opened_after = os.fstat(descriptor)
+        except OSError as exc:
+            raise OperationStateError("host-stage held file read failed") from exc
+        if _stage_stable_metadata(opened_after) != _stage_stable_metadata(opened_before):
+            raise OperationStateError("host-stage held file changed while reading")
+        raw = b"".join(chunks)
+        if raw != proof.expected_bytes[relative]:
+            raise OperationStateError("host-stage file bytes changed after verification")
+        if relative == "host-stage-manifest.json" and _decode_strict_manifest(raw) != expected_manifest:
+            raise OperationStateError("host-stage manifest contents changed")
+    for relative, initial in proof.directory_metadata.items():
+        current = current_directories[relative]
+        if (
+            not _same_identity(initial, current)
+            or _stage_stable_metadata(initial)
+            != _stage_stable_metadata(current)
+        ):
+            raise OperationStateError("host-stage directory path changed after verification")
+
+
+def _close_host_stage_proof(proof: _HostStageProof) -> None:
+    for descriptor in proof.file_descriptors.values():
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+    proof.file_descriptors.clear()
+    _close_stage_directories(proof.stage_directories)
+
+
+def _fsync_host_stage_proof(proof: _HostStageProof, manifest: dict[str, object]) -> None:
+    _revalidate_host_stage_proof(proof, manifest)
+    for descriptor in proof.file_descriptors.values():
+        try:
+            os.fsync(descriptor)
+        except OSError as exc:
+            raise OperationStateError("host-stage held file fsync failed") from exc
+    _fsync_stage_directories(proof.context, proof.stage_directories)
+    _revalidate_host_stage_proof(proof, manifest)
+
+
+def _host_stage_manifest(
+    context: OperationsContext,
+    asset_hashes: dict[str, str],
+    environment_sha256: str,
+    pair: _BackupPairProof,
+) -> dict[str, object]:
+    target_by_source = dict(_SOURCE_TO_TARGET)
+    reviewed_assets: list[dict[str, object]] = []
+    for source in sorted(_SOURCE_ASSETS):
+        reviewed_assets.append(
+            {
+                "mode": 0o755 if source in _EXECUTABLE_SOURCE_ASSETS else 0o644,
+                "sha256": asset_hashes[source],
+                "source": source,
+                "staged_path": f"reviewed/{source}",
+                "target": target_by_source.get(source),
+            }
+        )
+    return {
+        "schema_version": 1,
+        "operation": {
+            "archive_sha256": context.expected_archive_sha256,
+            "commit": context.expected_commit,
+            "manifest_sha256": context.expected_manifest_sha256,
+            "operation_dir": str(context.paths.operation_dir),
+            "operation_id": context.operation_id,
+        },
+        "selected_pair": {
+            "dump_basename": pair.dump_basename,
+            "dump_sha256": pair.dump_sha256,
+        },
+        "reviewed_assets": reviewed_assets,
+        "host_environment": {
+            "mode": 0o600,
+            "sha256": environment_sha256,
+            "staged_path": "host/etc/degen/prod-db-backup.env",
+            "target": "/etc/degen/prod-db-backup.env",
+        },
+    }
+
+
+def _canonical_host_stage_manifest(manifest: dict[str, object]) -> bytes:
+    raw = json.dumps(
+        manifest,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("ascii") + b"\n"
+    if len(raw) > _MAX_STAGED_MANIFEST_BYTES:
+        raise OperationStateError("host-stage manifest exceeds the size limit")
+    return raw
+
+
+def _validate_rendered_environment(
+    helper: types.ModuleType,
+    path: Path,
+    effective_config: dict[str, str],
+    effective_uid: int,
+) -> bytes:
+    try:
+        parsed = helper.parse_simple_environment(path)
+        rendered_effective = helper.validate_effective_configuration(
+            parsed.values,
+            effective_uid=effective_uid,
+        )
+    except Exception:
+        raise OperationStateError("rendered managed environment is invalid") from None
+    if rendered_effective != effective_config:
+        raise OperationStateError("rendered managed environment does not match effective config")
+    if parsed.values.get("REMOTE_PRUNE_ENABLED") != "0":
+        raise OperationStateError("rendered managed environment did not disable remote prune")
+    raw = parsed.raw_bytes
+    if _unsafe_environment_payload(raw):
+        raise OperationStateError("rendered managed environment contains secret-like content")
+    return raw
+
+
+def _render_expected_environment_for_existing_stage(
+    helper: types.ModuleType,
+    parsed_live_environment: object,
+    effective_config: dict[str, str],
+) -> bytes:
+    try:
+        renderer = helper._render_bytes
+        raw = renderer(parsed_live_environment, effective_config)
+    except Exception:
+        raise OperationStateError("managed environment byte render failed") from None
+    if type(raw) is not bytes or not raw:
+        raise OperationStateError("managed environment byte render returned invalid data")
+    if _unsafe_environment_payload(raw):
+        raise OperationStateError("managed environment byte render contains secret-like content")
+    if raw.count(b"REMOTE_PRUNE_ENABLED=0\n") != 1:
+        raise OperationStateError("managed environment byte render did not disable prune exactly once")
+    return raw
+
+
+def _fsync_stage_directories(
+    context: OperationsContext,
+    stage_directories: _StageDirectoryProof,
+) -> None:
+    if os.name != "posix":
+        return
+    _, directories = _stage_relative_paths()
+    for relative in sorted(
+        directories,
+        key=lambda value: (value.count("/"), value),
+        reverse=True,
+    ):
+        descriptor = stage_directories.descriptors.get(relative)
+        if descriptor is None:
+            path = _stage_directory_path(context, relative)
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+            descriptor = os.open(path, flags)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        else:
+            os.fsync(descriptor)
+    if stage_directories.operation_directory_fd is not None:
+        os.fsync(stage_directories.operation_directory_fd)
+    else:
+        _fsync_parent_directory(context.paths.operation_dir)
+    _revalidate_stage_directories(stage_directories)
+
+
+def _prepare_or_resume_stage(
+    context: OperationsContext,
+    helper: types.ModuleType,
+    parsed_live_environment: object,
+    effective_config: dict[str, str],
+    asset_bytes: dict[str, bytes],
+    pair: _BackupPairProof,
+    operation_directory_fd: int | None,
+) -> tuple[_HostStageProof, dict[str, object], bytes, dict[str, object]]:
+    asset_hashes = {
+        source: hashlib.sha256(contents).hexdigest()
+        for source, contents in asset_bytes.items()
+    }
+    if frozenset(asset_hashes) != _SOURCE_ASSETS:
+        raise OperationStateError("reviewed stage asset set is incomplete")
+    environment_bytes = _render_expected_environment_for_existing_stage(
+        helper,
+        parsed_live_environment,
+        effective_config,
+    )
+    try:
+        existing_metadata = (
+            os.stat(
+                "staged",
+                dir_fd=operation_directory_fd,
+                follow_symlinks=False,
+            )
+            if operation_directory_fd is not None
+            else context.paths.staged_dir.lstat()
+        )
+    except FileNotFoundError:
+        existing_metadata = None
+    except OSError as exc:
+        raise OperationStateError("staged path metadata cannot be read") from exc
+    existing = existing_metadata is not None
+    if existing and not stat.S_ISDIR(existing_metadata.st_mode):
+        raise OperationStateError("preexisting staged path is a symlink or non-directory")
+    stage_directories: _StageDirectoryProof | None = None
+    try:
+        stage_directories = _open_stage_directories(
+            context,
+            operation_directory_fd,
+            create=not existing,
+        )
+        if existing:
+            files, directories = _inventory_stage(context, stage_directories)
+            expected_files, expected_directories = _stage_relative_paths()
+            if set(files) != expected_files or set(directories) != expected_directories:
+                raise OperationStateError("preexisting staged residue is not exact")
+        if not existing:
+            for source in sorted(_SOURCE_ASSETS):
+                destination = context.paths.staged_dir / "reviewed" / Path(source)
+                mode = 0o755 if source in _EXECUTABLE_SOURCE_ASSETS else 0o644
+                _write_exclusive_staged_file(
+                    destination,
+                    asset_bytes[source],
+                    mode,
+                    effective_uid=context.effective_uid,
+                    directories=stage_directories,
+                )
+            environment_path = (
+                context.paths.staged_dir / "host/etc/degen/prod-db-backup.env"
+            )
+            _write_exclusive_staged_file(
+                environment_path,
+                environment_bytes,
+                0o600,
+                effective_uid=context.effective_uid,
+                directories=stage_directories,
+            )
+        environment_path = (
+            context.paths.staged_dir / "host/etc/degen/prod-db-backup.env"
+        )
+        if _validate_rendered_environment(
+            helper,
+            environment_path,
+            effective_config,
+            context.effective_uid,
+        ) != environment_bytes:
+            raise OperationStateError(
+                "staged managed environment differs from verified helper rendering"
+            )
+        environment_sha256 = hashlib.sha256(environment_bytes).hexdigest()
+        manifest = _host_stage_manifest(
+            context,
+            asset_hashes,
+            environment_sha256,
+            pair,
+        )
+        manifest_bytes = _canonical_host_stage_manifest(manifest)
+        if not existing:
+            _write_exclusive_staged_file(
+                context.paths.staged_dir / "host-stage-manifest.json",
+                manifest_bytes,
+                0o600,
+                effective_uid=context.effective_uid,
+                directories=stage_directories,
+            )
+        expected_bytes = {
+            **{
+                f"reviewed/{source}": contents
+                for source, contents in asset_bytes.items()
+            },
+            "host/etc/degen/prod-db-backup.env": environment_bytes,
+            "host-stage-manifest.json": manifest_bytes,
+        }
+        expected_modes = {
+            **{
+                f"reviewed/{source}": (
+                    0o755 if source in _EXECUTABLE_SOURCE_ASSETS else 0o644
+                )
+                for source in _SOURCE_ASSETS
+            },
+            "host/etc/degen/prod-db-backup.env": 0o600,
+            "host-stage-manifest.json": 0o600,
+        }
+        proof = _capture_host_stage_proof(
+            context,
+            stage_directories,
+            expected_bytes,
+            expected_modes,
+            manifest,
+        )
+        try:
+            _fsync_host_stage_proof(proof, manifest)
+        except BaseException:
+            _close_host_stage_proof(proof)
+            raise
+        host_stage: dict[str, object] = {
+            "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+            "asset_hashes": dict(asset_hashes),
+            "environment_sha256": environment_sha256,
+        }
+        return proof, manifest, manifest_bytes, host_stage
+    except BaseException:
+        if stage_directories is not None:
+            _close_stage_directories(stage_directories)
+        raise
+
+
+def _staging_evidence(
+    effective_config: dict[str, str],
+    host_stage: dict[str, object],
+) -> bytes:
+    payload = {
+        "effective_config": effective_config,
+        "host_stage": host_stage,
+    }
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("ascii")
+    return b"degen-host-staging-v1\n" + canonical + b"\n"
+
+
+def _staging_prepared_state(
+    context: OperationsContext,
+    previous: dict[str, object],
+    effective_config: dict[str, str],
+    host_stage: dict[str, object],
+) -> dict[str, object]:
+    now = context.clock()
+    if type(now) is not datetime or now.tzinfo is None or now.utcoffset() != timedelta(0):
+        raise OperationStateError("operations clock must return an aware UTC datetime")
+    state = copy.deepcopy(previous)
+    state["phase"] = "staging_prepared"
+    state["effective_config"] = dict(effective_config)
+    state["host_stage"] = copy.deepcopy(host_stage)
+    history = state["phase_history"]
+    assert isinstance(history, list)
+    history.append(
+        {
+            "phase": "staging_prepared",
+            "epoch": int(now.astimezone(timezone.utc).timestamp()),
+            "evidence_sha256": hashlib.sha256(
+                _staging_evidence(effective_config, host_stage)
+            ).hexdigest(),
+        }
+    )
+    validate_operation_state(state, context.paths.operation_dir, previous)
+    validate_operation_state_for_context(state, context)
+    return state
+
+
+def _commit_staging_prepared_receipt(
+    context: OperationsContext,
+    material: _VerifiedSourceMaterial,
+    initial_state: dict[str, object],
+    effective_config: dict[str, str],
+    host_stage: dict[str, object],
+    stage_proof: _HostStageProof,
+    stage_manifest: dict[str, object],
+    pair: _BackupPairProof,
+    managed_environment: _HostFileProof,
+    managed_raw: bytes,
+    app_environment: _HostFileProof,
+    app_environment_raw: bytes,
+    database_url: str,
+    database_name: str,
+    hostname: str,
+) -> dict[str, object]:
+    try:
+        state = _staging_prepared_state(
+            context,
+            initial_state,
+            effective_config,
+            host_stage,
+        )
+
+        def revalidate_receipt_proof() -> None:
+            _revalidate_verified_source_material(material)
+            _revalidate_backup_pair(pair)
+            _revalidate_host_file_proof(managed_environment)
+            if _read_host_file(managed_environment, _MAX_APP_ENV_BYTES) != managed_raw:
+                raise OperationStateError(
+                    "live managed environment changed before state replacement"
+                )
+            _revalidate_host_file_proof(app_environment)
+            if (
+                _read_host_file(app_environment, _MAX_APP_ENV_BYTES)
+                != app_environment_raw
+            ):
+                raise OperationStateError(
+                    "application environment changed before state replacement"
+                )
+            _revalidate_host_stage_proof(stage_proof, stage_manifest)
+            fresh_database = _query_current_database(context, database_url)
+            fresh_hostname = _query_hostname(context)
+            if (
+                fresh_database != database_name
+                or fresh_hostname != hostname
+                or f"{fresh_database}_{fresh_hostname}_" != pair.prefix
+            ):
+                raise OperationStateError(
+                    "live database or hostname identity changed before state replacement"
+                )
+            _revalidate_backup_pair(pair)
+            _revalidate_verified_source_material(material)
+            _revalidate_host_stage_proof(stage_proof, stage_manifest)
+
+        _atomic_write_operation_state_internal(
+            context.paths.state_file,
+            state,
+            effective_uid=context.effective_uid,
+            pre_replace_validator=revalidate_receipt_proof,
+            operation_directory_binding=_OperationDirectoryBinding(
+                context.paths.operation_dir,
+                material.directory_fd,
+                material.operation_metadata,
+            ),
+        )
+        result: dict[str, object] = {
+            "effective_config": dict(effective_config),
+            "host_stage": copy.deepcopy(host_stage),
+        }
+        _reject_residual_secrets(result)
+        return result
+    finally:
+        _close_host_stage_proof(stage_proof)
+
+
+def prepare_host_staging(context: OperationsContext) -> dict[str, object]:
+    """Verify live host readiness and persist one staging_prepared receipt."""
+    _validate_source_context(context, context.paths.source_dir)
+    initial_state = load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    validate_operation_state_for_context(initial_state, context)
+    if initial_state["phase"] != "source_verified":
+        raise OperationStateError("prepare-staging requires source_verified state")
+    with _open_verified_source_material(context) as material:
+        if material.state != initial_state:
+            raise OperationStateError("operation state changed before source revalidation")
+        asset_bytes = _capture_reviewed_asset_bytes(material.source_proof)
+        helper = _load_verified_environment_helper(
+            asset_bytes["deploy/linux/degen-prod-db-backup-env.py"]
+        )
+        with _open_host_file(
+            context,
+            "/etc/degen/prod-db-backup.env",
+            "live managed environment",
+            maximum_size=_MAX_APP_ENV_BYTES,
+        ) as managed_environment:
+            managed_raw = _read_host_file(managed_environment, _MAX_APP_ENV_BYTES)
+            _parsed_managed, base_effective = _parse_live_managed_environment(
+                helper,
+                managed_environment,
+                managed_raw,
+                context.effective_uid,
+            )
+            backup_dir = base_effective.get("BACKUP_DIR")
+            app_env_file = base_effective.get("APP_ENV_FILE")
+            if type(backup_dir) is not str or type(app_env_file) is not str:
+                raise OperationStateError("managed host paths are missing")
+            with _open_verified_backup_pair(context, backup_dir) as pair:
+                with _open_host_file(
+                    context,
+                    app_env_file,
+                    "application environment",
+                    maximum_size=_MAX_APP_ENV_BYTES,
+                ) as app_environment:
+                    app_environment_raw = _read_host_file(
+                        app_environment, _MAX_APP_ENV_BYTES
+                    )
+                    database_url = _parse_app_environment(app_environment_raw)
+                    database_name = _query_current_database(context, database_url)
+                    hostname = _query_hostname(context)
+                    expected_prefix = f"{database_name}_{hostname}_"
+                    configured_prefix = base_effective.get("BACKUP_PREFIX")
+                    if pair.prefix != expected_prefix:
+                        raise OperationStateError(
+                            "filename-derived backup prefix does not match live identity"
+                        )
+                    if configured_prefix is not None and configured_prefix != expected_prefix:
+                        raise OperationStateError(
+                            "configured backup prefix does not match live identity"
+                        )
+                    requested = dict(base_effective)
+                    requested["BACKUP_PREFIX"] = expected_prefix
+                    requested["REMOTE_PRUNE_ENABLED"] = "0"
+                    try:
+                        effective_config = helper.validate_effective_configuration(
+                            requested,
+                            effective_uid=context.effective_uid,
+                        )
+                    except Exception:
+                        raise OperationStateError(
+                            "effective managed configuration is invalid"
+                        ) from None
+                    if type(effective_config) is not dict:
+                        raise OperationStateError(
+                            "effective managed configuration result is invalid"
+                        )
+                    _revalidate_verified_source_material(material)
+                    _revalidate_backup_pair(pair)
+                    _revalidate_host_file_proof(managed_environment)
+                    if _read_host_file(
+                        managed_environment, _MAX_APP_ENV_BYTES
+                    ) != managed_raw:
+                        raise OperationStateError("live managed environment changed")
+                    _revalidate_host_file_proof(app_environment)
+                    if _read_host_file(app_environment, _MAX_APP_ENV_BYTES) != app_environment_raw:
+                        raise OperationStateError("application environment changed")
+                    stage_proof, stage_manifest, _manifest_bytes, host_stage = (
+                        _prepare_or_resume_stage(
+                            context,
+                            helper,
+                            _parsed_managed,
+                            effective_config,
+                            asset_bytes,
+                            pair,
+                            material.directory_fd,
+                        )
+                    )
+                    return _commit_staging_prepared_receipt(
+                        context,
+                        material,
+                        initial_state,
+                        effective_config,
+                        host_stage,
+                        stage_proof,
+                        stage_manifest,
+                        pair,
+                        managed_environment,
+                        managed_raw,
+                        app_environment,
+                        app_environment_raw,
+                        database_url,
+                        database_name,
+                        hostname,
+                    )
+
+
 def sanitize_error_text(value: object) -> str:
     try:
         text = str(value)
@@ -3858,6 +6039,8 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         action=_StoreOnce,
     )
+    prepare_staging = subparsers.add_parser("prepare-staging", allow_abbrev=False)
+    prepare_staging.add_argument("--operation-dir", required=True, action=_StoreOnce)
     return parser
 
 
@@ -3890,7 +6073,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             validate_operation_state(state, operation_dir)
             sys.stdout.write(_canonical_state_bytes(state).decode("utf-8"))
-        else:
+        elif args.command == "verify-source":
             if args.archive != f"{args.operation_dir}/source.tar":
                 raise OperationStateError("archive must equal the fixed operation source.tar path")
             paths = build_operation_paths(operation_dir)
@@ -3906,6 +6089,31 @@ def main(argv: Sequence[str] | None = None) -> int:
                 host_root=_PRODUCTION_HOST_ROOT,
             )
             verify_source_archive(context, source_dir=paths.source_dir)
+        else:
+            paths = build_operation_paths(operation_dir)
+            state = load_operation_state(
+                paths.state_file,
+                effective_uid=effective_uid,
+            )
+            if state["phase"] != "source_verified":
+                raise OperationStateError(
+                    "prepare-staging requires strict source_verified operation state"
+                )
+            reviewed = state["reviewed_source"]
+            assert isinstance(reviewed, dict)
+            context = OperationsContext(
+                operation_id=operation_dir.name,
+                paths=paths,
+                effective_uid=effective_uid,
+                command_runner=_default_command_runner,
+                clock=lambda: datetime.now(timezone.utc),
+                expected_commit=str(reviewed["commit"]),
+                expected_archive_sha256=str(reviewed["archive_sha256"]),
+                expected_manifest_sha256=str(reviewed["manifest_sha256"]),
+                host_root=_PRODUCTION_HOST_ROOT,
+            )
+            validate_operation_state_for_context(state, context)
+            prepare_host_staging(context)
     except Exception as exc:
         message = sanitize_error_text(exc)
         if _string_contains_secret(message):
