@@ -882,9 +882,10 @@ publish_remote_pair() {
 
 collect_local_names() {
     local -n destination=$1
-    local path
+    local path basename remainder
     local had_dotglob=0
     local had_nullglob=0
+    destination=()
     if shopt -q dotglob; then
         had_dotglob=1
     fi
@@ -893,8 +894,16 @@ collect_local_names() {
     fi
     shopt -s dotglob nullglob
     for path in "$BACKUP_DIR"/*; do
+        basename=${path##*/}
+        if [[ -L "$path" ]]; then
+            remainder=${basename#"$backup_prefix"}
+            if [[ "$basename" == "$backup_prefix"* && "$remainder" =~ ^[0-9]{8}T[0-9]{6}Z\.dump(\.sha256)?$ ]]; then
+                die "Unsafe local backup inventory entry: $basename is a symlink"
+            fi
+            continue
+        fi
         [[ -f "$path" ]] || continue
-        destination+=("${path##*/}")
+        destination+=("$basename")
     done
     if (( had_dotglob == 0 )); then
         shopt -u dotglob
@@ -909,10 +918,22 @@ validate_retention_candidates() {
     local now=$1
     local inventory_name=$2
     local candidates_name=$3
-    local candidate remainder stamp inventory_item prior counterpart paired
+    local candidate_role=$4
+    local candidate remainder stamp inventory_item counterpart
     local -n inventory_values=$inventory_name
     local -n candidate_values=$candidates_name
-    local -a seen_candidates=()
+    local -A inventory_set=() seen_candidates=() candidate_set=()
+
+    for inventory_item in "${inventory_values[@]}"; do
+        if [[ -n "$inventory_item" && "$inventory_item" != */* && \
+              "$inventory_item" =~ ^[A-Za-z0-9._-]+$ && \
+              "$inventory_item" == "$backup_prefix"* ]]; then
+            remainder=${inventory_item#"$backup_prefix"}
+            if [[ "$remainder" =~ ^[0-9]{8}T[0-9]{6}Z\.dump(\.sha256)?$ ]]; then
+                inventory_set["$inventory_item"]=1
+            fi
+        fi
+    done
 
     for candidate in "${candidate_values[@]}"; do
         if [[ -z "$candidate" || "$candidate" == */* || ! "$candidate" =~ ^[A-Za-z0-9._-]+$ || "$candidate" != "$backup_prefix"* ]]; then
@@ -923,23 +944,19 @@ validate_retention_candidates() {
             die "Unsafe retention candidate: $candidate"
         fi
         stamp=${remainder%%.dump*}
-        if [[ "$stamp" == "$now" || "$stamp" > "$now" ]]; then
-            die "Unsafe retention candidate: $candidate is current or future dated"
+        if [[ "$stamp" > "$now" ]]; then
+            die "Unsafe retention candidate: $candidate is future dated"
+        fi
+        if [[ "$candidate_role" == "delete" && "$stamp" == "$now" ]]; then
+            die "Unsafe retention candidate: $candidate is current dated"
         fi
 
-        paired=0
-        for inventory_item in "${inventory_values[@]}"; do
-            if [[ "$inventory_item" == "$candidate" ]]; then
-                paired=1
-                break
-            fi
-        done
-        (( paired == 1 )) || die "Unsafe retention candidate: $candidate was not in the planned inventory"
-
-        for prior in "${seen_candidates[@]}"; do
-            [[ "$prior" != "$candidate" ]] || die "Unsafe retention candidate: duplicate $candidate"
-        done
-        seen_candidates+=("$candidate")
+        [[ -n "${inventory_set[$candidate]+present}" ]] || \
+            die "Unsafe retention candidate: $candidate was not in the planned inventory"
+        [[ -z "${seen_candidates[$candidate]+present}" ]] || \
+            die "Unsafe retention candidate: duplicate $candidate"
+        seen_candidates["$candidate"]=1
+        candidate_set["$candidate"]=1
     done
 
     for candidate in "${candidate_values[@]}"; do
@@ -948,15 +965,68 @@ validate_retention_candidates() {
         else
             counterpart="${candidate}.sha256"
         fi
-        paired=0
-        for prior in "${candidate_values[@]}"; do
-            if [[ "$prior" == "$counterpart" ]]; then
-                paired=1
-                break
-            fi
-        done
-        (( paired == 1 )) || die "Unsafe retention candidate: $candidate was not emitted as a complete pair"
+        [[ -n "${candidate_set[$counterpart]+present}" ]] || \
+            die "Unsafe retention candidate: $candidate was not emitted as a complete pair"
     done
+}
+
+
+filter_retention_planner_output() {
+    local max_records=$1
+    local max_line_bytes=$2
+    python3 -c '
+import os
+import sys
+
+
+max_records = int(sys.argv[1])
+max_line_bytes = int(sys.argv[2])
+pending = bytearray()
+record_count = 0
+
+
+def fail(reason):
+    print(f"retention planner output {reason}", file=sys.stderr)
+    raise SystemExit(65)
+
+
+def write_all(payload):
+    offset = 0
+    while offset < len(payload):
+        offset += os.write(1, payload[offset:])
+
+
+while True:
+    chunk = os.read(0, 65536)
+    if not chunk:
+        break
+    if b"\x00" in chunk or b"\r" in chunk:
+        fail("contained a forbidden byte")
+    start = 0
+    while True:
+        newline = chunk.find(b"\n", start)
+        if newline < 0:
+            tail = chunk[start:]
+            if len(pending) + len(tail) > max_line_bytes:
+                fail("exceeded safe line length")
+            pending.extend(tail)
+            break
+        segment = chunk[start:newline]
+        if len(pending) + len(segment) > max_line_bytes:
+            fail("exceeded safe line length")
+        pending.extend(segment)
+        if not pending:
+            fail("contained an empty record")
+        record_count += 1
+        if record_count > max_records:
+            fail("exceeded safe record count")
+        write_all(pending + b"\n")
+        pending.clear()
+        start = newline + 1
+
+if pending:
+    fail("was not LF-terminated")
+' "$max_records" "$max_line_bytes"
 }
 
 
@@ -965,10 +1035,20 @@ planner_candidates() {
     local now=$2
     local inventory_name=$3
     local output_name=$4
+    local output_format=$5
     local -n inventory_ref=$inventory_name
     local -n output_ref=$output_name
-    local planner_output
+    local planner_output candidate_role inventory_item remainder candidate_bytes
+    local max_records=${#inventory_ref[@]}
+    local max_candidate_bytes=0
     local -a policy
+
+    case "$output_format" in
+        keep-names) candidate_role=keep ;;
+        delete-names) candidate_role=delete ;;
+        *) die "Unsafe retention planner output format: $output_format" ;;
+    esac
+    output_ref=()
 
     if [[ "$mode" == "local" ]]; then
         policy=(--local-count "$KEEP_LOCAL_COUNT")
@@ -979,35 +1059,241 @@ planner_candidates() {
             --monthly "$KEEP_REMOTE_MONTHLY"
         )
     fi
-    if ! planner_output=$(printf '%s\n' "${inventory_ref[@]}" | "$RETENTION_PLANNER" \
-        --mode "$mode" \
-        --prefix "$backup_prefix" \
-        --now "$now" \
-        "${policy[@]}" \
-        --format delete-names); then
+    for inventory_item in "${inventory_ref[@]}"; do
+        if [[ -n "$inventory_item" && "$inventory_item" != */* && \
+              "$inventory_item" =~ ^[A-Za-z0-9._-]+$ && \
+              "$inventory_item" == "$backup_prefix"* ]]; then
+            remainder=${inventory_item#"$backup_prefix"}
+            if [[ "$remainder" =~ ^[0-9]{8}T[0-9]{6}Z\.dump(\.sha256)?$ ]]; then
+                candidate_bytes=${#inventory_item}
+                if (( candidate_bytes > max_candidate_bytes )); then
+                    max_candidate_bytes=$candidate_bytes
+                fi
+            fi
+        fi
+    done
+    if ! planner_output=$(
+        printf '%s\n' "${inventory_ref[@]}" |
+            "$RETENTION_PLANNER" \
+                --mode "$mode" \
+                --prefix "$backup_prefix" \
+                --now "$now" \
+                "${policy[@]}" \
+                --format "$output_format" |
+            filter_retention_planner_output "$max_records" "$max_candidate_bytes"
+    ); then
         die "Retention planner failed for mode=$mode"
     fi
     if [[ -n "$planner_output" ]]; then
         mapfile -t output_ref <<< "$planner_output"
     fi
-    validate_retention_candidates "$now" "$inventory_name" "$output_name"
+    validate_retention_candidates "$now" "$inventory_name" "$output_name" "$candidate_role"
+}
+
+
+validate_local_retention_plan() {
+    local now=$1
+    local keep_name=$2
+    local delete_name=$3
+    local current_dump current_sidecar candidate
+    local -n keep_values=$keep_name
+    local -n delete_values=$delete_name
+    local -A keep_set=()
+
+    for candidate in "${keep_values[@]}"; do
+        keep_set["$candidate"]=1
+    done
+    current_dump="${backup_prefix}${now}.dump"
+    current_sidecar="${current_dump}.sha256"
+    for candidate in "$current_dump" "$current_sidecar"; do
+        [[ -n "${keep_set[$candidate]+present}" ]] || \
+            die "Unsafe retention plan: current backup pair was not kept"
+    done
+
+    for candidate in "${delete_values[@]}"; do
+        [[ -z "${keep_set[$candidate]+present}" ]] || \
+            die "Unsafe retention plan: keep and delete outputs overlap at $candidate"
+    done
+}
+
+
+validate_retained_local_pair() {
+    local dump_name=$1
+    local sidecar_name="${dump_name}.sha256"
+    # The root-owned backup directory and held operation lock are the trust boundary.
+    # Descriptor checks detect replacement and symlink mistakes without claiming safety
+    # against a malicious root process that can mutate the directory concurrently.
+    if ! python3 - "$BACKUP_DIR" "$dump_name" "$sidecar_name" <<'PY'
+import os
+import re
+import stat
+import subprocess
+import sys
+
+
+directory, dump_name, sidecar_name = sys.argv[1:]
+opened = []
+required_flags = ("O_NOFOLLOW", "O_DIRECTORY")
+
+
+def fail(message):
+    print(f"retained backup verification error: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def signature(value):
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_nlink,
+        value.st_uid,
+        value.st_gid,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def open_regular_at(directory_fd, name):
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+    descriptor = os.open(name, flags, dir_fd=directory_fd)
+    opened.append(descriptor)
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode):
+        fail(f"{name} is not a regular file")
+    if metadata.st_uid != os.geteuid():
+        fail(f"{name} is not owned by the effective user")
+    if stat.S_IMODE(metadata.st_mode) != 0o600:
+        fail(f"{name} does not have exact mode 0600")
+    if metadata.st_nlink != 1:
+        fail(f"{name} has an unsafe link count")
+    return descriptor, metadata
+
+
+def read_descriptor(descriptor):
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks = []
+    while True:
+        chunk = os.read(descriptor, 1024 * 1024)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+
+
+def require_stable(descriptor, before, label):
+    after = os.fstat(descriptor)
+    if signature(before) != signature(after):
+        fail(f"{label} changed while it was being verified")
+
+
+def require_path_identity(directory_fd, name, descriptor):
+    path_metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    descriptor_metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(path_metadata.st_mode):
+        fail(f"{name} is no longer a regular file")
+    if (path_metadata.st_dev, path_metadata.st_ino) != (
+        descriptor_metadata.st_dev,
+        descriptor_metadata.st_ino,
+    ):
+        fail(f"{name} was replaced while it was being verified")
+
+
+try:
+    missing_flags = [name for name in required_flags if not hasattr(os, name)]
+    if missing_flags:
+        fail(f"required open flags unavailable: {', '.join(missing_flags)}")
+    directory_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
+    directory_fd = os.open(directory, directory_flags)
+    opened.append(directory_fd)
+    dump_fd, dump_metadata = open_regular_at(directory_fd, dump_name)
+    sidecar_fd, sidecar_metadata = open_regular_at(directory_fd, sidecar_name)
+
+    expected_sidecar_size = 64 + 2 + len(os.fsencode(dump_name)) + 1
+    if sidecar_metadata.st_size != expected_sidecar_size:
+        fail(f"{sidecar_name} had an invalid byte length")
+    sidecar = read_descriptor(sidecar_fd)
+    require_stable(sidecar_fd, sidecar_metadata, sidecar_name)
+    sidecar_match = re.fullmatch(
+        rb"([0-9a-f]{64})  " + re.escape(os.fsencode(dump_name)) + rb"\n",
+        sidecar,
+    )
+    if sidecar_match is None:
+        fail(f"{sidecar_name} did not contain one exact checksum record")
+
+    dump_descriptor_path = f"/proc/self/fd/{dump_fd}"
+    os.lseek(dump_fd, 0, os.SEEK_SET)
+    checksum = subprocess.run(
+        ["sha256sum", "--", dump_descriptor_path],
+        pass_fds=(dump_fd,),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    checksum_match = re.fullmatch(rb"([0-9a-f]{64})  [^\r\n]+\n", checksum.stdout)
+    if checksum.returncode != 0 or checksum_match is None:
+        fail(f"sha256sum failed for {dump_name}")
+    require_stable(dump_fd, dump_metadata, dump_name)
+    if checksum_match.group(1) != sidecar_match.group(1):
+        fail(f"checksum mismatch for {dump_name}")
+
+    os.lseek(dump_fd, 0, os.SEEK_SET)
+    restore = subprocess.run(
+        ["pg_restore", "--list", dump_descriptor_path],
+        pass_fds=(dump_fd,),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if restore.returncode != 0:
+        fail(f"pg_restore validation failed for {dump_name}")
+    require_stable(dump_fd, dump_metadata, dump_name)
+    require_stable(sidecar_fd, sidecar_metadata, sidecar_name)
+    require_path_identity(directory_fd, dump_name, dump_fd)
+    require_path_identity(directory_fd, sidecar_name, sidecar_fd)
+except OSError as exc:
+    fail(exc.strerror or "filesystem validation failed")
+finally:
+    for descriptor in reversed(opened):
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+PY
+    then
+        die "Retained local backup validation failed: $dump_name"
+    fi
 }
 
 
 run_local_retention() {
     local now=$1
-    local candidate
-    local -a inventory=() candidates=()
+    local candidate current_dump
+    local -a inventory=() keep_candidates=() delete_candidates=()
     collect_local_names inventory
-    planner_candidates local "$now" inventory candidates
-    if (( ${#candidates[@]} == 0 )); then
+    planner_candidates local "$now" inventory keep_candidates keep-names
+    planner_candidates local "$now" inventory delete_candidates delete-names
+    validate_local_retention_plan "$now" keep_candidates delete_candidates
+
+    current_dump="${backup_prefix}${now}.dump"
+    for candidate in "${keep_candidates[@]}"; do
+        if [[ "$candidate" != *.sha256 && "$candidate" != "$current_dump" ]]; then
+            validate_retained_local_pair "$candidate"
+        fi
+    done
+
+    if (( ${#delete_candidates[@]} == 0 )); then
         log "Local retention candidates: none"
         return
     fi
-    for candidate in "${candidates[@]}"; do
+    for candidate in "${delete_candidates[@]}"; do
         log "Local retention candidate: $candidate"
     done
-    for candidate in "${candidates[@]}"; do
+    for candidate in "${delete_candidates[@]}"; do
+        [[ -f "$BACKUP_DIR/$candidate" && ! -L "$BACKUP_DIR/$candidate" ]] || \
+            die "Unsafe retention candidate changed before delete: $candidate"
+    done
+    for candidate in "${delete_candidates[@]}"; do
         rm -f -- "$BACKUP_DIR/$candidate"
     done
 }
@@ -1024,7 +1310,7 @@ run_remote_retention() {
     if [[ -n "$listing" ]]; then
         mapfile -t inventory <<< "$listing"
     fi
-    planner_candidates remote "$now" inventory candidates
+    planner_candidates remote "$now" inventory candidates delete-names
     if (( ${#candidates[@]} == 0 )); then
         log "Remote retention candidates: none"
         return

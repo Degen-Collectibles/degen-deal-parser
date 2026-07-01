@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -308,8 +309,12 @@ elif name == "pg_dump":
     fail_if("pg_dump")
 elif name == "pg_restore":
     trace("pg_restore")
-    fail_if("pg_restore")
     dump = Path(args[-1])
+    resolved_dump = dump.resolve(strict=True)
+    trace(f"pg_restore-file:{resolved_dump.name}")
+    fail_if("pg_restore")
+    if os.environ.get("FAKE_PG_RESTORE_FAIL_BASENAME") == resolved_dump.name:
+        raise SystemExit(76)
     if not dump.read_bytes().startswith(b"DEGEN-CUSTOM-DUMP"):
         raise SystemExit(76)
     print("; Archive created for tests")
@@ -318,6 +323,7 @@ elif name == "sha256sum":
     fail_if("sha256sum")
     targets = [item for item in args if item != "--" and not item.startswith("-")]
     target = Path(targets[-1])
+    trace(f"sha256sum-file:{target.resolve(strict=True).name}")
     digest = hashlib.sha256(target.read_bytes()).hexdigest()
     race_final = os.environ.get("FAKE_CREATE_LOCAL_FINAL")
     if race_final:
@@ -520,17 +526,37 @@ def _planner_wrapper(real_planner: str) -> str:
     return textwrap.dedent(
         f'''\
         #!/usr/bin/env python3
+        import hashlib
         import os
         from pathlib import Path
+        import subprocess
         import sys
 
         args = sys.argv[1:]
         mode = args[args.index("--mode") + 1]
+        output_format = args[args.index("--format") + 1]
+        inventory = sys.stdin.buffer.read()
+        inventory_digest = hashlib.sha256(inventory).hexdigest()
         with Path(os.environ["FAKE_TRACE"]).open("a", encoding="utf-8") as handle:
             handle.write(f"planner:{{mode}}\\n")
+            handle.write(f"planner:{{mode}}:{{output_format}}:{{inventory_digest}}\\n")
         if os.environ.get("FAKE_FAIL") in {{"planner", f"planner_{{mode}}"}}:
             raise SystemExit(81)
-        os.execv("/usr/bin/python3", ["python3", {real_planner!r}, *args])
+        completed = subprocess.run(
+            ["/usr/bin/python3", {real_planner!r}, *args],
+            input=inventory,
+            check=False,
+        )
+        if completed.returncode == 0 and output_format == "delete-names":
+            race_path = os.environ.get("FAKE_PLANNER_SYMLINK_PATH")
+            race_target = os.environ.get("FAKE_PLANNER_SYMLINK_TARGET")
+            if race_path and race_target:
+                target = Path(race_path)
+                target.unlink()
+                target.symlink_to(race_target)
+                with Path(os.environ["FAKE_TRACE"]).open("a", encoding="utf-8") as handle:
+                    handle.write(f"planner:local:symlink-race:{{target.name}}\\n")
+        raise SystemExit(completed.returncode)
         '''
     )
 
@@ -879,8 +905,14 @@ def harness(tmp_path: Path) -> BackupHarness:
 def _seed_pair(directory: Path, stamp: str, *, prefix: str = PREFIX) -> tuple[str, str]:
     dump_name = f"{prefix}{stamp}.dump"
     sidecar_name = f"{dump_name}.sha256"
-    (directory / dump_name).write_bytes(f"old-dump-{stamp}\n".encode())
-    (directory / sidecar_name).write_text(f"{'0' * 64}  {dump_name}\n", encoding="ascii")
+    payload = f"DEGEN-CUSTOM-DUMP\x00prior-{stamp}\n".encode()
+    dump_path = directory / dump_name
+    sidecar_path = directory / sidecar_name
+    dump_path.write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    sidecar_path.write_bytes(f"{digest}  {dump_name}\n".encode("ascii"))
+    _chmod(dump_path, 0o600)
+    _chmod(sidecar_path, 0o600)
     return dump_name, sidecar_name
 
 
@@ -899,6 +931,47 @@ def _pair_names(stamp: str = STAMP) -> tuple[str, str]:
 
 def _remote_delete_names(trace: list[str]) -> list[str]:
     return [line.removeprefix("rclone:delete:") for line in trace if line.startswith("rclone:delete:")]
+
+
+def _local_retention_delete_names(trace: list[str]) -> list[str]:
+    pattern = re.compile(rf"^rm:({re.escape(PREFIX)}\d{{8}}T\d{{6}}Z\.dump(?:\.sha256)?)$")
+    return [match.group(1) for line in trace if (match := pattern.fullmatch(line))]
+
+
+def _write_format_planner(path: Path, *, keep: list[str], delete: list[str]) -> None:
+    _write_executable(
+        path,
+        textwrap.dedent(
+            f'''\
+            #!/usr/bin/env python3
+            import sys
+
+            output_format = sys.argv[sys.argv.index("--format") + 1]
+            outputs = {{"keep-names": {keep!r}, "delete-names": {delete!r}}}
+            for name in outputs[output_format]:
+                print(name)
+            '''
+        ),
+    )
+
+
+def _write_raw_format_planner(path: Path, *, keep_expression: str, delete_expression: str) -> None:
+    _write_executable(
+        path,
+        textwrap.dedent(
+            f'''\
+            #!/usr/bin/env python3
+            import sys
+
+            output_format = sys.argv[sys.argv.index("--format") + 1]
+            if output_format == "keep-names":
+                payload = {keep_expression}
+            else:
+                payload = {delete_expression}
+            sys.stdout.buffer.write(payload)
+            '''
+        ),
+    )
 
 
 def _cleanup_warning(category: str, basename: str) -> str:
@@ -2114,14 +2187,289 @@ def test_success_verifies_before_pruning_and_preserves_non_candidates(harness: B
     assert not any(path.name.startswith(".degen-upload-") for path in harness.remote_dir.iterdir())
 
     trace = harness.trace_lines()
+    prior_dump = _pair_names("20260628T230000Z")[0]
     first_local_delete = trace.index(f"rm:{_pair_names('20260626T230000Z')[0]}")
     assert trace.index("pg_restore") < trace.index("rclone:copy:dump")
-    assert trace.index("rclone:final-content") < trace.index("planner:local") < first_local_delete
+    assert (
+        trace.index("rclone:final-content")
+        < trace.index(f"sha256sum-file:{prior_dump}")
+        < trace.index(f"pg_restore-file:{prior_dump}")
+        < first_local_delete
+    )
+    local_plans = [line.split(":", 3) for line in trace if line.startswith("planner:local:")]
+    assert {parts[2] for parts in local_plans} == {"keep-names", "delete-names"}
+    assert len({parts[3] for parts in local_plans}) == 1
     assert first_local_delete < trace.index("planner:remote")
     assert "Backup completed successfully" in result.stdout
     log_lines = harness.log_file.read_text(encoding="utf-8").splitlines()
     assert log_lines
     assert all(re.match(r"^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\] ", line) for line in log_lines)
+
+
+@pytest.mark.parametrize(
+    "sidecar_case",
+    ["wrong-digest", "wrong-basename", "missing-lf", "crlf", "extra-record", "uppercase", "control"],
+)
+def test_invalid_retained_sidecar_blocks_every_local_delete(
+    harness: BackupHarness,
+    sidecar_case: str,
+) -> None:
+    old_names = _seed_old_pairs(harness.backup_dir)
+    retained_dump, retained_sidecar = _pair_names("20260628T230000Z")
+    digest = hashlib.sha256((harness.backup_dir / retained_dump).read_bytes()).hexdigest()
+    exact = f"{digest}  {retained_dump}\n".encode("ascii")
+    malformed = {
+        "wrong-digest": f"{'0' * 64}  {retained_dump}\n".encode("ascii"),
+        "wrong-basename": f"{digest}  other.dump\n".encode("ascii"),
+        "missing-lf": exact[:-1],
+        "crlf": exact[:-1] + b"\r\n",
+        "extra-record": exact + exact,
+        "uppercase": exact.upper(),
+        "control": exact[:-1] + b"\x00\n",
+    }[sidecar_case]
+    (harness.backup_dir / retained_sidecar).write_bytes(malformed)
+
+    result = harness.run()
+
+    assert result.returncode != 0
+    assert all((harness.backup_dir / name).exists() for name in old_names)
+    assert _local_retention_delete_names(harness.trace_lines()) == []
+    current_dump, current_sidecar = _pair_names()
+    assert (harness.remote_dir / current_dump).exists()
+    assert (harness.remote_dir / current_sidecar).exists()
+    assert "Retained local backup validation failed" in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("symlink_kind", ["dump", "sidecar"])
+def test_retained_backup_symlink_blocks_every_local_delete(
+    harness: BackupHarness,
+    symlink_kind: str,
+) -> None:
+    old_names = _seed_old_pairs(harness.backup_dir)
+    retained_dump, retained_sidecar = _pair_names("20260628T230000Z")
+    attacked = harness.backup_dir / (retained_dump if symlink_kind == "dump" else retained_sidecar)
+    external = harness.root / f"external-{symlink_kind}"
+    external.write_bytes(attacked.read_bytes())
+    attacked.unlink()
+    _symlink(external, attacked)
+
+    result = harness.run()
+
+    assert result.returncode != 0
+    assert all((harness.backup_dir / name).exists() or _is_symlink(harness.backup_dir / name) for name in old_names)
+    assert _local_retention_delete_names(harness.trace_lines()) == []
+    assert "Unsafe local backup inventory entry" in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("symlink_kind", ["dump", "sidecar"])
+def test_post_inventory_retained_symlink_swap_reaches_fd_validator_and_blocks_delete(
+    harness: BackupHarness,
+    symlink_kind: str,
+) -> None:
+    old_names = _seed_old_pairs(harness.backup_dir)
+    retained_dump, retained_sidecar = _pair_names("20260628T230000Z")
+    attacked = harness.backup_dir / (retained_dump if symlink_kind == "dump" else retained_sidecar)
+    external = harness.root / f"late-external-{symlink_kind}"
+    external.write_bytes(attacked.read_bytes())
+    _chmod(external, 0o600)
+
+    result = harness.run(
+        overrides={
+            "FAKE_PLANNER_SYMLINK_PATH": _posix_path(attacked),
+            "FAKE_PLANNER_SYMLINK_TARGET": _posix_path(external),
+        }
+    )
+
+    assert result.returncode != 0
+    assert all((harness.backup_dir / name).exists() or _is_symlink(harness.backup_dir / name) for name in old_names)
+    trace = harness.trace_lines()
+    assert f"planner:local:symlink-race:{attacked.name}" in trace
+    assert _local_retention_delete_names(trace) == []
+    assert "Retained local backup validation failed" in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("file_kind", ["dump", "sidecar"])
+@pytest.mark.parametrize("metadata_attack", ["wrong-owner", "wrong-mode", "hardlink"])
+def test_unsafe_retained_file_metadata_blocks_every_local_delete(
+    harness: BackupHarness,
+    file_kind: str,
+    metadata_attack: str,
+) -> None:
+    old_names = _seed_old_pairs(harness.backup_dir)
+    retained_dump, retained_sidecar = _pair_names("20260628T230000Z")
+    attacked = harness.backup_dir / (retained_dump if file_kind == "dump" else retained_sidecar)
+    if metadata_attack == "wrong-owner":
+        wrong_uid = 0 if _effective_uid() != 0 else 1
+        _chown(attacked, wrong_uid)
+    elif metadata_attack == "wrong-mode":
+        _chmod(attacked, 0o640)
+    else:
+        _hardlink(attacked, harness.root / f"retained-{file_kind}.hardlink")
+
+    result = harness.run()
+
+    assert result.returncode != 0
+    assert all((harness.backup_dir / name).exists() for name in old_names)
+    assert _local_retention_delete_names(harness.trace_lines()) == []
+    assert "Retained local backup validation failed" in result.stdout + result.stderr
+
+
+def test_retained_pg_restore_failure_blocks_every_local_delete_after_remote_verification(
+    harness: BackupHarness,
+) -> None:
+    old_names = _seed_old_pairs(harness.backup_dir)
+    retained_dump = _pair_names("20260628T230000Z")[0]
+
+    result = harness.run(overrides={"FAKE_PG_RESTORE_FAIL_BASENAME": retained_dump})
+
+    assert result.returncode != 0
+    assert all((harness.backup_dir / name).exists() for name in old_names)
+    trace = harness.trace_lines()
+    assert _local_retention_delete_names(trace) == []
+    assert trace.index("rclone:final-content") < trace.index(f"pg_restore-file:{retained_dump}")
+    assert "Retained local backup validation failed" in result.stdout + result.stderr
+
+
+def test_retained_pair_is_validated_even_when_delete_plan_is_empty(harness: BackupHarness) -> None:
+    retained_dump, retained_sidecar = _seed_pair(harness.backup_dir, "20260628T230000Z")
+    (harness.backup_dir / retained_sidecar).write_text(
+        f"{'0' * 64}  {retained_dump}\n",
+        encoding="ascii",
+    )
+
+    result = harness.run()
+
+    assert result.returncode != 0
+    assert (harness.backup_dir / retained_dump).exists()
+    assert (harness.backup_dir / retained_sidecar).exists()
+    assert _local_retention_delete_names(harness.trace_lines()) == []
+    assert "Retained local backup validation failed" in result.stdout + result.stderr
+
+
+def test_retained_sidecar_exact_size_is_gated_before_any_content_read() -> None:
+    script = SCRIPT.read_text(encoding="utf-8")
+    validator = script.split("validate_retained_local_pair() {", 1)[1].split(
+        "run_local_retention() {",
+        1,
+    )[0]
+
+    size_formula = 'expected_sidecar_size = 64 + 2 + len(os.fsencode(dump_name)) + 1'
+    size_gate = 'if sidecar_metadata.st_size != expected_sidecar_size:'
+    content_read = "sidecar = read_descriptor(sidecar_fd)"
+    final_stability = 'require_stable(sidecar_fd, sidecar_metadata, sidecar_name)'
+    restore_check = 'if restore.returncode != 0:'
+    python_validator = validator.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    ast.parse(python_validator, filename="<retained-local-validator>", feature_version=(3, 10))
+    assert 'required_flags = ("O_NOFOLLOW", "O_DIRECTORY")' in python_validator
+    assert 'getattr(os, "O_NOFOLLOW", 0)' not in python_validator
+    assert 'getattr(os, "O_DIRECTORY", 0)' not in python_validator
+    assert size_formula in validator
+    assert validator.index(size_formula) < validator.index(size_gate) < validator.index(content_read)
+    assert validator.rindex(final_stability) > validator.index(restore_check)
+
+
+def test_every_kept_prior_pair_is_validated_before_any_delete(harness: BackupHarness) -> None:
+    old_names = _seed_old_pairs(harness.backup_dir)
+    retained_dump, retained_sidecar = _pair_names("20260627T230000Z")
+    (harness.backup_dir / retained_sidecar).write_text(
+        f"{'0' * 64}  {retained_dump}\n",
+        encoding="ascii",
+    )
+
+    result = harness.run(overrides={"KEEP_LOCAL_COUNT": "3"})
+
+    assert result.returncode != 0
+    assert all((harness.backup_dir / name).exists() for name in old_names)
+    assert _local_retention_delete_names(harness.trace_lines()) == []
+    assert "Retained local backup validation failed" in result.stdout + result.stderr
+
+
+def test_first_ever_backup_succeeds_with_only_the_current_pair(harness: BackupHarness) -> None:
+    result = harness.run()
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    current_dump, current_sidecar = _pair_names()
+    assert (harness.backup_dir / current_dump).is_file()
+    assert (harness.backup_dir / current_sidecar).is_file()
+    assert _local_retention_delete_names(harness.trace_lines()) == []
+
+
+@pytest.mark.parametrize(
+    "invalid_plan",
+    ["current-missing", "future", "overlap", "duplicate", "incomplete"],
+)
+def test_unsafe_keep_and_delete_plans_are_rejected_before_local_delete(
+    harness: BackupHarness,
+    invalid_plan: str,
+) -> None:
+    prior = list(_seed_pair(harness.backup_dir, "20260628T230000Z"))
+    future = list(_seed_pair(harness.backup_dir, "20260630T230000Z"))
+    current = list(_pair_names())
+    keep, delete = {
+        "current-missing": (prior, []),
+        "future": (current + future, []),
+        "overlap": (current + prior, prior),
+        "duplicate": (current + current, []),
+        "incomplete": ([current[0]], []),
+    }[invalid_plan]
+    _write_format_planner(harness.planner, keep=keep, delete=delete)
+
+    result = harness.run()
+
+    assert result.returncode != 0
+    assert all((harness.backup_dir / name).exists() for name in prior + future + current)
+    assert _local_retention_delete_names(harness.trace_lines()) == []
+    assert "Unsafe retention" in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "planner_attack",
+    [
+        "oversized-line",
+        "too-many-lines",
+        "nul-normalization",
+        "carriage-return",
+        "empty-record",
+        "missing-final-lf",
+    ],
+)
+def test_planner_output_is_binary_safe_and_bounded_before_bash_capture(
+    harness: BackupHarness,
+    planner_attack: str,
+) -> None:
+    prior = list(_seed_pair(harness.backup_dir, "20260628T230000Z"))
+    current_dump, current_sidecar = _pair_names()
+    keep_expression, expected_error = {
+        "oversized-line": ("b'A' * 1000000", "exceeded safe line length"),
+        "too-many-lines": ("b'x\\n' * 1000", "exceeded safe record count"),
+        "nul-normalization": (
+            f"{current_dump.encode('ascii')!r} + b'\\x00\\n' + {current_sidecar.encode('ascii')!r} + b'\\n'",
+            "contained a forbidden byte",
+        ),
+        "carriage-return": (
+            f"{current_dump.encode('ascii')!r} + b'\\r\\n'",
+            "contained a forbidden byte",
+        ),
+        "empty-record": ("b'\\n'", "contained an empty record"),
+        "missing-final-lf": (
+            f"{current_dump.encode('ascii')!r}",
+            "was not LF-terminated",
+        ),
+    }[planner_attack]
+    _write_raw_format_planner(
+        harness.planner,
+        keep_expression=keep_expression,
+        delete_expression="b''",
+    )
+
+    result = harness.run()
+
+    assert result.returncode != 0
+    assert all((harness.backup_dir / name).exists() for name in prior)
+    current = list(_pair_names())
+    assert all((harness.backup_dir / name).exists() for name in current)
+    assert _local_retention_delete_names(harness.trace_lines()) == []
+    assert expected_error in result.stdout + result.stderr
 
 
 @pytest.mark.parametrize("mode", [None, "preflight", "remote-retention-dry-run"])

@@ -352,6 +352,35 @@ def test_cli_keep_names_emits_newest_complete_pairs_first() -> None:
     assert result.stdout.splitlines() == expected_names
 
 
+def test_cli_keep_and_delete_views_partition_complete_nonfuture_pairs() -> None:
+    current = pair("20260629T230000Z")
+    prior = pair("20260628T230000Z")
+    expired = pair("20260627T230000Z")
+    future = pair("20260630T230000Z")
+    names = expired + prior + current + future
+    common = (
+        "--mode",
+        "local",
+        "--prefix",
+        PREFIX,
+        "--now",
+        NOW_STAMP,
+        "--local-count",
+        "2",
+    )
+
+    kept = run_cli(*common, "--format", "keep-names", names=names)
+    deleted = run_cli(*common, "--format", "delete-names", names=names)
+
+    assert kept.returncode == deleted.returncode == 0
+    keep_names = kept.stdout.splitlines()
+    delete_names = deleted.stdout.splitlines()
+    assert keep_names == current + prior
+    assert delete_names == expired
+    assert set(keep_names).isdisjoint(delete_names)
+    assert not set(future) & (set(keep_names) | set(delete_names))
+
+
 def test_cli_invalid_now_uses_concise_argparse_error() -> None:
     result = run_cli(
         "--mode",
