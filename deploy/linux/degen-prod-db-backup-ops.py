@@ -83,18 +83,25 @@ _GIT_EXECUTABLE = "/usr/bin/git"
 _PSQL_EXECUTABLE = "/usr/bin/psql"
 _PG_RESTORE_EXECUTABLE = "/usr/bin/pg_restore"
 _HOSTNAME_EXECUTABLE = "/bin/hostname"
+_SYSTEMCTL_EXECUTABLE = "/usr/bin/systemctl"
+_LOGINCTL_EXECUTABLE = "/usr/bin/loginctl"
+_DATE_EXECUTABLE = "/usr/bin/date"
 _MAX_COMMAND_OUTPUT_BYTES = 4096
 _MAX_DATABASE_URL_BYTES = 4096
 _MAX_APP_ENV_BYTES = 256 * 1024
 _MAX_BACKUP_ENTRIES = 4096
 _MAX_BACKUP_DUMP_BYTES = 1 << 50
 _MAX_STAGED_MANIFEST_BYTES = 64 * 1024
+_MAX_SNAPSHOT_FILE_BYTES = 8 * 1024 * 1024
+_MAX_SNAPSHOT_ARTIFACTS = 16
 _BACKUP_NAME_RE = re.compile(
     r"\A(?P<prefix>[A-Za-z0-9._-]+_)(?P<stamp>[0-9]{8}T[0-9]{6}Z)"
     r"\.dump(?P<sidecar>\.sha256)?\Z",
     re.ASCII,
 )
 _SAFE_LABEL_RE = re.compile(r"\A[A-Za-z0-9._-]{1,128}\Z", re.ASCII)
+_SYSTEMD_UNIT_RE = re.compile(r"\A[A-Za-z0-9_.@-]{1,192}\.service\Z", re.ASCII)
+_LOGIN_USER_RE = re.compile(r"\A[A-Za-z_][A-Za-z0-9_-]{0,31}\Z", re.ASCII)
 _BACKUP_PREFIX_RE = re.compile(r"\A[A-Za-z0-9._-]+_\Z", re.ASCII)
 _EFFECTIVE_CONFIG_KEYS = frozenset(
     {
@@ -211,6 +218,18 @@ _TARGET_ORDER = (
     "/etc/systemd/system/degen-prod-db-backup.timer",
     "/etc/degen/prod-db-backup.env",
 )
+_SNAPSHOT_TARGET_NAMES = {
+    "/usr/local/sbin/degen-prod-db-backup": "degen-prod-db-backup",
+    "/usr/local/sbin/degen-prod-db-retention": "degen-prod-db-retention",
+    "/usr/local/sbin/degen-prod-db-backup-env": "degen-prod-db-backup-env",
+    "/usr/local/sbin/degen-prod-db-backup-ops": "degen-prod-db-backup-ops",
+    "/etc/systemd/system/degen-prod-db-backup.service": "degen-prod-db-backup.service",
+    "/etc/systemd/system/degen-prod-db-backup.timer": "degen-prod-db-backup.timer",
+    "/etc/degen/prod-db-backup.env": "prod-db-backup.env",
+}
+_RCLONE_CONFIG_PATH = "/etc/degen/rclone.conf"
+_RCLONE_AUDIT_NAME = "rclone.conf.audit"
+_SNAPSHOT_MANIFEST_NAME = "SHA256SUMS"
 _SOURCE_TO_TARGET = (
     ("deploy/linux/degen-prod-db-backup.sh", _TARGET_ORDER[0]),
     ("deploy/linux/degen-prod-db-retention.py", _TARGET_ORDER[1]),
@@ -1416,8 +1435,12 @@ def _validate_file_audit(value: object, label: str, *, include_path: bool = Fals
     if include_path:
         _require_string(item["path"], f"{label}.path", nonempty=True)
     _require_hash(item["sha256"], f"{label}.sha256")
-    for field in ("inode", "uid", "gid", "mode", "size", "mtime_ns"):
+    _require_int(item["inode"], f"{label}.inode", minimum=1)
+    for field in ("uid", "gid", "size", "mtime_ns"):
         _require_int(item[field], f"{label}.{field}")
+    mode = _require_int(item["mode"], f"{label}.mode")
+    if mode > 0o7777:
+        raise OperationStateError(f"{label}.mode is invalid")
 
 
 def _validate_snapshot_target(value: object, label: str) -> None:
@@ -1462,6 +1485,33 @@ def _validate_prior_runtime(value: object) -> None:
     for key, pid in pids.items():
         _require_string(key, "prior_runtime.pids key", nonempty=True)
         _require_int(pid, "prior_runtime.pids value", minimum=1)
+    fixed = {
+        "system:degen-web.service",
+        "system:degen-worker.service",
+    }
+    keys = set(pids)
+    postgres_keys = [key for key in keys if key.startswith("postgresql:")]
+    user_keys = [key for key in keys if key.startswith("user:")]
+    if len(keys) != 4 or not fixed.issubset(keys) or len(postgres_keys) != 1 or len(user_keys) != 1:
+        raise OperationStateError("prior_runtime.pids identity keys are incomplete or ambiguous")
+    postgres_unit = postgres_keys[0].split(":", 1)[1]
+    if (
+        _SYSTEMD_UNIT_RE.fullmatch(postgres_unit) is None
+        or not postgres_unit.startswith("postgresql")
+    ):
+        raise OperationStateError("prior_runtime PostgreSQL unit identity is invalid")
+    user_parts = user_keys[0].split(":")
+    if (
+        len(user_parts) != 4
+        or not user_parts[1].isdigit()
+        or str(int(user_parts[1])) != user_parts[1]
+        or int(user_parts[1]) < 0
+        or _LOGIN_USER_RE.fullmatch(user_parts[2]) is None
+        or user_parts[3] != "degen-ops-discord-bot.service"
+    ):
+        raise OperationStateError("prior_runtime bot owner identity is invalid")
+    if len(set(pids.values())) != len(pids):
+        raise OperationStateError("prior_runtime.pids values must be unique")
     _require_optional_int(item["preinstall_trigger_epoch"], "prior_runtime.preinstall_trigger_epoch")
 
 
@@ -1832,6 +1882,21 @@ def _validate_snapshot_semantics(state: dict[str, object]) -> None:
             raise OperationStateError(f"snapshot.targets[{target_name!r}] present metadata is incomplete")
         if not target["present"] and any(value is not None for value in metadata):
             raise OperationStateError(f"snapshot.targets[{target_name!r}] absent metadata must be null")
+        if target["present"]:
+            mode = target["mode"]
+            assert isinstance(mode, int)
+            if mode > 0o777 or mode & 0o022:
+                raise OperationStateError(
+                    f"snapshot.targets[{target_name!r}] mode is unsafe"
+                )
+    effective_config = state["effective_config"]
+    assert isinstance(effective_config, dict)
+    rclone_audit = snapshot["rclone_audit"]
+    assert isinstance(rclone_audit, dict)
+    if rclone_audit["path"] != effective_config["RCLONE_CONFIG"]:
+        raise OperationStateError("snapshot rclone audit path differs from effective_config")
+    if rclone_audit["mode"] != 0o600:
+        raise OperationStateError("snapshot rclone audit source mode is unsafe")
 
 
 def _validate_install_semantics(state: dict[str, object], installed_reached: bool) -> None:
@@ -3965,6 +4030,135 @@ def _revalidate_verified_source_material(material: _VerifiedSourceMaterial) -> N
     )
 
 
+@contextlib.contextmanager
+def _open_verified_later_material(
+    context: OperationsContext,
+    expected_phase: str,
+):
+    if expected_phase not in {"staging_prepared", "snapshotted"}:
+        raise OperationStateError("later source proof phase is unsupported")
+    _validate_source_context(context, context.paths.source_dir)
+    source_proof: _SourceTreeProof | None = None
+    with _open_validated_operation_dir(
+        context.paths.operation_dir,
+        context.effective_uid,
+    ) as directory_fd:
+        operation_metadata = (
+            context.paths.operation_dir.lstat()
+            if directory_fd is None
+            else os.fstat(directory_fd)
+        )
+        with _open_source_archive(context, directory_fd) as (archive_fd, archive_metadata):
+            try:
+                if _hash_source_archive(archive_fd) != context.expected_archive_sha256:
+                    raise OperationStateError(
+                        "source archive SHA-256 does not match the approved digest"
+                    )
+                _revalidate_source_archive(
+                    context, directory_fd, archive_fd, archive_metadata
+                )
+                _verify_git_archive_commit(context, archive_fd)
+                _revalidate_source_archive(
+                    context, directory_fd, archive_fd, archive_metadata
+                )
+                archive_hashes, archive_manifest = _verify_raw_git_archive(
+                    archive_fd,
+                    context.expected_commit,
+                    context.expected_manifest_sha256,
+                )
+                source_proof = _verify_extracted_source_tree(
+                    context,
+                    directory_fd,
+                    archive_hashes,
+                    archive_manifest,
+                )
+                _revalidate_source_receipt_proof(
+                    context,
+                    directory_fd,
+                    operation_metadata,
+                    archive_fd,
+                    archive_metadata,
+                    source_proof,
+                )
+                state = _load_existing_verified_source_state(context, directory_fd)
+                if state is None or state["phase"] != expected_phase:
+                    raise OperationStateError(
+                        f"snapshot requires strict {expected_phase} operation state"
+                    )
+                reviewed = state["reviewed_source"]
+                effective_config = state["effective_config"]
+                host_stage = state["host_stage"]
+                history = state["phase_history"]
+                assert isinstance(reviewed, dict)
+                assert isinstance(effective_config, dict)
+                assert isinstance(host_stage, dict)
+                assert isinstance(history, list)
+                expected_reviewed: dict[str, object] = {
+                    "commit": context.expected_commit,
+                    "archive_sha256": context.expected_archive_sha256,
+                    "manifest_sha256": context.expected_manifest_sha256,
+                    "asset_hashes": dict(source_proof.asset_hashes),
+                }
+                expected_source_evidence = hashlib.sha256(
+                    _source_verification_evidence(expected_reviewed)
+                ).hexdigest()
+                expected_staging_evidence = hashlib.sha256(
+                    _staging_evidence(effective_config, host_stage)
+                ).hexdigest()
+                expected_phases = ["source_verified", "staging_prepared"]
+                if expected_phase == "snapshotted":
+                    expected_phases.append("snapshotted")
+                invalid = (
+                    reviewed != expected_reviewed
+                    or len(history) != len(expected_phases)
+                    or [entry["phase"] for entry in history]
+                    != expected_phases
+                    or history[0]["evidence_sha256"] != expected_source_evidence
+                    or history[1]["evidence_sha256"] != expected_staging_evidence
+                )
+                if expected_phase == "snapshotted":
+                    snapshot = state["snapshot"]
+                    prior_runtime = state["prior_runtime"]
+                    assert isinstance(snapshot, dict)
+                    assert isinstance(prior_runtime, dict)
+                    expected_snapshot_evidence = hashlib.sha256(
+                        _snapshot_evidence(snapshot, prior_runtime)
+                    ).hexdigest()
+                    invalid = invalid or (
+                        history[2]["evidence_sha256"] != expected_snapshot_evidence
+                    )
+                if invalid:
+                    raise OperationStateError(
+                        f"operation state is not the immutable {expected_phase} receipt"
+                    )
+                yield _VerifiedSourceMaterial(
+                    context,
+                    directory_fd,
+                    operation_metadata,
+                    archive_fd,
+                    archive_metadata,
+                    source_proof,
+                    state,
+                )
+            finally:
+                if source_proof is not None:
+                    _close_source_tree_proof(source_proof)
+
+
+@contextlib.contextmanager
+def _open_verified_staging_material(context: OperationsContext):
+    """Hold source proofs for one strict staging_prepared operation state."""
+    with _open_verified_later_material(context, "staging_prepared") as material:
+        yield material
+
+
+@contextlib.contextmanager
+def _open_verified_snapshotted_material(context: OperationsContext):
+    """Hold source proofs for one strict snapshotted operation state."""
+    with _open_verified_later_material(context, "snapshotted") as material:
+        yield material
+
+
 def _capture_reviewed_asset_bytes(
     proof: _SourceTreeProof,
 ) -> dict[str, bytes]:
@@ -4434,6 +4628,534 @@ def _hash_host_file(proof: _HostFileProof) -> str:
     return digest.hexdigest()
 
 
+@dataclass
+class _SnapshotTargetProof:
+    directory: _HostDirectoryProof
+    logical_path: str
+    name: str
+    path: Path
+    descriptor: int | None
+    metadata: os.stat_result | None
+    contents: bytes | None
+
+
+def _validate_snapshot_source_metadata(
+    metadata: os.stat_result,
+    context: OperationsContext,
+    label: str,
+) -> None:
+    if not stat.S_ISREG(metadata.st_mode):
+        raise OperationStateError(f"{label} is not a regular file")
+    if metadata.st_uid != context.effective_uid:
+        raise OperationStateError(f"{label} is not owned by the effective UID")
+    if metadata.st_nlink != 1:
+        raise OperationStateError(f"{label} must have a single link")
+    mode = stat.S_IMODE(metadata.st_mode)
+    if os.name == "posix" and mode & 0o7022:
+        raise OperationStateError(f"{label} has an unsafe mode")
+    if metadata.st_size < 0 or metadata.st_size > _MAX_SNAPSHOT_FILE_BYTES:
+        raise OperationStateError(f"{label} size is invalid")
+
+
+def _snapshot_named_metadata(proof: _SnapshotTargetProof) -> os.stat_result:
+    if proof.directory.descriptor is None:
+        return proof.path.lstat()
+    return os.stat(
+        proof.name,
+        dir_fd=proof.directory.descriptor,
+        follow_symlinks=False,
+    )
+
+
+def _revalidate_snapshot_target_proof(proof: _SnapshotTargetProof) -> None:
+    _revalidate_host_directory_proof(proof.directory)
+    if proof.descriptor is None:
+        try:
+            _snapshot_named_metadata(proof)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise OperationStateError("snapshot target absence cannot be revalidated") from exc
+        raise OperationStateError("snapshot target appeared after absence was recorded")
+    assert proof.metadata is not None and proof.contents is not None
+    try:
+        opened_before = os.fstat(proof.descriptor)
+        named_before = _snapshot_named_metadata(proof)
+        for metadata in (opened_before, named_before):
+            _validate_snapshot_source_metadata(
+                metadata,
+                proof.directory.context,
+                "snapshot target",
+            )
+        if (
+            _stage_stable_metadata(opened_before)
+            != _stage_stable_metadata(proof.metadata)
+            or not _same_identity(opened_before, named_before)
+        ):
+            raise OperationStateError("snapshot target path changed after capture")
+        os.lseek(proof.descriptor, 0, os.SEEK_SET)
+        raw = _read_exact_descriptor(
+            proof.descriptor,
+            opened_before.st_size,
+            "snapshot target",
+        )
+        opened_after = os.fstat(proof.descriptor)
+        named_after = _snapshot_named_metadata(proof)
+    except OSError as exc:
+        raise OperationStateError("snapshot target cannot be revalidated") from exc
+    if (
+        raw != proof.contents
+        or _stage_stable_metadata(opened_after)
+        != _stage_stable_metadata(opened_before)
+        or not _same_identity(opened_after, named_after)
+    ):
+        raise OperationStateError("snapshot target changed after capture")
+    _revalidate_host_directory_proof(proof.directory)
+
+
+def _capture_snapshot_target(
+    directory: _HostDirectoryProof,
+    logical_path: str,
+) -> _SnapshotTargetProof:
+    pure = PurePosixPath(logical_path)
+    if str(pure.parent) != directory.logical_path:
+        raise OperationStateError("snapshot target parent proof is mismatched")
+    name = pure.name
+    _validate_source_basename(name)
+    path = directory.path / name
+    descriptor: int | None = None
+    try:
+        try:
+            named = (
+                path.lstat()
+                if directory.descriptor is None
+                else os.stat(name, dir_fd=directory.descriptor, follow_symlinks=False)
+            )
+        except FileNotFoundError:
+            proof = _SnapshotTargetProof(
+                directory,
+                logical_path,
+                name,
+                path,
+                None,
+                None,
+                None,
+            )
+            _revalidate_snapshot_target_proof(proof)
+            return proof
+        _validate_snapshot_source_metadata(named, directory.context, "snapshot target")
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = (
+            os.open(path, flags)
+            if directory.descriptor is None
+            else os.open(name, flags, dir_fd=directory.descriptor)
+        )
+        opened = os.fstat(descriptor)
+        _validate_snapshot_source_metadata(opened, directory.context, "snapshot target")
+        if not _same_identity(named, opened):
+            raise OperationStateError("snapshot target changed while opening")
+        _atomic_event_hook(
+            "snapshot_target_opened",
+            logical_path=logical_path,
+            descriptor=descriptor,
+        )
+        contents = _read_exact_descriptor(
+            descriptor,
+            opened.st_size,
+            "snapshot target",
+        )
+        proof = _SnapshotTargetProof(
+            directory,
+            logical_path,
+            name,
+            path,
+            descriptor,
+            opened,
+            contents,
+        )
+        descriptor = None
+        try:
+            _revalidate_snapshot_target_proof(proof)
+        except BaseException:
+            _close_snapshot_target_proof(proof)
+            raise
+        return proof
+    except OSError as exc:
+        raise OperationStateError("snapshot target access failed") from exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _close_snapshot_target_proof(proof: _SnapshotTargetProof) -> None:
+    if proof.descriptor is not None:
+        try:
+            os.close(proof.descriptor)
+        except OSError:
+            pass
+        proof.descriptor = None
+
+
+@dataclass
+class _SnapshotDirectoryProof:
+    context: OperationsContext
+    operation_directory_fd: int | None
+    descriptor: int | None
+    metadata: os.stat_result
+    expected_bytes: dict[str, bytes]
+    file_descriptors: dict[str, int]
+    file_metadata: dict[str, os.stat_result]
+
+
+def _validate_snapshot_directory_metadata(
+    metadata: os.stat_result,
+    context: OperationsContext,
+) -> None:
+    _validate_host_directory_metadata(metadata, context.effective_uid, "snapshot directory")
+    if os.name == "posix" and stat.S_IMODE(metadata.st_mode) != 0o700:
+        raise OperationStateError("snapshot directory must have mode 0700")
+
+
+def _snapshot_file_metadata_is_safe(
+    metadata: os.stat_result,
+    context: OperationsContext,
+) -> bool:
+    return (
+        stat.S_ISREG(metadata.st_mode)
+        and metadata.st_uid == context.effective_uid
+        and metadata.st_nlink == 1
+        and (os.name != "posix" or stat.S_IMODE(metadata.st_mode) == 0o600)
+        and 0 <= metadata.st_size <= _MAX_SNAPSHOT_FILE_BYTES
+    )
+
+
+def _snapshot_named_directory_metadata(proof: _SnapshotDirectoryProof) -> os.stat_result:
+    if proof.operation_directory_fd is None:
+        return proof.context.paths.snapshot_dir.lstat()
+    return os.stat(
+        "snapshot",
+        dir_fd=proof.operation_directory_fd,
+        follow_symlinks=False,
+    )
+
+
+def _snapshot_named_file_metadata(
+    proof: _SnapshotDirectoryProof,
+    name: str,
+) -> os.stat_result:
+    if proof.descriptor is None:
+        return (proof.context.paths.snapshot_dir / name).lstat()
+    return os.stat(name, dir_fd=proof.descriptor, follow_symlinks=False)
+
+
+def _snapshot_inventory(
+    proof: _SnapshotDirectoryProof,
+) -> dict[str, os.stat_result]:
+    try:
+        iterator = os.scandir(
+            proof.descriptor
+            if proof.descriptor is not None
+            else proof.context.paths.snapshot_dir
+        )
+    except OSError as exc:
+        raise OperationStateError("snapshot inventory cannot be read") from exc
+    files: dict[str, os.stat_result] = {}
+    with iterator:
+        for entry in iterator:
+            if len(files) >= _MAX_SNAPSHOT_ARTIFACTS:
+                raise OperationStateError("snapshot inventory exceeds its entry bound")
+            _validate_source_basename(entry.name)
+            metadata = _snapshot_named_file_metadata(proof, entry.name)
+            if not _snapshot_file_metadata_is_safe(metadata, proof.context):
+                raise OperationStateError("snapshot inventory contains an unsafe artifact")
+            files[entry.name] = metadata
+    return files
+
+
+def _canonical_snapshot_manifest(artifacts: dict[str, bytes]) -> bytes:
+    if len(artifacts) != 8 or _SNAPSHOT_MANIFEST_NAME in artifacts:
+        raise OperationStateError("snapshot manifest requires exactly eight artifacts")
+    names = sorted(artifacts)
+    for name in names:
+        _validate_source_basename(name)
+    return b"".join(
+        hashlib.sha256(artifacts[name]).hexdigest().encode("ascii")
+        + b"  "
+        + name.encode("ascii")
+        + b"\n"
+        for name in names
+    )
+
+
+def _parse_snapshot_manifest(
+    raw: bytes,
+    artifacts: dict[str, bytes],
+) -> None:
+    expected = _canonical_snapshot_manifest(artifacts)
+    if raw != expected:
+        raise OperationStateError("snapshot SHA256SUMS is not exact and canonical")
+    try:
+        lines = raw.decode("ascii", errors="strict").splitlines()
+    except UnicodeDecodeError as exc:
+        raise OperationStateError("snapshot SHA256SUMS is not ASCII") from exc
+    names: list[str] = []
+    for line in lines:
+        if len(line) < 67 or line[64:66] != "  ":
+            raise OperationStateError("snapshot SHA256SUMS record is malformed")
+        digest = line[:64]
+        name = line[66:]
+        if _SHA256_RE.fullmatch(digest) is None:
+            raise OperationStateError("snapshot SHA256SUMS digest is malformed")
+        _validate_source_basename(name)
+        names.append(name)
+        if digest != hashlib.sha256(artifacts[name]).hexdigest():
+            raise OperationStateError("snapshot SHA256SUMS digest does not match artifact")
+    if names != sorted(artifacts) or len(names) != 8:
+        raise OperationStateError("snapshot SHA256SUMS inventory is incomplete")
+
+
+def _revalidate_snapshot_directory_proof(proof: _SnapshotDirectoryProof) -> None:
+    named_directory = _snapshot_named_directory_metadata(proof)
+    opened_directory = (
+        os.fstat(proof.descriptor)
+        if proof.descriptor is not None
+        else named_directory
+    )
+    for metadata in (named_directory, opened_directory):
+        _validate_snapshot_directory_metadata(metadata, proof.context)
+    if (
+        _stage_stable_metadata(opened_directory)
+        != _stage_stable_metadata(proof.metadata)
+        or not _same_identity(opened_directory, named_directory)
+    ):
+        raise OperationStateError("snapshot directory binding changed")
+    current_files = _snapshot_inventory(proof)
+    if set(current_files) != set(proof.expected_bytes):
+        raise OperationStateError("snapshot artifact inventory changed")
+    for name, expected in proof.expected_bytes.items():
+        descriptor = proof.file_descriptors[name]
+        initial = proof.file_metadata[name]
+        opened_before = os.fstat(descriptor)
+        named_before = current_files[name]
+        if (
+            not _snapshot_file_metadata_is_safe(opened_before, proof.context)
+            or _stage_stable_metadata(opened_before)
+            != _stage_stable_metadata(initial)
+            or not _same_identity(opened_before, named_before)
+        ):
+            raise OperationStateError("snapshot artifact binding changed")
+        try:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            raw = _read_exact_descriptor(
+                descriptor,
+                opened_before.st_size,
+                "snapshot artifact",
+            )
+            opened_after = os.fstat(descriptor)
+            named_after = _snapshot_named_file_metadata(proof, name)
+        except OSError as exc:
+            raise OperationStateError("snapshot artifact cannot be revalidated") from exc
+        if (
+            raw != expected
+            or _stage_stable_metadata(opened_after)
+            != _stage_stable_metadata(opened_before)
+            or not _same_identity(opened_after, named_after)
+        ):
+            raise OperationStateError("snapshot artifact bytes changed")
+    artifacts = {
+        name: raw
+        for name, raw in proof.expected_bytes.items()
+        if name != _SNAPSHOT_MANIFEST_NAME
+    }
+    _parse_snapshot_manifest(
+        proof.expected_bytes[_SNAPSHOT_MANIFEST_NAME],
+        artifacts,
+    )
+
+
+def _open_snapshot_artifact_descriptor(
+    proof: _SnapshotDirectoryProof,
+    name: str,
+    *,
+    create: bool,
+) -> int:
+    _validate_source_basename(name)
+    flags = (os.O_RDWR if create else os.O_RDONLY) | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    if create:
+        flags |= os.O_CREAT | os.O_EXCL
+    path = proof.context.paths.snapshot_dir / name
+    return (
+        os.open(name, flags, 0o600, dir_fd=proof.descriptor)
+        if proof.descriptor is not None
+        else os.open(path, flags, 0o600)
+    )
+
+
+def _open_snapshot_directory_proof(
+    context: OperationsContext,
+    operation_directory_fd: int | None,
+    expected_bytes: dict[str, bytes],
+    *,
+    create: bool,
+) -> _SnapshotDirectoryProof:
+    if len(expected_bytes) != 9 or _SNAPSHOT_MANIFEST_NAME not in expected_bytes:
+        raise OperationStateError("snapshot expected artifact inventory is invalid")
+    descriptor: int | None = None
+    file_descriptors: dict[str, int] = {}
+    file_metadata: dict[str, os.stat_result] = {}
+    use_descriptors = os.name == "posix" and operation_directory_fd is not None
+    try:
+        if create:
+            try:
+                (
+                    os.stat(
+                        "snapshot",
+                        dir_fd=operation_directory_fd,
+                        follow_symlinks=False,
+                    )
+                    if use_descriptors
+                    else context.paths.snapshot_dir.lstat()
+                )
+            except FileNotFoundError:
+                pass
+            else:
+                raise OperationStateError("preexisting snapshot path is forbidden")
+            if use_descriptors:
+                os.mkdir("snapshot", 0o700, dir_fd=operation_directory_fd)
+            else:
+                context.paths.snapshot_dir.mkdir(mode=0o700)
+                if os.name == "posix":
+                    context.paths.snapshot_dir.chmod(0o700)
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        if use_descriptors:
+            descriptor = os.open("snapshot", flags, dir_fd=operation_directory_fd)
+            if create:
+                os.fchmod(descriptor, 0o700)
+            metadata = os.fstat(descriptor)
+            named = os.stat(
+                "snapshot",
+                dir_fd=operation_directory_fd,
+                follow_symlinks=False,
+            )
+            if not _same_identity(metadata, named):
+                raise OperationStateError("snapshot directory changed while opening")
+        else:
+            metadata = context.paths.snapshot_dir.lstat()
+        _validate_snapshot_directory_metadata(metadata, context)
+        proof = _SnapshotDirectoryProof(
+            context,
+            operation_directory_fd,
+            descriptor,
+            metadata,
+            dict(expected_bytes),
+            file_descriptors,
+            file_metadata,
+        )
+        if not create:
+            if set(_snapshot_inventory(proof)) != set(expected_bytes):
+                raise OperationStateError("preexisting snapshot inventory is not exact")
+        write_order = (
+            [
+                _RCLONE_AUDIT_NAME,
+                *sorted(
+                    set(expected_bytes)
+                    - {_RCLONE_AUDIT_NAME, _SNAPSHOT_MANIFEST_NAME}
+                ),
+                _SNAPSHOT_MANIFEST_NAME,
+            ]
+            if create
+            else sorted(expected_bytes)
+        )
+        for name in write_order:
+            artifact_fd = _open_snapshot_artifact_descriptor(
+                proof,
+                name,
+                create=create,
+            )
+            file_descriptors[name] = artifact_fd
+            if create:
+                if hasattr(os, "fchmod"):
+                    os.fchmod(artifact_fd, 0o600)
+                elif os.name == "posix":
+                    raise OperationStateError("snapshot artifact chmod primitive is unavailable")
+                else:
+                    (context.paths.snapshot_dir / name).chmod(0o600)
+                _write_all(artifact_fd, expected_bytes[name])
+                os.fsync(artifact_fd)
+            opened = os.fstat(artifact_fd)
+            named = _snapshot_named_file_metadata(proof, name)
+            if (
+                not _snapshot_file_metadata_is_safe(opened, context)
+                or not _same_identity(opened, named)
+                or opened.st_size != len(expected_bytes[name])
+            ):
+                raise OperationStateError("snapshot artifact metadata is invalid")
+            file_metadata[name] = opened
+            if create:
+                _atomic_event_hook("snapshot_artifact_written", name=name)
+        if create:
+            refreshed = (
+                os.fstat(descriptor)
+                if descriptor is not None
+                else context.paths.snapshot_dir.lstat()
+            )
+            named_refreshed = _snapshot_named_directory_metadata(proof)
+            if not _same_identity(refreshed, named_refreshed):
+                raise OperationStateError("snapshot directory changed during artifact writes")
+            _validate_snapshot_directory_metadata(refreshed, context)
+            proof.metadata = refreshed
+        _revalidate_snapshot_directory_proof(proof)
+        return proof
+    except BaseException as exc:
+        for artifact_fd in file_descriptors.values():
+            try:
+                os.close(artifact_fd)
+            except OSError:
+                pass
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if isinstance(exc, OperationStateError):
+            raise
+        raise OperationStateError("snapshot directory cannot be opened safely") from exc
+
+
+def _fsync_snapshot_directory_proof(proof: _SnapshotDirectoryProof) -> None:
+    _revalidate_snapshot_directory_proof(proof)
+    for descriptor in proof.file_descriptors.values():
+        os.fsync(descriptor)
+    if proof.descriptor is not None:
+        os.fsync(proof.descriptor)
+    if proof.operation_directory_fd is not None:
+        os.fsync(proof.operation_directory_fd)
+    elif os.name == "posix":
+        _fsync_parent_directory(proof.context.paths.operation_dir)
+    _revalidate_snapshot_directory_proof(proof)
+
+
+def _close_snapshot_directory_proof(proof: _SnapshotDirectoryProof) -> None:
+    for descriptor in proof.file_descriptors.values():
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+    proof.file_descriptors.clear()
+    if proof.descriptor is not None:
+        try:
+            os.close(proof.descriptor)
+        except OSError:
+            pass
+        proof.descriptor = None
+
+
 def _scrub_completed_process(completed: subprocess.CompletedProcess[str]) -> None:
     completed.args = ("[REDACTED]",)
     completed.stdout = "[REDACTED]"
@@ -4482,6 +5204,259 @@ def _checked_command(
         completed.stderr = ""
         raise OperationStateError(f"{label} failed")
     return completed
+
+
+def _readonly_command_output(
+    context: OperationsContext,
+    argv: tuple[str, ...],
+    label: str,
+) -> str:
+    completed = _checked_command(context, argv, (), label)
+    assert isinstance(completed.stdout, str) and isinstance(completed.stderr, str)
+    output = completed.stdout
+    if completed.stderr:
+        _scrub_completed_process(completed)
+        raise OperationStateError(f"{label} returned unexpected stderr")
+    _scrub_completed_process(completed)
+    return output
+
+
+def _parse_systemctl_show(
+    raw: str,
+    expected_keys: tuple[str, ...],
+    label: str,
+    *,
+    allow_empty: frozenset[str] = frozenset(),
+) -> dict[str, str]:
+    if not raw.endswith("\n") or "\r" in raw:
+        raise OperationStateError(f"{label} output is not canonical")
+    values: dict[str, str] = {}
+    for line in raw.splitlines():
+        if line.count("=") != 1:
+            raise OperationStateError(f"{label} output is malformed")
+        key, value = line.split("=", 1)
+        if (
+            key in values
+            or key not in expected_keys
+            or (not value and key not in allow_empty)
+        ):
+            raise OperationStateError(f"{label} output has ambiguous properties")
+        values[key] = value
+    if tuple(values) != expected_keys and set(values) != set(expected_keys):
+        raise OperationStateError(f"{label} output is incomplete")
+    return values
+
+
+def _systemctl_show_unit(
+    context: OperationsContext,
+    unit: str,
+    *,
+    user_machine: str | None = None,
+) -> dict[str, str]:
+    if _SYSTEMD_UNIT_RE.fullmatch(unit) is None:
+        raise OperationStateError("systemd service unit is unsafe")
+    properties = ("LoadState", "ActiveState", "SubState", "MainPID")
+    prefix: tuple[str, ...] = (_SYSTEMCTL_EXECUTABLE,)
+    if user_machine is not None:
+        if _LOGIN_USER_RE.fullmatch(user_machine) is None:
+            raise OperationStateError("systemd user owner is unsafe")
+        prefix += ("--user", f"--machine={user_machine}@.host")
+    argv = (
+        *prefix,
+        "show",
+        unit,
+        *(f"--property={value}" for value in properties),
+        "--no-pager",
+    )
+    raw = _readonly_command_output(context, argv, "systemd unit query")
+    return _parse_systemctl_show(raw, properties, "systemd unit query")
+
+
+def _parse_positive_main_pid(
+    values: dict[str, str],
+    label: str,
+    *,
+    require_active: bool,
+) -> int:
+    try:
+        pid = int(values["MainPID"], 10)
+    except (KeyError, ValueError):
+        raise OperationStateError(f"{label} MainPID is invalid") from None
+    if str(pid) != values["MainPID"] or pid < 0:
+        raise OperationStateError(f"{label} MainPID is invalid")
+    if require_active:
+        if (
+            values.get("LoadState") != "loaded"
+            or values.get("ActiveState") != "active"
+            or values.get("SubState") != "running"
+            or pid < 1
+        ):
+            raise OperationStateError(f"{label} is not one exact active process")
+    elif (
+        values.get("LoadState") != "loaded"
+        or values.get("ActiveState") != "inactive"
+        or values.get("SubState") != "dead"
+        or pid != 0
+    ):
+        raise OperationStateError(f"{label} must be loaded, inactive, dead, and pidless")
+    return pid
+
+
+def _capture_prior_runtime(context: OperationsContext) -> dict[str, object]:
+    timer_properties = (
+        "UnitFileState",
+        "ActiveState",
+        "SubState",
+        "LastTriggerUSec",
+    )
+    timer_raw = _readonly_command_output(
+        context,
+        (
+            _SYSTEMCTL_EXECUTABLE,
+            "show",
+            "degen-prod-db-backup.timer",
+            *(f"--property={value}" for value in timer_properties),
+            "--no-pager",
+        ),
+        "backup timer query",
+    )
+    timer = _parse_systemctl_show(
+        timer_raw,
+        timer_properties,
+        "backup timer query",
+        allow_empty=frozenset({"LastTriggerUSec"}),
+    )
+    if timer["UnitFileState"] not in {"enabled", "disabled"}:
+        raise OperationStateError("backup timer enablement state is ambiguous")
+    if timer["ActiveState"] not in {"active", "inactive"}:
+        raise OperationStateError("backup timer active state is ambiguous")
+    expected_substate = "waiting" if timer["ActiveState"] == "active" else "dead"
+    if timer["SubState"] != expected_substate:
+        raise OperationStateError("backup timer substate is ambiguous")
+    trigger_raw = timer["LastTriggerUSec"]
+    trigger_epoch: int | None
+    if trigger_raw in {"", "n/a", "never"}:
+        trigger_epoch = None
+    else:
+        converted = _readonly_command_output(
+            context,
+            (_DATE_EXECUTABLE, "--date", trigger_raw, "+%s"),
+            "backup timer trigger conversion",
+        )
+        if not converted.endswith("\n") or not converted[:-1].isdigit():
+            raise OperationStateError("backup timer trigger epoch is invalid")
+        trigger_epoch = int(converted[:-1], 10)
+
+    postgres_raw = _readonly_command_output(
+        context,
+        (
+            _SYSTEMCTL_EXECUTABLE,
+            "list-units",
+            "--type=service",
+            "--state=running",
+            "--no-legend",
+            "--no-pager",
+            "--plain",
+            "postgresql*.service",
+        ),
+        "PostgreSQL unit discovery",
+    )
+    postgres_units: list[str] = []
+    for line in postgres_raw.splitlines():
+        fields = line.split()
+        if (
+            len(fields) < 4
+            or _SYSTEMD_UNIT_RE.fullmatch(fields[0]) is None
+            or not fields[0].startswith("postgresql")
+            or fields[1:4] != ["loaded", "active", "running"]
+        ):
+            raise OperationStateError("PostgreSQL unit discovery output is ambiguous")
+        postgres_units.append(fields[0])
+    if len(postgres_units) != 1 or len(set(postgres_units)) != 1:
+        raise OperationStateError("exactly one active PostgreSQL service is required")
+    postgres_unit = postgres_units[0]
+    postgres_pid = _parse_positive_main_pid(
+        _systemctl_show_unit(context, postgres_unit),
+        "PostgreSQL service",
+        require_active=True,
+    )
+    web_pid = _parse_positive_main_pid(
+        _systemctl_show_unit(context, "degen-web.service"),
+        "web service",
+        require_active=True,
+    )
+    worker_pid = _parse_positive_main_pid(
+        _systemctl_show_unit(context, "degen-worker.service"),
+        "worker service",
+        require_active=True,
+    )
+    _parse_positive_main_pid(
+        _systemctl_show_unit(context, "degen-prod-db-backup.service"),
+        "backup service",
+        require_active=False,
+    )
+
+    users_raw = _readonly_command_output(
+        context,
+        (_LOGINCTL_EXECUTABLE, "list-users", "--no-legend", "--no-pager"),
+        "login user discovery",
+    )
+    users: list[tuple[str, str]] = []
+    seen_uids: set[str] = set()
+    seen_names: set[str] = set()
+    for line in users_raw.splitlines():
+        fields = line.split()
+        if (
+            len(fields) < 2
+            or not fields[0].isdigit()
+            or len(fields[0]) > 10
+            or str(int(fields[0])) != fields[0]
+            or int(fields[0]) < 0
+            or _LOGIN_USER_RE.fullmatch(fields[1]) is None
+            or fields[0] in seen_uids
+            or fields[1] in seen_names
+        ):
+            raise OperationStateError("login user discovery output is ambiguous")
+        seen_uids.add(fields[0])
+        seen_names.add(fields[1])
+        users.append((fields[0], fields[1]))
+    bot_candidates: list[tuple[str, str, int]] = []
+    for uid, username in users:
+        values = _systemctl_show_unit(
+            context,
+            "degen-ops-discord-bot.service",
+            user_machine=username,
+        )
+        if (
+            values["LoadState"] == "not-found"
+            and values["ActiveState"] == "inactive"
+            and values["SubState"] == "dead"
+            and values["MainPID"] == "0"
+        ):
+            continue
+        bot_pid = _parse_positive_main_pid(
+            values,
+            "Discord bot service",
+            require_active=True,
+        )
+        bot_candidates.append((uid, username, bot_pid))
+    if len(bot_candidates) != 1:
+        raise OperationStateError("Discord bot owning user or unit is ambiguous")
+    bot_uid, bot_user, bot_pid = bot_candidates[0]
+    pids = {
+        f"postgresql:{postgres_unit}": postgres_pid,
+        "system:degen-web.service": web_pid,
+        "system:degen-worker.service": worker_pid,
+        f"user:{bot_uid}:{bot_user}:degen-ops-discord-bot.service": bot_pid,
+    }
+    if len(set(pids.values())) != len(pids):
+        raise OperationStateError("protected runtime PIDs are not unique")
+    return {
+        "timer_enabled": timer["UnitFileState"] == "enabled",
+        "timer_active": timer["ActiveState"] == "active",
+        "pids": pids,
+        "preinstall_trigger_epoch": trigger_epoch,
+    }
 
 
 @dataclass
@@ -5447,6 +6422,242 @@ def _fsync_host_stage_proof(proof: _HostStageProof, manifest: dict[str, object])
     _revalidate_host_stage_proof(proof, manifest)
 
 
+def _read_stage_file_once(
+    context: OperationsContext,
+    stage_directories: _StageDirectoryProof,
+    relative: str,
+    *,
+    maximum_size: int,
+    exact_mode: int,
+) -> bytes:
+    pure = PurePosixPath(relative)
+    parent = pure.parent.as_posix()
+    if parent == ".":
+        parent = "."
+    parent_fd = stage_directories.descriptors.get(parent)
+    path = context.paths.staged_dir.joinpath(*pure.parts)
+    descriptor: int | None = None
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        named = (
+            os.stat(pure.name, dir_fd=parent_fd, follow_symlinks=False)
+            if parent_fd is not None
+            else path.lstat()
+        )
+        if (
+            not stat.S_ISREG(named.st_mode)
+            or named.st_uid != context.effective_uid
+            or named.st_nlink != 1
+            or (os.name == "posix" and stat.S_IMODE(named.st_mode) != exact_mode)
+            or named.st_size < 0
+            or named.st_size > maximum_size
+        ):
+            raise OperationStateError("host-stage file metadata is invalid")
+        descriptor = (
+            os.open(pure.name, flags, dir_fd=parent_fd)
+            if parent_fd is not None
+            else os.open(path, flags)
+        )
+        opened_before = os.fstat(descriptor)
+        if not _same_identity(named, opened_before):
+            raise OperationStateError("host-stage file changed while opening")
+        raw = _read_exact_descriptor(
+            descriptor,
+            opened_before.st_size,
+            "host-stage file",
+        )
+        opened_after = os.fstat(descriptor)
+        named_after = (
+            os.stat(pure.name, dir_fd=parent_fd, follow_symlinks=False)
+            if parent_fd is not None
+            else path.lstat()
+        )
+        if (
+            _stage_stable_metadata(opened_before)
+            != _stage_stable_metadata(opened_after)
+            or not _same_identity(opened_after, named_after)
+        ):
+            raise OperationStateError("host-stage file changed while reading")
+        _revalidate_stage_directories(stage_directories)
+        return raw
+    except OSError as exc:
+        raise OperationStateError("host-stage file cannot be read safely") from exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _validate_existing_stage_manifest(
+    context: OperationsContext,
+    state: dict[str, object],
+    manifest: dict[str, object],
+    asset_bytes: dict[str, bytes],
+    environment_sha256: str,
+) -> None:
+    root = _require_object(
+        manifest,
+        frozenset(
+            {
+                "schema_version",
+                "operation",
+                "selected_pair",
+                "reviewed_assets",
+                "host_environment",
+            }
+        ),
+        "host-stage manifest",
+    )
+    if root["schema_version"] != 1:
+        raise OperationStateError("host-stage manifest schema is invalid")
+    operation = _require_object(
+        root["operation"],
+        frozenset(
+            {
+                "archive_sha256",
+                "commit",
+                "manifest_sha256",
+                "operation_dir",
+                "operation_id",
+            }
+        ),
+        "host-stage manifest operation",
+    )
+    expected_operation = {
+        "archive_sha256": context.expected_archive_sha256,
+        "commit": context.expected_commit,
+        "manifest_sha256": context.expected_manifest_sha256,
+        "operation_dir": str(context.paths.operation_dir),
+        "operation_id": context.operation_id,
+    }
+    if operation != expected_operation:
+        raise OperationStateError("host-stage manifest operation binding is invalid")
+    selected = _require_object(
+        root["selected_pair"],
+        frozenset({"dump_basename", "dump_sha256"}),
+        "host-stage manifest selected pair",
+    )
+    dump_basename = _require_string(
+        selected["dump_basename"],
+        "host-stage manifest dump basename",
+        nonempty=True,
+    )
+    _require_hash(selected["dump_sha256"], "host-stage manifest dump sha256")
+    match = _BACKUP_NAME_RE.fullmatch(dump_basename)
+    effective_config = state["effective_config"]
+    assert isinstance(effective_config, dict)
+    if (
+        match is None
+        or match.group("sidecar") is not None
+        or match.group("prefix") != effective_config["BACKUP_PREFIX"]
+    ):
+        raise OperationStateError("host-stage manifest selected pair is invalid")
+    target_by_source = dict(_SOURCE_TO_TARGET)
+    expected_reviewed = [
+        {
+            "mode": 0o755 if source in _EXECUTABLE_SOURCE_ASSETS else 0o644,
+            "sha256": hashlib.sha256(asset_bytes[source]).hexdigest(),
+            "source": source,
+            "staged_path": f"reviewed/{source}",
+            "target": target_by_source.get(source),
+        }
+        for source in sorted(_SOURCE_ASSETS)
+    ]
+    if root["reviewed_assets"] != expected_reviewed:
+        raise OperationStateError("host-stage manifest reviewed assets are invalid")
+    expected_environment = {
+        "mode": 0o600,
+        "sha256": environment_sha256,
+        "staged_path": "host/etc/degen/prod-db-backup.env",
+        "target": "/etc/degen/prod-db-backup.env",
+    }
+    if root["host_environment"] != expected_environment:
+        raise OperationStateError("host-stage manifest environment binding is invalid")
+
+
+def _open_existing_host_stage_proof(
+    context: OperationsContext,
+    material: _VerifiedSourceMaterial,
+) -> tuple[_HostStageProof, dict[str, object]]:
+    stage_directories = _open_stage_directories(
+        context,
+        material.directory_fd,
+        create=False,
+    )
+    try:
+        asset_bytes = _capture_reviewed_asset_bytes(material.source_proof)
+        environment_raw = _read_stage_file_once(
+            context,
+            stage_directories,
+            "host/etc/degen/prod-db-backup.env",
+            maximum_size=_MAX_APP_ENV_BYTES,
+            exact_mode=0o600,
+        )
+        if _unsafe_environment_payload(environment_raw):
+            raise OperationStateError("host-stage environment contains secret-like content")
+        environment_sha256 = hashlib.sha256(environment_raw).hexdigest()
+        manifest_raw = _read_stage_file_once(
+            context,
+            stage_directories,
+            "host-stage-manifest.json",
+            maximum_size=_MAX_STAGED_MANIFEST_BYTES,
+            exact_mode=0o600,
+        )
+        manifest = _decode_strict_manifest(manifest_raw)
+        _validate_existing_stage_manifest(
+            context,
+            material.state,
+            manifest,
+            asset_bytes,
+            environment_sha256,
+        )
+        expected_bytes = {
+            **{
+                f"reviewed/{source}": contents
+                for source, contents in asset_bytes.items()
+            },
+            "host/etc/degen/prod-db-backup.env": environment_raw,
+            "host-stage-manifest.json": manifest_raw,
+        }
+        expected_modes = {
+            **{
+                f"reviewed/{source}": (
+                    0o755 if source in _EXECUTABLE_SOURCE_ASSETS else 0o644
+                )
+                for source in _SOURCE_ASSETS
+            },
+            "host/etc/degen/prod-db-backup.env": 0o600,
+            "host-stage-manifest.json": 0o600,
+        }
+        proof = _capture_host_stage_proof(
+            context,
+            stage_directories,
+            expected_bytes,
+            expected_modes,
+            manifest,
+        )
+        host_stage = material.state["host_stage"]
+        assert isinstance(host_stage, dict)
+        expected_receipt = {
+            "manifest_sha256": hashlib.sha256(manifest_raw).hexdigest(),
+            "asset_hashes": {
+                source: hashlib.sha256(contents).hexdigest()
+                for source, contents in asset_bytes.items()
+            },
+            "environment_sha256": environment_sha256,
+        }
+        if host_stage != expected_receipt:
+            _close_host_stage_proof(proof)
+            raise OperationStateError("host-stage receipt does not match held stage bytes")
+        return proof, manifest
+    except BaseException:
+        _close_stage_directories(stage_directories)
+        raise
+
+
 def _host_stage_manifest(
     context: OperationsContext,
     asset_hashes: dict[str, str],
@@ -5951,6 +7162,313 @@ def prepare_host_staging(context: OperationsContext) -> dict[str, object]:
                     )
 
 
+def _snapshot_target_receipt(proof: _SnapshotTargetProof) -> dict[str, object]:
+    if proof.descriptor is None:
+        return {
+            "present": False,
+            "sha256": None,
+            "mode": None,
+            "uid": None,
+            "gid": None,
+        }
+    assert proof.metadata is not None and proof.contents is not None
+    return {
+        "present": True,
+        "sha256": hashlib.sha256(proof.contents).hexdigest(),
+        "mode": (
+            stat.S_IMODE(proof.metadata.st_mode)
+            if os.name == "posix"
+            else 0o600
+        ),
+        "uid": proof.metadata.st_uid,
+        "gid": proof.metadata.st_gid,
+    }
+
+
+def _snapshot_artifacts_and_receipt(
+    targets: dict[str, _SnapshotTargetProof],
+    rclone: _HostFileProof,
+    rclone_raw: bytes,
+) -> tuple[dict[str, bytes], dict[str, object]]:
+    if tuple(targets) != _TARGET_ORDER:
+        raise OperationStateError("snapshot target capture order is invalid")
+    if len(set(_SNAPSHOT_TARGET_NAMES.values())) != len(_TARGET_ORDER):
+        raise OperationStateError("snapshot target basenames collide")
+    artifacts: dict[str, bytes] = {}
+    target_receipts: dict[str, dict[str, object]] = {}
+    for logical_path, proof in targets.items():
+        base = _SNAPSHOT_TARGET_NAMES[logical_path]
+        receipt = _snapshot_target_receipt(proof)
+        target_receipts[logical_path] = receipt
+        if proof.contents is None:
+            name = f"{base}.absent"
+            contents = f"ABSENT {logical_path}\n".encode("ascii")
+        else:
+            name = base
+            contents = proof.contents
+        if name in artifacts:
+            raise OperationStateError("snapshot artifact basenames collide")
+        artifacts[name] = contents
+    if _RCLONE_AUDIT_NAME in artifacts:
+        raise OperationStateError("rclone audit artifact basename collides")
+    artifacts[_RCLONE_AUDIT_NAME] = rclone_raw
+    manifest_raw = _canonical_snapshot_manifest(artifacts)
+    expected_bytes = {**artifacts, _SNAPSHOT_MANIFEST_NAME: manifest_raw}
+    metadata = rclone.metadata
+    snapshot: dict[str, object] = {
+        "manifest_sha256": hashlib.sha256(manifest_raw).hexdigest(),
+        "targets": target_receipts,
+        "rclone_audit": {
+            "path": _RCLONE_CONFIG_PATH,
+            "sha256": hashlib.sha256(rclone_raw).hexdigest(),
+            "inode": metadata.st_ino,
+            "uid": metadata.st_uid,
+            "gid": metadata.st_gid,
+            "mode": stat.S_IMODE(metadata.st_mode) if os.name == "posix" else 0o600,
+            "size": metadata.st_size,
+            "mtime_ns": metadata.st_mtime_ns,
+        },
+    }
+    return expected_bytes, snapshot
+
+
+def _snapshot_evidence(
+    snapshot: dict[str, object],
+    prior_runtime: dict[str, object],
+) -> bytes:
+    canonical = json.dumps(
+        {"prior_runtime": prior_runtime, "snapshot": snapshot},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("ascii")
+    return b"degen-host-snapshot-v1\n" + canonical + b"\n"
+
+
+def _snapshotted_state(
+    context: OperationsContext,
+    previous: dict[str, object],
+    snapshot: dict[str, object],
+    prior_runtime: dict[str, object],
+) -> dict[str, object]:
+    now = context.clock()
+    if type(now) is not datetime or now.tzinfo is None or now.utcoffset() != timedelta(0):
+        raise OperationStateError("operations clock must return an aware UTC datetime")
+    state = copy.deepcopy(previous)
+    state["phase"] = "snapshotted"
+    state["snapshot"] = copy.deepcopy(snapshot)
+    state["prior_runtime"] = copy.deepcopy(prior_runtime)
+    history = state["phase_history"]
+    assert isinstance(history, list)
+    history.append(
+        {
+            "phase": "snapshotted",
+            "epoch": int(now.astimezone(timezone.utc).timestamp()),
+            "evidence_sha256": hashlib.sha256(
+                _snapshot_evidence(snapshot, prior_runtime)
+            ).hexdigest(),
+        }
+    )
+    validate_operation_state(state, context.paths.operation_dir, previous)
+    validate_operation_state_for_context(state, context)
+    return state
+
+
+def _revalidate_snapshot_inputs(
+    material: _VerifiedSourceMaterial,
+    stage_proof: _HostStageProof,
+    stage_manifest: dict[str, object],
+    targets: dict[str, _SnapshotTargetProof],
+    rclone: _HostFileProof,
+    rclone_raw: bytes,
+    snapshot_proof: _SnapshotDirectoryProof,
+) -> None:
+    _revalidate_verified_source_material(material)
+    _revalidate_host_stage_proof(stage_proof, stage_manifest)
+    for proof in targets.values():
+        _revalidate_snapshot_target_proof(proof)
+    _revalidate_host_file_proof(rclone)
+    if _read_host_file(rclone, _MAX_SNAPSHOT_FILE_BYTES) != rclone_raw:
+        raise OperationStateError("rclone audit source changed after capture")
+    _revalidate_snapshot_directory_proof(snapshot_proof)
+    _revalidate_host_stage_proof(stage_proof, stage_manifest)
+    _revalidate_verified_source_material(material)
+
+
+def _snapshot_result(
+    snapshot: dict[str, object],
+    prior_runtime: dict[str, object],
+) -> dict[str, object]:
+    result = {
+        "snapshot": copy.deepcopy(snapshot),
+        "prior_runtime": copy.deepcopy(prior_runtime),
+    }
+    _reject_residual_secrets(result)
+    return result
+
+
+def snapshot_host_state(context: OperationsContext) -> dict[str, object]:
+    """Capture immutable rollback artifacts and prior runtime without mutation."""
+    _validate_source_context(context, context.paths.source_dir)
+    initial_state = load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    validate_operation_state_for_context(initial_state, context)
+    phase = initial_state["phase"]
+    if phase not in {"staging_prepared", "snapshotted"}:
+        raise OperationStateError(
+            "snapshot requires strict staging_prepared or snapshotted state"
+        )
+    material_context = (
+        _open_verified_staging_material(context)
+        if phase == "staging_prepared"
+        else _open_verified_snapshotted_material(context)
+    )
+    with material_context as material:
+        if material.state != initial_state:
+            raise OperationStateError("operation state changed before snapshot proof")
+        stage_proof, stage_manifest = _open_existing_host_stage_proof(
+            context,
+            material,
+        )
+        snapshot_proof: _SnapshotDirectoryProof | None = None
+        target_proofs: dict[str, _SnapshotTargetProof] = {}
+        try:
+            with contextlib.ExitStack() as stack:
+                for logical_path in _TARGET_ORDER:
+                    parent = str(PurePosixPath(logical_path).parent)
+                    directory = stack.enter_context(
+                        _open_host_directory(context, parent)
+                    )
+                    proof = _capture_snapshot_target(directory, logical_path)
+                    target_proofs[logical_path] = proof
+                effective_config = initial_state["effective_config"]
+                assert isinstance(effective_config, dict)
+                if effective_config["RCLONE_CONFIG"] != _RCLONE_CONFIG_PATH:
+                    raise OperationStateError("rclone config path is not the approved host path")
+                rclone = stack.enter_context(
+                    _open_host_file(
+                        context,
+                        _RCLONE_CONFIG_PATH,
+                        "rclone audit source",
+                        maximum_size=_MAX_SNAPSHOT_FILE_BYTES,
+                        exact_mode=0o600,
+                    )
+                )
+                rclone_raw = _read_host_file(rclone, _MAX_SNAPSHOT_FILE_BYTES)
+                if not rclone_raw:
+                    raise OperationStateError("rclone audit source is empty")
+                _revalidate_verified_source_material(material)
+                _revalidate_host_stage_proof(stage_proof, stage_manifest)
+                for proof in target_proofs.values():
+                    _revalidate_snapshot_target_proof(proof)
+                _revalidate_host_file_proof(rclone)
+                prior_runtime = _capture_prior_runtime(context)
+                expected_bytes, snapshot = _snapshot_artifacts_and_receipt(
+                    target_proofs,
+                    rclone,
+                    rclone_raw,
+                )
+                if phase == "snapshotted":
+                    if (
+                        initial_state["snapshot"] != snapshot
+                        or initial_state["prior_runtime"] != prior_runtime
+                    ):
+                        raise OperationStateError(
+                            "snapshotted state differs from current verified evidence"
+                        )
+                    snapshot_proof = _open_snapshot_directory_proof(
+                        context,
+                        material.directory_fd,
+                        expected_bytes,
+                        create=False,
+                    )
+                    _revalidate_snapshot_inputs(
+                        material,
+                        stage_proof,
+                        stage_manifest,
+                        target_proofs,
+                        rclone,
+                        rclone_raw,
+                        snapshot_proof,
+                    )
+                    if _capture_prior_runtime(context) != prior_runtime:
+                        raise OperationStateError(
+                            "protected runtime changed during snapshot verification"
+                        )
+                    _revalidate_snapshot_inputs(
+                        material,
+                        stage_proof,
+                        stage_manifest,
+                        target_proofs,
+                        rclone,
+                        rclone_raw,
+                        snapshot_proof,
+                    )
+                    return _snapshot_result(snapshot, prior_runtime)
+
+                snapshot_proof = _open_snapshot_directory_proof(
+                    context,
+                    material.directory_fd,
+                    expected_bytes,
+                    create=True,
+                )
+                _fsync_snapshot_directory_proof(snapshot_proof)
+                state = _snapshotted_state(
+                    context,
+                    initial_state,
+                    snapshot,
+                    prior_runtime,
+                )
+
+                def revalidate_receipt_proof() -> None:
+                    assert snapshot_proof is not None
+                    _revalidate_snapshot_inputs(
+                        material,
+                        stage_proof,
+                        stage_manifest,
+                        target_proofs,
+                        rclone,
+                        rclone_raw,
+                        snapshot_proof,
+                    )
+                    if _capture_prior_runtime(context) != prior_runtime:
+                        raise OperationStateError(
+                            "protected runtime changed before snapshot state replacement"
+                        )
+                    _revalidate_snapshot_inputs(
+                        material,
+                        stage_proof,
+                        stage_manifest,
+                        target_proofs,
+                        rclone,
+                        rclone_raw,
+                        snapshot_proof,
+                    )
+
+                revalidate_receipt_proof()
+                _atomic_write_operation_state_internal(
+                    context.paths.state_file,
+                    state,
+                    effective_uid=context.effective_uid,
+                    pre_replace_validator=revalidate_receipt_proof,
+                    operation_directory_binding=_OperationDirectoryBinding(
+                        context.paths.operation_dir,
+                        material.directory_fd,
+                        material.operation_metadata,
+                    ),
+                )
+                return _snapshot_result(snapshot, prior_runtime)
+        finally:
+            if snapshot_proof is not None:
+                _close_snapshot_directory_proof(snapshot_proof)
+            for proof in target_proofs.values():
+                _close_snapshot_target_proof(proof)
+            _close_host_stage_proof(stage_proof)
+
+
 def sanitize_error_text(value: object) -> str:
     try:
         text = str(value)
@@ -6041,6 +7559,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     prepare_staging = subparsers.add_parser("prepare-staging", allow_abbrev=False)
     prepare_staging.add_argument("--operation-dir", required=True, action=_StoreOnce)
+    snapshot = subparsers.add_parser("snapshot", allow_abbrev=False)
+    snapshot.add_argument("--operation-dir", required=True, action=_StoreOnce)
     return parser
 
 
@@ -6089,7 +7609,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 host_root=_PRODUCTION_HOST_ROOT,
             )
             verify_source_archive(context, source_dir=paths.source_dir)
-        else:
+        elif args.command == "prepare-staging":
             paths = build_operation_paths(operation_dir)
             state = load_operation_state(
                 paths.state_file,
@@ -6114,6 +7634,33 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             validate_operation_state_for_context(state, context)
             prepare_host_staging(context)
+        elif args.command == "snapshot":
+            paths = build_operation_paths(operation_dir)
+            state = load_operation_state(
+                paths.state_file,
+                effective_uid=effective_uid,
+            )
+            if state["phase"] not in {"staging_prepared", "snapshotted"}:
+                raise OperationStateError(
+                    "snapshot requires strict staging_prepared or snapshotted state"
+                )
+            reviewed = state["reviewed_source"]
+            assert isinstance(reviewed, dict)
+            context = OperationsContext(
+                operation_id=operation_dir.name,
+                paths=paths,
+                effective_uid=effective_uid,
+                command_runner=_default_command_runner,
+                clock=lambda: datetime.now(timezone.utc),
+                expected_commit=str(reviewed["commit"]),
+                expected_archive_sha256=str(reviewed["archive_sha256"]),
+                expected_manifest_sha256=str(reviewed["manifest_sha256"]),
+                host_root=_PRODUCTION_HOST_ROOT,
+            )
+            validate_operation_state_for_context(state, context)
+            snapshot_host_state(context)
+        else:
+            raise OperationStateError("unsupported command")
     except Exception as exc:
         message = sanitize_error_text(exc)
         if _string_contains_secret(message):

@@ -17,7 +17,7 @@ import sys
 import tarfile
 import threading
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -383,7 +383,12 @@ def observed_state(operation_dir: Path) -> dict[str, object]:
     state["prior_runtime"] = {
         "timer_enabled": True,
         "timer_active": True,
-        "pids": {"web": 100, "postgres": 200},
+        "pids": {
+            "postgresql:postgresql@15-main.service": 200,
+            "system:degen-web.service": 100,
+            "system:degen-worker.service": 101,
+            "user:1001:degen:degen-ops-discord-bot.service": 102,
+        },
         "preinstall_trigger_epoch": None,
     }
     append_phase(state, "installing", 1_750_000_030)
@@ -5490,3 +5495,878 @@ def test_host_stage_state_requires_exact_disabled_managed_configuration(
 
     with pytest.raises(module.OperationStateError, match="effective_config|managed|prefix|prune"):
         module.validate_operation_state(state, operation_dir)
+
+
+def host_snapshot_fixture(
+    module: object,
+    tmp_path: Path,
+    *,
+    absent_targets: tuple[str, ...] = (),
+) -> tuple[object, dict[str, object]]:
+    context, staging = host_staging_fixture(module, tmp_path)
+    module.prepare_host_staging(context)
+    source_runner = context.command_runner
+    target_bytes: dict[str, bytes] = {}
+    target_modes = {
+        TARGETS[0]: 0o755,
+        TARGETS[1]: 0o750,
+        TARGETS[2]: 0o755,
+        TARGETS[3]: 0o755,
+        TARGETS[4]: 0o644,
+        TARGETS[5]: 0o640,
+        TARGETS[6]: 0o600,
+    }
+    for index, target in enumerate(TARGETS):
+        path = host_root_path(context.host_root, target)
+        if path.exists():
+            path.unlink()
+        if target in absent_targets:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            continue
+        contents = f"prior host bytes {index} for {target}\n".encode("ascii")
+        write_private_host_file(path, contents, target_modes[target])
+        target_bytes[target] = contents
+
+    runtime = {
+        "timer_enabled": "enabled",
+        "timer_active": "active",
+        "timer_substate": "waiting",
+        "timer_trigger": "Wed 2026-07-01 00:00:00 UTC",
+        "timer_trigger_epoch": 1_782_883_200,
+        "postgres_units": ["postgresql@15-main.service"],
+        "service_pids": {
+            "postgresql@15-main.service": 210,
+            "degen-web.service": 310,
+            "degen-worker.service": 320,
+        },
+        "bot_users": [("1001", "degen")],
+        "bot_pids": {"degen": 410},
+    }
+    calls: list[tuple[str, ...]] = []
+
+    def completed(
+        argv: tuple[str, ...],
+        stdout: str,
+        *,
+        returncode: int = 0,
+        stderr: str = "",
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
+
+    def command_runner(
+        argv: object,
+        pass_fds: tuple[int, ...],
+    ) -> subprocess.CompletedProcess[str]:
+        argv_tuple = tuple(str(value) for value in argv)
+        if "get-tar-commit-id" in argv_tuple:
+            return source_runner(argv_tuple, pass_fds)
+        calls.append(argv_tuple)
+        assert pass_fds == ()
+        assert not any(
+            token in argv_tuple
+            for token in (
+                "start",
+                "stop",
+                "restart",
+                "enable",
+                "disable",
+                "daemon-reload",
+            )
+        )
+        assert not any("rclone" in token.lower() for token in argv_tuple)
+        executable = Path(argv_tuple[0]).name if argv_tuple else ""
+        if executable == "systemctl" and "list-units" in argv_tuple:
+            stdout = "".join(
+                f"{unit} loaded active running PostgreSQL service\n"
+                for unit in runtime["postgres_units"]
+            )
+            return completed(argv_tuple, stdout)
+        if executable == "systemctl" and "show" in argv_tuple:
+            unit = argv_tuple[argv_tuple.index("show") + 1]
+            if unit == "degen-prod-db-backup.timer":
+                return completed(
+                    argv_tuple,
+                    "UnitFileState="
+                    + str(runtime["timer_enabled"])
+                    + "\nActiveState="
+                    + str(runtime["timer_active"])
+                    + "\nSubState="
+                    + str(runtime["timer_substate"])
+                    + "\nLastTriggerUSec="
+                    + str(runtime["timer_trigger"])
+                    + "\n",
+                )
+            if unit == "degen-ops-discord-bot.service":
+                machine = next(
+                    token.split("=", 1)[1]
+                    for token in argv_tuple
+                    if token.startswith("--machine=")
+                )
+                username = machine.split("@", 1)[0]
+                pid = runtime["bot_pids"].get(username)
+                if pid is None:
+                    return completed(
+                        argv_tuple,
+                        "LoadState=not-found\nActiveState=inactive\n"
+                        "SubState=dead\nMainPID=0\n",
+                    )
+                return completed(
+                    argv_tuple,
+                    "LoadState=loaded\nActiveState=active\n"
+                    f"SubState=running\nMainPID={pid}\n",
+                )
+            pid = runtime["service_pids"].get(unit, 0)
+            active = "active" if pid else "inactive"
+            substate = "running" if pid else "dead"
+            return completed(
+                argv_tuple,
+                f"LoadState=loaded\nActiveState={active}\n"
+                f"SubState={substate}\nMainPID={pid}\n",
+            )
+        if executable == "loginctl" and "list-users" in argv_tuple:
+            return completed(
+                argv_tuple,
+                "".join(
+                    f"{uid} {username}\n"
+                    for uid, username in runtime["bot_users"]
+                ),
+            )
+        if executable == "date":
+            assert str(runtime["timer_trigger"]) in argv_tuple
+            return completed(argv_tuple, f"{runtime['timer_trigger_epoch']}\n")
+        raise AssertionError(f"unexpected snapshot command: {argv_tuple!r}")
+
+    return dataclasses.replace(context, command_runner=command_runner), {
+        "calls": calls,
+        "rclone_bytes": staging["rclone_path"].read_bytes(),
+        "rclone_path": staging["rclone_path"],
+        "runtime": runtime,
+        "target_bytes": target_bytes,
+        "target_modes": target_modes,
+    }
+
+
+def snapshot_artifact_name(target: str) -> str:
+    return PurePosixPath(target).name
+
+
+def expected_prior_runtime() -> dict[str, object]:
+    return {
+        "timer_enabled": True,
+        "timer_active": True,
+        "preinstall_trigger_epoch": 1_782_883_200,
+        "pids": {
+            "postgresql:postgresql@15-main.service": 210,
+            "system:degen-web.service": 310,
+            "system:degen-worker.service": 320,
+            "user:1001:degen:degen-ops-discord-bot.service": 410,
+        },
+    }
+
+
+def test_snapshot_host_state_saves_exact_targets_manifest_and_receipt(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = host_snapshot_fixture(module, tmp_path)
+
+    result = module.snapshot_host_state(context)
+
+    assert set(result) == {"snapshot", "prior_runtime"}
+    assert result["prior_runtime"] == expected_prior_runtime()
+    snapshot = result["snapshot"]
+    assert set(snapshot) == {"manifest_sha256", "targets", "rclone_audit"}
+    assert tuple(snapshot["targets"]) == TARGETS
+    assert snapshot["rclone_audit"]["path"] == "/etc/degen/rclone.conf"
+    assert "/etc/degen/rclone.conf" not in snapshot["targets"]
+
+    expected_artifacts: dict[str, bytes] = {}
+    for target in TARGETS:
+        name = snapshot_artifact_name(target)
+        expected_artifacts[name] = fixture["target_bytes"][target]
+        source = host_root_path(context.host_root, target)
+        metadata = source.stat()
+        assert snapshot["targets"][target] == {
+            "present": True,
+            "sha256": hashlib.sha256(fixture["target_bytes"][target]).hexdigest(),
+            "mode": stat.S_IMODE(metadata.st_mode) if os.name == "posix" else 0o600,
+            "uid": metadata.st_uid,
+            "gid": metadata.st_gid,
+        }
+    expected_artifacts["rclone.conf.audit"] = fixture["rclone_bytes"]
+    for name, contents in expected_artifacts.items():
+        path = context.paths.snapshot_dir / name
+        assert path.read_bytes() == contents
+        if os.name == "posix":
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    manifest = context.paths.snapshot_dir / "SHA256SUMS"
+    expected_manifest = b"".join(
+        hashlib.sha256(expected_artifacts[name]).hexdigest().encode("ascii")
+        + b"  "
+        + name.encode("ascii")
+        + b"\n"
+        for name in sorted(expected_artifacts)
+    )
+    assert manifest.read_bytes() == expected_manifest
+    assert snapshot["manifest_sha256"] == hashlib.sha256(expected_manifest).hexdigest()
+    if os.name == "posix":
+        assert stat.S_IMODE(context.paths.snapshot_dir.stat().st_mode) == 0o700
+        assert stat.S_IMODE(manifest.stat().st_mode) == 0o600
+
+    state = module.load_operation_state(
+        context.paths.state_file, effective_uid=context.effective_uid
+    )
+    module.validate_operation_state_for_context(state, context)
+    assert state["phase"] == "snapshotted"
+    assert state["snapshot"] == snapshot
+    assert state["prior_runtime"] == expected_prior_runtime()
+    assert [entry["phase"] for entry in state["phase_history"]] == [
+        "source_verified",
+        "staging_prepared",
+        "snapshotted",
+    ]
+
+
+def test_absence_marker_is_mutually_exclusive_and_manifested(tmp_path: Path) -> None:
+    module = load_ops_helper()
+    absent = (TARGETS[1], TARGETS[3])
+    context, _fixture = host_snapshot_fixture(
+        module,
+        tmp_path,
+        absent_targets=absent,
+    )
+
+    result = module.snapshot_host_state(context)
+
+    snapshot = result["snapshot"]
+    manifest_names = {
+        line.split(b"  ", 1)[1].decode("ascii")
+        for line in (context.paths.snapshot_dir / "SHA256SUMS").read_bytes().splitlines()
+    }
+    for target in absent:
+        name = snapshot_artifact_name(target)
+        marker = context.paths.snapshot_dir / f"{name}.absent"
+        assert not (context.paths.snapshot_dir / name).exists()
+        assert marker.read_bytes() == f"ABSENT {target}\n".encode("ascii")
+        assert f"{name}.absent" in manifest_names
+        assert snapshot["targets"][target] == {
+            "present": False,
+            "sha256": None,
+            "mode": None,
+            "uid": None,
+            "gid": None,
+        }
+
+
+@pytest.mark.parametrize("invalid_kind", ["symlink", "directory", "hardlink"])
+def test_snapshot_rejects_link_nonregular_or_hardlinked_target(
+    tmp_path: Path,
+    invalid_kind: str,
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = host_snapshot_fixture(module, tmp_path)
+    target = host_root_path(context.host_root, TARGETS[0])
+    prior = target.with_name(target.name + ".prior")
+    target.rename(prior)
+    if invalid_kind == "symlink":
+        try:
+            target.symlink_to(prior.name)
+        except OSError:
+            pytest.skip("symlink creation is unavailable")
+    elif invalid_kind == "directory":
+        target.mkdir()
+    else:
+        os.link(prior, target)
+    before = context.paths.state_file.read_bytes()
+
+    with pytest.raises(module.OperationStateError):
+        module.snapshot_host_state(context)
+
+    assert context.paths.state_file.read_bytes() == before
+    assert not context.paths.snapshot_dir.exists()
+
+
+def test_snapshot_unstable_source_fails_and_closes_held_descriptors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = host_snapshot_fixture(module, tmp_path)
+    target = host_root_path(context.host_root, TARGETS[0])
+    opened: list[int] = []
+
+    def mutate(event: str, **details: object) -> None:
+        if event == "snapshot_target_opened" and details.get("logical_path") == TARGETS[0]:
+            opened.append(int(details["descriptor"]))
+            target.write_bytes(target.read_bytes() + b"changed while held\n")
+
+    monkeypatch.setattr(module, "_atomic_event_hook", mutate)
+
+    with pytest.raises(module.OperationStateError):
+        module.snapshot_host_state(context)
+
+    assert opened
+    for descriptor in opened:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+    assert not context.paths.snapshot_dir.exists()
+
+
+@pytest.mark.parametrize("changed", ["present", "absent"])
+def test_snapshot_pre_replace_revalidates_present_and_absent_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    changed: str,
+) -> None:
+    module = load_ops_helper()
+    absent_targets = (TARGETS[1],) if changed == "absent" else ()
+    context, _fixture = host_snapshot_fixture(
+        module,
+        tmp_path,
+        absent_targets=absent_targets,
+    )
+    before = context.paths.state_file.read_bytes()
+
+    def replace(event: str, **_details: object) -> None:
+        if event != "before_replace":
+            return
+        target_name = TARGETS[1] if changed == "absent" else TARGETS[0]
+        target = host_root_path(context.host_root, target_name)
+        if changed == "absent":
+            write_private_host_file(target, b"appeared after absence proof\n", 0o600)
+        else:
+            replacement = target.with_name(target.name + ".replacement")
+            write_private_host_file(
+                replacement,
+                target.read_bytes(),
+                stat.S_IMODE(target.stat().st_mode),
+            )
+            os.replace(replacement, target)
+
+    monkeypatch.setattr(module, "_atomic_event_hook", replace)
+
+    with pytest.raises(module.OperationStateError):
+        module.snapshot_host_state(context)
+
+    assert context.paths.state_file.read_bytes() == before
+
+
+@pytest.mark.parametrize("artifact", ["saved", "absence", "audit", "manifest"])
+def test_snapshot_manifest_is_reverified_through_state_cas(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    artifact: str,
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = host_snapshot_fixture(
+        module,
+        tmp_path,
+        absent_targets=(TARGETS[1],),
+    )
+    before = context.paths.state_file.read_bytes()
+
+    def tamper(event: str, **_details: object) -> None:
+        if event != "before_replace":
+            return
+        paths = {
+            "saved": context.paths.snapshot_dir / snapshot_artifact_name(TARGETS[0]),
+            "absence": context.paths.snapshot_dir
+            / f"{snapshot_artifact_name(TARGETS[1])}.absent",
+            "audit": context.paths.snapshot_dir / "rclone.conf.audit",
+            "manifest": context.paths.snapshot_dir / "SHA256SUMS",
+        }
+        path = paths[artifact]
+        path.write_bytes(path.read_bytes() + b"tampered\n")
+        path.chmod(0o600)
+
+    monkeypatch.setattr(module, "_atomic_event_hook", tamper)
+
+    with pytest.raises(module.OperationStateError):
+        module.snapshot_host_state(context)
+
+    assert context.paths.state_file.read_bytes() == before
+
+
+def test_snapshot_revalidates_source_stage_and_state_before_host_capture(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = host_snapshot_fixture(module, tmp_path)
+    manifest = context.paths.staged_dir / "host-stage-manifest.json"
+    manifest.write_bytes(manifest.read_bytes() + b"tampered\n")
+    before = context.paths.state_file.read_bytes()
+
+    with pytest.raises(module.OperationStateError):
+        module.snapshot_host_state(context)
+
+    assert fixture["calls"] == []
+    assert context.paths.state_file.read_bytes() == before
+    assert not context.paths.snapshot_dir.exists()
+
+
+def test_rclone_audit_is_root_only_secret_free_json_and_never_a_rollback_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = host_snapshot_fixture(module, tmp_path)
+    audit_seen_at_cas = False
+    write_order: list[str] = []
+
+    def inspect(event: str, **_details: object) -> None:
+        nonlocal audit_seen_at_cas
+        if event == "snapshot_artifact_written":
+            write_order.append(str(_details["name"]))
+        if event == "before_replace":
+            audit = context.paths.snapshot_dir / "rclone.conf.audit"
+            assert audit.read_bytes() == fixture["rclone_bytes"]
+            audit_seen_at_cas = True
+
+    monkeypatch.setattr(module, "_atomic_event_hook", inspect)
+
+    result = module.snapshot_host_state(context)
+
+    assert audit_seen_at_cas
+    assert write_order[0] == "rclone.conf.audit"
+    assert write_order[-1] == "SHA256SUMS"
+    observable_json = json.dumps(result, sort_keys=True).encode("utf-8")
+    assert b"RCLONE_CONTENT_SENTINEL" not in observable_json
+    assert fixture["rclone_bytes"] not in observable_json
+    assert "/etc/degen/rclone.conf" not in result["snapshot"]["targets"]
+    assert all(not any("rclone" in token.lower() for token in call) for call in fixture["calls"])
+    audit = context.paths.snapshot_dir / "rclone.conf.audit"
+    if os.name == "posix":
+        assert stat.S_IMODE(audit.stat().st_mode) == 0o600
+
+
+def test_prior_runtime_is_exact_and_recaptured_during_state_cas(tmp_path: Path) -> None:
+    module = load_ops_helper()
+    context, fixture = host_snapshot_fixture(module, tmp_path)
+
+    result = module.snapshot_host_state(context)
+
+    assert result["prior_runtime"] == expected_prior_runtime()
+    calls = fixture["calls"]
+    assert sum("list-units" in call for call in calls) >= 2
+    assert sum(
+        "show" in call and "degen-prod-db-backup.timer" in call for call in calls
+    ) >= 2
+    assert all(call and call[0].startswith("/") for call in calls)
+
+
+@pytest.mark.parametrize(
+    "ambiguous",
+    ["postgres", "bot-owner", "web-pid", "timer-enabled", "timer-active"],
+)
+def test_prior_runtime_fails_closed_on_ambiguous_unit_owner_or_state(
+    tmp_path: Path,
+    ambiguous: str,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = host_snapshot_fixture(module, tmp_path)
+    runtime = fixture["runtime"]
+    if ambiguous == "postgres":
+        runtime["postgres_units"].append("postgresql@16-main.service")
+    elif ambiguous == "bot-owner":
+        runtime["bot_users"].append(("1002", "other"))
+        runtime["bot_pids"]["other"] = 411
+    elif ambiguous == "web-pid":
+        runtime["service_pids"]["degen-web.service"] = 0
+    elif ambiguous == "timer-enabled":
+        runtime["timer_enabled"] = "indirect"
+    else:
+        runtime["timer_active"] = "activating"
+    before = context.paths.state_file.read_bytes()
+
+    with pytest.raises(module.OperationStateError):
+        module.snapshot_host_state(context)
+
+    assert context.paths.state_file.read_bytes() == before
+
+
+def test_prior_runtime_requires_backup_service_inactive_dead_with_zero_pid(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = host_snapshot_fixture(module, tmp_path)
+    fixture["runtime"]["service_pids"]["degen-prod-db-backup.service"] = 999
+    before = context.paths.state_file.read_bytes()
+
+    with pytest.raises(module.OperationStateError, match="backup|service|inactive"):
+        module.snapshot_host_state(context)
+
+    assert context.paths.state_file.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "bad_keys",
+    [
+        {"postgresql:postgresql@15-main.service": 210},
+        {
+            **expected_prior_runtime()["pids"],
+            "system:unexpected.service": 999,
+        },
+        {
+            **expected_prior_runtime()["pids"],
+            "postgresql:postgresql@16-main.service": 211,
+        },
+        {
+            key.replace("user:1001:degen:", "user:bad:degen:"): value
+            for key, value in expected_prior_runtime()["pids"].items()
+        },
+    ],
+)
+def test_prior_runtime_pid_identity_keys_are_exact_and_unambiguous(
+    tmp_path: Path,
+    bad_keys: dict[str, int],
+) -> None:
+    module = load_ops_helper()
+    operation_dir, _uid = private_operation_dir(tmp_path)
+    state = state_at_phase(operation_dir, "snapshotted")
+    state["prior_runtime"]["pids"] = bad_keys
+
+    with pytest.raises(module.OperationStateError, match="prior_runtime|pids|identity"):
+        module.validate_operation_state(state, operation_dir)
+
+
+def test_prior_runtime_rejects_duplicate_pid_values_and_wrong_audit_path(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    operation_dir, _uid = private_operation_dir(tmp_path)
+    state = state_at_phase(operation_dir, "snapshotted")
+    state["prior_runtime"]["pids"] = expected_prior_runtime()["pids"]
+    state["prior_runtime"]["pids"]["system:degen-worker.service"] = 310
+    with pytest.raises(module.OperationStateError, match="prior_runtime|pids|unique"):
+        module.validate_operation_state(state, operation_dir)
+
+    state = state_at_phase(operation_dir, "snapshotted")
+    state["prior_runtime"]["pids"] = expected_prior_runtime()["pids"]
+    state["snapshot"]["rclone_audit"]["path"] = "/tmp/wrong-rclone.conf"
+    with pytest.raises(module.OperationStateError, match="rclone|path|effective_config"):
+        module.validate_operation_state(state, operation_dir)
+
+
+@pytest.mark.parametrize("changed", ["pid", "timer", "postgres-unit"])
+def test_prior_runtime_change_during_state_cas_is_rejected(
+    tmp_path: Path,
+    changed: str,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = host_snapshot_fixture(module, tmp_path)
+    original_runner = context.command_runner
+    list_calls = 0
+    timer_calls = 0
+    web_calls = 0
+
+    def changing_runner(argv: object, pass_fds: tuple[int, ...]):
+        nonlocal list_calls, timer_calls, web_calls
+        argv_tuple = tuple(str(value) for value in argv)
+        completed = original_runner(argv_tuple, pass_fds)
+        if "list-units" in argv_tuple:
+            list_calls += 1
+            if changed == "postgres-unit" and list_calls == 2:
+                completed.stdout = (
+                    "postgresql@16-main.service loaded active running PostgreSQL service\n"
+                )
+        if "show" in argv_tuple and "degen-prod-db-backup.timer" in argv_tuple:
+            timer_calls += 1
+            if changed == "timer" and timer_calls == 2:
+                completed.stdout = completed.stdout.replace(
+                    str(fixture["runtime"]["timer_trigger"]),
+                    "Wed 2026-07-01 00:00:01 UTC",
+                )
+        if "show" in argv_tuple and "degen-web.service" in argv_tuple:
+            web_calls += 1
+            if changed == "pid" and web_calls == 2:
+                completed.stdout = completed.stdout.replace("MainPID=310", "MainPID=311")
+        return completed
+
+    before = context.paths.state_file.read_bytes()
+    with pytest.raises(
+        module.OperationStateError,
+        match="runtime|changed|identity|timer|trigger|PostgreSQL|service",
+    ):
+        module.snapshot_host_state(dataclasses.replace(context, command_runner=changing_runner))
+
+    assert context.paths.state_file.read_bytes() == before
+
+
+def test_rclone_audit_source_replacement_during_state_cas_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = host_snapshot_fixture(module, tmp_path)
+    before = context.paths.state_file.read_bytes()
+
+    def replace(event: str, **_details: object) -> None:
+        if event != "before_replace":
+            return
+        source = fixture["rclone_path"]
+        replacement = source.with_name(source.name + ".replacement")
+        write_private_host_file(replacement, fixture["rclone_bytes"], 0o600)
+        os.replace(replacement, source)
+
+    monkeypatch.setattr(module, "_atomic_event_hook", replace)
+
+    with pytest.raises(module.OperationStateError):
+        module.snapshot_host_state(context)
+
+    assert context.paths.state_file.read_bytes() == before
+
+
+def test_snapshot_failure_after_artifact_creation_preserves_state_and_residue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = host_snapshot_fixture(module, tmp_path)
+    before = context.paths.state_file.read_bytes()
+
+    def interrupt(event: str, **_details: object) -> None:
+        if event == "before_replace":
+            raise module.OperationStateError("injected snapshot CAS interruption")
+
+    monkeypatch.setattr(module, "_atomic_event_hook", interrupt)
+
+    with pytest.raises(module.OperationStateError, match="interruption"):
+        module.snapshot_host_state(context)
+
+    assert context.paths.state_file.read_bytes() == before
+    residue = {
+        path.name: path.read_bytes()
+        for path in context.paths.snapshot_dir.iterdir()
+        if path.is_file()
+    }
+    assert "rclone.conf.audit" in residue
+    assert "SHA256SUMS" in residue
+    monkeypatch.setattr(module, "_atomic_event_hook", lambda *_args, **_kwargs: None)
+    with pytest.raises(module.OperationStateError, match="snapshot"):
+        module.snapshot_host_state(context)
+    assert {
+        path.name: path.read_bytes()
+        for path in context.paths.snapshot_dir.iterdir()
+        if path.is_file()
+    } == residue
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX mode semantics")
+@pytest.mark.parametrize("unsafe_mode", [0o777, 0o6755, 0o1755])
+def test_snapshot_rejects_unsafe_present_target_mode(
+    tmp_path: Path,
+    unsafe_mode: int,
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = host_snapshot_fixture(module, tmp_path)
+    target = host_root_path(context.host_root, TARGETS[0])
+    target.chmod(unsafe_mode)
+    before = context.paths.state_file.read_bytes()
+
+    with pytest.raises(module.OperationStateError, match="mode|target|unsafe"):
+        module.snapshot_host_state(context)
+
+    assert context.paths.state_file.read_bytes() == before
+    assert not context.paths.snapshot_dir.exists()
+
+
+def test_snapshot_already_snapshotted_is_verified_read_only_noop(tmp_path: Path) -> None:
+    module = load_ops_helper()
+    context, fixture = host_snapshot_fixture(module, tmp_path)
+    first = module.snapshot_host_state(context)
+    state_before = context.paths.state_file.read_bytes()
+    artifacts_before = {
+        path.name: (path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns)
+        for path in context.paths.snapshot_dir.iterdir()
+        if path.is_file()
+    }
+    calls_before = len(fixture["calls"])
+    directory_before = context.paths.snapshot_dir.stat()
+
+    second = module.snapshot_host_state(context)
+
+    assert second == first
+    assert context.paths.state_file.read_bytes() == state_before
+    assert {
+        path.name: (path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns)
+        for path in context.paths.snapshot_dir.iterdir()
+        if path.is_file()
+    } == artifacts_before
+    assert len(fixture["calls"]) > calls_before
+    directory_after = context.paths.snapshot_dir.stat()
+    assert (
+        directory_after.st_ino,
+        directory_after.st_mode,
+        directory_after.st_mtime_ns,
+        directory_after.st_ctime_ns,
+    ) == (
+        directory_before.st_ino,
+        directory_before.st_mode,
+        directory_before.st_mtime_ns,
+        directory_before.st_ctime_ns,
+    )
+
+
+def test_snapshot_already_snapshotted_opens_artifacts_read_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = host_snapshot_fixture(module, tmp_path)
+    module.snapshot_host_state(context)
+    artifact_names = {
+        path.name for path in context.paths.snapshot_dir.iterdir() if path.is_file()
+    }
+    observed_flags: list[int] = []
+    original_open = module.os.open
+
+    def tracked_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        opened_path = Path(path)
+        if opened_path.name in artifact_names and (
+            not opened_path.is_absolute()
+            or opened_path.parent == context.paths.snapshot_dir
+        ):
+            observed_flags.append(flags)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "open", tracked_open)
+
+    module.snapshot_host_state(context)
+
+    assert len(observed_flags) >= len(artifact_names)
+    assert all(
+        flags & (os.O_WRONLY | os.O_RDWR) == 0 for flags in observed_flags
+    ), observed_flags
+
+
+@pytest.mark.parametrize(
+    ("receipt", "field"),
+    [("target", "uid"), ("target", "gid"), ("audit", "size"), ("runtime", "trigger")],
+)
+def test_snapshot_state_rejects_negative_metadata(
+    tmp_path: Path,
+    receipt: str,
+    field: str,
+) -> None:
+    module = load_ops_helper()
+    operation_dir, _uid = private_operation_dir(tmp_path)
+    state = state_at_phase(operation_dir, "snapshotted")
+    if receipt == "target":
+        state["snapshot"]["targets"][TARGETS[0]][field] = -1
+    elif receipt == "audit":
+        state["snapshot"]["rclone_audit"][field] = -1
+    else:
+        state["prior_runtime"]["preinstall_trigger_epoch"] = -1
+
+    with pytest.raises(module.OperationStateError):
+        module.validate_operation_state(state, operation_dir)
+
+
+def test_prior_runtime_requires_exact_timer_substate(tmp_path: Path) -> None:
+    module = load_ops_helper()
+    context, fixture = host_snapshot_fixture(module, tmp_path)
+    result = module.snapshot_host_state(context)
+    assert result["prior_runtime"]["timer_active"] is True
+
+    invalid_root = tmp_path / "invalid"
+    invalid_root.mkdir()
+    context, fixture = host_snapshot_fixture(module, invalid_root)
+    fixture["runtime"]["timer_substate"] = "running"
+
+    with pytest.raises(module.OperationStateError, match="timer|state|substate"):
+        module.snapshot_host_state(context)
+
+
+def test_prior_runtime_maps_empty_last_trigger_to_null(tmp_path: Path) -> None:
+    module = load_ops_helper()
+    context, fixture = host_snapshot_fixture(module, tmp_path)
+    fixture["runtime"]["timer_trigger"] = ""
+
+    result = module.snapshot_host_state(context)
+
+    assert result["prior_runtime"]["preinstall_trigger_epoch"] is None
+    assert not any(Path(call[0]).name == "date" for call in fixture["calls"])
+
+
+def test_prior_runtime_allows_canonical_root_bot_owner(tmp_path: Path) -> None:
+    module = load_ops_helper()
+    context, fixture = host_snapshot_fixture(module, tmp_path)
+    fixture["runtime"]["bot_users"] = [("0", "root")]
+    fixture["runtime"]["bot_pids"] = {"root": 410}
+
+    result = module.snapshot_host_state(context)
+
+    assert result["prior_runtime"]["pids"] == {
+        "postgresql:postgresql@15-main.service": 210,
+        "system:degen-web.service": 310,
+        "system:degen-worker.service": 320,
+        "user:0:root:degen-ops-discord-bot.service": 410,
+    }
+
+
+def test_snapshot_rejects_preexisting_snapshot_path(tmp_path: Path) -> None:
+    module = load_ops_helper()
+    context, _fixture = host_snapshot_fixture(module, tmp_path)
+    context.paths.snapshot_dir.mkdir(mode=0o700)
+
+    with pytest.raises(module.OperationStateError, match="snapshot"):
+        module.snapshot_host_state(context)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX symlink semantics")
+def test_snapshot_private_host_root_cannot_escape_through_symlink(tmp_path: Path) -> None:
+    module = load_ops_helper()
+    context, _fixture = host_snapshot_fixture(module, tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    escaped = tmp_path / "escaped-host"
+    escaped.symlink_to(outside, target_is_directory=True)
+    escaped_context = dataclasses.replace(context, host_root=escaped)
+
+    with pytest.raises(module.OperationStateError, match="host_root|symlink|binding"):
+        module.snapshot_host_state(escaped_context)
+
+
+def test_snapshot_cli_has_only_operation_dir_and_reconstructs_sealed_context(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = load_ops_helper()
+    operation_dir_raw = "/opt/degen/backups/config/20260701T123456Z"
+    operation_dir = Path(operation_dir_raw)
+    state = state_at_phase(operation_dir, "staging_prepared")
+    observed: list[object] = []
+    monkeypatch.setattr(module, "_effective_uid", lambda: 0)
+    monkeypatch.setattr(module, "_require_posix_descriptor_primitives", lambda: None)
+    monkeypatch.setattr(module, "load_operation_state", lambda path, *, effective_uid: state)
+    if os.name != "posix":
+        monkeypatch.setattr(module, "validate_operation_state_for_context", lambda *_: None)
+    monkeypatch.setattr(
+        module,
+        "snapshot_host_state",
+        lambda context: observed.append(context)
+        or {"snapshot": state["snapshot"], "prior_runtime": state["prior_runtime"]},
+        raising=False,
+    )
+
+    help_result = subprocess.run(
+        [sys.executable, str(OPS_HELPER), "snapshot", "--help"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    result = module.main(["snapshot", "--operation-dir", operation_dir_raw])
+
+    captured = capsys.readouterr()
+    assert help_result.returncode == 0
+    assert "--operation-dir" in help_result.stdout
+    for forbidden in ("host-root", "archive", "digest", "commit", "runner"):
+        assert forbidden not in help_result.stdout.lower()
+    assert result == 0
+    assert captured.out == ""
+    assert captured.err == ""
+    assert len(observed) == 1
+    context = observed[0]
+    assert context.host_root == Path("/")
+    assert context.paths == module.build_operation_paths(operation_dir)
