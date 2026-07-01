@@ -37,6 +37,10 @@ class _OperationDirectoryBinding:
     descriptor: int | None
     metadata: os.stat_result
 
+
+_DIRECT_OPERATION_LOCKS_GUARD = threading.Lock()
+_DIRECT_OPERATION_LOCKS: dict[str, threading.Lock] = {}
+
 _PRODUCTION_OPERATION_RE = re.compile(
     r"\A/opt/degen/backups/config/[0-9]{8}T[0-9]{6}Z\Z"
 )
@@ -270,6 +274,30 @@ class OperationStateError(ValueError):
     """Raised when operation state or its storage is not trustworthy."""
 
 
+class _Task7RcloneEvidencePersistenceError(OperationStateError):
+    def __init__(
+        self,
+        group: dict[str, object],
+        persistence_error: Exception,
+        preflight_error: BaseException | None,
+    ) -> None:
+        super().__init__("rclone before/after audit could not be persisted durably")
+        self.group = copy.deepcopy(group)
+        self.persistence_error = persistence_error
+        self.preflight_error = preflight_error
+
+
+class _Task7RcloneAuditIncompleteError(OperationStateError):
+    def __init__(
+        self,
+        primary_error: Exception,
+        secondary_error: BaseException | None,
+    ) -> None:
+        super().__init__(sanitize_error_text(primary_error))
+        self.primary_error = primary_error
+        self.secondary_error = secondary_error
+
+
 @dataclass(frozen=True)
 class OperationPaths:
     operation_dir: Path
@@ -291,6 +319,23 @@ class OperationsContext:
     expected_archive_sha256: str
     expected_manifest_sha256: str
     host_root: Path
+
+
+@dataclass(frozen=True)
+class MigrationLocks:
+    legacy_fd: int
+    runtime_fd: int
+
+
+@dataclass(frozen=True)
+class _Task7LockReleaseIssue:
+    stage: str
+    error: Exception
+    release_uncertain: bool
+
+    def __iter__(self):
+        yield self.stage
+        yield self.error
 
 
 def build_operation_paths(operation_dir: Path) -> OperationPaths:
@@ -620,6 +665,7 @@ def _atomic_write_operation_state_internal(
     effective_uid: int,
     pre_replace_validator: PreReplaceValidator | None,
     operation_directory_binding: _OperationDirectoryBinding | None = None,
+    operation_lock_held: bool = False,
 ) -> None:
     if path.name != "operation-state.json":
         raise OperationStateError("operation state path must end in operation-state.json")
@@ -636,6 +682,7 @@ def _atomic_write_operation_state_internal(
             effective_uid,
             operation_directory_binding,
             pre_replace_validator,
+            operation_lock_held=operation_lock_held,
         )
         return
     with _open_validated_operation_dir(operation_dir, effective_uid) as directory_fd:
@@ -654,6 +701,7 @@ def _atomic_write_operation_state_internal(
             effective_uid,
             binding,
             pre_replace_validator,
+            operation_lock_held=operation_lock_held,
         )
 
 
@@ -664,6 +712,8 @@ def _atomic_write_with_operation_directory_binding(
     effective_uid: int,
     binding: _OperationDirectoryBinding,
     pre_replace_validator: PreReplaceValidator | None,
+    *,
+    operation_lock_held: bool = False,
 ) -> None:
     if binding.path != path.parent:
         raise OperationStateError("operation directory binding path does not match state path")
@@ -673,7 +723,12 @@ def _atomic_write_with_operation_directory_binding(
         binding.metadata,
         effective_uid,
     )
-    with _exclusive_operation_state_lock(binding.descriptor):
+    lock_context = (
+        contextlib.nullcontext()
+        if operation_lock_held
+        else _exclusive_operation_state_lock(binding.descriptor)
+    )
+    with lock_context:
         _revalidate_operation_dir_binding(
             binding.path,
             binding.descriptor,
@@ -689,6 +744,48 @@ def _atomic_write_with_operation_directory_binding(
             binding.metadata,
             pre_replace_validator,
         )
+
+
+@contextlib.contextmanager
+def _open_operation_transaction(context: OperationsContext):
+    with _open_validated_operation_dir(
+        context.paths.operation_dir,
+        context.effective_uid,
+    ) as directory_fd:
+        operation_metadata = (
+            context.paths.operation_dir.lstat()
+            if directory_fd is None
+            else os.fstat(directory_fd)
+        )
+        binding = _OperationDirectoryBinding(
+            context.paths.operation_dir,
+            directory_fd,
+            operation_metadata,
+        )
+        if directory_fd is None:
+            key = str(context.paths.operation_dir)
+            with _DIRECT_OPERATION_LOCKS_GUARD:
+                direct_lock = _DIRECT_OPERATION_LOCKS.setdefault(
+                    key,
+                    threading.Lock(),
+                )
+            with direct_lock:
+                _revalidate_operation_dir_binding(
+                    binding.path,
+                    binding.descriptor,
+                    binding.metadata,
+                    context.effective_uid,
+                )
+                yield binding
+            return
+        with _exclusive_operation_state_lock(directory_fd):
+            _revalidate_operation_dir_binding(
+                binding.path,
+                binding.descriptor,
+                binding.metadata,
+                context.effective_uid,
+            )
+            yield binding
 
 
 @contextlib.contextmanager
@@ -1300,6 +1397,7 @@ def validate_operation_state(
     if not history or history[-1]["phase"] != state["phase"]:
         raise OperationStateError("phase_history must end at the current phase")
     _validate_receipt_phase_rules(state)
+    _validate_rclone_evidence_semantics(state)
     _validate_lifecycle_epochs(state)
     _validate_phase_history_graph(state)
     if previous_state is not None:
@@ -1312,7 +1410,15 @@ def _require_object(value: object, keys: frozenset[str], label: str) -> dict[str
         raise OperationStateError(f"{label} must be an object with exact keys")
     actual = frozenset(value)
     if actual != keys:
-        raise OperationStateError(f"{label} has invalid keys")
+        missing = sorted(keys - actual)
+        extra = sorted(actual - keys)
+        if missing:
+            raise OperationStateError(
+                f"{label} has invalid keys: missing required field {missing[0]}"
+            )
+        raise OperationStateError(
+            f"{label} has invalid keys: unexpected field {extra[0]}"
+        )
     return value
 
 
@@ -1527,6 +1633,9 @@ def _validate_install(value: object) -> None:
                 "installed_hashes",
                 "started_epoch",
                 "completed_epoch",
+                "runtime_directory_created",
+                "validated_epoch",
+                "validation_evidence_sha256",
             }
         ),
         "install",
@@ -1539,6 +1648,15 @@ def _validate_install(value: object) -> None:
     _require_string_map(item["installed_hashes"], "install.installed_hashes", hash_values=True)
     _require_int(item["started_epoch"], "install.started_epoch")
     _require_optional_int(item["completed_epoch"], "install.completed_epoch")
+    _require_bool(
+        item["runtime_directory_created"],
+        "install.runtime_directory_created",
+    )
+    _require_optional_int(item["validated_epoch"], "install.validated_epoch")
+    _require_optional_hash(
+        item["validation_evidence_sha256"],
+        "install.validation_evidence_sha256",
+    )
 
 
 def _validate_rclone_evidence_group(value: object, label: str) -> None:
@@ -1550,8 +1668,41 @@ def _validate_rclone_evidence_group(value: object, label: str) -> None:
     _require_string(item["group_id"], f"{label}.group_id")
     _require_string(item["purpose"], f"{label}.purpose")
     _validate_file_audit(item["before"], f"{label}.before")
-    _validate_file_audit(item["after"], f"{label}.after")
-    _require_hash(item["evidence_sha256"], f"{label}.evidence_sha256")
+    if item["after"] is None:
+        if item["evidence_sha256"] is not None:
+            raise OperationStateError(
+                f"{label} pending audit evidence must be null"
+            )
+    else:
+        _validate_file_audit(item["after"], f"{label}.after")
+        _require_hash(item["evidence_sha256"], f"{label}.evidence_sha256")
+
+
+def _validate_rclone_evidence_semantics(state: dict[str, object]) -> None:
+    groups = state["rclone_evidence_groups"]
+    assert isinstance(groups, list)
+    pending = [
+        index
+        for index, group in enumerate(groups)
+        if isinstance(group, dict) and group["after"] is None
+    ]
+    if not pending:
+        return
+    if pending != [len(groups) - 1]:
+        raise OperationStateError(
+            "pending rclone audit must be the final and only pending group"
+        )
+    group = groups[-1]
+    assert isinstance(group, dict)
+    if (
+        group["group_id"] != "install"
+        or group["purpose"] != "credential-refresh-audit"
+    ):
+        raise OperationStateError("pending rclone audit identity is invalid")
+    if state["phase"] not in {"installing", "recovering", "recovery_required"}:
+        raise OperationStateError(
+            "pending rclone audit is forbidden in a terminal or unrelated phase"
+        )
 
 
 def _validate_probe_receipt(value: object) -> None:
@@ -1759,6 +1910,10 @@ def _validate_recovery(value: object) -> None:
                 "started_epoch",
                 "completed_epoch",
                 "evidence_sha256",
+                "runtime_directory_created",
+                "runtime_baseline",
+                "restored_epoch",
+                "restore_evidence_sha256",
             }
         ),
         "recovery",
@@ -1774,6 +1929,16 @@ def _validate_recovery(value: object) -> None:
     _require_int(item["started_epoch"], "recovery.started_epoch")
     _require_optional_int(item["completed_epoch"], "recovery.completed_epoch")
     _require_hash(item["evidence_sha256"], "recovery.evidence_sha256")
+    _require_bool(
+        item["runtime_directory_created"],
+        "recovery.runtime_directory_created",
+    )
+    _validate_prior_runtime(item["runtime_baseline"])
+    _require_optional_int(item["restored_epoch"], "recovery.restored_epoch")
+    _require_optional_hash(
+        item["restore_evidence_sha256"],
+        "recovery.restore_evidence_sha256",
+    )
 
 
 def _validate_state_schema(state: object) -> None:
@@ -1938,6 +2103,20 @@ def _validate_install_semantics(state: dict[str, object], installed_reached: boo
 
     hashes = install["installed_hashes"]
     assert isinstance(hashes, dict)
+    validated_epoch = install["validated_epoch"]
+    validation_evidence = install["validation_evidence_sha256"]
+    if (validated_epoch is None) != (validation_evidence is None):
+        raise OperationStateError(
+            "install validated_epoch and validation_evidence_sha256 must be recorded together"
+        )
+    if validated_epoch is not None:
+        assert isinstance(validated_epoch, int)
+        if index != len(_TARGET_ORDER) or any(value is not None for value in cursor):
+            raise OperationStateError(
+                "install provisional validation requires a terminal cursor"
+            )
+        if validated_epoch < install["started_epoch"]:
+            raise OperationStateError("install validation precedes install start")
     if not installed_reached:
         if hashes:
             raise OperationStateError("install.installed_hashes must be empty before installed")
@@ -1950,6 +2129,10 @@ def _validate_install_semantics(state: dict[str, object], installed_reached: boo
         raise OperationStateError("install.installed_hashes must contain the exact seven targets")
     if install["completed_epoch"] is None:
         raise OperationStateError("install.completed_epoch is required after installed")
+    if validated_epoch is None:
+        raise OperationStateError("installed requires provisional validation evidence")
+    if install["completed_epoch"] < validated_epoch:
+        raise OperationStateError("install completion precedes provisional validation")
     reviewed = state["reviewed_source"]
     host_stage = state["host_stage"]
     assert isinstance(reviewed, dict) and isinstance(host_stage, dict)
@@ -2034,6 +2217,20 @@ def _validate_policy_environment_semantics(state: dict[str, object]) -> None:
         )
 
 
+def _manual_rollback_origin_phase(history: list[object]) -> str:
+    stable = {"installed", "probed", "dry_run_recorded", "policy_enabled", "observed"}
+    for index, entry in enumerate(history):
+        assert isinstance(entry, dict)
+        if entry["phase"] != "manual_rollback" or index == 0:
+            continue
+        previous = history[index - 1]
+        assert isinstance(previous, dict)
+        phase = str(previous["phase"])
+        if phase in stable:
+            return phase
+    raise OperationStateError("manual rollback history has no stable origin")
+
+
 def _receipt_baseline_phase(state: dict[str, object]) -> str:
     phase = str(state["phase"])
     if phase in _NORMAL_PHASE_ORDER:
@@ -2043,16 +2240,13 @@ def _receipt_baseline_phase(state: dict[str, object]) -> str:
         history = state["phase_history"]
         assert isinstance(history, list)
         if any(entry["phase"] == "installed" for entry in history):
-            rollback_index = max(
-                index for index, entry in enumerate(history) if entry["phase"] == "manual_rollback"
-            )
-            return str(history[rollback_index - 1]["phase"])
+            return _manual_rollback_origin_phase(history)
         return "installing"
     if phase in {"recovering", "manual_rollback"}:
         if phase == "manual_rollback":
             history = state["phase_history"]
             assert isinstance(history, list)
-            return str(history[-2]["phase"])
+            return _manual_rollback_origin_phase(history)
         return "installing"
     if phase in {"recovery_required", "recovering_policy", "recovering_probe", "recovering_guard"}:
         if kind == "install":
@@ -2060,10 +2254,7 @@ def _receipt_baseline_phase(state: dict[str, object]) -> str:
         if kind == "manual_rollback":
             history = state["phase_history"]
             assert isinstance(history, list)
-            manual_index = max(
-                index for index, entry in enumerate(history) if entry["phase"] == "manual_rollback"
-            )
-            return str(history[manual_index - 1]["phase"])
+            return _manual_rollback_origin_phase(history)
         if kind == "policy":
             return "policy_enabling"
         if kind == "probe":
@@ -2102,6 +2293,10 @@ def _validate_recovery_semantics(state: dict[str, object]) -> None:
         return
     assert isinstance(recovery, dict)
     kind = str(recovery["kind"])
+    if kind == "install" and recovery["runtime_baseline"] != state["prior_runtime"]:
+        raise OperationStateError(
+            "install recovery runtime baseline must equal immutable prior_runtime"
+        )
     if latest_kind is not None and kind != latest_kind:
         raise OperationStateError("recovery kind does not match the latest recovery attempt")
     if latest_entry_epoch is not None and recovery["started_epoch"] != latest_entry_epoch:
@@ -2196,6 +2391,24 @@ def _validate_recovery_semantics(state: dict[str, object]) -> None:
         if index != 0 or any(value is not None for value in cursor):
             raise OperationStateError("probe and guard recovery require a null file cursor")
     completed = recovery["completed_epoch"]
+    restored_epoch = recovery["restored_epoch"]
+    restore_evidence = recovery["restore_evidence_sha256"]
+    if (restored_epoch is None) != (restore_evidence is None):
+        raise OperationStateError(
+            "recovery restored_epoch and restore_evidence_sha256 must be recorded together"
+        )
+    if restored_epoch is not None:
+        assert isinstance(restored_epoch, int)
+        if kind not in {"install", "manual_rollback"}:
+            raise OperationStateError(
+                "recovery restore evidence is valid only for target restoration"
+            )
+        if index != len(_TARGET_ORDER) or any(value is not None for value in cursor):
+            raise OperationStateError(
+                "recovery provisional restoration requires a terminal cursor"
+            )
+        if restored_epoch < recovery["started_epoch"]:
+            raise OperationStateError("recovery restoration precedes recovery start")
     if completed is not None:
         if completed < recovery["started_epoch"]:
             raise OperationStateError("recovery completion precedes recovery start")
@@ -2206,6 +2419,15 @@ def _validate_recovery_semantics(state: dict[str, object]) -> None:
         )
         if not terminal:
             raise OperationStateError("recovery completion is premature")
+        if kind in {"install", "manual_rollback"}:
+            if restored_epoch is None:
+                raise OperationStateError(
+                    "completed target recovery requires provisional restore evidence"
+                )
+            if completed < restored_epoch:
+                raise OperationStateError(
+                    "recovery completion precedes provisional restoration"
+                )
     if phase in {"recovering", "recovering_policy", "recovering_probe", "recovering_guard", "manual_rollback", "recovery_required"} and completed is not None:
         raise OperationStateError("recovery completion is premature in an active recovery phase")
     if phase == "rolled_back" and completed is None:
@@ -2311,6 +2533,24 @@ def _validate_lifecycle_epochs(state: dict[str, object]) -> None:
         completed = install["completed_epoch"]
         if completed is not None and install["started_epoch"] > completed:
             raise OperationStateError("install completion precedes install start")
+        validated = install["validated_epoch"]
+        if validated is not None and validated < install["started_epoch"]:
+            raise OperationStateError("install validation precedes install start")
+        if completed is not None and validated is not None and completed < validated:
+            raise OperationStateError("install completion precedes validation")
+    recovery = state["recovery"]
+    if recovery is not None:
+        assert isinstance(recovery, dict)
+        restored = recovery["restored_epoch"]
+        completed_recovery = recovery["completed_epoch"]
+        if restored is not None and restored < recovery["started_epoch"]:
+            raise OperationStateError("recovery restoration precedes recovery start")
+        if (
+            restored is not None
+            and completed_recovery is not None
+            and completed_recovery < restored
+        ):
+            raise OperationStateError("recovery completion precedes restoration")
     transaction = state["active_transaction"]
     if transaction is not None:
         assert isinstance(transaction, dict)
@@ -2442,12 +2682,36 @@ def _validate_append_only_streams(
     previous: dict[str, object],
     current: dict[str, object],
 ) -> None:
-    for field in ("rclone_evidence_groups", "secondary_errors"):
-        old_stream = previous[field]
-        new_stream = current[field]
-        assert isinstance(old_stream, list) and isinstance(new_stream, list)
-        if not _is_prefix(old_stream, new_stream):
-            raise OperationStateError(f"{field} must remain append-only")
+    old_groups = previous["rclone_evidence_groups"]
+    new_groups = current["rclone_evidence_groups"]
+    assert isinstance(old_groups, list) and isinstance(new_groups, list)
+    groups_valid = _is_prefix(old_groups, new_groups)
+    if (
+        not groups_valid
+        and len(old_groups) == len(new_groups)
+        and bool(old_groups)
+        and old_groups[:-1] == new_groups[:-1]
+    ):
+        old_last = old_groups[-1]
+        new_last = new_groups[-1]
+        assert isinstance(old_last, dict) and isinstance(new_last, dict)
+        groups_valid = (
+            old_last.get("after") is None
+            and old_last.get("evidence_sha256") is None
+            and new_last.get("after") is not None
+            and new_last.get("evidence_sha256") is not None
+            and all(
+                old_last.get(field) == new_last.get(field)
+                for field in ("group_id", "purpose", "before")
+            )
+        )
+    if not groups_valid:
+        raise OperationStateError("rclone_evidence_groups must remain append-only")
+    old_errors = previous["secondary_errors"]
+    new_errors = current["secondary_errors"]
+    assert isinstance(old_errors, list) and isinstance(new_errors, list)
+    if not _is_prefix(old_errors, new_errors):
+        raise OperationStateError("secondary_errors must remain append-only")
     if previous["failure"] is not None and current["failure"] != previous["failure"]:
         raise OperationStateError("the first primary failure is immutable")
 
@@ -2586,18 +2850,62 @@ def _validate_same_phase_progress(previous: dict[str, object], current: dict[str
             raise OperationStateError(f"same-phase mutation changed immutable field {field}")
     if phase == "installing":
         assert isinstance(previous["install"], dict) and isinstance(current["install"], dict)
-        for field in ("started_epoch", "installed_hashes", "completed_epoch"):
+        for field in (
+            "started_epoch",
+            "installed_hashes",
+            "completed_epoch",
+            "runtime_directory_created",
+        ):
             if current["install"][field] != previous["install"][field]:
                 raise OperationStateError("install start and completion receipt are immutable during progress")
         _validate_cursor_progress(previous["install"], current["install"], "install")
+        old_validation = (
+            previous["install"]["validated_epoch"],
+            previous["install"]["validation_evidence_sha256"],
+        )
+        new_validation = (
+            current["install"]["validated_epoch"],
+            current["install"]["validation_evidence_sha256"],
+        )
+        if old_validation != new_validation:
+            if old_validation != (None, None) or None in new_validation:
+                raise OperationStateError("install provisional validation is immutable")
+            if (
+                previous["install"]["next_target_index"]
+                != current["install"]["next_target_index"]
+            ):
+                raise OperationStateError(
+                    "install cursor and provisional validation require separate writes"
+                )
     if "recovery" in mutable:
         old_recovery = previous["recovery"]
         new_recovery = current["recovery"]
         assert isinstance(old_recovery, dict) and isinstance(new_recovery, dict)
-        for field in ("kind", "started_epoch", "evidence_sha256"):
+        for field in (
+            "kind",
+            "started_epoch",
+            "evidence_sha256",
+            "runtime_directory_created",
+            "runtime_baseline",
+        ):
             if old_recovery[field] != new_recovery[field]:
                 raise OperationStateError("recovery attempt identity is immutable")
         _validate_cursor_progress(old_recovery, new_recovery, "recovery")
+        old_restoration = (
+            old_recovery["restored_epoch"],
+            old_recovery["restore_evidence_sha256"],
+        )
+        new_restoration = (
+            new_recovery["restored_epoch"],
+            new_recovery["restore_evidence_sha256"],
+        )
+        if old_restoration != new_restoration:
+            if old_restoration != (None, None) or None in new_restoration:
+                raise OperationStateError("recovery provisional restoration is immutable")
+            if old_recovery["next_target_index"] != new_recovery["next_target_index"]:
+                raise OperationStateError(
+                    "recovery cursor and provisional restoration require separate writes"
+                )
         if old_recovery["completed_epoch"] is not None and new_recovery["completed_epoch"] != old_recovery["completed_epoch"]:
             raise OperationStateError("recovery completion is immutable")
     if previous["active_transaction"] is not None:
@@ -2704,6 +3012,13 @@ def _validate_state_transition(previous: dict[str, object], current: dict[str, o
         assert isinstance(install, dict)
         if install["next_target_index"] != 0 or install["current_target"] != _TARGET_ORDER[0]:
             raise OperationStateError("installing entry requires index zero and the first target")
+        if (
+            install["validated_epoch"] is not None
+            or install["validation_evidence_sha256"] is not None
+        ):
+            raise OperationStateError(
+                "installing entry cannot fabricate provisional validation"
+            )
     if old_phase == "installing" and new_phase == "installed":
         prior_install = previous["install"]
         completed_install = current["install"]
@@ -2717,8 +3032,16 @@ def _validate_state_transition(previous: dict[str, object], current: dict[str, o
             value is not None for value in prior_cursor
         ):
             raise OperationStateError("install prior cursor must be terminal before installed")
-        if completed_install["started_epoch"] != prior_install["started_epoch"]:
-            raise OperationStateError("install started_epoch is immutable at completion")
+        for field in (
+            "started_epoch",
+            "runtime_directory_created",
+            "validated_epoch",
+            "validation_evidence_sha256",
+        ):
+            if completed_install[field] != prior_install[field]:
+                raise OperationStateError(
+                    "install start and provisional receipt are immutable at completion"
+                )
     receipt_creation_edges = {
         "probe": ("probing", "probed"),
         "dry_run": ("dry_run_recording", "dry_run_recorded"),
@@ -2763,7 +3086,15 @@ def _validate_state_transition(previous: dict[str, object], current: dict[str, o
     elif old_recovery != new_recovery:
         if not (isinstance(old_recovery, dict) and isinstance(new_recovery, dict)):
             raise OperationStateError("current/latest recovery receipt must remain preserved")
-        for field in ("kind", "started_epoch", "evidence_sha256"):
+        for field in (
+            "kind",
+            "started_epoch",
+            "evidence_sha256",
+            "runtime_directory_created",
+            "runtime_baseline",
+            "restored_epoch",
+            "restore_evidence_sha256",
+        ):
             if old_recovery[field] != new_recovery[field]:
                 raise OperationStateError("recovery attempt identity is immutable")
         _validate_cursor_progress(old_recovery, new_recovery, "recovery")
@@ -2780,7 +3111,18 @@ def validate_operation_state_for_context(
     context: OperationsContext,
 ) -> None:
     validate_operation_state(state, context.paths.operation_dir)
-    if context.paths != build_operation_paths(context.paths.operation_dir):
+    expected_paths = build_operation_paths(context.paths.operation_dir)
+    if any(
+        getattr(context.paths, field) != getattr(expected_paths, field)
+        for field in (
+            "operation_dir",
+            "source_archive",
+            "source_dir",
+            "snapshot_dir",
+            "staged_dir",
+            "state_file",
+        )
+    ):
         raise OperationStateError("operations context paths do not match the fixed operation paths")
     if state["operation_id"] != context.operation_id:
         raise OperationStateError("operation_id does not match the operations context")
@@ -5169,6 +5511,7 @@ def _checked_command(
     label: str,
     *,
     forbidden_values: tuple[str, ...] = (),
+    include_safe_stderr: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     try:
         completed = context.command_runner(argv, pass_fds)
@@ -5200,9 +5543,17 @@ def _checked_command(
         _scrub_completed_process(completed)
         raise OperationStateError(f"{label} output exceeds the size limit")
     if type(completed.returncode) is not int or completed.returncode != 0:
+        detail = ""
+        if (
+            include_safe_stderr
+            and completed.stderr
+            and not _string_contains_secret(completed.stderr)
+        ):
+            detail = sanitize_error_text(completed.stderr)
         completed.stdout = ""
         completed.stderr = ""
-        raise OperationStateError(f"{label} failed")
+        suffix = f": {detail}" if detail else ""
+        raise OperationStateError(f"{label} failed{suffix}")
     return completed
 
 
@@ -6658,6 +7009,368 @@ def _open_existing_host_stage_proof(
         raise
 
 
+def _open_snapshot_proof_from_state(
+    context: OperationsContext,
+    operation_directory_fd: int | None,
+    operation_metadata: os.stat_result,
+    state: dict[str, object],
+) -> _SnapshotDirectoryProof:
+    snapshot = state["snapshot"]
+    assert isinstance(snapshot, dict)
+    targets = snapshot["targets"]
+    assert isinstance(targets, dict)
+    expected_names: set[str] = {_RCLONE_AUDIT_NAME, _SNAPSHOT_MANIFEST_NAME}
+    for target_name in _TARGET_ORDER:
+        receipt = targets[target_name]
+        assert isinstance(receipt, dict)
+        basename = _SNAPSHOT_TARGET_NAMES[target_name]
+        expected_names.add(basename if receipt["present"] else f"{basename}.absent")
+    directory_fd: int | None = None
+    file_descriptors: dict[str, int] = {}
+    file_metadata: dict[str, os.stat_result] = {}
+    expected_bytes: dict[str, bytes] = {}
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    file_flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    file_flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        use_descriptors = os.name == "posix" and operation_directory_fd is not None
+        if use_descriptors:
+            directory_fd = os.open(
+                "snapshot",
+                directory_flags,
+                dir_fd=operation_directory_fd,
+            )
+            directory_metadata = os.fstat(directory_fd)
+            named_directory = os.stat(
+                "snapshot",
+                dir_fd=operation_directory_fd,
+                follow_symlinks=False,
+            )
+        else:
+            named_directory = context.paths.snapshot_dir.lstat()
+            directory_metadata = named_directory
+        _validate_snapshot_directory_metadata(directory_metadata, context)
+        _validate_snapshot_directory_metadata(named_directory, context)
+        if not _same_identity(directory_metadata, named_directory):
+            raise OperationStateError("snapshot directory binding changed")
+        _revalidate_operation_dir_binding(
+            context.paths.operation_dir,
+            operation_directory_fd,
+            operation_metadata,
+            context.effective_uid,
+        )
+        try:
+            inventory = {
+                entry.name
+                for entry in os.scandir(
+                    directory_fd
+                    if directory_fd is not None
+                    else context.paths.snapshot_dir
+                )
+            }
+        except OSError as exc:
+            raise OperationStateError("snapshot inventory cannot be read") from exc
+        if inventory != expected_names:
+            raise OperationStateError("snapshot artifact inventory changed")
+        for name in sorted(expected_names):
+            _validate_source_basename(name)
+            descriptor = (
+                os.open(name, file_flags, dir_fd=directory_fd)
+                if directory_fd is not None
+                else os.open(context.paths.snapshot_dir / name, file_flags)
+            )
+            file_descriptors[name] = descriptor
+            opened = os.fstat(descriptor)
+            named = (
+                os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if directory_fd is not None
+                else (context.paths.snapshot_dir / name).lstat()
+            )
+            if (
+                not _snapshot_file_metadata_is_safe(opened, context)
+                or not _same_identity(opened, named)
+            ):
+                raise OperationStateError("snapshot artifact binding changed")
+            file_metadata[name] = opened
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            raw = _read_exact_descriptor(
+                descriptor,
+                opened.st_size,
+                "snapshot artifact",
+            )
+            opened_after = os.fstat(descriptor)
+            named_after = (
+                os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if directory_fd is not None
+                else (context.paths.snapshot_dir / name).lstat()
+            )
+            if (
+                _stage_stable_metadata(opened_after)
+                != _stage_stable_metadata(opened)
+                or not _same_identity(opened_after, named_after)
+            ):
+                raise OperationStateError("snapshot artifact changed while reading")
+            expected_bytes[name] = raw
+        artifacts = {
+            name: raw
+            for name, raw in expected_bytes.items()
+            if name != _SNAPSHOT_MANIFEST_NAME
+        }
+        for target_name in _TARGET_ORDER:
+            receipt = targets[target_name]
+            assert isinstance(receipt, dict)
+            basename = _SNAPSHOT_TARGET_NAMES[target_name]
+            name = basename if receipt["present"] else f"{basename}.absent"
+            raw = artifacts[name]
+            if receipt["present"]:
+                if hashlib.sha256(raw).hexdigest() != receipt["sha256"]:
+                    raise OperationStateError(
+                        "snapshot target artifact differs from its state receipt"
+                    )
+            elif raw != f"ABSENT {target_name}\n".encode("ascii"):
+                raise OperationStateError("snapshot absence marker is invalid")
+        audit = artifacts[_RCLONE_AUDIT_NAME]
+        rclone_receipt = snapshot["rclone_audit"]
+        assert isinstance(rclone_receipt, dict)
+        if hashlib.sha256(audit).hexdigest() != rclone_receipt["sha256"]:
+            raise OperationStateError(
+                "snapshot rclone audit differs from its state receipt"
+            )
+        manifest = expected_bytes[_SNAPSHOT_MANIFEST_NAME]
+        if hashlib.sha256(manifest).hexdigest() != snapshot["manifest_sha256"]:
+            raise OperationStateError(
+                "snapshot manifest differs from its state receipt"
+            )
+        _parse_snapshot_manifest(manifest, artifacts)
+        proof = _SnapshotDirectoryProof(
+            context,
+            operation_directory_fd,
+            directory_fd,
+            directory_metadata,
+            expected_bytes,
+            file_descriptors,
+            file_metadata,
+        )
+        _revalidate_snapshot_directory_proof(proof)
+        return proof
+    except BaseException:
+        for descriptor in file_descriptors.values():
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if directory_fd is not None:
+            try:
+                os.close(directory_fd)
+            except OSError:
+                pass
+        raise
+
+
+@dataclass
+class _VerifiedTransactionMaterial:
+    source: _VerifiedSourceMaterial
+    stage_proof: _HostStageProof
+    stage_manifest: dict[str, object]
+    snapshot_proof: _SnapshotDirectoryProof
+
+
+def _revalidate_transaction_material(
+    material: _VerifiedTransactionMaterial,
+) -> None:
+    _revalidate_verified_source_material(material.source)
+    _revalidate_host_stage_proof(
+        material.stage_proof,
+        material.stage_manifest,
+    )
+    _revalidate_snapshot_directory_proof(material.snapshot_proof)
+    _revalidate_verified_source_material(material.source)
+
+
+@contextlib.contextmanager
+def _open_verified_transaction_material(
+    context: OperationsContext,
+    allowed_phases: frozenset[str],
+):
+    _validate_source_context(context, context.paths.source_dir)
+    source_proof: _SourceTreeProof | None = None
+    stage_proof: _HostStageProof | None = None
+    snapshot_proof: _SnapshotDirectoryProof | None = None
+    with _open_validated_operation_dir(
+        context.paths.operation_dir,
+        context.effective_uid,
+    ) as directory_fd:
+        operation_metadata = (
+            context.paths.operation_dir.lstat()
+            if directory_fd is None
+            else os.fstat(directory_fd)
+        )
+        with _open_source_archive(context, directory_fd) as (
+            archive_fd,
+            archive_metadata,
+        ):
+            try:
+                if _hash_source_archive(archive_fd) != context.expected_archive_sha256:
+                    raise OperationStateError(
+                        "source archive SHA-256 does not match the approved digest"
+                    )
+                _revalidate_source_archive(
+                    context,
+                    directory_fd,
+                    archive_fd,
+                    archive_metadata,
+                )
+                _verify_git_archive_commit(context, archive_fd)
+                _revalidate_source_archive(
+                    context,
+                    directory_fd,
+                    archive_fd,
+                    archive_metadata,
+                )
+                archive_hashes, archive_manifest = _verify_raw_git_archive(
+                    archive_fd,
+                    context.expected_commit,
+                    context.expected_manifest_sha256,
+                )
+                source_proof = _verify_extracted_source_tree(
+                    context,
+                    directory_fd,
+                    archive_hashes,
+                    archive_manifest,
+                )
+                _revalidate_source_receipt_proof(
+                    context,
+                    directory_fd,
+                    operation_metadata,
+                    archive_fd,
+                    archive_metadata,
+                    source_proof,
+                )
+                state = _load_existing_verified_source_state(context, directory_fd)
+                if state is None or state["phase"] not in allowed_phases:
+                    raise OperationStateError(
+                        "operation state is not in an allowed transaction phase"
+                    )
+                validate_operation_state_for_context(state, context)
+                reviewed = state["reviewed_source"]
+                effective_config = state["effective_config"]
+                host_stage = state["host_stage"]
+                snapshot = state["snapshot"]
+                prior_runtime = state["prior_runtime"]
+                history = state["phase_history"]
+                assert isinstance(reviewed, dict)
+                assert isinstance(effective_config, dict)
+                assert isinstance(host_stage, dict)
+                assert isinstance(snapshot, dict)
+                assert isinstance(prior_runtime, dict)
+                assert isinstance(history, list)
+                expected_reviewed: dict[str, object] = {
+                    "commit": context.expected_commit,
+                    "archive_sha256": context.expected_archive_sha256,
+                    "manifest_sha256": context.expected_manifest_sha256,
+                    "asset_hashes": dict(source_proof.asset_hashes),
+                }
+                expected_prefix = [
+                    (
+                        "source_verified",
+                        hashlib.sha256(
+                            _source_verification_evidence(expected_reviewed)
+                        ).hexdigest(),
+                    ),
+                    (
+                        "staging_prepared",
+                        hashlib.sha256(
+                            _staging_evidence(effective_config, host_stage)
+                        ).hexdigest(),
+                    ),
+                    (
+                        "snapshotted",
+                        hashlib.sha256(
+                            _snapshot_evidence(snapshot, prior_runtime)
+                        ).hexdigest(),
+                    ),
+                ]
+                if reviewed != expected_reviewed or len(history) < len(expected_prefix):
+                    raise OperationStateError(
+                        "transaction source history is not provenance-bound"
+                    )
+                for entry, (phase, evidence) in zip(history, expected_prefix):
+                    if entry["phase"] != phase or entry["evidence_sha256"] != evidence:
+                        raise OperationStateError(
+                            "transaction source history is not provenance-bound"
+                        )
+                running_helper = Path(os.path.abspath(str(__file__)))
+                expected_helper = Path(
+                    os.path.abspath(
+                        str(
+                            context.paths.source_dir
+                            / "deploy/linux/degen-prod-db-backup-ops.py"
+                        )
+                    )
+                )
+                if context.host_root == _PRODUCTION_HOST_ROOT:
+                    if running_helper != expected_helper:
+                        raise OperationStateError(
+                            "transaction helper is outside verified source"
+                        )
+                    helper_proofs = [
+                        item
+                        for item in source_proof.files
+                        if item.relative == "deploy/linux/degen-prod-db-backup-ops.py"
+                    ]
+                    if len(helper_proofs) != 1:
+                        raise OperationStateError(
+                            "verified transaction helper proof is incomplete"
+                        )
+                    helper_digest, _contents = _hash_open_source_file(
+                        helper_proofs[0].descriptor,
+                        helper_proofs[0].metadata,
+                        "verified transaction helper",
+                        capture=False,
+                    )
+                    if helper_digest != expected_reviewed["asset_hashes"][
+                        "deploy/linux/degen-prod-db-backup-ops.py"
+                    ]:
+                        raise OperationStateError(
+                            "verified transaction helper hash changed"
+                        )
+                source = _VerifiedSourceMaterial(
+                    context,
+                    directory_fd,
+                    operation_metadata,
+                    archive_fd,
+                    archive_metadata,
+                    source_proof,
+                    state,
+                )
+                stage_proof, stage_manifest = _open_existing_host_stage_proof(
+                    context,
+                    source,
+                )
+                snapshot_proof = _open_snapshot_proof_from_state(
+                    context,
+                    directory_fd,
+                    operation_metadata,
+                    state,
+                )
+                material = _VerifiedTransactionMaterial(
+                    source,
+                    stage_proof,
+                    stage_manifest,
+                    snapshot_proof,
+                )
+                _revalidate_transaction_material(material)
+                yield material
+            finally:
+                if snapshot_proof is not None:
+                    _close_snapshot_directory_proof(snapshot_proof)
+                if stage_proof is not None:
+                    _close_host_stage_proof(stage_proof)
+                if source_proof is not None:
+                    _close_source_tree_proof(source_proof)
+
+
 def _host_stage_manifest(
     context: OperationsContext,
     asset_hashes: dict[str, str],
@@ -7518,6 +8231,2824 @@ def _reject_residual_secrets(value: object, path: str = "state") -> None:
         raise OperationStateError("secret-like value is forbidden in operation state")
 
 
+def _task7_expected_owner(context: OperationsContext) -> int:
+    return 0 if context.host_root == _PRODUCTION_HOST_ROOT else context.effective_uid
+
+
+def _validate_task7_directory(
+    metadata: os.stat_result,
+    context: OperationsContext,
+    label: str,
+    *,
+    exact_mode: int,
+) -> None:
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise OperationStateError(f"{label} is not a real directory")
+    if metadata.st_uid != _task7_expected_owner(context):
+        raise OperationStateError(f"{label} owner is unsafe")
+    if os.name == "posix" and stat.S_IMODE(metadata.st_mode) != exact_mode:
+        raise OperationStateError(f"{label} mode is unsafe")
+
+
+@dataclass
+class _Task7DirectoryProof:
+    context: OperationsContext
+    host_root_proof: _HostRootProof
+    logical_path: str
+    descriptors: list[int]
+    names: list[str]
+    metadata: list[os.stat_result]
+    modes: list[int]
+
+    @property
+    def descriptor(self) -> int:
+        return self.descriptors[-1]
+
+
+def _revalidate_task7_directory_proof(proof: _Task7DirectoryProof) -> None:
+    _revalidate_host_root_proof(proof.host_root_proof)
+    if len(proof.descriptors) != len(proof.metadata) or len(proof.names) != len(
+        proof.modes
+    ):
+        raise OperationStateError("Task 7 directory proof is incomplete")
+    root_opened = os.fstat(proof.descriptors[0])
+    root_named = os.fstat(proof.host_root_proof.descriptors[-1])
+    if not _same_identity(root_opened, root_named):
+        raise OperationStateError("Task 7 host-root binding changed")
+    for index, (name, expected_mode) in enumerate(zip(proof.names, proof.modes), start=1):
+        opened = os.fstat(proof.descriptors[index])
+        named = os.stat(
+            name,
+            dir_fd=proof.descriptors[index - 1],
+            follow_symlinks=False,
+        )
+        _validate_task7_directory(
+            opened,
+            proof.context,
+            proof.logical_path,
+            exact_mode=expected_mode,
+        )
+        if (
+            not _same_identity(opened, named)
+            or _task7_directory_stable_metadata(opened)
+            != _task7_directory_stable_metadata(proof.metadata[index])
+        ):
+            raise OperationStateError("Task 7 directory binding changed")
+
+
+def _task7_directory_stable_metadata(metadata: os.stat_result) -> tuple[int, ...]:
+    """Return directory security metadata that child creation cannot change.
+
+    Creating the runtime directory or either lock file legitimately changes a
+    held parent directory's size, link count, mtime, and ctime.  The proof must
+    still bind its inode, owner, group, type, and exact permission bits across
+    that controlled mutation.
+    """
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        stat.S_IFMT(metadata.st_mode),
+        stat.S_IMODE(metadata.st_mode),
+        metadata.st_uid,
+        metadata.st_gid,
+    )
+
+
+def _close_task7_directory_proof(proof: _Task7DirectoryProof) -> None:
+    for descriptor in reversed(proof.descriptors):
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+    proof.descriptors.clear()
+    _close_host_root_proof(proof.host_root_proof)
+
+
+def _open_task7_directory(
+    context: OperationsContext,
+    logical_path: str,
+    *,
+    exact_mode: int,
+) -> _Task7DirectoryProof:
+    _host_path(context, logical_path)
+    components = list(PurePosixPath(logical_path).parts[1:])
+    if not components or components[0] != "run":
+        raise OperationStateError("Task 7 directory must be under /run")
+    host_root_proof = _open_host_root_proof(context)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    descriptors: list[int] = []
+    names: list[str] = []
+    metadata: list[os.stat_result] = []
+    modes: list[int] = []
+    try:
+        root_fd = os.dup(host_root_proof.descriptors[-1])
+        descriptors.append(root_fd)
+        metadata.append(os.fstat(root_fd))
+        for index, component in enumerate(components):
+            _validate_source_basename(component)
+            mode = exact_mode if index == len(components) - 1 else 0o755
+            named_before = os.stat(
+                component,
+                dir_fd=descriptors[-1],
+                follow_symlinks=False,
+            )
+            _validate_task7_directory(
+                named_before,
+                context,
+                logical_path,
+                exact_mode=mode,
+            )
+            child_fd = os.open(component, flags, dir_fd=descriptors[-1])
+            try:
+                opened = os.fstat(child_fd)
+                named_after = os.stat(
+                    component,
+                    dir_fd=descriptors[-1],
+                    follow_symlinks=False,
+                )
+            except BaseException:
+                os.close(child_fd)
+                raise
+            if (
+                not _same_identity(named_before, opened)
+                or not _same_identity(opened, named_after)
+            ):
+                os.close(child_fd)
+                raise OperationStateError(f"{logical_path} binding changed")
+            descriptors.append(child_fd)
+            names.append(component)
+            metadata.append(opened)
+            modes.append(mode)
+        proof = _Task7DirectoryProof(
+            context,
+            host_root_proof,
+            logical_path,
+            descriptors,
+            names,
+            metadata,
+            modes,
+        )
+        _revalidate_task7_directory_proof(proof)
+        return proof
+    except BaseException as exc:
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        _close_host_root_proof(host_root_proof)
+        if isinstance(exc, OSError):
+            raise OperationStateError(
+                f"{logical_path} cannot be opened safely"
+            ) from exc
+        raise
+
+
+def _validate_task7_lock_file(
+    metadata: os.stat_result,
+    context: OperationsContext,
+    label: str,
+) -> None:
+    if not stat.S_ISREG(metadata.st_mode):
+        raise OperationStateError(f"{label} is not a regular file")
+    if metadata.st_uid != _task7_expected_owner(context):
+        raise OperationStateError(f"{label} owner is unsafe")
+    if metadata.st_nlink != 1:
+        raise OperationStateError(f"{label} must have one link")
+    if stat.S_IMODE(metadata.st_mode) != 0o600:
+        raise OperationStateError(f"{label} mode is unsafe")
+
+
+def _open_and_flock_task7_file(
+    context: OperationsContext,
+    parent_fd: int,
+    name: str,
+    label: str,
+) -> int:
+    try:
+        import fcntl
+    except ImportError as exc:
+        raise OperationStateError("required POSIX flock primitive is unavailable") from exc
+    descriptor: int | None = None
+    created = False
+    base_flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    base_flags |= getattr(os, "O_CLOEXEC", 0)
+    try:
+        try:
+            named_before = os.stat(
+                name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            named_before = None
+        if named_before is None:
+            descriptor = os.open(
+                name,
+                base_flags | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=parent_fd,
+            )
+            created = True
+            os.fchmod(descriptor, 0o600)
+        else:
+            _validate_task7_lock_file(named_before, context, label)
+            descriptor = os.open(name, base_flags, dir_fd=parent_fd)
+        opened = os.fstat(descriptor)
+        named_after = os.stat(
+            name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+        for metadata in (opened, named_after):
+            _validate_task7_lock_file(metadata, context, label)
+        if not _same_identity(opened, named_after):
+            raise OperationStateError(f"{label} path/descriptor binding changed")
+        if named_before is not None and not _same_identity(named_before, opened):
+            raise OperationStateError(f"{label} changed while opening")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise OperationStateError(f"{label} is busy with a contender") from exc
+        locked = os.fstat(descriptor)
+        named_locked = os.stat(
+            name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+        if (
+            not _same_identity(locked, named_locked)
+            or _stage_stable_metadata(locked)
+            != _stage_stable_metadata(opened)
+        ):
+            raise OperationStateError(f"{label} changed after locking")
+        result = descriptor
+        descriptor = None
+        return result
+    except FileExistsError as exc:
+        raise OperationStateError(f"{label} exclusive creation raced") from exc
+    except OSError as exc:
+        raise OperationStateError(f"{label} cannot be opened safely") from exc
+    finally:
+        if descriptor is not None:
+            try:
+                if not created:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _open_or_create_runtime_directory_proof(
+    context: OperationsContext,
+    *,
+    require_create: bool,
+) -> tuple[bool, _Task7DirectoryProof]:
+    _require_posix_descriptor_primitives()
+    proof = _open_task7_directory(
+        context,
+        "/run",
+        exact_mode=0o755,
+    )
+    created = False
+    runtime_fd: int | None = None
+    name = "degen-prod-db-backup"
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        try:
+            named_before = os.stat(
+                name,
+                dir_fd=proof.descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            named_before = None
+        if named_before is None:
+            try:
+                os.mkdir(name, 0o700, dir_fd=proof.descriptor)
+            except FileExistsError as exc:
+                raise OperationStateError(
+                    "runtime directory exclusive creation raced"
+                ) from exc
+            created = True
+        else:
+            if require_create:
+                raise OperationStateError(
+                    "runtime directory appeared after the held absence proof"
+                )
+            _validate_task7_directory(
+                named_before,
+                context,
+                "runtime directory",
+                exact_mode=0o700,
+            )
+        runtime_fd = os.open(name, flags, dir_fd=proof.descriptor)
+        if created:
+            os.fchmod(runtime_fd, 0o700)
+        opened = os.fstat(runtime_fd)
+        named_after = os.stat(
+            name,
+            dir_fd=proof.descriptor,
+            follow_symlinks=False,
+        )
+        for metadata in (opened, named_after):
+            _validate_task7_directory(
+                metadata,
+                context,
+                "runtime directory",
+                exact_mode=0o700,
+            )
+        if not _same_identity(opened, named_after):
+            raise OperationStateError("runtime directory binding changed")
+        if named_before is not None and not _same_identity(named_before, opened):
+            raise OperationStateError("runtime directory changed while opening")
+        proof.descriptors.append(runtime_fd)
+        proof.names.append(name)
+        proof.metadata.append(opened)
+        proof.modes.append(0o700)
+        proof.logical_path = "/run/degen-prod-db-backup"
+        runtime_fd = None
+        _revalidate_task7_directory_proof(proof)
+        if created:
+            os.fsync(proof.descriptors[-2])
+            _atomic_event_hook("task7_after_runtime_directory_create")
+        return created, proof
+    except OSError as exc:
+        if runtime_fd is not None:
+            try:
+                os.close(runtime_fd)
+            except OSError:
+                pass
+        _close_task7_directory_proof(proof)
+        raise OperationStateError("runtime directory cannot be created safely") from exc
+    except BaseException:
+        if runtime_fd is not None:
+            try:
+                os.close(runtime_fd)
+            except OSError:
+                pass
+        _close_task7_directory_proof(proof)
+        raise
+
+
+def ensure_runtime_directory(context: OperationsContext) -> bool:
+    created, proof = _open_or_create_runtime_directory_proof(
+        context,
+        require_create=False,
+    )
+    _close_task7_directory_proof(proof)
+    return created
+
+
+def _require_backup_service_inactive(context: OperationsContext) -> None:
+    _parse_positive_main_pid(
+        _systemctl_show_unit(context, "degen-prod-db-backup.service"),
+        "backup service",
+        require_active=False,
+    )
+
+
+def _acquire_migration_locks(
+    context: OperationsContext,
+    *,
+    require_runtime_create: bool,
+) -> MigrationLocks:
+    _require_posix_descriptor_primitives()
+    legacy_fd: int | None = None
+    runtime_fd: int | None = None
+    lock_parent_proof: _Task7DirectoryProof | None = None
+    runtime_parent_proof: _Task7DirectoryProof | None = None
+    try:
+        lock_parent_proof = _open_task7_directory(
+            context,
+            "/run/lock",
+            exact_mode=0o1777,
+        )
+        _atomic_event_hook("task7_before_legacy_lock")
+        legacy_fd = _open_and_flock_task7_file(
+            context,
+            lock_parent_proof.descriptor,
+            "degen-prod-db-backup.lock",
+            "legacy migration lock",
+        )
+        _atomic_event_hook(
+            "migration_lock_acquired",
+            kind="legacy",
+            fd=legacy_fd,
+        )
+        _atomic_event_hook("task7_after_legacy_lock")
+        _created, runtime_parent_proof = _open_or_create_runtime_directory_proof(
+            context,
+            require_create=require_runtime_create,
+        )
+        _revalidate_task7_directory_proof(runtime_parent_proof)
+        _atomic_event_hook("task7_before_runtime_lock")
+        runtime_fd = _open_and_flock_task7_file(
+            context,
+            runtime_parent_proof.descriptor,
+            "backup.lock",
+            "runtime migration lock",
+        )
+        _atomic_event_hook(
+            "migration_lock_acquired",
+            kind="runtime",
+            fd=runtime_fd,
+        )
+        _atomic_event_hook("task7_after_runtime_lock")
+        _revalidate_task7_directory_proof(lock_parent_proof)
+        _revalidate_task7_directory_proof(runtime_parent_proof)
+        _require_backup_service_inactive(context)
+        locks = MigrationLocks(legacy_fd=legacy_fd, runtime_fd=runtime_fd)
+        legacy_fd = None
+        runtime_fd = None
+        return locks
+    finally:
+        if runtime_parent_proof is not None:
+            _close_task7_directory_proof(runtime_parent_proof)
+        if lock_parent_proof is not None:
+            _close_task7_directory_proof(lock_parent_proof)
+        for descriptor in (runtime_fd, legacy_fd):
+            if descriptor is not None:
+                try:
+                    import fcntl
+
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                except (ImportError, OSError):
+                    pass
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+
+
+def acquire_migration_locks(context: OperationsContext) -> MigrationLocks:
+    return _acquire_migration_locks(
+        context,
+        require_runtime_create=False,
+    )
+
+
+def _release_migration_locks(
+    locks: MigrationLocks,
+) -> list[_Task7LockReleaseIssue]:
+    try:
+        import fcntl
+    except ImportError:
+        fcntl = None  # type: ignore[assignment]
+    errors: list[_Task7LockReleaseIssue] = []
+    crashes: list[BaseException] = []
+    for kind, descriptor in (
+        ("runtime", locks.runtime_fd),
+        ("legacy", locks.legacy_fd),
+    ):
+        stage = f"release_{kind}_lock"
+        try:
+            _atomic_event_hook(f"task7_before_{kind}_lock_release")
+        except BaseException as exc:
+            if isinstance(exc, Exception):
+                errors.append(_Task7LockReleaseIssue(stage, exc, False))
+            else:
+                crashes.append(exc)
+        if fcntl is not None:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            except OSError as exc:
+                errors.append(_Task7LockReleaseIssue(stage, exc, True))
+        elif os.name == "posix":
+            errors.append(
+                _Task7LockReleaseIssue(
+                    stage,
+                    OperationStateError(
+                        "required POSIX flock primitive is unavailable"
+                    ),
+                    True,
+                )
+            )
+        try:
+            os.close(descriptor)
+        except OSError as exc:
+            errors.append(_Task7LockReleaseIssue(stage, exc, True))
+        try:
+            _atomic_event_hook("migration_lock_released", kind=kind, fd=descriptor)
+            _atomic_event_hook(f"task7_after_{kind}_lock_release")
+        except BaseException as exc:
+            if isinstance(exc, Exception):
+                errors.append(_Task7LockReleaseIssue(stage, exc, False))
+            else:
+                crashes.append(exc)
+    try:
+        _atomic_event_hook("migration_locks_released")
+    except BaseException as exc:
+        if isinstance(exc, Exception):
+            errors.append(
+                _Task7LockReleaseIssue("release_migration_locks", exc, False)
+            )
+        else:
+            crashes.append(exc)
+    if crashes:
+        raise crashes[0]
+    return errors
+
+
+def verify_running_source_helper(context: OperationsContext) -> None:
+    relative = "deploy/linux/degen-prod-db-backup-ops.py"
+    expected = context.paths.source_dir / relative
+    running = Path(os.path.abspath(str(__file__)))
+    expected_absolute = Path(os.path.abspath(str(expected)))
+    if running != expected_absolute:
+        raise OperationStateError(
+            "recover must run the helper under the verified source directory"
+        )
+    descriptor: int | None = None
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        named_before = expected.lstat()
+        _validate_source_file_metadata(
+            named_before,
+            context.effective_uid,
+            "verified source helper",
+        )
+        descriptor = os.open(expected, flags)
+        opened_before = os.fstat(descriptor)
+        _validate_source_file_metadata(
+            opened_before,
+            context.effective_uid,
+            "verified source helper",
+        )
+        if not _same_identity(named_before, opened_before):
+            raise OperationStateError("verified source helper binding changed")
+        digest, _contents = _hash_open_source_file(
+            descriptor,
+            opened_before,
+            "verified source helper",
+            capture=False,
+        )
+        named_after = expected.lstat()
+        _validate_source_file_metadata(
+            named_after,
+            context.effective_uid,
+            "verified source helper",
+        )
+        if (
+            not _same_identity(opened_before, named_after)
+            or _source_binding_metadata(opened_before)
+            != _source_binding_metadata(named_after)
+        ):
+            raise OperationStateError("verified source helper binding changed")
+        state = load_operation_state(
+            context.paths.state_file,
+            effective_uid=context.effective_uid,
+        )
+        validate_operation_state_for_context(state, context)
+        reviewed = state["reviewed_source"]
+        assert isinstance(reviewed, dict)
+        hashes = reviewed["asset_hashes"]
+        assert isinstance(hashes, dict)
+        if digest != hashes[relative]:
+            raise OperationStateError(
+                "running helper hash does not match verified source"
+            )
+    except OSError as exc:
+        raise OperationStateError("verified source helper proof failed") from exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _task7_epoch(context: OperationsContext) -> int:
+    now = context.clock()
+    if type(now) is not datetime or now.tzinfo is None or now.utcoffset() != timedelta(0):
+        raise OperationStateError("operations clock must return an aware UTC datetime")
+    return int(now.astimezone(timezone.utc).timestamp())
+
+
+def _task7_state_epoch(
+    context: OperationsContext,
+    state: dict[str, object],
+) -> int:
+    epoch = _task7_epoch(context)
+    history = state["phase_history"]
+    assert isinstance(history, list) and history
+    last = history[-1]
+    assert isinstance(last, dict)
+    return max(epoch, int(last["epoch"]))
+
+
+def _task7_evidence_sha256(label: str, payload: object) -> str:
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("ascii")
+    return hashlib.sha256(
+        f"degen-task7-{label}-v1\n".encode("ascii") + canonical + b"\n"
+    ).hexdigest()
+
+
+def _task7_error_evidence_sha256(
+    kind: str,
+    receipt: dict[str, object],
+) -> str:
+    if kind == "primary":
+        payload = {
+            "phase": receipt["phase"],
+            "primary_error": receipt["primary_error"],
+            "epoch": receipt["epoch"],
+        }
+    elif kind == "secondary":
+        payload = {
+            "stage": receipt["stage"],
+            "error": receipt["error"],
+            "epoch": receipt["epoch"],
+        }
+    else:
+        raise OperationStateError("failure evidence kind is invalid")
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("ascii")
+    return hashlib.sha256(
+        f"degen-task7-{kind}-error-v1\n".encode("ascii") + canonical + b"\n"
+    ).hexdigest()
+
+
+def _task7_systemctl(
+    context: OperationsContext,
+    action: str,
+) -> None:
+    if action not in {"disable", "stop", "enable", "start", "daemon-reload"}:
+        raise OperationStateError("Task 7 systemctl action is invalid")
+    argv = (
+        (_SYSTEMCTL_EXECUTABLE, action)
+        if action == "daemon-reload"
+        else (
+            _SYSTEMCTL_EXECUTABLE,
+            action,
+            "degen-prod-db-backup.timer",
+        )
+    )
+    _checked_command(
+        context,
+        argv,
+        (),
+        f"systemctl {action}",
+        include_safe_stderr=True,
+    )
+
+
+def _quiesce_backup_timer(
+    context: OperationsContext,
+    prior_runtime: dict[str, object],
+) -> None:
+    if prior_runtime["timer_enabled"]:
+        _task7_systemctl(context, "disable")
+        _atomic_event_hook("task7_after_timer_disable")
+    _task7_systemctl(context, "stop")
+    _atomic_event_hook("task7_after_timer_stop")
+    _require_backup_service_inactive(context)
+    observed = _capture_prior_runtime(context)
+    expected = copy.deepcopy(prior_runtime)
+    expected["timer_enabled"] = False
+    expected["timer_active"] = False
+    if observed != expected:
+        raise OperationStateError(
+            "backup timer did not reach the exact quiesced runtime state"
+        )
+
+
+def _restore_backup_timer(
+    context: OperationsContext,
+    prior_runtime: dict[str, object],
+) -> None:
+    if prior_runtime["timer_enabled"]:
+        _task7_systemctl(context, "enable")
+        _atomic_event_hook("task7_after_timer_enable")
+    if prior_runtime["timer_active"]:
+        _task7_systemctl(context, "start")
+        _atomic_event_hook("task7_after_timer_start")
+    if _capture_prior_runtime(context) != prior_runtime:
+        raise OperationStateError(
+            "backup timer did not return to the exact prior runtime state"
+        )
+    _atomic_event_hook("task7_after_timer_restore")
+
+
+def _task7_write_state(
+    context: OperationsContext,
+    binding: _OperationDirectoryBinding,
+    state: dict[str, object],
+    *,
+    pre_replace_validator: PreReplaceValidator | None = None,
+) -> None:
+    _atomic_write_operation_state_internal(
+        context.paths.state_file,
+        state,
+        effective_uid=context.effective_uid,
+        pre_replace_validator=pre_replace_validator,
+        operation_directory_binding=binding,
+        operation_lock_held=True,
+    )
+
+
+def _task7_load_state(context: OperationsContext) -> dict[str, object]:
+    state = load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    validate_operation_state_for_context(state, context)
+    return state
+
+
+def _task7_recovery_command(context: OperationsContext) -> str:
+    helper = context.paths.source_dir / "deploy/linux/degen-prod-db-backup-ops.py"
+    return f"{helper} recover --operation-dir {context.paths.operation_dir}"
+
+
+def _task7_append_history(
+    state: dict[str, object],
+    phase: str,
+    epoch: int,
+    label: str,
+    payload: object,
+) -> None:
+    state["phase"] = phase
+    history = state["phase_history"]
+    assert isinstance(history, list)
+    history.append(
+        {
+            "phase": phase,
+            "epoch": epoch,
+            "evidence_sha256": _task7_evidence_sha256(label, payload),
+        }
+    )
+
+
+def _task7_install_bytes(material: _VerifiedTransactionMaterial) -> dict[str, bytes]:
+    expected: dict[str, bytes] = {}
+    for source, target in _SOURCE_TO_TARGET:
+        expected[target] = material.stage_proof.expected_bytes[f"reviewed/{source}"]
+    expected[_TARGET_ORDER[-1]] = material.stage_proof.expected_bytes[
+        "host/etc/degen/prod-db-backup.env"
+    ]
+    if tuple(expected) != _TARGET_ORDER:
+        raise OperationStateError("Task 7 staged target order is incomplete")
+    return expected
+
+
+def _task7_install_mode(target: str) -> int:
+    if target in _TARGET_ORDER[:4]:
+        return 0o755
+    if target in _TARGET_ORDER[4:6]:
+        return 0o644
+    if target == _TARGET_ORDER[-1]:
+        return 0o600
+    raise OperationStateError("Task 7 target is outside the fixed order")
+
+
+def _task7_runtime_directory_preexists(context: OperationsContext) -> bool:
+    if os.name != "posix" or not _descriptor_primitives_available():
+        path = _host_path(context, "/run/degen-prod-db-backup")
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            return False
+        _validate_task7_directory(
+            metadata,
+            context,
+            "runtime directory",
+            exact_mode=0o700,
+        )
+        return True
+    proof = _open_task7_directory(context, "/run", exact_mode=0o755)
+    try:
+        try:
+            metadata = os.stat(
+                "degen-prod-db-backup",
+                dir_fd=proof.descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return False
+        _validate_task7_directory(
+            metadata,
+            context,
+            "runtime directory",
+            exact_mode=0o700,
+        )
+        return True
+    finally:
+        _close_task7_directory_proof(proof)
+
+
+def _task7_acquire_migration_locks(
+    context: OperationsContext,
+    *,
+    runtime_directory_created: bool,
+) -> MigrationLocks:
+    if os.name == "posix" and _descriptor_primitives_available():
+        return _acquire_migration_locks(
+            context,
+            require_runtime_create=runtime_directory_created,
+        )
+    if runtime_directory_created and _task7_runtime_directory_preexists(context):
+        raise OperationStateError(
+            "runtime directory appeared after the held absence proof"
+        )
+    if runtime_directory_created:
+        runtime_path = _host_path(context, "/run/degen-prod-db-backup")
+        try:
+            runtime_path.mkdir(mode=0o700)
+        except FileExistsError as exc:
+            raise OperationStateError(
+                "runtime directory exclusive creation raced"
+            ) from exc
+        if os.name == "posix":
+            runtime_path.chmod(0o700)
+        _atomic_event_hook("task7_after_runtime_directory_create")
+    return acquire_migration_locks(context)
+
+
+@contextlib.contextmanager
+def _open_task7_live_target_proofs(context: OperationsContext):
+    proofs: dict[str, _SnapshotTargetProof] = {}
+    with contextlib.ExitStack() as stack:
+        try:
+            for target in _TARGET_ORDER:
+                parent = str(PurePosixPath(target).parent)
+                directory = stack.enter_context(_open_host_directory(context, parent))
+                proofs[target] = _capture_snapshot_target(directory, target)
+            yield proofs
+        finally:
+            for proof in proofs.values():
+                _close_snapshot_target_proof(proof)
+
+
+def _task7_revalidate_live_target_proofs(
+    proofs: dict[str, _SnapshotTargetProof],
+) -> None:
+    if tuple(proofs) != _TARGET_ORDER:
+        raise OperationStateError("Task 7 live target proof order is incomplete")
+    for proof in proofs.values():
+        _revalidate_snapshot_target_proof(proof)
+
+
+def _task7_require_snapshot_live_targets(
+    state: dict[str, object],
+    proofs: dict[str, _SnapshotTargetProof],
+) -> None:
+    snapshot = state["snapshot"]
+    assert isinstance(snapshot, dict)
+    targets = snapshot["targets"]
+    assert isinstance(targets, dict)
+    for target, proof in proofs.items():
+        if _snapshot_target_receipt(proof) != targets[target]:
+            raise OperationStateError(
+                f"live target changed from snapshot before installation: {target}"
+            )
+
+
+def _task7_temp_name(context: OperationsContext, target: str, kind: str) -> str:
+    if kind not in {"install", "recovery"}:
+        raise OperationStateError("Task 7 temporary kind is invalid")
+    return f".{PurePosixPath(target).name}.{context.operation_id}.{kind}.tmp"
+
+
+def _task7_named_metadata(
+    directory: _HostDirectoryProof,
+    name: str,
+) -> os.stat_result:
+    if directory.descriptor is None:
+        return (directory.path / name).lstat()
+    return os.stat(name, dir_fd=directory.descriptor, follow_symlinks=False)
+
+
+def _task7_refresh_mutable_directory_proof(
+    proof: _HostDirectoryProof,
+) -> None:
+    """Rebind expected directory timestamps after our own child mutation."""
+    _revalidate_host_root_proof(proof.host_root_proof)
+    if not proof.descriptors:
+        current = proof.context.host_root
+        refreshed: list[os.stat_result] = []
+        for index, expected in enumerate(proof.metadata):
+            named = current.lstat()
+            _validate_host_directory_metadata(
+                named,
+                proof.context.effective_uid,
+                "Task 7 target parent",
+            )
+            if not _same_identity(named, expected):
+                raise OperationStateError("Task 7 target parent binding changed")
+            refreshed.append(named)
+            if index < len(proof.names):
+                current = current / proof.names[index]
+        proof.metadata[:] = refreshed
+        return
+    refreshed = []
+    for index, descriptor in enumerate(proof.descriptors):
+        opened = os.fstat(descriptor)
+        _validate_host_directory_metadata(
+            opened,
+            proof.context.effective_uid,
+            "Task 7 target parent",
+        )
+        if not _same_identity(opened, proof.metadata[index]):
+            raise OperationStateError("Task 7 target parent identity changed")
+        if index:
+            named = os.stat(
+                proof.names[index - 1],
+                dir_fd=proof.descriptors[index - 1],
+                follow_symlinks=False,
+            )
+            if not _same_identity(opened, named):
+                raise OperationStateError("Task 7 target parent binding changed")
+        refreshed.append(opened)
+    proof.metadata[:] = refreshed
+
+
+def _task7_require_no_install_temporaries(context: OperationsContext) -> None:
+    for target in _TARGET_ORDER:
+        parent = str(PurePosixPath(target).parent)
+        with _open_host_directory(context, parent) as directory:
+            name = _task7_temp_name(context, target, "install")
+            try:
+                _task7_named_metadata(directory, name)
+            except FileNotFoundError:
+                continue
+            raise OperationStateError(
+                f"preexisting operation target temporary exists: {name}"
+            )
+
+
+def _task7_install_cursor(
+    state: dict[str, object],
+    expected_bytes: dict[str, bytes],
+    index: int,
+) -> tuple[str | None, str | None, str | None]:
+    if index == len(_TARGET_ORDER):
+        return None, None, None
+    target = _TARGET_ORDER[index]
+    snapshot = state["snapshot"]
+    assert isinstance(snapshot, dict)
+    targets = snapshot["targets"]
+    assert isinstance(targets, dict)
+    snapshot_target = targets[target]
+    assert isinstance(snapshot_target, dict)
+    previous = snapshot_target["sha256"] if snapshot_target["present"] else None
+    intended = hashlib.sha256(expected_bytes[target]).hexdigest()
+    return target, previous, intended
+
+
+def _task7_build_installing_state(
+    context: OperationsContext,
+    previous: dict[str, object],
+    expected_bytes: dict[str, bytes],
+    *,
+    runtime_directory_created: bool,
+) -> dict[str, object]:
+    epoch = _task7_state_epoch(context, previous)
+    target, previous_hash, intended_hash = _task7_install_cursor(
+        previous,
+        expected_bytes,
+        0,
+    )
+    state = copy.deepcopy(previous)
+    state["install"] = {
+        "next_target_index": 0,
+        "current_target": target,
+        "previous_sha256": previous_hash,
+        "intended_sha256": intended_hash,
+        "installed_hashes": {},
+        "started_epoch": epoch,
+        "completed_epoch": None,
+        "runtime_directory_created": runtime_directory_created,
+        "validated_epoch": None,
+        "validation_evidence_sha256": None,
+    }
+    _task7_append_history(
+        state,
+        "installing",
+        epoch,
+        "install-start",
+        {
+            "operation_id": context.operation_id,
+            "runtime_directory_created": runtime_directory_created,
+            "target_order": list(_TARGET_ORDER),
+        },
+    )
+    validate_operation_state(state, context.paths.operation_dir, previous)
+    validate_operation_state_for_context(state, context)
+    return state
+
+
+def _task7_advance_install_cursor(
+    context: OperationsContext,
+    binding: _OperationDirectoryBinding,
+    state: dict[str, object],
+    expected_bytes: dict[str, bytes],
+    next_index: int,
+) -> dict[str, object]:
+    updated = copy.deepcopy(state)
+    install = updated["install"]
+    assert isinstance(install, dict)
+    target, previous_hash, intended_hash = _task7_install_cursor(
+        updated,
+        expected_bytes,
+        next_index,
+    )
+    install.update(
+        {
+            "next_target_index": next_index,
+            "current_target": target,
+            "previous_sha256": previous_hash,
+            "intended_sha256": intended_hash,
+        }
+    )
+    _task7_write_state(context, binding, updated)
+    _atomic_event_hook("task7_after_cursor_state", index=next_index)
+    return updated
+
+
+def _task7_validate_temp_metadata(
+    metadata: os.stat_result,
+    context: OperationsContext,
+    mode: int,
+) -> None:
+    if not stat.S_ISREG(metadata.st_mode):
+        raise OperationStateError("operation target temporary is not regular")
+    if metadata.st_uid != _task7_expected_owner(context):
+        raise OperationStateError("operation target temporary owner is unsafe")
+    if metadata.st_nlink != 1:
+        raise OperationStateError("operation target temporary link count is unsafe")
+    if os.name == "posix" and stat.S_IMODE(metadata.st_mode) != mode:
+        raise OperationStateError("operation target temporary mode is unsafe")
+
+
+def _task7_atomic_install_target(
+    context: OperationsContext,
+    target: str,
+    contents: bytes,
+    mode: int,
+    index: int,
+    expected_previous: dict[str, object],
+) -> None:
+    parent = str(PurePosixPath(target).parent)
+    name = PurePosixPath(target).name
+    temp_name = _task7_temp_name(context, target, "install")
+    descriptor: int | None = None
+    owned_temp_metadata: os.stat_result | None = None
+    temp_metadata: os.stat_result | None = None
+    replaced = False
+    with _open_host_directory(context, parent) as directory:
+        target_path = directory.path / name
+        temp_path = directory.path / temp_name
+        proof = _capture_snapshot_target(directory, target)
+        try:
+            if _snapshot_target_receipt(proof) != expected_previous:
+                raise OperationStateError(
+                    f"live target changed before installation replace: {target}"
+                )
+        finally:
+            _close_snapshot_target_proof(proof)
+        try:
+            try:
+                _task7_named_metadata(directory, temp_name)
+            except FileNotFoundError:
+                pass
+            else:
+                raise OperationStateError(
+                    f"operation target temporary already exists: {temp_name}"
+                )
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            flags |= getattr(os, "O_BINARY", 0)
+            flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+            descriptor = (
+                os.open(temp_path, flags, mode)
+                if directory.descriptor is None
+                else os.open(temp_name, flags, mode, dir_fd=directory.descriptor)
+            )
+            owned_temp_metadata = os.fstat(descriptor)
+            if os.name == "posix":
+                os.fchmod(descriptor, mode)
+                expected_gid = 0 if context.host_root == _PRODUCTION_HOST_ROOT else os.getegid()
+                os.fchown(descriptor, _task7_expected_owner(context), expected_gid)
+            _write_all(descriptor, contents)
+            os.fsync(descriptor)
+            temp_metadata = os.fstat(descriptor)
+            _task7_validate_temp_metadata(temp_metadata, context, mode)
+            os.close(descriptor)
+            descriptor = None
+            _task7_refresh_mutable_directory_proof(directory)
+            _atomic_event_hook(
+                "task7_after_staged_file_fsync",
+                index=index,
+                target=target,
+                temp_path=str(temp_path),
+            )
+            current_temp = _task7_named_metadata(directory, temp_name)
+            if (
+                not _same_identity(current_temp, temp_metadata)
+                or _stage_stable_metadata(current_temp)
+                != _stage_stable_metadata(temp_metadata)
+            ):
+                raise OperationStateError("operation target temporary binding changed")
+            proof = _capture_snapshot_target(directory, target)
+            try:
+                if _snapshot_target_receipt(proof) != expected_previous:
+                    raise OperationStateError(
+                        f"live target changed before installation replace: {target}"
+                    )
+            finally:
+                _close_snapshot_target_proof(proof)
+            _atomic_event_hook(
+                "task7_before_target_replace",
+                index=index,
+                target=target,
+            )
+            if directory.descriptor is None:
+                os.replace(temp_path, target_path)
+            else:
+                os.replace(
+                    temp_name,
+                    name,
+                    src_dir_fd=directory.descriptor,
+                    dst_dir_fd=directory.descriptor,
+                )
+            replaced = True
+            _task7_refresh_mutable_directory_proof(directory)
+            _atomic_event_hook(
+                "task7_after_target_replace",
+                index=index,
+                target=target,
+            )
+            if directory.descriptor is not None:
+                os.fsync(directory.descriptor)
+            elif os.name == "posix":
+                _fsync_parent_directory(target_path)
+            _atomic_event_hook(
+                "task7_after_target_parent_fsync",
+                index=index,
+                target=target,
+            )
+            _task7_refresh_mutable_directory_proof(directory)
+            installed = _capture_snapshot_target(directory, target)
+            try:
+                receipt = _snapshot_target_receipt(installed)
+                if (
+                    receipt["sha256"] != hashlib.sha256(contents).hexdigest()
+                    or (os.name == "posix" and receipt["mode"] != mode)
+                ):
+                    raise OperationStateError(
+                        f"installed target validation failed: {target}"
+                    )
+            finally:
+                _close_snapshot_target_proof(installed)
+        except Exception as target_error:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+                descriptor = None
+            if not replaced and owned_temp_metadata is not None:
+                try:
+                    current_temp = _task7_named_metadata(directory, temp_name)
+                    if _same_identity(current_temp, owned_temp_metadata):
+                        if directory.descriptor is None:
+                            temp_path.unlink()
+                        else:
+                            os.unlink(temp_name, dir_fd=directory.descriptor)
+                        _task7_refresh_mutable_directory_proof(directory)
+                        if directory.descriptor is not None:
+                            os.fsync(directory.descriptor)
+                        elif os.name == "posix":
+                            _fsync_parent_directory(temp_path)
+                except OSError:
+                    pass
+            try:
+                _task7_refresh_mutable_directory_proof(directory)
+            except Exception:
+                pass
+            if isinstance(target_error, OSError):
+                raise OperationStateError(
+                    sanitize_error_text(target_error)
+                ) from target_error
+            raise
+        finally:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+
+
+def _task7_verify_installed_targets(
+    context: OperationsContext,
+    expected_bytes: dict[str, bytes],
+) -> dict[str, str]:
+    hashes: dict[str, str] = {}
+    for target in _TARGET_ORDER:
+        parent = str(PurePosixPath(target).parent)
+        with _open_host_directory(context, parent) as directory:
+            proof = _capture_snapshot_target(directory, target)
+            try:
+                if proof.contents != expected_bytes[target]:
+                    raise OperationStateError(
+                        f"installed target bytes differ from verified stage: {target}"
+                    )
+                receipt = _snapshot_target_receipt(proof)
+                if (
+                    os.name == "posix"
+                    and receipt["mode"] != _task7_install_mode(target)
+                ):
+                    raise OperationStateError(
+                        f"installed target mode differs from verified stage: {target}"
+                    )
+                hashes[target] = hashlib.sha256(expected_bytes[target]).hexdigest()
+            finally:
+                _close_snapshot_target_proof(proof)
+    return hashes
+
+
+def _task7_require_protected_pid_parity(
+    context: OperationsContext,
+    prior_runtime: dict[str, object],
+) -> None:
+    current = _capture_prior_runtime(context)
+    if current["pids"] != prior_runtime["pids"]:
+        raise OperationStateError("protected process PID identity changed")
+
+
+def _task7_release_locks(
+    locks: MigrationLocks,
+) -> list[_Task7LockReleaseIssue]:
+    errors: list[_Task7LockReleaseIssue] = []
+    crashes: list[BaseException] = []
+    try:
+        _atomic_event_hook("task7_before_lock_release")
+    except BaseException as exc:
+        if isinstance(exc, Exception):
+            errors.append(
+                _Task7LockReleaseIssue("release_migration_locks", exc, False)
+            )
+        else:
+            crashes.append(exc)
+    try:
+        for issue in _release_migration_locks(locks):
+            if isinstance(issue, _Task7LockReleaseIssue):
+                errors.append(issue)
+                continue
+            stage, error = issue
+            errors.append(
+                _Task7LockReleaseIssue(
+                    stage,
+                    error,
+                    isinstance(error, OSError),
+                )
+            )
+    except BaseException as exc:
+        crashes.append(exc)
+    try:
+        _atomic_event_hook("task7_after_lock_release")
+    except BaseException as exc:
+        if isinstance(exc, Exception):
+            errors.append(
+                _Task7LockReleaseIssue("release_migration_locks", exc, False)
+            )
+        else:
+            crashes.append(exc)
+    if crashes:
+        raise crashes[0]
+    return errors
+
+
+def _task7_emergency_close_locks(locks: MigrationLocks) -> None:
+    try:
+        import fcntl
+    except ImportError:
+        fcntl = None  # type: ignore[assignment]
+    for descriptor in (locks.runtime_fd, locks.legacy_fd):
+        if fcntl is not None:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
+def _task7_capture_file_audit(
+    context: OperationsContext,
+    logical_path: str,
+) -> dict[str, object]:
+    with _open_host_file(
+        context,
+        logical_path,
+        "Task 7 audit file",
+        maximum_size=_MAX_SNAPSHOT_FILE_BYTES,
+        exact_mode=0o600,
+    ) as proof:
+        raw = _read_host_file(proof, _MAX_SNAPSHOT_FILE_BYTES)
+        _revalidate_host_file_proof(proof)
+        metadata = os.fstat(proof.descriptor)
+        return {
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "inode": metadata.st_ino,
+            "uid": metadata.st_uid,
+            "gid": metadata.st_gid,
+            "mode": stat.S_IMODE(metadata.st_mode) if os.name == "posix" else 0o600,
+            "size": metadata.st_size,
+            "mtime_ns": metadata.st_mtime_ns,
+        }
+
+
+def _task7_run_preflight_with_rclone_audit(
+    context: OperationsContext,
+    binding: _OperationDirectoryBinding,
+    state: dict[str, object],
+    runtime_lock_fd: int,
+) -> dict[str, object]:
+    effective = state["effective_config"]
+    assert isinstance(effective, dict)
+    rclone_path = str(effective["RCLONE_CONFIG"])
+    if rclone_path != _RCLONE_CONFIG_PATH:
+        raise OperationStateError("Task 7 rclone audit path is not fixed")
+    before = _task7_capture_file_audit(context, rclone_path)
+    pending_group: dict[str, object] = {
+        "group_id": "install",
+        "purpose": "credential-refresh-audit",
+        "before": before,
+        "after": None,
+        "evidence_sha256": None,
+    }
+    pending_state = copy.deepcopy(state)
+    pending_groups = pending_state["rclone_evidence_groups"]
+    assert isinstance(pending_groups, list)
+    pending_groups.append(pending_group)
+    _task7_write_required_receipt_state(
+        context,
+        binding,
+        pending_state,
+        "rclone preflight intent",
+    )
+    preflight_error: BaseException | None = None
+    try:
+        executable = _host_path(context, _TARGET_ORDER[0])
+        _checked_command(
+            context,
+            (
+                str(executable),
+                "preflight",
+                "--lock-fd",
+                str(runtime_lock_fd),
+            ),
+            (runtime_lock_fd,),
+            "installed backup preflight",
+        )
+    except BaseException as exc:
+        preflight_error = exc
+    try:
+        after = _task7_capture_file_audit(context, rclone_path)
+    except BaseException as audit_error:
+        if not isinstance(audit_error, Exception):
+            raise
+        if preflight_error is not None:
+            if not isinstance(preflight_error, Exception):
+                raise preflight_error
+            raise _Task7RcloneAuditIncompleteError(
+                preflight_error,
+                audit_error,
+            ) from audit_error
+        raise _Task7RcloneAuditIncompleteError(
+            audit_error,
+            None,
+        ) from audit_error
+    group_without_evidence: dict[str, object] = {
+        "group_id": "install",
+        "purpose": "credential-refresh-audit",
+        "before": before,
+        "after": after,
+    }
+    group = {
+        **group_without_evidence,
+        "evidence_sha256": _task7_evidence_sha256(
+            "rclone-audit",
+            group_without_evidence,
+        ),
+    }
+    updated = copy.deepcopy(pending_state)
+    groups = updated["rclone_evidence_groups"]
+    assert isinstance(groups, list)
+    groups[-1] = group
+    try:
+        _task7_write_required_receipt_state(
+            context,
+            binding,
+            updated,
+            "rclone before/after audit",
+        )
+    except Exception as exc:
+        raise _Task7RcloneEvidencePersistenceError(
+            group,
+            exc,
+            preflight_error,
+        ) from exc
+    if preflight_error is not None:
+        raise preflight_error
+    return updated
+
+
+def _task7_finalize_pending_rclone_audit(
+    context: OperationsContext,
+    binding: _OperationDirectoryBinding,
+    state: dict[str, object],
+) -> dict[str, object]:
+    groups = state["rclone_evidence_groups"]
+    assert isinstance(groups, list)
+    if not groups:
+        return state
+    pending = groups[-1]
+    assert isinstance(pending, dict)
+    if pending["after"] is not None:
+        return state
+    effective = state["effective_config"]
+    assert isinstance(effective, dict)
+    rclone_path = str(effective["RCLONE_CONFIG"])
+    if rclone_path != _RCLONE_CONFIG_PATH:
+        raise OperationStateError("pending rclone audit path is not fixed")
+    after = _task7_capture_file_audit(context, rclone_path)
+    payload: dict[str, object] = {
+        "group_id": pending["group_id"],
+        "purpose": pending["purpose"],
+        "before": pending["before"],
+        "after": after,
+    }
+    final = {
+        **payload,
+        "evidence_sha256": _task7_evidence_sha256(
+            "rclone-audit",
+            payload,
+        ),
+    }
+    updated = copy.deepcopy(state)
+    updated_groups = updated["rclone_evidence_groups"]
+    assert isinstance(updated_groups, list)
+    updated_groups[-1] = final
+    _task7_write_required_receipt_state(
+        context,
+        binding,
+        updated,
+        "pending rclone before/after audit",
+    )
+    return _task7_load_state(context)
+
+
+def _task7_record_install_validation(
+    context: OperationsContext,
+    binding: _OperationDirectoryBinding,
+    state: dict[str, object],
+    installed_hashes: dict[str, str],
+    prior_runtime: dict[str, object],
+) -> dict[str, object]:
+    epoch = _task7_state_epoch(context, state)
+    updated = copy.deepcopy(state)
+    install = updated["install"]
+    assert isinstance(install, dict)
+    evidence = {
+        "installed_hashes": installed_hashes,
+        "protected_pids": prior_runtime["pids"],
+        "rclone_group_count": len(updated["rclone_evidence_groups"]),
+    }
+    install["validated_epoch"] = epoch
+    install["validation_evidence_sha256"] = _task7_evidence_sha256(
+        "install-validation",
+        evidence,
+    )
+    _task7_write_state(context, binding, updated)
+    _atomic_event_hook("task7_after_validation")
+    return updated
+
+
+def _task7_complete_install(
+    context: OperationsContext,
+    binding: _OperationDirectoryBinding,
+    state: dict[str, object],
+    installed_hashes: dict[str, str],
+) -> dict[str, object]:
+    epoch = _task7_state_epoch(context, state)
+    updated = copy.deepcopy(state)
+    install = updated["install"]
+    assert isinstance(install, dict)
+    install["installed_hashes"] = dict(installed_hashes)
+    install["completed_epoch"] = epoch
+    _task7_append_history(
+        updated,
+        "installed",
+        epoch,
+        "install-complete",
+        {
+            "installed_hashes": installed_hashes,
+            "validation_evidence_sha256": install["validation_evidence_sha256"],
+        },
+    )
+    _task7_write_state(context, binding, updated)
+    return updated
+
+
+def _task7_write_required_receipt_state(
+    context: OperationsContext,
+    binding: _OperationDirectoryBinding,
+    expected: dict[str, object],
+    label: str,
+) -> None:
+    try:
+        _task7_write_state(context, binding, expected)
+    except Exception as first_error:
+        current = _task7_load_state(context)
+        if current != expected:
+            try:
+                _task7_write_state(context, binding, expected)
+            except Exception as retry_error:
+                raise OperationStateError(
+                    f"{label} receipt could not be persisted durably"
+                ) from retry_error
+        else:
+            return
+        current = _task7_load_state(context)
+        if current != expected:
+            raise OperationStateError(
+                f"{label} receipt persistence could not be verified"
+            ) from first_error
+
+
+def _task7_persist_pending_rclone_group(
+    context: OperationsContext,
+    binding: _OperationDirectoryBinding,
+    group: dict[str, object],
+) -> dict[str, object]:
+    _reject_residual_secrets(group)
+    state = _task7_load_state(context)
+    groups = state["rclone_evidence_groups"]
+    assert isinstance(groups, list)
+    if not groups:
+        updated = copy.deepcopy(state)
+        pending_groups = updated["rclone_evidence_groups"]
+        assert isinstance(pending_groups, list)
+        pending_groups.append(copy.deepcopy(group))
+        _task7_write_required_receipt_state(
+            context,
+            binding,
+            updated,
+            "pending rclone before/after audit",
+        )
+        return _task7_load_state(context)
+    last = groups[-1]
+    assert isinstance(last, dict)
+    if (
+        last["after"] is None
+        and group.get("after") is not None
+        and all(
+            last[field] == group.get(field)
+            for field in ("group_id", "purpose", "before")
+        )
+    ):
+        updated = copy.deepcopy(state)
+        updated_groups = updated["rclone_evidence_groups"]
+        assert isinstance(updated_groups, list)
+        updated_groups[-1] = copy.deepcopy(group)
+        _task7_write_required_receipt_state(
+            context,
+            binding,
+            updated,
+            "pending rclone before/after audit",
+        )
+        return _task7_load_state(context)
+    if groups[-1] != group:
+        raise OperationStateError(
+            "durable rclone evidence differs from pending audit"
+        )
+    return state
+
+
+def _task7_record_primary_failure(
+    context: OperationsContext,
+    binding: _OperationDirectoryBinding,
+    error: BaseException,
+) -> dict[str, object]:
+    state = _task7_load_state(context)
+    if state["failure"] is not None:
+        return state
+    receipt: dict[str, object] = {
+        "phase": state["phase"],
+        "primary_error": sanitize_error_text(error),
+        "epoch": _task7_state_epoch(context, state),
+    }
+    receipt["evidence_sha256"] = _task7_error_evidence_sha256(
+        "primary",
+        receipt,
+    )
+    updated = copy.deepcopy(state)
+    updated["failure"] = receipt
+    _task7_write_required_receipt_state(
+        context,
+        binding,
+        updated,
+        "primary failure",
+    )
+    return updated
+
+
+def _task7_append_secondary_error(
+    context: OperationsContext,
+    binding: _OperationDirectoryBinding,
+    stage: str,
+    error: BaseException,
+) -> dict[str, object]:
+    state = _task7_load_state(context)
+    receipt: dict[str, object] = {
+        "stage": stage,
+        "error": sanitize_error_text(error),
+        "epoch": _task7_state_epoch(context, state),
+    }
+    receipt["evidence_sha256"] = _task7_error_evidence_sha256(
+        "secondary",
+        receipt,
+    )
+    updated = copy.deepcopy(state)
+    errors = updated["secondary_errors"]
+    assert isinstance(errors, list)
+    errors.append(receipt)
+    _task7_write_required_receipt_state(
+        context,
+        binding,
+        updated,
+        "secondary failure",
+    )
+    return updated
+
+
+def _task7_capture_target_receipt(
+    context: OperationsContext,
+    target: str,
+) -> dict[str, object]:
+    parent = str(PurePosixPath(target).parent)
+    with _open_host_directory(context, parent) as directory:
+        proof = _capture_snapshot_target(directory, target)
+        try:
+            return _snapshot_target_receipt(proof)
+        finally:
+            _close_snapshot_target_proof(proof)
+
+
+def _task7_receipt_matches_installed(
+    receipt: dict[str, object],
+    target: str,
+    installed_hash: str,
+) -> bool:
+    if not receipt["present"] or receipt["sha256"] != installed_hash:
+        return False
+    return os.name != "posix" or receipt["mode"] == _task7_install_mode(target)
+
+
+def _task7_require_recoverable_live_targets(
+    context: OperationsContext,
+    state: dict[str, object],
+) -> dict[str, dict[str, object]]:
+    snapshot = state["snapshot"]
+    assert isinstance(snapshot, dict)
+    snapshot_targets = snapshot["targets"]
+    assert isinstance(snapshot_targets, dict)
+    receipts: dict[str, dict[str, object]] = {}
+    for target in _TARGET_ORDER:
+        receipt = _task7_capture_target_receipt(context, target)
+        restore = snapshot_targets[target]
+        assert isinstance(restore, dict)
+        staged_hash = _target_staged_hash(state, target)
+        if receipt != restore and not _task7_receipt_matches_installed(
+            receipt,
+            target,
+            staged_hash,
+        ):
+            raise OperationStateError(
+                f"live target is neither snapshot nor installed provenance: {target}"
+            )
+        receipts[target] = receipt
+    return receipts
+
+
+def _task7_read_named_regular_file(
+    context: OperationsContext,
+    directory: _HostDirectoryProof,
+    name: str,
+    *,
+    mode: int,
+) -> tuple[bytes, os.stat_result]:
+    descriptor: int | None = None
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        named = _task7_named_metadata(directory, name)
+        _task7_validate_temp_metadata(named, context, mode)
+        descriptor = (
+            os.open(directory.path / name, flags)
+            if directory.descriptor is None
+            else os.open(name, flags, dir_fd=directory.descriptor)
+        )
+        opened = os.fstat(descriptor)
+        _task7_validate_temp_metadata(opened, context, mode)
+        if not _same_identity(named, opened):
+            raise OperationStateError("operation target temporary binding changed")
+        raw = _read_exact_descriptor(
+            descriptor,
+            opened.st_size,
+            "operation target temporary",
+        )
+        after = os.fstat(descriptor)
+        named_after = _task7_named_metadata(directory, name)
+        if (
+            not _same_identity(opened, after)
+            or not _same_identity(after, named_after)
+            or _stage_stable_metadata(after) != _stage_stable_metadata(opened)
+        ):
+            raise OperationStateError("operation target temporary changed while read")
+        return raw, after
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _task7_cleanup_owned_install_temp(
+    context: OperationsContext,
+    target: str,
+    expected_staged: bytes,
+) -> None:
+    parent = str(PurePosixPath(target).parent)
+    name = _task7_temp_name(context, target, "install")
+    with _open_host_directory(context, parent) as directory:
+        try:
+            _task7_named_metadata(directory, name)
+        except FileNotFoundError:
+            return
+        raw, metadata = _task7_read_named_regular_file(
+            context,
+            directory,
+            name,
+            mode=_task7_install_mode(target),
+        )
+        if raw != expected_staged:
+            raise OperationStateError(
+                "operation-owned install temporary has unexpected bytes"
+            )
+        current = _task7_named_metadata(directory, name)
+        if not _same_identity(current, metadata):
+            raise OperationStateError(
+                "operation-owned install temporary binding changed"
+            )
+        if directory.descriptor is None:
+            (directory.path / name).unlink()
+        else:
+            os.unlink(name, dir_fd=directory.descriptor)
+        _task7_refresh_mutable_directory_proof(directory)
+        if directory.descriptor is not None:
+            os.fsync(directory.descriptor)
+        elif os.name == "posix":
+            _fsync_parent_directory(directory.path / name)
+
+
+def _task7_snapshot_restore_bytes(
+    state: dict[str, object],
+    material: _VerifiedTransactionMaterial,
+    target: str,
+) -> tuple[bytes | None, int | None, int | None, int | None]:
+    snapshot = state["snapshot"]
+    assert isinstance(snapshot, dict)
+    targets = snapshot["targets"]
+    assert isinstance(targets, dict)
+    receipt = targets[target]
+    assert isinstance(receipt, dict)
+    if not receipt["present"]:
+        absent_name = f"{_SNAPSHOT_TARGET_NAMES[target]}.absent"
+        expected_marker = f"ABSENT {target}\n".encode("ascii")
+        if material.snapshot_proof.expected_bytes[absent_name] != expected_marker:
+            raise OperationStateError("snapshot absence artifact changed")
+        return None, None, None, None
+    raw = material.snapshot_proof.expected_bytes[_SNAPSHOT_TARGET_NAMES[target]]
+    if hashlib.sha256(raw).hexdigest() != receipt["sha256"]:
+        raise OperationStateError("snapshot restore artifact hash changed")
+    return raw, int(receipt["mode"]), int(receipt["uid"]), int(receipt["gid"])
+
+
+def _task7_remove_recovery_temp_if_owned(
+    context: OperationsContext,
+    directory: _HostDirectoryProof,
+    target: str,
+    expected: bytes,
+    mode: int,
+) -> None:
+    name = _task7_temp_name(context, target, "recovery")
+    try:
+        _task7_named_metadata(directory, name)
+    except FileNotFoundError:
+        return
+    raw, metadata = _task7_read_named_regular_file(
+        context,
+        directory,
+        name,
+        mode=mode,
+    )
+    if raw != expected:
+        raise OperationStateError("recovery temporary has unexpected bytes")
+    current = _task7_named_metadata(directory, name)
+    if not _same_identity(current, metadata):
+        raise OperationStateError("recovery temporary binding changed")
+    if directory.descriptor is None:
+        (directory.path / name).unlink()
+    else:
+        os.unlink(name, dir_fd=directory.descriptor)
+    _task7_refresh_mutable_directory_proof(directory)
+    if directory.descriptor is not None:
+        os.fsync(directory.descriptor)
+    elif os.name == "posix":
+        _fsync_parent_directory(directory.path / name)
+
+
+def _task7_atomic_restore_present_target(
+    context: OperationsContext,
+    target: str,
+    contents: bytes,
+    mode: int,
+    uid: int,
+    gid: int,
+    index: int,
+) -> None:
+    parent = str(PurePosixPath(target).parent)
+    name = PurePosixPath(target).name
+    temp_name = _task7_temp_name(context, target, "recovery")
+    descriptor: int | None = None
+    owned_temp_metadata: os.stat_result | None = None
+    temp_metadata: os.stat_result | None = None
+    replaced = False
+    with _open_host_directory(context, parent) as directory:
+        target_path = directory.path / name
+        temp_path = directory.path / temp_name
+        _task7_remove_recovery_temp_if_owned(
+            context,
+            directory,
+            target,
+            contents,
+            mode,
+        )
+        try:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            flags |= getattr(os, "O_BINARY", 0)
+            flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+            descriptor = (
+                os.open(temp_path, flags, mode)
+                if directory.descriptor is None
+                else os.open(temp_name, flags, mode, dir_fd=directory.descriptor)
+            )
+            owned_temp_metadata = os.fstat(descriptor)
+            if os.name == "posix":
+                os.fchmod(descriptor, mode)
+                os.fchown(descriptor, uid, gid)
+            _write_all(descriptor, contents)
+            os.fsync(descriptor)
+            temp_metadata = os.fstat(descriptor)
+            if os.name == "posix":
+                if (
+                    stat.S_IMODE(temp_metadata.st_mode) != mode
+                    or temp_metadata.st_uid != uid
+                    or temp_metadata.st_gid != gid
+                ):
+                    raise OperationStateError("recovery temporary metadata is incorrect")
+            os.close(descriptor)
+            descriptor = None
+            _task7_refresh_mutable_directory_proof(directory)
+            _atomic_event_hook(
+                "task7_after_recovery_file_fsync",
+                index=index,
+                target=target,
+                temp_path=str(temp_path),
+            )
+            current_temp = _task7_named_metadata(directory, temp_name)
+            if (
+                not _same_identity(current_temp, temp_metadata)
+                or _stage_stable_metadata(current_temp)
+                != _stage_stable_metadata(temp_metadata)
+            ):
+                raise OperationStateError("recovery temporary binding changed")
+            if directory.descriptor is None:
+                os.replace(temp_path, target_path)
+            else:
+                os.replace(
+                    temp_name,
+                    name,
+                    src_dir_fd=directory.descriptor,
+                    dst_dir_fd=directory.descriptor,
+                )
+            replaced = True
+            _task7_refresh_mutable_directory_proof(directory)
+            _atomic_event_hook(
+                "task7_after_recovery_target_replace",
+                index=index,
+                target=target,
+            )
+            if directory.descriptor is not None:
+                os.fsync(directory.descriptor)
+            elif os.name == "posix":
+                _fsync_parent_directory(target_path)
+            _atomic_event_hook(
+                "task7_after_recovery_target_parent_fsync",
+                index=index,
+                target=target,
+            )
+            _task7_refresh_mutable_directory_proof(directory)
+        except Exception as recovery_error:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+                descriptor = None
+            if not replaced and owned_temp_metadata is not None:
+                try:
+                    current = _task7_named_metadata(directory, temp_name)
+                    if _same_identity(current, owned_temp_metadata):
+                        if directory.descriptor is None:
+                            temp_path.unlink()
+                        else:
+                            os.unlink(temp_name, dir_fd=directory.descriptor)
+                        _task7_refresh_mutable_directory_proof(directory)
+                        if directory.descriptor is not None:
+                            os.fsync(directory.descriptor)
+                        elif os.name == "posix":
+                            _fsync_parent_directory(temp_path)
+                except OSError:
+                    pass
+            try:
+                _task7_refresh_mutable_directory_proof(directory)
+            except Exception:
+                pass
+            if isinstance(recovery_error, OSError):
+                raise OperationStateError(
+                    sanitize_error_text(recovery_error)
+                ) from recovery_error
+            raise
+        finally:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+
+
+def _task7_restore_target(
+    context: OperationsContext,
+    state: dict[str, object],
+    material: _VerifiedTransactionMaterial,
+    expected_staged: dict[str, bytes],
+    target: str,
+    index: int,
+) -> None:
+    _atomic_event_hook("task7_before_recovery_target", index=index, target=target)
+    _task7_cleanup_owned_install_temp(context, target, expected_staged[target])
+    raw, mode, uid, gid = _task7_snapshot_restore_bytes(state, material, target)
+    snapshot = state["snapshot"]
+    assert isinstance(snapshot, dict)
+    snapshot_targets = snapshot["targets"]
+    assert isinstance(snapshot_targets, dict)
+    current = _task7_capture_target_receipt(context, target)
+    if current == snapshot_targets[target]:
+        return
+    if raw is None:
+        parent = str(PurePosixPath(target).parent)
+        name = PurePosixPath(target).name
+        with _open_host_directory(context, parent) as directory:
+            latest = _task7_capture_target_receipt(context, target)
+            if not latest["present"]:
+                return
+            if directory.descriptor is None:
+                (directory.path / name).unlink()
+            else:
+                os.unlink(name, dir_fd=directory.descriptor)
+            _task7_refresh_mutable_directory_proof(directory)
+            _atomic_event_hook(
+                "task7_after_target_unlink",
+                index=index,
+                target=target,
+            )
+            if directory.descriptor is not None:
+                os.fsync(directory.descriptor)
+            elif os.name == "posix":
+                _fsync_parent_directory(directory.path / name)
+            _atomic_event_hook(
+                "task7_after_recovery_target_parent_fsync",
+                index=index,
+                target=target,
+            )
+        return
+    assert mode is not None and uid is not None and gid is not None
+    _task7_atomic_restore_present_target(
+        context,
+        target,
+        raw,
+        mode,
+        uid,
+        gid,
+        index,
+    )
+
+
+def _task7_recovery_phase_for_kind(kind: str) -> str:
+    if kind == "install":
+        return "recovering"
+    if kind == "manual_rollback":
+        return "manual_rollback"
+    raise OperationStateError("Task 7 recovery kind is unsupported")
+
+
+def _task7_build_recovery_entry(
+    context: OperationsContext,
+    previous: dict[str, object],
+    kind: str,
+    runtime_directory_created: bool,
+    runtime_baseline: dict[str, object],
+    live_receipts: dict[str, dict[str, object]],
+) -> dict[str, object]:
+    epoch = _task7_state_epoch(context, previous)
+    phase = _task7_recovery_phase_for_kind(kind)
+    target = _TARGET_ORDER[0]
+    snapshot = previous["snapshot"]
+    assert isinstance(snapshot, dict)
+    targets = snapshot["targets"]
+    assert isinstance(targets, dict)
+    restore = targets[target]
+    assert isinstance(restore, dict)
+    current = live_receipts[target]
+    previous_hash = current["sha256"] if current["present"] else None
+    intended_hash = restore["sha256"] if restore["present"] else None
+    evidence_payload = {
+        "kind": kind,
+        "operation_id": context.operation_id,
+        "runtime_directory_created": runtime_directory_created,
+        "runtime_baseline": copy.deepcopy(runtime_baseline),
+        "snapshot_manifest_sha256": snapshot["manifest_sha256"],
+    }
+    state = copy.deepcopy(previous)
+    state["recovery"] = {
+        "kind": kind,
+        "next_target_index": 0,
+        "current_target": target,
+        "previous_sha256": previous_hash,
+        "intended_sha256": intended_hash,
+        "started_epoch": epoch,
+        "completed_epoch": None,
+        "evidence_sha256": _task7_evidence_sha256(
+            "recovery-start",
+            evidence_payload,
+        ),
+        "runtime_directory_created": runtime_directory_created,
+        "runtime_baseline": copy.deepcopy(runtime_baseline),
+        "restored_epoch": None,
+        "restore_evidence_sha256": None,
+    }
+    _task7_append_history(
+        state,
+        phase,
+        epoch,
+        "recovery-entry",
+        evidence_payload,
+    )
+    validate_operation_state(state, context.paths.operation_dir, previous)
+    validate_operation_state_for_context(state, context)
+    return state
+
+
+def _task7_resume_recovery_state(
+    context: OperationsContext,
+    previous: dict[str, object],
+) -> dict[str, object]:
+    recovery = previous["recovery"]
+    assert isinstance(recovery, dict)
+    kind = str(recovery["kind"])
+    phase = _task7_recovery_phase_for_kind(kind)
+    epoch = _task7_state_epoch(context, previous)
+    state = copy.deepcopy(previous)
+    _task7_append_history(
+        state,
+        phase,
+        epoch,
+        "recovery-resume",
+        {
+            "kind": kind,
+            "started_epoch": recovery["started_epoch"],
+            "evidence_sha256": recovery["evidence_sha256"],
+        },
+    )
+    validate_operation_state(state, context.paths.operation_dir, previous)
+    validate_operation_state_for_context(state, context)
+    return state
+
+
+def _task7_advance_recovery_cursor(
+    context: OperationsContext,
+    binding: _OperationDirectoryBinding,
+    state: dict[str, object],
+    next_index: int,
+) -> dict[str, object]:
+    updated = copy.deepcopy(state)
+    recovery = updated["recovery"]
+    assert isinstance(recovery, dict)
+    if next_index == len(_TARGET_ORDER):
+        cursor = (None, None, None)
+    else:
+        target = _TARGET_ORDER[next_index]
+        current = _task7_capture_target_receipt(context, target)
+        snapshot = updated["snapshot"]
+        assert isinstance(snapshot, dict)
+        targets = snapshot["targets"]
+        assert isinstance(targets, dict)
+        restore = targets[target]
+        assert isinstance(restore, dict)
+        cursor = (
+            target,
+            current["sha256"] if current["present"] else None,
+            restore["sha256"] if restore["present"] else None,
+        )
+    recovery.update(
+        {
+            "next_target_index": next_index,
+            "current_target": cursor[0],
+            "previous_sha256": cursor[1],
+            "intended_sha256": cursor[2],
+        }
+    )
+    _task7_write_state(context, binding, updated)
+    _atomic_event_hook("task7_after_cursor_state", index=next_index)
+    return updated
+
+
+def _task7_require_snapshot_restored(
+    context: OperationsContext,
+    state: dict[str, object],
+) -> None:
+    snapshot = state["snapshot"]
+    assert isinstance(snapshot, dict)
+    targets = snapshot["targets"]
+    assert isinstance(targets, dict)
+    for target in _TARGET_ORDER:
+        if _task7_capture_target_receipt(context, target) != targets[target]:
+            raise OperationStateError(
+                f"recovered target differs from immutable snapshot: {target}"
+            )
+
+
+def _task7_record_recovery_validation(
+    context: OperationsContext,
+    binding: _OperationDirectoryBinding,
+    state: dict[str, object],
+    prior_runtime: dict[str, object],
+) -> dict[str, object]:
+    epoch = _task7_state_epoch(context, state)
+    updated = copy.deepcopy(state)
+    recovery = updated["recovery"]
+    assert isinstance(recovery, dict)
+    recovery["restored_epoch"] = epoch
+    recovery["restore_evidence_sha256"] = _task7_evidence_sha256(
+        "recovery-validation",
+        {
+            "kind": recovery["kind"],
+            "snapshot_manifest_sha256": updated["snapshot"]["manifest_sha256"],
+            "protected_pids": prior_runtime["pids"],
+        },
+    )
+    _task7_write_state(context, binding, updated)
+    _atomic_event_hook("task7_after_recovery_validation_state")
+    return updated
+
+
+def _task7_complete_recovery(
+    context: OperationsContext,
+    binding: _OperationDirectoryBinding,
+    state: dict[str, object],
+) -> dict[str, object]:
+    epoch = _task7_state_epoch(context, state)
+    updated = copy.deepcopy(state)
+    recovery = updated["recovery"]
+    assert isinstance(recovery, dict)
+    recovery["completed_epoch"] = epoch
+    _task7_append_history(
+        updated,
+        "rolled_back",
+        epoch,
+        "recovery-complete",
+        {
+            "kind": recovery["kind"],
+            "restore_evidence_sha256": recovery["restore_evidence_sha256"],
+        },
+    )
+    _task7_write_state(context, binding, updated)
+    return updated
+
+
+def _task7_mark_recovery_required(
+    context: OperationsContext,
+    binding: _OperationDirectoryBinding,
+) -> dict[str, object] | None:
+    try:
+        state = _task7_load_state(context)
+        if state["phase"] == "recovery_required":
+            return state
+        if state["phase"] not in {"recovering", "manual_rollback"}:
+            return None
+        recovery = state["recovery"]
+        assert isinstance(recovery, dict)
+        epoch = _task7_state_epoch(context, state)
+        updated = copy.deepcopy(state)
+        _task7_append_history(
+            updated,
+            "recovery_required",
+            epoch,
+            "recovery-required",
+            {
+                "kind": recovery["kind"],
+                "next_target_index": recovery["next_target_index"],
+            },
+        )
+        _task7_write_state(context, binding, updated)
+        return updated
+    except Exception:
+        return None
+
+
+def install_host_configuration(context: OperationsContext) -> dict[str, object]:
+    primary_error: Exception | None = None
+    receipt_persistence_error: Exception | None = None
+    pending_rclone_group: dict[str, object] | None = None
+    pending_secondary_errors: list[tuple[str, BaseException]] = []
+    audit_incomplete = False
+    marker_written = False
+    completed_state: dict[str, object] | None = None
+    with _open_operation_transaction(context) as binding:
+        state = _task7_load_state(context)
+        if state["phase"] != "snapshotted":
+            raise OperationStateError(
+                "installation cannot continue from an incomplete operation; run "
+                + _task7_recovery_command(context)
+            )
+        locks: MigrationLocks | None = None
+        release_issues: list[_Task7LockReleaseIssue] = []
+        try:
+            with _open_verified_transaction_material(
+                context,
+                frozenset({"snapshotted"}),
+            ) as material:
+                if material.source.state != state:
+                    raise OperationStateError(
+                        "operation state changed before transaction proof"
+                    )
+                expected_bytes = _task7_install_bytes(material)
+                _task7_require_no_install_temporaries(context)
+                runtime_directory_created = not _task7_runtime_directory_preexists(
+                    context
+                )
+                prior_runtime = state["prior_runtime"]
+                assert isinstance(prior_runtime, dict)
+                with _open_task7_live_target_proofs(context) as live_proofs:
+                    _task7_require_snapshot_live_targets(state, live_proofs)
+                    if _capture_prior_runtime(context) != prior_runtime:
+                        raise OperationStateError(
+                            "protected runtime or timer changed before installation"
+                        )
+                    _revalidate_transaction_material(material)
+                    _task7_revalidate_live_target_proofs(live_proofs)
+                    installing = _task7_build_installing_state(
+                        context,
+                        state,
+                        expected_bytes,
+                        runtime_directory_created=runtime_directory_created,
+                    )
+
+                    def revalidate_install_entry() -> None:
+                        _revalidate_transaction_material(material)
+                        _task7_revalidate_live_target_proofs(live_proofs)
+                        _task7_require_snapshot_live_targets(state, live_proofs)
+                        _task7_require_no_install_temporaries(context)
+                        if (
+                            not _task7_runtime_directory_preexists(context)
+                        ) != runtime_directory_created:
+                            raise OperationStateError(
+                                "runtime directory presence changed before installation"
+                            )
+                        if _capture_prior_runtime(context) != prior_runtime:
+                            raise OperationStateError(
+                                "protected runtime or timer changed before installation"
+                            )
+                        _revalidate_transaction_material(material)
+
+                    _task7_write_state(
+                        context,
+                        binding,
+                        installing,
+                        pre_replace_validator=revalidate_install_entry,
+                    )
+                    marker_written = True
+                    state = installing
+                    _atomic_event_hook("task7_after_installing_state")
+                    revalidate_install_entry()
+                    locks = _task7_acquire_migration_locks(
+                        context,
+                        runtime_directory_created=runtime_directory_created,
+                    )
+                    if _task7_load_state(context) != state:
+                        raise OperationStateError(
+                            "operation state changed while migration locks were acquired"
+                        )
+                    _revalidate_transaction_material(material)
+                    _task7_revalidate_live_target_proofs(live_proofs)
+                    if _capture_prior_runtime(context) != prior_runtime:
+                        raise OperationStateError(
+                            "protected runtime or timer changed before guard quiesce"
+                        )
+                    _require_backup_service_inactive(context)
+                    _quiesce_backup_timer(context, prior_runtime)
+                    _task7_require_protected_pid_parity(context, prior_runtime)
+                    _revalidate_transaction_material(material)
+                    _task7_revalidate_live_target_proofs(live_proofs)
+
+                snapshot = state["snapshot"]
+                assert isinstance(snapshot, dict)
+                snapshot_targets = snapshot["targets"]
+                assert isinstance(snapshot_targets, dict)
+                for index, target in enumerate(_TARGET_ORDER):
+                    install = state["install"]
+                    assert isinstance(install, dict)
+                    if (
+                        install["next_target_index"] != index
+                        or install["current_target"] != target
+                    ):
+                        raise OperationStateError(
+                            "install cursor changed before target replacement"
+                        )
+                    _task7_atomic_install_target(
+                        context,
+                        target,
+                        expected_bytes[target],
+                        _task7_install_mode(target),
+                        index,
+                        snapshot_targets[target],
+                    )
+                    state = _task7_advance_install_cursor(
+                        context,
+                        binding,
+                        state,
+                        expected_bytes,
+                        index + 1,
+                    )
+                _task7_systemctl(context, "daemon-reload")
+                _atomic_event_hook("task7_after_daemon_reload")
+                assert locks is not None
+                state = _task7_run_preflight_with_rclone_audit(
+                    context,
+                    binding,
+                    state,
+                    locks.runtime_fd,
+                )
+                installed_hashes = _task7_verify_installed_targets(
+                    context,
+                    expected_bytes,
+                )
+                _task7_require_protected_pid_parity(context, prior_runtime)
+                _require_backup_service_inactive(context)
+                state = _task7_record_install_validation(
+                    context,
+                    binding,
+                    state,
+                    installed_hashes,
+                    prior_runtime,
+                )
+                owned_locks = locks
+                locks = None
+                release_issues.extend(_task7_release_locks(owned_locks))
+                if release_issues:
+                    raise release_issues[0].error
+                _require_backup_service_inactive(context)
+                _restore_backup_timer(context, prior_runtime)
+                completed_state = _task7_complete_install(
+                    context,
+                    binding,
+                    state,
+                    installed_hashes,
+                )
+        except Exception as exc:
+            if (
+                isinstance(exc, _Task7RcloneEvidencePersistenceError)
+                and exc.preflight_error is not None
+                and not isinstance(exc.preflight_error, Exception)
+            ):
+                try:
+                    _task7_persist_pending_rclone_group(
+                        context,
+                        binding,
+                        exc.group,
+                    )
+                except Exception:
+                    pass
+                if locks is not None:
+                    _task7_emergency_close_locks(locks)
+                    locks = None
+                raise exc.preflight_error
+            primary_error = exc
+            if isinstance(exc, _Task7RcloneAuditIncompleteError):
+                primary_error = exc.primary_error
+                audit_incomplete = True
+                if exc.secondary_error is not None:
+                    pending_secondary_errors.append(
+                        ("rclone_audit_capture", exc.secondary_error)
+                    )
+            if isinstance(exc, _Task7RcloneEvidencePersistenceError):
+                pending_rclone_group = copy.deepcopy(exc.group)
+                if exc.preflight_error is not None:
+                    primary_error = (
+                        exc.preflight_error
+                        if isinstance(exc.preflight_error, Exception)
+                        else exc
+                    )
+                    pending_secondary_errors.append(
+                        ("rclone_audit_persistence", exc.persistence_error)
+                    )
+            if locks is not None:
+                owned_locks = locks
+                locks = None
+                release_issues.extend(_task7_release_locks(owned_locks))
+            if marker_written:
+                try:
+                    _task7_record_primary_failure(
+                        context,
+                        binding,
+                        primary_error,
+                    )
+                    for stage, secondary_error in pending_secondary_errors:
+                        _task7_append_secondary_error(
+                            context,
+                            binding,
+                            stage,
+                            secondary_error,
+                        )
+                    for stage, release_error in release_issues:
+                        if release_error is exc:
+                            continue
+                        _task7_append_secondary_error(
+                            context,
+                            binding,
+                            stage,
+                            release_error,
+                        )
+                except Exception as persistence_error:
+                    receipt_persistence_error = persistence_error
+        except BaseException:
+            if locks is not None:
+                _task7_emergency_close_locks(locks)
+                locks = None
+            raise
+    if primary_error is not None:
+        if receipt_persistence_error is not None:
+            raise primary_error from receipt_persistence_error
+        if audit_incomplete:
+            raise primary_error
+        if marker_written:
+            try:
+                _task7_run_recovery(
+                    context,
+                    manual_request=False,
+                    pending_rclone_group=pending_rclone_group,
+                )
+            except Exception:
+                pass
+        raise primary_error
+    if completed_state is None:
+        raise OperationStateError("installation did not produce a terminal receipt")
+    return completed_state
+
+
+def _task7_run_recovery(
+    context: OperationsContext,
+    *,
+    manual_request: bool,
+    pending_rclone_group: dict[str, object] | None = None,
+) -> dict[str, object]:
+    terminal: dict[str, object] | None = None
+    raised: Exception | None = None
+    with _open_operation_transaction(context) as binding:
+        initial = _task7_load_state(context)
+        if pending_rclone_group is not None:
+            initial = _task7_persist_pending_rclone_group(
+                context,
+                binding,
+                pending_rclone_group,
+            )
+        initial = _task7_finalize_pending_rclone_audit(
+            context,
+            binding,
+            initial,
+        )
+        stable_phases = {
+            "installed",
+            "probed",
+            "dry_run_recorded",
+            "policy_enabled",
+            "observed",
+        }
+        recoverable_phases = {
+            "installing",
+            "recovering",
+            "manual_rollback",
+            "recovery_required",
+        }
+        if manual_request:
+            if initial["phase"] not in stable_phases:
+                raise OperationStateError(
+                    "manual rollback requires an installed stable phase"
+                )
+            kind = "manual_rollback"
+        else:
+            if initial["phase"] not in recoverable_phases:
+                raise OperationStateError(
+                    "recover requires an incomplete install or rollback state"
+                )
+            recovery = initial["recovery"]
+            if initial["phase"] == "installing":
+                kind = "install"
+            else:
+                assert isinstance(recovery, dict)
+                kind = str(recovery["kind"])
+            if kind not in {"install", "manual_rollback"}:
+                raise OperationStateError(
+                    "Task 7 recover cannot resume this transaction kind"
+                )
+        if kind == "manual_rollback":
+            if manual_request:
+                runtime_baseline = _capture_prior_runtime(context)
+            else:
+                existing_recovery = initial["recovery"]
+                assert isinstance(existing_recovery, dict)
+                runtime_baseline = copy.deepcopy(
+                    existing_recovery["runtime_baseline"]
+                )
+        else:
+            immutable_runtime = initial["prior_runtime"]
+            assert isinstance(immutable_runtime, dict)
+            runtime_baseline = copy.deepcopy(immutable_runtime)
+        assert isinstance(runtime_baseline, dict)
+        locks: MigrationLocks | None = None
+        recovery_started = False
+        release_issues: list[_Task7LockReleaseIssue] = []
+        failure_stage = "recovery"
+        failure_already_recorded = False
+        try:
+            with _open_verified_transaction_material(
+                context,
+                frozenset({str(initial["phase"])}),
+            ) as material:
+                if material.source.state != initial:
+                    raise OperationStateError(
+                        "operation state changed before recovery proof"
+                    )
+                expected_staged = _task7_install_bytes(material)
+                live_receipts = _task7_require_recoverable_live_targets(
+                    context,
+                    initial,
+                )
+                runtime_directory_created = not _task7_runtime_directory_preexists(
+                    context
+                )
+                _revalidate_transaction_material(material)
+                locks = _task7_acquire_migration_locks(
+                    context,
+                    runtime_directory_created=runtime_directory_created,
+                )
+                if _task7_load_state(context) != initial:
+                    raise OperationStateError(
+                        "operation state changed while recovery locks were acquired"
+                    )
+                _revalidate_transaction_material(material)
+                _task7_require_recoverable_live_targets(context, initial)
+                _require_backup_service_inactive(context)
+                if manual_request:
+                    if _capture_prior_runtime(context) != runtime_baseline:
+                        raise OperationStateError(
+                            "manual rollback runtime changed before durable entry"
+                        )
+                else:
+                    _task7_require_protected_pid_parity(
+                        context,
+                        runtime_baseline,
+                    )
+                if initial["phase"] in stable_phases or initial["phase"] == "installing":
+                    state = _task7_build_recovery_entry(
+                        context,
+                        initial,
+                        kind,
+                        runtime_directory_created,
+                        runtime_baseline,
+                        live_receipts,
+                    )
+                    _task7_write_state(context, binding, state)
+                elif initial["phase"] == "recovery_required":
+                    state = _task7_resume_recovery_state(context, initial)
+                    _task7_write_state(context, binding, state)
+                else:
+                    state = initial
+                recovery_started = True
+                _atomic_event_hook("task7_after_recovery_state")
+                _revalidate_transaction_material(material)
+                recovery_receipt = state["recovery"]
+                assert isinstance(recovery_receipt, dict)
+                if recovery_receipt["runtime_baseline"] != runtime_baseline:
+                    raise OperationStateError(
+                        "durable recovery runtime baseline changed"
+                    )
+                _quiesce_backup_timer(context, runtime_baseline)
+                _require_backup_service_inactive(context)
+                _task7_require_protected_pid_parity(context, runtime_baseline)
+                start_index = int(recovery_receipt["next_target_index"])
+                for index in range(start_index, len(_TARGET_ORDER)):
+                    target = _TARGET_ORDER[index]
+                    current_recovery = state["recovery"]
+                    assert isinstance(current_recovery, dict)
+                    if (
+                        current_recovery["next_target_index"] != index
+                        or current_recovery["current_target"] != target
+                    ):
+                        raise OperationStateError(
+                            "recovery cursor changed before target restoration"
+                        )
+                    _task7_restore_target(
+                        context,
+                        state,
+                        material,
+                        expected_staged,
+                        target,
+                        index,
+                    )
+                    state = _task7_advance_recovery_cursor(
+                        context,
+                        binding,
+                        state,
+                        index + 1,
+                    )
+                _task7_systemctl(context, "daemon-reload")
+                _atomic_event_hook("task7_after_recovery_daemon_reload")
+                _task7_require_snapshot_restored(context, state)
+                _atomic_event_hook("task7_before_recovery_pid_validation")
+                _task7_require_protected_pid_parity(context, runtime_baseline)
+                _require_backup_service_inactive(context)
+                recovery_receipt = state["recovery"]
+                assert isinstance(recovery_receipt, dict)
+                if recovery_receipt["restored_epoch"] is None:
+                    state = _task7_record_recovery_validation(
+                        context,
+                        binding,
+                        state,
+                        runtime_baseline,
+                    )
+                owned_locks = locks
+                locks = None
+                release_issues.extend(_task7_release_locks(owned_locks))
+                current_after_release = _task7_load_state(context)
+                uncertain_release = next(
+                    (issue for issue in release_issues if issue.release_uncertain),
+                    None,
+                )
+                if uncertain_release is not None:
+                    primary_release_error: Exception | None = None
+                    if current_after_release["failure"] is None:
+                        _task7_record_primary_failure(
+                            context,
+                            binding,
+                            uncertain_release.error,
+                        )
+                        primary_release_error = uncertain_release.error
+                    for issue in release_issues:
+                        if issue.error is primary_release_error:
+                            continue
+                        _task7_append_secondary_error(
+                            context,
+                            binding,
+                            issue.stage,
+                            issue.error,
+                        )
+                    release_issues.clear()
+                    failure_stage = uncertain_release.stage
+                    failure_already_recorded = True
+                    raise uncertain_release.error
+                if release_issues and current_after_release["failure"] is None:
+                    failure_stage = release_issues[0].stage
+                    raise release_issues[0].error
+                for stage, release_error in release_issues:
+                    _task7_append_secondary_error(
+                        context,
+                        binding,
+                        stage,
+                        release_error,
+                    )
+                release_issues.clear()
+                state = _task7_load_state(context)
+                _require_backup_service_inactive(context)
+                try:
+                    _restore_backup_timer(context, runtime_baseline)
+                except Exception as restore_error:
+                    failure_stage = "timer_restore"
+                    current_failure_state = _task7_load_state(context)
+                    if current_failure_state["failure"] is None:
+                        _task7_record_primary_failure(
+                            context,
+                            binding,
+                            restore_error,
+                        )
+                    else:
+                        _task7_append_secondary_error(
+                            context,
+                            binding,
+                            "timer_restore",
+                            restore_error,
+                        )
+                    failure_already_recorded = True
+                    _atomic_event_hook("task7_after_timer_restore_failure_state")
+                    try:
+                        _quiesce_backup_timer(context, runtime_baseline)
+                    except Exception as quiesce_error:
+                        _task7_append_secondary_error(
+                            context,
+                            binding,
+                            "timer_quiesce",
+                            quiesce_error,
+                        )
+                    raise
+                terminal = _task7_complete_recovery(context, binding, state)
+        except Exception as exc:
+            raised = exc
+            if locks is not None:
+                owned_locks = locks
+                locks = None
+                release_issues.extend(_task7_release_locks(owned_locks))
+            if recovery_started:
+                if not failure_already_recorded:
+                    current = _task7_load_state(context)
+                    if current["failure"] is None:
+                        _task7_record_primary_failure(context, binding, exc)
+                    else:
+                        _task7_append_secondary_error(
+                            context,
+                            binding,
+                            failure_stage,
+                            exc,
+                        )
+                for stage, release_error in release_issues:
+                    if release_error is exc:
+                        continue
+                    _task7_append_secondary_error(
+                        context,
+                        binding,
+                        stage,
+                        release_error,
+                    )
+                _task7_mark_recovery_required(context, binding)
+        except BaseException:
+            if locks is not None:
+                _task7_emergency_close_locks(locks)
+                locks = None
+            raise
+    if raised is not None:
+        raise raised
+    if terminal is None:
+        raise OperationStateError("recovery did not produce a terminal receipt")
+    return terminal
+
+
+def recover_host_configuration(context: OperationsContext) -> dict[str, object]:
+    return _task7_run_recovery(context, manual_request=False)
+
+
+def rollback_host_configuration(context: OperationsContext) -> dict[str, object]:
+    return _task7_run_recovery(context, manual_request=True)
+
+
 def _effective_uid() -> int:
     getter = getattr(os, "geteuid", None)
     if getter is None:
@@ -7561,7 +11092,31 @@ def _build_parser() -> argparse.ArgumentParser:
     prepare_staging.add_argument("--operation-dir", required=True, action=_StoreOnce)
     snapshot = subparsers.add_parser("snapshot", allow_abbrev=False)
     snapshot.add_argument("--operation-dir", required=True, action=_StoreOnce)
+    for command in ("install", "recover", "rollback"):
+        transaction = subparsers.add_parser(command, allow_abbrev=False)
+        transaction.add_argument("--operation-dir", required=True, action=_StoreOnce)
     return parser
+
+
+def _context_from_recorded_state(
+    operation_dir: Path,
+    state: dict[str, object],
+    *,
+    effective_uid: int,
+) -> OperationsContext:
+    reviewed = state["reviewed_source"]
+    assert isinstance(reviewed, dict)
+    return OperationsContext(
+        operation_id=operation_dir.name,
+        paths=build_operation_paths(operation_dir),
+        effective_uid=effective_uid,
+        command_runner=_default_command_runner,
+        clock=lambda: datetime.now(timezone.utc),
+        expected_commit=str(reviewed["commit"]),
+        expected_archive_sha256=str(reviewed["archive_sha256"]),
+        expected_manifest_sha256=str(reviewed["manifest_sha256"]),
+        host_root=_PRODUCTION_HOST_ROOT,
+    )
 
 
 def _is_production_operation_dir(raw_path: str) -> bool:
@@ -7659,6 +11214,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             validate_operation_state_for_context(state, context)
             snapshot_host_state(context)
+        elif args.command in {"install", "recover", "rollback"}:
+            paths = build_operation_paths(operation_dir)
+            state = load_operation_state(
+                paths.state_file,
+                effective_uid=effective_uid,
+            )
+            context = _context_from_recorded_state(
+                operation_dir,
+                state,
+                effective_uid=effective_uid,
+            )
+            validate_operation_state_for_context(state, context)
+            verify_running_source_helper(context)
+            if args.command == "install":
+                install_host_configuration(context)
+            elif args.command == "recover":
+                recover_host_configuration(context)
+            else:
+                rollback_host_configuration(context)
         else:
             raise OperationStateError("unsupported command")
     except Exception as exc:

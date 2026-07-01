@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tarfile
 import threading
+import types
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
@@ -400,6 +401,9 @@ def observed_state(operation_dir: Path) -> dict[str, object]:
         "installed_hashes": {},
         "started_epoch": 1_750_000_030,
         "completed_epoch": None,
+        "runtime_directory_created": False,
+        "validated_epoch": 1_750_000_039,
+        "validation_evidence_sha256": HASH_B,
     }
     append_phase(state, "installed", 1_750_000_040)
     state["install"]["installed_hashes"] = {target: HASH_A for target in TARGETS}
@@ -518,6 +522,10 @@ def schema_rich_state(operation_dir: Path) -> dict[str, object]:
         "started_epoch": 1_750_000_053,
         "completed_epoch": None,
         "evidence_sha256": HASH_C,
+        "runtime_directory_created": False,
+        "runtime_baseline": recovery_runtime_baseline(),
+        "restored_epoch": None,
+        "restore_evidence_sha256": None,
     }
     return state
 
@@ -574,6 +582,20 @@ def active_transaction(kind: str, prior_phase: str, started_epoch: int) -> dict[
     }
 
 
+def recovery_runtime_baseline() -> dict[str, object]:
+    return {
+        "timer_enabled": True,
+        "timer_active": True,
+        "pids": {
+            "postgresql:postgresql@15-main.service": 200,
+            "system:degen-web.service": 100,
+            "system:degen-worker.service": 101,
+            "user:1001:degen:degen-ops-discord-bot.service": 102,
+        },
+        "preinstall_trigger_epoch": None,
+    }
+
+
 def state_at_phase(operation_dir: Path, phase: str) -> dict[str, object]:
     if phase not in NORMAL_PHASES:
         raise ValueError(phase)
@@ -605,6 +627,9 @@ def state_at_phase(operation_dir: Path, phase: str) -> dict[str, object]:
             "installed_hashes": {},
             "started_epoch": 1_750_000_030,
             "completed_epoch": None,
+            "runtime_directory_created": False,
+            "validated_epoch": None,
+            "validation_evidence_sha256": None,
         }
     if cutoff < NORMAL_PHASES.index("probed"):
         state["probe"] = None
@@ -635,6 +660,9 @@ def recovery_receipt(
     intended_sha256: str | None = None,
     completed_epoch: int | None = None,
     started_epoch: int = 1_750_000_041,
+    runtime_directory_created: bool = False,
+    restored_epoch: int | None = None,
+    restore_evidence_sha256: str | None = None,
 ) -> dict[str, object]:
     return {
         "kind": kind,
@@ -645,6 +673,10 @@ def recovery_receipt(
         "started_epoch": started_epoch,
         "completed_epoch": completed_epoch,
         "evidence_sha256": HASH_C,
+        "runtime_directory_created": runtime_directory_created,
+        "runtime_baseline": recovery_runtime_baseline(),
+        "restored_epoch": restored_epoch,
+        "restore_evidence_sha256": restore_evidence_sha256,
     }
 
 
@@ -675,6 +707,8 @@ def install_recovery_state(operation_dir: Path, phase: str) -> dict[str, object]
                 "current_target": None,
                 "previous_sha256": None,
                 "intended_sha256": None,
+                "restored_epoch": 1_750_000_049,
+                "restore_evidence_sha256": HASH_B,
                 "completed_epoch": 1_750_000_050,
             }
         )
@@ -705,6 +739,8 @@ def manual_rollback_state(operation_dir: Path, phase: str) -> dict[str, object]:
                 "current_target": None,
                 "previous_sha256": None,
                 "intended_sha256": None,
+                "restored_epoch": 1_750_000_059,
+                "restore_evidence_sha256": HASH_B,
                 "completed_epoch": 1_750_000_060,
             }
         )
@@ -3490,6 +3526,8 @@ def test_every_normal_forward_transition_accepts_exact_receipts(
                 "current_target": None,
                 "previous_sha256": None,
                 "intended_sha256": None,
+                "validated_epoch": 1_750_000_039,
+                "validation_evidence_sha256": HASH_B,
             }
         )
     module.validate_operation_state(
@@ -5541,6 +5579,7 @@ def host_snapshot_fixture(
         },
         "bot_users": [("1001", "degen")],
         "bot_pids": {"degen": 410},
+        "service_states": {},
     }
     calls: list[tuple[str, ...]] = []
 
@@ -5614,6 +5653,14 @@ def host_snapshot_fixture(
                     argv_tuple,
                     "LoadState=loaded\nActiveState=active\n"
                     f"SubState=running\nMainPID={pid}\n",
+                )
+            override = runtime["service_states"].get(unit)
+            if override is not None:
+                load_state, active, substate, pid = override
+                return completed(
+                    argv_tuple,
+                    f"LoadState={load_state}\nActiveState={active}\n"
+                    f"SubState={substate}\nMainPID={pid}\n",
                 )
             pid = runtime["service_pids"].get(unit, 0)
             active = "active" if pid else "inactive"
@@ -6370,3 +6417,3475 @@ def test_snapshot_cli_has_only_operation_dir_and_reconstructs_sealed_context(
     context = observed[0]
     assert context.host_root == Path("/")
     assert context.paths == module.build_operation_paths(operation_dir)
+
+
+class SimulatedTask7Crash(BaseException):
+    pass
+
+
+def configure_task7_test_lock_seam(module: object, context: object) -> None:
+    if os.name == "posix" or not hasattr(module, "MigrationLocks"):
+        return
+    lock_files = (
+        host_root_path(context.host_root, "/run/lock/degen-prod-db-backup.lock"),
+        host_root_path(context.host_root, "/run/degen-prod-db-backup/backup.lock"),
+    )
+
+    def acquire_test_migration_locks(_context: object) -> object:
+        lock_files[1].parent.mkdir(parents=True, exist_ok=True)
+        descriptors: list[int] = []
+        try:
+            for kind, path in zip(("legacy", "runtime"), lock_files):
+                module._atomic_event_hook(f"task7_before_{kind}_lock")
+                descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+                descriptors.append(descriptor)
+                module._atomic_event_hook(
+                    "migration_lock_acquired",
+                    kind=kind,
+                    fd=descriptor,
+                )
+                module._atomic_event_hook(f"task7_after_{kind}_lock")
+            return module.MigrationLocks(
+                legacy_fd=descriptors[0],
+                runtime_fd=descriptors[1],
+            )
+        except BaseException:
+            for descriptor in reversed(descriptors):
+                os.close(descriptor)
+            raise
+
+    module.acquire_migration_locks = acquire_test_migration_locks
+
+
+def task7_transaction_fixture(
+    module: object,
+    tmp_path: Path,
+    *,
+    absent_targets: tuple[str, ...] = (),
+    timer_enabled: bool = True,
+    timer_active: bool = True,
+) -> tuple[object, dict[str, object]]:
+    context, snapshot_fixture = host_snapshot_fixture(
+        module,
+        tmp_path,
+        absent_targets=absent_targets,
+    )
+    runtime = snapshot_fixture["runtime"]
+    runtime["timer_enabled"] = "enabled" if timer_enabled else "disabled"
+    runtime["timer_active"] = "active" if timer_active else "inactive"
+    runtime["timer_substate"] = "waiting" if timer_active else "dead"
+    module.snapshot_host_state(context)
+    readonly_runner = context.command_runner
+    snapshot_fixture["calls"].clear()
+
+    run_lock = host_root_path(context.host_root, "/run/lock")
+    run_lock.mkdir(parents=True, exist_ok=True)
+    if os.name == "posix":
+        run_lock.parent.chmod(0o755)
+        run_lock.chmod(0o1777)
+
+    expected_bytes: dict[str, bytes] = {}
+    for source, target in zip(SOURCE_ASSETS[:6], TARGETS[:6]):
+        expected_bytes[target] = (
+            context.paths.staged_dir / "reviewed" / source
+        ).read_bytes()
+    expected_bytes[TARGETS[6]] = (
+        context.paths.staged_dir / "host/etc/degen/prod-db-backup.env"
+    ).read_bytes()
+    expected_modes = {
+        **{target: 0o755 for target in TARGETS[:4]},
+        TARGETS[4]: 0o644,
+        TARGETS[5]: 0o644,
+        TARGETS[6]: 0o600,
+    }
+    prior: dict[str, dict[str, object]] = {}
+    for target in TARGETS:
+        path = host_root_path(context.host_root, target)
+        if path.exists():
+            metadata = path.stat()
+            prior[target] = {
+                "present": True,
+                "bytes": path.read_bytes(),
+                "mode": stat.S_IMODE(metadata.st_mode),
+                "uid": metadata.st_uid,
+                "gid": metadata.st_gid,
+            }
+        else:
+            prior[target] = {
+                "present": False,
+                "bytes": None,
+                "mode": None,
+                "uid": None,
+                "gid": None,
+            }
+
+    calls: list[dict[str, object]] = []
+    events: list[str] = []
+    controls: dict[str, object] = {
+        "fail_command": None,
+        "fail_command_remaining": 1,
+        "noop_command": None,
+        "rclone_after_preflight": None,
+    }
+
+    def command_runner(
+        argv: object,
+        pass_fds: tuple[int, ...],
+    ) -> subprocess.CompletedProcess[str]:
+        argv_tuple = tuple(str(value) for value in argv)
+        executable = Path(argv_tuple[0]).name if argv_tuple else ""
+        if (
+            "get-tar-commit-id" in argv_tuple
+            or executable in {"loginctl", "date"}
+            or (
+                executable == "systemctl"
+                and ("show" in argv_tuple or "list-units" in argv_tuple)
+            )
+        ):
+            return readonly_runner(argv_tuple, pass_fds)
+        action: str
+        if executable == "systemctl" and "daemon-reload" in argv_tuple:
+            action = "daemon-reload"
+        elif executable == "systemctl" and len(argv_tuple) >= 3:
+            verb = argv_tuple[1]
+            unit = argv_tuple[2]
+            if verb not in {"stop", "start", "enable", "disable"}:
+                raise AssertionError(f"unexpected Task 7 command: {argv_tuple!r}")
+            assert unit == "degen-prod-db-backup.timer"
+            action = f"{verb}-timer"
+        elif executable == "degen-prod-db-backup" and "preflight" in argv_tuple:
+            action = "preflight"
+            assert "--lock-fd" in argv_tuple
+            inherited = int(argv_tuple[argv_tuple.index("--lock-fd") + 1])
+            assert pass_fds == (inherited,)
+        else:
+            raise AssertionError(f"unexpected Task 7 command: {argv_tuple!r}")
+        calls.append({"action": action, "argv": argv_tuple, "pass_fds": pass_fds})
+        events.append(action)
+        if action == "preflight" and controls["rclone_after_preflight"] is not None:
+            rotated = controls["rclone_after_preflight"]
+            assert isinstance(rotated, bytes)
+            write_private_host_file(
+                snapshot_fixture["rclone_path"],
+                rotated,
+                0o600,
+            )
+        if controls["fail_command"] == action and int(controls["fail_command_remaining"]) > 0:
+            controls["fail_command_remaining"] = int(controls["fail_command_remaining"]) - 1
+            if controls["fail_command_remaining"] == 0:
+                controls["fail_command"] = None
+            return subprocess.CompletedProcess(argv_tuple, 1, "", "controlled failure")
+        if controls["noop_command"] == action:
+            return subprocess.CompletedProcess(argv_tuple, 0, "", "")
+        if action == "stop-timer":
+            runtime["timer_active"] = "inactive"
+            runtime["timer_substate"] = "dead"
+        elif action == "start-timer":
+            runtime["timer_active"] = "active"
+            runtime["timer_substate"] = "waiting"
+        elif action == "enable-timer":
+            runtime["timer_enabled"] = "enabled"
+        elif action == "disable-timer":
+            runtime["timer_enabled"] = "disabled"
+        return subprocess.CompletedProcess(argv_tuple, 0, "", "")
+
+    configure_task7_test_lock_seam(module, context)
+
+    return dataclasses.replace(context, command_runner=command_runner), {
+        "calls": calls,
+        "controls": controls,
+        "events": events,
+        "expected_bytes": expected_bytes,
+        "expected_modes": expected_modes,
+        "prior": prior,
+        "rclone_path": snapshot_fixture["rclone_path"],
+        "runtime": runtime,
+        "timer_active": timer_active,
+        "timer_enabled": timer_enabled,
+    }
+
+
+def assert_task7_prior_targets_restored(
+    context: object,
+    fixture: dict[str, object],
+) -> None:
+    prior = fixture["prior"]
+    for target in TARGETS:
+        expected = prior[target]
+        path = host_root_path(context.host_root, target)
+        if expected["present"]:
+            assert path.read_bytes() == expected["bytes"]
+            if os.name == "posix":
+                metadata = path.stat()
+                assert stat.S_IMODE(metadata.st_mode) == expected["mode"]
+                assert metadata.st_uid == expected["uid"]
+                assert metadata.st_gid == expected["gid"]
+        else:
+            assert not path.exists()
+
+
+def task7_file_audit(path: Path) -> dict[str, object]:
+    metadata = path.stat()
+    return {
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "inode": metadata.st_ino,
+        "uid": metadata.st_uid,
+        "gid": metadata.st_gid,
+        "mode": stat.S_IMODE(metadata.st_mode) if os.name == "posix" else 0o600,
+        "size": metadata.st_size,
+        "mtime_ns": metadata.st_mtime_ns,
+    }
+
+
+def task7_error_evidence_sha256(kind: str, receipt: dict[str, object]) -> str:
+    if kind == "primary":
+        payload = {
+            "phase": receipt["phase"],
+            "primary_error": receipt["primary_error"],
+            "epoch": receipt["epoch"],
+        }
+    elif kind == "secondary":
+        payload = {
+            "stage": receipt["stage"],
+            "error": receipt["error"],
+            "epoch": receipt["epoch"],
+        }
+    else:
+        raise ValueError(kind)
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("ascii")
+    return hashlib.sha256(
+        f"degen-task7-{kind}-error-v1\n".encode("ascii") + canonical + b"\n"
+    ).hexdigest()
+
+
+def task7_write_incomplete_install_state(
+    module: object,
+    context: object,
+    fixture: dict[str, object],
+    *,
+    index: int = 0,
+) -> dict[str, object]:
+    state = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    history = state["phase_history"]
+    started = int(history[-1]["epoch"]) + 1
+    append_phase(state, "installing", started)
+    target = TARGETS[index] if index < len(TARGETS) else None
+    snapshot_targets = state["snapshot"]["targets"]
+    previous = (
+        snapshot_targets[target]["sha256"]
+        if target is not None and snapshot_targets[target]["present"]
+        else None
+    )
+    intended = (
+        hashlib.sha256(fixture["expected_bytes"][target]).hexdigest()
+        if target is not None
+        else None
+    )
+    state["install"] = {
+        "next_target_index": index,
+        "current_target": target,
+        "previous_sha256": previous,
+        "intended_sha256": intended,
+        "installed_hashes": {},
+        "started_epoch": started,
+        "completed_epoch": None,
+        "runtime_directory_created": False,
+        "validated_epoch": None,
+        "validation_evidence_sha256": None,
+    }
+    write_state_file(context.paths.operation_dir, state)
+    return state
+
+
+def test_migration_locks_public_contract_is_exact() -> None:
+    module = load_ops_helper()
+
+    assert [field.name for field in dataclasses.fields(module.MigrationLocks)] == [
+        "legacy_fd",
+        "runtime_fd",
+    ]
+    assert module.MigrationLocks.__dataclass_params__.frozen is True
+    assert callable(module.acquire_migration_locks)
+
+
+@pytest.mark.parametrize(
+    "api_name",
+    [
+        "install_host_configuration",
+        "recover_host_configuration",
+        "rollback_host_configuration",
+        "ensure_runtime_directory",
+        "verify_running_source_helper",
+    ],
+)
+def test_task7_public_api_surface_exists(api_name: str) -> None:
+    module = load_ops_helper()
+
+    assert callable(getattr(module, api_name))
+
+
+@pytest.mark.parametrize("receipt", ["install", "recovery"])
+@pytest.mark.parametrize("created", [False, True])
+def test_task7_schema_records_runtime_directory_creation(
+    tmp_path: Path,
+    receipt: str,
+    created: bool,
+) -> None:
+    module = load_ops_helper()
+    operation_dir, _uid = private_operation_dir(tmp_path)
+    state = (
+        state_at_phase(operation_dir, "installing")
+        if receipt == "install"
+        else install_recovery_state(operation_dir, "recovering")
+    )
+    state["install"].update(
+        {
+            "runtime_directory_created": created,
+            "validated_epoch": None,
+            "validation_evidence_sha256": None,
+        }
+    )
+    if receipt == "recovery":
+        state["recovery"].update(
+            {
+                "runtime_directory_created": created,
+                "restored_epoch": None,
+                "restore_evidence_sha256": None,
+            }
+        )
+
+    module.validate_operation_state(state, operation_dir)
+
+
+@pytest.mark.parametrize(
+    ("receipt", "field"),
+    [
+        ("install", "runtime_directory_created"),
+        ("install", "validated_epoch"),
+        ("install", "validation_evidence_sha256"),
+        ("recovery", "runtime_directory_created"),
+        ("recovery", "runtime_baseline"),
+        ("recovery", "restored_epoch"),
+        ("recovery", "restore_evidence_sha256"),
+    ],
+)
+def test_task7_schema_requires_runtime_and_provisional_evidence_fields(
+    tmp_path: Path,
+    receipt: str,
+    field: str,
+) -> None:
+    module = load_ops_helper()
+    operation_dir, _uid = private_operation_dir(tmp_path)
+    state = (
+        state_at_phase(operation_dir, "installing")
+        if receipt == "install"
+        else install_recovery_state(operation_dir, "recovering")
+    )
+    state["install"].update(
+        {
+            "runtime_directory_created": False,
+            "validated_epoch": None,
+            "validation_evidence_sha256": None,
+        }
+    )
+    if receipt == "recovery":
+        state["recovery"].update(
+            {
+                "runtime_directory_created": False,
+                "restored_epoch": None,
+                "restore_evidence_sha256": None,
+            }
+        )
+    state[receipt].pop(field)
+
+    with pytest.raises(module.OperationStateError, match=field):
+        module.validate_operation_state(state, operation_dir)
+
+
+@pytest.mark.parametrize("receipt", ["install", "recovery"])
+def test_task7_provisional_evidence_requires_terminal_cursor_and_complete_pair(
+    tmp_path: Path,
+    receipt: str,
+) -> None:
+    module = load_ops_helper()
+    operation_dir, _uid = private_operation_dir(tmp_path)
+    state = (
+        state_at_phase(operation_dir, "installing")
+        if receipt == "install"
+        else install_recovery_state(operation_dir, "recovering")
+    )
+    state["install"].update(
+        {
+            "runtime_directory_created": False,
+            "validated_epoch": None,
+            "validation_evidence_sha256": None,
+        }
+    )
+    if receipt == "install":
+        target = state["install"]
+        epoch_field = "validated_epoch"
+        digest_field = "validation_evidence_sha256"
+    else:
+        state["recovery"].update(
+            {
+                "runtime_directory_created": False,
+                "restored_epoch": None,
+                "restore_evidence_sha256": None,
+            }
+        )
+        target = state["recovery"]
+        epoch_field = "restored_epoch"
+        digest_field = "restore_evidence_sha256"
+    target.update(
+        {
+            "next_target_index": len(TARGETS),
+            "current_target": None,
+            "previous_sha256": None,
+            "intended_sha256": None,
+            epoch_field: 1_750_000_042,
+            digest_field: HASH_B,
+        }
+    )
+    module.validate_operation_state(state, operation_dir)
+
+    partial = copy.deepcopy(state)
+    partial[receipt][digest_field] = None
+    with pytest.raises(module.OperationStateError, match=receipt):
+        module.validate_operation_state(partial, operation_dir)
+
+    premature = copy.deepcopy(state)
+    premature[receipt].update(
+        {
+            "next_target_index": 0,
+            "current_target": TARGETS[0],
+            "previous_sha256": HASH_A,
+            "intended_sha256": HASH_A,
+        }
+    )
+    with pytest.raises(module.OperationStateError, match=receipt):
+        module.validate_operation_state(premature, operation_dir)
+
+
+def test_install_completion_cannot_create_provisional_validation_in_same_write(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    operation_dir, _uid = private_operation_dir(tmp_path)
+    previous = state_at_phase(operation_dir, "installing")
+    previous["install"].update(
+        {
+            "next_target_index": len(TARGETS),
+            "current_target": None,
+            "previous_sha256": None,
+            "intended_sha256": None,
+        }
+    )
+    completed = state_at_phase(operation_dir, "installed")
+
+    with pytest.raises(
+        module.OperationStateError,
+        match="provisional|immutable|validation",
+    ):
+        module.validate_operation_state(completed, operation_dir, previous)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX flock semantics")
+def test_acquire_migration_locks_creates_safe_files_in_stable_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = task7_transaction_fixture(module, tmp_path)
+    lock_parent = host_root_path(context.host_root, "/run/lock")
+    events: list[str] = []
+
+    def record(event: str, **details: object) -> None:
+        if event == "migration_lock_acquired":
+            events.append(str(details["kind"]))
+
+    monkeypatch.setattr(module, "_atomic_event_hook", record)
+    locks = module.acquire_migration_locks(context)
+    try:
+        assert events == ["legacy", "runtime"]
+        assert stat.S_IMODE(lock_parent.stat().st_mode) == 0o1777
+        assert os.fstat(locks.legacy_fd).st_nlink == 1
+        assert os.fstat(locks.runtime_fd).st_nlink == 1
+        runtime_dir = host_root_path(context.host_root, "/run/degen-prod-db-backup")
+        assert stat.S_IMODE(runtime_dir.stat().st_mode) == 0o700
+        for path in (
+            lock_parent / "degen-prod-db-backup.lock",
+            runtime_dir / "backup.lock",
+        ):
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    finally:
+        os.close(locks.runtime_fd)
+        os.close(locks.legacy_fd)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX link semantics")
+@pytest.mark.parametrize("unsafe", ["symlink", "hardlink", "directory", "mode"])
+def test_acquire_migration_locks_rejects_unsafe_legacy_lock(
+    tmp_path: Path,
+    unsafe: str,
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = task7_transaction_fixture(module, tmp_path)
+    lock_parent = host_root_path(context.host_root, "/run/lock")
+    lock_path = lock_parent / "degen-prod-db-backup.lock"
+    other = lock_parent / "other"
+    if unsafe == "symlink":
+        write_private_host_file(other, b"other\n")
+        lock_path.symlink_to(other.name)
+    elif unsafe == "hardlink":
+        write_private_host_file(other, b"other\n")
+        os.link(other, lock_path)
+    elif unsafe == "directory":
+        lock_path.mkdir()
+    else:
+        write_private_host_file(lock_path, b"lock\n", 0o666)
+
+    with pytest.raises(module.OperationStateError):
+        module.acquire_migration_locks(context)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX directory metadata")
+@pytest.mark.parametrize("unsafe", ["mode", "symlink", "owner"])
+def test_acquire_migration_locks_requires_safe_run_lock_parent(
+    tmp_path: Path,
+    unsafe: str,
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = task7_transaction_fixture(module, tmp_path)
+    lock_parent = host_root_path(context.host_root, "/run/lock")
+    if unsafe == "mode":
+        lock_parent.chmod(0o755)
+    elif unsafe == "symlink":
+        lock_parent.rmdir()
+        outside = tmp_path / "outside-run-lock"
+        outside.mkdir(mode=0o777)
+        outside.chmod(0o1777)
+        lock_parent.symlink_to(outside, target_is_directory=True)
+    else:
+        if os.geteuid() != 0:
+            pytest.skip("changing owner requires root")
+        os.chown(lock_parent, 1, 1)
+
+    with pytest.raises(module.OperationStateError, match="lock|parent|mode|owner|symlink"):
+        module.acquire_migration_locks(context)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX directory metadata")
+@pytest.mark.parametrize("unsafe", ["symlink", "file", "mode", "owner"])
+def test_ensure_runtime_directory_rejects_unsafe_existing_path(
+    tmp_path: Path,
+    unsafe: str,
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = task7_transaction_fixture(module, tmp_path)
+    runtime_dir = host_root_path(context.host_root, "/run/degen-prod-db-backup")
+    outside = tmp_path / "outside-runtime"
+    if unsafe == "symlink":
+        outside.mkdir(mode=0o700)
+        runtime_dir.symlink_to(outside, target_is_directory=True)
+    elif unsafe == "file":
+        write_private_host_file(runtime_dir, b"not a directory\n", 0o600)
+    else:
+        runtime_dir.mkdir(mode=0o700)
+        if unsafe == "mode":
+            runtime_dir.chmod(0o755)
+        else:
+            if os.geteuid() != 0:
+                pytest.skip("changing owner requires root")
+            os.chown(runtime_dir, 1, 1)
+
+    with pytest.raises(module.OperationStateError, match="runtime|directory|mode|owner|symlink"):
+        module.acquire_migration_locks(context)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX link semantics")
+@pytest.mark.parametrize("unsafe", ["symlink", "hardlink", "directory", "mode"])
+def test_acquire_migration_locks_rejects_unsafe_runtime_lock(
+    tmp_path: Path,
+    unsafe: str,
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = task7_transaction_fixture(module, tmp_path)
+    runtime_dir = host_root_path(context.host_root, "/run/degen-prod-db-backup")
+    runtime_dir.mkdir(mode=0o700)
+    lock_path = runtime_dir / "backup.lock"
+    other = runtime_dir / "other"
+    if unsafe == "symlink":
+        write_private_host_file(other, b"other\n")
+        lock_path.symlink_to(other.name)
+    elif unsafe == "hardlink":
+        write_private_host_file(other, b"other\n")
+        os.link(other, lock_path)
+    elif unsafe == "directory":
+        lock_path.mkdir()
+    else:
+        write_private_host_file(lock_path, b"lock\n", 0o666)
+    before = len(os.listdir("/proc/self/fd"))
+
+    with pytest.raises(module.OperationStateError):
+        module.acquire_migration_locks(context)
+
+    assert len(os.listdir("/proc/self/fd")) == before
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX path/FD races")
+@pytest.mark.parametrize("race_target", ["runtime_directory", "runtime_lock"])
+def test_migration_guard_rejects_runtime_path_descriptor_rebind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    race_target: str,
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = task7_transaction_fixture(module, tmp_path)
+    runtime_dir = host_root_path(context.host_root, "/run/degen-prod-db-backup")
+    runtime_dir.mkdir(mode=0o700)
+    lock_path = runtime_dir / "backup.lock"
+    if race_target == "runtime_lock":
+        write_private_host_file(lock_path, b"lock\n", 0o600)
+    original_open = module.os.open
+    raced = False
+
+    def racing_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        nonlocal raced
+        descriptor = original_open(path, flags, *args, **kwargs)
+        if raced or not isinstance(path, (str, bytes, os.PathLike)):
+            return descriptor
+        name = Path(path).name
+        expected = "degen-prod-db-backup" if race_target == "runtime_directory" else "backup.lock"
+        if name != expected:
+            return descriptor
+        raced = True
+        if race_target == "runtime_directory":
+            moved = runtime_dir.with_name("degen-prod-db-backup-opened")
+            runtime_dir.rename(moved)
+            runtime_dir.mkdir(mode=0o700)
+        else:
+            moved = lock_path.with_name("backup.lock.opened")
+            lock_path.rename(moved)
+            write_private_host_file(lock_path, b"replacement\n", 0o600)
+        return descriptor
+
+    monkeypatch.setattr(module.os, "open", racing_open)
+    monkeypatch.setattr(module, "_require_posix_descriptor_primitives", lambda: None)
+    monkeypatch.setattr(module, "_descriptor_primitives_available", lambda: True)
+
+    with pytest.raises(module.OperationStateError, match="binding|changed|runtime|lock"):
+        module.acquire_migration_locks(context)
+
+    assert raced is True
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX exclusive mkdir")
+def test_runtime_directory_first_attempt_rejects_unexpected_eexist_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = task7_transaction_fixture(module, tmp_path)
+    runtime_dir = host_root_path(context.host_root, "/run/degen-prod-db-backup")
+    original_mkdir = module.os.mkdir
+    raced = False
+
+    def racing_mkdir(path: object, mode: int = 0o777, *args: object, **kwargs: object) -> None:
+        nonlocal raced
+        if (
+            not raced
+            and isinstance(path, (str, os.PathLike))
+            and Path(path).name == "degen-prod-db-backup"
+        ):
+            raced = True
+            original_mkdir(path, 0o700, *args, **kwargs)
+        original_mkdir(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "mkdir", racing_mkdir)
+
+    with pytest.raises(module.OperationStateError, match="runtime|race|exist"):
+        module.acquire_migration_locks(context)
+
+    assert raced is True
+    assert runtime_dir.is_dir()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX flock semantics")
+def test_migration_lock_contender_fails_and_does_not_leak_fds(tmp_path: Path) -> None:
+    module = load_ops_helper()
+    context, _fixture = task7_transaction_fixture(module, tmp_path)
+    lock_parent = host_root_path(context.host_root, "/run/lock")
+    first = module.acquire_migration_locks(context)
+    before = len(os.listdir("/proc/self/fd"))
+    try:
+        with pytest.raises(module.OperationStateError, match="lock|contender|busy"):
+            module.acquire_migration_locks(context)
+        assert len(os.listdir("/proc/self/fd")) == before
+    finally:
+        os.close(first.runtime_fd)
+        os.close(first.legacy_fd)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX flock primitives")
+def test_release_migration_locks_reports_actual_unlock_and_close_errors_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import fcntl
+
+    module = load_ops_helper()
+    calls: list[tuple[str, int]] = []
+
+    def fail_flock(descriptor: int, operation: int) -> None:
+        assert operation == fcntl.LOCK_UN
+        calls.append(("flock", descriptor))
+        raise OSError(f"unlock {descriptor}")
+
+    def fail_close(descriptor: int) -> None:
+        calls.append(("close", descriptor))
+        raise OSError(f"close {descriptor}")
+
+    monkeypatch.setattr(fcntl, "flock", fail_flock)
+    monkeypatch.setattr(
+        module,
+        "os",
+        types.SimpleNamespace(close=fail_close, name=os.name),
+    )
+    issues = module._release_migration_locks(
+        module.MigrationLocks(legacy_fd=101, runtime_fd=202)
+    )
+
+    assert calls == [
+        ("flock", 202),
+        ("close", 202),
+        ("flock", 101),
+        ("close", 101),
+    ]
+    assert [stage for stage, _error in issues] == [
+        "release_runtime_lock",
+        "release_runtime_lock",
+        "release_legacy_lock",
+        "release_legacy_lock",
+    ]
+    assert [issue.release_uncertain for issue in issues] == [True, True, True, True]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX flock semantics")
+def test_both_migration_locks_remain_held_through_replace_reload_and_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import fcntl
+
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    legacy_path = host_root_path(
+        context.host_root,
+        "/run/lock/degen-prod-db-backup.lock",
+    )
+    runtime_path = host_root_path(
+        context.host_root,
+        "/run/degen-prod-db-backup/backup.lock",
+    )
+    checked: list[str] = []
+
+    def assert_separately_contended(path: Path) -> None:
+        descriptor = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(descriptor)
+
+    def inspect_locks(event: str, **_details: object) -> None:
+        if event not in {
+            "task7_after_target_replace",
+            "task7_after_daemon_reload",
+            "task7_after_validation",
+        }:
+            return
+        assert_separately_contended(legacy_path)
+        assert_separately_contended(runtime_path)
+        checked.append(event)
+
+    monkeypatch.setattr(module, "_atomic_event_hook", inspect_locks)
+    original_runner = context.command_runner
+
+    def inspect_inherited_fd(
+        argv: object,
+        pass_fds: tuple[int, ...],
+    ) -> subprocess.CompletedProcess[str]:
+        argv_tuple = tuple(str(value) for value in argv)
+        if Path(argv_tuple[0]).name == "degen-prod-db-backup" and "preflight" in argv_tuple:
+            assert len(pass_fds) == 1
+            fcntl.flock(pass_fds[0], fcntl.LOCK_EX | fcntl.LOCK_NB)
+            assert_separately_contended(runtime_path)
+            assert_separately_contended(legacy_path)
+            checked.append("inherited-same-ofd-preflight")
+        return original_runner(argv_tuple, pass_fds)
+
+    context = dataclasses.replace(context, command_runner=inspect_inherited_fd)
+    module.install_host_configuration(context)
+
+    assert "task7_after_target_replace" in checked
+    assert "task7_after_daemon_reload" in checked
+    assert "task7_after_validation" in checked
+    assert "inherited-same-ofd-preflight" in checked
+    assert fixture["runtime"]["timer_active"] == "active"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX flock semantics")
+def test_external_legacy_owner_blocks_install_before_timer_mutation(
+    tmp_path: Path,
+) -> None:
+    import fcntl
+
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    path = host_root_path(context.host_root, "/run/lock/degen-prod-db-backup.lock")
+    descriptor = os.open(
+        path,
+        os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+        0o600,
+    )
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        with pytest.raises(module.OperationStateError, match="lock|busy|contender"):
+            module.install_host_configuration(context)
+    finally:
+        os.close(descriptor)
+
+    assert not any(call["action"] in {"disable-timer", "stop-timer"} for call in fixture["calls"])
+    assert_task7_prior_targets_restored(context, fixture)
+
+
+def test_install_happy_path_is_transactional_and_provenance_bound(tmp_path: Path) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+
+    module.install_host_configuration(context)
+
+    state = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    module.validate_operation_state_for_context(state, context)
+    assert state["phase"] == "installed"
+    assert state["install"]["completed_epoch"] is not None
+    assert state["install"]["runtime_directory_created"] is True
+    assert state["install"]["installed_hashes"] == {
+        target: hashlib.sha256(fixture["expected_bytes"][target]).hexdigest()
+        for target in TARGETS
+    }
+    for target in TARGETS:
+        path = host_root_path(context.host_root, target)
+        assert path.read_bytes() == fixture["expected_bytes"][target]
+        if os.name == "posix":
+            assert stat.S_IMODE(path.stat().st_mode) == fixture["expected_modes"][target]
+    environment_target = host_root_path(context.host_root, TARGETS[6])
+    reviewed_environment_example = (
+        context.paths.staged_dir / "reviewed" / SOURCE_ASSETS[6]
+    )
+    assert environment_target.read_bytes() != reviewed_environment_example.read_bytes()
+    assert state["install"]["installed_hashes"][TARGETS[6]] == state["host_stage"][
+        "environment_sha256"
+    ]
+    actions = [call["action"] for call in fixture["calls"]]
+    assert actions.count("daemon-reload") == 1
+    assert actions.count("preflight") == 1
+    assert not any(
+        "degen-prod-db-backup.service" in call["argv"] and "start" in call["argv"]
+        for call in fixture["calls"]
+    )
+    assert fixture["runtime"]["timer_active"] == "active"
+    assert fixture["runtime"]["timer_enabled"] == "enabled"
+
+
+def test_install_persists_provisional_validation_before_reverse_unlock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = task7_transaction_fixture(module, tmp_path)
+    observed: dict[str, dict[str, object]] = {}
+
+    def capture(event: str, **_details: object) -> None:
+        if event not in {
+            "task7_after_daemon_reload",
+            "task7_after_validation",
+            "task7_before_lock_release",
+            "task7_after_lock_release",
+            "task7_after_timer_restore",
+        }:
+            return
+        state = module.load_operation_state(
+            context.paths.state_file,
+            effective_uid=context.effective_uid,
+        )
+        observed[event] = copy.deepcopy(state)
+
+    monkeypatch.setattr(module, "_atomic_event_hook", capture)
+    module.install_host_configuration(context)
+
+    for event in (
+        "task7_after_daemon_reload",
+        "task7_after_validation",
+        "task7_before_lock_release",
+        "task7_after_lock_release",
+        "task7_after_timer_restore",
+    ):
+        state = observed[event]
+        assert state["phase"] == "installing"
+        assert state["install"]["installed_hashes"] == {}
+        assert state["install"]["completed_epoch"] is None
+    before_release = observed["task7_before_lock_release"]["install"]
+    assert before_release["next_target_index"] == len(TARGETS)
+    assert before_release["current_target"] is None
+    assert before_release["validated_epoch"] is not None
+    assert len(before_release["validation_evidence_sha256"]) == 64
+    assert len(observed["task7_before_lock_release"]["rclone_evidence_groups"]) == 1
+    final = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert final["phase"] == "installed"
+    assert final["install"]["completed_epoch"] is not None
+
+
+@pytest.mark.parametrize("oauth_refresh", [False, True])
+def test_install_preflight_records_exact_secret_free_rclone_evidence_group(
+    tmp_path: Path,
+    oauth_refresh: bool,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    before = task7_file_audit(fixture["rclone_path"])
+    secret = b"[onedrive]\ntype=onedrive\ntoken=TASK7_ROTATED_SECRET_SENTINEL\n"
+    if oauth_refresh:
+        fixture["controls"]["rclone_after_preflight"] = secret
+
+    module.install_host_configuration(context)
+
+    after = task7_file_audit(fixture["rclone_path"])
+    state = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert len(state["rclone_evidence_groups"]) == 1
+    group = state["rclone_evidence_groups"][0]
+    assert group["group_id"] == "install"
+    assert group["purpose"] == "credential-refresh-audit"
+    assert group["before"] == before
+    assert group["after"] == after
+    assert len(group["evidence_sha256"]) == 64
+    int(group["evidence_sha256"], 16)
+    assert (before != after) is oauth_refresh
+    serialized = json.dumps(state, sort_keys=True)
+    assert "TASK7_ROTATED_SECRET_SENTINEL" not in serialized
+    assert "token=" not in serialized
+
+
+def test_failed_preflight_still_records_after_rclone_audit_before_recovery(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    rotated = b"[onedrive]\ntype=onedrive\ntoken=FAILED_PREFLIGHT_REFRESH\n"
+    fixture["controls"]["rclone_after_preflight"] = rotated
+    fixture["controls"]["fail_command"] = "preflight"
+
+    with pytest.raises(module.OperationStateError):
+        module.install_host_configuration(context)
+
+    state = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert len(state["rclone_evidence_groups"]) == 1
+    group = state["rclone_evidence_groups"][0]
+    assert group["before"] != group["after"]
+    assert group["after"] == task7_file_audit(fixture["rclone_path"])
+    assert "FAILED_PREFLIGHT_REFRESH" not in json.dumps(state, sort_keys=True)
+    assert fixture["rclone_path"].read_bytes() == rotated
+
+
+def test_rclone_audit_group_write_is_retried_before_recovery_can_finish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    rotated = b"[onedrive]\ntype=onedrive\ntoken=RETRIED_AUDIT_SECRET\n"
+    fixture["controls"]["rclone_after_preflight"] = rotated
+    original_write = module._task7_write_state
+    audit_write_failed = False
+
+    def fail_first_audit_write(
+        write_context: object,
+        binding: object,
+        state: dict[str, object],
+        **kwargs: object,
+    ) -> None:
+        nonlocal audit_write_failed
+        groups = state["rclone_evidence_groups"]
+        if groups and groups[-1]["after"] is not None and not audit_write_failed:
+            audit_write_failed = True
+            raise module.OperationStateError("controlled audit receipt write")
+        original_write(write_context, binding, state, **kwargs)
+
+    monkeypatch.setattr(module, "_task7_write_state", fail_first_audit_write)
+    module.install_host_configuration(context)
+
+    state = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert audit_write_failed is True
+    assert state["phase"] == "installed"
+    assert len(state["rclone_evidence_groups"]) == 1
+    assert state["rclone_evidence_groups"][0]["after"] == task7_file_audit(
+        fixture["rclone_path"]
+    )
+    assert "RETRIED_AUDIT_SECRET" not in json.dumps(state, sort_keys=True)
+
+
+def test_rclone_audit_survives_two_write_failures_before_terminal_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    rotated = b"[onedrive]\ntype=onedrive\ntoken=CARRIED_AUDIT_SECRET\n"
+    fixture["controls"]["rclone_after_preflight"] = rotated
+    original_write = module._task7_write_state
+    blocked = 0
+
+    def block_two_audit_writes(
+        write_context: object,
+        binding: object,
+        state: dict[str, object],
+        **kwargs: object,
+    ) -> None:
+        nonlocal blocked
+        groups = state["rclone_evidence_groups"]
+        if groups and groups[-1]["after"] is not None and blocked < 2:
+            blocked += 1
+            raise module.OperationStateError("controlled persistent audit receipt write")
+        original_write(write_context, binding, state, **kwargs)
+
+    monkeypatch.setattr(module, "_task7_write_state", block_two_audit_writes)
+
+    with pytest.raises(module.OperationStateError, match="audit"):
+        module.install_host_configuration(context)
+
+    state = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert blocked == 2
+    assert state["phase"] == "rolled_back"
+    assert len(state["rclone_evidence_groups"]) == 1
+    assert state["rclone_evidence_groups"][0]["after"] == task7_file_audit(
+        fixture["rclone_path"]
+    )
+    assert fixture["rclone_path"].read_bytes() == rotated
+    assert "CARRIED_AUDIT_SECRET" not in json.dumps(state, sort_keys=True)
+
+
+def test_preflight_failure_remains_primary_when_rclone_audit_write_also_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    rotated = b"[onedrive]\ntype=onedrive\ntoken=COMBINED_FAILURE_SECRET\n"
+    fixture["controls"]["rclone_after_preflight"] = rotated
+    fixture["controls"]["fail_command"] = "preflight"
+    original_write = module._task7_write_state
+    blocked = 0
+
+    def block_two_audit_writes(
+        write_context: object,
+        binding: object,
+        state: dict[str, object],
+        **kwargs: object,
+    ) -> None:
+        nonlocal blocked
+        groups = state["rclone_evidence_groups"]
+        if groups and groups[-1]["after"] is not None and blocked < 2:
+            blocked += 1
+            raise module.OperationStateError("controlled combined audit write")
+        original_write(write_context, binding, state, **kwargs)
+
+    monkeypatch.setattr(module, "_task7_write_state", block_two_audit_writes)
+
+    with pytest.raises(module.OperationStateError, match="preflight"):
+        module.install_host_configuration(context)
+
+    state = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert state["phase"] == "rolled_back"
+    assert "preflight" in state["failure"]["primary_error"]
+    assert any(
+        item["stage"] == "rclone_audit_persistence"
+        and "audit" in item["error"]
+        for item in state["secondary_errors"]
+    )
+    assert len(state["rclone_evidence_groups"]) == 1
+    assert fixture["rclone_path"].read_bytes() == rotated
+    assert "COMBINED_FAILURE_SECRET" not in json.dumps(state, sort_keys=True)
+
+
+def test_persistent_rclone_audit_storage_failure_blocks_terminal_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    rotated = b"[onedrive]\ntype=onedrive\ntoken=BLOCKED_AUDIT_SECRET\n"
+    fixture["controls"]["rclone_after_preflight"] = rotated
+    original_write = module._task7_write_state
+
+    def block_all_audit_writes(
+        write_context: object,
+        binding: object,
+        state: dict[str, object],
+        **kwargs: object,
+    ) -> None:
+        groups = state["rclone_evidence_groups"]
+        if groups and groups[-1]["after"] is not None:
+            raise module.OperationStateError("persistent audit storage outage")
+        original_write(write_context, binding, state, **kwargs)
+
+    monkeypatch.setattr(module, "_task7_write_state", block_all_audit_writes)
+
+    with pytest.raises(module.OperationStateError, match="audit"):
+        module.install_host_configuration(context)
+
+    state = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert state["phase"] not in {"installed", "rolled_back"}
+    assert len(state["rclone_evidence_groups"]) == 1
+    assert state["rclone_evidence_groups"][0]["after"] is None
+    assert fixture["rclone_path"].read_bytes() == rotated
+
+    resumed = load_ops_helper()
+    configure_task7_test_lock_seam(resumed, context)
+    resumed.recover_host_configuration(context)
+    final = resumed.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert final["phase"] == "rolled_back"
+    assert len(final["rclone_evidence_groups"]) == 1
+    assert final["rclone_evidence_groups"][0]["after"] == task7_file_audit(
+        fixture["rclone_path"]
+    )
+
+
+def test_preflight_crash_survives_compound_rclone_audit_write_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    rotated = b"[onedrive]\ntype=onedrive\ntoken=CRASH_AUDIT_SECRET\n"
+    fixture["controls"]["rclone_after_preflight"] = rotated
+    original_runner = context.command_runner
+
+    def crash_after_preflight(
+        argv: object,
+        pass_fds: tuple[int, ...],
+    ) -> subprocess.CompletedProcess[str]:
+        result = original_runner(argv, pass_fds)
+        argv_tuple = tuple(str(value) for value in argv)
+        if Path(argv_tuple[0]).name == "degen-prod-db-backup" and "preflight" in argv_tuple:
+            raise SimulatedTask7Crash("preflight process crash")
+        return result
+
+    context = dataclasses.replace(context, command_runner=crash_after_preflight)
+    original_write = module._task7_write_state
+    blocked = 0
+
+    def block_two_audit_writes(
+        write_context: object,
+        binding: object,
+        state: dict[str, object],
+        **kwargs: object,
+    ) -> None:
+        nonlocal blocked
+        groups = state["rclone_evidence_groups"]
+        if groups and groups[-1]["after"] is not None and blocked < 2:
+            blocked += 1
+            raise module.OperationStateError("controlled crash audit write")
+        original_write(write_context, binding, state, **kwargs)
+
+    monkeypatch.setattr(module, "_task7_write_state", block_two_audit_writes)
+
+    with pytest.raises(SimulatedTask7Crash, match="preflight"):
+        module.install_host_configuration(context)
+
+    crashed = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert crashed["phase"] == "installing"
+    assert crashed["failure"] is None
+    assert len(crashed["rclone_evidence_groups"]) == 1
+    assert fixture["runtime"]["timer_active"] == "inactive"
+
+    resumed = load_ops_helper()
+    configure_task7_test_lock_seam(resumed, context)
+    resumed.recover_host_configuration(context)
+    final = resumed.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert final["phase"] == "rolled_back"
+    assert len(final["rclone_evidence_groups"]) == 1
+    assert fixture["rclone_path"].read_bytes() == rotated
+    assert "CRASH_AUDIT_SECRET" not in json.dumps(final, sort_keys=True)
+
+
+def test_preflight_crash_is_not_masked_by_after_audit_capture_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    original_runner = context.command_runner
+
+    def crash_after_preflight(
+        argv: object,
+        pass_fds: tuple[int, ...],
+    ) -> subprocess.CompletedProcess[str]:
+        result = original_runner(argv, pass_fds)
+        argv_tuple = tuple(str(value) for value in argv)
+        if Path(argv_tuple[0]).name == "degen-prod-db-backup" and "preflight" in argv_tuple:
+            raise SimulatedTask7Crash("original preflight crash")
+        return result
+
+    context = dataclasses.replace(context, command_runner=crash_after_preflight)
+    original_audit = module._task7_capture_file_audit
+    audit_calls = 0
+
+    def fail_after_audit(*args: object, **kwargs: object) -> dict[str, object]:
+        nonlocal audit_calls
+        audit_calls += 1
+        if audit_calls == 2:
+            raise module.OperationStateError("controlled after-audit capture failure")
+        return original_audit(*args, **kwargs)
+
+    monkeypatch.setattr(module, "_task7_capture_file_audit", fail_after_audit)
+
+    with pytest.raises(SimulatedTask7Crash, match="original preflight"):
+        module.install_host_configuration(context)
+
+    state = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert audit_calls == 2
+    assert state["phase"] == "installing"
+    assert state["failure"] is None
+    assert len(state["rclone_evidence_groups"]) == 1
+    assert state["rclone_evidence_groups"][0]["after"] is None
+    assert fixture["runtime"]["timer_active"] == "inactive"
+
+
+def test_ordinary_preflight_failure_remains_primary_when_after_audit_is_unknown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    fixture["controls"]["fail_command"] = "preflight"
+    fixture["controls"]["rclone_after_preflight"] = (
+        b"[onedrive]\ntype=onedrive\ntoken=UNKNOWN_AFTER_AUDIT_SECRET\n"
+    )
+    original_audit = module._task7_capture_file_audit
+    audit_calls = 0
+
+    def fail_after_audit(*args: object, **kwargs: object) -> dict[str, object]:
+        nonlocal audit_calls
+        audit_calls += 1
+        if audit_calls == 2:
+            raise module.OperationStateError("controlled after-audit capture failure")
+        return original_audit(*args, **kwargs)
+
+    monkeypatch.setattr(module, "_task7_capture_file_audit", fail_after_audit)
+
+    with pytest.raises(module.OperationStateError, match="preflight"):
+        module.install_host_configuration(context)
+
+    state = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert state["phase"] not in {"installed", "rolled_back"}
+    assert "preflight" in state["failure"]["primary_error"]
+    assert any(
+        item["stage"] == "rclone_audit_capture"
+        and "after-audit" in item["error"]
+        for item in state["secondary_errors"]
+    )
+    assert len(state["rclone_evidence_groups"]) == 1
+    assert state["rclone_evidence_groups"][0]["after"] is None
+    assert "UNKNOWN_AFTER_AUDIT_SECRET" not in json.dumps(state, sort_keys=True)
+
+
+def test_after_audit_crash_escapes_even_after_ordinary_preflight_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    fixture["controls"]["fail_command"] = "preflight"
+    original_audit = module._task7_capture_file_audit
+    audit_calls = 0
+
+    def crash_after_audit(*args: object, **kwargs: object) -> dict[str, object]:
+        nonlocal audit_calls
+        audit_calls += 1
+        if audit_calls == 2:
+            raise SimulatedTask7Crash("after-audit crash")
+        return original_audit(*args, **kwargs)
+
+    monkeypatch.setattr(module, "_task7_capture_file_audit", crash_after_audit)
+
+    with pytest.raises(SimulatedTask7Crash, match="after-audit"):
+        module.install_host_configuration(context)
+
+    state = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert state["phase"] == "installing"
+    assert state["failure"] is None
+    assert len(state["rclone_evidence_groups"]) == 1
+    assert state["rclone_evidence_groups"][0]["after"] is None
+    assert fixture["runtime"]["timer_active"] == "inactive"
+
+
+def test_failed_install_recovery_never_restores_rclone_audit_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    rotated = b"[onedrive]\ntype=onedrive\ntoken=ROTATED_DURING_PREFLIGHT\n"
+    fixture["controls"]["rclone_after_preflight"] = rotated
+
+    def fail_after_validation(event: str, **_details: object) -> None:
+        if event == "task7_after_validation":
+            raise module.OperationStateError("controlled post-preflight failure")
+
+    monkeypatch.setattr(module, "_atomic_event_hook", fail_after_validation)
+    with pytest.raises(module.OperationStateError, match="controlled"):
+        module.install_host_configuration(context)
+
+    assert fixture["rclone_path"].read_bytes() == rotated
+    assert_task7_prior_targets_restored(context, fixture)
+
+
+def test_runtime_directory_creation_is_recorded_per_install_and_recovery_attempt(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = task7_transaction_fixture(module, tmp_path)
+    runtime_dir = host_root_path(context.host_root, "/run/degen-prod-db-backup")
+    runtime_dir.mkdir(mode=0o700)
+    if os.name == "posix":
+        runtime_dir.chmod(0o700)
+
+    module.install_host_configuration(context)
+    installed = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert installed["install"]["runtime_directory_created"] is False
+
+    lock_path = runtime_dir / "backup.lock"
+    if lock_path.exists():
+        lock_path.unlink()
+    runtime_dir.rmdir()
+    module.rollback_host_configuration(context)
+    rolled_back = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert rolled_back["install"]["runtime_directory_created"] is False
+    assert rolled_back["recovery"]["runtime_directory_created"] is True
+
+
+def test_install_rejects_runtime_directory_created_after_absence_proof(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    runtime_dir = host_root_path(context.host_root, "/run/degen-prod-db-backup")
+    raced = False
+
+    def create_after_marker(event: str, **_details: object) -> None:
+        nonlocal raced
+        if event == "task7_after_installing_state" and not raced:
+            raced = True
+            runtime_dir.mkdir(mode=0o700)
+            if os.name == "posix":
+                runtime_dir.chmod(0o700)
+
+    monkeypatch.setattr(module, "_atomic_event_hook", create_after_marker)
+    with pytest.raises(module.OperationStateError, match="runtime|race|exist"):
+        module.install_host_configuration(context)
+
+    state = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert state["install"]["runtime_directory_created"] is True
+    assert state["phase"] != "installed"
+    assert_task7_prior_targets_restored(context, fixture)
+
+
+@pytest.mark.parametrize(
+    ("timer_enabled", "timer_active"),
+    [(False, False), (False, True), (True, False), (True, True)],
+)
+def test_install_restores_exact_prior_timer_state(
+    tmp_path: Path,
+    timer_enabled: bool,
+    timer_active: bool,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(
+        module,
+        tmp_path,
+        timer_enabled=timer_enabled,
+        timer_active=timer_active,
+    )
+
+    module.install_host_configuration(context)
+
+    assert (fixture["runtime"]["timer_enabled"] == "enabled") is timer_enabled
+    assert (fixture["runtime"]["timer_active"] == "active") is timer_active
+    actions = [call["action"] for call in fixture["calls"]]
+    assert ("disable-timer" in actions) is timer_enabled
+    assert ("enable-timer" in actions) is timer_enabled
+    assert "stop-timer" in actions
+    assert ("start-timer" in actions) is timer_active
+    if timer_enabled:
+        assert actions.index("disable-timer") < actions.index("stop-timer")
+    if timer_enabled and timer_active:
+        assert actions.index("enable-timer") < actions.index("start-timer")
+
+
+@pytest.mark.parametrize(
+    ("noop_action", "timer_enabled", "timer_active"),
+    [
+        ("disable-timer", True, True),
+        ("stop-timer", True, True),
+        ("enable-timer", True, False),
+        ("start-timer", False, True),
+    ],
+)
+def test_install_rejects_successful_but_stubborn_timer_transition(
+    tmp_path: Path,
+    noop_action: str,
+    timer_enabled: bool,
+    timer_active: bool,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(
+        module,
+        tmp_path,
+        timer_enabled=timer_enabled,
+        timer_active=timer_active,
+    )
+    fixture["controls"]["noop_command"] = noop_action
+
+    with pytest.raises(module.OperationStateError, match="timer|runtime|state"):
+        module.install_host_configuration(context)
+
+    state = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert state["phase"] != "installed"
+
+
+@pytest.mark.parametrize(
+    "primitive",
+    ["write", "fsync", "fchmod", "fchown"],
+)
+def test_ordinary_install_temp_failure_cleans_only_owned_temporary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    primitive: str,
+) -> None:
+    if primitive in {"fchmod", "fchown"} and os.name != "posix":
+        pytest.skip("requires POSIX target metadata primitives")
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    target = host_root_path(context.host_root, TARGETS[0])
+    temporary = target.with_name(
+        f".{target.name}.{context.operation_id}.install.tmp"
+    )
+    unrelated = target.with_name(".degen-prod-db-backup.operator.tmp")
+    write_private_host_file(unrelated, b"operator-owned\n", 0o600)
+    armed = False
+    failed = False
+
+    def arm(event: str, **_details: object) -> None:
+        nonlocal armed
+        if event == "task7_after_installing_state":
+            armed = True
+
+    monkeypatch.setattr(module, "_atomic_event_hook", arm)
+    if primitive == "write":
+        original = module._write_all
+
+        def fail_write(descriptor: int, data: bytes) -> None:
+            nonlocal failed
+            if armed and not failed:
+                failed = True
+                os.write(descriptor, data[: min(32, len(data))])
+                raise OSError("controlled partial target write failure")
+            original(descriptor, data)
+
+        monkeypatch.setattr(module, "_write_all", fail_write)
+    elif primitive == "fsync":
+        original = module.os.fsync
+
+        def fail_fsync(descriptor: int) -> None:
+            nonlocal failed
+            metadata = os.fstat(descriptor)
+            if (
+                armed
+                and not failed
+                and stat.S_ISREG(metadata.st_mode)
+                and metadata.st_size == len(fixture["expected_bytes"][TARGETS[0]])
+            ):
+                failed = True
+                raise OSError("controlled target fsync failure")
+            original(descriptor)
+
+        monkeypatch.setattr(module.os, "fsync", fail_fsync)
+    elif primitive == "fchmod":
+        original = module.os.fchmod
+
+        def fail_fchmod(descriptor: int, mode: int) -> None:
+            nonlocal failed
+            if armed and not failed and mode == 0o755:
+                failed = True
+                raise OSError("controlled target fchmod failure")
+            original(descriptor, mode)
+
+        monkeypatch.setattr(module.os, "fchmod", fail_fchmod)
+    else:
+        original = module.os.fchown
+
+        def fail_fchown(descriptor: int, uid: int, gid: int) -> None:
+            nonlocal failed
+            if armed and not failed:
+                failed = True
+                raise OSError("controlled target fchown failure")
+            original(descriptor, uid, gid)
+
+        monkeypatch.setattr(module.os, "fchown", fail_fchown)
+
+    with pytest.raises((module.OperationStateError, OSError), match="controlled"):
+        module.install_host_configuration(context)
+
+    assert failed is True
+    assert not temporary.exists()
+    assert unrelated.read_bytes() == b"operator-owned\n"
+
+
+def test_install_temp_open_race_preserves_unowned_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = task7_transaction_fixture(module, tmp_path)
+    target = host_root_path(context.host_root, TARGETS[0])
+    temporary = target.with_name(
+        f".{target.name}.{context.operation_id}.install.tmp"
+    )
+    attacker = b"attacker-created race file\n"
+    original_open = module.os.open
+    armed = False
+    raced = False
+
+    def arm(event: str, **_details: object) -> None:
+        nonlocal armed
+        if event == "task7_after_installing_state":
+            armed = True
+
+    def racing_open(
+        path: object,
+        flags: int,
+        *args: object,
+        **kwargs: object,
+    ) -> int:
+        nonlocal raced
+        if (
+            armed
+            and not raced
+            and Path(path).name == temporary.name
+            and flags & os.O_EXCL
+        ):
+            raced = True
+            descriptor = original_open(path, flags, *args, **kwargs)
+            try:
+                os.write(descriptor, attacker)
+            finally:
+                os.close(descriptor)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(module, "_atomic_event_hook", arm)
+    monkeypatch.setattr(module.os, "open", racing_open)
+    if os.name == "posix":
+        monkeypatch.setattr(module, "_descriptor_primitives_available", lambda: True)
+        monkeypatch.setattr(
+            module,
+            "_write_descriptor_primitives_available",
+            lambda: True,
+        )
+        monkeypatch.setattr(module, "_require_posix_descriptor_primitives", lambda: None)
+
+    with pytest.raises(module.OperationStateError, match="exist|race|temporary"):
+        module.install_host_configuration(context)
+
+    assert raced is True
+    assert temporary.read_bytes() == attacker
+
+
+def test_primary_failure_receipt_write_is_retried_before_terminal_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = task7_transaction_fixture(module, tmp_path)
+    original_write = module._task7_write_state
+    receipt_write_failed = False
+    target_failed = False
+
+    def fail_primary(event: str, **_details: object) -> None:
+        nonlocal target_failed
+        if event == "task7_after_target_replace" and not target_failed:
+            target_failed = True
+            raise module.OperationStateError("durable original install failure")
+
+    def fail_first_receipt_write(
+        write_context: object,
+        binding: object,
+        state: dict[str, object],
+        **kwargs: object,
+    ) -> None:
+        nonlocal receipt_write_failed
+        if state["failure"] is not None and not receipt_write_failed:
+            receipt_write_failed = True
+            raise module.OperationStateError("controlled failure receipt write")
+        original_write(write_context, binding, state, **kwargs)
+
+    monkeypatch.setattr(module, "_atomic_event_hook", fail_primary)
+    monkeypatch.setattr(module, "_task7_write_state", fail_first_receipt_write)
+
+    with pytest.raises(module.OperationStateError, match="original"):
+        module.install_host_configuration(context)
+
+    state = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert receipt_write_failed is True
+    assert state["phase"] == "rolled_back"
+    assert state["failure"]["primary_error"] == "durable original install failure"
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "source",
+        "source_manifest",
+        "stage",
+        "stage_manifest",
+        "snapshot",
+        "snapshot_manifest",
+        "state",
+    ],
+)
+def test_install_revalidates_every_proof_before_first_mutation(
+    tmp_path: Path,
+    tamper: str,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    if tamper == "source":
+        path = context.paths.source_dir / SOURCE_ASSETS[0]
+    elif tamper == "source_manifest":
+        path = context.paths.source_dir / SOURCE_MANIFEST
+    elif tamper == "stage":
+        path = context.paths.staged_dir / "reviewed" / SOURCE_ASSETS[0]
+    elif tamper == "stage_manifest":
+        path = context.paths.staged_dir / "host-stage-manifest.json"
+    elif tamper == "snapshot":
+        path = context.paths.snapshot_dir / snapshot_artifact_name(TARGETS[0])
+    elif tamper == "snapshot_manifest":
+        path = context.paths.snapshot_dir / "SHA256SUMS"
+    else:
+        path = context.paths.state_file
+    path.write_bytes(path.read_bytes() + b"tampered before install\n")
+    if os.name == "posix":
+        path.chmod(0o600 if tamper in {"snapshot", "state"} else path.stat().st_mode)
+
+    with pytest.raises(module.OperationStateError):
+        module.install_host_configuration(context)
+
+    assert fixture["calls"] == []
+    assert_task7_prior_targets_restored(context, fixture)
+    assert not host_root_path(
+        context.host_root,
+        "/run/degen-prod-db-backup",
+    ).exists()
+
+
+@pytest.mark.parametrize("tamper", ["content", "symlink", "hardlink", "mode"])
+def test_install_refuses_live_target_drift_before_guard_or_timer_mutation(
+    tmp_path: Path,
+    tamper: str,
+) -> None:
+    if tamper in {"symlink", "hardlink", "mode"} and os.name != "posix":
+        pytest.skip("requires POSIX target metadata")
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    target = host_root_path(context.host_root, TARGETS[0])
+    if tamper == "content":
+        target.write_bytes(target.read_bytes() + b"drift\n")
+    elif tamper == "mode":
+        target.chmod(0o777)
+    else:
+        outside = tmp_path / f"outside-{tamper}"
+        write_private_host_file(outside, b"outside\n", 0o600)
+        target.unlink()
+        if tamper == "symlink":
+            target.symlink_to(outside)
+        else:
+            os.link(outside, target)
+
+    with pytest.raises(module.OperationStateError, match="target|snapshot|changed|binding|mode"):
+        module.install_host_configuration(context)
+
+    assert not any(
+        call["action"]
+        in {
+            "disable-timer",
+            "stop-timer",
+            "daemon-reload",
+            "preflight",
+        }
+        for call in fixture["calls"]
+    )
+    assert not host_root_path(
+        context.host_root,
+        "/run/degen-prod-db-backup",
+    ).exists()
+
+
+@pytest.mark.parametrize(
+    "service_state",
+    [
+        ("loaded", "active", "running", 0),
+        ("loaded", "inactive", "running", 0),
+        ("loaded", "inactive", "dead", 999),
+        ("loaded", "failed", "failed", 0),
+    ],
+)
+def test_install_requires_service_inactive_dead_and_zero_pid_before_locking(
+    tmp_path: Path,
+    service_state: tuple[str, str, str, int],
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    fixture["runtime"]["service_states"][
+        "degen-prod-db-backup.service"
+    ] = service_state
+
+    with pytest.raises(module.OperationStateError, match="service|inactive|dead|MainPID"):
+        module.install_host_configuration(context)
+
+    assert_task7_prior_targets_restored(context, fixture)
+    assert fixture["runtime"]["timer_enabled"] == "enabled"
+    assert fixture["runtime"]["timer_active"] == "active"
+
+
+@pytest.mark.parametrize("drift", ["enabled", "active", "trigger", "protected_pid"])
+def test_install_refuses_prior_runtime_drift_before_first_mutation(
+    tmp_path: Path,
+    drift: str,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    runtime = fixture["runtime"]
+    if drift == "enabled":
+        runtime["timer_enabled"] = "disabled"
+    elif drift == "active":
+        runtime["timer_active"] = "inactive"
+        runtime["timer_substate"] = "dead"
+    elif drift == "trigger":
+        runtime["timer_trigger_epoch"] += 60
+    else:
+        runtime["service_pids"]["degen-web.service"] += 1
+
+    with pytest.raises(module.OperationStateError, match="runtime|timer|trigger|PID|pid"):
+        module.install_host_configuration(context)
+
+    assert fixture["calls"] == []
+    assert not host_root_path(
+        context.host_root,
+        "/run/degen-prod-db-backup",
+    ).exists()
+
+
+@pytest.mark.parametrize("proof", ["source", "stage", "snapshot", "state"])
+def test_held_later_phase_proof_rejects_change_after_initial_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    proof: str,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    paths = {
+        "source": context.paths.source_dir / SOURCE_ASSETS[0],
+        "stage": context.paths.staged_dir / "reviewed" / SOURCE_ASSETS[0],
+        "snapshot": context.paths.snapshot_dir / snapshot_artifact_name(TARGETS[0]),
+        "state": context.paths.state_file,
+    }
+    raced = False
+
+    def mutate(event: str, **_details: object) -> None:
+        nonlocal raced
+        if event == "task7_after_installing_state" and not raced:
+            raced = True
+            path = paths[proof]
+            path.write_bytes(path.read_bytes() + b"post-proof mutation\n")
+            if os.name == "posix":
+                path.chmod(0o600 if proof in {"snapshot", "state"} else path.stat().st_mode)
+
+    monkeypatch.setattr(module, "_atomic_event_hook", mutate)
+    with pytest.raises(module.OperationStateError, match="changed|proof|binding|state"):
+        module.install_host_configuration(context)
+
+    assert_task7_prior_targets_restored(context, fixture)
+
+
+def test_installing_write_ahead_is_durable_before_timer_disable_and_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    sequence = fixture["events"]
+    original = module._atomic_write_operation_state_internal
+
+    def record_state(*args: object, **kwargs: object) -> None:
+        state = args[1]
+        original(*args, **kwargs)
+        if state["phase"] == "installing":
+            sequence.append("installing-state-durable")
+
+    monkeypatch.setattr(module, "_atomic_write_operation_state_internal", record_state)
+
+    module.install_host_configuration(context)
+
+    assert sequence.index("installing-state-durable") < sequence.index("disable-timer")
+    assert sequence.index("installing-state-durable") < sequence.index("stop-timer")
+
+
+def test_each_target_cursor_is_durable_and_exact_before_rename(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(
+        module,
+        tmp_path,
+        absent_targets=(TARGETS[2], TARGETS[3]),
+    )
+    observed: list[str] = []
+
+    def inspect(event: str, **details: object) -> None:
+        if event != "task7_before_target_replace":
+            return
+        index = int(details["index"])
+        target = str(details["target"])
+        state = module.load_operation_state(
+            context.paths.state_file,
+            effective_uid=context.effective_uid,
+        )
+        cursor = state["install"]
+        snapshot_target = state["snapshot"]["targets"][target]
+        assert index == len(observed)
+        assert target == TARGETS[index]
+        assert cursor["next_target_index"] == index
+        assert cursor["current_target"] == target
+        assert cursor["previous_sha256"] == (
+            snapshot_target["sha256"] if snapshot_target["present"] else None
+        )
+        assert cursor["intended_sha256"] == hashlib.sha256(
+            fixture["expected_bytes"][target]
+        ).hexdigest()
+        observed.append(target)
+
+    monkeypatch.setattr(module, "_atomic_event_hook", inspect)
+    module.install_host_configuration(context)
+
+    assert tuple(observed) == TARGETS
+
+
+@pytest.mark.parametrize(
+    "fault_event",
+    [
+        "task7_after_target_replace",
+        "task7_after_target_parent_fsync",
+        "task7_after_daemon_reload",
+        "task7_after_validation",
+        "task7_after_runtime_lock_release",
+        "task7_after_legacy_lock_release",
+    ],
+)
+def test_install_failure_restores_every_prior_target_and_timer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault_event: str,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(
+        module,
+        tmp_path,
+        absent_targets=(TARGETS[2], TARGETS[3]),
+    )
+
+    def fail(event: str, **_details: object) -> None:
+        if event == fault_event:
+            raise module.OperationStateError(f"controlled {fault_event}")
+
+    monkeypatch.setattr(module, "_atomic_event_hook", fail)
+
+    with pytest.raises(module.OperationStateError, match="controlled"):
+        module.install_host_configuration(context)
+
+    assert_task7_prior_targets_restored(context, fixture)
+    assert fixture["runtime"]["timer_active"] == "active"
+    assert fixture["runtime"]["timer_enabled"] == "enabled"
+    state = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert state["phase"] == "rolled_back"
+    assert state["install"]["installed_hashes"] == {}
+    assert state["install"]["completed_epoch"] is None
+
+
+@pytest.mark.parametrize(
+    "fail_action",
+    ["disable-timer", "stop-timer", "daemon-reload", "preflight"],
+)
+def test_each_guard_command_failure_recovers_targets_and_exact_timer_state(
+    tmp_path: Path,
+    fail_action: str,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(
+        module,
+        tmp_path,
+        absent_targets=(TARGETS[2], TARGETS[3]),
+    )
+    fixture["controls"]["fail_command"] = fail_action
+
+    with pytest.raises(module.OperationStateError):
+        module.install_host_configuration(context)
+
+    assert_task7_prior_targets_restored(context, fixture)
+    assert fixture["runtime"]["timer_active"] == "active"
+    assert fixture["runtime"]["timer_enabled"] == "enabled"
+    state = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert state["phase"] == "rolled_back"
+
+
+@pytest.mark.parametrize(
+    "crash_event",
+    [
+        "task7_after_installing_state",
+        "task7_after_runtime_directory_create",
+        "task7_after_timer_disable",
+        "task7_after_timer_stop",
+        "task7_after_daemon_reload",
+        "task7_after_validation",
+        "task7_after_runtime_lock_release",
+        "task7_after_legacy_lock_release",
+        "task7_after_timer_enable",
+        "task7_after_timer_start",
+        "task7_after_timer_restore",
+    ],
+)
+def test_crash_restart_recover_restores_from_each_guard_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    crash_event: str,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(
+        module,
+        tmp_path,
+        absent_targets=(TARGETS[2], TARGETS[3]),
+    )
+
+    def crash(event: str, **_details: object) -> None:
+        if event == crash_event:
+            raise SimulatedTask7Crash(crash_event)
+
+    monkeypatch.setattr(module, "_atomic_event_hook", crash)
+    with pytest.raises(SimulatedTask7Crash):
+        module.install_host_configuration(context)
+
+    resumed = load_ops_helper()
+    configure_task7_test_lock_seam(resumed, context)
+    resumed.recover_host_configuration(context)
+
+    assert_task7_prior_targets_restored(context, fixture)
+    state = resumed.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert state["phase"] == "rolled_back"
+    assert state["install"]["installed_hashes"] == {}
+    assert state["install"]["completed_epoch"] is None
+    if crash_event == "task7_after_runtime_directory_create":
+        assert state["install"]["runtime_directory_created"] is True
+        assert state["recovery"]["runtime_directory_created"] is False
+    if crash_event in {
+        "task7_after_validation",
+        "task7_after_runtime_lock_release",
+        "task7_after_legacy_lock_release",
+        "task7_after_timer_enable",
+        "task7_after_timer_start",
+        "task7_after_timer_restore",
+    }:
+        assert state["install"]["validated_epoch"] is not None
+        assert len(state["install"]["validation_evidence_sha256"]) == 64
+
+
+@pytest.mark.parametrize(
+    "crash_event",
+    [
+        "task7_after_staged_file_fsync",
+        "task7_after_target_replace",
+        "task7_after_target_parent_fsync",
+        "task7_after_cursor_state",
+    ],
+)
+@pytest.mark.parametrize("target_index", range(len(TARGETS)))
+def test_crash_restart_recover_restores_at_each_target_durable_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    crash_event: str,
+    target_index: int,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(
+        module,
+        tmp_path,
+        absent_targets=(TARGETS[2], TARGETS[3]),
+    )
+    expected_index = target_index + 1 if crash_event == "task7_after_cursor_state" else target_index
+
+    def crash(event: str, **details: object) -> None:
+        if event == crash_event and details.get("index") == expected_index:
+            raise SimulatedTask7Crash(f"{crash_event}:{target_index}")
+
+    monkeypatch.setattr(module, "_atomic_event_hook", crash)
+    with pytest.raises(SimulatedTask7Crash):
+        module.install_host_configuration(context)
+
+    resumed = load_ops_helper()
+    configure_task7_test_lock_seam(resumed, context)
+    resumed.recover_host_configuration(context)
+
+    assert_task7_prior_targets_restored(context, fixture)
+    state = resumed.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert state["phase"] == "rolled_back"
+    assert state["install"]["installed_hashes"] == {}
+    assert state["install"]["completed_epoch"] is None
+
+
+def test_restart_recovery_removes_only_operation_owned_target_temporary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    target_parent = host_root_path(context.host_root, TARGETS[0]).parent
+    unrelated = target_parent / ".degen-prod-db-backup.unrelated.tmp"
+    write_private_host_file(unrelated, b"unrelated operator file\n", 0o600)
+    captured: list[Path] = []
+
+    def crash(event: str, **details: object) -> None:
+        if event == "task7_after_staged_file_fsync" and details.get("index") == 0:
+            captured.append(Path(str(details["temp_path"])))
+            raise SimulatedTask7Crash("owned target temp fsynced")
+
+    monkeypatch.setattr(module, "_atomic_event_hook", crash)
+    with pytest.raises(SimulatedTask7Crash):
+        module.install_host_configuration(context)
+
+    assert len(captured) == 1
+    assert captured[0].name == (
+        f".{PurePosixPath(TARGETS[0]).name}.{context.operation_id}.install.tmp"
+    )
+    assert captured[0].exists()
+    assert unrelated.read_bytes() == b"unrelated operator file\n"
+    resumed = load_ops_helper()
+    configure_task7_test_lock_seam(resumed, context)
+    resumed.recover_host_configuration(context)
+
+    assert not captured[0].exists()
+    assert unrelated.read_bytes() == b"unrelated operator file\n"
+    assert_task7_prior_targets_restored(context, fixture)
+
+
+def test_install_refuses_preexisting_deterministic_target_temporary(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    target = host_root_path(context.host_root, TARGETS[0])
+    temporary = target.with_name(
+        f".{target.name}.{context.operation_id}.install.tmp"
+    )
+    write_private_host_file(temporary, b"unrelated preexisting bytes\n", 0o600)
+
+    with pytest.raises(module.OperationStateError, match="temporary|exist|owned"):
+        module.install_host_configuration(context)
+
+    assert temporary.read_bytes() == b"unrelated preexisting bytes\n"
+    assert_task7_prior_targets_restored(context, fixture)
+
+
+def test_manual_rollback_restart_resumes_after_absence_unlink_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(
+        module,
+        tmp_path,
+        absent_targets=(TARGETS[2],),
+    )
+    module.install_host_configuration(context)
+    installed = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    frozen_install = copy.deepcopy(installed["install"])
+
+    def crash(event: str, **details: object) -> None:
+        if event == "task7_after_target_unlink" and details.get("target") == TARGETS[2]:
+            raise SimulatedTask7Crash("absence unlink")
+
+    monkeypatch.setattr(module, "_atomic_event_hook", crash)
+    with pytest.raises(SimulatedTask7Crash):
+        module.rollback_host_configuration(context)
+
+    resumed = load_ops_helper()
+    configure_task7_test_lock_seam(resumed, context)
+    resumed.recover_host_configuration(context)
+    state = resumed.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert state["phase"] == "rolled_back"
+    assert state["install"] == frozen_install
+    assert not host_root_path(context.host_root, TARGETS[2]).exists()
+    assert_task7_prior_targets_restored(context, fixture)
+
+
+@pytest.mark.parametrize("primitive", ["write", "fsync", "fchmod", "fchown"])
+def test_ordinary_recovery_temp_failure_cleans_owned_temporary_and_resumes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    primitive: str,
+) -> None:
+    if primitive in {"fchmod", "fchown"} and os.name != "posix":
+        pytest.skip("requires POSIX recovery metadata primitives")
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    module.install_host_configuration(context)
+    target = host_root_path(context.host_root, TARGETS[0])
+    temporary = target.with_name(
+        f".{target.name}.{context.operation_id}.recovery.tmp"
+    )
+    armed = False
+    failed = False
+
+    def arm(event: str, **_details: object) -> None:
+        nonlocal armed
+        if event == "task7_after_recovery_state":
+            armed = True
+
+    monkeypatch.setattr(module, "_atomic_event_hook", arm)
+    if primitive == "write":
+        original = module._write_all
+
+        def fail_write(descriptor: int, data: bytes) -> None:
+            nonlocal failed
+            if armed and not failed:
+                failed = True
+                os.write(descriptor, data[: min(32, len(data))])
+                raise OSError("controlled partial recovery write failure")
+            original(descriptor, data)
+
+        monkeypatch.setattr(module, "_write_all", fail_write)
+    elif primitive == "fsync":
+        original = module.os.fsync
+        prior_size = len(fixture["prior"][TARGETS[0]]["bytes"])
+
+        def fail_fsync(descriptor: int) -> None:
+            nonlocal failed
+            metadata = os.fstat(descriptor)
+            if (
+                armed
+                and not failed
+                and stat.S_ISREG(metadata.st_mode)
+                and metadata.st_size == prior_size
+            ):
+                failed = True
+                raise OSError("controlled recovery fsync failure")
+            original(descriptor)
+
+        monkeypatch.setattr(module.os, "fsync", fail_fsync)
+    elif primitive == "fchmod":
+        original = module.os.fchmod
+        prior_mode = int(fixture["prior"][TARGETS[0]]["mode"])
+
+        def fail_fchmod(descriptor: int, mode: int) -> None:
+            nonlocal failed
+            if armed and not failed and mode == prior_mode:
+                failed = True
+                raise OSError("controlled recovery fchmod failure")
+            original(descriptor, mode)
+
+        monkeypatch.setattr(module.os, "fchmod", fail_fchmod)
+    else:
+        original = module.os.fchown
+
+        def fail_fchown(descriptor: int, uid: int, gid: int) -> None:
+            nonlocal failed
+            if armed and not failed:
+                failed = True
+                raise OSError("controlled recovery fchown failure")
+            original(descriptor, uid, gid)
+
+        monkeypatch.setattr(module.os, "fchown", fail_fchown)
+
+    with pytest.raises((module.OperationStateError, OSError), match="controlled"):
+        module.rollback_host_configuration(context)
+
+    assert failed is True
+    assert not temporary.exists()
+    module.recover_host_configuration(context)
+    final = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert final["phase"] == "rolled_back"
+    assert_task7_prior_targets_restored(context, fixture)
+
+
+def test_recovery_temp_open_race_preserves_unowned_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    module.install_host_configuration(context)
+    target = host_root_path(context.host_root, TARGETS[0])
+    temporary = target.with_name(
+        f".{target.name}.{context.operation_id}.recovery.tmp"
+    )
+    attacker = b"attacker recovery race file\n"
+    original_open = module.os.open
+    armed = False
+    raced = False
+
+    def arm(event: str, **_details: object) -> None:
+        nonlocal armed
+        if event == "task7_after_recovery_state":
+            armed = True
+
+    def racing_open(
+        path: object,
+        flags: int,
+        *args: object,
+        **kwargs: object,
+    ) -> int:
+        nonlocal raced
+        if (
+            armed
+            and not raced
+            and Path(path).name == temporary.name
+            and flags & os.O_EXCL
+        ):
+            raced = True
+            descriptor = original_open(path, flags, *args, **kwargs)
+            try:
+                os.write(descriptor, attacker)
+            finally:
+                os.close(descriptor)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(module, "_atomic_event_hook", arm)
+    monkeypatch.setattr(module.os, "open", racing_open)
+    if os.name == "posix":
+        monkeypatch.setattr(module, "_descriptor_primitives_available", lambda: True)
+        monkeypatch.setattr(
+            module,
+            "_write_descriptor_primitives_available",
+            lambda: True,
+        )
+        monkeypatch.setattr(module, "_require_posix_descriptor_primitives", lambda: None)
+
+    with pytest.raises(module.OperationStateError, match="exist|race|temporary"):
+        module.rollback_host_configuration(context)
+
+    assert raced is True
+    assert temporary.read_bytes() == attacker
+    temporary.unlink()
+    module.recover_host_configuration(context)
+    final = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert final["phase"] == "rolled_back"
+    assert_task7_prior_targets_restored(context, fixture)
+
+
+def test_manual_rollback_binds_current_timer_and_pid_baseline(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    module.install_host_configuration(context)
+    runtime = fixture["runtime"]
+    runtime["timer_enabled"] = "disabled"
+    runtime["timer_active"] = "inactive"
+    runtime["timer_substate"] = "dead"
+    runtime["service_pids"]["postgresql@15-main.service"] = 1200
+    runtime["service_pids"]["degen-web.service"] = 1100
+    runtime["service_pids"]["degen-worker.service"] = 1101
+    runtime["bot_pids"]["degen"] = 1102
+    baseline = module._capture_prior_runtime(context)
+
+    module.rollback_host_configuration(context)
+
+    state = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert state["phase"] == "rolled_back"
+    assert state["recovery"]["runtime_baseline"] == baseline
+    assert fixture["runtime"]["timer_enabled"] == "disabled"
+    assert fixture["runtime"]["timer_active"] == "inactive"
+
+
+def test_manual_rollback_runtime_baseline_is_durable_across_crash_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    module.install_host_configuration(context)
+    runtime = fixture["runtime"]
+    runtime["timer_enabled"] = "disabled"
+    runtime["timer_active"] = "active"
+    runtime["timer_substate"] = "waiting"
+    runtime["service_pids"]["postgresql@15-main.service"] = 2200
+    runtime["service_pids"]["degen-web.service"] = 2100
+    runtime["service_pids"]["degen-worker.service"] = 2101
+    runtime["bot_pids"]["degen"] = 2102
+    baseline = module._capture_prior_runtime(context)
+
+    def crash(event: str, **_details: object) -> None:
+        if event == "task7_after_timer_stop":
+            raise SimulatedTask7Crash("manual baseline crash")
+
+    monkeypatch.setattr(module, "_atomic_event_hook", crash)
+    with pytest.raises(SimulatedTask7Crash, match="baseline"):
+        module.rollback_host_configuration(context)
+
+    interrupted = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert interrupted["phase"] == "manual_rollback"
+    assert interrupted["recovery"]["runtime_baseline"] == baseline
+
+    resumed = load_ops_helper()
+    configure_task7_test_lock_seam(resumed, context)
+    resumed.recover_host_configuration(context)
+    final = resumed.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert final["phase"] == "rolled_back"
+    assert final["recovery"]["runtime_baseline"] == baseline
+    assert fixture["runtime"]["timer_enabled"] == "disabled"
+    assert fixture["runtime"]["timer_active"] == "active"
+
+
+def test_timer_restore_primary_is_durable_before_requiesce_crash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    module.install_host_configuration(context)
+    fixture["controls"]["fail_command"] = "start-timer"
+
+    def crash(event: str, **_details: object) -> None:
+        if event == "task7_after_timer_restore_failure_state":
+            raise SimulatedTask7Crash("post-primary requiesce crash")
+
+    monkeypatch.setattr(module, "_atomic_event_hook", crash)
+    with pytest.raises(SimulatedTask7Crash, match="post-primary"):
+        module.rollback_host_configuration(context)
+
+    interrupted = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert interrupted["phase"] == "manual_rollback"
+    assert interrupted["failure"] is not None
+    assert "start" in interrupted["failure"]["primary_error"]
+    assert interrupted["secondary_errors"] == []
+
+    resumed = load_ops_helper()
+    configure_task7_test_lock_seam(resumed, context)
+    resumed.recover_host_configuration(context)
+    final = resumed.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert final["phase"] == "rolled_back"
+    assert final["failure"] == interrupted["failure"]
+
+
+@pytest.mark.parametrize(
+    "crash_event",
+    [
+        "task7_after_recovery_file_fsync",
+        "task7_after_recovery_target_replace",
+        "task7_after_recovery_target_parent_fsync",
+        "task7_after_cursor_state",
+    ],
+)
+@pytest.mark.parametrize("target_index", range(len(TARGETS)))
+def test_manual_recovery_restart_at_each_present_target_durable_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    crash_event: str,
+    target_index: int,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    module.install_host_configuration(context)
+    expected_index = target_index + 1 if crash_event == "task7_after_cursor_state" else target_index
+
+    def crash(event: str, **details: object) -> None:
+        if event == crash_event and details.get("index") == expected_index:
+            raise SimulatedTask7Crash(f"{crash_event}:{target_index}")
+
+    monkeypatch.setattr(module, "_atomic_event_hook", crash)
+    with pytest.raises(SimulatedTask7Crash):
+        module.rollback_host_configuration(context)
+
+    resumed = load_ops_helper()
+    configure_task7_test_lock_seam(resumed, context)
+    resumed.recover_host_configuration(context)
+    final = resumed.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert final["phase"] == "rolled_back"
+    assert_task7_prior_targets_restored(context, fixture)
+
+
+@pytest.mark.parametrize("target_index", range(len(TARGETS)))
+@pytest.mark.parametrize(
+    "crash_event",
+    ["task7_after_target_unlink", "task7_after_recovery_target_parent_fsync"],
+)
+def test_manual_recovery_restart_after_each_absence_unlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target_index: int,
+    crash_event: str,
+) -> None:
+    target = TARGETS[target_index]
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(
+        module,
+        tmp_path,
+        absent_targets=(target,),
+    )
+    module.install_host_configuration(context)
+
+    def crash(event: str, **details: object) -> None:
+        if event == crash_event and details.get("target") == target:
+            raise SimulatedTask7Crash(f"{crash_event}:{target_index}")
+
+    monkeypatch.setattr(module, "_atomic_event_hook", crash)
+    with pytest.raises(SimulatedTask7Crash):
+        module.rollback_host_configuration(context)
+
+    resumed = load_ops_helper()
+    configure_task7_test_lock_seam(resumed, context)
+    resumed.recover_host_configuration(context)
+    final = resumed.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert final["phase"] == "rolled_back"
+    assert_task7_prior_targets_restored(context, fixture)
+
+
+def test_fresh_install_refuses_incomplete_state_with_exact_recover_command(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    task7_write_incomplete_install_state(module, context, fixture)
+    expected = (
+        str(
+            context.paths.source_dir
+            / "deploy/linux/degen-prod-db-backup-ops.py"
+        )
+        + " recover --operation-dir "
+        + str(context.paths.operation_dir)
+    )
+
+    with pytest.raises(module.OperationStateError) as raised:
+        module.install_host_configuration(context)
+
+    assert expected in str(raised.value)
+    assert fixture["calls"] == []
+
+
+def test_fresh_install_refuses_recovery_required_state_with_source_helper_command(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    fixture["controls"]["fail_command"] = "start-timer"
+    fixture["controls"]["fail_command_remaining"] = 2
+    with pytest.raises(module.OperationStateError):
+        module.install_host_configuration(context)
+    fixture["controls"]["fail_command"] = None
+    expected = (
+        str(context.paths.source_dir / "deploy/linux/degen-prod-db-backup-ops.py")
+        + " recover --operation-dir "
+        + str(context.paths.operation_dir)
+    )
+
+    with pytest.raises(module.OperationStateError) as raised:
+        module.install_host_configuration(context)
+
+    assert expected in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("fail_action", "timer_enabled", "timer_active"),
+    [
+        ("enable-timer", True, False),
+        ("start-timer", False, True),
+        ("start-timer", True, True),
+    ],
+)
+def test_timer_restore_failure_enters_verified_durable_recovery_required(
+    tmp_path: Path,
+    fail_action: str,
+    timer_enabled: bool,
+    timer_active: bool,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(
+        module,
+        tmp_path,
+        timer_enabled=timer_enabled,
+        timer_active=timer_active,
+    )
+    fixture["controls"]["fail_command"] = fail_action
+    fixture["controls"]["fail_command_remaining"] = 2
+
+    with pytest.raises(module.OperationStateError):
+        module.install_host_configuration(context)
+
+    state = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert state["phase"] == "recovery_required"
+    assert state["failure"] is not None
+    assert state["recovery"]["kind"] == "install"
+    assert state["recovery"]["completed_epoch"] is None
+    assert "recovering" in [entry["phase"] for entry in state["phase_history"]]
+    assert state["install"]["installed_hashes"] == {}
+    assert state["install"]["completed_epoch"] is None
+    assert fixture["runtime"]["timer_active"] == "inactive"
+
+
+def test_recover_resume_preserves_install_receipt_and_recovery_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+
+    def crash_install(event: str, **_details: object) -> None:
+        if event == "task7_after_target_replace":
+            raise SimulatedTask7Crash("install replacement")
+
+    monkeypatch.setattr(module, "_atomic_event_hook", crash_install)
+    with pytest.raises(SimulatedTask7Crash):
+        module.install_host_configuration(context)
+
+    recovering = load_ops_helper()
+    configure_task7_test_lock_seam(recovering, context)
+
+    def crash_recovery(event: str, **details: object) -> None:
+        if event == "task7_after_cursor_state" and details.get("index") == 2:
+            raise SimulatedTask7Crash("recovery cursor two")
+
+    monkeypatch.setattr(recovering, "_atomic_event_hook", crash_recovery)
+    with pytest.raises(SimulatedTask7Crash):
+        recovering.recover_host_configuration(context)
+    before = recovering.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    frozen_install = copy.deepcopy(before["install"])
+    recovery_identity = copy.deepcopy(before["recovery"])
+
+    resumed = load_ops_helper()
+    configure_task7_test_lock_seam(resumed, context)
+    resumed.recover_host_configuration(context)
+    after = resumed.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+
+    assert after["install"] == frozen_install
+    assert after["recovery"]["kind"] == recovery_identity["kind"]
+    assert after["recovery"]["started_epoch"] == recovery_identity["started_epoch"]
+    assert after["recovery"]["evidence_sha256"] == recovery_identity["evidence_sha256"]
+
+
+def test_recover_resume_preserves_provisional_restore_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    task7_write_incomplete_install_state(module, context, fixture)
+
+    def crash(event: str, **_details: object) -> None:
+        if event == "task7_after_recovery_validation_state":
+            raise SimulatedTask7Crash("recovery validated")
+
+    monkeypatch.setattr(module, "_atomic_event_hook", crash)
+    with pytest.raises(SimulatedTask7Crash):
+        module.recover_host_configuration(context)
+    before = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    provisional = {
+        "restored_epoch": before["recovery"]["restored_epoch"],
+        "restore_evidence_sha256": before["recovery"]["restore_evidence_sha256"],
+    }
+    assert provisional["restored_epoch"] is not None
+    assert len(provisional["restore_evidence_sha256"]) == 64
+
+    resumed = load_ops_helper()
+    configure_task7_test_lock_seam(resumed, context)
+    resumed.recover_host_configuration(context)
+    after = resumed.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert after["phase"] == "rolled_back"
+    assert {
+        "restored_epoch": after["recovery"]["restored_epoch"],
+        "restore_evidence_sha256": after["recovery"]["restore_evidence_sha256"],
+    } == provisional
+
+
+@pytest.mark.parametrize("helper_target", [TARGETS[2], TARGETS[3]])
+@pytest.mark.parametrize("prior_present", [False, True])
+@pytest.mark.parametrize("flow", ["initial_recovery", "manual_rollback"])
+def test_recovery_restores_new_helper_target_bytes_or_absence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    helper_target: str,
+    prior_present: bool,
+    flow: str,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(
+        module,
+        tmp_path,
+        absent_targets=() if prior_present else (helper_target,),
+    )
+
+    if flow == "manual_rollback":
+        module.install_host_configuration(context)
+        assert host_root_path(context.host_root, helper_target).exists()
+        module.rollback_host_configuration(context)
+    else:
+        failed = False
+
+        def fail_after_validation(event: str, **_details: object) -> None:
+            nonlocal failed
+            if event == "task7_after_validation" and not failed:
+                failed = True
+                raise module.OperationStateError("controlled initial recovery")
+
+        monkeypatch.setattr(module, "_atomic_event_hook", fail_after_validation)
+        with pytest.raises(module.OperationStateError, match="controlled"):
+            module.install_host_configuration(context)
+
+    if prior_present:
+        assert host_root_path(context.host_root, helper_target).read_bytes() == fixture[
+            "prior"
+        ][helper_target]["bytes"]
+    else:
+        assert not host_root_path(context.host_root, helper_target).exists()
+    assert_task7_prior_targets_restored(context, fixture)
+
+
+def test_manual_rollback_preserves_historical_install_receipt_and_skips_rclone(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    module.install_host_configuration(context)
+    installed = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    frozen_install = copy.deepcopy(installed["install"])
+    rclone_path = fixture["rclone_path"]
+    changed_rclone = b"[onedrive]\ntype=onedrive\ntoken=ROTATED_AFTER_SNAPSHOT\n"
+    write_private_host_file(rclone_path, changed_rclone, 0o600)
+
+    module.rollback_host_configuration(context)
+
+    rolled_back = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert rolled_back["phase"] == "rolled_back"
+    assert rolled_back["install"] == frozen_install
+    assert rolled_back["recovery"]["kind"] == "manual_rollback"
+    assert rolled_back["recovery"]["restored_epoch"] is not None
+    assert len(rolled_back["recovery"]["restore_evidence_sha256"]) == 64
+    assert rolled_back["recovery"]["completed_epoch"] is not None
+    assert rclone_path.read_bytes() == changed_rclone
+    assert_task7_prior_targets_restored(context, fixture)
+
+
+@pytest.mark.parametrize("identity", ["postgres", "web", "worker", "bot"])
+def test_manual_rollback_pid_parity_failure_stays_quiesced_and_recoverable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    identity: str,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    module.install_host_configuration(context)
+    installed = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    frozen_install = copy.deepcopy(installed["install"])
+
+    def change_pid(event: str, **_details: object) -> None:
+        if event != "task7_before_recovery_pid_validation":
+            return
+        if identity == "postgres":
+            fixture["runtime"]["service_pids"]["postgresql@15-main.service"] = 211
+        elif identity == "web":
+            fixture["runtime"]["service_pids"]["degen-web.service"] = 311
+        elif identity == "worker":
+            fixture["runtime"]["service_pids"]["degen-worker.service"] = 321
+        else:
+            fixture["runtime"]["bot_pids"]["degen"] = 411
+
+    monkeypatch.setattr(module, "_atomic_event_hook", change_pid)
+    with pytest.raises(module.OperationStateError, match="PID|pid|process|identity"):
+        module.rollback_host_configuration(context)
+
+    state = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert state["phase"] == "recovery_required"
+    assert state["install"] == frozen_install
+    assert state["recovery"]["restored_epoch"] is None
+    assert state["recovery"]["restore_evidence_sha256"] is None
+    assert fixture["runtime"]["timer_enabled"] == "disabled"
+    assert fixture["runtime"]["timer_active"] == "inactive"
+    assert_task7_prior_targets_restored(context, fixture)
+
+
+def test_primary_failure_is_immutable_and_lock_errors_append_in_exact_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    primary_raised = False
+    secondary_raised: set[str] = set()
+
+    def fail_in_order(event: str, **_details: object) -> None:
+        nonlocal primary_raised
+        if event == "task7_after_validation" and not primary_raised:
+            primary_raised = True
+            raise module.OperationStateError("controlled primary install failure")
+        failures = {
+            "task7_before_runtime_lock_release": (
+                "runtime",
+                "controlled runtime lock release failure",
+            ),
+            "task7_before_legacy_lock_release": (
+                "legacy",
+                "controlled legacy lock release failure",
+            ),
+        }
+        if event in failures:
+            kind, message = failures[event]
+            if kind not in secondary_raised:
+                secondary_raised.add(kind)
+                raise module.OperationStateError(message)
+
+    monkeypatch.setattr(module, "_atomic_event_hook", fail_in_order)
+    with pytest.raises(module.OperationStateError, match="primary"):
+        module.install_host_configuration(context)
+    state = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+
+    assert state["phase"] == "rolled_back"
+    assert state["failure"]["phase"] == "installing"
+    assert state["failure"]["primary_error"] == "controlled primary install failure"
+    assert state["failure"]["evidence_sha256"] == task7_error_evidence_sha256(
+        "primary",
+        state["failure"],
+    )
+    assert [error["stage"] for error in state["secondary_errors"][:2]] == [
+        "release_runtime_lock",
+        "release_legacy_lock",
+    ]
+    assert [error["error"] for error in state["secondary_errors"][:2]] == [
+        "controlled runtime lock release failure",
+        "controlled legacy lock release failure",
+    ]
+    epochs = [error["epoch"] for error in state["secondary_errors"]]
+    assert epochs == sorted(epochs)
+    for error in state["secondary_errors"]:
+        assert error["evidence_sha256"] == task7_error_evidence_sha256(
+            "secondary",
+            error,
+        )
+    assert fixture["runtime"]["timer_enabled"] == "enabled"
+    assert fixture["runtime"]["timer_active"] == "active"
+
+
+@pytest.mark.parametrize(
+    ("primitive", "stage"),
+    [
+        ("flock", "release_runtime_lock"),
+        ("close", "release_runtime_lock"),
+    ],
+)
+def test_existing_primary_plus_os_lock_release_uncertainty_blocks_recovery_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    primitive: str,
+    stage: str,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    original_release = module._release_migration_locks
+    original_close = module.os.close
+    release_cycles = 0
+    failed = False
+    leaked_descriptors: list[int] = []
+
+    def inject_second_release_uncertainty(locks: object) -> list[object]:
+        nonlocal release_cycles
+        release_cycles += 1
+        if release_cycles != 2:
+            return list(original_release(locks))
+        message = f"controlled {primitive} primitive release uncertainty"
+        if os.name != "posix":
+            issues = list(original_release(locks))
+            issues.append((stage, OSError(message)))
+            return issues
+        if primitive == "flock":
+            import fcntl
+
+            original_flock = fcntl.flock
+            injected = False
+
+            def fail_runtime_unlock(descriptor: int, operation: int) -> object:
+                nonlocal injected
+                if (
+                    not injected
+                    and descriptor == locks.runtime_fd
+                    and operation == fcntl.LOCK_UN
+                ):
+                    injected = True
+                    raise OSError(message)
+                return original_flock(descriptor, operation)
+
+            with monkeypatch.context() as release_patch:
+                release_patch.setattr(fcntl, "flock", fail_runtime_unlock)
+                return list(original_release(locks))
+        injected = False
+
+        def fail_runtime_close(descriptor: int) -> None:
+            nonlocal injected
+            if not injected and descriptor == locks.runtime_fd:
+                injected = True
+                leaked_descriptors.append(descriptor)
+                raise OSError(message)
+            original_close(descriptor)
+
+        with monkeypatch.context() as release_patch:
+            release_patch.setattr(module.os, "close", fail_runtime_close)
+            return list(original_release(locks))
+
+    def fail_after_validation(event: str, **_details: object) -> None:
+        nonlocal failed
+        if event == "task7_after_validation" and not failed:
+            failed = True
+            raise module.OperationStateError("controlled immutable primary")
+
+    monkeypatch.setattr(
+        module,
+        "_release_migration_locks",
+        inject_second_release_uncertainty,
+    )
+    monkeypatch.setattr(module, "_atomic_event_hook", fail_after_validation)
+
+    try:
+        with pytest.raises(module.OperationStateError, match="immutable primary"):
+            module.install_host_configuration(context)
+    finally:
+        for descriptor in leaked_descriptors:
+            original_close(descriptor)
+
+    state = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert release_cycles == 2
+    assert state["failure"]["primary_error"] == "controlled immutable primary"
+    assert state["phase"] == "recovery_required"
+    assert state["phase_history"][-1]["phase"] == "recovery_required"
+    assert state["recovery"]["completed_epoch"] is None
+    assert state["secondary_errors"][-1]["stage"] == stage
+    assert primitive in state["secondary_errors"][-1]["error"]
+    assert fixture["runtime"]["timer_enabled"] == "disabled"
+    assert fixture["runtime"]["timer_active"] == "inactive"
+
+
+def test_timer_restore_error_appends_without_replacing_existing_primary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    fixture["controls"]["fail_command"] = "start-timer"
+    failed = False
+
+    def fail_install(event: str, **_details: object) -> None:
+        nonlocal failed
+        if event == "task7_after_target_replace" and not failed:
+            failed = True
+            raise module.OperationStateError("original target replacement failure")
+
+    monkeypatch.setattr(module, "_atomic_event_hook", fail_install)
+    with pytest.raises(module.OperationStateError, match="original"):
+        module.install_host_configuration(context)
+    state = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+
+    assert state["phase"] == "recovery_required"
+    assert state["failure"]["primary_error"] == "original target replacement failure"
+    assert any(
+        error["stage"] == "timer_restore"
+        and "controlled failure" in error["error"]
+        for error in state["secondary_errors"]
+    )
+
+
+def test_failure_receipts_preserve_first_error_and_redact_secondary_secrets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    failures = 0
+    primary_raised = False
+
+    def fail_recovery(event: str, **_details: object) -> None:
+        nonlocal failures, primary_raised
+        if event == "task7_after_target_replace" and not primary_raised:
+            primary_raised = True
+            raise module.OperationStateError(
+                "TOKEN=PRIMARY_SECRET_SENTINEL controlled install failure"
+            )
+        if event == "task7_before_recovery_target":
+            failures += 1
+            raise module.OperationStateError(
+                "PASSWORD=SECONDARY_SECRET_SENTINEL recovery failed"
+            )
+
+    monkeypatch.setattr(module, "_atomic_event_hook", fail_recovery)
+    with pytest.raises(module.OperationStateError):
+        module.install_host_configuration(context)
+    state = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+
+    assert failures == 1
+    assert state["failure"] is not None
+    primary = state["failure"]["primary_error"]
+    assert "PRIMARY_SECRET_SENTINEL" not in primary
+    assert "TOKEN" not in primary
+    assert "SECONDARY_SECRET_SENTINEL" not in primary
+    assert len(state["secondary_errors"]) >= 1
+    observable = json.dumps(state["secondary_errors"], sort_keys=True)
+    assert "SECONDARY_SECRET_SENTINEL" not in observable
+    assert "PASSWORD" not in observable
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "task7_after_legacy_lock",
+        "task7_after_runtime_lock",
+        "task7_after_target_replace",
+        "task7_before_lock_release",
+        "task7_after_runtime_lock_release",
+    ],
+)
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX flock semantics")
+def test_real_old_runtime_contender_is_excluded_at_every_guard_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+) -> None:
+    import fcntl
+
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    legacy_path = host_root_path(
+        context.host_root,
+        "/run/lock/degen-prod-db-backup.lock",
+    )
+    runtime_path = host_root_path(
+        context.host_root,
+        "/run/degen-prod-db-backup/backup.lock",
+    )
+    observed = False
+
+    def expect_lock(path: Path, *, contended: bool) -> None:
+        descriptor = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            if contended:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            else:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+    def contend(event: str, **_details: object) -> None:
+        nonlocal observed
+        if event != boundary or observed:
+            return
+        observed = True
+        expect_lock(legacy_path, contended=True)
+        if boundary == "task7_after_runtime_lock_release":
+            expect_lock(runtime_path, contended=False)
+        elif boundary != "task7_after_legacy_lock":
+            expect_lock(runtime_path, contended=True)
+
+    monkeypatch.setattr(module, "_atomic_event_hook", contend)
+    module.install_host_configuration(context)
+
+    assert observed is True
+    state = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert state["phase"] == "installed"
+    assert fixture["runtime"]["timer_active"] == "active"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires real dual flock guard")
+def test_backup_service_inactivity_is_rechecked_while_both_locks_are_held(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import fcntl
+
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+
+    def activate(event: str, **details: object) -> None:
+        if event == "migration_lock_acquired" and details.get("kind") == "runtime":
+            for path in (
+                host_root_path(
+                    context.host_root,
+                    "/run/lock/degen-prod-db-backup.lock",
+                ),
+                host_root_path(
+                    context.host_root,
+                    "/run/degen-prod-db-backup/backup.lock",
+                ),
+            ):
+                descriptor = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+                try:
+                    with pytest.raises(BlockingIOError):
+                        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    os.close(descriptor)
+            fixture["runtime"]["service_pids"]["degen-prod-db-backup.service"] = 999
+
+    monkeypatch.setattr(module, "_atomic_event_hook", activate)
+
+    with pytest.raises(module.OperationStateError, match="service|inactive|pid"):
+        module.install_host_configuration(context)
+
+    assert_task7_prior_targets_restored(context, fixture)
+
+
+@pytest.mark.parametrize("flow", ["install", "recover", "manual_rollback"])
+def test_dual_guard_reacquires_and_reverse_releases_before_timer_restore(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    flow: str,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    if flow == "manual_rollback":
+        module.install_host_configuration(context)
+        fixture["events"].clear()
+        fixture["calls"].clear()
+    elif flow == "recover":
+        task7_write_incomplete_install_state(module, context, fixture)
+    acquired: list[str] = []
+    released: list[str] = []
+
+    def record(event: str, **details: object) -> None:
+        if event == "migration_lock_acquired":
+            kind = str(details["kind"])
+            acquired.append(kind)
+            fixture["events"].append(f"acquire-{kind}")
+        elif event == "migration_lock_released":
+            kind = str(details["kind"])
+            released.append(kind)
+            fixture["events"].append(f"release-{kind}")
+
+    monkeypatch.setattr(module, "_atomic_event_hook", record)
+    if flow == "install":
+        module.install_host_configuration(context)
+    elif flow == "recover":
+        module.recover_host_configuration(context)
+    else:
+        module.rollback_host_configuration(context)
+
+    assert acquired == ["legacy", "runtime"]
+    assert released == ["runtime", "legacy"]
+    persistent_restore = [
+        action
+        for action in ("enable-timer", "start-timer")
+        if action in fixture["events"]
+    ]
+    for action in persistent_restore:
+        assert fixture["events"].index("release-legacy") < fixture["events"].index(action)
+
+
+def test_recovery_state_does_not_start_until_both_migration_locks_are_owned(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(module, tmp_path)
+    task7_write_incomplete_install_state(module, context, fixture)
+    observations: list[tuple[str, str]] = []
+
+    def inspect(event: str, **details: object) -> None:
+        if event == "migration_lock_acquired":
+            state = module.load_operation_state(
+                context.paths.state_file,
+                effective_uid=context.effective_uid,
+            )
+            observations.append((str(details["kind"]), str(state["phase"])))
+        elif event == "task7_after_recovery_state":
+            state = module.load_operation_state(
+                context.paths.state_file,
+                effective_uid=context.effective_uid,
+            )
+            observations.append(("recovery-state", str(state["phase"])))
+
+    monkeypatch.setattr(module, "_atomic_event_hook", inspect)
+    module.recover_host_configuration(context)
+
+    assert observations[:3] == [
+        ("legacy", "installing"),
+        ("runtime", "installing"),
+        ("recovery-state", "recovering"),
+    ]
+
+
+def test_operation_transaction_lock_serializes_final_timer_and_state_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = task7_transaction_fixture(module, tmp_path)
+    paused = threading.Event()
+    release = threading.Event()
+    install_errors: list[BaseException] = []
+    recover_errors: list[BaseException] = []
+
+    def pause_after_unlock(event: str, **_details: object) -> None:
+        if (
+            event == "task7_after_legacy_lock_release"
+            and threading.current_thread().name == "task7-install"
+        ):
+            if os.name == "posix":
+                import fcntl
+
+                descriptor = os.open(
+                    context.paths.operation_dir,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC,
+                )
+                try:
+                    with pytest.raises(BlockingIOError):
+                        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    os.close(descriptor)
+            paused.set()
+            assert release.wait(timeout=5)
+
+    monkeypatch.setattr(module, "_atomic_event_hook", pause_after_unlock)
+
+    def install() -> None:
+        try:
+            module.install_host_configuration(context)
+        except BaseException as exc:
+            install_errors.append(exc)
+
+    def recover() -> None:
+        try:
+            module.recover_host_configuration(context)
+        except BaseException as exc:
+            recover_errors.append(exc)
+
+    install_thread = threading.Thread(target=install, name="task7-install")
+    recover_thread = threading.Thread(target=recover, name="task7-recover")
+    install_thread.start()
+    assert paused.wait(timeout=5)
+    recover_thread.start()
+    try:
+        recover_thread.join(timeout=0.25)
+        mid_state = module.load_operation_state(
+            context.paths.state_file,
+            effective_uid=context.effective_uid,
+        )
+        assert mid_state["phase"] == "installing"
+        assert "recovering" not in [
+            entry["phase"] for entry in mid_state["phase_history"]
+        ]
+    finally:
+        release.set()
+    install_thread.join(timeout=5)
+    recover_thread.join(timeout=5)
+
+    assert not install_thread.is_alive()
+    assert not recover_thread.is_alive()
+    assert install_errors == []
+    assert len(recover_errors) == 1
+    final = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert final["phase"] == "installed"
+
+
+@pytest.mark.parametrize(
+    ("command", "phase", "api_name"),
+    [
+        ("install", "snapshotted", "install_host_configuration"),
+        ("recover", "installing", "recover_host_configuration"),
+        ("rollback", "installed", "rollback_host_configuration"),
+    ],
+)
+def test_task7_cli_has_only_operation_dir_and_uses_verified_source_context(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    phase: str,
+    api_name: str,
+) -> None:
+    module = load_ops_helper()
+    operation_dir_raw = "/opt/degen/backups/config/20260701T123456Z"
+    operation_dir = Path(operation_dir_raw)
+    state = state_at_phase(operation_dir, phase)
+    state["install"] = copy.deepcopy(state["install"])
+    if state["install"] is not None:
+        state["install"].update(
+            {
+                "runtime_directory_created": False,
+                "validated_epoch": (
+                    1_750_000_039 if phase == "installed" else None
+                ),
+                "validation_evidence_sha256": HASH_B if phase == "installed" else None,
+            }
+        )
+    observed: list[object] = []
+    source_checks: list[object] = []
+    monkeypatch.setattr(module, "_effective_uid", lambda: 0)
+    monkeypatch.setattr(module, "_require_posix_descriptor_primitives", lambda: None)
+    monkeypatch.setattr(module, "load_operation_state", lambda path, *, effective_uid: state)
+    if os.name != "posix":
+        monkeypatch.setattr(module, "validate_operation_state_for_context", lambda *_: None)
+    monkeypatch.setattr(
+        module,
+        "verify_running_source_helper",
+        lambda context: source_checks.append(context),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        module,
+        api_name,
+        lambda context: observed.append(context) or {},
+        raising=False,
+    )
+
+    help_result = subprocess.run(
+        [sys.executable, str(OPS_HELPER), command, "--help"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    result = module.main([command, "--operation-dir", operation_dir_raw])
+
+    captured = capsys.readouterr()
+    assert help_result.returncode == 0
+    assert "--operation-dir" in help_result.stdout
+    for forbidden in ("host-root", "archive", "digest", "commit", "runner"):
+        assert forbidden not in help_result.stdout.lower()
+    assert result == 0
+    assert captured.out == ""
+    assert captured.err == ""
+    assert len(observed) == 1
+    assert source_checks == observed
+    assert observed[0].host_root == Path("/")
+    assert observed[0].paths == module.build_operation_paths(operation_dir)
+
+
+def test_recover_refuses_running_helper_outside_verified_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = task7_transaction_fixture(module, tmp_path)
+    verified_helper = (
+        context.paths.source_dir / "deploy/linux/degen-prod-db-backup-ops.py"
+    )
+    installed_helper = host_root_path(
+        context.host_root,
+        "/usr/local/sbin/degen-prod-db-backup-ops",
+    )
+
+    monkeypatch.setattr(module, "__file__", str(verified_helper))
+    module.verify_running_source_helper(context)
+    monkeypatch.setattr(module, "__file__", str(installed_helper))
+    with pytest.raises(module.OperationStateError, match="verified|source|helper"):
+        module.verify_running_source_helper(context)
+
+
+@pytest.mark.parametrize("tamper", ["hash", "inode"])
+def test_verified_source_helper_proof_rejects_hash_or_inode_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tamper: str,
+) -> None:
+    if tamper == "inode" and os.name != "posix":
+        pytest.skip("requires POSIX descriptor/path identity")
+    module = load_ops_helper()
+    context, _fixture = task7_transaction_fixture(module, tmp_path)
+    helper = context.paths.source_dir / "deploy/linux/degen-prod-db-backup-ops.py"
+    monkeypatch.setattr(module, "__file__", str(helper))
+    if tamper == "hash":
+        helper.write_bytes(helper.read_bytes() + b"tampered helper\n")
+    else:
+        original_open = module.os.open
+        raced = False
+
+        def racing_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+            nonlocal raced
+            descriptor = original_open(path, flags, *args, **kwargs)
+            if not raced and Path(path) == helper:
+                raced = True
+                replacement = helper.with_name("helper-replacement")
+                replacement.write_bytes(helper.read_bytes())
+                replacement.chmod(helper.stat().st_mode)
+                os.replace(replacement, helper)
+            return descriptor
+
+        monkeypatch.setattr(module.os, "open", racing_open)
+
+    with pytest.raises(module.OperationStateError, match="verified|source|helper|changed"):
+        module.verify_running_source_helper(context)
