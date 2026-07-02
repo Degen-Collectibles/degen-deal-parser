@@ -72,9 +72,28 @@ def source_metadata_state(path: Path) -> tuple[int, ...]:
 def stable_source_state(path: Path) -> tuple[bytes, tuple[int, ...]]:
     data = path.read_bytes()
     metadata = source_metadata_state(path)
-    if os.name != "posix":
-        metadata = metadata[:4] + metadata[5:6] + metadata[7:]
+    # Normal reads in this assertion helper can update atime on some mounts.
+    metadata = metadata[:4] + metadata[5:6] + metadata[7:]
     return data, metadata
+
+
+def test_stable_source_state_ignores_atime_on_posix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.env"
+    source.write_bytes(b"VALUE=stable\n")
+    states = iter(
+        [
+            (0o100600, 1, 2, 13, 100, 200, 300, 4, 5, 1),
+            (0o100600, 1, 2, 13, 101, 200, 300, 4, 5, 1),
+        ]
+    )
+    monkeypatch.setattr(os, "name", "posix")
+    monkeypatch.setattr(
+        sys.modules[__name__], "source_metadata_state", lambda _path: next(states)
+    )
+
+    assert stable_source_state(source) == stable_source_state(source)
 
 
 def run_cli(*args: str) -> subprocess.CompletedProcess[str]:

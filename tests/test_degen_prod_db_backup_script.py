@@ -3289,6 +3289,29 @@ def test_backup_directory_must_not_be_a_symlink(harness: BackupHarness) -> None:
     assert "pg_dump" not in harness.trace_lines()
 
 
+def test_missing_backup_directory_is_not_created(harness: BackupHarness) -> None:
+    harness.backup_dir.rmdir()
+
+    result = harness.run("preflight")
+
+    assert result.returncode != 0
+    assert "Backup directory is not installed" in result.stdout + result.stderr
+    assert not harness.backup_dir.exists()
+    assert "pg_dump" not in harness.trace_lines()
+
+
+def test_backup_directory_is_validated_before_log_creation(harness: BackupHarness) -> None:
+    _chmod(harness.backup_dir, 0o770)
+    harness.log_dir.rmdir()
+
+    result = harness.run("preflight")
+
+    assert result.returncode != 0
+    assert "Backup directory must not be group or world writable" in result.stdout + result.stderr
+    assert not harness.log_dir.exists()
+    assert "pg_dump" not in harness.trace_lines()
+
+
 def test_backup_directory_must_not_be_group_or_world_writable(harness: BackupHarness) -> None:
     _chmod(harness.backup_dir, 0o770)
 

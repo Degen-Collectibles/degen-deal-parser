@@ -1684,7 +1684,8 @@ main() {
     load_managed_configuration
     validate_configuration
 
-    mkdir -p -- "$BACKUP_DIR"
+    [[ -d "$BACKUP_DIR" ]] || die "Backup directory is not installed: $BACKUP_DIR"
+    validate_backup_directory
     run_secure_log_helper prepare </dev/null >/dev/null
     trap cleanup_on_exit EXIT
     trap 'exit 129' HUP
