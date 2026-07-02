@@ -1,0 +1,36 @@
+[Unit]
+Description=Degen PostgreSQL verified backup
+After=network-online.target postgresql.service
+Wants=network-online.target
+RefuseManualStart=yes
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+Environment=BACKUP_ENV_FILE=/etc/degen/prod-db-backup.env
+ExecStart=/usr/local/sbin/degen-prod-db-backup
+RuntimeDirectory=degen-prod-db-backup
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+LogsDirectory=degen-prod-db-backup
+LogsDirectoryMode=0700
+TimeoutStartSec=infinity
+TimeoutStopSec=90
+KillMode=control-group
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/etc/degen
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

@@ -1,0 +1,12 @@
+[Unit]
+Description=Nightly Degen PostgreSQL verified backup
+
+[Timer]
+Unit=degen-prod-db-backup.service
+OnCalendar=*-*-* 03:15:00 America/Los_Angeles
+RandomizedDelaySec=20m
+AccuracySec=1m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
