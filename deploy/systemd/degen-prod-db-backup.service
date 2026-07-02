@@ -2,6 +2,7 @@
 Description=Degen PostgreSQL verified backup
 After=network-online.target postgresql.service
 Wants=network-online.target
+RefuseManualStart=yes
 
 [Service]
 Type=oneshot

@@ -1405,6 +1405,7 @@ create_backup() {
 parse_arguments() {
     mode=run
     inherited_lock_fd=""
+    requested_now=""
     case $# in
         0)
             ;;
@@ -1418,6 +1419,15 @@ parse_arguments() {
             fi
             inherited_lock_fd=$3
             ;;
+        5)
+            mode=$1
+            if [[ "$2" != "--lock-fd" || ! "$3" =~ ^[0-9]+$ || \
+                  "$4" != "--now" || ! "$5" =~ ^[0-9]{8}T[0-9]{6}Z$ ]]; then
+                die "Unsupported mode or extra arguments"
+            fi
+            inherited_lock_fd=$3
+            requested_now=$5
+            ;;
         *)
             die "Unsupported mode or extra arguments"
             ;;
@@ -1428,6 +1438,20 @@ parse_arguments() {
     esac
     if [[ -n "$inherited_lock_fd" && "$mode" == "run" ]]; then
         die "--lock-fd is not permitted for run mode"
+    fi
+    if [[ -n "$requested_now" ]]; then
+        [[ "$mode" == "remote-retention-dry-run" ]] || \
+            die "--now is permitted only for remote-retention-dry-run mode"
+        local parsed_now
+        if ! parsed_now=$(
+            /usr/bin/date -u \
+                --date="${requested_now:0:8} ${requested_now:9:2}:${requested_now:11:2}:${requested_now:13:2} UTC" \
+                '+%Y%m%dT%H%M%SZ' 2>/dev/null
+        ); then
+            die "--now must be a valid UTC timestamp"
+        fi
+        [[ "$parsed_now" == "$requested_now" ]] || \
+            die "--now must be a valid UTC timestamp"
     fi
 }
 
@@ -1459,7 +1483,11 @@ main() {
         return
     fi
 
-    now=$(date -u '+%Y%m%dT%H%M%SZ')
+    if [[ -n "$requested_now" ]]; then
+        now=$requested_now
+    else
+        now=$(date -u '+%Y%m%dT%H%M%SZ')
+    fi
     [[ "$now" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || die "UTC timestamp was invalid"
 
     if [[ "$mode" == "remote-retention-dry-run" ]]; then

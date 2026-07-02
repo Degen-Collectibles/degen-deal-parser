@@ -540,6 +540,8 @@ def _planner_wrapper(real_planner: str) -> str:
         with Path(os.environ["FAKE_TRACE"]).open("a", encoding="utf-8") as handle:
             handle.write(f"planner:{{mode}}\\n")
             handle.write(f"planner:{{mode}}:{{output_format}}:{{inventory_digest}}\\n")
+            if os.environ.get("FAKE_TRACE_PLANNER_NOW") == "1":
+                handle.write(f"planner-now:{{args[args.index('--now') + 1]}}\\n")
         if os.environ.get("FAKE_FAIL") in {{"planner", f"planner_{{mode}}"}}:
             raise SystemExit(81)
         completed = subprocess.run(
@@ -668,6 +670,9 @@ case "${FAKE_LOCK_FD_CASE:-valid}" in
         exit 65
         ;;
 esac
+if [[ -n "${FAKE_LOCK_FD_NOW:-}" ]]; then
+    exec "$BACKUP_SCRIPT" "$FAKE_LOCK_FD_MODE" --lock-fd 8 --now "$FAKE_LOCK_FD_NOW"
+fi
 exec "$BACKUP_SCRIPT" "$FAKE_LOCK_FD_MODE" --lock-fd 8
 ''',
         )
@@ -809,6 +814,7 @@ exit "$status"
         mode: str,
         *,
         fd_case: str = "valid",
+        frozen_now: str | None = None,
         overrides: dict[str, str | None] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         if not self.lock_file.exists() and not _is_symlink(self.lock_file):
@@ -826,6 +832,7 @@ exit "$status"
                 "FAKE_LOCK_FD_PATH": _posix_path(self.lock_file),
                 "FAKE_WRONG_LOCK_FD_PATH": _posix_path(wrong_file),
                 "FAKE_LOCK_FD_RENAMED_PATH": _posix_path(renamed_file),
+                "FAKE_LOCK_FD_NOW": frozen_now,
             }
         )
         return subprocess.run(
@@ -1219,6 +1226,7 @@ def test_systemd_service_is_exact_oneshot_with_postgres_compatible_hardening() -
             "Description": "Degen PostgreSQL verified backup",
             "After": "network-online.target postgresql.service",
             "Wants": "network-online.target",
+            "RefuseManualStart": "yes",
         },
         "Service": {
             "Type": "oneshot",
@@ -3641,6 +3649,47 @@ def test_inherited_lock_fd_is_validated_flocked_and_kept_for_allowed_modes(
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "flock" in harness.trace_lines()
+
+
+def test_remote_dry_run_uses_operator_frozen_retention_timestamp(
+    harness: BackupHarness,
+) -> None:
+    frozen_now = "20260701T123456Z"
+
+    result = harness.run_with_lock_fd(
+        "remote-retention-dry-run",
+        frozen_now=frozen_now,
+        overrides={"FAKE_TRACE_PLANNER_NOW": "1"},
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    planner_times = [
+        line.removeprefix("planner-now:")
+        for line in harness.trace_lines()
+        if line.startswith("planner-now:")
+    ]
+    assert planner_times
+    assert set(planner_times) == {frozen_now}
+
+
+@pytest.mark.parametrize(
+    ("mode", "frozen_now"),
+    [
+        ("preflight", "20260701T123456Z"),
+        ("remote-retention-dry-run", "20260701T12345Z"),
+        ("remote-retention-dry-run", "20260230T123456Z"),
+    ],
+)
+def test_frozen_retention_timestamp_rejects_wrong_mode_or_invalid_value(
+    harness: BackupHarness,
+    mode: str,
+    frozen_now: str,
+) -> None:
+    result = harness.run_with_lock_fd(mode, frozen_now=frozen_now)
+
+    assert result.returncode != 0
+    assert "psql:database" not in harness.trace_lines()
+    assert not any(line.startswith("rclone:") for line in harness.trace_lines())
 
 
 @pytest.mark.parametrize("fd_case", ["closed", "wrong-file", "replaced-path"])
