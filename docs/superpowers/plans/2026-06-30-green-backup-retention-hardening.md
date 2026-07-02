@@ -240,6 +240,7 @@ complex or duplicate environment input fails before mkdir/log/lock/database/rclo
 runtime directory rejects symlink, wrong owner, and group/world write
 backup log directory/file reject symlink, hard link, wrong owner/mode, and path/descriptor drift before external work
 missing/reused backup log paths become or remain root-owned mode 0700/0600 with a single-link regular log
+the fixed root-owned `/var/log` parent accepts Green's audited `root:syslog` mode 0775 shape but rejects world-write or wrong ownership
 lock file rejects symlink without changing the target sentinel
 existing private regular lock supports overlap detection
 preflight/dry-run accepts only a validated inherited lock FD when an operations transaction owns the lock
@@ -1095,25 +1096,33 @@ other alternative. Automatic recovery/rollback intentionally preserves the
 dedicated log directory and log as evidence outside the seven snapshotted
 install targets.
 
+Read-only Green revalidation during final review confirmed
+`root:syslog 775 0:111 directory /var/log`, `degen:degen 750 /var/log/degen`,
+no pre-existing `/var/log/degen-prod-db-backup`, and `degen` membership only in
+group `degen`. The logger therefore accepts group-write only as part of its
+fixed effective-UID-owned, non-world-writable parent contract; it continues to
+reject a world-writable or wrong-owner parent, and its descriptor-relative
+child/file checks prevent parent-path replacement from redirecting root writes.
+
 The checkpoint asset hashes are environment helper
 `2144cd589a654bbf32c6f2603b4fea73116642d6002f4908e324b024ca902245`,
 operations helper
 `b2d3c8be31d1039cfd306ccb7a6a25ea93acdb3fabba45d8a1c9a69266c99cc5`,
 backup shell
-`b940129920378a1c082be8d82a4b9d4e2f62b3ac7b0b61e407489311f2053e1a`,
+`631e25789267709e557f4f3b3fa9338d72861b9dd4d33c8261f0efb1215bf2f6`,
 environment template
 `0db78d39b9deb3df15316704aa159bc33b0f24eecb1b5ce1d53172ac49ba01bc`,
 systemd service
 `782e44ef10d48b6f46d21ddf3241adf4010b419698d910685033d6523b60df1a`,
 and fixed manifest
-`e1a1f0c5826612dabffa7b0df1446d389d258dc2d667fadab905c66afa7fa26c`.
+`ef15f5b5dd6334ac2134f23eb6f73df3ad457cbb3e6ccad74e5a9dd73d024f17`.
 The environment, operations, and shell test hashes are respectively
 `dbac66a609dacbc72e3d025e87df95df055b99ce03e9825792f42a6be40b323a`,
 `c1e79e67ee34b0e802dcd3988a8e19d87ea7b0d4e81bbf009a2131b02813fcfa`,
-and `29fdb5fb2110af940d7fb41d5c833d8d7ce1e607b5c2307b818de909600cd4b4`.
-Focused logging/migration/systemd verification passed `74` tests with `6`
+and `f470f6f8bd9bcd9a9a6fdd1dde63b4595f028a1914b7def883efe87804454bef`.
+Focused logging/migration/systemd verification passed `77` tests with `6`
 platform skips; selected CPython 3.10.20 compatibility/security verification
-passed `17` tests; and the complete backup/operations gate passed `1692` tests
+passed `20` tests; and the complete backup/operations gate passed `1695` tests
 with `84` expected platform skips. The final repository-wide and immutable
 review gates follow below. No Git remote, Green host, database, timer, service,
 credential, OneDrive remote, or backup object was mutated by this checkpoint.
@@ -1162,6 +1171,8 @@ After push approval, push `codex/backup-retention-hardening` and verify the remo
 Report the exact reviewed SHA, archive/manifest digests, operation directory,
 seven install targets, the dedicated `/var/log/degen-prod-db-backup`
 operational path with root:root `0700`/`0600` directory/file requirements,
+the audited `root:syslog` mode-`0775` `/var/log` parent and proof that `degen`
+is not in `syslog`,
 timer quiescing/restoration, service-inactive and lock controls, rclone
 audit/token-refresh possibility, disposable remote mutation/cleanup, rollback
 scope, the preserved-log evidence limit, irreversible limits, and post-action
@@ -1176,7 +1187,22 @@ directory creation, transfer, install, rclone call, or timer change.
 
 - [ ] **Step 1: Install transactionally**
 
-After the production `proceed`, first define `UTC_STAMP`, `OPERATION_DIR`, `SOURCE_OPS`, and `MANIFEST_SHA256` from the approved immutable-publication evidence. Then perform the standard-tool archive transfer/bootstrap/extraction/verification, and only after those checks invoke `/usr/bin/python3 "$SOURCE_OPS"` for `verify-source`, `prepare-staging`, `snapshot`, and `install`. An incomplete or `recovery_required` transaction before installed-helper verification uses the separate conditional source-routed `/usr/bin/python3 "$SOURCE_OPS" recover` path; recovery is never appended to the normal success sequence. Verify exact installed hashes/modes, timer state restoration, inactive backup service, unchanged application/PostgreSQL/web/worker/bot PIDs, operation-state completeness, exact root:root mode `0700` metadata for `/var/log/degen-prod-db-backup`, exact root:root mode `0600` and single-link regular-file metadata for its log, and an exact SHA-256 match between `/usr/local/sbin/degen-prod-db-backup-ops` and its reviewed manifest entry.
+After the production `proceed`, first define `UTC_STAMP`, `OPERATION_DIR`,
+`SOURCE_OPS`, and `MANIFEST_SHA256` from the approved immutable-publication
+evidence. Then perform the standard-tool archive
+transfer/bootstrap/extraction/verification, and only after those checks invoke
+`/usr/bin/python3 "$SOURCE_OPS"` for `verify-source`, `prepare-staging`,
+`snapshot`, and `install`. An incomplete or `recovery_required` transaction
+before installed-helper verification uses the separate conditional
+source-routed `/usr/bin/python3 "$SOURCE_OPS" recover` path; recovery is never
+appended to the normal success sequence. Verify exact installed hashes/modes,
+timer state restoration, inactive backup service, unchanged
+application/PostgreSQL/web/worker/bot PIDs, operation-state completeness,
+exact `root:syslog` mode `0775` metadata for `/var/log`, proof that `degen` is
+not in `syslog`, exact root:root mode `0700` metadata for
+`/var/log/degen-prod-db-backup`, exact root:root mode `0600` and single-link
+regular-file metadata for its log, and an exact SHA-256 match between
+`/usr/local/sbin/degen-prod-db-backup-ops` and its reviewed manifest entry.
 
 - [ ] **Step 2: Run the disposable probe and production dry-run**
 

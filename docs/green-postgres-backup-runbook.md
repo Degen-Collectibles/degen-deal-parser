@@ -82,6 +82,14 @@ and path/descriptor identity checks. The exact audited legacy managed value
 `LOG_DIR=/var/log/degen` is migrated during staging; any other non-default log
 path fails closed.
 
+Green's verified parent metadata is `root:syslog 775 /var/log`, and the
+verified membership result is `degen_in_syslog=no`. The logger therefore
+requires the fixed parent to be a real effective-UID-owned directory with no
+world-write bit, while allowing its audited trusted-group write bit. The held
+directory/file descriptors plus repeated path/inode checks prevent that parent
+mode from redirecting root writes. Any parent ownership change, world-write
+bit, symlink, or path/descriptor drift stops the run.
+
 ## Gate 1: push the exact reviewed commit
 
 This gate authorizes only a normal, non-force push of the reviewed local commit
@@ -204,7 +212,7 @@ read-only preflight. It prints no environment or configuration contents:
 ```bash
 brev exec --help | grep -F -- '--host'
 brev copy --help | grep -F -- '--host'
-brev exec openclaw-9902ae --host 'set -eu; printf "host=%s uid=%s gid=%s\n" "$(hostname -s)" "$(id -u)" "$(id -g)"; test -d /opt/degen/app; test -d /opt/degen/backups; command -v git tar sha256sum python3 find stat cmp >/dev/null'
+brev exec openclaw-9902ae --host 'set -eu; printf "host=%s uid=%s gid=%s\n" "$(hostname -s)" "$(id -u)" "$(id -g)"; test -d /opt/degen/app; test -d /opt/degen/backups; command -v git tar sha256sum python3 find stat cmp id tr grep >/dev/null; test "$(stat -Lc "%U:%G %a %F" /var/log)" = "root:syslog 775 directory"; if id -nG degen | tr " " "\n" | grep -Fx syslog >/dev/null; then printf "%s\n" "ERROR: degen unexpectedly belongs to syslog" >&2; exit 1; fi; printf "%s\n" "log_parent=root:syslog 775 directory" "degen_in_syslog=no"'
 ```
 
 Validate both digests as lowercase 64-hex, the commit as lowercase 40-hex, the
@@ -219,7 +227,9 @@ for a new explicit `proceed`:
   bootstrap-verify it; snapshot current host state; install the reviewed
   assets with pruning disabled; normalize only the audited legacy shared log
   value; create or reuse the dedicated root:root mode-`0700` log directory and
-  root:root mode-`0600` log file; let the helper quiesce/restore the timer;
+  root:root mode-`0600` log file under the verified root-owned,
+  non-world-writable `root:syslog` mode-`0775` parent; let the helper
+  quiesce/restore the timer;
   perform a disposable remote probe; and record a remote-prune dry run. Once a
   previously active timer is restored, either a persistent catch-up or any
   ordinary scheduled run before Gate 3 can run a backup and local retention.
@@ -241,8 +251,9 @@ for a new explicit `proceed`:
   worker, bot, or PostgreSQL. `RefuseManualStart=yes` remains enforced for the
   backup service.
 - Verification: durable phase receipts, exact target hashes/modes/ownership,
-  timer restoration (including whether a catch-up run occurred), remote probe
-  cleanup, and the zero-remote-deletion dry-run report.
+  exact log parent/child/file ownership and modes plus `degen` group
+  separation, timer restoration (including whether a catch-up run occurred),
+  remote probe cleanup, and the zero-remote-deletion dry-run report.
 - Rollback: interrupted mutations use only Conditional recovery below. A
   stable completed transaction needs the later, separately approved manual
   rollback gate. Neither path deletes `/var/log/degen-prod-db-backup` or its

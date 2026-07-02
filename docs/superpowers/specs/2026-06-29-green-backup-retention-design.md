@@ -18,6 +18,7 @@ Overwriting one fixed filename would reduce storage but could replace the only g
 - Green has only Python 3.10.12 available through its system `python3` paths.
 - `/run/lock` is root-owned but mode `1777`; the proposed lock must not live directly there under a predictable filename.
 - `/etc/degen/rclone.conf` is a regular root-owned `0600` file under a root-owned `0750` directory.
+- `/var/log` is `root:syslog` mode `0775` on Green. The `degen` account belongs only to group `degen`, not `syslog`; the dedicated backup-log child therefore remains outside the app account's writable boundary.
 - `/etc/degen/prod-db-backup.env` currently contains only simple, single-line assignments, no continuations, multiline quotes, or duplicate keys. Its legacy `LOG_DIR=/var/log/degen` value points into the app-owned log directory; staging must migrate exactly that value to the dedicated root-only backup log directory and reject every other override.
 - `/opt/degen/backups/db` is a root-owned, non-symlink `0750` directory with one complete dump/checksum pair.
 - The installed script, service, timer, environment contract, and runbook are not yet tracked on `main`.
@@ -116,6 +117,12 @@ fail-closed. `LogsDirectory=degen-prod-db-backup` and
 runtime logger independently validates directory and file type, owner, mode,
 link count, and path/descriptor identity before every write session.
 
+The fixed parent `/var/log` must remain a real effective-UID-owned directory
+with no world-write bit. Its audited `root:syslog` mode `0775` is accepted:
+group-write on the parent cannot redirect writes through the held child/file
+descriptors, while the app account is not a `syslog` member. A world-writable,
+wrong-owner, symlinked, or path-replaced parent remains fail-closed.
+
 ## Transactional Installation
 
 1. Complete local tests and whole-change review.
@@ -154,7 +161,7 @@ No checkout switch, app deployment, or application/database service restart occu
 - Orchestrator tests model real rclone 1.74.1 direct-operation semantics, strict no-existing flags, signals, cleanup failures, symlink/no-clobber paths, secure log-directory creation and reuse, service/direct configuration parity, and destructive failure ordering.
 - A local official-rclone 1.74.1 probe verifies absent/existing behavior for `copyto` and `moveto` with the selected flags.
 - Shell syntax, systemd directives, timer calendar, focused tests, and the full repository suite pass before each commit.
-- The production preflight verifies Green's Python version, exact source SHA/manifest, effective non-secret configuration, lock/runtime directory, backup directory, rclone metadata, timer/service state, disk, existing pair integrity, and unchanged application/database PIDs.
+- The production preflight verifies Green's Python version, exact source SHA/manifest, effective non-secret configuration, the live `root:syslog` mode-`0775` non-world-writable `/var/log` parent and `degen` non-membership in `syslog`, lock/runtime directory, backup directory, rclone metadata, timer/service state, disk, existing pair integrity, and unchanged application/database PIDs.
 - A disposable approved OneDrive prefix verifies no-clobber and cleanup behavior without touching production backup objects.
 - The next-run gate requires service success, a trigger/start after the recorded policy epoch, a fresh success log, fresh dump/sidecar mtimes, valid sidecar grammar, SHA-256, archive listing, installed hash parity, local two-pair policy, remote integrity, and unchanged application/database PIDs.
 

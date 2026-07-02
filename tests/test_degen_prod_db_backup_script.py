@@ -1176,6 +1176,7 @@ def test_source_declares_safe_shell_contract_and_live_defaults() -> None:
     assert "metadata.st_gid" in source
     assert "st_nlink != 1" in source
     assert "same_identity(log_fd_metadata, log_path_metadata)" in source
+    assert "stat.S_IMODE(metadata.st_mode) & 0o002" in source
     assert "flock tee rclone" not in source
     for key in MANAGED_KEYS:
         assert not re.search(rf"^{key}=\$\{{{key}:-", source, re.MULTILINE)
@@ -1483,6 +1484,57 @@ def test_missing_log_directory_is_created_private_and_owned_by_effective_uid(
     assert file_mode == 0o600
     assert file_links == 1
     assert file_kind == "regular file"
+
+
+def test_group_writable_non_world_writable_log_parent_is_accepted(
+    harness: BackupHarness,
+) -> None:
+    _chmod(harness.root, 0o775)
+    try:
+        result = harness.run("preflight")
+    finally:
+        _chmod(harness.root, 0o700)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert harness.log_file.exists()
+    assert "psql:database" in harness.trace_lines()
+
+
+def test_world_writable_log_parent_is_rejected_before_external_work(
+    harness: BackupHarness,
+) -> None:
+    _chmod(harness.root, 0o777)
+    try:
+        result = harness.run("preflight")
+    finally:
+        _chmod(harness.root, 0o700)
+
+    assert result.returncode != 0
+    assert "Secure backup logging failed" in result.stdout + result.stderr
+    assert not harness.log_file.exists()
+    assert "psql:database" not in harness.trace_lines()
+    assert "pg_dump" not in harness.trace_lines()
+
+
+def test_log_parent_owned_by_another_uid_is_rejected_before_external_work(
+    harness: BackupHarness,
+) -> None:
+    effective_uid = _effective_uid()
+    if effective_uid == 0:
+        pytest.skip("requires a non-root harness user")
+    _chmod(harness.root, 0o755)
+    _chown(harness.root, 0)
+    try:
+        result = harness.run("preflight")
+    finally:
+        _chown(harness.root, effective_uid)
+        _chmod(harness.root, 0o700)
+
+    assert result.returncode != 0
+    assert "Secure backup logging failed" in result.stdout + result.stderr
+    assert not harness.log_file.exists()
+    assert "psql:database" not in harness.trace_lines()
+    assert "pg_dump" not in harness.trace_lines()
 
 
 def test_existing_private_log_file_is_reused_only_in_append_mode(
@@ -1804,6 +1856,8 @@ def test_task9_runbook_bootstrap_and_source_success_path_are_ordered() -> None:
     assert "outside those seven snapshotted" in runbook
     assert "LOG_DIR=/var/log/degen` is migrated" in runbook
     assert "any other non-default log" in runbook
+    assert "root:syslog 775" in runbook
+    assert "degen_in_syslog=no" in runbook
     for asset in (
         "deploy/linux/degen-prod-db-backup.sh",
         "deploy/linux/degen-prod-db-retention.py",

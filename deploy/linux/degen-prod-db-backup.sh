@@ -235,7 +235,7 @@ def validate_parent(metadata, effective_uid):
         fail()
     if metadata.st_uid != effective_uid:
         fail()
-    if stat.S_IMODE(metadata.st_mode) & 0o022:
+    if stat.S_IMODE(metadata.st_mode) & 0o002:
         fail()
 
 
