@@ -60,7 +60,7 @@ SOURCE_COMMIT = "1" * 40
 EFFECTIVE_CONFIG = {
     "APP_ENV_FILE": "/opt/degen/web.env",
     "BACKUP_DIR": "/opt/degen/backups/db",
-    "LOG_DIR": "/var/log/degen",
+    "LOG_DIR": "/var/log/degen-prod-db-backup",
     "RCLONE_CONFIG": "/etc/degen/rclone.conf",
     "RCLONE_REMOTE_PATH": "onedrive:backups/degen-db",
     "KEEP_LOCAL_COUNT": "2",
@@ -5632,6 +5632,48 @@ def test_prepare_host_staging_builds_exact_assets_manifest_and_state(tmp_path: P
         "recovery",
     ):
         assert state[field] is None
+
+
+def test_prepare_host_staging_migrates_only_the_legacy_shared_log_directory(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = host_staging_fixture(module, tmp_path)
+    managed_path = fixture["managed_path"]
+    managed_path.write_bytes(
+        managed_path.read_bytes().replace(
+            b"LOG_DIR=/var/log/degen-prod-db-backup\n",
+            b"LOG_DIR=/var/log/degen\n",
+        )
+    )
+
+    result = module.prepare_host_staging(context)
+
+    assert result["effective_config"]["LOG_DIR"] == "/var/log/degen-prod-db-backup"
+    staged = context.paths.staged_dir / "host/etc/degen/prod-db-backup.env"
+    assert b"LOG_DIR=/var/log/degen-prod-db-backup\n" in staged.read_bytes()
+    assert b"LOG_DIR=/var/log/degen\n" not in staged.read_bytes()
+
+
+def test_prepare_host_staging_rejects_nonlegacy_log_directory_override(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = host_staging_fixture(module, tmp_path)
+    managed_path = fixture["managed_path"]
+    managed_path.write_bytes(
+        managed_path.read_bytes().replace(
+            b"LOG_DIR=/var/log/degen-prod-db-backup\n",
+            b"LOG_DIR=/var/log/arbitrary-backup-path\n",
+        )
+    )
+    before = context.paths.state_file.read_bytes()
+
+    with pytest.raises(module.OperationStateError, match="managed environment"):
+        module.prepare_host_staging(context)
+
+    assert context.paths.state_file.read_bytes() == before
+    assert not context.paths.staged_dir.exists()
 
 
 def test_prepare_host_staging_no_existing_pair_fails_before_staging_or_state(

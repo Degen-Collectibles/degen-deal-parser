@@ -69,7 +69,9 @@ resolve_runtime_configuration_paths() {
     for variable in \
         DEGEN_BACKUP_TEST_MODE \
         DEGEN_BACKUP_TEST_ENV_FILE \
-        DEGEN_BACKUP_TEST_ENV_HELPER; do
+        DEGEN_BACKUP_TEST_ENV_HELPER \
+        DEGEN_BACKUP_TEST_LOGGER_EXIT_AFTER \
+        DEGEN_BACKUP_TEST_LOGGER_REPLACE_PATH_AFTER_OPEN; do
         if [[ -v "$variable" ]]; then
             test_variable_present=1
         fi
@@ -211,11 +213,230 @@ timestamp_stream() {
 }
 
 
+run_secure_log_helper() {
+    local action=$1
+    local test_exit_after=${DEGEN_BACKUP_TEST_LOGGER_EXIT_AFTER:-}
+    /usr/bin/python3 -c '
+import os
+import stat
+import sys
+
+
+def fail():
+    raise RuntimeError("secure logger validation failed")
+
+
+def same_identity(left, right):
+    return left.st_dev == right.st_dev and left.st_ino == right.st_ino
+
+
+def validate_parent(metadata, effective_uid):
+    if not stat.S_ISDIR(metadata.st_mode):
+        fail()
+    if metadata.st_uid != effective_uid:
+        fail()
+    if stat.S_IMODE(metadata.st_mode) & 0o022:
+        fail()
+
+
+def validate_directory(metadata, effective_uid, effective_gid):
+    if not stat.S_ISDIR(metadata.st_mode):
+        fail()
+    if metadata.st_uid != effective_uid:
+        fail()
+    if metadata.st_gid != effective_gid:
+        fail()
+    if stat.S_IMODE(metadata.st_mode) != 0o700:
+        fail()
+
+
+def validate_log_file(metadata, effective_uid, effective_gid):
+    if not stat.S_ISREG(metadata.st_mode):
+        fail()
+    if metadata.st_uid != effective_uid:
+        fail()
+    if metadata.st_gid != effective_gid:
+        fail()
+    if stat.S_IMODE(metadata.st_mode) != 0o600:
+        fail()
+    if metadata.st_nlink != 1:
+        fail()
+
+
+def write_all(descriptor, payload):
+    view = memoryview(payload)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            fail()
+        view = view[written:]
+
+
+def revalidate_path_binding(parent_path, parent_fd, directory_name, directory_fd, log_name, log_fd):
+    effective_uid = os.geteuid()
+    effective_gid = os.getegid()
+    parent_fd_metadata = os.fstat(parent_fd)
+    parent_path_metadata = os.stat(parent_path, follow_symlinks=False)
+    validate_parent(parent_fd_metadata, effective_uid)
+    if not same_identity(parent_fd_metadata, parent_path_metadata):
+        fail()
+
+    directory_fd_metadata = os.fstat(directory_fd)
+    directory_path_metadata = os.stat(
+        directory_name,
+        dir_fd=parent_fd,
+        follow_symlinks=False,
+    )
+    validate_directory(directory_fd_metadata, effective_uid, effective_gid)
+    if not same_identity(directory_fd_metadata, directory_path_metadata):
+        fail()
+
+    log_fd_metadata = os.fstat(log_fd)
+    log_path_metadata = os.stat(log_name, dir_fd=directory_fd, follow_symlinks=False)
+    validate_log_file(log_fd_metadata, effective_uid, effective_gid)
+    if not same_identity(log_fd_metadata, log_path_metadata):
+        fail()
+
+
+def main():
+    if len(sys.argv) != 5:
+        fail()
+    action, log_dir, log_name, test_exit_after = sys.argv[1:]
+    if action not in {"prepare", "stream"}:
+        fail()
+    if log_name != "prod-db-backup.log":
+        fail()
+    if not os.path.isabs(log_dir) or os.path.normpath(log_dir) != log_dir:
+        fail()
+
+    effective_uid = os.geteuid()
+    effective_gid = os.getegid()
+    if effective_uid == 0 and log_dir != "/var/log/degen-prod-db-backup":
+        fail()
+    if test_exit_after and os.environ.get("DEGEN_BACKUP_TEST_MODE") != "1":
+        fail()
+    test_replace_path = os.environ.get(
+        "DEGEN_BACKUP_TEST_LOGGER_REPLACE_PATH_AFTER_OPEN",
+        "",
+    )
+    if test_replace_path not in {"", "1"}:
+        fail()
+    if test_replace_path and os.environ.get("DEGEN_BACKUP_TEST_MODE") != "1":
+        fail()
+
+    parent_path = os.path.dirname(log_dir)
+    directory_name = os.path.basename(log_dir)
+    if not parent_path or directory_name in {"", ".", ".."}:
+        fail()
+
+    directory_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
+    file_flags = (
+        os.O_WRONLY
+        | os.O_APPEND
+        | os.O_CREAT
+        | os.O_CLOEXEC
+        | os.O_NOFOLLOW
+        | os.O_NONBLOCK
+    )
+    parent_fd = None
+    directory_fd = None
+    log_fd = None
+    try:
+        parent_fd = os.open(parent_path, directory_flags)
+        parent_metadata = os.fstat(parent_fd)
+        validate_parent(parent_metadata, effective_uid)
+        parent_path_metadata = os.stat(parent_path, follow_symlinks=False)
+        if not same_identity(parent_metadata, parent_path_metadata):
+            fail()
+
+        try:
+            os.mkdir(directory_name, 0o700, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
+        directory_fd = os.open(directory_name, directory_flags, dir_fd=parent_fd)
+        directory_metadata = os.fstat(directory_fd)
+        directory_path_metadata = os.stat(
+            directory_name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+        validate_directory(directory_metadata, effective_uid, effective_gid)
+        if not same_identity(directory_metadata, directory_path_metadata):
+            fail()
+
+        log_fd = os.open(log_name, file_flags, 0o600, dir_fd=directory_fd)
+        if test_replace_path:
+            replaced_name = log_name + ".test-replaced"
+            os.rename(
+                log_name,
+                replaced_name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+            replacement_fd = os.open(
+                log_name,
+                file_flags | os.O_EXCL,
+                0o600,
+                dir_fd=directory_fd,
+            )
+            os.close(replacement_fd)
+        revalidate_path_binding(
+            parent_path,
+            parent_fd,
+            directory_name,
+            directory_fd,
+            log_name,
+            log_fd,
+        )
+        if action == "prepare":
+            return
+
+        marker = test_exit_after.encode("utf-8")
+        marker_tail = b""
+        while True:
+            payload = os.read(0, 65536)
+            if not payload:
+                break
+            marker_window = marker_tail + payload
+            marker_seen = bool(marker) and marker in marker_window
+            if marker:
+                tail_length = max(len(marker) - 1, 0)
+                marker_tail = marker_window[-tail_length:] if tail_length else b""
+            write_all(log_fd, payload)
+            write_all(1, payload)
+            if marker_seen:
+                raise SystemExit(96)
+        os.fsync(log_fd)
+        revalidate_path_binding(
+            parent_path,
+            parent_fd,
+            directory_name,
+            directory_fd,
+            log_name,
+            log_fd,
+        )
+    finally:
+        for descriptor in (log_fd, directory_fd, parent_fd):
+            if descriptor is not None:
+                os.close(descriptor)
+
+
+try:
+    main()
+except SystemExit:
+    raise
+except Exception:
+    sys.stderr.write("ERROR: Secure backup logging failed\n")
+    raise SystemExit(96)
+' "$action" "$LOG_DIR" "prod-db-backup.log" "$test_exit_after"
+}
+
+
 start_logging() {
     exec {original_stdout_fd}>&1 {original_stderr_fd}>&2
     coproc LOGGER_PROCESS {
         set -o pipefail
-        timestamp_stream | tee -a "$LOG_FILE" >&${original_stdout_fd}
+        timestamp_stream | run_secure_log_helper stream >&${original_stdout_fd}
     }
     logger_pid=$LOGGER_PROCESS_PID
     logger_read_fd=${LOGGER_PROCESS[0]}
@@ -611,7 +832,7 @@ finish_rclone_config_receipts() {
 require_tools() {
     local tool
     local -a tools=(
-        python3 psql pg_dump pg_restore sha256sum stat df awk flock tee rclone
+        python3 psql pg_dump pg_restore sha256sum stat df awk flock rclone
         hostname date mktemp mv rm
     )
     for tool in "${tools[@]}"; do
@@ -1463,7 +1684,8 @@ main() {
     load_managed_configuration
     validate_configuration
 
-    mkdir -p -- "$BACKUP_DIR" "$LOG_DIR"
+    mkdir -p -- "$BACKUP_DIR"
+    run_secure_log_helper prepare </dev/null >/dev/null
     trap cleanup_on_exit EXIT
     trap 'exit 129' HUP
     trap 'exit 130' INT

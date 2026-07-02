@@ -1,6 +1,6 @@
 # Green PostgreSQL backup retention runbook
 
-Last reviewed: 2026-06-30
+Last reviewed: 2026-07-01
 
 This is the production execution guide for Green/Brev host `openclaw-9902ae`.
 The application directory remains `/opt/degen/app`, but no production source is
@@ -72,6 +72,15 @@ The corresponding install targets are:
 /etc/systemd/system/degen-prod-db-backup.timer
 /etc/degen/prod-db-backup.env
 ```
+
+The service also owns one operational path outside those seven snapshotted
+install targets: `/var/log/degen-prod-db-backup` must be a root:root mode-`0700`
+real directory, and `prod-db-backup.log`, when present, must be a root:root
+mode-`0600`, single-link regular file. Systemd and the runtime logger create or
+reuse that path only after independent no-follow, ownership, mode, link-count,
+and path/descriptor identity checks. The exact audited legacy managed value
+`LOG_DIR=/var/log/degen` is migrated during staging; any other non-default log
+path fails closed.
 
 ## Gate 1: push the exact reviewed commit
 
@@ -204,17 +213,21 @@ the still-equal remote branch SHA. Then present this exact preflight and wait
 for a new explicit `proceed`:
 
 - Target: host `openclaw-9902ae`, exact `OPERATION_DIR`, temporary
-  `REMOTE_ARCHIVE`, and the seven install targets listed above.
+  `REMOTE_ARCHIVE`, the seven install targets listed above, and the dedicated
+  operational log path `/var/log/degen-prod-db-backup`.
 - Changes: create a root-only operation directory; transfer `source.tar`;
   bootstrap-verify it; snapshot current host state; install the reviewed
-  assets with pruning disabled; let the helper quiesce/restore the timer;
+  assets with pruning disabled; normalize only the audited legacy shared log
+  value; create or reuse the dedicated root:root mode-`0700` log directory and
+  root:root mode-`0600` log file; let the helper quiesce/restore the timer;
   perform a disposable remote probe; and record a remote-prune dry run. Once a
   previously active timer is restored, either a persistent catch-up or any
   ordinary scheduled run before Gate 3 can run a backup and local retention.
 - Reversible: the operation-local source/staging/snapshot/state evidence and
   all installed targets are covered by the helper's verified snapshot and
   recovery/rollback contract. Database dump files are not part of that
-  snapshot.
+  snapshot. The dedicated log directory and log file are also outside that
+  snapshot and are deliberately preserved as evidence during rollback.
 - Irreversible: remote retention deletion remains disabled in this gate, but
   any catch-up or later scheduled run after timer restoration can apply the
   approved local newest-2 policy before Gate 3 and irreversibly delete older
@@ -232,7 +245,8 @@ for a new explicit `proceed`:
   cleanup, and the zero-remote-deletion dry-run report.
 - Rollback: interrupted mutations use only Conditional recovery below. A
   stable completed transaction needs the later, separately approved manual
-  rollback gate.
+  rollback gate. Neither path deletes `/var/log/degen-prod-db-backup` or its
+  log; removal requires a separate explicit cleanup preflight and approval.
 
 No production mutation described below this point is run before that
 production approval.
@@ -582,6 +596,8 @@ Rollback restores only targets represented in the verified host snapshot. It
 does not automatically restore `rclone.conf.audit`, because that file is audit
 evidence rather than a rollback target. It cannot restore deleted local backups
 or deleted OneDrive objects, and it does not restart the application, worker,
-bot, or PostgreSQL.
+bot, or PostgreSQL. It also leaves `/var/log/degen-prod-db-backup` and its log
+in place because they are operational evidence outside the seven install
+targets; do not delete them without a separate explicit cleanup decision.
 If rollback fails or leaves a recovery phase, use Conditional recovery only;
 never copy snapshot files into place by hand.

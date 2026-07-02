@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import textwrap
 from dataclasses import dataclass
@@ -107,6 +108,19 @@ def _hardlink(target: Path, link: Path) -> None:
         os.link(target, link)
 
 
+def _mkfifo(path: Path) -> None:
+    if os.name == "nt":
+        subprocess.run(
+            ["wsl.exe", "-e", "mkfifo", _posix_path(path)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+    else:
+        os.mkfifo(path, 0o600)
+
+
 def _is_symlink(path: Path) -> bool:
     if os.name == "nt":
         return subprocess.run(
@@ -132,6 +146,19 @@ def _chown(path: Path, uid: int) -> None:
         os.chown(path, uid, -1)
 
 
+def _chgrp(path: Path, gid: int) -> None:
+    if os.name == "nt":
+        subprocess.run(
+            ["wsl.exe", "-u", "root", "-e", "chgrp", str(gid), _posix_path(path)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+    else:
+        os.chown(path, -1, gid)
+
+
 def _effective_uid() -> int:
     if os.name == "nt":
         return int(
@@ -144,6 +171,54 @@ def _effective_uid() -> int:
             ).stdout.strip()
         )
     return os.geteuid()
+
+
+def _effective_gid() -> int:
+    if os.name == "nt":
+        return int(
+            subprocess.run(
+                ["wsl.exe", "-e", "id", "-g"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=True,
+            ).stdout.strip()
+        )
+    return os.getegid()
+
+
+def _posix_metadata(path: Path) -> tuple[int, int, int, int, str]:
+    if os.name == "nt":
+        output = subprocess.run(
+            [
+                "wsl.exe",
+                "-e",
+                "stat",
+                "-Lc",
+                "%u|%g|%a|%h|%F",
+                _posix_path(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        ).stdout.strip()
+        owner, group, mode, links, kind = output.split("|", 4)
+        return int(owner), int(group), int(mode, 8), int(links), kind
+    metadata = path.stat()
+    return (
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_mode & 0o7777,
+        metadata.st_nlink,
+        (
+            "regular file"
+            if stat.S_ISREG(metadata.st_mode)
+            else "fifo"
+            if stat.S_ISFIFO(metadata.st_mode)
+            else "other"
+        ),
+    )
 
 
 def _native_behavior_root(tmp_path: Path) -> Path:
@@ -257,22 +332,7 @@ def remote_path(value):
     return matches[0] if matches else root / relative
 
 
-if name == "tee":
-    targets = [item for item in args if item != "-a" and not item.startswith("-")]
-    if len(targets) != 1:
-        raise SystemExit(87)
-    marker = os.environ.get("FAKE_TEE_EXIT_AFTER", "")
-    mode = "a" if "-a" in args else "w"
-    with Path(targets[0]).open(mode, encoding="utf-8") as log_handle:
-        for line in sys.stdin:
-            log_handle.write(line)
-            log_handle.flush()
-            sys.stdout.write(line)
-            sys.stdout.flush()
-            if marker and marker in line:
-                trace("tee:exit-after-marker")
-                raise SystemExit(96)
-elif name == "hostname":
+if name == "hostname":
     trace("hostname")
     print(os.environ.get("FAKE_HOST", "green"))
 elif name == "date":
@@ -1107,6 +1167,16 @@ def test_source_declares_safe_shell_contract_and_live_defaults() -> None:
     assert f'FIXED_BACKUP_ENV_FILE="{FIXED_BACKUP_ENV_FILE}"' in source
     assert f'FIXED_ENV_HELPER="{FIXED_ENV_HELPER}"' in source
     assert 'LOG_FILE="$LOG_DIR/prod-db-backup.log"' in source
+    assert "run_secure_log_helper" in source
+    assert 'timestamp_stream | run_secure_log_helper stream' in source
+    assert 'tee -a "$LOG_FILE"' not in source
+    assert "os.O_NOFOLLOW" in source
+    assert "os.O_NONBLOCK" in source
+    assert "stat.S_ISREG" in source
+    assert "metadata.st_gid" in source
+    assert "st_nlink != 1" in source
+    assert "same_identity(log_fd_metadata, log_path_metadata)" in source
+    assert "flock tee rclone" not in source
     for key in MANAGED_KEYS:
         assert not re.search(rf"^{key}=\$\{{{key}:-", source, re.MULTILINE)
     assert not re.search(r"^LOG_FILE=\$\{LOG_FILE:-", source, re.MULTILINE)
@@ -1133,6 +1203,8 @@ def test_systemd_service_is_exact_oneshot_with_postgres_compatible_hardening() -
             "RuntimeDirectory": "degen-prod-db-backup",
             "RuntimeDirectoryMode": "0700",
             "RuntimeDirectoryPreserve": "yes",
+            "LogsDirectory": "degen-prod-db-backup",
+            "LogsDirectoryMode": "0700",
             "TimeoutStartSec": "infinity",
             "TimeoutStopSec": "90",
             "KillMode": "control-group",
@@ -1190,7 +1262,7 @@ def test_env_template_has_exact_secret_free_defaults_and_preservation_warning() 
     assert assignments == {
         "APP_ENV_FILE": "/opt/degen/web.env",
         "BACKUP_DIR": "/opt/degen/backups/db",
-        "LOG_DIR": "/var/log/degen",
+        "LOG_DIR": "/var/log/degen-prod-db-backup",
         "RCLONE_CONFIG": "/etc/degen/rclone.conf",
         "RCLONE_REMOTE_PATH": "onedrive:backups/degen-db",
         "KEEP_LOCAL_COUNT": "2",
@@ -1375,6 +1447,221 @@ def test_arbitrary_inherited_log_file_is_rejected_before_logging(
     assert "psql:database" not in harness.trace_lines()
 
 
+def test_symlinked_log_directory_is_rejected_before_external_work(
+    harness: BackupHarness,
+) -> None:
+    alternate = harness.root / "alternate-logs"
+    alternate.mkdir(mode=0o700)
+    _chmod(alternate, 0o700)
+    harness.log_dir.rmdir()
+    _symlink(alternate, harness.log_dir)
+
+    result = harness.run("preflight")
+
+    assert result.returncode != 0
+    assert "Secure backup logging failed" in result.stdout + result.stderr
+    assert not (alternate / "prod-db-backup.log").exists()
+    assert "psql:database" not in harness.trace_lines()
+    assert "pg_dump" not in harness.trace_lines()
+
+
+def test_missing_log_directory_is_created_private_and_owned_by_effective_uid(
+    harness: BackupHarness,
+) -> None:
+    harness.log_dir.rmdir()
+
+    result = harness.run("preflight")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    directory_owner, directory_group, directory_mode, _, _ = _posix_metadata(harness.log_dir)
+    file_owner, file_group, file_mode, file_links, file_kind = _posix_metadata(harness.log_file)
+    assert directory_owner == _effective_uid()
+    assert directory_group == _effective_gid()
+    assert directory_mode == 0o700
+    assert file_owner == _effective_uid()
+    assert file_group == _effective_gid()
+    assert file_mode == 0o600
+    assert file_links == 1
+    assert file_kind == "regular file"
+
+
+def test_existing_private_log_file_is_reused_only_in_append_mode(
+    harness: BackupHarness,
+) -> None:
+    first = harness.run("preflight")
+    assert first.returncode == 0, first.stdout + first.stderr
+    first_bytes = harness.log_file.read_bytes()
+    assert first_bytes
+
+    second = harness.run("preflight")
+
+    assert second.returncode == 0, second.stdout + second.stderr
+    second_bytes = harness.log_file.read_bytes()
+    assert second_bytes.startswith(first_bytes)
+    assert len(second_bytes) > len(first_bytes)
+    owner, group, mode, links, kind = _posix_metadata(harness.log_file)
+    assert owner == _effective_uid()
+    assert group == _effective_gid()
+    assert mode == 0o600
+    assert links == 1
+    assert kind == "regular file"
+
+
+def test_symlinked_log_file_is_rejected_without_changing_target(
+    harness: BackupHarness,
+) -> None:
+    target = harness.root / "log-target-sentinel"
+    sentinel = b"do-not-append-to-me\n"
+    target.write_bytes(sentinel)
+    _chmod(target, 0o600)
+    _symlink(target, harness.log_file)
+
+    result = harness.run("preflight")
+
+    assert result.returncode != 0
+    assert "Secure backup logging failed" in result.stdout + result.stderr
+    assert target.read_bytes() == sentinel
+    assert "psql:database" not in harness.trace_lines()
+
+
+def test_hard_linked_log_file_is_rejected_without_changing_target(
+    harness: BackupHarness,
+) -> None:
+    target = harness.root / "hard-link-target-sentinel"
+    sentinel = b"do-not-append-to-me\n"
+    target.write_bytes(sentinel)
+    _chmod(target, 0o600)
+    _hardlink(target, harness.log_file)
+
+    result = harness.run("preflight")
+
+    assert result.returncode != 0
+    assert "Secure backup logging failed" in result.stdout + result.stderr
+    assert target.read_bytes() == sentinel
+    assert _posix_metadata(target)[3] == 2
+    assert "psql:database" not in harness.trace_lines()
+
+
+def test_log_directory_with_unsafe_mode_is_rejected_before_external_work(
+    harness: BackupHarness,
+) -> None:
+    _chmod(harness.log_dir, 0o750)
+
+    result = harness.run("preflight")
+
+    assert result.returncode != 0
+    assert "Secure backup logging failed" in result.stdout + result.stderr
+    assert not harness.log_file.exists()
+    assert "psql:database" not in harness.trace_lines()
+
+
+def test_log_directory_owned_by_another_uid_is_rejected_before_external_work(
+    harness: BackupHarness,
+) -> None:
+    effective_uid = _effective_uid()
+    if effective_uid == 0:
+        pytest.skip("requires a non-root harness user")
+    _chown(harness.log_dir, 0)
+    try:
+        result = harness.run("preflight")
+    finally:
+        _chown(harness.log_dir, effective_uid)
+
+    assert result.returncode != 0
+    assert "Secure backup logging failed" in result.stdout + result.stderr
+    assert not harness.log_file.exists()
+    assert "psql:database" not in harness.trace_lines()
+
+
+def test_existing_log_file_with_unsafe_mode_is_rejected_without_writing(
+    harness: BackupHarness,
+) -> None:
+    sentinel = b"existing-log-sentinel\n"
+    harness.log_file.write_bytes(sentinel)
+    _chmod(harness.log_file, 0o640)
+
+    result = harness.run("preflight")
+
+    assert result.returncode != 0
+    assert "Secure backup logging failed" in result.stdout + result.stderr
+    assert harness.log_file.read_bytes() == sentinel
+    assert "psql:database" not in harness.trace_lines()
+
+
+def test_existing_log_file_owned_by_another_uid_is_rejected_without_writing(
+    harness: BackupHarness,
+) -> None:
+    effective_uid = _effective_uid()
+    if effective_uid == 0:
+        pytest.skip("requires a non-root harness user")
+    sentinel = b"existing-log-sentinel\n"
+    harness.log_file.write_bytes(sentinel)
+    _chmod(harness.log_file, 0o600)
+    _chown(harness.log_file, 0)
+    try:
+        result = harness.run("preflight")
+    finally:
+        _chown(harness.log_file, effective_uid)
+
+    assert result.returncode != 0
+    assert "Secure backup logging failed" in result.stdout + result.stderr
+    assert harness.log_file.read_bytes() == sentinel
+    assert "psql:database" not in harness.trace_lines()
+
+
+def test_existing_log_file_owned_by_another_gid_is_rejected_without_writing(
+    harness: BackupHarness,
+) -> None:
+    effective_gid = _effective_gid()
+    if effective_gid == 0:
+        pytest.skip("requires a non-root harness group")
+    sentinel = b"existing-log-sentinel\n"
+    harness.log_file.write_bytes(sentinel)
+    _chmod(harness.log_file, 0o600)
+    _chgrp(harness.log_file, 0)
+    try:
+        result = harness.run("preflight")
+    finally:
+        _chgrp(harness.log_file, effective_gid)
+
+    assert result.returncode != 0
+    assert "Secure backup logging failed" in result.stdout + result.stderr
+    assert harness.log_file.read_bytes() == sentinel
+    assert "psql:database" not in harness.trace_lines()
+
+
+def test_fifo_log_path_is_rejected_without_blocking_or_external_work(
+    harness: BackupHarness,
+) -> None:
+    _mkfifo(harness.log_file)
+    _chmod(harness.log_file, 0o600)
+
+    result = harness.run("preflight")
+
+    assert result.returncode != 0
+    assert "Secure backup logging failed" in result.stdout + result.stderr
+    assert _posix_metadata(harness.log_file)[4] == "fifo"
+    assert "psql:database" not in harness.trace_lines()
+    assert "pg_dump" not in harness.trace_lines()
+
+
+def test_log_path_replacement_after_open_is_rejected_before_writing(
+    harness: BackupHarness,
+) -> None:
+    result = harness.run(
+        "preflight",
+        overrides={"DEGEN_BACKUP_TEST_LOGGER_REPLACE_PATH_AFTER_OPEN": "1"},
+    )
+
+    assert result.returncode != 0
+    assert "Secure backup logging failed" in result.stdout + result.stderr
+    replaced = harness.log_dir / "prod-db-backup.log.test-replaced"
+    assert harness.log_file.read_bytes() == b""
+    assert replaced.read_bytes() == b""
+    assert "psql:database" not in harness.trace_lines()
+    assert "pg_dump" not in harness.trace_lines()
+
+
 def test_root_execution_rejects_explicit_harness_injection(
     harness: BackupHarness,
 ) -> None:
@@ -1511,6 +1798,12 @@ def test_task9_runbook_bootstrap_and_source_success_path_are_ordered() -> None:
     assert 'find "$SOURCE_DIR" -xdev' in runbook
     assert '--expected-manifest-sha256 "$MANIFEST_SHA256"' in runbook
     assert "deploy/linux/degen-prod-db-backup-assets.sha256" in runbook
+    assert "/var/log/degen-prod-db-backup" in runbook
+    assert "root:root mode-`0700`" in runbook
+    assert "root:root mode-`0600`" in runbook
+    assert "outside those seven snapshotted" in runbook
+    assert "LOG_DIR=/var/log/degen` is migrated" in runbook
+    assert "any other non-default log" in runbook
     for asset in (
         "deploy/linux/degen-prod-db-backup.sh",
         "deploy/linux/degen-prod-db-retention.py",
@@ -1598,6 +1891,9 @@ def test_task9_runbook_separates_recovery_and_installed_helper_gates() -> None:
     assert "approved local newest-2 policy" in lowered
     assert "recovery and rollback cannot" in lowered
     assert "restore those deleted dumps" in lowered
+    assert "neither path deletes `/var/log/degen-prod-db-backup`" in lowered
+    assert "separate explicit cleanup preflight and approval" in lowered
+    assert "leaves `/var/log/degen-prod-db-backup` and its log" in lowered
     assert "zero candidates still require approval" in lowered
     assert "timer stop/start" in lowered
     assert "rclone configuration may refresh" in lowered
@@ -1858,6 +2154,12 @@ def test_success_verifies_before_pruning_and_preserves_non_candidates(harness: B
     log_lines = harness.log_file.read_text(encoding="utf-8").splitlines()
     assert log_lines
     assert all(re.match(r"^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\] ", line) for line in log_lines)
+    owner, group, mode, links, kind = _posix_metadata(harness.log_file)
+    assert owner == _effective_uid()
+    assert group == _effective_gid()
+    assert mode == 0o600
+    assert links == 1
+    assert kind == "regular file"
 
 
 @pytest.mark.parametrize(
@@ -2369,7 +2671,6 @@ def test_process_group_term_cleans_only_current_run_temps(
 def test_compound_local_cleanup_failures_warn_on_saved_stderr_and_preserve_primary_status(
     harness: BackupHarness,
 ) -> None:
-    _write_executable(harness.fake_bin / "tee", FAKE_COMMAND)
     current_dump, current_sidecar = _pair_names()
     dump_partial = f".{current_dump}.partial.TESTTOKEN"
     sidecar_partial = f".{current_sidecar}.partial.TESTTOKEN"
@@ -2379,13 +2680,12 @@ def test_compound_local_cleanup_failures_warn_on_saved_stderr_and_preserve_prima
         overrides={
             "FAKE_CLEANUP_RM_FAILURE": "all",
             "FAKE_CREATE_LOCAL_FINAL": _posix_path(final_dump),
-            "FAKE_TEE_EXIT_AFTER": "ERROR: Dump final path already exists",
+            "DEGEN_BACKUP_TEST_LOGGER_EXIT_AFTER": "ERROR: Dump final path already exists",
         }
     )
 
     assert result.returncode == 1
     assert "ERROR: Dump final path already exists" in result.stdout
-    assert "tee:exit-after-marker" in harness.trace_lines()
     assert _cleanup_warning("local dump partial", dump_partial) in result.stderr
     assert _cleanup_warning("local checksum partial", sidecar_partial) in result.stderr
     assert (harness.backup_dir / dump_partial).exists()
@@ -3443,12 +3743,17 @@ def test_preflight_checks_capacity_and_access_without_dump_or_retention(harness:
 
 
 def test_logging_pipeline_failure_is_not_masked(harness: BackupHarness) -> None:
-    if os.name != "nt" and not Path("/dev/full").exists():
-        pytest.skip("/dev/full is unavailable")
+    result = harness.run(
+        "preflight",
+        overrides={
+            "DEGEN_BACKUP_TEST_LOGGER_EXIT_AFTER": (
+                "Preflight completed; no dump or retention was performed"
+            )
+        },
+    )
 
-    result = harness.run("preflight", overrides={"LOG_FILE": "/dev/full"})
-
-    assert result.returncode != 0
+    assert result.returncode == 96
+    assert "Preflight completed; no dump or retention was performed" in result.stdout
     assert "pg_dump" not in harness.trace_lines()
 
 

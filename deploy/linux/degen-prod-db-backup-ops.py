@@ -11433,8 +11433,11 @@ def _parse_live_managed_environment(
             raise OperationStateError("live managed environment changed while parsing")
         if not _same_identity(parsed.source_metadata, proof.metadata):
             raise OperationStateError("live managed environment path changed while parsing")
+        values_for_validation = dict(parsed.values)
+        if values_for_validation.get("LOG_DIR") == "/var/log/degen":
+            values_for_validation["LOG_DIR"] = helper.MANAGED_DEFAULTS["LOG_DIR"]
         effective = helper.validate_effective_configuration(
-            parsed.values,
+            values_for_validation,
             effective_uid=effective_uid,
         )
     except OperationStateError:

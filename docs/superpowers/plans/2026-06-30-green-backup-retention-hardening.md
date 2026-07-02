@@ -19,7 +19,7 @@
 - `deploy/linux/degen-prod-db-backup.sh`: nightly dump, verification, publication, retained-pair validation, and pruning.
 - `deploy/linux/degen-prod-db-backup-ops.py`: privileged operation state machine for source verification, install, probe, dry-run evidence, enablement, observation, and rollback.
 - `deploy/linux/degen-prod-db-backup-assets.sha256`: fixed manifest of repo-managed production assets, excluding itself.
-- `deploy/systemd/degen-prod-db-backup.service`: root oneshot using the script's environment parser and a root-only runtime directory.
+- `deploy/systemd/degen-prod-db-backup.service`: root oneshot using the script's environment parser plus root-only runtime and backup-log directories.
 - `deploy/systemd/degen-prod-db-backup.timer`: existing 03:15 Pacific persistent schedule.
 - `deploy/systemd/degen-prod-db-backup.env.example`: secret-free managed-key reference.
 - `docs/green-postgres-backup-runbook.md`: approval boundaries and exact helper invocations, not duplicated implementation algorithms.
@@ -36,11 +36,11 @@
 - Modify: `docs/superpowers/plans/2026-06-29-green-backup-retention.md`
 - Create: `docs/superpowers/plans/2026-06-30-green-backup-retention-hardening.md`
 
-- [ ] **Step 1: Validate the plan artifacts**
+- [x] **Step 1: Validate the plan artifacts**
 
 Run placeholder, spec-coverage, exact-path, and `git diff --check` reviews. Require the old production Tasks 5-6 banner and every approved design control in this plan.
 
-- [ ] **Step 2: Run the full suite and commit only the two plans**
+- [x] **Step 2: Run the full suite and commit only the two plans**
 
 Per the repository contract, run the full repository suite even for this documentation commit. Stage only the two plan files and commit:
 
@@ -59,7 +59,7 @@ Do not push, merge, write Green, access OneDrive, or change any timer/service.
 - Modify: `tests/test_degen_prod_db_retention.py`
 - Modify: `tests/test_degen_prod_db_backup_script.py:48-60`
 
-- [ ] **Step 1: Write failing Python 3.10 contract tests**
+- [x] **Step 1: Write failing Python 3.10 contract tests**
 
 Add tests that parse the planner and both backup test modules with Python 3.10 grammar and verify the planner's keep-name CLI:
 
@@ -89,7 +89,7 @@ stripped_tail = tail.lstrip("\\/").replace("\\", "/")
 return f"/mnt/{drive[0].lower()}/{stripped_tail}"
 ```
 
-- [ ] **Step 2: Run the tests and verify RED**
+- [x] **Step 2: Run the tests and verify RED**
 
 Run:
 
@@ -99,7 +99,7 @@ Run:
 
 Expected: failures for `datetime.UTC`, missing `keep-names`, and the Python-3.12-only f-string expression.
 
-- [ ] **Step 3: Implement Python 3.10 compatibility and `keep-names`**
+- [x] **Step 3: Implement Python 3.10 compatibility and `keep-names`**
 
 Use this import and UTC contract:
 
@@ -113,11 +113,11 @@ def _stamp(value: str) -> datetime:
 
 Extend the CLI format choices to `("json", "delete-names", "keep-names")`. For `keep-names`, print each kept dump followed by its checksum in existing newest-first plan order. Keep `delete-names` oldest-first.
 
-- [ ] **Step 4: Verify with Python 3.10 and the repo interpreter**
+- [x] **Step 4: Verify with Python 3.10 and the repo interpreter**
 
 Run focused pytest locally, then send the planner source through Green's read-only `python3` to compile and exercise one `keep-names` input without writing a host file. Expected: Python 3.10.12 exits 0 and returns the same names as local pytest.
 
-- [ ] **Step 5: Run the full suite and commit**
+- [x] **Step 5: Run the full suite and commit**
 
 Run the full repository suite once, stage only the three files, and commit:
 
@@ -133,7 +133,7 @@ fix: support Python 3.10 backup retention
 - Create: `deploy/linux/degen-prod-db-backup-env.py`
 - Create: `tests/test_degen_prod_db_backup_env.py`
 
-- [ ] **Step 1: Write failing parser and renderer tests**
+- [x] **Step 1: Write failing parser and renderer tests**
 
 The tests must cover this API:
 
@@ -163,7 +163,7 @@ Use the exact managed contract:
 MANAGED_DEFAULTS = {
     "APP_ENV_FILE": "/opt/degen/web.env",
     "BACKUP_DIR": "/opt/degen/backups/db",
-    "LOG_DIR": "/var/log/degen",
+    "LOG_DIR": "/var/log/degen-prod-db-backup",
     "RCLONE_CONFIG": "/etc/degen/rclone.conf",
     "RCLONE_REMOTE_PATH": "onedrive:backups/degen-db",
     "KEEP_LOCAL_COUNT": "2",
@@ -181,7 +181,7 @@ MANAGED_DEFAULTS = {
 
 The parser accepts `REMOTE_PRUNE_ENABLED` only as `0` or `1`. Initial staging and installation require exactly `0`, enablement requires the current value to be exactly `0`, and only the operations helper's `enable-prune` transaction may render `1`.
 
-- [ ] **Step 2: Run the tests and verify RED**
+- [x] **Step 2: Run the tests and verify RED**
 
 Run:
 
@@ -191,7 +191,7 @@ Run:
 
 Expected: collection fails because `deploy/linux/degen-prod-db-backup-env.py` and its required parser/renderer interfaces do not exist.
 
-- [ ] **Step 3: Implement the parser and renderer**
+- [x] **Step 3: Implement the parser and renderer**
 
 Create an executable Python 3.10 script with subcommands:
 
@@ -205,11 +205,11 @@ render --source PATH --destination PATH --set KEY=VALUE [--set ...]
 
 Reject the full file before emitting or rendering when any unsupported grammar appears. Validate values with per-key rules rather than shell evaluation. Never use `source`, `eval`, `shlex`, environment expansion, or command substitution.
 
-- [ ] **Step 4: Verify focused behavior and Python 3.10**
+- [x] **Step 4: Verify focused behavior and Python 3.10**
 
 Run the new test module locally. Send only the helper source to Green's Python 3.10 `compile()` through stdin so no Green file is created; functional `inspect` execution remains in the local tests against private temporary files.
 
-- [ ] **Step 5: Run the full suite and commit**
+- [x] **Step 5: Run the full suite and commit**
 
 Stage only the helper and its test module after full-suite success. Commit:
 
@@ -228,7 +228,7 @@ feat: add fail-closed Green backup environment contract
 - Modify: `tests/test_degen_prod_db_backup_script.py`
 - Modify: `tests/test_degen_prod_db_backup_env.py`
 
-- [ ] **Step 1: Write failing service/direct parity and lock tests**
+- [x] **Step 1: Write failing service/direct parity and lock tests**
 
 Add tests proving:
 
@@ -238,6 +238,8 @@ BACKUP_ENV_FILE and ENV_HELPER accept absent or identical fixed inherited values
 inherited managed values cannot override the parsed file
 complex or duplicate environment input fails before mkdir/log/lock/database/rclone
 runtime directory rejects symlink, wrong owner, and group/world write
+backup log directory/file reject symlink, hard link, wrong owner/mode, and path/descriptor drift before external work
+missing/reused backup log paths become or remain root-owned mode 0700/0600 with a single-link regular log
 lock file rejects symlink without changing the target sentinel
 existing private regular lock supports overlap detection
 preflight/dry-run accepts only a validated inherited lock FD when an operations transaction owns the lock
@@ -245,7 +247,7 @@ preflight/dry-run accepts only a validated inherited lock FD when an operations 
 
 Update the harness so fake controls remain in the process environment while every managed backup value is written to a temporary `prod-db-backup.env` and selected with `BACKUP_ENV_FILE`.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -255,7 +257,7 @@ Run:
 
 Expected: current eager Bash defaults, service `EnvironmentFile=`, and `/run/lock` behavior fail the new tests.
 
-- [ ] **Step 3: Load the helper before runtime side effects**
+- [x] **Step 3: Load the helper before runtime side effects**
 
 Replace the eager assignments with fixed production paths:
 
@@ -268,7 +270,7 @@ Treat `/etc/degen/prod-db-backup.env` and `/usr/local/sbin/degen-prod-db-backup-
 
 Tests may inject temporary paths only through an explicit harness-only interface that is rejected for root/production execution. Add separate direct/service cases for absent, identical-fixed, and alternate inherited values for both `BACKUP_ENV_FILE` and `ENV_HELPER`; prove alternates and inherited managed-value overrides fail before any mutation or external command.
 
-- [ ] **Step 4: Validate the root-only runtime lock**
+- [x] **Step 4: Validate the root-only runtime lock**
 
 Use `LOCK_FILE=/run/degen-prod-db-backup/backup.lock`. Validate the parent and lock before and after opening FD 9:
 
@@ -284,20 +286,29 @@ For operations-helper integration, add `--lock-fd N` only to `preflight` and `re
 
 Update the service:
 
+- set `LogsDirectory=degen-prod-db-backup` and `LogsDirectoryMode=0700`;
+- set the audited `LOG_DIR=/var/log/degen-prod-db-backup` default;
+- use a no-follow descriptor-relative logger that validates directory/file
+  type, owner, exact private mode, link count, and path/descriptor identity;
+- let host staging migrate exactly the legacy `/var/log/degen` value while
+  runtime and every arbitrary alternative remain fail-closed.
+
 ```ini
 Environment=BACKUP_ENV_FILE=/etc/degen/prod-db-backup.env
 RuntimeDirectory=degen-prod-db-backup
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
+LogsDirectory=degen-prod-db-backup
+LogsDirectoryMode=0700
 ```
 
 Remove `EnvironmentFile=` so service and direct modes use the same parser, but retain the exact `Environment=BACKUP_ENV_FILE=/etc/degen/prod-db-backup.env` line above; the script accepts it only because it equals the fixed production path. Change the template lock path and document that `BACKUP_PREFIX` is added on-host from verified identity.
 
-- [ ] **Step 5: Validate rclone config metadata**
+- [x] **Step 5: Validate rclone config metadata**
 
 Before the first rclone call, require the config to be a regular non-symlink owned by EUID with mode `0600`, link count one, and a real parent owned by EUID without group/world write. Tests use private temporary paths; Green's audited `/etc/degen` and `rclone.conf` satisfy the contract.
 
-- [ ] **Step 6: Run focused/systemd/full verification and commit**
+- [x] **Step 6: Run focused/systemd/full verification and commit**
 
 Run the environment and script modules, WSL `bash -n`, `systemd-analyze verify`, the full suite, and commit the five intended files:
 
@@ -313,7 +324,7 @@ fix: unify Green backup configuration and secure locking
 - Modify: `deploy/linux/degen-prod-db-backup.sh:227-245,353-423`
 - Modify: `tests/test_degen_prod_db_backup_script.py`
 
-- [ ] **Step 1: Write failing real-semantics tests**
+- [x] **Step 1: Write failing real-semantics tests**
 
 Change the fake so direct `copyto`/`moveto --immutable` overwrites an existing different destination, matching the official rclone 1.74.1 probe. Add tests requiring all four publication calls to use both flags:
 
@@ -325,7 +336,7 @@ Existing identical or different destinations must exit nonzero, remain byte-for-
 
 Add identity tests requiring a configured `BACKUP_PREFIX` to equal the actual `${current_database}_${hostname -s}_` value and proving the identity queries always run. Add tests that the scheduled runtime brackets its complete rclone command group with safe config metadata markers containing hash, inode, owner/group, mode, size, and nanosecond mtime, but never config contents.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -335,7 +346,7 @@ Run:
 
 Expected: the current `--immutable` commands overwrite in the realistic fake and arbitrary persisted prefixes bypass identity queries.
 
-- [ ] **Step 3: Implement strict direct-file publication**
+- [x] **Step 3: Implement strict direct-file publication**
 
 Replace each direct operation with:
 
@@ -348,11 +359,11 @@ Keep the pre-upload and pre-publish casefold inventories, ownership-after-succes
 
 Before the first scheduled rclone call and after the final scheduled rclone call, validate and log one structured metadata receipt for `/etc/degen/rclone.conf`. A changed hash or mtime is recorded as possible OAuth refresh, not treated as failure and never used to restore the audit copy. Any early exit after the first marker must still emit a final marker from the exit trap. These receipts are later bound to the observed post-policy journal run.
 
-- [ ] **Step 4: Bind the prefix to live identity**
+- [x] **Step 4: Bind the prefix to live identity**
 
 Always query `current_database()` and `hostname -s`, validate them, and build the expected prefix. If `BACKUP_PREFIX` exists, require exact equality; otherwise use the expected prefix. A mismatch fails before dump or rclone.
 
-- [ ] **Step 5: Reproduce the official local rclone probe**
+- [x] **Step 5: Reproduce the official local rclone probe**
 
 Run official rclone 1.74.1 against disposable local paths and record:
 
@@ -362,7 +373,7 @@ existing identical/different: exit 9, destination unchanged
 moveto skipped destination: source remains
 ```
 
-- [ ] **Step 6: Run focused/full verification and commit**
+- [x] **Step 6: Run focused/full verification and commit**
 
 Commit after the full suite:
 
@@ -380,7 +391,7 @@ fix: enforce strict Green remote publication
 - Modify: `tests/test_degen_prod_db_backup_script.py`
 - Modify: `tests/test_degen_prod_db_retention.py`
 
-- [ ] **Step 1: Write failing retained-pair tests**
+- [x] **Step 1: Write failing retained-pair tests**
 
 Seed prior pairs with genuine matching sidecars and fake archives. Add tests proving:
 
@@ -391,7 +402,7 @@ corrupt digest, wrong basename, missing LF, symlink, or pg_restore failure block
 first backup with no prior pair succeeds without a second-pair requirement
 ```
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -401,7 +412,7 @@ Run:
 
 Expected: current local retention deletes without reading the kept prior pair.
 
-- [ ] **Step 3: Add strict local-pair verification**
+- [x] **Step 3: Add strict local-pair verification**
 
 Use planner `keep-names` and the same captured local inventory used for delete decisions. For every kept pair other than the newly created current pair:
 
@@ -412,7 +423,7 @@ Use planner `keep-names` and the same captured local inventory used for delete d
 
 Only after all retained prior pairs pass may the delete loop begin. Exclude symlinks from `collect_local_names()`.
 
-- [ ] **Step 4: Run focused/full verification and commit**
+- [x] **Step 4: Run focused/full verification and commit**
 
 Commit:
 
@@ -432,7 +443,7 @@ Task 6 is intentionally executed as four independently reviewed TDD slices. For 
 
 #### Task 6A: Add strict operation paths and state
 
-- [ ] **Step 1: Write failing path/state tests**
+- [x] **Step 1: Write failing path/state tests**
 
 Define and test these Python 3.10 interfaces:
 
@@ -599,7 +610,7 @@ Require `operation_id`/`operation_dir` plus reviewed source digests to remain bo
 
 Task 6A tests reject wrong operation roots, symlink path components, owner/mode mismatch, state-file symlinks or hard links, state secrets, duplicate keys at every JSON depth, corrupt/trailing JSON, non-atomic state writes, missing or extra fields at every schema level, operation-path rebinding, altered or truncated phase/evidence/error history, replacement or reordering of `secondary_errors`, mutation of the first primary error, regressed phases, phase-invalid nullability, forbidden transitions, unauthorized or partial receipt resets, secret-like error content, bool-as-int values, finite floats, non-finite numbers, and impossible lifecycle ordering. Tests separately construct and accept both legal terminal histories: failed initial install recovery with empty installed hashes/null install completion, and manual rollback after `installed` with the exact seven provenance-bound hashes/original install completion plus a distinct recovery completion. They reject every reordered/skipped/rebound install or recovery cursor; missing/extra recovery tuple fields; a reset of cursor, start epoch, or evidence on `recovery_required` resume; a `recovery.started_epoch` that differs from the latest attempt-start epoch derived from `phase_history` when validating without `previous_state`, including a completed receipt preserved in a later state; non-null probe/guard tuples; a policy transaction with a null, malformed, or mutable enabled-environment digest; a non-policy transaction with a non-null policy digest; a successful policy receipt whose environment digest differs from the precommitted transaction digest; a policy tuple targeting anything except the fixed environment path; an uncommitted policy recovery whose index-zero intended digest is not the disabled host-stage digest; a committed policy recovery whose intended or previous digest is not the exact enabled-policy digest; a policy recovery `previous_sha256` outside its phase-valid disabled/enabled digest set; mutation of the frozen install receipt during recovery/manual rollback; premature or terminal-epoch-unbound recovery completion; impossible policy/guard milestone combinations; and any environment hash sourced from the reviewed asset manifest instead of `host_stage.environment_sha256`. Develop the one reviewed Task 6A commit in this focused TDD order without intermediate partial commits: interfaces/Python 3.10 grammar/CLI surface; operation-directory and state-file descriptor/metadata checks; strict JSON decoding and primitive schema types; exact recursive object schemas; the phase receipt/nullability matrix; active-transaction/recovery and transition/history invariants; the authorized policy reset; sanitization/secret rejection; atomic write ordering/failure/race cases; then exact `show-state` output and sanitized errors.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -609,7 +620,7 @@ Run:
 
 Expected: collection fails because `deploy/linux/degen-prod-db-backup-ops.py`, `OperationsContext`, strict phase-valid state loading, and atomic state commands do not exist.
 
-- [ ] **Step 3: Implement strict paths and atomic state**
+- [x] **Step 3: Implement strict paths and atomic state**
 
 Expose only `show-state --operation-dir DIR` in this slice. Require `/opt/degen/backups/config/<YYYYMMDDTHHMMSSZ>` in production, effective UID zero, a real root-owned operation directory with exact mode `0700`, no symlink in any validated path component, and `operation-state.json` as a root-owned regular single-link file with exact mode `0600`. Open and bind directories/files with no-follow descriptors instead of trusting `Path.resolve()`. `show-state` performs the production lexical-root check, descriptor/metadata validation, exact schema and operation-path binding, and residual-secret rejection before emitting the exact canonical state JSON plus one LF; failures use concise sanitized stderr, emit no stdout or traceback, and never print untrusted state contents.
 
@@ -617,7 +628,7 @@ Validate the exact recursive schema and phase rules above before serialization a
 
 Before creating a temporary, validate the replacement, require caller-derived receipt errors already sanitized through `sanitize_error_text()`, reject residual secret-like keys/values without rewriting them, and load/validate the existing state through the held operation-directory descriptor. Write through an unpredictable exclusive same-directory `0600` temporary, verify its path/FD binding, write all canonical bytes, and fsync the file. Immediately before replacement, compare the destination's identity and exact old bytes with the originally loaded state as a compare-and-swap guard. Atomically replace via the validated directory FD, fsync the parent, then reopen the destination no-follow and revalidate exact canonical bytes, metadata, inode binding, and parent binding. A failure before replacement leaves the old destination byte-for-byte unchanged; cleanup never unlinks by name after an inode race. These checks ensure immutable bindings, append-only histories, first-failure immutability, no-op/same-phase rules, and transition legality cannot be bypassed.
 
-- [ ] **Step 4: Review, run the full suite, and commit Task 6A**
+- [x] **Step 4: Review, run the full suite, and commit Task 6A**
 
 After focused tests and Python 3.10 grammar checks pass, follow the shared independent-review gate, then run:
 
@@ -633,11 +644,11 @@ feat: add strict Green backup operation state
 
 #### Task 6B: Verify immutable reviewed source
 
-- [ ] **Step 1: Write failing source-verification tests**
+- [x] **Step 1: Write failing source-verification tests**
 
 Add focused tests named for these contracts: archive digest fails before Git or tree access; expected commit, archive digest, and independently approved manifest digest all bind to `OperationsContext` and state; archive member names/types are exact; duplicate, extra, missing, traversal, absolute, backslash, symlink, hard-link, sparse, device, FIFO, and unknown entries fail; required Git-archive parent directory entries are accepted only when they are exact real directories; every asset hash matches; and the already extracted source tree contains exactly the reviewed regular files with no links or extras. No failure may create `operation-state.json`.
 
-- [ ] **Step 2: Verify Task 6B RED**
+- [x] **Step 2: Verify Task 6B RED**
 
 Run:
 
@@ -647,7 +658,7 @@ Run:
 
 Expected: failures identify the missing `verify-source` command, approved manifest-digest binding, archive/member verification, and exact extracted-tree validation.
 
-- [ ] **Step 3: Implement source verification without rewriting the running source tree**
+- [x] **Step 3: Implement source verification without rewriting the running source tree**
 
 Define the source-verification interface in this slice:
 
@@ -681,7 +692,7 @@ The helper independently re-hashes the archive, sends the no-follow archive FD t
 
 Task 9 owns the real fixed manifest. Task 6B tests create exact fixture manifests, but production bootstrap and `verify-source` must fail closed while the tracked manifest is absent or its approved digest is unavailable. This dependency does not authorize archive transfer, operation-directory creation, or any other production action before Tasks 9-10 and the explicit production approval gate.
 
-- [ ] **Step 4: Review, run the full suite, and commit Task 6B**
+- [x] **Step 4: Review, run the full suite, and commit Task 6B**
 
 Follow the shared independent-review gate and full-suite command, then commit only the two Task 6 files:
 
@@ -691,11 +702,11 @@ feat: verify immutable Green backup source
 
 #### Task 6C: Prepare verified host staging
 
-- [ ] **Step 1: Write failing host-staging tests**
+- [x] **Step 1: Write failing host-staging tests**
 
 Add focused tests proving: no verified existing local pair fails before staging; canonical lowercase one-record sidecar grammar, recomputed SHA-256, and `pg_restore --list` run in that order; the filename-derived prefix exactly matches independently queried `current_database()` and `hostname -s`; the database URL travels only through the bounded inherited FD and child-only `PGDATABASE`; the manifest-verified environment helper remains the sole managed-environment parser/renderer; `REMOTE_PRUNE_ENABLED=0` is forced; staged assets/modes and the host-stage manifest are exact; and no database URL or environment/rclone content reaches argv, state, logs, exceptions, or `CompletedProcess`.
 
-- [ ] **Step 2: Verify Task 6C RED**
+- [x] **Step 2: Verify Task 6C RED**
 
 Run:
 
@@ -705,11 +716,11 @@ Run:
 
 Expected: failures identify the missing `prepare-staging` command, inherited-FD database transport, verified pair/identity checks, environment rendering, and staged manifest.
 
-- [ ] **Step 3: Implement host staging**
+- [x] **Step 3: Implement host staging**
 
 Expose `prepare-staging --operation-dir DIR`. Revalidate source, strict state, and context binding first. Validate the newest existing complete local pair, derive its prefix, query database and host identity independently, and stop on no verified pair or any identity/path/policy mismatch. Load the environment helper only from the manifest-verified source tree and render every managed key into a new root-only staged file with pruning disabled. Stage exact reviewed bytes and final modes separately from installed paths, generate and immediately verify a strict host-stage manifest, persist only non-secret effective configuration/hashes, and atomically transition `source_verified -> staging_prepared` after all checks succeed.
 
-- [ ] **Step 4: Review, run the full suite, and commit Task 6C**
+- [x] **Step 4: Review, run the full suite, and commit Task 6C**
 
 Follow the shared independent-review gate and full-suite command, then commit only the two Task 6 files:
 
@@ -719,11 +730,11 @@ feat: stage verified Green backup assets
 
 #### Task 6D: Snapshot current host state safely
 
-- [ ] **Step 1: Write failing snapshot tests**
+- [x] **Step 1: Write failing snapshot tests**
 
 Add focused tests proving: each exact target is represented by saved regular-file bytes plus mode/uid/gid/hash or by one mutually exclusive explicit absence marker; symlink, nonregular, hard-linked, unstable, or replaced sources fail; the rclone audit copy is created before any later rclone use but is never a rollback target; JSON contains only rclone metadata/hash and never credential bytes; sorted `SHA256SUMS` covers every and only saved files/absence markers/audit evidence and is reverified before state transition; timer enabled/active state, trigger epoch, and protected service PIDs are exact; and a private test `host_root` cannot escape while production still has no override.
 
-- [ ] **Step 2: Verify Task 6D RED**
+- [x] **Step 2: Verify Task 6D RED**
 
 Run:
 
@@ -733,7 +744,7 @@ Run:
 
 Expected: failures identify the missing `snapshot` command, safe saved-or-absent representation, rclone audit boundary, exact manifest, and prior-runtime evidence.
 
-- [ ] **Step 3: Implement safe snapshot capture**
+- [x] **Step 3: Implement safe snapshot capture**
 
 Define the snapshot interface in this slice:
 
@@ -755,7 +766,7 @@ Expose `snapshot --operation-dir DIR`. Snapshot every install target below plus 
 
 Revalidate source, staging, state, and host-root bindings before reading host targets. Use no-follow descriptors and stable path/FD metadata, write every snapshot artifact exclusively below the root-only snapshot directory, and verify the complete manifest before atomically transitioning `staging_prepared -> snapshotted`. Capture prior timer state, the pre-install trigger, and application/PostgreSQL/web/worker/bot PID evidence without restarting or mutating any service. If an owning account, unit, or unique active PostgreSQL service cannot be identified, fail rather than guess.
 
-- [ ] **Step 4: Review, run the full suite, and commit Task 6D**
+- [x] **Step 4: Review, run the full suite, and commit Task 6D**
 
 Follow the shared independent-review gate and full-suite command, then commit only the two Task 6 files:
 
@@ -773,7 +784,7 @@ Task 7 consumes the Task 6 atomic state store, exact snapshot representation, im
 - Modify: `deploy/linux/degen-prod-db-backup-ops.py`
 - Modify: `tests/test_degen_prod_db_backup_ops.py`
 
-- [ ] **Step 1: Write the failure matrix first**
+- [x] **Step 1: Write the failure matrix first**
 
 Use a fake command runner and temporary host root to test every phase:
 
@@ -806,7 +817,7 @@ failed initial-install rollback and later manual rollback preserve their distinc
 all six repo-managed installed hashes bind to reviewed-source and host-stage assets, while the environment binds only to host_stage.environment_sha256
 ```
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -816,7 +827,7 @@ Run:
 
 Expected: failures naming missing `recover`, `acquire_migration_locks`, durable per-target write-ahead progress, atomic replacement/fsync behavior, incomplete-install refusal, and restart recovery at the injected mutation boundaries.
 
-- [ ] **Step 3: Implement `install`, `recover`, and `rollback` subcommands**
+- [x] **Step 3: Implement `install`, `recover`, and `rollback` subcommands**
 
 Expose:
 
@@ -852,7 +863,7 @@ Before restoring an active persistent timer after install, atomically record pro
 
 Manual `rollback` revalidates the snapshot and state, quiesces the timer, requires service inactivity, acquires both migration locks, initializes and advances only the independent manual-rollback recovery cursor, restores with the same atomic protocol, reloads systemd, verifies destinations and PIDs, persists provisional recovery evidence, releases both locks, and restores the exact prior timer state before recording terminal `rolled_back` with `recovery.completed_epoch`. Because this history already contains `installed`, manual rollback preserves the complete historical install receipt/cursor, including all seven exact `install.installed_hashes` and the original `install.completed_epoch`; it never replaces the install completion with the rollback epoch. A resumed manual rollback continues the existing recovery cursor and never reinitializes it. Locally pruned and remotely deleted backup objects remain explicitly unrecoverable.
 
-- [ ] **Step 4: Run focused/full verification and commit**
+- [x] **Step 4: Run focused/full verification and commit**
 
 Commit:
 
@@ -1070,6 +1081,43 @@ Commit:
 docs: finalize Green backup production workflow
 ```
 
+Task 10 secure-logging remediation checkpoint (2026-07-01): final whole-change
+review found that the prior `/var/log/degen` default was owned by the app
+account and the root `tee -a` logger could follow a replaced final path. The
+runtime now uses `/var/log/degen-prod-db-backup`, systemd creates it root:root
+mode `0700`, and a descriptor-relative Python logger requires a root:root mode
+`0600` single-link regular file. Directory/file opens use `O_NOFOLLOW`; the
+file open also uses `O_NONBLOCK`; path/descriptor identity is checked before
+streaming and after flush; FIFO, symlink, hard-link, wrong UID/GID/mode, and
+post-open replacement cases fail before database or rclone work. Host staging
+normalizes only the audited legacy `/var/log/degen` value and rejects every
+other alternative. Automatic recovery/rollback intentionally preserves the
+dedicated log directory and log as evidence outside the seven snapshotted
+install targets.
+
+The checkpoint asset hashes are environment helper
+`2144cd589a654bbf32c6f2603b4fea73116642d6002f4908e324b024ca902245`,
+operations helper
+`b2d3c8be31d1039cfd306ccb7a6a25ea93acdb3fabba45d8a1c9a69266c99cc5`,
+backup shell
+`b940129920378a1c082be8d82a4b9d4e2f62b3ac7b0b61e407489311f2053e1a`,
+environment template
+`0db78d39b9deb3df15316704aa159bc33b0f24eecb1b5ce1d53172ac49ba01bc`,
+systemd service
+`782e44ef10d48b6f46d21ddf3241adf4010b419698d910685033d6523b60df1a`,
+and fixed manifest
+`e1a1f0c5826612dabffa7b0df1446d389d258dc2d667fadab905c66afa7fa26c`.
+The environment, operations, and shell test hashes are respectively
+`dbac66a609dacbc72e3d025e87df95df055b99ce03e9825792f42a6be40b323a`,
+`c1e79e67ee34b0e802dcd3988a8e19d87ea7b0d4e81bbf009a2131b02813fcfa`,
+and `29fdb5fb2110af940d7fb41d5c833d8d7ce1e607b5c2307b818de909600cd4b4`.
+Focused logging/migration/systemd verification passed `74` tests with `6`
+platform skips; selected CPython 3.10.20 compatibility/security verification
+passed `17` tests; and the complete backup/operations gate passed `1692` tests
+with `84` expected platform skips. The final repository-wide and immutable
+review gates follow below. No Git remote, Green host, database, timer, service,
+credential, OneDrive remote, or backup object was mutated by this checkpoint.
+
 ---
 
 ### Task 10: Final whole-change review and immutable publication checkpoint
@@ -1111,7 +1159,14 @@ After push approval, push `codex/backup-retention-hardening` and verify the remo
 
 - [ ] **Step 5: Present the production preflight and obtain separate approval**
 
-Report the exact reviewed SHA, archive/manifest digests, operation directory, seven install targets, timer quiescing/restoration, service-inactive and lock controls, rclone audit/token-refresh possibility, disposable remote mutation/cleanup, rollback scope, irreversible limits, and post-action verification. Wait for a new explicit production `proceed` before any Green directory creation, transfer, install, rclone call, or timer change.
+Report the exact reviewed SHA, archive/manifest digests, operation directory,
+seven install targets, the dedicated `/var/log/degen-prod-db-backup`
+operational path with root:root `0700`/`0600` directory/file requirements,
+timer quiescing/restoration, service-inactive and lock controls, rclone
+audit/token-refresh possibility, disposable remote mutation/cleanup, rollback
+scope, the preserved-log evidence limit, irreversible limits, and post-action
+verification. Wait for a new explicit production `proceed` before any Green
+directory creation, transfer, install, rclone call, or timer change.
 
 ---
 
@@ -1121,7 +1176,7 @@ Report the exact reviewed SHA, archive/manifest digests, operation directory, se
 
 - [ ] **Step 1: Install transactionally**
 
-After the production `proceed`, first define `UTC_STAMP`, `OPERATION_DIR`, `SOURCE_OPS`, and `MANIFEST_SHA256` from the approved immutable-publication evidence. Then perform the standard-tool archive transfer/bootstrap/extraction/verification, and only after those checks invoke `/usr/bin/python3 "$SOURCE_OPS"` for `verify-source`, `prepare-staging`, `snapshot`, and `install`. An incomplete or `recovery_required` transaction before installed-helper verification uses the separate conditional source-routed `/usr/bin/python3 "$SOURCE_OPS" recover` path; recovery is never appended to the normal success sequence. Verify exact installed hashes/modes, timer state restoration, inactive backup service, unchanged application/PostgreSQL/web/worker/bot PIDs, operation-state completeness, and an exact SHA-256 match between `/usr/local/sbin/degen-prod-db-backup-ops` and its reviewed manifest entry.
+After the production `proceed`, first define `UTC_STAMP`, `OPERATION_DIR`, `SOURCE_OPS`, and `MANIFEST_SHA256` from the approved immutable-publication evidence. Then perform the standard-tool archive transfer/bootstrap/extraction/verification, and only after those checks invoke `/usr/bin/python3 "$SOURCE_OPS"` for `verify-source`, `prepare-staging`, `snapshot`, and `install`. An incomplete or `recovery_required` transaction before installed-helper verification uses the separate conditional source-routed `/usr/bin/python3 "$SOURCE_OPS" recover` path; recovery is never appended to the normal success sequence. Verify exact installed hashes/modes, timer state restoration, inactive backup service, unchanged application/PostgreSQL/web/worker/bot PIDs, operation-state completeness, exact root:root mode `0700` metadata for `/var/log/degen-prod-db-backup`, exact root:root mode `0600` and single-link regular-file metadata for its log, and an exact SHA-256 match between `/usr/local/sbin/degen-prod-db-backup-ops` and its reviewed manifest entry.
 
 - [ ] **Step 2: Run the disposable probe and production dry-run**
 

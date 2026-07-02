@@ -1,7 +1,7 @@
 # Green PostgreSQL Backup Retention Design
 
-Dates: 2026-06-29; revised 2026-06-30
-Status: Revised design approved in conversation by Jeffrey; written-spec review pending
+Dates: 2026-06-29; revised 2026-07-01
+Status: Revised design approved by Jeffrey; written-spec review completed
 
 ## Problem
 
@@ -18,7 +18,7 @@ Overwriting one fixed filename would reduce storage but could replace the only g
 - Green has only Python 3.10.12 available through its system `python3` paths.
 - `/run/lock` is root-owned but mode `1777`; the proposed lock must not live directly there under a predictable filename.
 - `/etc/degen/rclone.conf` is a regular root-owned `0600` file under a root-owned `0750` directory.
-- `/etc/degen/prod-db-backup.env` currently contains only simple, single-line assignments, no continuations, multiline quotes, or duplicate keys. Its five non-secret path values equal the audited defaults.
+- `/etc/degen/prod-db-backup.env` currently contains only simple, single-line assignments, no continuations, multiline quotes, or duplicate keys. Its legacy `LOG_DIR=/var/log/degen` value points into the app-owned log directory; staging must migrate exactly that value to the dedicated root-only backup log directory and reject every other override.
 - `/opt/degen/backups/db` is a root-owned, non-symlink `0750` directory with one complete dump/checksum pair.
 - The installed script, service, timer, environment contract, and runbook are not yet tracked on `main`.
 - Manual preservation directories are outside automatic retention and must never be deleted by this change.
@@ -33,7 +33,7 @@ Overwriting one fixed filename would reduce storage but could replace the only g
 6. Retention pruning never deletes unknown names, incomplete pairs, manual backups, unowned temporary objects, future timestamps, or unparseable objects. State-tracked temporary objects created by the current run or disposable probe may be cleaned up.
 7. Remote pruning emits a deterministic exact candidate list and remains disabled until a separate approval after dry-run review.
 8. Concurrent manual, timer, and deployment activity is serialized with a validated root-only lock.
-9. Backup, cleanup, validation, and rollback failures remain visible in journal/operator output without replacing the primary failure status.
+9. Backup, cleanup, validation, and rollback failures remain visible in journal/operator output without replacing the primary failure status. The backup logger never follows a symlink or writes through a multiply linked, wrongly owned, or non-private log path.
 10. Manual validation and the scheduled service use the same effective configuration.
 11. Repo-managed installation assets use only bytes exported from an immutable reviewed Git commit and compared to a reviewed manifest. The host-derived environment is staged separately, preserves unrelated assignments, and receives its own manifest entry.
 12. Installation is transactional: staged and validated before mutation, protected from timer races, and automatically restored on an installation failure.
@@ -48,6 +48,7 @@ Overwriting one fixed filename would reduce storage but could replace the only g
 - Add a repo-managed backup orchestrator and credential-free deterministic retention planner.
 - Add the systemd service/timer, a secret-free environment template, focused tests, and a production runbook.
 - Replace the predictable `/run/lock` file with a lock below a validated root-only runtime directory.
+- Replace the shared app-owned backup log path with `/var/log/degen-prod-db-backup`, a root-owned mode-`0700` directory containing only a root-owned mode-`0600`, single-link regular log file opened with no-follow and path/descriptor identity checks.
 - Make the script load and validate the same managed service environment for timer and direct validation modes.
 - Reject complex `EnvironmentFile` constructs before mutation; preserve unrelated simple assignments and normalize every managed key to one canonical assignment.
 - Replace the disproven rclone `--immutable` assumption with the locally verified rclone 1.74.1 no-clobber composition `--ignore-existing --error-on-no-transfer`, plus case-insensitive inventory checks and post-operation verification.
@@ -101,11 +102,19 @@ The deployment requires the audited effective values unless a new design is appr
 
 - `APP_ENV_FILE=/opt/degen/web.env`
 - `BACKUP_DIR=/opt/degen/backups/db`
-- `LOG_DIR=/var/log/degen`
+- `LOG_DIR=/var/log/degen-prod-db-backup`
 - `RCLONE_CONFIG=/etc/degen/rclone.conf`
 - `RCLONE_REMOTE_PATH=onedrive:backups/degen-db`
 
 `BACKUP_PREFIX` is derived on-host from a verified existing complete pair, checked against the actual database name and short hostname, and persisted as a non-secret managed key.
+
+The operations staging helper may normalize only the audited live legacy value
+`LOG_DIR=/var/log/degen` to the dedicated value above. The installed runtime
+environment parser accepts only the dedicated value; arbitrary log paths remain
+fail-closed. `LogsDirectory=degen-prod-db-backup` and
+`LogsDirectoryMode=0700` establish the systemd ownership contract, while the
+runtime logger independently validates directory and file type, owner, mode,
+link count, and path/descriptor identity before every write session.
 
 ## Transactional Installation
 
@@ -114,7 +123,7 @@ The deployment requires the audited effective values unless a new design is appr
 3. Present a production preflight naming every target and possible side effect. Obtain explicit `proceed`.
 4. Export only the required files from that exact commit into a root-owned staging directory outside `/opt/degen/app`; verify the commit and manifest.
 5. Snapshot the current script, service, timer, environment, planner presence/absence, rclone config audit copy, timer state, PIDs, hashes, modes, and non-secret effective configuration. Validate the snapshot manifest immediately.
-6. Precompute the final environment and all install files in staging. Run syntax, policy, path, and metadata checks before the first host-file replacement.
+6. Precompute the final environment and all install files in staging. Run syntax, policy, path, and metadata checks before the first host-file replacement. Disclose that service validation can create `/var/log/degen-prod-db-backup` as root:root mode `0700` and `prod-db-backup.log` as root:root mode `0600`; these paths are outside the seven snapshotted install targets.
 7. Verify the service is inactive, stop only the backup timer, acquire the deployment/backup lock, and install with a rollback trap active.
 8. Reload systemd metadata, run non-destructive validation with the exact service configuration, restore the timer's prior state, and record the installation epoch and installed hashes in operation state.
 9. Run remote access only after the approved rclone audit snapshot. Bracket every rclone command group with config hash/mtime evidence because OAuth refresh may rewrite the file.
@@ -137,11 +146,12 @@ No checkout switch, app deployment, or application/database service restart occu
 - The timer is restored to its exact prior state on success or rollback.
 - Every later policy mutation repeats the timer-stop, service-inactive, lock, staged-write, rollback, and timer-restoration controls; no approval phase relies on the installation shell remaining alive.
 - Production secrets remain only in root-owned host files; tracked executable/configuration assets contain no secret values or host-derived backup prefix.
+- Backup logging is isolated from `/var/log/degen`; the logger rejects symlinked directories/files, non-regular or multiply linked files, wrong ownership, non-private modes, and pathname/open-descriptor identity drift before external backup work.
 
 ## Verification
 
 - Planner tests cover policy overlap, ISO boundaries, deterministic output, malformed/incomplete/future objects, and Python 3.10 execution.
-- Orchestrator tests model real rclone 1.74.1 direct-operation semantics, strict no-existing flags, signals, cleanup failures, symlink/no-clobber paths, service/direct configuration parity, and destructive failure ordering.
+- Orchestrator tests model real rclone 1.74.1 direct-operation semantics, strict no-existing flags, signals, cleanup failures, symlink/no-clobber paths, secure log-directory creation and reuse, service/direct configuration parity, and destructive failure ordering.
 - A local official-rclone 1.74.1 probe verifies absent/existing behavior for `copyto` and `moveto` with the selected flags.
 - Shell syntax, systemd directives, timer calendar, focused tests, and the full repository suite pass before each commit.
 - The production preflight verifies Green's Python version, exact source SHA/manifest, effective non-secret configuration, lock/runtime directory, backup directory, rclone metadata, timer/service state, disk, existing pair integrity, and unchanged application/database PIDs.
@@ -151,6 +161,11 @@ No checkout switch, app deployment, or application/database service restart occu
 ## Rollback
 
 The root-only snapshot records current files, absence markers, hashes, metadata, timer state, PIDs, effective configuration, and operation epochs. Installation rollback validates the snapshot before any restore, restores saved script/planner/unit/environment contents and modes, reloads systemd metadata, restores the timer's exact prior state, and verifies installed hashes and unchanged application/database PIDs.
+
+The dedicated `/var/log/degen-prod-db-backup` directory and its log are
+operational evidence outside the seven snapshotted install targets. Automatic
+recovery and rollback do not delete them. Removing them requires a separate
+explicit cleanup decision after confirming no retained evidence is needed.
 
 The rclone config audit copy is not restored automatically because OAuth refresh-token rotation may invalidate the old copy. Credential recovery requires a separate explicit decision after comparing current authentication state and audit evidence.
 

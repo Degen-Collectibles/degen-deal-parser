@@ -18,7 +18,7 @@ HELPER = ROOT / "deploy" / "linux" / "degen-prod-db-backup-env.py"
 MANAGED_DEFAULTS = {
     "APP_ENV_FILE": "/opt/degen/web.env",
     "BACKUP_DIR": "/opt/degen/backups/db",
-    "LOG_DIR": "/var/log/degen",
+    "LOG_DIR": "/var/log/degen-prod-db-backup",
     "RCLONE_CONFIG": "/etc/degen/rclone.conf",
     "RCLONE_REMOTE_PATH": "onedrive:backups/degen-db",
     "KEEP_LOCAL_COUNT": "2",
