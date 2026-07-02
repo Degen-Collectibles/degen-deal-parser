@@ -959,6 +959,7 @@ feat: gate Green pruning on probe and fresh state
 ### Task 9: Rewrite the production runbook and pin the asset manifest
 
 **Files:**
+- Modify: `.gitattributes`
 - Modify: `docs/green-postgres-backup-runbook.md`
 - Create: `deploy/linux/degen-prod-db-backup-assets.sha256`
 - Modify: `tests/test_degen_prod_db_backup_ops.py`
@@ -966,11 +967,11 @@ feat: gate Green pruning on probe and fresh state
 - Read/verify only: `docs/superpowers/plans/2026-06-29-green-backup-retention.md` (banner already owned by Task 0)
 - Read/hash only: `deploy/systemd/degen-prod-db-backup.env.example` (content already owned by Task 3)
 
-- [ ] **Step 1: Write failing documentation/manifest contract tests**
+- [x] **Step 1: Write failing documentation/manifest contract tests**
 
 Tests require the old plan's superseded banner, exact reviewed-SHA push-before-install ordering, definitions of `UTC_STAMP`, `OPERATION_DIR`, `SOURCE_OPS`, and `MANIFEST_SHA256` before transfer/bootstrap, standard-tool archive transfer/bootstrap/extraction/verification before `verify-source`, archive manifest parity, the mandatory approved `--expected-manifest-sha256` binding, separate push and production approvals plus the later prune approval, explicit timer/rclone mutation disclosure, exact `OPERATION_DIR`/`SOURCE_OPS` construction, source-helper routing for verification/staging/snapshot/install and conditional recovery, absence of `recover` from the normal success block, installed-helper use only after reviewed-manifest hash verification, no direct inline environment editor/install/rollback algorithms, and no rclone command before audit snapshot.
 
-- [ ] **Step 2: Rewrite the runbook around tested helpers**
+- [x] **Step 2: Rewrite the runbook around tested helpers**
 
 The runbook first defines and validates the exact operation-local values before any operation-directory creation, archive transfer, bootstrap, extraction, or helper invocation:
 
@@ -1019,7 +1020,7 @@ After install succeeds, the runbook compares `/usr/local/sbin/degen-prod-db-back
 
 Only recovery from an already interrupted install, probe, dry run, policy enablement, observation, timer restoration, rollback, or recovery transaction with matching durable state uses the conditional source-routed command above; `recover` refuses absent, stable, or mismatched state and never resolves through a possibly mixed installed binary. A newly approved stable-phase manual rollback instead invokes `/usr/bin/python3 "$SOURCE_OPS" rollback --operation-dir "$OPERATION_DIR"` after its separate mutation preflight and approval. The runbook documents exact expected evidence, the standard-tool bootstrap, separate push/install/prune gates, source transfer, timer/rclone effects, operation-directory recovery, and irreversible local/remote deletion limits. It explains incomplete-phase refusal, automatic/resumed recovery authorized by the original transaction approval, and the verified-source recovery command. The runbook does not duplicate parser, transaction, or rollback logic. `pg_restore --list` proves archive readability only; the canceled full logical restore rehearsal remains an accepted recovery risk, and this work must not claim end-to-end restore proof.
 
-- [ ] **Step 3: Generate the fixed asset manifest**
+- [x] **Step 3: Generate the fixed asset manifest**
 
 Hash exactly these seven assets, with repo-relative paths and no manifest self-entry:
 
@@ -1033,9 +1034,35 @@ deploy/systemd/degen-prod-db-backup.timer
 deploy/systemd/degen-prod-db-backup.env.example
 ```
 
-Tests recompute every digest and reject any extra/missing entry.
+Tests recompute every digest and reject any extra/missing entry. Exact
+`.gitattributes` rules pin every source asset and the manifest to LF so the
+working-tree bytes hashed during review match the Git blob bytes placed in the
+production archive even on Windows with `core.autocrlf=true`.
 
-- [ ] **Step 4: Run all focused, syntax, systemd, Python3.10, and full checks**
+- [x] **Step 4: Run all focused, syntax, systemd, Python3.10, and full checks**
+
+Task 9 checkpoint (2026-07-01 Pacific / 2026-07-02 UTC): the production
+runbook was replaced with the three-gate immutable-source workflow on runbook
+SHA-256 `d8de6d3f7d086436cbafbefefffd3f13e89434fd98946ecd18e1e363b0e57c0a`,
+script-test SHA-256
+`987d706e90d52f8d90e592b4da6298d4688922a4c7047b997e33e8a15cf7c296`,
+operations-test SHA-256
+`42c547f7cde647d0ac826a034ff2796795b4e2fa5c2f5569a87617503bd1e749`,
+fixed-manifest SHA-256
+`0c3f0a969e0810aa759221794b97f4788016ba8afc3a7c66ddf531acae6a9e47`,
+and `.gitattributes` SHA-256
+`b618df3e1be65345761ea0ea2dc24e4a23e8ce359a2172aea8be170230f2b48e`.
+The five Task 9 contract tests passed under the repository interpreter and
+CPython 3.10.20; the complete backup/operations gate passed `1678` tests with
+`84` platform skips; and the full repository gate passed `3517` tests with
+`84` platform skips and `46` subtests. `compileall app`, Bash syntax, systemd
+validation, manifest recomputation, and `git diff --check` passed. Three
+independent final reviews reported no remaining Critical or Important issue.
+No Git remote, Green host, database, timer, service, credential, OneDrive
+remote, or backup object was mutated. A review-tool-generated untracked
+`typescript` transcript remains explicitly outside the manifest and intended
+commit; Gate 1's clean-tree check will reject it until its separately approved
+cleanup.
 
 Commit:
 

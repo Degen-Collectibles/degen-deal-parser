@@ -22,6 +22,7 @@ SERVICE = ROOT / "deploy" / "systemd" / "degen-prod-db-backup.service"
 TIMER = ROOT / "deploy" / "systemd" / "degen-prod-db-backup.timer"
 ENV_TEMPLATE = ROOT / "deploy" / "systemd" / "degen-prod-db-backup.env.example"
 RUNBOOK = ROOT / "docs" / "green-postgres-backup-runbook.md"
+OLD_PLAN = ROOT / "docs" / "superpowers" / "plans" / "2026-06-29-green-backup-retention.md"
 STAMP = "20260629T230000Z"
 PREFIX = "degen_green_prod_green_"
 SECRET = "postgresql://degen:do-not-log-this@db.internal/degen_green_prod"
@@ -1084,111 +1085,6 @@ def _systemd_analyze_prefix() -> list[str] | None:
     return [executable] if executable is not None else None
 
 
-def _runbook_shell_block(name: str) -> str:
-    runbook = RUNBOOK.read_text(encoding="utf-8")
-    match = re.search(
-        rf"^# BEGIN {re.escape(name)}\s*$\n(?P<body>.*?)^# END {re.escape(name)}\s*$",
-        runbook,
-        re.MULTILINE | re.DOTALL,
-    )
-    assert match is not None, f"missing runnable runbook block: {name}"
-    return match.group("body")
-
-
-def _run_runbook_shell_block(
-    tmp_path: Path,
-    name: str,
-    values: dict[str, str | None],
-) -> subprocess.CompletedProcess[str]:
-    if BASH is None:
-        pytest.skip("No usable POSIX Bash/WSL environment")
-    script = tmp_path / f"{name.lower()}.sh"
-    with script.open("w", encoding="utf-8", newline="\n") as handle:
-        handle.write(
-            "#!/usr/bin/env bash\n"
-            "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n"
-            "if [[ -n \"${RUNBOOK_TEST_BIN:-}\" ]]; then export PATH=\"$RUNBOOK_TEST_BIN:$PATH\"; fi\n"
-            + "".join(f"unset {key}\n" for key, value in values.items() if value is None)
-            + _runbook_shell_block(name)
-        )
-    environment = os.environ.copy()
-    for key, value in values.items():
-        if value is None:
-            environment.pop(key, None)
-        else:
-            environment[key] = value
-    if os.name == "nt":
-        environment["WSLENV"] = ":".join(sorted(key for key, value in values.items() if value is not None))
-    return subprocess.run(
-        [BASH, _posix_path(script)],
-        cwd=ROOT,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=False,
-    )
-
-
-def _run_runbook_python_block(
-    tmp_path: Path,
-    name: str,
-    values: dict[str, str],
-) -> subprocess.CompletedProcess[str]:
-    script = tmp_path / f"{name.lower()}.py"
-    with script.open("w", encoding="utf-8", newline="\n") as handle:
-        handle.write(_runbook_shell_block(name))
-    if os.name == "nt":
-        wsl = shutil.which("wsl.exe")
-        if wsl is None:
-            pytest.skip("WSL is unavailable")
-        assignments = [f"{key}={value}" for key, value in values.items()]
-        command = [wsl, "-u", "root", "-e", "env", *assignments, "python3", _posix_path(script)]
-        environment = os.environ.copy()
-    else:
-        if os.geteuid() != 0:
-            pytest.skip("root is required for environment-file ownership tests")
-        command = [shutil.which("python3") or "python3", str(script)]
-        environment = os.environ.copy()
-        environment.update(values)
-    return subprocess.run(
-        command,
-        cwd=ROOT,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=False,
-    )
-
-
-def _wsl_root_command(*arguments: str, check: bool = False) -> subprocess.CompletedProcess[str]:
-    if os.name != "nt" or shutil.which("wsl.exe") is None:
-        pytest.skip("isolated WSL root environment is unavailable")
-    return subprocess.run(
-        ["wsl.exe", "-u", "root", "-e", *arguments],
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=check,
-    )
-
-
-def _write_verified_pair(directory: Path, prefix: str, stamp: str, payload: bytes) -> tuple[str, str]:
-    dump_name = f"{prefix}{stamp}.dump"
-    sidecar_name = f"{dump_name}.sha256"
-    (directory / dump_name).write_bytes(payload)
-    digest = hashlib.sha256(payload).hexdigest()
-    with (directory / sidecar_name).open("w", encoding="ascii", newline="\n") as handle:
-        handle.write(f"{digest}  {dump_name}\n")
-    return dump_name, sidecar_name
-
-
-def _write_text_lf(path: Path, content: str) -> None:
-    with path.open("w", encoding="utf-8", newline="\n") as handle:
-        handle.write(content)
-
-
 def test_source_declares_safe_shell_contract_and_live_defaults() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
 
@@ -1509,603 +1405,353 @@ def test_root_execution_rejects_explicit_harness_injection(
     _assert_no_backup_side_effects(harness, helper_may_run=False)
 
 
-def test_runbook_covers_green_backup_policy_mapping_and_safety_gates() -> None:
+def test_task9_runbook_bootstrap_and_source_success_path_are_ordered() -> None:
+    runbook = RUNBOOK.read_text(encoding="utf-8")
+    old_plan = OLD_PLAN.read_text(encoding="utf-8")
+    expected_archive_paths = (
+        "deploy/linux/degen-prod-db-backup-assets.sha256",
+        "deploy/linux/degen-prod-db-backup-env.py",
+        "deploy/linux/degen-prod-db-backup-ops.py",
+        "deploy/linux/degen-prod-db-backup.sh",
+        "deploy/linux/degen-prod-db-retention.py",
+        "deploy/systemd/degen-prod-db-backup.env.example",
+        "deploy/systemd/degen-prod-db-backup.service",
+        "deploy/systemd/degen-prod-db-backup.timer",
+    )
+    expected_archive_members = (
+        "deploy/",
+        "deploy/linux/",
+        *expected_archive_paths[:5],
+        "deploy/systemd/",
+        *expected_archive_paths[5:],
+    )
+
+    def shell_array(name: str) -> tuple[str, ...]:
+        match = re.search(
+            rf"(?ms)^{re.escape(name)}=\(\n(?P<body>.*?)^\)$",
+            runbook,
+        )
+        assert match is not None, f"missing exact {name} array"
+        return tuple(
+            line.strip().strip("'\"")
+            for line in match.group("body").splitlines()
+            if line.strip()
+        )
+
+    assert "SUPERSEDED FOR PRODUCTION EXECUTION" in old_plan
+    push_gate = runbook.index("## Gate 1: push the exact reviewed commit")
+    ref_check = runbook.index('git check-ref-format "$REMOTE_REF"')
+    push_url_check = runbook.index("git remote get-url --push --all origin")
+    push_url_equality = runbook.index(
+        'test "${ORIGIN_PUSH_URLS[0]}" = "$CANONICAL_REMOTE_URL"'
+    )
+    push = runbook.index('git push origin "$REVIEWED_SHA:$REMOTE_REF"')
+    remote_sha = runbook.index(
+        'REMOTE_BRANCH_SHA="$(git ls-remote --exit-code --refs origin "$REMOTE_REF"'
+    )
+    remote_equality = runbook.index('test "$REMOTE_BRANCH_SHA" = "$REVIEWED_SHA"')
+    archive_creation = runbook.index("git -c tar.umask=0002 archive --format=tar")
+    local_embedded_commit = runbook.index('git get-tar-commit-id < "$ARCHIVE_LOCAL"')
+    local_member_types = runbook.index('tar --list --verbose --file "$ARCHIVE_LOCAL"')
+    local_extraction = runbook.index('tar --extract --file "$ARCHIVE_LOCAL"')
+    local_manifest_parity = runbook.index("sha256sum --check --strict", local_extraction)
+    production_gate = runbook.index("## Gate 2: approve production installation")
+    assignments = (
+        'UTC_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"',
+        'OPERATION_DIR="/opt/degen/backups/config/$UTC_STAMP"',
+        'SOURCE_OPS="$OPERATION_DIR/source/deploy/linux/degen-prod-db-backup-ops.py"',
+        'MANIFEST_SHA256="${APPROVED_MANIFEST_SHA256:?set the approved reviewed-manifest SHA-256}"',
+    )
+    assignment_positions = [runbook.index(value) for value in assignments]
+    operation_creation = runbook.index('mkdir -m 0700 -- "$OPERATION_DIR"')
+    transfer_creation = runbook.index('mkdir -m 0700 -- "$TRANSFER_DIR"')
+    archive_transfer = runbook.index("brev copy --host")
+    archive_digest = runbook.index(
+        'printf \'%s  %s\\n\' "$ARCHIVE_SHA256"', archive_transfer
+    )
+    embedded_commit = runbook.index("git get-tar-commit-id", archive_digest)
+    member_types = runbook.index("tar --list --verbose", embedded_commit)
+    extraction = runbook.index('tar --extract --file "$OPERATION_DIR/source.tar"', member_types)
+    manifest_digest = runbook.index('printf \'%s  %s\\n\' "$MANIFEST_SHA256"')
+    manifest_parity = runbook.index("sha256sum --check --strict", extraction)
+    verify_source = runbook.index('"$SOURCE_OPS" verify-source --operation-dir "$OPERATION_DIR"')
+    prepare = runbook.index('"$SOURCE_OPS" prepare-staging --operation-dir "$OPERATION_DIR"')
+    snapshot = runbook.index('"$SOURCE_OPS" snapshot --operation-dir "$OPERATION_DIR"')
+    install = runbook.index('"$SOURCE_OPS" install --operation-dir "$OPERATION_DIR"')
+
+    assert push_gate < ref_check < push_url_check < push_url_equality < push
+    assert push < remote_sha < remote_equality < archive_creation
+    assert archive_creation < local_embedded_commit < local_member_types < local_extraction
+    assert local_extraction < local_manifest_parity < production_gate
+    assert 'REMOTE_REF="${APPROVED_REMOTE_REF:?set the exact approved refs/heads/... ref}"' in runbook
+    assert "test \"$REMOTE_REF\" = refs/heads/codex/backup-retention-hardening" in runbook
+    assert "https://github.com/Degen-Collectibles/degen-deal-parser.git" in runbook
+    assert runbook.count("git remote get-url --all origin") == 2
+    assert runbook.count("git remote get-url --push --all origin") == 2
+    assert runbook.count('test "${#ORIGIN_FETCH_URLS[@]}" -eq 1') == 2
+    assert runbook.count('test "${#ORIGIN_PUSH_URLS[@]}" -eq 1') == 2
+    assert not re.search(r"git remote get-url(?! --(?:push )?--all) origin", runbook)
+    assert runbook.count("git -c tar.umask=0002 archive --format=tar") == 1
+    assert shell_array("ARCHIVE_PATHS") == expected_archive_paths
+    assert shell_array("EXPECTED_ARCHIVE_MEMBERS") == expected_archive_members
+    assert assignment_positions == sorted(assignment_positions)
+    assert production_gate < assignment_positions[0]
+    assert max(assignment_positions) < transfer_creation < operation_creation < archive_transfer
+    assert 'TRANSFER_DIR="/tmp/degen-backup-transfer-$TRANSFER_TOKEN"' in runbook
+    assert 'REMOTE_ARCHIVE="$TRANSFER_DIR/source.tar"' in runbook
+    assert 'EVIDENCE_DIR="$(mktemp -d /tmp/degen-backup-evidence.XXXXXXXX)"' in runbook
+    assert 'PREPARE_SCRIPT="$(mktemp /tmp/degen-backup-prepare.XXXXXXXX)"' in runbook
+    assert 'BOOTSTRAP_SCRIPT="$(mktemp /tmp/degen-backup-bootstrap.XXXXXXXX)"' in runbook
+    assert archive_transfer < archive_digest < embedded_commit < member_types < extraction
+    assert extraction < manifest_digest < manifest_parity < verify_source < prepare < snapshot < install
+    assert 'test ! -e "$SOURCE_DIR"' in runbook
+    assert "umask 077" in runbook
+    assert "--no-same-owner" in runbook
+    assert "--no-same-permissions" in runbook
+    assert 'find "$SOURCE_DIR" -xdev' in runbook
+    assert '--expected-manifest-sha256 "$MANIFEST_SHA256"' in runbook
+    assert "deploy/linux/degen-prod-db-backup-assets.sha256" in runbook
+    for asset in (
+        "deploy/linux/degen-prod-db-backup.sh",
+        "deploy/linux/degen-prod-db-retention.py",
+        "deploy/linux/degen-prod-db-backup-env.py",
+        "deploy/linux/degen-prod-db-backup-ops.py",
+        "deploy/systemd/degen-prod-db-backup.service",
+        "deploy/systemd/degen-prod-db-backup.timer",
+        "deploy/systemd/degen-prod-db-backup.env.example",
+    ):
+        assert asset in runbook
+
+
+def test_task9_runbook_separates_recovery_and_installed_helper_gates() -> None:
     runbook = RUNBOOK.read_text(encoding="utf-8")
     lowered = runbook.lower()
+    verify_source = runbook.index('"$SOURCE_OPS" verify-source --operation-dir "$OPERATION_DIR"')
+    install = runbook.index('"$SOURCE_OPS" install --operation-dir "$OPERATION_DIR"')
+    recovery_heading = runbook.index("## Conditional recovery only")
+    recovery = runbook.index('"$SOURCE_OPS" recover --operation-dir "$OPERATION_DIR"')
+    installed_hash_gate = runbook.index("EXPECTED_INSTALLED_OPS_SHA256")
+    probe = runbook.index("/usr/local/sbin/degen-prod-db-backup-ops probe-remote")
+    dry_run = runbook.index("/usr/local/sbin/degen-prod-db-backup-ops record-dry-run")
+    prune_gate = runbook.index("## Gate 3: approve remote pruning")
+    enable = runbook.index("/usr/local/sbin/degen-prod-db-backup-ops enable-prune")
+    observe = runbook.index("/usr/local/sbin/degen-prod-db-backup-ops observe")
+    dry_run_state = runbook.index(
+        "/usr/local/sbin/degen-prod-db-backup-ops show-state", dry_run
+    )
+    enable_state = runbook.index(
+        "/usr/local/sbin/degen-prod-db-backup-ops show-state", enable
+    )
+    observe_state = runbook.index(
+        "/usr/local/sbin/degen-prod-db-backup-ops show-state", observe
+    )
+    rollback_heading = runbook.index("## Separately approved manual rollback")
+    rollback = runbook.index('"$SOURCE_OPS" rollback --operation-dir "$OPERATION_DIR"')
+    installed_hash_checks = [
+        match.start()
+        for match in re.finditer(
+            r"(?m)^printf '%s  %s\\n' \"\$EXPECTED_INSTALLED_OPS_SHA256\" "
+            r"/usr/local/sbin/degen-prod-db-backup-ops \| sha256sum --check --strict -$",
+            runbook,
+        )
+    ]
+    normal_section = runbook[runbook.index("### Standard-tool bootstrap"):recovery_heading]
+    recovery_section = runbook[recovery_heading:prune_gate]
+    rollback_section = runbook[rollback_heading:]
 
-    for required in (
-        "2026-06-29",
-        "Green",
-        "unique timestamped",
-        "newest 2",
-        "7 distinct UTC dates",
-        "4 ISO weeks",
-        "3 months",
-        "unknown",
-        "incomplete",
-        "manual",
-        "temporary",
-        "REMOTE_PRUNE_ENABLED=0",
-        "REMOTE_PRUNE_ENABLED=1",
-        "deploy/linux/degen-prod-db-backup.sh",
+    assert verify_source < install < installed_hash_gate < probe < dry_run < prune_gate < enable < observe
+    assert dry_run < dry_run_state < prune_gate
+    assert enable < enable_state < observe < observe_state
+    assert install < recovery_heading < recovery
+    assert len(installed_hash_checks) == 4
+    assert (
+        install
+        < installed_hash_checks[0]
+        < probe
+        < installed_hash_checks[1]
+        < dry_run
+        < prune_gate
+        < installed_hash_checks[2]
+        < enable
+        < installed_hash_checks[3]
+        < observe
+    )
+    assert '"$SOURCE_OPS" recover --operation-dir "$OPERATION_DIR"' not in normal_section
+    assert '"$SOURCE_OPS" show-state --operation-dir "$OPERATION_DIR"' in recovery_section
+    assert '"$SOURCE_OPS" recover --operation-dir "$OPERATION_DIR"' in recovery_section
+    assert runbook.count('"$SOURCE_OPS" recover --operation-dir "$OPERATION_DIR"') == 1
+    assert rollback_heading < rollback
+    assert runbook.count('"$SOURCE_OPS" rollback --operation-dir "$OPERATION_DIR"') == 1
+    assert '"$SOURCE_OPS" rollback --operation-dir "$OPERATION_DIR"' in rollback_section
+    interrupted_phases = (
+        "installing|recovering|probing|dry_run_recording|policy_enabling|observing|"
+        "recovery_required|recovering_policy|manual_rollback|recovering_probe|recovering_guard"
+    )
+    assert interrupted_phases in runbook
+    assert "Gate 2 for install/probe/dry-run phases" in runbook
+    assert "Gate 3 for" in runbook and "policy/observation phases" in runbook
+    assert "separately approved manual rollback" in runbook
+    assert "An earlier Gate 2 approval never authorizes recovery" in runbook
+    assert "persistent catch-up or any" in lowered
+    assert "ordinary scheduled run before gate 3" in lowered
+    assert "any catch-up or later scheduled run after timer restoration" in lowered
+    assert "approved local newest-2 policy" in lowered
+    assert "recovery and rollback cannot" in lowered
+    assert "restore those deleted dumps" in lowered
+    assert "zero candidates still require approval" in lowered
+    assert "timer stop/start" in lowered
+    assert "rclone configuration may refresh" in lowered
+    assert "remote probe creates and deletes" in lowered
+    assert "remote deletion is potentially irreversible" in lowered
+    assert "pg_restore --list" in runbook
+    assert "does not prove an end-to-end logical restore" in lowered
+    assert "rclone.conf.audit" in runbook
+    assert "does not automatically restore" in lowered
+    assert "cannot restore deleted local backups" in lowered
+    assert "deleted onedrive objects" in lowered
+    assert "CONFIG_BACKUP_DIR" not in runbook
+    assert "# BEGIN " not in runbook
+    assert "sudo install -o root" not in runbook
+    assert "python3 - <<" not in runbook
+    assert "sudo -E" not in runbook
+    assert "set -x" not in runbook
+    assert not re.search(r"(?m)^[ \t]*(?:sudo[ \t]+)?rclone\b", runbook)
+    assert not re.search(
+        r"(?mi)^[ \t]*(?:sudo[ \t]+)?(?:/usr/bin/)?systemctl[ \t]+"
+        r"(?:start|stop|restart|daemon-reload)\b",
+        runbook,
+    )
+    assert not re.search(
+        r"(?mi)^[ \t]*(?:sudo[ \t]+)?(?:source|\.)[ \t]+"
+        r"/(?:etc/degen/(?:prod-db-backup\.env|rclone\.conf)|opt/degen/web\.env)\b",
+        runbook,
+    )
+    assert not re.search(
+        r"(?mi)^[ \t]*(?:sudo[ \t]+)?cat[ \t]+"
+        r"/(?:etc/degen/(?:prod-db-backup\.env|rclone\.conf)|opt/degen/web\.env)\b",
+        runbook,
+    )
+    protected_targets = (
         "/usr/local/sbin/degen-prod-db-backup",
-        "deploy/linux/degen-prod-db-retention.py",
         "/usr/local/sbin/degen-prod-db-retention",
-        "deploy/systemd/degen-prod-db-backup.service",
+        "/usr/local/sbin/degen-prod-db-backup-env",
+        "/usr/local/sbin/degen-prod-db-backup-ops",
         "/etc/systemd/system/degen-prod-db-backup.service",
-        "deploy/systemd/degen-prod-db-backup.timer",
         "/etc/systemd/system/degen-prod-db-backup.timer",
-        "deploy/systemd/degen-prod-db-backup.env.example",
         "/etc/degen/prod-db-backup.env",
-        "/opt/degen/backups/config/<UTC timestamp>/",
-        "/opt/degen/backups/manual/",
-        "root:root 0755",
-        "root:root 0644",
-        "root:root 0600",
-        "systemd-analyze verify",
-        "systemctl daemon-reload",
-        "systemctl is-enabled",
-        "systemctl list-timers",
-        "preflight",
-        "remote-retention-dry-run",
-        "MainPID",
-        "sha256sum",
-        "rollback",
-        "next scheduled run",
-        "OneDrive",
-        "recycle bin",
-        "WARNING: backup cleanup failed",
-        "identical-byte",
-    ):
-        assert required in runbook
-    for boundary in (
-        "never overwrite the real environment file from the template",
-        "do not start or restart PostgreSQL, the web service, the worker, or the bot",
-        "do not run a manual full backup without Jeffrey's explicit approval",
-        "does not delete even when REMOTE_PRUNE_ENABLED=1",
-        "do not claim success before this scheduled observation",
-        "remote deletion is potentially irreversible",
-    ):
-        assert boundary.lower() in lowered
-    assert "exact targets" in lowered
-    assert "reversible" in lowered and "irreversible" in lowered
-    assert "missing planner" in lowered and "expected on the first install" in lowered
-    assert "environment variable names only" in lowered
-    assert "every candidate" in lowered and "outside the keep set" in lowered
-    assert "zero candidates" in lowered
-    assert "zero candidates is not approval" in lowered
-    assert "both zero-candidate and nonzero-candidate reviews require explicit jeffrey/operator approval" in lowered
-    assert "unchanged MainPID" in runbook
-    assert "no secret output" in lowered
-    assert "no placeholders" not in lowered
-    assert "TBD" not in runbook
-    assert "systemctl restart" not in lowered
-    assert "systemctl start" not in lowered
-
-
-def test_runbook_checksum_verification_checks_every_pair_and_aggregates_failures(tmp_path: Path) -> None:
-    prefix = "degen_green_prod_green_"
-    invalid_dump, invalid_sidecar = _write_verified_pair(
-        tmp_path,
-        prefix,
-        "20260628T101500Z",
-        b"invalid-after-sidecar-created\n",
     )
-    (tmp_path / invalid_dump).write_bytes(b"tampered\n")
-    valid_dump, valid_sidecar = _write_verified_pair(
-        tmp_path,
-        prefix,
-        "20260629T101500Z",
-        b"valid\n",
-    )
-
-    result = _run_runbook_shell_block(
-        tmp_path,
-        "POST_RUN_CHECKSUM_VERIFICATION",
-        {
-            "BACKUP_DIR": _posix_path(tmp_path),
-            "BACKUP_PREFIX": prefix,
-        },
-    )
-
-    assert result.returncode != 0
-    combined = result.stdout + result.stderr
-    assert invalid_dump in combined
-    assert valid_dump in combined
-    assert f"{valid_dump}: OK" in combined
-
-    empty = tmp_path / "empty"
-    empty.mkdir()
-    empty_result = _run_runbook_shell_block(
-        empty,
-        "POST_RUN_CHECKSUM_VERIFICATION",
-        {
-            "BACKUP_DIR": _posix_path(empty),
-            "BACKUP_PREFIX": prefix,
-        },
-    )
-    assert empty_result.returncode != 0
-    assert "no recognized checksum sidecars" in (empty_result.stdout + empty_result.stderr).lower()
+    for target in protected_targets:
+        assert not re.search(
+            rf"(?mi)^[ \t]*(?:sudo[ \t]+)?(?:install|cp|mv|rm|tee|sed)[^\n]*{re.escape(target)}",
+            runbook,
+        ), target
 
 
-def test_runbook_derives_prefix_only_from_newest_verified_complete_pair(tmp_path: Path) -> None:
-    expected_prefix = "degen_green_prod_green_"
-    _write_verified_pair(tmp_path, expected_prefix, "20260628T101500Z", b"verified\n")
-    corrupt_dump, _ = _write_verified_pair(tmp_path, "wrong_newer_", "20260629T101500Z", b"before\n")
-    (tmp_path / corrupt_dump).write_bytes(b"after\n")
-    (tmp_path / "incomplete_newest_20260630T101500Z.dump").write_bytes(b"incomplete\n")
-
-    result = _run_runbook_shell_block(
-        tmp_path,
-        "INSTALL_PREFIX_DERIVATION",
-        {"BACKUP_DIR": _posix_path(tmp_path)},
-    )
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stdout.strip() == expected_prefix
-
-    no_complete_pair = tmp_path / "no-complete-pair"
-    no_complete_pair.mkdir()
-    (no_complete_pair / "degen_green_prod_green_20260630T101500Z.dump").write_bytes(b"incomplete\n")
-    missing_result = _run_runbook_shell_block(
-        no_complete_pair,
-        "INSTALL_PREFIX_DERIVATION",
-        {"BACKUP_DIR": _posix_path(no_complete_pair)},
-    )
-    assert missing_result.returncode != 0
-    assert "verified complete backup pair" in (missing_result.stdout + missing_result.stderr).lower()
-
-
-def test_runbook_reads_only_one_safe_persisted_prefix_in_a_fresh_shell(tmp_path: Path) -> None:
-    env_file = tmp_path / "prod-db-backup.env"
-    _write_text_lf(
-        env_file,
-        "UNRELATED=do-not-print-this\n"
-        "BACKUP_PREFIX=degen_green_prod_green_\n"
-        "ANOTHER=also-do-not-print\n",
-    )
-
-    result = _run_runbook_shell_block(
-        tmp_path,
-        "FRESH_SHELL_PREFIX_RETRIEVAL",
-        {"BACKUP_ENV_FILE": _posix_path(env_file)},
-    )
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stdout.strip() == "degen_green_prod_green_"
-    assert "do-not-print" not in result.stdout + result.stderr
-
-    _write_text_lf(env_file, "BACKUP_PREFIX=safe_\nBACKUP_PREFIX=duplicate_\n")
-    duplicate_result = _run_runbook_shell_block(
-        tmp_path,
-        "FRESH_SHELL_PREFIX_RETRIEVAL",
-        {"BACKUP_ENV_FILE": _posix_path(env_file)},
-    )
-    assert duplicate_result.returncode != 0
-
-    _write_text_lf(env_file, "BACKUP_PREFIX=../unsafe\n")
-    unsafe_result = _run_runbook_shell_block(
-        tmp_path,
-        "FRESH_SHELL_PREFIX_RETRIEVAL",
-        {"BACKUP_ENV_FILE": _posix_path(env_file)},
-    )
-    assert unsafe_result.returncode != 0
-
-
-def test_runbook_persists_derived_prefix_without_putting_host_identity_in_template() -> None:
-    runbook = RUNBOOK.read_text(encoding="utf-8")
-    source = SCRIPT.read_text(encoding="utf-8")
-    template = ENV_TEMPLATE.read_text(encoding="utf-8")
-
-    assert 'sudo env BACKUP_PREFIX="$BACKUP_PREFIX" python3' in runbook
-    assert 'backup_prefix = os.environ.get("BACKUP_PREFIX", "")' in runbook
-    assert '"BACKUP_PREFIX": backup_prefix,' in runbook
-    assert 'if [[ -v BACKUP_PREFIX && "$BACKUP_PREFIX" != "$expected_prefix" ]]' in source
-    assert "backup_prefix=$expected_prefix" in source
-    assert 'validate_label "$BACKUP_PREFIX"' in source
-    assert not re.search(r"^BACKUP_PREFIX=", template, re.MULTILINE)
-
-
-def test_runbook_post_run_planner_commands_generate_local_and_remote_reports(tmp_path: Path) -> None:
-    prefix = "degen_green_prod_green_"
-    names = [
-        name
-        for stamp in ("20260628T101500Z", "20260629T101500Z")
-        for name in (f"{prefix}{stamp}.dump", f"{prefix}{stamp}.dump.sha256")
-    ]
-    local_inventory = tmp_path / "local-inventory.txt"
-    remote_inventory = tmp_path / "remote-inventory.txt"
-    local_plan = tmp_path / "local-plan.json"
-    remote_plan = tmp_path / "remote-plan.json"
-    inventory_text = "\n".join(names) + "\n"
-    local_inventory.write_text(inventory_text, encoding="utf-8")
-    remote_inventory.write_text(inventory_text, encoding="utf-8")
-    values = {
-        "RETENTION_PLANNER": _posix_path(PLANNER),
-        "BACKUP_PREFIX": prefix,
-        "REVIEW_NOW": "20260630T101500Z",
-        "LOCAL_INVENTORY_FILE": _posix_path(local_inventory),
-        "REMOTE_INVENTORY_FILE": _posix_path(remote_inventory),
-        "LOCAL_PLAN_FILE": _posix_path(local_plan),
-        "REMOTE_PLAN_FILE": _posix_path(remote_plan),
-    }
-
-    result = _run_runbook_shell_block(tmp_path, "POST_RUN_PLANNER_REPORTS", values)
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    local = json.loads(local_plan.read_text(encoding="utf-8"))
-    remote = json.loads(remote_plan.read_text(encoding="utf-8"))
-    assert local["mode"] == "local"
-    assert len(local["keep"]) == 2 and local["delete"] == []
-    assert remote["mode"] == "remote" and remote["delete"] == []
-    block = _runbook_shell_block("POST_RUN_PLANNER_REPORTS")
-    for exact_policy in ("--local-count 2", "--daily 7", "--weekly 4", "--monthly 3"):
-        assert exact_policy in block
-
-    values["REMOTE_INVENTORY_FILE"] = _posix_path(tmp_path / "missing-inventory.txt")
-    failed = _run_runbook_shell_block(tmp_path, "POST_RUN_PLANNER_REPORTS", values)
-    assert failed.returncode != 0
-
-
-def test_runbook_requires_explicit_approval_for_zero_and_nonzero_candidate_reviews() -> None:
-    runbook = RUNBOOK.read_text(encoding="utf-8")
-    zero = runbook.index("zero candidates")
-    approval = runbook.index(
-        "Both zero-candidate and nonzero-candidate reviews require explicit Jeffrey/operator approval"
-    )
-    flag_edit = runbook.index("# BEGIN PRUNE_FLAG_NORMALIZATION")
-
-    assert zero < approval < flag_edit
-    assert "Zero candidates is not approval" in runbook
-    assert "record `zero candidates` and then enable" not in runbook
-    assert "Only after that approval" in runbook[approval:flag_edit]
-
-
-def test_install_env_writer_normalizes_all_systemd_semantic_managed_key_duplicates(tmp_path: Path) -> None:
-    managed = {
-        "BACKUP_PREFIX": "degen_green_prod_green_",
-        "KEEP_LOCAL_COUNT": "2",
-        "KEEP_REMOTE_DAILY": "7",
-        "KEEP_REMOTE_WEEKLY": "4",
-        "KEEP_REMOTE_MONTHLY": "3",
-        "REMOTE_PRUNE_ENABLED": "0",
-        "MIN_FREE_AFTER_BYTES": "10737418240",
-        "RETENTION_PLANNER": "/usr/local/sbin/degen-prod-db-retention",
-        "LOCK_FILE": "/run/lock/degen-prod-db-backup.lock",
-    }
-    wsl_dir = _wsl_root_command("mktemp", "-d", "/tmp/degen-env-normalize.XXXXXXXX", check=True).stdout.strip()
-    assert wsl_dir.startswith("/tmp/degen-env-normalize.")
-    env_path = f"{wsl_dir}/prod-db-backup.env"
-    source = tmp_path / "input.env"
-    lines = ["# REMOTE_PRUNE_ENABLED=comment-only\n", "UNRELATED = preserve exactly\n"]
-    for key in managed:
-        lines.extend((f" {key}=legacy-one\n", f"\t{key} =legacy-two\n"))
-    lines.append(" REMOTE_PRUNE_ENABLED =1\n")
-    original = "".join(lines)
-    _write_text_lf(source, original)
-    try:
-        _wsl_root_command(
-            "install",
-            "-o",
-            "root",
-            "-g",
-            "root",
-            "-m",
-            "0600",
-            _posix_path(source),
-            env_path,
-            check=True,
-        )
-        result = _run_runbook_python_block(
-            tmp_path,
-            "INSTALL_MANAGED_ENV_NORMALIZATION",
-            {
-                "BACKUP_ENV_FILE": env_path,
-                "BACKUP_PREFIX": managed["BACKUP_PREFIX"],
-            },
-        )
-        assert result.returncode == 0, result.stdout + result.stderr
-        normalized = _wsl_root_command("cat", env_path, check=True).stdout
-        assert "# REMOTE_PRUNE_ENABLED=comment-only\n" in normalized
-        assert "UNRELATED = preserve exactly\n" in normalized
-        for key, value in managed.items():
-            semantic = [
-                line
-                for line in normalized.splitlines()
-                if (match := re.match(r"^[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*=", line))
-                and match.group(1) == key
-            ]
-            assert semantic == [f"{key}={value}"]
-        metadata = _wsl_root_command("stat", "-c", "%u:%g:%a", env_path, check=True).stdout.strip()
-        assert metadata == "0:0:600"
-
-        malformed = normalized + "REMOTE_PRUNE_ENABLED +=1\n"
-        _write_text_lf(source, malformed)
-        _wsl_root_command("install", "-o", "root", "-g", "root", "-m", "0600", _posix_path(source), env_path, check=True)
-        rejected = _run_runbook_python_block(
-            tmp_path,
-            "INSTALL_MANAGED_ENV_NORMALIZATION",
-            {"BACKUP_ENV_FILE": env_path, "BACKUP_PREFIX": managed["BACKUP_PREFIX"]},
-        )
-        assert rejected.returncode != 0
-        assert _wsl_root_command("cat", env_path, check=True).stdout == malformed
-    finally:
-        _wsl_root_command("rm", "-rf", "--", wsl_dir, check=True)
-
-
-def test_prune_flag_writer_normalizes_whitespace_duplicates_only_after_disabled_gate(tmp_path: Path) -> None:
-    wsl_dir = _wsl_root_command("mktemp", "-d", "/tmp/degen-prune-normalize.XXXXXXXX", check=True).stdout.strip()
-    assert wsl_dir.startswith("/tmp/degen-prune-normalize.")
-    env_path = f"{wsl_dir}/prod-db-backup.env"
-    source = tmp_path / "prune.env"
-    disabled_duplicates = (
-        "# REMOTE_PRUNE_ENABLED=comment-only\n"
-        "UNRELATED=preserve\n"
-        " REMOTE_PRUNE_ENABLED=0\n"
-        "REMOTE_PRUNE_ENABLED = 0\n"
-        "\tREMOTE_PRUNE_ENABLED\t=0\n"
-    )
-    _write_text_lf(source, disabled_duplicates)
-    try:
-        _wsl_root_command("install", "-o", "root", "-g", "root", "-m", "0600", _posix_path(source), env_path, check=True)
-        result = _run_runbook_python_block(
-            tmp_path,
-            "PRUNE_FLAG_NORMALIZATION",
-            {"BACKUP_ENV_FILE": env_path},
-        )
-        assert result.returncode == 0, result.stdout + result.stderr
-        enabled = _wsl_root_command("cat", env_path, check=True).stdout
-        semantic = [
-            line
-            for line in enabled.splitlines()
-            if re.match(r"^[ \t]*REMOTE_PRUNE_ENABLED[ \t]*=", line)
-        ]
-        assert semantic == ["REMOTE_PRUNE_ENABLED=1"]
-        assert "# REMOTE_PRUNE_ENABLED=comment-only\n" in enabled
-        assert "UNRELATED=preserve\n" in enabled
-        assert _wsl_root_command("stat", "-c", "%u:%g:%a", env_path, check=True).stdout.strip() == "0:0:600"
-
-        already_enabled_duplicate = disabled_duplicates + " REMOTE_PRUNE_ENABLED =1\n"
-        _write_text_lf(source, already_enabled_duplicate)
-        _wsl_root_command("install", "-o", "root", "-g", "root", "-m", "0600", _posix_path(source), env_path, check=True)
-        rejected = _run_runbook_python_block(
-            tmp_path,
-            "PRUNE_FLAG_NORMALIZATION",
-            {"BACKUP_ENV_FILE": env_path},
-        )
-        assert rejected.returncode != 0
-        assert _wsl_root_command("cat", env_path, check=True).stdout == already_enabled_duplicate
-    finally:
-        _wsl_root_command("rm", "-rf", "--", wsl_dir, check=True)
-
-
-@pytest.mark.parametrize(
-    "failure_case",
-    [
-        "unset",
-        "empty",
-        "malformed",
-        "outside-root",
-        "symlink",
-        "wrong-owner",
-        "wrong-mode",
-        "missing-manifest",
-        "corrupt-manifest",
-        "missing-planner-state",
-    ],
-)
-def test_rollback_fails_before_side_effects_for_invalid_snapshot_state(
+def test_task9_later_root_wrappers_fail_closed_before_any_helper(
     tmp_path: Path,
-    failure_case: str,
 ) -> None:
-    case_number = [
-        "unset",
-        "empty",
-        "malformed",
-        "outside-root",
-        "symlink",
-        "wrong-owner",
-        "wrong-mode",
-        "missing-manifest",
-        "corrupt-manifest",
-        "missing-planner-state",
-    ].index(failure_case) + 1
-    stamp = f"209901{case_number:02d}T010203Z"
-    snapshot = f"/opt/degen/backups/config/{stamp}"
-    symlink_target = f"/tmp/degen-rollback-target-{stamp}"
-    setup = tmp_path / "setup-rollback.sh"
-    with setup.open("w", encoding="utf-8", newline="\n") as handle:
-        handle.write(
-            "#!/usr/bin/env bash\n"
-            "set -euo pipefail\n"
-            "snapshot=$1\nstate=$2\nmanifest=$3\nowner=$4\nmode=$5\n"
-            "rm -rf -- \"$snapshot\"\nmkdir -p -- /opt/degen/backups/config\nmkdir -m 0700 -- \"$snapshot\"\n"
-            "for name in degen-prod-db-backup degen-prod-db-backup.service degen-prod-db-backup.timer prod-db-backup.env rclone.conf.audit; do printf '%s\\n' \"payload-$name\" > \"$snapshot/$name\"; done\n"
-            "if [[ \"$state\" == saved ]]; then printf '%s\\n' planner > \"$snapshot/degen-prod-db-retention\"; fi\n"
-            "if [[ \"$state\" == absent ]]; then printf '%s\\n' absent > \"$snapshot/degen-prod-db-retention.absent\"; fi\n"
-            "if [[ \"$manifest\" != missing ]]; then (cd \"$snapshot\" && find . -mindepth 1 -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\\0' | sort -z | xargs -0 sha256sum -- > SHA256SUMS); fi\n"
-            "if [[ \"$manifest\" == corrupt ]]; then printf '%s\\n' changed >> \"$snapshot/prod-db-backup.env\"; fi\n"
-            "chown -R \"$owner\" \"$snapshot\"\nchmod \"$mode\" \"$snapshot\"\n"
-        )
-    fake_bin = tmp_path / "fake-bin"
-    fake_bin.mkdir()
-    side_effect_log = tmp_path / "side-effects.log"
+    runbook = RUNBOOK.read_text(encoding="utf-8")
+
+    def section(start: str, end: str | None) -> str:
+        start_position = runbook.index(start)
+        end_position = runbook.index(end, start_position) if end else len(runbook)
+        return runbook[start_position:end_position]
+
+    recovery_blocks = re.findall(
+        r"(?ms)^```bash\n(.*?)^```$",
+        section("## Conditional recovery only", "## Stable checkpoint resume"),
+    )
+    prune_blocks = re.findall(
+        r"(?ms)^```bash\n(.*?)^```$",
+        section("## Gate 3: approve remote pruning", "## Evidence and accepted limitation"),
+    )
+    rollback_blocks = re.findall(
+        r"(?ms)^```bash\n(.*?)^```$",
+        section("## Separately approved manual rollback", None),
+    )
+    wrappers = (*recovery_blocks, *prune_blocks, *rollback_blocks)
+
+    assert len(recovery_blocks) == 1
+    assert len(prune_blocks) == 2
+    assert len(rollback_blocks) == 1
+
+    operation_dir = tmp_path / "operation"
+    source_dir = operation_dir / "source" / "deploy" / "linux"
+    source_dir.mkdir(parents=True)
+    source_ops = source_dir / "degen-prod-db-backup-ops.py"
+    source_manifest = source_dir / "degen-prod-db-backup-assets.sha256"
+    helper_log = tmp_path / "helper.log"
+    helper = tmp_path / "helper"
     _write_executable(
-        fake_bin / "sudo",
-        """#!/usr/bin/env bash
-set -eu
-case "${1:-}" in
-  install|rm|systemctl)
-    printf 'SIDE_EFFECT:%s\\n' "$*" >> "$SIDE_EFFECT_LOG"
-    exit 97
-    ;;
-  *) exec /usr/bin/sudo -n "$@" ;;
-esac
-""",
+        helper,
+        f"#!/usr/bin/env bash\nprintf '%s\\n' reached >> {_posix_path(helper_log)!r}\nexit 0\n",
+    )
+    source_ops.write_bytes(helper.read_bytes())
+    source_manifest.write_text(
+        f"{'1' * 64}  deploy/linux/degen-prod-db-backup-ops.py\n",
+        encoding="ascii",
+        newline="\n",
     )
     values = {
-        "RUNBOOK_TEST_BIN": _posix_path(fake_bin),
-        "SIDE_EFFECT_LOG": _posix_path(side_effect_log),
-        "CONFIG_BACKUP_DIR": None,
+        "OPERATION_DIR": _posix_path(operation_dir),
+        "SOURCE_OPS": _posix_path(source_ops),
+        "SOURCE_MANIFEST": _posix_path(source_manifest),
+        "MANIFEST_SHA256": "0" * 64,
     }
-    cleanup_paths = [snapshot, symlink_target]
-    try:
-        if failure_case not in {"unset", "empty", "malformed", "outside-root"}:
-            state = "missing" if failure_case == "missing-planner-state" else "absent"
-            manifest = {
-                "missing-manifest": "missing",
-                "corrupt-manifest": "corrupt",
-            }.get(failure_case, "valid")
-            owner = "1000:1000" if failure_case == "wrong-owner" else "0:0"
-            mode = "0755" if failure_case == "wrong-mode" else "0700"
-            target = symlink_target if failure_case == "symlink" else snapshot
-            _wsl_root_command(
-                "bash",
-                _posix_path(setup),
-                target,
-                state,
-                manifest,
-                owner,
-                mode,
-                check=True,
-            )
-            if failure_case == "symlink":
-                _wsl_root_command("ln", "-s", symlink_target, snapshot, check=True)
 
-        if failure_case == "empty":
-            values["CONFIG_BACKUP_DIR"] = ""
-        elif failure_case == "malformed":
-            values["CONFIG_BACKUP_DIR"] = "/opt/degen/backups/config/not-a-timestamp"
-        elif failure_case == "outside-root":
-            values["CONFIG_BACKUP_DIR"] = symlink_target
-        elif failure_case != "unset":
-            values["CONFIG_BACKUP_DIR"] = snapshot
+    for index, wrapper in enumerate(wrappers, start=1):
+        assert wrapper.startswith("#!/usr/bin/env bash\nset -euo pipefail\numask 077\n")
+        script = tmp_path / f"fail-closed-wrapper-{index}.sh"
+        script.write_text(
+            wrapper.replace(
+                "/usr/local/sbin/degen-prod-db-backup-ops",
+                _posix_path(helper),
+            ),
+            encoding="utf-8",
+            newline="\n",
+        )
+        assignments = [f"{key}={value}" for key, value in values.items()]
+        if os.name == "nt":
+            wsl = shutil.which("wsl.exe")
+            if wsl is None:
+                pytest.skip("WSL is unavailable")
+            command = [wsl, "-u", "root", "-e", "env", *assignments, "bash", _posix_path(script)]
+        else:
+            if os.geteuid() != 0:
+                pytest.skip("root is required for fail-closed wrapper tests")
+            command = ["env", *assignments, BASH or "bash", str(script)]
+        result = subprocess.run(
+            command,
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
 
-        result = _run_runbook_shell_block(tmp_path, "FAIL_CLOSED_ROLLBACK", values)
         assert result.returncode != 0
-        assert not side_effect_log.exists() or side_effect_log.read_text(encoding="utf-8") == ""
-    finally:
-        for path in cleanup_paths:
-            assert path.startswith(("/opt/degen/backups/config/2099", "/tmp/degen-rollback-target-2099"))
-            _wsl_root_command("rm", "-rf", "--", path, check=True)
+        assert not helper_log.exists(), result.stdout + result.stderr
 
 
-def test_rclone_commands_follow_proceed_and_root_only_token_config_snapshot() -> None:
+def test_task9_runbook_bash_blocks_pass_syntax_check(tmp_path: Path) -> None:
+    if BASH is None:
+        pytest.skip("No usable POSIX Bash/WSL environment")
     runbook = RUNBOOK.read_text(encoding="utf-8")
-    proceed = runbook.index("wait for Jeffrey's explicit `proceed`")
-    snapshot = runbook.index('rclone.conf "$CONFIG_BACKUP_DIR/rclone.conf.audit"')
-    executable_rclone = [match.start() for match in re.finditer(r"(?m)^[ \t]*(?:sudo[ \t]+)?rclone\b", runbook)]
+    blocks = re.findall(r"(?ms)^```bash\n(.*?)^```$", runbook)
 
-    assert executable_rclone
-    assert proceed < snapshot < executable_rclone[0]
-    assert all(position > snapshot for position in executable_rclone)
-    assert "may refresh or rewrite `/etc/degen/rclone.conf`" in runbook
-    assert "hash and mtime changed" in runbook
-    assert "do not automatically restore `rclone.conf.audit`" in runbook.lower()
-    rollback = runbook[runbook.index("## Rollback") :]
-    assert not re.search(r"(?:install|cp).*rclone\.conf\.audit", rollback)
-
-
-def test_approval_summary_discloses_rclone_credential_refresh_and_recovery_limits() -> None:
-    runbook = RUNBOOK.read_text(encoding="utf-8")
-    summary = runbook[
-        runbook.index("## Mandatory preflight and approval") : runbook.index(
-            "Run this read-only inventory"
+    assert len(blocks) >= 8
+    for index, block in enumerate(blocks, start=1):
+        script = tmp_path / f"runbook-block-{index}.sh"
+        script.write_text(block, encoding="utf-8", newline="\n")
+        result = subprocess.run(
+            [BASH, "-n", _posix_path(script)],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
         )
-    ]
-
-    assert "non-destructive validation" in summary
-    assert "non-mutating" not in summary
-    assert (
-        "`/etc/degen/rclone.conf` (ordinary rclone validation may refresh or rewrite "
-        "this file after approval)"
-    ) in summary
-    assert "audit and emergency-recovery evidence" in summary
-    assert (
-        "not automatically restored because rotated refresh tokens may invalidate the old copy"
-        in summary
-    )
-
-
-@pytest.mark.parametrize(
-    ("scenario", "fresh", "expected_success"),
-    [
-        ("failed-service", False, False),
-        ("stale-dump", False, False),
-        ("stale-log", True, False),
-        ("valid", True, True),
-    ],
-)
-def test_post_run_freshness_gate_rejects_failed_or_stale_evidence(
-    tmp_path: Path,
-    scenario: str,
-    fresh: bool,
-    expected_success: bool,
-) -> None:
-    prefix = "degen_green_prod_green_"
-    older_dump, older_sidecar = _write_verified_pair(tmp_path, prefix, "20260628T100001Z", b"older\n")
-    dump_name, sidecar_name = _write_verified_pair(tmp_path, prefix, "20260629T100001Z", b"freshness\n")
-    service_start_epoch = 1782727200
-    artifact_epoch = service_start_epoch + 1 if fresh else service_start_epoch - 600
-    os.utime(tmp_path / older_dump, (service_start_epoch - 1200, service_start_epoch - 1200))
-    os.utime(tmp_path / older_sidecar, (service_start_epoch - 1200, service_start_epoch - 1200))
-    os.utime(tmp_path / dump_name, (artifact_epoch, artifact_epoch))
-    os.utime(tmp_path / sidecar_name, (artifact_epoch, artifact_epoch))
-    fake_bin = tmp_path / "freshness-bin"
-    fake_bin.mkdir()
-    systemctl = fake_bin / "systemctl"
-    journalctl = fake_bin / "journalctl"
-    _write_executable(
-        systemctl,
-        """#!/usr/bin/env bash
-set -eu
-if [[ "$*" == *"$SERVICE_UNIT"* ]]; then
-  if [[ "$FRESHNESS_SCENARIO" == failed-service ]]; then
-    printf '%s\\n' 'Result=exit-code' 'ExecMainCode=exited' 'ExecMainStatus=1' 'ExecMainStartTimestamp=2026-06-29T10:00:00Z'
-  else
-    printf '%s\\n' 'Result=success' 'ExecMainCode=exited' 'ExecMainStatus=0' 'ExecMainStartTimestamp=2026-06-29T10:00:00Z'
-  fi
-else
-  printf '%s\\n' 'LastTriggerUSec=2026-06-29T09:59:00Z'
-fi
-""",
-    )
-    _write_executable(
-        journalctl,
-        """#!/usr/bin/env bash
-set -eu
-if [[ "$FRESHNESS_SCENARIO" == stale-log ]]; then
-  printf '%s\\n' 'older unrelated log line'
-else
-  printf '%s\\n' 'Backup completed successfully'
-fi
-""",
-    )
-    values = {
-        "SYSTEMCTL_BIN": _posix_path(systemctl),
-        "JOURNALCTL_BIN": _posix_path(journalctl),
-        "DATE_BIN": "/usr/bin/date",
-        "STAT_BIN": "/usr/bin/stat",
-        "SERVICE_UNIT": "degen-prod-db-backup.service",
-        "TIMER_UNIT": "degen-prod-db-backup.timer",
-        "BACKUP_DIR": _posix_path(tmp_path),
-        "BACKUP_PREFIX": prefix,
-        "FRESHNESS_SCENARIO": scenario,
-    }
-
-    result = _run_runbook_shell_block(tmp_path, "POST_RUN_FRESHNESS_GATE", values)
-
-    assert (result.returncode == 0) is expected_success, result.stdout + result.stderr
-    if expected_success:
-        assert f"fresh_backup={dump_name}" in result.stdout
-    freshness_block = _runbook_shell_block("POST_RUN_FRESHNESS_GATE")
-    assert '--since "$service_start"' in freshness_block
-    for required_property in ("Result", "ExecMainCode", "ExecMainStatus", "ExecMainStartTimestamp", "LastTriggerUSec"):
-        assert required_property in freshness_block
-    runbook = RUNBOOK.read_text(encoding="utf-8")
-    assert runbook.index("# BEGIN POST_RUN_FRESHNESS_GATE") < runbook.index(
-        "# BEGIN POST_RUN_CHECKSUM_VERIFICATION"
-    ) < runbook.index("# BEGIN POST_RUN_PLANNER_REPORTS")
+        assert result.returncode == 0, f"bash block {index}: {result.stderr}"
 
 
 def test_systemd_units_and_calendar_validate_when_systemd_analyze_is_available(tmp_path: Path) -> None:

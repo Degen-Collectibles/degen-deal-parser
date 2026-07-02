@@ -1,976 +1,587 @@
-# Green PostgreSQL backup operations runbook
+# Green PostgreSQL backup retention runbook
 
-Status date: **2026-06-29**. This runbook is specific to the Green production host and the repository-managed PostgreSQL backup assets. It does not authorize production work by itself.
+Last reviewed: 2026-06-30
 
-## Policy and hard boundaries
+This is the production execution guide for Green/Brev host `openclaw-9902ae`.
+The application directory remains `/opt/degen/app`, but no production source is
+read or installed from that live checkout. The only install source is an
+uncompressed, path-limited Git archive made from one exact pushed commit.
 
-The backup job publishes unique timestamped `.dump` and `.dump.sha256` pairs. A pair is complete only when both files exist; a new pair is accepted only after dump, checksum, remote size, and remote sidecar verification.
+The policy is:
 
-- Local retention keeps exactly the newest 2 recognized complete verified pairs; unknown, incomplete, manual, and temporary files remain protected and do not count toward those two.
-- Remote retention keeps the union representing the newest 7 distinct UTC dates, 4 ISO weeks, and 3 months. Unknown, incomplete, manual, and temporary objects remain protected.
-- `REMOTE_PRUNE_ENABLED=0` is mandatory for installation and dry-run review. Remote deletion is enabled only through the candidate gate below.
-- Manual preservation belongs in `/opt/degen/backups/manual/`; configuration snapshots belong in `/opt/degen/backups/config/`. Both directories are excluded from the flat `/opt/degen/backups/db` inventory.
-- Never overwrite the real environment file from the template. `/etc/degen/prod-db-backup.env` is edited and preserved in place as `root:root 0600`.
-- Do not start or restart PostgreSQL, the web service, the worker, or the bot. Metadata reload is the only systemd manager mutation in this procedure.
-- Do not run a manual full backup without Jeffrey's explicit approval. The only manual script modes permitted here are `preflight` and `remote-retention-dry-run`.
-- Do not purge the OneDrive recycle bin. Provider recovery behavior is not a rollback plan.
+- create one unique timestamped PostgreSQL custom-format dump and its SHA-256
+  sidecar per successful scheduled run;
+- retain the newest 2 verified complete local pairs;
+- retain remote representatives for 7 distinct UTC dates, 4 ISO weeks, and 3
+  months;
+- fail closed for unknown, incomplete, malformed, replaced, or unverified
+  objects;
+- install with `REMOTE_PRUNE_ENABLED=0`, prove a remote dry run, and only then
+  seek the separate pruning approval.
 
-## Repository-to-host mapping
+Do not improvise an environment editor, copy files from `/opt/degen/app`, run
+`rclone` directly, manually start the protected backup service, or hand-write a
+rollback. The reviewed operations helper owns those actions and their durable
+receipts. Keep OneDrive on this Windows computer off throughout this workflow;
+the production remote is accessed by Green, not by the desktop sync client.
 
-| Reviewed repository asset | Green disposition |
-|---|---|
-| `deploy/linux/degen-prod-db-backup.sh` | `/usr/local/sbin/degen-prod-db-backup`, `root:root 0755` |
-| `deploy/linux/degen-prod-db-retention.py` | `/usr/local/sbin/degen-prod-db-retention`, `root:root 0755` |
-| `deploy/systemd/degen-prod-db-backup.service` | `/etc/systemd/system/degen-prod-db-backup.service`, `root:root 0644` |
-| `deploy/systemd/degen-prod-db-backup.timer` | `/etc/systemd/system/degen-prod-db-backup.timer`, `root:root 0644` |
-| `deploy/systemd/degen-prod-db-backup.env.example` | Reference only. Never copy it over the real `/etc/degen/prod-db-backup.env`; that host-owned file remains `root:root 0600`. |
+## Fixed reviewed source contract
 
-The standard snapshot location is `/opt/degen/backups/config/<UTC timestamp>/`. The commands below generate that timestamp directly.
-
-## Mandatory preflight and approval
-
-Before any write, state this preflight and wait for Jeffrey's explicit `proceed`:
-
-- **Exact targets:** the two `/usr/local/sbin/degen-prod-db-*` executables, the two `/etc/systemd/system/degen-prod-db-backup.*` units, selected policy keys in `/etc/degen/prod-db-backup.env`, `/etc/degen/rclone.conf` (ordinary rclone validation may refresh or rewrite this file after approval), and one new root-only snapshot directory.
-- **What changes:** install reviewed bytes, leave pruning disabled, reload systemd metadata, and run non-destructive validation. Existing timer enablement is inspected, not changed.
-- **Reversible effects:** installed local files, policy-key edits, and metadata reload can be restored from the snapshot. The root-only `rclone.conf.audit` snapshot is audit and emergency-recovery evidence and is not automatically restored because rotated refresh tokens may invalidate the old copy.
-- **Irreversible effects:** none before the flag gate. After the flag becomes `1`, remote deletion is potentially irreversible except for provider recycle behavior.
-- **Rollback:** restore exact saved files and the real environment file, conditionally remove a first-install planner, and reload metadata.
-- **Post-action verification:** hashes, owners, modes, next trigger, environment variable names only, unchanged MainPID values, Windows OneDrive remaining off, and rollback readiness.
-
-Run this read-only inventory from the reviewed checkout. It produces no secret output and must not print environment values or rclone configuration content.
-
-Do not run any rclone command before Jeffrey's explicit `proceed`. Even an ordinary rclone access command may refresh or rewrite `/etc/degen/rclone.conf` while rotating access credentials. Remote inventory is therefore deferred until that file has been captured in the approved root-only snapshot.
+The archive contains exactly the manifest plus these seven non-secret assets.
+It excludes the runbook, tests, plans, real environment files, database dumps,
+operation snapshots/state, and `/etc/degen/rclone.conf`.
 
 ```bash
-set -euo pipefail
-cd /opt/degen/app
-git status --short --branch
-git rev-parse HEAD
-sha256sum -- \
-  deploy/linux/degen-prod-db-backup.sh \
-  deploy/linux/degen-prod-db-retention.py \
-  deploy/systemd/degen-prod-db-backup.service \
-  deploy/systemd/degen-prod-db-backup.timer \
+ARCHIVE_PATHS=(
+  deploy/linux/degen-prod-db-backup-assets.sha256
+  deploy/linux/degen-prod-db-backup-env.py
+  deploy/linux/degen-prod-db-backup-ops.py
+  deploy/linux/degen-prod-db-backup.sh
+  deploy/linux/degen-prod-db-retention.py
   deploy/systemd/degen-prod-db-backup.env.example
-
-for target in \
-  /usr/local/sbin/degen-prod-db-backup \
-  /usr/local/sbin/degen-prod-db-retention \
-  /etc/systemd/system/degen-prod-db-backup.service \
-  /etc/systemd/system/degen-prod-db-backup.timer \
-  /etc/degen/prod-db-backup.env
-do
-  if sudo test -e "$target"; then
-    sudo stat -c '%n owner=%U:%G mode=%a size=%s' -- "$target"
-    sudo sha256sum -- "$target"
-  else
-    printf 'MISSING %s\n' "$target"
-  fi
-done
-
-systemctl is-enabled degen-prod-db-backup.timer || true
-systemctl list-timers --all degen-prod-db-backup.timer --no-pager
-systemctl show degen-prod-db-backup.timer \
-  -p ActiveState -p SubState -p NextElapseUSecRealtime -p LastTriggerUSec
-df -B1 /opt/degen/backups/db
-sudo find /opt/degen/backups/db -mindepth 1 -maxdepth 1 -type f \
-  -printf '%f\t%s bytes\n' | sort
-```
-
-Identify the active PostgreSQL unit instead of assuming that the umbrella unit owns the server process. Stop unless this produces exactly one active database unit. The bot check must run in the login session that owns its live user-systemd manager.
-
-```bash
-mapfile -t POSTGRES_UNITS < <(
-  systemctl list-units --type=service --state=running --no-legend 'postgresql*.service' |
-    awk '{print $1}'
+  deploy/systemd/degen-prod-db-backup.service
+  deploy/systemd/degen-prod-db-backup.timer
 )
-test "${#POSTGRES_UNITS[@]}" -eq 1
-POSTGRES_UNIT=${POSTGRES_UNITS[0]}
-POSTGRES_PID_BEFORE=$(systemctl show "$POSTGRES_UNIT" -p MainPID --value)
-WEB_PID_BEFORE=$(systemctl show degen-web.service -p MainPID --value)
-WORKER_PID_BEFORE=$(systemctl show degen-worker.service -p MainPID --value)
 
-BOT_UNIT=degen-ops-discord-bot.service
-systemctl --user is-active "$BOT_UNIT"
-systemctl --user list-unit-files "$BOT_UNIT" --no-legend
-BOT_PID_BEFORE=$(systemctl --user show "$BOT_UNIT" -p MainPID --value)
-
-printf 'PostgreSQL unit=%s MainPID=%s\n' "$POSTGRES_UNIT" "$POSTGRES_PID_BEFORE"
-printf 'web MainPID=%s\nworker MainPID=%s\nbot unit=%s MainPID=%s\n' \
-  "$WEB_PID_BEFORE" "$WORKER_PID_BEFORE" "$BOT_UNIT" "$BOT_PID_BEFORE"
-test "$POSTGRES_PID_BEFORE" -gt 0
-test "$WEB_PID_BEFORE" -gt 0
-test "$WORKER_PID_BEFORE" -gt 0
-test "$BOT_PID_BEFORE" -gt 0
+EXPECTED_ARCHIVE_MEMBERS=(
+  deploy/
+  deploy/linux/
+  deploy/linux/degen-prod-db-backup-assets.sha256
+  deploy/linux/degen-prod-db-backup-env.py
+  deploy/linux/degen-prod-db-backup-ops.py
+  deploy/linux/degen-prod-db-backup.sh
+  deploy/linux/degen-prod-db-retention.py
+  deploy/systemd/
+  deploy/systemd/degen-prod-db-backup.env.example
+  deploy/systemd/degen-prod-db-backup.service
+  deploy/systemd/degen-prod-db-backup.timer
+)
 ```
 
-If `degen-ops-discord-bot.service` is not confirmed there, stop and identify the real owning account, scope, and unit from live state. Do not guess or continue with a zero MainPID.
+Start one WSL Bash shell, evaluate both arrays above, and keep that shell open
+through archive creation and transfer so the exact contract is not retyped.
 
-## Back up current host configuration
+The corresponding install targets are:
 
-After approval and before installation, keep the same shell so the PID variables remain available. The current script, service, timer, real environment file, and rclone token configuration are required and copied exactly. A missing planner is expected on the first install and is recorded with a root-only explicit `.absent` marker; an existing planner is saved instead. The two planner states are mutually exclusive.
+```text
+/usr/local/sbin/degen-prod-db-backup
+/usr/local/sbin/degen-prod-db-retention
+/usr/local/sbin/degen-prod-db-backup-env
+/usr/local/sbin/degen-prod-db-backup-ops
+/etc/systemd/system/degen-prod-db-backup.service
+/etc/systemd/system/degen-prod-db-backup.timer
+/etc/degen/prod-db-backup.env
+```
+
+## Gate 1: push the exact reviewed commit
+
+This gate authorizes only a normal, non-force push of the reviewed local commit
+to one exact branch ref. It does not authorize merge, deployment, Green access,
+operation-directory creation, archive transfer, service/timer changes, rclone
+access, or database writes.
+
+Before asking for `proceed`, record the local branch, clean/dirty state, exact
+40-character commit, remote URL, destination ref, intended push command, and
+the rollback (delete or supersede the remote branch after a separate approval).
+After approval, run in WSL Bash from the reviewed worktree:
 
 ```bash
 set -euo pipefail
 umask 077
-CONFIG_BACKUP_DIR="/opt/degen/backups/config/$(date -u +%Y%m%dT%H%M%SZ)"
-sudo test ! -e "$CONFIG_BACKUP_DIR"
-sudo mkdir -m 0700 -- "$CONFIG_BACKUP_DIR"
-sudo chown root:root -- "$CONFIG_BACKUP_DIR"
+export LC_ALL=C
 
-for required in \
-  /usr/local/sbin/degen-prod-db-backup \
-  /etc/systemd/system/degen-prod-db-backup.service \
-  /etc/systemd/system/degen-prod-db-backup.timer \
-  /etc/degen/prod-db-backup.env \
-  /etc/degen/rclone.conf
-do
-  sudo test -f "$required"
-  sudo test ! -L "$required"
-done
+REVIEWED_SHA="${APPROVED_REVIEWED_SHA:?set the exact approved 40-character commit}"
+REMOTE_REF="${APPROVED_REMOTE_REF:?set the exact approved refs/heads/... ref}"
+CANONICAL_REMOTE_URL="https://github.com/Degen-Collectibles/degen-deal-parser.git"
+[[ "$REVIEWED_SHA" =~ ^[0-9a-f]{40}$ ]]
+git check-ref-format "$REMOTE_REF"
+case "$REMOTE_REF" in
+  refs/heads/codex/*) ;;
+  *) printf '%s\n' 'ERROR: destination must be an approved codex branch ref' >&2; exit 1 ;;
+esac
+test "$REMOTE_REF" = refs/heads/codex/backup-retention-hardening
+mapfile -t ORIGIN_FETCH_URLS < <(git remote get-url --all origin)
+mapfile -t ORIGIN_PUSH_URLS < <(git remote get-url --push --all origin)
+test "${#ORIGIN_FETCH_URLS[@]}" -eq 1
+test "${#ORIGIN_PUSH_URLS[@]}" -eq 1
+test "${ORIGIN_FETCH_URLS[0]}" = "$CANONICAL_REMOTE_URL"
+test "${ORIGIN_PUSH_URLS[0]}" = "$CANONICAL_REMOTE_URL"
+test "$(git rev-parse --verify HEAD^{commit})" = "$REVIEWED_SHA"
+test -z "$(git status --porcelain=v1 --untracked-files=all)"
+git push origin "$REVIEWED_SHA:$REMOTE_REF"
+REMOTE_BRANCH_SHA="$(git ls-remote --exit-code --refs origin "$REMOTE_REF" | awk -v ref="$REMOTE_REF" '$2 == ref { print $1 }')"
+test "$REMOTE_BRANCH_SHA" = "$REVIEWED_SHA"
 
-sudo sha256sum -- \
-  /usr/local/sbin/degen-prod-db-backup \
-  /etc/systemd/system/degen-prod-db-backup.service \
-  /etc/systemd/system/degen-prod-db-backup.timer \
-  /etc/degen/prod-db-backup.env \
-  /etc/degen/rclone.conf |
-  sudo tee "$CONFIG_BACKUP_DIR/preinstall-source-files.sha256" >/dev/null
-sudo cp -a -- /usr/local/sbin/degen-prod-db-backup "$CONFIG_BACKUP_DIR/"
-sudo cp -a -- /etc/systemd/system/degen-prod-db-backup.service "$CONFIG_BACKUP_DIR/"
-sudo cp -a -- /etc/systemd/system/degen-prod-db-backup.timer "$CONFIG_BACKUP_DIR/"
-sudo cp -a -- /etc/degen/prod-db-backup.env "$CONFIG_BACKUP_DIR/"
-sudo cp -a -- /etc/degen/rclone.conf "$CONFIG_BACKUP_DIR/rclone.conf.audit"
-sudo chown root:root -- "$CONFIG_BACKUP_DIR/rclone.conf.audit"
-sudo chmod 0600 -- "$CONFIG_BACKUP_DIR/rclone.conf.audit"
-sudo sha256sum -- /etc/degen/rclone.conf |
-  sudo tee "$CONFIG_BACKUP_DIR/rclone-before.sha256" >/dev/null
-sudo stat -c 'mtime_epoch=%Y mtime=%y owner=%U:%G mode=%a size=%s' \
-  /etc/degen/rclone.conf |
-  sudo tee "$CONFIG_BACKUP_DIR/rclone-before.stat" >/dev/null
-if sudo test -e /usr/local/sbin/degen-prod-db-retention; then
-  sudo test -f /usr/local/sbin/degen-prod-db-retention
-  sudo test ! -L /usr/local/sbin/degen-prod-db-retention
-  sudo sha256sum -- /usr/local/sbin/degen-prod-db-retention |
-    sudo tee -a "$CONFIG_BACKUP_DIR/preinstall-source-files.sha256" >/dev/null
-  sudo cp -a -- /usr/local/sbin/degen-prod-db-retention "$CONFIG_BACKUP_DIR/"
-else
-  sudo install -o root -g root -m 0600 /dev/null \
-    "$CONFIG_BACKUP_DIR/degen-prod-db-retention.absent"
-fi
+EVIDENCE_DIR="$(mktemp -d /tmp/degen-backup-evidence.XXXXXXXX)"
+ARCHIVE_LOCAL="$EVIDENCE_DIR/source.tar"
+git -c tar.umask=0002 archive --format=tar --output "$ARCHIVE_LOCAL" "$REVIEWED_SHA" -- "${ARCHIVE_PATHS[@]}"
 
-printf 'PostgreSQL unit=%s MainPID=%s\nweb MainPID=%s\nworker MainPID=%s\nbot unit=%s MainPID=%s\n' \
-  "$POSTGRES_UNIT" "$POSTGRES_PID_BEFORE" "$WEB_PID_BEFORE" "$WORKER_PID_BEFORE" \
-  "$BOT_UNIT" "$BOT_PID_BEFORE" |
-  sudo tee "$CONFIG_BACKUP_DIR/mainpids.before" >/dev/null
-sudo find "$CONFIG_BACKUP_DIR" -mindepth 1 -maxdepth 1 -type f \
-  -printf '%f owner=%u:%g mode=%m size=%s\n' |
-  sudo tee "$CONFIG_BACKUP_DIR/backup-files.stat" >/dev/null
-sudo find "$CONFIG_BACKUP_DIR" -mindepth 1 -maxdepth 1 -type f \
-  -exec chmod 0600 -- {} +
-sudo sh -c 'cd "$1" && find . -mindepth 1 -maxdepth 1 -type f ! -name SHA256SUMS -printf "%P\0" | LC_ALL=C sort -z | xargs -0 sha256sum -- > SHA256SUMS' \
-  sh "$CONFIG_BACKUP_DIR"
-sudo chmod 0600 "$CONFIG_BACKUP_DIR/SHA256SUMS"
-sudo sh -c 'cd "$1" && sha256sum -c SHA256SUMS' sh "$CONFIG_BACKUP_DIR"
-sudo test "$(sudo stat -c '%U:%G:%a' "$CONFIG_BACKUP_DIR")" = 'root:root:700'
-```
+test "$(git get-tar-commit-id < "$ARCHIVE_LOCAL")" = "$REVIEWED_SHA"
+mapfile -t LOCAL_ARCHIVE_NAMES < <(tar --list --file "$ARCHIVE_LOCAL")
+test "${#LOCAL_ARCHIVE_NAMES[@]}" -eq "${#EXPECTED_ARCHIVE_MEMBERS[@]}"
+cmp --silent \
+  <(printf '%s\n' "${EXPECTED_ARCHIVE_MEMBERS[@]}") \
+  <(printf '%s\n' "${LOCAL_ARCHIVE_NAMES[@]}" | sort)
+while IFS= read -r member_record; do
+  case "${member_record:0:1}" in
+    d|-) ;;
+    *) printf '%s\n' 'ERROR: archive contains a link or special member' >&2; exit 1 ;;
+  esac
+done < <(tar --list --verbose --file "$ARCHIVE_LOCAL")
 
-`rclone.conf.audit`, its before-use hash, and its mtime are audit and emergency-recovery evidence. Do not automatically restore `rclone.conf.audit`: a refresh may have rotated credentials and made the older token configuration unusable. Any recovery from that copy requires a separate explicit decision after current authentication state is understood.
-
-## Install reviewed bytes and update only policy keys
-
-Install executables as `root:root 0755` and units as `root:root 0644`. Do not install the example over the real environment file.
-
-```bash
-set -euo pipefail
-cd /opt/degen/app
-sudo install -o root -g root -m 0755 \
-  deploy/linux/degen-prod-db-backup.sh \
-  /usr/local/sbin/degen-prod-db-backup
-sudo install -o root -g root -m 0755 \
-  deploy/linux/degen-prod-db-retention.py \
-  /usr/local/sbin/degen-prod-db-retention
-sudo install -o root -g root -m 0644 \
-  deploy/systemd/degen-prod-db-backup.service \
-  /etc/systemd/system/degen-prod-db-backup.service
-sudo install -o root -g root -m 0644 \
-  deploy/systemd/degen-prod-db-backup.timer \
-  /etc/systemd/system/degen-prod-db-backup.timer
-```
-
-The orchestrator accepts a validated `BACKUP_PREFIX` override. Derive that non-sensitive namespace from the newest existing complete pair whose sidecar exactly matches its dump. An incomplete or checksum-invalid pair is not evidence. Stop if no verified complete pair exists or if the newest timestamp is ambiguous across prefixes. This prints only the safe prefix, never environment contents.
-
-```bash
-set -euo pipefail
-BACKUP_PREFIX=$(
-  sudo env BACKUP_DIR=/opt/degen/backups/db bash <<'BASH'
-# BEGIN INSTALL_PREFIX_DERIVATION
-set -uo pipefail
-shopt -s nullglob
-prefix_candidates=()
-for dump_path in "$BACKUP_DIR"/*.dump; do
-  [[ -f "$dump_path" && ! -L "$dump_path" ]] || continue
-  dump_name=${dump_path##*/}
-  if [[ "$dump_name" =~ ^([A-Za-z0-9._-]+)([0-9]{8}T[0-9]{6}Z)\.dump$ ]]; then
-    candidate_prefix=${BASH_REMATCH[1]}
-    candidate_stamp=${BASH_REMATCH[2]}
-  else
-    continue
-  fi
-  sidecar_path="$dump_path.sha256"
-  [[ -f "$sidecar_path" && ! -L "$sidecar_path" ]] || continue
-  sidecar_line=$(<"$sidecar_path") || continue
-  checksum_output=$(sha256sum -- "$dump_path") || continue
-  checksum=${checksum_output%% *}
-  [[ "$sidecar_line" == "$checksum  $dump_name" ]] || continue
-  prefix_candidates+=("$candidate_stamp"$'\t'"$candidate_prefix")
-done
-if (( ${#prefix_candidates[@]} == 0 )); then
-  printf '%s\n' 'ERROR: no verified complete backup pair exists for prefix derivation' >&2
-  exit 1
-fi
-mapfile -t sorted_prefix_candidates < <(
-  printf '%s\n' "${prefix_candidates[@]}" | LC_ALL=C sort -r
+LOCAL_VERIFY_DIR="$(mktemp -d /tmp/degen-backup-archive.XXXXXXXX)"
+trap 'rm -rf -- "$LOCAL_VERIFY_DIR"' EXIT
+tar --extract --file "$ARCHIVE_LOCAL" --directory "$LOCAL_VERIFY_DIR" --no-same-owner --no-same-permissions
+(
+  cd "$LOCAL_VERIFY_DIR"
+  sha256sum --check --strict deploy/linux/degen-prod-db-backup-assets.sha256
 )
-IFS=$'\t' read -r newest_stamp BACKUP_PREFIX <<< "${sorted_prefix_candidates[0]}"
-[[ "$BACKUP_PREFIX" =~ ^[A-Za-z0-9._-]+$ ]] || {
-  printf '%s\n' 'ERROR: derived backup prefix is unsafe' >&2
+
+REVIEWED_ARCHIVE_SHA256="$(sha256sum "$ARCHIVE_LOCAL" | awk '{ print $1 }')"
+REVIEWED_MANIFEST_SHA256="$(git show "$REVIEWED_SHA:deploy/linux/degen-prod-db-backup-assets.sha256" | sha256sum | awk '{ print $1 }')"
+printf 'reviewed_sha=%s\narchive_sha256=%s\nmanifest_sha256=%s\narchive_local=%s\n' \
+  "$REVIEWED_SHA" "$REVIEWED_ARCHIVE_SHA256" "$REVIEWED_MANIFEST_SHA256" "$ARCHIVE_LOCAL"
+```
+
+The three printed values are the immutable evidence for Gate 2. If any command
+fails, stop. Do not create a different archive from the display branch name or
+from working-tree content.
+
+## Gate 2: approve production installation
+
+Resume the same WSL controller shell. If it was closed, re-evaluate the two
+fixed arrays, restore the printed Gate 1 values, and repeat only the read-only
+validations (never the push) before fixing these exact non-secret values for
+the production preflight:
+
+```bash
+UTC_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+OPERATION_DIR="/opt/degen/backups/config/$UTC_STAMP"
+SOURCE_OPS="$OPERATION_DIR/source/deploy/linux/degen-prod-db-backup-ops.py"
+MANIFEST_SHA256="${APPROVED_MANIFEST_SHA256:?set the approved reviewed-manifest SHA-256}"
+REMOTE_REF="${APPROVED_REMOTE_REF:?set the exact approved refs/heads/... ref}"
+CANONICAL_REMOTE_URL="https://github.com/Degen-Collectibles/degen-deal-parser.git"
+REVIEWED_SHA="${APPROVED_REVIEWED_SHA:?set the approved reviewed commit}"
+ARCHIVE_SHA256="${APPROVED_ARCHIVE_SHA256:?set the approved source.tar SHA-256}"
+ARCHIVE_LOCAL="${APPROVED_ARCHIVE_LOCAL:?set the private Gate 1 source.tar path}"
+TRANSFER_TOKEN="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+TRANSFER_DIR="/tmp/degen-backup-transfer-$TRANSFER_TOKEN"
+REMOTE_ARCHIVE="$TRANSFER_DIR/source.tar"
+SOURCE_DIR="$OPERATION_DIR/source"
+SOURCE_MANIFEST="$SOURCE_DIR/deploy/linux/degen-prod-db-backup-assets.sha256"
+[[ "$UTC_STAMP" =~ ^[0-9]{8}T[0-9]{6}Z$ ]]
+[[ "$REVIEWED_SHA" =~ ^[0-9a-f]{40}$ ]]
+[[ "$ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+[[ "$MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
+[[ "$TRANSFER_TOKEN" =~ ^[0-9a-f]{32}$ ]]
+test "$OPERATION_DIR" = "/opt/degen/backups/config/$UTC_STAMP"
+test "$SOURCE_OPS" = "$OPERATION_DIR/source/deploy/linux/degen-prod-db-backup-ops.py"
+test "$REMOTE_REF" = refs/heads/codex/backup-retention-hardening
+mapfile -t ORIGIN_FETCH_URLS < <(git remote get-url --all origin)
+mapfile -t ORIGIN_PUSH_URLS < <(git remote get-url --push --all origin)
+test "${#ORIGIN_FETCH_URLS[@]}" -eq 1
+test "${#ORIGIN_PUSH_URLS[@]}" -eq 1
+test "${ORIGIN_FETCH_URLS[0]}" = "$CANONICAL_REMOTE_URL"
+test "${ORIGIN_PUSH_URLS[0]}" = "$CANONICAL_REMOTE_URL"
+test "$(sha256sum "$ARCHIVE_LOCAL" | awk '{ print $1 }')" = "$ARCHIVE_SHA256"
+test "$(git get-tar-commit-id < "$ARCHIVE_LOCAL")" = "$REVIEWED_SHA"
+REMOTE_BRANCH_SHA="$(git ls-remote --exit-code --refs origin "$REMOTE_REF" | awk -v ref="$REMOTE_REF" '$2 == ref { print $1 }')"
+test "$REMOTE_BRANCH_SHA" = "$REVIEWED_SHA"
+```
+
+Before any Green write, re-verify the current Brev host routing with this
+read-only preflight. It prints no environment or configuration contents:
+
+```bash
+brev exec --help | grep -F -- '--host'
+brev copy --help | grep -F -- '--host'
+brev exec openclaw-9902ae --host 'set -eu; printf "host=%s uid=%s gid=%s\n" "$(hostname -s)" "$(id -u)" "$(id -g)"; test -d /opt/degen/app; test -d /opt/degen/backups; command -v git tar sha256sum python3 find stat cmp >/dev/null'
+```
+
+Validate both digests as lowercase 64-hex, the commit as lowercase 40-hex, the
+local archive hash, the embedded commit, the exact archive arrays above, and
+the still-equal remote branch SHA. Then present this exact preflight and wait
+for a new explicit `proceed`:
+
+- Target: host `openclaw-9902ae`, exact `OPERATION_DIR`, temporary
+  `REMOTE_ARCHIVE`, and the seven install targets listed above.
+- Changes: create a root-only operation directory; transfer `source.tar`;
+  bootstrap-verify it; snapshot current host state; install the reviewed
+  assets with pruning disabled; let the helper quiesce/restore the timer;
+  perform a disposable remote probe; and record a remote-prune dry run. Once a
+  previously active timer is restored, either a persistent catch-up or any
+  ordinary scheduled run before Gate 3 can run a backup and local retention.
+- Reversible: the operation-local source/staging/snapshot/state evidence and
+  all installed targets are covered by the helper's verified snapshot and
+  recovery/rollback contract. Database dump files are not part of that
+  snapshot.
+- Irreversible: remote retention deletion remains disabled in this gate, but
+  any catch-up or later scheduled run after timer restoration can apply the
+  approved local newest-2 policy before Gate 3 and irreversibly delete older
+  local pairs. Recovery and rollback cannot restore those deleted dumps. The
+  probe also briefly creates and deletes disposable objects at its unique
+  probe prefix.
+- Credentials: no secret crosses argv. The rclone configuration may refresh a
+  token during the helper-owned probe. Its root-only audit copy is evidence,
+  not an automatic rollback target.
+- Service impact: the helper owns timer stop/start and never restarts the app,
+  worker, bot, or PostgreSQL. `RefuseManualStart=yes` remains enforced for the
+  backup service.
+- Verification: durable phase receipts, exact target hashes/modes/ownership,
+  timer restoration (including whether a catch-up run occurred), remote probe
+  cleanup, and the zero-remote-deletion dry-run report.
+- Rollback: interrupted mutations use only Conditional recovery below. A
+  stable completed transaction needs the later, separately approved manual
+  rollback gate.
+
+No production mutation described below this point is run before that
+production approval.
+
+### Create private transfer and root-only operation directories, then transfer
+
+Build a non-secret preparation script locally. It atomically creates a random,
+mode-0700 transfer directory as the actual Brev SSH user, verifies that user
+owns it, then creates the separate operation directory as root. Copying into a
+private directory avoids the dangling-symlink and check-to-copy races of a
+predictable file directly under world-writable `/tmp`.
+
+```bash
+PREPARE_SCRIPT="$(mktemp /tmp/degen-backup-prepare.XXXXXXXX)"
+{
+  printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'umask 077'
+  printf 'OPERATION_DIR=%q\n' "$OPERATION_DIR"
+  printf 'TRANSFER_DIR=%q\n' "$TRANSFER_DIR"
+  printf 'REMOTE_ARCHIVE=%q\n' "$REMOTE_ARCHIVE"
+  cat <<'REMOTE_PREPARE'
+TRANSFER_UID="$(id -u)"
+mkdir -m 0700 -- "$TRANSFER_DIR"
+test -d "$TRANSFER_DIR"
+test ! -L "$TRANSFER_DIR"
+test "$(stat -c %u "$TRANSFER_DIR")" -eq "$TRANSFER_UID"
+test "$(stat -c %a "$TRANSFER_DIR")" = 700
+test -z "$(find "$TRANSFER_DIR" -mindepth 1 -maxdepth 1 -print -quit)"
+sudo -- /bin/bash -c '
+set -euo pipefail
+umask 077
+OPERATION_DIR="$1"
+TRANSFER_DIR="$2"
+TRANSFER_UID="$3"
+PARENT="${OPERATION_DIR%/*}"
+if [[ ! -e "$PARENT" ]]; then mkdir -m 0700 -- "$PARENT"; fi
+test -d "$PARENT"
+test ! -L "$PARENT"
+test "$(stat -c %u "$PARENT")" -eq 0
+PARENT_MODE="$(stat -c %a "$PARENT")"
+(( (8#$PARENT_MODE & 0022) == 0 ))
+test ! -e "$OPERATION_DIR"
+test -d "$TRANSFER_DIR"
+test ! -L "$TRANSFER_DIR"
+test "$(stat -c %u "$TRANSFER_DIR")" -eq "$TRANSFER_UID"
+test "$(stat -c %a "$TRANSFER_DIR")" = 700
+mkdir -m 0700 -- "$OPERATION_DIR"
+test "$(stat -c %u "$OPERATION_DIR")" -eq 0
+test "$(stat -c %a "$OPERATION_DIR")" = 700
+' -- "$OPERATION_DIR" "$TRANSFER_DIR" "$TRANSFER_UID"
+REMOTE_PREPARE
+} > "$PREPARE_SCRIPT"
+chmod 0700 "$PREPARE_SCRIPT"
+brev exec openclaw-9902ae --host "@$PREPARE_SCRIPT"
+brev copy --host "$ARCHIVE_LOCAL" "openclaw-9902ae:$REMOTE_ARCHIVE"
+```
+
+### Standard-tool bootstrap and normal source-helper path
+
+The following local controller builds a remote script containing only approved
+non-secret values and the fixed member-name contract. The remote script first
+verifies the archive with `sha256sum`, `git`, `tar`, `find`, `stat`, and `cmp`.
+It does not execute the new helper until all bootstrap checks pass.
+
+```bash
+BOOTSTRAP_SCRIPT="$(mktemp /tmp/degen-backup-bootstrap.XXXXXXXX)"
+{
+  printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'umask 077' 'export LC_ALL=C'
+  printf 'OPERATION_DIR=%q\n' "$OPERATION_DIR"
+  printf 'SOURCE_OPS=%q\n' "$SOURCE_OPS"
+  printf 'SOURCE_DIR=%q\n' "$SOURCE_DIR"
+  printf 'SOURCE_MANIFEST=%q\n' "$SOURCE_MANIFEST"
+  printf 'TRANSFER_DIR=%q\n' "$TRANSFER_DIR"
+  printf 'REMOTE_ARCHIVE=%q\n' "$REMOTE_ARCHIVE"
+  printf 'REVIEWED_SHA=%q\n' "$REVIEWED_SHA"
+  printf 'ARCHIVE_SHA256=%q\n' "$ARCHIVE_SHA256"
+  printf 'MANIFEST_SHA256=%q\n' "$MANIFEST_SHA256"
+  declare -p EXPECTED_ARCHIVE_MEMBERS
+  cat <<'REMOTE_BOOTSTRAP'
+if (( EUID != 0 )); then exec sudo -- /bin/bash "$0"; fi
+test -d "$OPERATION_DIR"
+test ! -L "$OPERATION_DIR"
+test "$(stat -c %u "$OPERATION_DIR")" -eq 0
+test "$(stat -c %a "$OPERATION_DIR")" = 700
+test -d "$TRANSFER_DIR"
+test ! -L "$TRANSFER_DIR"
+test "$(stat -c %a "$TRANSFER_DIR")" = 700
+test -f "$REMOTE_ARCHIVE"
+test ! -L "$REMOTE_ARCHIVE"
+test "$(stat -c %u "$REMOTE_ARCHIVE")" -eq "$(stat -c %u "$TRANSFER_DIR")"
+test "$(stat -c %h "$REMOTE_ARCHIVE")" -eq 1
+REMOTE_ARCHIVE_MODE="$(stat -c %a "$REMOTE_ARCHIVE")"
+(( (8#$REMOTE_ARCHIVE_MODE & 0022) == 0 ))
+test ! -e "$OPERATION_DIR/source.tar"
+mv --no-target-directory -- "$REMOTE_ARCHIVE" "$OPERATION_DIR/source.tar"
+rmdir -- "$TRANSFER_DIR"
+test -f "$OPERATION_DIR/source.tar"
+test ! -L "$OPERATION_DIR/source.tar"
+test "$(stat -c %h "$OPERATION_DIR/source.tar")" -eq 1
+chown root:root "$OPERATION_DIR/source.tar"
+chmod 0600 "$OPERATION_DIR/source.tar"
+test "$(stat -c %u "$OPERATION_DIR/source.tar")" -eq 0
+test "$(stat -c %h "$OPERATION_DIR/source.tar")" -eq 1
+printf '%s  %s\n' "$ARCHIVE_SHA256" "$OPERATION_DIR/source.tar" | sha256sum --check --strict -
+test "$(git get-tar-commit-id < "$OPERATION_DIR/source.tar")" = "$REVIEWED_SHA"
+
+BOOTSTRAP_WORK="$(mktemp -d /tmp/degen-backup-bootstrap.XXXXXXXX)"
+trap 'rm -rf -- "$BOOTSTRAP_WORK"' EXIT
+printf '%s\n' "${EXPECTED_ARCHIVE_MEMBERS[@]}" > "$BOOTSTRAP_WORK/expected"
+mapfile -t ACTUAL_ARCHIVE_MEMBERS < <(tar --list --file "$OPERATION_DIR/source.tar")
+test "${#ACTUAL_ARCHIVE_MEMBERS[@]}" -eq "${#EXPECTED_ARCHIVE_MEMBERS[@]}"
+printf '%s\n' "${ACTUAL_ARCHIVE_MEMBERS[@]}" | sort > "$BOOTSTRAP_WORK/actual"
+cmp --silent "$BOOTSTRAP_WORK/expected" "$BOOTSTRAP_WORK/actual"
+tar --list --verbose --file "$OPERATION_DIR/source.tar" > "$BOOTSTRAP_WORK/verbose"
+while IFS= read -r member_record; do
+  case "${member_record:0:1}" in
+    d|-) ;;
+    *) printf '%s\n' 'ERROR: archive contains a link or special member' >&2; exit 1 ;;
+  esac
+done < "$BOOTSTRAP_WORK/verbose"
+
+test ! -e "$SOURCE_DIR"
+mkdir -m 0700 -- "$SOURCE_DIR"
+tar --extract --file "$OPERATION_DIR/source.tar" --directory "$SOURCE_DIR" --no-same-owner --no-same-permissions
+if find "$SOURCE_DIR" -xdev \( -type l -o \( ! -type f ! -type d \) \) -print -quit | grep -q .; then
+  printf '%s\n' 'ERROR: extracted source contains a link or special entry' >&2
   exit 1
-}
-for candidate in "${sorted_prefix_candidates[@]}"; do
-  IFS=$'\t' read -r candidate_stamp candidate_prefix <<< "$candidate"
-  [[ "$candidate_stamp" == "$newest_stamp" ]] || break
-  if [[ "$candidate_prefix" != "$BACKUP_PREFIX" ]]; then
-    printf '%s\n' 'ERROR: newest verified backup timestamp has multiple prefixes' >&2
+fi
+if find "$SOURCE_DIR" -xdev ! -user root -print -quit | grep -q .; then
+  printf '%s\n' 'ERROR: extracted source is not root-owned' >&2
+  exit 1
+fi
+if find "$SOURCE_DIR" -xdev -type f -links +1 -print -quit | grep -q .; then
+  printf '%s\n' 'ERROR: extracted source contains a hard-linked file' >&2
+  exit 1
+fi
+if find "$SOURCE_DIR" -xdev -perm /7022 -print -quit | grep -q .; then
+  printf '%s\n' 'ERROR: extracted source mode is unsafe' >&2
+  exit 1
+fi
+printf '%s  %s\n' "$MANIFEST_SHA256" "$SOURCE_MANIFEST" | sha256sum --check --strict -
+(
+  cd "$SOURCE_DIR"
+  sha256sum --check --strict deploy/linux/degen-prod-db-backup-assets.sha256
+)
+
+/usr/bin/python3 "$SOURCE_OPS" verify-source --operation-dir "$OPERATION_DIR" --archive "$OPERATION_DIR/source.tar" --expected-commit "$REVIEWED_SHA" --expected-archive-sha256 "$ARCHIVE_SHA256" --expected-manifest-sha256 "$MANIFEST_SHA256"
+/usr/bin/python3 "$SOURCE_OPS" prepare-staging --operation-dir "$OPERATION_DIR"
+/usr/bin/python3 "$SOURCE_OPS" snapshot --operation-dir "$OPERATION_DIR"
+/usr/bin/python3 "$SOURCE_OPS" install --operation-dir "$OPERATION_DIR"
+
+printf '%s  %s\n' "$MANIFEST_SHA256" "$SOURCE_MANIFEST" | sha256sum --check --strict -
+EXPECTED_INSTALLED_OPS_SHA256="$(awk '$2 == "deploy/linux/degen-prod-db-backup-ops.py" { print $1 }' "$SOURCE_MANIFEST")"
+test "$(awk '$2 == "deploy/linux/degen-prod-db-backup-ops.py" { count += 1 } END { print count + 0 }' "$SOURCE_MANIFEST")" -eq 1
+[[ "$EXPECTED_INSTALLED_OPS_SHA256" =~ ^[0-9a-f]{64}$ ]]
+printf '%s  %s\n' "$EXPECTED_INSTALLED_OPS_SHA256" /usr/local/sbin/degen-prod-db-backup-ops | sha256sum --check --strict -
+/usr/local/sbin/degen-prod-db-backup-ops probe-remote --operation-dir "$OPERATION_DIR"
+printf '%s  %s\n' "$EXPECTED_INSTALLED_OPS_SHA256" /usr/local/sbin/degen-prod-db-backup-ops | sha256sum --check --strict -
+/usr/local/sbin/degen-prod-db-backup-ops record-dry-run --operation-dir "$OPERATION_DIR"
+/usr/local/sbin/degen-prod-db-backup-ops show-state --operation-dir "$OPERATION_DIR"
+REMOTE_BOOTSTRAP
+} > "$BOOTSTRAP_SCRIPT"
+chmod 0700 "$BOOTSTRAP_SCRIPT"
+brev exec openclaw-9902ae --host "@$BOOTSTRAP_SCRIPT"
+```
+
+Stop if the helper fails. Do not skip to pruning. Preserve `OPERATION_DIR`, the
+approved hashes, all helper output, and the dry-run report for review.
+
+## Conditional recovery only
+
+This is not part of the normal success path. Use it only when source-routed
+`show-state` reports one of the explicitly recoverable in-progress phases
+below. Recovery authority comes from the original approval for the exact
+interrupted transaction: Gate 2 for install/probe/dry-run phases, Gate 3 for
+policy/observation phases, or the separately approved manual rollback for its
+rollback phases. An earlier Gate 2 approval never authorizes recovery of a
+later Gate 3 or manual-rollback transaction. A different operation directory,
+commit, archive, manifest, host, or stable phase needs a new preflight and
+approval.
+
+Run on Green as root through a non-secret `brev exec ... @script.sh` wrapper.
+Before executing source code again, bind both the manifest and source helper to
+the originally approved manifest digest:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+(( EUID == 0 ))
+: "${OPERATION_DIR:?set the exact approved operation directory}"
+: "${SOURCE_OPS:?set the exact approved source helper path}"
+: "${SOURCE_MANIFEST:?set the exact approved source manifest path}"
+: "${MANIFEST_SHA256:?set the approved manifest SHA-256}"
+test "$SOURCE_OPS" = "$OPERATION_DIR/source/deploy/linux/degen-prod-db-backup-ops.py"
+test "$SOURCE_MANIFEST" = "$OPERATION_DIR/source/deploy/linux/degen-prod-db-backup-assets.sha256"
+printf '%s  %s\n' "$MANIFEST_SHA256" "$SOURCE_MANIFEST" | sha256sum --check --strict -
+EXPECTED_SOURCE_OPS_SHA256="$(awk '$2 == "deploy/linux/degen-prod-db-backup-ops.py" { print $1 }' "$SOURCE_MANIFEST")"
+test "$(awk '$2 == "deploy/linux/degen-prod-db-backup-ops.py" { count += 1 } END { print count + 0 }' "$SOURCE_MANIFEST")" -eq 1
+[[ "$EXPECTED_SOURCE_OPS_SHA256" =~ ^[0-9a-f]{64}$ ]]
+printf '%s  %s\n' "$EXPECTED_SOURCE_OPS_SHA256" "$SOURCE_OPS" | sha256sum --check --strict -
+RECORDED_PHASE="$(
+  /usr/bin/python3 "$SOURCE_OPS" show-state --operation-dir "$OPERATION_DIR" |
+    /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["phase"])'
+)"
+case "$RECORDED_PHASE" in
+  installing|recovering|probing|dry_run_recording|policy_enabling|observing|recovery_required|recovering_policy|manual_rollback|recovering_probe|recovering_guard)
+    /usr/bin/python3 "$SOURCE_OPS" recover --operation-dir "$OPERATION_DIR"
+    ;;
+  *)
+    printf '%s\n' "ERROR: recovery refused for non-interrupted phase: $RECORDED_PHASE" >&2
     exit 1
-  fi
-done
-printf '%s\n' "$BACKUP_PREFIX"
-# END INSTALL_PREFIX_DERIVATION
-BASH
-)
-[[ "$BACKUP_PREFIX" =~ ^[A-Za-z0-9._-]+$ ]]
+    ;;
+esac
 ```
 
-This exact editor preserves unrelated lines and comments byte-for-byte where possible and adds or replaces only the new non-sensitive policy keys, including the derived `BACKUP_PREFIX`. For managed keys it follows systemd `EnvironmentFile` assignment semantics: leading horizontal whitespace and whitespace immediately before `=` do not create a different key. Every semantic duplicate is removed, exactly one canonical `KEY=value` remains, and malformed managed-key lines fail closed. It also refuses a symlink, incorrect ownership/mode, an unsafe prefix, or an existing temporary path. `REMOTE_PRUNE_ENABLED=0` remains the initial state.
+Never resolve interrupted recovery through a possibly mixed installed binary.
+If verified source is unavailable or `show-state` cannot prove the exact bound
+transaction, stop and investigate; do not reconstruct state manually.
+
+## Stable checkpoint resume
+
+Do not run `recover` for a stable phase and do not blindly replay the whole
+normal block. First repeat the approved-manifest/source-helper check from the
+recovery wrapper, run source-routed `show-state`, and continue only with the
+single next action shown here:
+
+| Stable phase | Next action |
+|---|---|
+| `source_verified` | source `prepare-staging` |
+| `staging_prepared` | source `snapshot` |
+| `snapshotted` | source `install` |
+| `installed` | reverify installed helper, then `probe-remote` |
+| `probed` | reverify installed helper, then `record-dry-run` and print `show-state` |
+| `dry_run_recorded` | stop and seek Gate 3 approval |
+| `policy_enabled` | wait for the next scheduled run, then reverify and `observe` |
+| `observed` | no mutation; retain the final evidence |
+
+Any other phase must match the Conditional recovery allowlist or stop for a
+new investigation and preflight.
+
+## Gate 3: approve remote pruning
+
+Review the recorded dry-run report and durable operation state. Zero candidates still require approval because this changes future scheduled behavior. Before
+asking for `proceed`, disclose:
+
+- enabling changes only the helper-managed prune flag and preserves all other
+  verified configuration;
+- the helper may perform timer stop/start while applying the policy;
+- rclone configuration may refresh its token during later scheduled access;
+- the remote probe creates and deletes only disposable objects at its unique
+  probe prefix;
+- remote deletion is potentially irreversible; local deletion can also be
+  irreversible. Later scheduled runs can delete verified out-of-policy backup
+  objects even when today's candidate count is zero;
+- rollback cannot restore deleted local backups or deleted OneDrive objects.
+
+After a new explicit approval, put the following commands in a non-secret root
+script with the exact approved values and run it on Green using the same
+`brev exec openclaw-9902ae --host @script.sh` pattern. Re-check both the
+approved manifest and installed helper immediately before enabling, then invoke
+only the installed helper:
 
 ```bash
-sudo env BACKUP_PREFIX="$BACKUP_PREFIX" python3 - <<'PY'
-# BEGIN INSTALL_MANAGED_ENV_NORMALIZATION
-from pathlib import Path
-import os
-import re
-import stat
-
-path = Path(os.environ.get("BACKUP_ENV_FILE", "/etc/degen/prod-db-backup.env"))
-temporary = path.with_name(path.name + ".retention-update")
-backup_prefix = os.environ.get("BACKUP_PREFIX", "")
-if re.fullmatch(r"[A-Za-z0-9._-]+", backup_prefix) is None:
-    raise SystemExit("derived backup prefix is unsafe")
-updates = {
-    "BACKUP_PREFIX": backup_prefix,
-    "KEEP_LOCAL_COUNT": "2",
-    "KEEP_REMOTE_DAILY": "7",
-    "KEEP_REMOTE_WEEKLY": "4",
-    "KEEP_REMOTE_MONTHLY": "3",
-    "REMOTE_PRUNE_ENABLED": "0",
-    "MIN_FREE_AFTER_BYTES": "10737418240",
-    "RETENTION_PLANNER": "/usr/local/sbin/degen-prod-db-retention",
-    "LOCK_FILE": "/run/lock/degen-prod-db-backup.lock",
-}
-assignment = re.compile(r"^[ \t]*(?P<key>[A-Za-z_][A-Za-z0-9_]*)[ \t]*=(?P<value>.*)$")
-
-
-def body_and_ending(line: str) -> tuple[str, str]:
-    if line.endswith("\r\n"):
-        return line[:-2], "\r\n"
-    if line.endswith("\n"):
-        return line[:-1], "\n"
-    return line, ""
-
-
-def semantic_assignment(line: str) -> tuple[str, str] | None:
-    body, _ = body_and_ending(line)
-    stripped = body.lstrip(" \t")
-    if not stripped or stripped.startswith(("#", ";")):
-        return None
-    match = assignment.fullmatch(body)
-    if match is not None:
-        return match.group("key"), match.group("value")
-    token = re.match(r"^(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)", stripped)
-    if token is not None and token.group(1) in updates:
-        raise SystemExit(f"malformed managed environment assignment: {token.group(1)}")
-    return None
-
-
-def validate_canonical(lines: list[str]) -> None:
-    found: dict[str, list[str]] = {key: [] for key in updates}
-    for line in lines:
-        parsed = semantic_assignment(line)
-        if parsed is not None and parsed[0] in found:
-            found[parsed[0]].append(body_and_ending(line)[0])
-    for key, value in updates.items():
-        if found[key] != [f"{key}={value}"]:
-            raise SystemExit(f"managed environment key was not canonicalized exactly once: {key}")
-
-
-if path.is_symlink() or not path.is_file():
-    raise SystemExit("real environment file must be a regular file")
-metadata = path.stat()
-if metadata.st_uid != 0 or metadata.st_gid != 0 or stat.S_IMODE(metadata.st_mode) != 0o600:
-    raise SystemExit("real environment file must remain root:root 0600")
-if temporary.exists() or temporary.is_symlink():
-    raise SystemExit("refusing a pre-existing policy-update temporary path")
-
-with path.open("r", encoding="utf-8", newline="") as handle:
-    lines = handle.readlines()
-newline = next((ending for line in lines if (ending := body_and_ending(line)[1])), "\n")
-output = []
-seen = set()
-for line in lines:
-    parsed = semantic_assignment(line)
-    if parsed is not None and parsed[0] in updates:
-        key = parsed[0]
-        if key not in seen:
-            output.append(f"{key}={updates[key]}{newline}")
-            seen.add(key)
-        continue
-    output.append(line)
-for key, value in updates.items():
-    if key not in seen:
-        if output and not output[-1].endswith(("\n", "\r")):
-            output[-1] += newline
-        output.append(f"{key}={value}{newline}")
-
-validate_canonical(output)
-
-descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
-    handle.writelines(output)
-    handle.flush()
-    os.fsync(handle.fileno())
-os.chown(temporary, 0, 0)
-os.chmod(temporary, 0o600)
-with temporary.open("r", encoding="utf-8", newline="") as handle:
-    validate_canonical(handle.readlines())
-os.replace(temporary, path)
-directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-try:
-    os.fsync(directory_fd)
-finally:
-    os.close(directory_fd)
-metadata = path.stat()
-if metadata.st_uid != 0 or metadata.st_gid != 0 or stat.S_IMODE(metadata.st_mode) != 0o600:
-    raise SystemExit("real environment file metadata changed unexpectedly")
-with path.open("r", encoding="utf-8", newline="") as handle:
-    validate_canonical(handle.readlines())
-# END INSTALL_MANAGED_ENV_NORMALIZATION
-PY
-sudo test "$(sudo stat -c '%U:%G:%a' /etc/degen/prod-db-backup.env)" = 'root:root:600'
-sudo awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/{print $1}' /etc/degen/prod-db-backup.env | sort
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+(( EUID == 0 ))
+: "${OPERATION_DIR:?set the exact approved operation directory}"
+: "${SOURCE_MANIFEST:?set the exact approved source manifest path}"
+: "${MANIFEST_SHA256:?set the approved manifest SHA-256}"
+test "$SOURCE_MANIFEST" = "$OPERATION_DIR/source/deploy/linux/degen-prod-db-backup-assets.sha256"
+printf '%s  %s\n' "$MANIFEST_SHA256" "$SOURCE_MANIFEST" | sha256sum --check --strict -
+EXPECTED_INSTALLED_OPS_SHA256="$(awk '$2 == "deploy/linux/degen-prod-db-backup-ops.py" { print $1 }' "$SOURCE_MANIFEST")"
+test "$(awk '$2 == "deploy/linux/degen-prod-db-backup-ops.py" { count += 1 } END { print count + 0 }' "$SOURCE_MANIFEST")" -eq 1
+[[ "$EXPECTED_INSTALLED_OPS_SHA256" =~ ^[0-9a-f]{64}$ ]]
+printf '%s  %s\n' "$EXPECTED_INSTALLED_OPS_SHA256" /usr/local/sbin/degen-prod-db-backup-ops | sha256sum --check --strict -
+/usr/local/sbin/degen-prod-db-backup-ops enable-prune --operation-dir "$OPERATION_DIR"
+/usr/local/sbin/degen-prod-db-backup-ops show-state --operation-dir "$OPERATION_DIR"
 ```
 
-The last command displays environment variable names only. Never inspect, diff, log, or paste the file's values.
-
-## Validate without running a backup
-
-Validate unit syntax, reload metadata, and confirm the existing timer remains enabled with the intended next trigger. Do not invoke the service and do not use `--now`.
+Do not manually start the backup service. Wait for the next scheduled timer run
+and record its actual completion evidence. Then re-check the installed helper
+and observe that scheduled run:
 
 ```bash
+#!/usr/bin/env bash
 set -euo pipefail
-sudo systemd-analyze verify \
-  /etc/systemd/system/degen-prod-db-backup.service \
-  /etc/systemd/system/degen-prod-db-backup.timer
-sudo systemctl daemon-reload
-systemctl is-enabled degen-prod-db-backup.timer
-systemctl list-timers --all degen-prod-db-backup.timer --no-pager
-systemctl show degen-prod-db-backup.timer \
-  -p ActiveState -p SubState -p NextElapseUSecRealtime -p LastTriggerUSec
-
-REVIEW_DIR="$CONFIG_BACKUP_DIR/review"
-sudo test ! -e "$REVIEW_DIR"
-sudo mkdir -m 0700 -- "$REVIEW_DIR"
-sudo chown root:root -- "$REVIEW_DIR"
-sudo /usr/local/sbin/degen-prod-db-backup preflight |
-  sudo tee "$REVIEW_DIR/preflight.txt"
-sudo /usr/local/sbin/degen-prod-db-backup remote-retention-dry-run |
-  sudo tee "$REVIEW_DIR/remote-retention-dry-run.txt"
-sudo sha256sum -- /etc/degen/rclone.conf |
-  sudo tee "$REVIEW_DIR/rclone-after.sha256" >/dev/null
-sudo stat -c 'mtime_epoch=%Y mtime=%y owner=%U:%G mode=%a size=%s' \
-  /etc/degen/rclone.conf |
-  sudo tee "$REVIEW_DIR/rclone-after.stat" >/dev/null
-sudo sh -c '
-  before_hash=$(awk "NR == 1 {print \$1}" "$1/rclone-before.sha256")
-  after_hash=$(awk "NR == 1 {print \$1}" "$2/rclone-after.sha256")
-  before_mtime=$(sed -n "s/^mtime_epoch=\([0-9][0-9]*\).*/\1/p" "$1/rclone-before.stat")
-  after_mtime=$(sed -n "s/^mtime_epoch=\([0-9][0-9]*\).*/\1/p" "$2/rclone-after.stat")
-  test -n "$before_hash" && test -n "$after_hash" && test -n "$before_mtime" && test -n "$after_mtime"
-  test "$before_hash" = "$after_hash" && hash_changed=no || hash_changed=yes
-  test "$before_mtime" = "$after_mtime" && mtime_changed=no || mtime_changed=yes
-  printf "hash_changed=%s mtime_changed=%s\n" "$hash_changed" "$mtime_changed" > "$2/rclone-change.txt"
-' sh "$CONFIG_BACKUP_DIR" "$REVIEW_DIR"
-sudo chmod 0600 "$REVIEW_DIR"/rclone-after.sha256 \
-  "$REVIEW_DIR"/rclone-after.stat "$REVIEW_DIR"/rclone-change.txt
+umask 077
+(( EUID == 0 ))
+: "${OPERATION_DIR:?set the exact approved operation directory}"
+: "${SOURCE_MANIFEST:?set the exact approved source manifest path}"
+: "${MANIFEST_SHA256:?set the approved manifest SHA-256}"
+test "$SOURCE_MANIFEST" = "$OPERATION_DIR/source/deploy/linux/degen-prod-db-backup-assets.sha256"
+printf '%s  %s\n' "$MANIFEST_SHA256" "$SOURCE_MANIFEST" | sha256sum --check --strict -
+EXPECTED_INSTALLED_OPS_SHA256="$(awk '$2 == "deploy/linux/degen-prod-db-backup-ops.py" { print $1 }' "$SOURCE_MANIFEST")"
+test "$(awk '$2 == "deploy/linux/degen-prod-db-backup-ops.py" { count += 1 } END { print count + 0 }' "$SOURCE_MANIFEST")" -eq 1
+[[ "$EXPECTED_INSTALLED_OPS_SHA256" =~ ^[0-9a-f]{64}$ ]]
+printf '%s  %s\n' "$EXPECTED_INSTALLED_OPS_SHA256" /usr/local/sbin/degen-prod-db-backup-ops | sha256sum --check --strict -
+/usr/local/sbin/degen-prod-db-backup-ops observe --operation-dir "$OPERATION_DIR"
+/usr/local/sbin/degen-prod-db-backup-ops show-state --operation-dir "$OPERATION_DIR"
 ```
 
-`remote-retention-dry-run` does not delete even when REMOTE_PRUNE_ENABLED=1; it also does not create a dump. The host flag must still be `0` here.
+The observation must prove a fresh successful scheduled run, exact local and
+remote inventory receipts, checksum verification, policy decisions, timer
+restoration, and the final durable phase. A failed or stale run is not success.
 
-Review `rclone-change.txt` to record whether the hash and mtime changed during remote preflight/dry-run. A change is evidence of credential refresh, not permission to restore the audit copy.
+## Evidence and accepted limitation
 
-## Exact dry-run candidate review gate
+Retain the root-only operation directory and the non-secret summary supplied by
+the helper. Do not print or copy the real app environment, managed backup
+environment, database URL, rclone configuration, token material, database dump,
+or `rclone.conf.audit` contents into tickets or chat.
 
-Extract exact dry-run objects and independently regenerate the keep/delete/protected plan from the complete remote inventory:
+`pg_restore --list` proves that a custom-format archive is structurally
+readable. `pg_restore --list` does not prove an end-to-end logical restore. The
+canceled full restore rehearsal remains an explicit recovery limitation and
+must not be described as restore proof.
+
+## Separately approved manual rollback
+
+Stable-phase rollback is a new production mutation. Present a fresh preflight
+with the exact operation directory, current phase, targets, snapshot evidence,
+timer state, effects, verification, and limits, then wait for a new explicit
+`proceed`. In the non-secret Green root wrapper, re-bind the manifest and source
+helper first, then invoke only the verified source helper:
 
 ```bash
+#!/usr/bin/env bash
 set -euo pipefail
-sudo sed -n 's/^.*Remote retention dry run: would delete //p' \
-  "$REVIEW_DIR/remote-retention-dry-run.txt" |
-  sudo tee "$REVIEW_DIR/remote-retention-candidates.txt" >/dev/null
-sudo rclone --config /etc/degen/rclone.conf lsf \
-  onedrive:backups/degen-db --files-only --max-depth 1 | sort |
-  sudo tee "$REVIEW_DIR/remote-inventory.txt" >/dev/null
-BACKUP_PREFIX=$(sudo sed -n 's/^.*Preflight passed for mode=remote-retention-dry-run prefix=//p' \
-  "$REVIEW_DIR/remote-retention-dry-run.txt" | tail -n 1)
-test -n "$BACKUP_PREFIX"
-REVIEW_NOW=$(date -u +%Y%m%dT%H%M%SZ)
-sudo sh -c '/usr/local/sbin/degen-prod-db-retention --mode remote --prefix "$1" --now "$2" --daily 7 --weekly 4 --monthly 3 --format json < "$3" > "$4"' \
-  sh "$BACKUP_PREFIX" "$REVIEW_NOW" \
-  "$REVIEW_DIR/remote-inventory.txt" \
-  "$REVIEW_DIR/remote-retention-plan.json"
-sudo python3 - "$REVIEW_DIR" <<'PY'
-from pathlib import Path
-import json
-import sys
-
-root = Path(sys.argv[1])
-inventory = set((root / "remote-inventory.txt").read_text(encoding="utf-8").splitlines())
-candidates = (root / "remote-retention-candidates.txt").read_text(encoding="utf-8").splitlines()
-plan = json.loads((root / "remote-retention-plan.json").read_text(encoding="utf-8"))
-planned_delete = {
-    name
-    for record in plan["delete"]
-    for name in (record["dump"], record["checksum"])
-}
-keep = {
-    name
-    for record in plan["keep"]
-    for name in (record["dump"], record["checksum"])
-}
-if len(candidates) != len(set(candidates)) or set(candidates) != planned_delete:
-    raise SystemExit("dry-run candidates differ from independent plan")
-if not set(candidates) <= inventory or set(candidates) & keep:
-    raise SystemExit("candidate absent from inventory or inside keep set")
-for name in candidates:
-    counterpart = name.removesuffix(".sha256") if name.endswith(".sha256") else name + ".sha256"
-    if counterpart not in candidates:
-        raise SystemExit(f"candidate is not a complete pair: {name}")
-print(f"candidate_objects={len(candidates)} candidate_pairs={len(candidates) // 2}")
-PY
-sudo cat "$REVIEW_DIR/remote-retention-candidates.txt"
+umask 077
+(( EUID == 0 ))
+: "${OPERATION_DIR:?set the exact approved operation directory}"
+: "${SOURCE_OPS:?set the exact approved source helper path}"
+: "${SOURCE_MANIFEST:?set the exact approved source manifest path}"
+: "${MANIFEST_SHA256:?set the approved manifest SHA-256}"
+test "$SOURCE_OPS" = "$OPERATION_DIR/source/deploy/linux/degen-prod-db-backup-ops.py"
+test "$SOURCE_MANIFEST" = "$OPERATION_DIR/source/deploy/linux/degen-prod-db-backup-assets.sha256"
+printf '%s  %s\n' "$MANIFEST_SHA256" "$SOURCE_MANIFEST" | sha256sum --check --strict -
+EXPECTED_SOURCE_OPS_SHA256="$(awk '$2 == "deploy/linux/degen-prod-db-backup-ops.py" { print $1 }' "$SOURCE_MANIFEST")"
+test "$(awk '$2 == "deploy/linux/degen-prod-db-backup-ops.py" { count += 1 } END { print count + 0 }' "$SOURCE_MANIFEST")" -eq 1
+[[ "$EXPECTED_SOURCE_OPS_SHA256" =~ ^[0-9a-f]{64}$ ]]
+printf '%s  %s\n' "$EXPECTED_SOURCE_OPS_SHA256" "$SOURCE_OPS" | sha256sum --check --strict -
+/usr/bin/python3 "$SOURCE_OPS" rollback --operation-dir "$OPERATION_DIR"
 ```
 
-Do not cross this gate until every candidate is manually recognized as an automation-owned complete pair and is outside the keep set in `remote-retention-plan.json`. Protected objects must never appear as candidates. Record the decision beside the snapshot.
-
-If there are zero candidates, record `zero candidates` in the review evidence. Zero candidates is not approval: future scheduled runs can still produce deletable objects. If candidates exist, record the reviewed object list and keep-set comparison. In both cases, leave `REMOTE_PRUNE_ENABLED=0` unchanged and stop.
-
-Both zero-candidate and nonzero-candidate reviews require explicit Jeffrey/operator approval before remote deletion may be enabled. Only after that approval is recorded may the operator run the gated edit below. It recognizes all whitespace-equivalent systemd assignments, requires every effective pre-edit value to be `0`, removes duplicates, and writes exactly one canonical `REMOTE_PRUNE_ENABLED=1` line while preserving unrelated content:
-
-```bash
-sudo python3 - <<'PY'
-# BEGIN PRUNE_FLAG_NORMALIZATION
-from pathlib import Path
-import os
-import re
-import stat
-
-path = Path(os.environ.get("BACKUP_ENV_FILE", "/etc/degen/prod-db-backup.env"))
-temporary = path.with_name(path.name + ".prune-enable")
-managed_key = "REMOTE_PRUNE_ENABLED"
-assignment = re.compile(r"^[ \t]*(?P<key>[A-Za-z_][A-Za-z0-9_]*)[ \t]*=(?P<value>.*)$")
-
-
-def body_and_ending(line: str) -> tuple[str, str]:
-    if line.endswith("\r\n"):
-        return line[:-2], "\r\n"
-    if line.endswith("\n"):
-        return line[:-1], "\n"
-    return line, ""
-
-
-def semantic_assignment(line: str) -> tuple[str, str] | None:
-    body, _ = body_and_ending(line)
-    stripped = body.lstrip(" \t")
-    if not stripped or stripped.startswith(("#", ";")):
-        return None
-    match = assignment.fullmatch(body)
-    if match is not None:
-        return match.group("key"), match.group("value")
-    token = re.match(r"^(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)", stripped)
-    if token is not None and token.group(1) == managed_key:
-        raise SystemExit("malformed REMOTE_PRUNE_ENABLED assignment")
-    return None
-
-
-if path.is_symlink() or not path.is_file():
-    raise SystemExit("real environment file must be a regular file")
-metadata = path.stat()
-if metadata.st_uid != 0 or metadata.st_gid != 0 or stat.S_IMODE(metadata.st_mode) != 0o600:
-    raise SystemExit("real environment file must remain root:root 0600")
-if temporary.exists() or temporary.is_symlink():
-    raise SystemExit("refusing a pre-existing prune-enable temporary path")
-
-with path.open("r", encoding="utf-8", newline="") as handle:
-    lines = handle.readlines()
-newline = next((ending for line in lines if (ending := body_and_ending(line)[1])), "\n")
-output = []
-disabled_values = []
-emitted = False
-for line in lines:
-    parsed = semantic_assignment(line)
-    if parsed is not None and parsed[0] == managed_key:
-        disabled_values.append(parsed[1].strip(" \t"))
-        if not emitted:
-            output.append(f"{managed_key}=1{newline}")
-            emitted = True
-        continue
-    output.append(line)
-if not disabled_values or any(value != "0" for value in disabled_values):
-    raise SystemExit("every systemd-effective REMOTE_PRUNE_ENABLED entry must be disabled before approval")
-if [body_and_ending(line)[0] for line in output if (parsed := semantic_assignment(line)) is not None and parsed[0] == managed_key] != [f"{managed_key}=1"]:
-    raise SystemExit("REMOTE_PRUNE_ENABLED was not canonicalized exactly once")
-
-descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
-    handle.writelines(output)
-    handle.flush()
-    os.fsync(handle.fileno())
-os.chown(temporary, 0, 0)
-os.chmod(temporary, 0o600)
-os.replace(temporary, path)
-directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-try:
-    os.fsync(directory_fd)
-finally:
-    os.close(directory_fd)
-metadata = path.stat()
-if metadata.st_uid != 0 or metadata.st_gid != 0 or stat.S_IMODE(metadata.st_mode) != 0o600:
-    raise SystemExit("real environment file metadata changed unexpectedly")
-with path.open("r", encoding="utf-8", newline="") as handle:
-    final_lines = handle.readlines()
-effective = [body_and_ending(line)[0] for line in final_lines if (parsed := semantic_assignment(line)) is not None and parsed[0] == managed_key]
-if effective != [f"{managed_key}=1"]:
-    raise SystemExit("REMOTE_PRUNE_ENABLED post-write validation failed")
-# END PRUNE_FLAG_NORMALIZATION
-PY
-sudo test "$(sudo stat -c '%U:%G:%a' /etc/degen/prod-db-backup.env)" = 'root:root:600'
-sudo awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/{print $1}' /etc/degen/prod-db-backup.env | sort
-```
-
-Do not run another script mode after the flag change. Let the next scheduled timer activation exercise the full path. No OneDrive recycle bin purge is part of this procedure.
-
-## Immediate post-install verification
-
-Verify installed bytes and modes against the reviewed checkout, confirm the correct next trigger (03:15 America/Los_Angeles plus at most 20 minutes randomized delay), and compare all process IDs in the same shell:
-
-```bash
-set -euo pipefail
-cd /opt/degen/app
-sha256sum -- \
-  deploy/linux/degen-prod-db-backup.sh \
-  deploy/linux/degen-prod-db-retention.py \
-  deploy/systemd/degen-prod-db-backup.service \
-  deploy/systemd/degen-prod-db-backup.timer
-sudo sha256sum -- \
-  /usr/local/sbin/degen-prod-db-backup \
-  /usr/local/sbin/degen-prod-db-retention \
-  /etc/systemd/system/degen-prod-db-backup.service \
-  /etc/systemd/system/degen-prod-db-backup.timer
-sudo stat -c '%n owner=%U:%G mode=%a' -- \
-  /usr/local/sbin/degen-prod-db-backup \
-  /usr/local/sbin/degen-prod-db-retention \
-  /etc/systemd/system/degen-prod-db-backup.service \
-  /etc/systemd/system/degen-prod-db-backup.timer \
-  /etc/degen/prod-db-backup.env
-systemctl is-enabled degen-prod-db-backup.timer
-systemctl list-timers --all degen-prod-db-backup.timer --no-pager
-systemctl show degen-prod-db-backup.timer -p NextElapseUSecRealtime -p LastTriggerUSec
-sudo awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/{print $1}' /etc/degen/prod-db-backup.env | sort
-
-POSTGRES_PID_AFTER=$(systemctl show "$POSTGRES_UNIT" -p MainPID --value)
-WEB_PID_AFTER=$(systemctl show degen-web.service -p MainPID --value)
-WORKER_PID_AFTER=$(systemctl show degen-worker.service -p MainPID --value)
-BOT_PID_AFTER=$(systemctl --user show "$BOT_UNIT" -p MainPID --value)
-test "$POSTGRES_PID_AFTER" = "$POSTGRES_PID_BEFORE"
-test "$WEB_PID_AFTER" = "$WEB_PID_BEFORE"
-test "$WORKER_PID_AFTER" = "$WORKER_PID_BEFORE"
-test "$BOT_PID_AFTER" = "$BOT_PID_BEFORE"
-printf 'unchanged MainPID values: PostgreSQL=%s web=%s worker=%s bot=%s\n' \
-  "$POSTGRES_PID_AFTER" "$WEB_PID_AFTER" "$WORKER_PID_AFTER" "$BOT_PID_AFTER"
-
-sudo sh -c 'cd "$1" && sha256sum -c SHA256SUMS' sh "$CONFIG_BACKUP_DIR"
-```
-
-On the Windows workstation, confirm OneDrive stays off before and after this Green-only operation. Do not enable the client, sync this backup directory, or use it to inspect remote backup content. Record that operational check with the rollback-ready snapshot path.
-
-## Required observation after the next scheduled run
-
-Do not claim success before this scheduled observation. After the next scheduled run has actually fired, perform every check below:
-
-```bash
-set -euo pipefail
-REVIEW_NOW=$(date -u +%Y%m%dT%H%M%SZ)
-OBSERVATION_DIR="/opt/degen/backups/config/${REVIEW_NOW}-scheduled-observation"
-sudo test ! -e "$OBSERVATION_DIR"
-sudo mkdir -m 0700 -- "$OBSERVATION_DIR"
-sudo chown root:root -- "$OBSERVATION_DIR"
-
-BACKUP_ENV_FILE=/etc/degen/prod-db-backup.env
-BACKUP_PREFIX=$(
-  sudo env BACKUP_ENV_FILE="$BACKUP_ENV_FILE" bash <<'BASH'
-# BEGIN FRESH_SHELL_PREFIX_RETRIEVAL
-set -uo pipefail
-mapfile -t persisted_prefixes < <(
-  awk -F= '$1 == "BACKUP_PREFIX" { print substr($0, index($0, "=") + 1) }' \
-    "$BACKUP_ENV_FILE"
-)
-if (( ${#persisted_prefixes[@]} != 1 )); then
-  printf '%s\n' 'ERROR: expected exactly one persisted BACKUP_PREFIX entry' >&2
-  exit 1
-fi
-BACKUP_PREFIX=${persisted_prefixes[0]}
-if [[ ! "$BACKUP_PREFIX" =~ ^[A-Za-z0-9._-]+$ ]]; then
-  printf '%s\n' 'ERROR: persisted backup prefix is unsafe' >&2
-  exit 1
-fi
-printf '%s\n' "$BACKUP_PREFIX"
-# END FRESH_SHELL_PREFIX_RETRIEVAL
-BASH
-)
-[[ "$BACKUP_PREFIX" =~ ^[A-Za-z0-9._-]+$ ]]
-
-BACKUP_DIR=/opt/degen/backups/db
-RETENTION_PLANNER=/usr/local/sbin/degen-prod-db-retention
-sudo env \
-  SYSTEMCTL_BIN=/usr/bin/systemctl \
-  JOURNALCTL_BIN=/usr/bin/journalctl \
-  DATE_BIN=/usr/bin/date \
-  STAT_BIN=/usr/bin/stat \
-  SERVICE_UNIT=degen-prod-db-backup.service \
-  TIMER_UNIT=degen-prod-db-backup.timer \
-  BACKUP_DIR="$BACKUP_DIR" \
-  BACKUP_PREFIX="$BACKUP_PREFIX" \
-  bash <<'BASH' | sudo tee "$OBSERVATION_DIR/freshness-gate.txt"
-# BEGIN POST_RUN_FRESHNESS_GATE
-set -euo pipefail
-
-read_property() {
-  local property=$1
-  local source=$2
-  local -a values=()
-  mapfile -t values < <(printf '%s\n' "$source" | sed -n "s/^${property}=//p")
-  if (( ${#values[@]} != 1 )) || [[ -z "${values[0]}" ]]; then
-    printf 'ERROR: expected one nonempty %s property\n' "$property" >&2
-    exit 1
-  fi
-  printf '%s\n' "${values[0]}"
-}
-
-service_properties=$("$SYSTEMCTL_BIN" show "$SERVICE_UNIT" --no-pager \
-  -p Result -p ExecMainCode -p ExecMainStatus -p ExecMainStartTimestamp)
-service_result=$(read_property Result "$service_properties")
-service_code=$(read_property ExecMainCode "$service_properties")
-service_status=$(read_property ExecMainStatus "$service_properties")
-service_start=$(read_property ExecMainStartTimestamp "$service_properties")
-[[ "$service_result" == success ]] || { printf '%s\n' 'ERROR: latest backup service Result is not success' >&2; exit 1; }
-[[ "$service_code" == exited ]] || { printf '%s\n' 'ERROR: latest backup service ExecMainCode is not exited' >&2; exit 1; }
-[[ "$service_status" == 0 ]] || { printf '%s\n' 'ERROR: latest backup service ExecMainStatus is not zero' >&2; exit 1; }
-
-timer_properties=$("$SYSTEMCTL_BIN" show "$TIMER_UNIT" --no-pager -p LastTriggerUSec)
-last_trigger=$(read_property LastTriggerUSec "$timer_properties")
-service_start_epoch=$("$DATE_BIN" --date="$service_start" +%s)
-last_trigger_epoch=$("$DATE_BIN" --date="$last_trigger" +%s)
-trigger_to_start_seconds=$((service_start_epoch - last_trigger_epoch))
-if (( trigger_to_start_seconds < 0 || trigger_to_start_seconds > 300 )); then
-  printf '%s\n' 'ERROR: latest service start does not correspond to the timer LastTrigger' >&2
-  exit 1
-fi
-
-service_journal=$("$JOURNALCTL_BIN" -u "$SERVICE_UNIT" --since "$service_start" --no-pager -o cat)
-if ! grep -Fq 'Backup completed successfully' <<< "$service_journal"; then
-  printf '%s\n' 'ERROR: no backup success log exists since the exact service start' >&2
-  exit 1
-fi
-
-shopt -s nullglob
-recognized_pairs=()
-for dump_path in "$BACKUP_DIR"/"$BACKUP_PREFIX"*.dump; do
-  [[ -f "$dump_path" && ! -L "$dump_path" ]] || continue
-  dump_name=${dump_path##*/}
-  remainder=${dump_name#"$BACKUP_PREFIX"}
-  [[ "$remainder" =~ ^([0-9]{8}T[0-9]{6}Z)\.dump$ ]] || continue
-  sidecar_path="$dump_path.sha256"
-  [[ -f "$sidecar_path" && ! -L "$sidecar_path" ]] || continue
-  recognized_pairs+=("${BASH_REMATCH[1]}"$'\t'"$dump_name")
-done
-if (( ${#recognized_pairs[@]} == 0 )); then
-  printf '%s\n' 'ERROR: no recognized complete local backup pair exists' >&2
-  exit 1
-fi
-mapfile -t sorted_pairs < <(printf '%s\n' "${recognized_pairs[@]}" | LC_ALL=C sort -r)
-IFS=$'\t' read -r newest_stamp newest_dump <<< "${sorted_pairs[0]}"
-dump_mtime=$("$STAT_BIN" -c %Y -- "$BACKUP_DIR/$newest_dump")
-sidecar_mtime=$("$STAT_BIN" -c %Y -- "$BACKUP_DIR/$newest_dump.sha256")
-for artifact_mtime in "$dump_mtime" "$sidecar_mtime"; do
-  [[ "$artifact_mtime" =~ ^[0-9]+$ ]] || { printf '%s\n' 'ERROR: backup artifact mtime is invalid' >&2; exit 1; }
-  if (( artifact_mtime < service_start_epoch || artifact_mtime < last_trigger_epoch )); then
-    printf '%s\n' 'ERROR: newest backup pair is stale relative to the latest scheduled service' >&2
-    exit 1
-  fi
-done
-printf 'service_start=%s last_trigger=%s fresh_backup=%s dump_mtime=%s sidecar_mtime=%s\n' \
-  "$service_start" "$last_trigger" "$newest_dump" "$dump_mtime" "$sidecar_mtime"
-# END POST_RUN_FRESHNESS_GATE
-BASH
-
-sudo journalctl -u degen-prod-db-backup.service -n 200 --no-pager |
-  sudo tee "$OBSERVATION_DIR/service-journal.txt"
-systemctl show degen-prod-db-backup.service \
-  -p Result -p ExecMainCode -p ExecMainStatus -p ExecMainStartTimestamp -p InactiveEnterTimestamp |
-  sudo tee "$OBSERVATION_DIR/service-result.txt"
-systemctl show degen-prod-db-backup.timer -p LastTriggerUSec |
-  sudo tee "$OBSERVATION_DIR/timer-trigger.txt"
-sudo tail -n 200 /var/log/degen/prod-db-backup.log |
-  sudo tee "$OBSERVATION_DIR/backup-log-tail.txt"
-systemctl list-timers --all degen-prod-db-backup.timer --no-pager
-
-df -B1 "$BACKUP_DIR" | sudo tee "$OBSERVATION_DIR/disk-free.txt"
-sudo find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type f \
-  -printf '%f\t%s bytes\n' | LC_ALL=C sort |
-  sudo tee "$OBSERVATION_DIR/local-files.txt"
-
-sudo env BACKUP_DIR="$BACKUP_DIR" BACKUP_PREFIX="$BACKUP_PREFIX" bash <<'BASH' |
-  sudo tee "$OBSERVATION_DIR/local-checksums.txt"
-# BEGIN POST_RUN_CHECKSUM_VERIFICATION
-set -uo pipefail
-checksum_status=0
-mapfile -d '' -t checksum_sidecars < <(
-  find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type f \
-    -name "${BACKUP_PREFIX}[0-9]*T[0-9]*Z.dump.sha256" -print0 |
-    LC_ALL=C sort -z
-)
-if (( ${#checksum_sidecars[@]} == 0 )); then
-  printf '%s\n' 'ERROR: no recognized checksum sidecars were found' >&2
-  checksum_status=1
-fi
-for sidecar_path in "${checksum_sidecars[@]}"; do
-  sidecar_name=${sidecar_path##*/}
-  if ! (cd "$BACKUP_DIR" && sha256sum -c -- "$sidecar_name"); then
-    checksum_status=1
-  fi
-done
-exit "$checksum_status"
-# END POST_RUN_CHECKSUM_VERIFICATION
-BASH
-
-LOCAL_INVENTORY_FILE="$OBSERVATION_DIR/local-inventory.txt"
-REMOTE_INVENTORY_FILE="$OBSERVATION_DIR/remote-inventory.txt"
-LOCAL_PLAN_FILE="$OBSERVATION_DIR/local-retention-plan.json"
-REMOTE_PLAN_FILE="$OBSERVATION_DIR/remote-retention-plan.json"
-sudo find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' |
-  LC_ALL=C sort | sudo tee "$LOCAL_INVENTORY_FILE" >/dev/null
-sudo rclone --config /etc/degen/rclone.conf lsf \
-  onedrive:backups/degen-db --files-only --max-depth 1 |
-  LC_ALL=C sort | sudo tee "$REMOTE_INVENTORY_FILE" >/dev/null
-
-sudo env \
-  RETENTION_PLANNER="$RETENTION_PLANNER" \
-  BACKUP_PREFIX="$BACKUP_PREFIX" \
-  REVIEW_NOW="$REVIEW_NOW" \
-  LOCAL_INVENTORY_FILE="$LOCAL_INVENTORY_FILE" \
-  REMOTE_INVENTORY_FILE="$REMOTE_INVENTORY_FILE" \
-  LOCAL_PLAN_FILE="$LOCAL_PLAN_FILE" \
-  REMOTE_PLAN_FILE="$REMOTE_PLAN_FILE" \
-  bash <<'BASH'
-# BEGIN POST_RUN_PLANNER_REPORTS
-set -euo pipefail
-"$RETENTION_PLANNER" \
-  --mode local \
-  --prefix "$BACKUP_PREFIX" \
-  --now "$REVIEW_NOW" \
-  --local-count 2 \
-  --format json \
-  < "$LOCAL_INVENTORY_FILE" \
-  > "$LOCAL_PLAN_FILE"
-"$RETENTION_PLANNER" \
-  --mode remote \
-  --prefix "$BACKUP_PREFIX" \
-  --now "$REVIEW_NOW" \
-  --daily 7 \
-  --weekly 4 \
-  --monthly 3 \
-  --format json \
-  < "$REMOTE_INVENTORY_FILE" \
-  > "$REMOTE_PLAN_FILE"
-# END POST_RUN_PLANNER_REPORTS
-BASH
-
-sudo python3 - "$LOCAL_PLAN_FILE" "$REMOTE_PLAN_FILE" "$BACKUP_PREFIX" <<'PY'
-from pathlib import Path
-import json
-import sys
-
-local = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-remote = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
-prefix = sys.argv[3]
-if local.get("mode") != "local" or local.get("prefix") != prefix:
-    raise SystemExit("local retention report identity mismatch")
-if len(local.get("keep", [])) != 2 or local.get("delete") != []:
-    raise SystemExit("local retention is not exactly two kept pairs with zero eligible deletions")
-if remote.get("mode") != "remote" or remote.get("prefix") != prefix:
-    raise SystemExit("remote retention report identity mismatch")
-if remote.get("delete") != []:
-    raise SystemExit("remote eligible deletions remain after the scheduled run")
-print(f"local_keep_pairs={len(local['keep'])} local_delete_pairs=0")
-print(f"remote_keep_pairs={len(remote['keep'])} remote_delete_pairs=0")
-PY
-
-NEWEST_DUMP=$(sudo python3 - "$LOCAL_PLAN_FILE" <<'PY'
-from pathlib import Path
-import json
-import re
-import sys
-
-plan = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-keep = plan.get("keep", [])
-if len(keep) != 2:
-    raise SystemExit("local report does not contain exactly two kept pairs")
-name = keep[0].get("dump", "")
-if re.fullmatch(r"[A-Za-z0-9._-]+[0-9]{8}T[0-9]{6}Z\.dump", name) is None:
-    raise SystemExit("newest local dump name is unsafe")
-print(name)
-PY
-)
-LOCAL_SIZE=$(sudo stat -c '%s' "$BACKUP_DIR/$NEWEST_DUMP")
-REMOTE_SIZE=$(sudo rclone --config /etc/degen/rclone.conf lsjson \
-  "onedrive:backups/degen-db/$NEWEST_DUMP" --stat |
-  python3 -c 'import json,sys; print(json.load(sys.stdin)["Size"])')
-test "$REMOTE_SIZE" = "$LOCAL_SIZE"
-sudo rclone --config /etc/degen/rclone.conf cat \
-  "onedrive:backups/degen-db/$NEWEST_DUMP.sha256" |
-  sudo cmp -s - "$BACKUP_DIR/$NEWEST_DUMP.sha256"
-printf 'remote_final_dump=%s local_bytes=%s remote_bytes=%s sidecar_match=true\n' \
-  "$NEWEST_DUMP" "$LOCAL_SIZE" "$REMOTE_SIZE" |
-  sudo tee "$OBSERVATION_DIR/remote-final-pair.txt"
-sudo find "$OBSERVATION_DIR" -mindepth 1 -maxdepth 1 -type f \
-  -exec chmod 0600 -- {} +
-```
-
-The fresh-shell block reads only the persisted `BACKUP_PREFIX` key; it never sources or prints the real environment file. The generated local report must prove exactly 2 complete pairs in `keep` and no eligible pair in `delete`. The generated remote report applies the exact 7 distinct UTC dates/4 ISO weeks/3 months policy and must have no remaining eligible pair in `delete`; protected objects may remain. Preserve both JSON reports with the journal exit status, aggregate checksum output, remote final-pair size/sidecar result, and disk-free evidence.
-
-Any nonzero `ExecMainStatus`, missing success line, checksum failure, remote mismatch, unexpected candidate, or retention mismatch is a failed scheduled observation even if a dump file exists.
-
-## Rollback
-
-Rollback requires the exact `CONFIG_BACKUP_DIR` created above and separate approval. Start in a fresh shell and set that variable explicitly. Validation of path, ownership, mode, required files, exclusive planner state, manifest completeness, and every digest finishes before the first install/remove/reload side effect. The rclone audit copy is intentionally not restored.
-
-```bash
-# BEGIN FAIL_CLOSED_ROLLBACK
-set -euo pipefail
-: "${CONFIG_BACKUP_DIR:?set exact snapshot path}"
-if [[ ! "$CONFIG_BACKUP_DIR" =~ ^/opt/degen/backups/config/[0-9]{8}T[0-9]{6}Z$ ]]; then
-  printf '%s\n' 'ERROR: snapshot path is outside the exact timestamped config root' >&2
-  exit 1
-fi
-[[ -d "$CONFIG_BACKUP_DIR" && ! -L "$CONFIG_BACKUP_DIR" ]] || {
-  printf '%s\n' 'ERROR: snapshot path must be a real directory, not a symlink' >&2
-  exit 1
-}
-resolved_snapshot=$(readlink -f -- "$CONFIG_BACKUP_DIR")
-[[ "$resolved_snapshot" == "$CONFIG_BACKUP_DIR" ]] || {
-  printf '%s\n' 'ERROR: snapshot path did not resolve exactly' >&2
-  exit 1
-}
-snapshot_owner=$(sudo stat -c '%u:%g' -- "$CONFIG_BACKUP_DIR")
-snapshot_mode=$(sudo stat -c '%a' -- "$CONFIG_BACKUP_DIR")
-[[ "$snapshot_owner" == 0:0 && "$snapshot_mode" == 700 ]] || {
-  printf '%s\n' 'ERROR: snapshot directory must be root:root mode 0700' >&2
-  exit 1
-}
-
-required_snapshot_files=(
-  degen-prod-db-backup
-  degen-prod-db-backup.service
-  degen-prod-db-backup.timer
-  prod-db-backup.env
-  rclone.conf.audit
-  SHA256SUMS
-)
-for snapshot_name in "${required_snapshot_files[@]}"; do
-  snapshot_path="$CONFIG_BACKUP_DIR/$snapshot_name"
-  sudo test -f "$snapshot_path"
-  sudo test ! -L "$snapshot_path"
-done
-
-if sudo test -f "$CONFIG_BACKUP_DIR/degen-prod-db-retention" && \
-   sudo test ! -e "$CONFIG_BACKUP_DIR/degen-prod-db-retention.absent"; then
-  sudo test ! -L "$CONFIG_BACKUP_DIR/degen-prod-db-retention"
-  planner_state=saved
-elif sudo test ! -e "$CONFIG_BACKUP_DIR/degen-prod-db-retention" && \
-     sudo test -f "$CONFIG_BACKUP_DIR/degen-prod-db-retention.absent" && \
-     sudo test ! -L "$CONFIG_BACKUP_DIR/degen-prod-db-retention.absent"; then
-  planner_state=absent
-else
-  printf '%s\n' 'ERROR: snapshot must contain saved planner xor explicit absence marker' >&2
-  exit 1
-fi
-
-sudo sh -c '
-  cd "$1"
-  manifest_names=$(awk "{print \$2}" SHA256SUMS | LC_ALL=C sort)
-  snapshot_names=$(find . -mindepth 1 -maxdepth 1 -type f ! -name SHA256SUMS -printf "%P\n" | LC_ALL=C sort)
-  test "$manifest_names" = "$snapshot_names"
-  sha256sum -c SHA256SUMS
-' sh "$CONFIG_BACKUP_DIR"
-
-sudo install -o root -g root -m 0755 \
-  "$CONFIG_BACKUP_DIR/degen-prod-db-backup" \
-  /usr/local/sbin/degen-prod-db-backup
-if [[ "$planner_state" == saved ]]; then
-  sudo install -o root -g root -m 0755 \
-    "$CONFIG_BACKUP_DIR/degen-prod-db-retention" \
-    /usr/local/sbin/degen-prod-db-retention
-elif [[ "$planner_state" == absent ]]; then
-  sudo rm -f -- /usr/local/sbin/degen-prod-db-retention
-else
-  printf '%s\n' 'ERROR: validated planner state was lost' >&2
-  exit 1
-fi
-sudo install -o root -g root -m 0644 \
-  "$CONFIG_BACKUP_DIR/degen-prod-db-backup.service" \
-  /etc/systemd/system/degen-prod-db-backup.service
-sudo install -o root -g root -m 0644 \
-  "$CONFIG_BACKUP_DIR/degen-prod-db-backup.timer" \
-  /etc/systemd/system/degen-prod-db-backup.timer
-sudo install -o root -g root -m 0600 \
-  "$CONFIG_BACKUP_DIR/prod-db-backup.env" \
-  /etc/degen/prod-db-backup.env
-sudo systemctl daemon-reload
-systemctl is-enabled degen-prod-db-backup.timer
-systemctl list-timers --all degen-prod-db-backup.timer --no-pager
-# END FAIL_CLOSED_ROLLBACK
-```
-
-Local rollback cannot restore remote objects deleted by a completed retention run. Remote deletion is potentially irreversible except for provider recycle behavior, which is neither guaranteed nor to be purged during this work. The saved `rclone.conf.audit` is audit/emergency evidence only; recovering it requires separate explicit approval and current-token analysis because an automatic restore can invalidate rotated refresh credentials.
-
-## Troubleshooting and no-silent-failure rules
-
-- Check both `journalctl -u degen-prod-db-backup.service` and `/var/log/degen/prod-db-backup.log`. A stale or absent success line is not success.
-- `WARNING: backup cleanup failed` is actionable. Capture the exact warning and inventory the named local or remote temporary object before any cleanup. Never broaden cleanup to a wildcard.
-- A lock-unavailable message means another run owns `/run/lock/degen-prod-db-backup.lock`; inspect the unit and process state rather than removing the lock file.
-- Capacity failure requires database-size and `df -B1` evidence. Do not lower `MIN_FREE_AFTER_BYTES` to force a run.
-- Rclone access, size, or sidecar failures block publication and retention. Do not bypass `--immutable` or manually rename temporary objects.
-- The accepted rclone identical-byte TOCTOU caveat is narrow: after an immutable upload reports success, the script cannot distinguish its uploaded temporary object from an identically named object raced into place with identical bytes. Final size and checksum-sidecar verification detect content differences but cannot prove upload ownership. A collision or unexpected temporary object remains protected for investigation.
-- Unknown, incomplete, manual, and temporary names are deliberately protected. Their presence is a review item, not permission to delete them.
-- No OneDrive recycle-bin purge, application-process restart, database-process restart, or manual full backup is a troubleshooting step in this runbook.
+Rollback restores only targets represented in the verified host snapshot. It
+does not automatically restore `rclone.conf.audit`, because that file is audit
+evidence rather than a rollback target. It cannot restore deleted local backups
+or deleted OneDrive objects, and it does not restart the application, worker,
+bot, or PostgreSQL.
+If rollback fails or leaves a recovery phase, use Conditional recovery only;
+never copy snapshot files into place by hand.

@@ -2063,6 +2063,51 @@ def _invalid_source_manifests() -> list[tuple[str, bytes]]:
     ]
 
 
+def test_task9_tracked_asset_manifest_is_exact_and_current() -> None:
+    module = load_ops_helper()
+    manifest_path = ROOT / SOURCE_MANIFEST
+    lf_pinned_paths = {*SOURCE_ASSETS, SOURCE_MANIFEST}
+    for path in sorted(lf_pinned_paths):
+        attributes = subprocess.run(
+            ["git", "check-attr", "text", "eol", "--", path],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+        assert attributes == [f"{path}: text: set", f"{path}: eol: lf"]
+        raw = (ROOT / path).read_bytes()
+        assert b"\r" not in raw
+        unfiltered = subprocess.run(
+            ["git", "hash-object", "--no-filters", "--stdin"],
+            cwd=ROOT,
+            check=True,
+            input=raw,
+            capture_output=True,
+        ).stdout.strip()
+        filtered = subprocess.run(
+            ["git", "hash-object", f"--path={path}", "--stdin"],
+            cwd=ROOT,
+            check=True,
+            input=raw,
+            capture_output=True,
+        ).stdout.strip()
+        assert filtered == unfiltered
+    expected_records = {
+        asset: hashlib.sha256((ROOT / asset).read_bytes()).hexdigest()
+        for asset in sorted(SOURCE_ASSETS)
+    }
+    expected = b"".join(
+        f"{digest}  {asset}\n".encode("ascii")
+        for asset, digest in expected_records.items()
+    )
+
+    raw = manifest_path.read_bytes()
+
+    assert raw == expected
+    assert module._parse_source_manifest(raw) == expected_records
+
+
 @pytest.mark.parametrize(("label", "manifest_bytes"), _invalid_source_manifests())
 def test_manifest_parser_rejects_noncanonical_or_unsafe_records_without_state(
     tmp_path: Path,
