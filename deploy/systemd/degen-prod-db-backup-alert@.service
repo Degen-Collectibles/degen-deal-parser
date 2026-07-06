@@ -1,0 +1,21 @@
+[Unit]
+Description=Surface Degen PostgreSQL backup failure for %i
+RefuseManualStart=yes
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/systemd-cat --identifier=degen-prod-db-backup-alert --priority=alert /usr/bin/echo Degen PostgreSQL backup unit %i failed; inspect journalctl -u %i
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX

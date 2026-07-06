@@ -844,13 +844,21 @@ require_tools() {
 
 load_database_url() {
     local line value first last
+    local database_url_count=0
     if [[ -n "${DATABASE_URL:-}" ]]; then
         database_url=$DATABASE_URL
     else
         [[ -r "$APP_ENV_FILE" ]] || die "DATABASE_URL is unset and app environment file is unreadable"
         while IFS= read -r line || [[ -n "$line" ]]; do
-            [[ "$line" == DATABASE_URL=* ]] || continue
-            value=${line#DATABASE_URL=}
+            if [[ "$line" =~ ^[[:blank:]]*DATABASE_URL=(.*)$ ]]; then
+                value=${BASH_REMATCH[1]}
+            else
+                continue
+            fi
+            (( database_url_count += 1 ))
+            if (( database_url_count > 1 )); then
+                die "App environment contains duplicate DATABASE_URL assignments"
+            fi
             value=${value%$'\r'}
             if (( ${#value} >= 2 )); then
                 first=${value:0:1}
@@ -860,7 +868,6 @@ load_database_url() {
                 fi
             fi
             database_url=$value
-            break
         done < "$APP_ENV_FILE"
     fi
     unset DATABASE_URL
@@ -1553,6 +1560,96 @@ run_remote_retention() {
 }
 
 
+fsync_local_backup_files() {
+    if ! python3 - "$@" <<'PY'
+import os
+import stat
+import sys
+
+
+def fail(message):
+    print(f"backup file fsync error: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+required_flags = ("O_CLOEXEC", "O_NOFOLLOW", "O_NONBLOCK")
+for name in required_flags:
+    if not hasattr(os, name):
+        fail(f"required flag unavailable: {name}")
+
+for path in sys.argv[1:]:
+    descriptor = None
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+        )
+        descriptor_metadata = os.fstat(descriptor)
+        path_metadata = os.lstat(path)
+        if not stat.S_ISREG(descriptor_metadata.st_mode):
+            fail("target is not a regular file")
+        if descriptor_metadata.st_nlink != 1:
+            fail("target must have exactly one link")
+        if descriptor_metadata.st_uid != os.geteuid():
+            fail("target owner does not match the effective uid")
+        if (descriptor_metadata.st_dev, descriptor_metadata.st_ino) != (
+            path_metadata.st_dev,
+            path_metadata.st_ino,
+        ):
+            fail("target path changed before fsync")
+        os.fsync(descriptor)
+    except OSError as exc:
+        fail(exc.strerror or "file fsync failed")
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+PY
+    then
+        die "Unable to durably sync local backup files"
+    fi
+}
+
+
+fsync_backup_directory() {
+    local directory=$1
+    if ! python3 - "$directory" <<'PY'
+import os
+import stat
+import sys
+
+
+def fail(message):
+    print(f"backup directory fsync error: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+required_flags = ("O_CLOEXEC", "O_DIRECTORY", "O_NOFOLLOW")
+for name in required_flags:
+    if not hasattr(os, name):
+        fail(f"required flag unavailable: {name}")
+
+descriptor = None
+try:
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
+    descriptor = os.open(sys.argv[1], flags)
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISDIR(metadata.st_mode):
+        fail("target is not a directory")
+    if metadata.st_uid != os.geteuid():
+        fail("directory owner does not match the effective uid")
+    os.fsync(descriptor)
+except OSError as exc:
+    fail(exc.strerror or "directory fsync failed")
+finally:
+    if descriptor is not None:
+        os.close(descriptor)
+PY
+    then
+        die "Unable to durably sync the backup directory"
+    fi
+}
+
+
 publish_local_no_clobber() {
     local source=$1
     local destination=$2
@@ -1613,11 +1710,13 @@ create_backup() {
     [[ "$checksum" =~ ^[0-9a-fA-F]{64}$ ]] || die "sha256sum returned an invalid digest"
     checksum=${checksum,,}
     printf '%s  %s\n' "$checksum" "$dump_name" > "$owned_local_sidecar_partial"
+    fsync_local_backup_files "$owned_local_dump_partial" "$owned_local_sidecar_partial"
 
     publish_local_no_clobber "$owned_local_dump_partial" "$dump_path" "Dump"
     owned_local_dump_partial=""
     publish_local_no_clobber "$owned_local_sidecar_partial" "$sidecar_path" "Checksum"
     owned_local_sidecar_partial=""
+    fsync_backup_directory "$BACKUP_DIR"
 
     publish_remote_pair "$dump_path" "$sidecar_path" "$dump_name" "$sidecar_name" "$checksum"
 }

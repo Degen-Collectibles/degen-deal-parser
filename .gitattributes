@@ -5,5 +5,6 @@ deploy/linux/degen-prod-db-backup-ops.py text eol=lf
 deploy/linux/degen-prod-db-backup.sh text eol=lf
 deploy/linux/degen-prod-db-retention.py text eol=lf
 deploy/systemd/degen-prod-db-backup.env.example text eol=lf
+deploy/systemd/degen-prod-db-backup-alert@.service text eol=lf
 deploy/systemd/degen-prod-db-backup.service text eol=lf
 deploy/systemd/degen-prod-db-backup.timer text eol=lf
