@@ -6091,8 +6091,6 @@ def _validate_snapshot_semantics(state: dict[str, object]) -> None:
     assert isinstance(snapshot, dict)
     targets = snapshot["targets"]
     assert isinstance(targets, dict)
-    if tuple(targets) != _TARGET_ORDER and frozenset(targets) != frozenset(_TARGET_ORDER):
-        raise OperationStateError("snapshot.targets must contain the exact eight targets")
     if frozenset(targets) != frozenset(_TARGET_ORDER):
         raise OperationStateError("snapshot.targets must contain the exact eight targets")
     for target_name, target in targets.items():

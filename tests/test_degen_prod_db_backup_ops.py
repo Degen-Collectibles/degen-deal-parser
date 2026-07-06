@@ -5502,7 +5502,7 @@ def expected_host_stage_manifest(
     dump_name: str,
     dump_sha256: str,
 ) -> dict[str, object]:
-    target_by_source = dict(zip(SOURCE_ASSETS[:7], TARGETS[:7]))
+    target_by_source = dict(zip(SOURCE_ASSETS[:7], TARGETS[:7], strict=True))
     return {
         "schema_version": 1,
         "operation": {
@@ -8074,7 +8074,7 @@ def task7_transaction_fixture(
         run_lock.chmod(0o1777)
 
     expected_bytes: dict[str, bytes] = {}
-    for source, target in zip(SOURCE_ASSETS[:7], TARGETS[:7]):
+    for source, target in zip(SOURCE_ASSETS[:7], TARGETS[:7], strict=True):
         expected_bytes[target] = (
             context.paths.staged_dir / "reviewed" / source
         ).read_bytes()
