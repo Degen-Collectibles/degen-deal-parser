@@ -20,6 +20,7 @@ SCRIPT = ROOT / "deploy" / "linux" / "degen-prod-db-backup.sh"
 ENV_HELPER = ROOT / "deploy" / "linux" / "degen-prod-db-backup-env.py"
 PLANNER = ROOT / "deploy" / "linux" / "degen-prod-db-retention.py"
 SERVICE = ROOT / "deploy" / "systemd" / "degen-prod-db-backup.service"
+ALERT_SERVICE = ROOT / "deploy" / "systemd" / "degen-prod-db-backup-alert@.service"
 TIMER = ROOT / "deploy" / "systemd" / "degen-prod-db-backup.timer"
 ENV_TEMPLATE = ROOT / "deploy" / "systemd" / "degen-prod-db-backup.env.example"
 RUNBOOK = ROOT / "docs" / "green-postgres-backup-runbook.md"
@@ -1193,6 +1194,7 @@ def test_systemd_service_is_exact_oneshot_with_postgres_compatible_hardening() -
             "Description": "Degen PostgreSQL verified backup",
             "After": "network-online.target postgresql.service",
             "Wants": "network-online.target",
+            "OnFailure": "degen-prod-db-backup-alert@%n.service",
             "RefuseManualStart": "yes",
         },
         "Service": {
@@ -1206,7 +1208,7 @@ def test_systemd_service_is_exact_oneshot_with_postgres_compatible_hardening() -
             "RuntimeDirectoryPreserve": "yes",
             "LogsDirectory": "degen-prod-db-backup",
             "LogsDirectoryMode": "0700",
-            "TimeoutStartSec": "infinity",
+            "TimeoutStartSec": "6h",
             "TimeoutStopSec": "90",
             "KillMode": "control-group",
             "Nice": "10",
@@ -1233,6 +1235,71 @@ def test_systemd_service_is_exact_oneshot_with_postgres_compatible_hardening() -
     for unrelated_service in ("degen-web.service", "degen-worker.service", "degen-ops-discord-bot.service"):
         assert unrelated_service not in unit
     assert not re.search(r"^Exec\w*=.*\bsystemctl\b", unit, re.MULTILINE)
+
+
+def test_systemd_failure_alert_emits_a_hardened_priority_alert_without_credentials() -> None:
+    unit = ALERT_SERVICE.read_text(encoding="utf-8")
+
+    assert _parse_unit(unit) == {
+        "Unit": {
+            "Description": "Surface Degen PostgreSQL backup failure for %i",
+            "RefuseManualStart": "yes",
+        },
+        "Service": {
+            "Type": "oneshot",
+            "User": "root",
+            "Group": "root",
+            "ExecStart": (
+                "/usr/bin/systemd-cat --identifier=degen-prod-db-backup-alert "
+                "--priority=alert /usr/bin/echo Degen PostgreSQL backup unit %i failed; "
+                "inspect journalctl -u %i"
+            ),
+            "UMask": "0077",
+            "NoNewPrivileges": "true",
+            "PrivateTmp": "true",
+            "PrivateDevices": "true",
+            "ProtectHome": "true",
+            "ProtectSystem": "strict",
+            "ProtectKernelTunables": "true",
+            "ProtectKernelModules": "true",
+            "ProtectControlGroups": "true",
+            "RestrictSUIDSGID": "true",
+            "LockPersonality": "true",
+            "RestrictAddressFamilies": "AF_UNIX",
+        },
+    }
+    lowered = unit.lower()
+    assert "http" not in lowered
+    assert "token" not in lowered
+    assert "secret" not in lowered
+    assert "password" not in lowered
+    assert "[install]" not in lowered
+
+
+def test_local_publish_fsyncs_payloads_and_directory_before_remote_upload() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    create_body = source[source.index("create_backup() {") : source.index("parse_arguments() {")]
+
+    file_sync = (
+        'fsync_local_backup_files "$owned_local_dump_partial" '
+        '"$owned_local_sidecar_partial"'
+    )
+    dump_publish = 'publish_local_no_clobber "$owned_local_dump_partial"'
+    sidecar_publish = 'publish_local_no_clobber "$owned_local_sidecar_partial"'
+    directory_sync = 'fsync_backup_directory "$BACKUP_DIR"'
+    remote_publish = "publish_remote_pair "
+
+    assert "fsync_local_backup_files()" in source
+    assert "fsync_backup_directory()" in source
+    assert "os.fsync" in source
+    file_sync_body = source[
+        source.index("fsync_local_backup_files() {") : source.index("fsync_backup_directory() {")
+    ]
+    assert "os.O_NONBLOCK" in file_sync_body
+    assert create_body.index(file_sync) < create_body.index(dump_publish)
+    assert create_body.index(dump_publish) < create_body.index(sidecar_publish)
+    assert create_body.index(sidecar_publish) < create_body.index(directory_sync)
+    assert create_body.index(directory_sync) < create_body.index(remote_publish)
 
 
 def test_timer_preserves_exact_green_schedule_and_persistence() -> None:
@@ -1753,6 +1820,7 @@ def test_task9_runbook_bootstrap_and_source_success_path_are_ordered() -> None:
         "deploy/linux/degen-prod-db-backup-ops.py",
         "deploy/linux/degen-prod-db-backup.sh",
         "deploy/linux/degen-prod-db-retention.py",
+        "deploy/systemd/degen-prod-db-backup-alert@.service",
         "deploy/systemd/degen-prod-db-backup.env.example",
         "deploy/systemd/degen-prod-db-backup.service",
         "deploy/systemd/degen-prod-db-backup.timer",
@@ -1776,6 +1844,10 @@ def test_task9_runbook_bootstrap_and_source_success_path_are_ordered() -> None:
             for line in match.group("body").splitlines()
             if line.strip()
         )
+
+    assert shell_array("EXPECTED_ARCHIVE_MEMBERS") == tuple(
+        sorted(shell_array("EXPECTED_ARCHIVE_MEMBERS"))
+    )
 
     assert "SUPERSEDED FOR PRODUCTION EXECUTION" in old_plan
     push_gate = runbook.index("## Gate 1: push the exact reviewed commit")
@@ -1853,7 +1925,7 @@ def test_task9_runbook_bootstrap_and_source_success_path_are_ordered() -> None:
     assert "/var/log/degen-prod-db-backup" in runbook
     assert "root:root mode-`0700`" in runbook
     assert "root:root mode-`0600`" in runbook
-    assert "outside those seven snapshotted" in runbook
+    assert "outside those eight snapshotted" in runbook
     assert "LOG_DIR=/var/log/degen` is migrated" in runbook
     assert "any other non-default log" in runbook
     assert "root:syslog 775" in runbook
@@ -1986,6 +2058,7 @@ def test_task9_runbook_separates_recovery_and_installed_helper_gates() -> None:
         "/usr/local/sbin/degen-prod-db-retention",
         "/usr/local/sbin/degen-prod-db-backup-env",
         "/usr/local/sbin/degen-prod-db-backup-ops",
+        "/etc/systemd/system/degen-prod-db-backup-alert@.service",
         "/etc/systemd/system/degen-prod-db-backup.service",
         "/etc/systemd/system/degen-prod-db-backup.timer",
         "/etc/degen/prod-db-backup.env",
@@ -1995,6 +2068,17 @@ def test_task9_runbook_separates_recovery_and_installed_helper_gates() -> None:
             rf"(?mi)^[ \t]*(?:sudo[ \t]+)?(?:install|cp|mv|rm|tee|sed)[^\n]*{re.escape(target)}",
             runbook,
         ), target
+
+
+def test_runbook_requires_separate_approval_for_protected_orphan_cleanup() -> None:
+    runbook = RUNBOOK.read_text(encoding="utf-8").lower()
+
+    assert "## protected orphan cleanup" in runbook
+    assert ".degen-upload-" in runbook
+    assert "incomplete pair" in runbook
+    assert "never delete protected objects automatically" in runbook
+    assert "separate explicit cleanup preflight and approval" in runbook
+    assert "verify the matching remote dump size and checksum sidecar" in runbook
 
 
 def test_task9_later_root_wrappers_fail_closed_before_any_helper(
@@ -2110,6 +2194,7 @@ def test_systemd_units_and_calendar_validate_when_systemd_analyze_is_available(t
         pytest.skip("systemd-analyze is unavailable")
 
     service_copy = tmp_path / SERVICE.name
+    alert_copy = tmp_path / ALERT_SERVICE.name
     timer_copy = tmp_path / TIMER.name
     service_copy.write_text(
         SERVICE.read_text(encoding="utf-8").replace(
@@ -2118,11 +2203,13 @@ def test_systemd_units_and_calendar_validate_when_systemd_analyze_is_available(t
         ),
         encoding="utf-8",
     )
+    alert_copy.write_text(ALERT_SERVICE.read_text(encoding="utf-8"), encoding="utf-8")
     timer_copy.write_text(TIMER.read_text(encoding="utf-8"), encoding="utf-8")
     service_arg = _posix_path(service_copy) if os.name == "nt" else str(service_copy)
+    alert_arg = _posix_path(alert_copy) if os.name == "nt" else str(alert_copy)
     timer_arg = _posix_path(timer_copy) if os.name == "nt" else str(timer_copy)
     verify = subprocess.run(
-        [*command, "verify", service_arg, timer_arg],
+        [*command, "verify", service_arg, alert_arg, timer_arg],
         capture_output=True,
         text=True,
         timeout=20,
@@ -3850,6 +3937,30 @@ def test_database_url_is_read_without_sourcing_and_never_logged(harness: BackupH
     combined = result.stdout + result.stderr + harness.log_file.read_text(encoding="utf-8")
     assert SECRET not in combined
     assert "do-not-log-rclone-secret" not in combined
+
+
+@pytest.mark.parametrize("second_prefix", ["", " \t"])
+def test_duplicate_database_url_assignments_fail_closed_without_logging(
+    harness: BackupHarness,
+    second_prefix: str,
+) -> None:
+    first = "postgresql://first:first-secret@db/degen"
+    second = "postgresql://second:second-secret@db/degen"
+    harness.app_env.write_text(
+        f"DATABASE_URL='{first}'\n{second_prefix}DATABASE_URL='{second}'\n",
+        encoding="utf-8",
+    )
+
+    result = harness.run("preflight")
+
+    assert result.returncode != 0
+    assert "duplicate DATABASE_URL assignments" in result.stdout + result.stderr
+    assert "psql:database" not in harness.trace_lines()
+    combined = result.stdout + result.stderr + harness.log_file.read_text(encoding="utf-8")
+    assert first not in combined
+    assert second not in combined
+    assert "first-secret" not in combined
+    assert "second-secret" not in combined
 
 
 @pytest.mark.parametrize(

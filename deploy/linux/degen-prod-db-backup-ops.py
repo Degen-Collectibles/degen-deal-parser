@@ -304,6 +304,7 @@ _TARGET_ORDER = (
     "/usr/local/sbin/degen-prod-db-backup-env",
     "/usr/local/sbin/degen-prod-db-backup-ops",
     "/etc/systemd/system/degen-prod-db-backup.service",
+    "/etc/systemd/system/degen-prod-db-backup-alert@.service",
     "/etc/systemd/system/degen-prod-db-backup.timer",
     "/etc/degen/prod-db-backup.env",
 )
@@ -313,6 +314,7 @@ _SNAPSHOT_TARGET_NAMES = {
     "/usr/local/sbin/degen-prod-db-backup-env": "degen-prod-db-backup-env",
     "/usr/local/sbin/degen-prod-db-backup-ops": "degen-prod-db-backup-ops",
     "/etc/systemd/system/degen-prod-db-backup.service": "degen-prod-db-backup.service",
+    "/etc/systemd/system/degen-prod-db-backup-alert@.service": "degen-prod-db-backup-alert@.service",
     "/etc/systemd/system/degen-prod-db-backup.timer": "degen-prod-db-backup.timer",
     "/etc/degen/prod-db-backup.env": "prod-db-backup.env",
 }
@@ -325,7 +327,8 @@ _SOURCE_TO_TARGET = (
     ("deploy/linux/degen-prod-db-backup-env.py", _TARGET_ORDER[2]),
     ("deploy/linux/degen-prod-db-backup-ops.py", _TARGET_ORDER[3]),
     ("deploy/systemd/degen-prod-db-backup.service", _TARGET_ORDER[4]),
-    ("deploy/systemd/degen-prod-db-backup.timer", _TARGET_ORDER[5]),
+    ("deploy/systemd/degen-prod-db-backup-alert@.service", _TARGET_ORDER[5]),
+    ("deploy/systemd/degen-prod-db-backup.timer", _TARGET_ORDER[6]),
 )
 _SOURCE_ASSETS = frozenset(
     {
@@ -6088,10 +6091,8 @@ def _validate_snapshot_semantics(state: dict[str, object]) -> None:
     assert isinstance(snapshot, dict)
     targets = snapshot["targets"]
     assert isinstance(targets, dict)
-    if tuple(targets) != _TARGET_ORDER and frozenset(targets) != frozenset(_TARGET_ORDER):
-        raise OperationStateError("snapshot.targets must contain the exact seven targets")
     if frozenset(targets) != frozenset(_TARGET_ORDER):
-        raise OperationStateError("snapshot.targets must contain the exact seven targets")
+        raise OperationStateError("snapshot.targets must contain the exact eight targets")
     for target_name, target in targets.items():
         assert isinstance(target, dict)
         metadata = (target["sha256"], target["mode"], target["uid"], target["gid"])
@@ -6178,7 +6179,7 @@ def _validate_install_semantics(state: dict[str, object], installed_reached: boo
     if index != len(_TARGET_ORDER) or any(value is not None for value in cursor):
         raise OperationStateError("installed requires a terminal cleared install cursor")
     if frozenset(hashes) != frozenset(_TARGET_ORDER):
-        raise OperationStateError("install.installed_hashes must contain the exact seven targets")
+        raise OperationStateError("install.installed_hashes must contain the exact eight targets")
     if install["completed_epoch"] is None:
         raise OperationStateError("install.completed_epoch is required after installed")
     if validated_epoch is None:
@@ -10166,8 +10167,8 @@ def _snapshot_inventory(
 
 
 def _canonical_snapshot_manifest(artifacts: dict[str, bytes]) -> bytes:
-    if len(artifacts) != 8 or _SNAPSHOT_MANIFEST_NAME in artifacts:
-        raise OperationStateError("snapshot manifest requires exactly eight artifacts")
+    if len(artifacts) != 9 or _SNAPSHOT_MANIFEST_NAME in artifacts:
+        raise OperationStateError("snapshot manifest requires exactly nine artifacts")
     names = sorted(artifacts)
     for name in names:
         _validate_source_basename(name)
@@ -10203,7 +10204,7 @@ def _parse_snapshot_manifest(
         names.append(name)
         if digest != hashlib.sha256(artifacts[name]).hexdigest():
             raise OperationStateError("snapshot SHA256SUMS digest does not match artifact")
-    if names != sorted(artifacts) or len(names) != 8:
+    if names != sorted(artifacts) or len(names) != 9:
         raise OperationStateError("snapshot SHA256SUMS inventory is incomplete")
 
 
@@ -10292,7 +10293,7 @@ def _open_snapshot_directory_proof(
     *,
     create: bool,
 ) -> _SnapshotDirectoryProof:
-    if len(expected_bytes) != 9 or _SNAPSHOT_MANIFEST_NAME not in expected_bytes:
+    if len(expected_bytes) != 10 or _SNAPSHOT_MANIFEST_NAME not in expected_bytes:
         raise OperationStateError("snapshot expected artifact inventory is invalid")
     descriptor: int | None = None
     file_descriptors: dict[str, int] = {}
@@ -14693,7 +14694,7 @@ def _task7_install_bytes(material: _VerifiedTransactionMaterial) -> dict[str, by
 def _task7_install_mode(target: str) -> int:
     if target in _TARGET_ORDER[:4]:
         return 0o755
-    if target in _TARGET_ORDER[4:6]:
+    if target in _TARGET_ORDER[4:7]:
         return 0o644
     if target == _TARGET_ORDER[-1]:
         return 0o600

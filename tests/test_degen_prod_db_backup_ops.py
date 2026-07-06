@@ -43,6 +43,7 @@ TARGETS = (
     "/usr/local/sbin/degen-prod-db-backup-env",
     "/usr/local/sbin/degen-prod-db-backup-ops",
     "/etc/systemd/system/degen-prod-db-backup.service",
+    "/etc/systemd/system/degen-prod-db-backup-alert@.service",
     "/etc/systemd/system/degen-prod-db-backup.timer",
     "/etc/degen/prod-db-backup.env",
 )
@@ -52,6 +53,7 @@ SOURCE_ASSETS = (
     "deploy/linux/degen-prod-db-backup-env.py",
     "deploy/linux/degen-prod-db-backup-ops.py",
     "deploy/systemd/degen-prod-db-backup.service",
+    "deploy/systemd/degen-prod-db-backup-alert@.service",
     "deploy/systemd/degen-prod-db-backup.timer",
     "deploy/systemd/degen-prod-db-backup.env.example",
 )
@@ -991,7 +993,7 @@ def observed_state(operation_dir: Path) -> dict[str, object]:
     }
     append_phase(state, "installing", 1_750_000_030)
     state["install"] = {
-        "next_target_index": 7,
+        "next_target_index": len(TARGETS),
         "current_target": None,
         "previous_sha256": None,
         "intended_sha256": None,
@@ -1380,7 +1382,7 @@ def install_recovery_state(operation_dir: Path, phase: str) -> dict[str, object]
     if phase == "rolled_back":
         state["recovery"].update(
             {
-                "next_target_index": 7,
+                "next_target_index": len(TARGETS),
                 "current_target": None,
                 "previous_sha256": None,
                 "intended_sha256": None,
@@ -1412,7 +1414,7 @@ def manual_rollback_state(operation_dir: Path, phase: str) -> dict[str, object]:
     if phase == "rolled_back":
         state["recovery"].update(
             {
-                "next_target_index": 7,
+                "next_target_index": len(TARGETS),
                 "current_target": None,
                 "previous_sha256": None,
                 "intended_sha256": None,
@@ -3368,7 +3370,7 @@ def test_stable_phase_rejects_active_transaction(tmp_path: Path) -> None:
         module.validate_operation_state(state, operation_dir)
 
 
-def test_snapshot_requires_exact_seven_targets_and_presence_coherence(tmp_path: Path) -> None:
+def test_snapshot_requires_exact_eight_targets_and_presence_coherence(tmp_path: Path) -> None:
     module = load_ops_helper()
     operation_dir, _ = private_operation_dir(tmp_path)
     state = state_at_phase(operation_dir, "snapshotted")
@@ -3382,7 +3384,7 @@ def test_snapshot_requires_exact_seven_targets_and_presence_coherence(tmp_path: 
         module.validate_operation_state(state, operation_dir)
 
 
-def test_install_hashes_require_exact_provenance_bound_seven_targets(tmp_path: Path) -> None:
+def test_install_hashes_require_exact_provenance_bound_eight_targets(tmp_path: Path) -> None:
     module = load_ops_helper()
     operation_dir, _ = private_operation_dir(tmp_path)
     state = state_at_phase(operation_dir, "installed")
@@ -5500,7 +5502,7 @@ def expected_host_stage_manifest(
     dump_name: str,
     dump_sha256: str,
 ) -> dict[str, object]:
-    target_by_source = dict(zip(SOURCE_ASSETS[:6], TARGETS[:6]))
+    target_by_source = dict(zip(SOURCE_ASSETS[:7], TARGETS[:7], strict=True))
     return {
         "schema_version": 1,
         "operation": {
@@ -7125,8 +7127,9 @@ def host_snapshot_fixture(
         TARGETS[2]: 0o755,
         TARGETS[3]: 0o755,
         TARGETS[4]: 0o644,
-        TARGETS[5]: 0o640,
-        TARGETS[6]: 0o600,
+        TARGETS[5]: 0o644,
+        TARGETS[6]: 0o640,
+        TARGETS[7]: 0o600,
     }
     for index, target in enumerate(TARGETS):
         path = host_root_path(context.host_root, target)
@@ -8071,18 +8074,19 @@ def task7_transaction_fixture(
         run_lock.chmod(0o1777)
 
     expected_bytes: dict[str, bytes] = {}
-    for source, target in zip(SOURCE_ASSETS[:6], TARGETS[:6]):
+    for source, target in zip(SOURCE_ASSETS[:7], TARGETS[:7], strict=True):
         expected_bytes[target] = (
             context.paths.staged_dir / "reviewed" / source
         ).read_bytes()
-    expected_bytes[TARGETS[6]] = (
+    expected_bytes[TARGETS[7]] = (
         context.paths.staged_dir / "host/etc/degen/prod-db-backup.env"
     ).read_bytes()
     expected_modes = {
         **{target: 0o755 for target in TARGETS[:4]},
         TARGETS[4]: 0o644,
         TARGETS[5]: 0o644,
-        TARGETS[6]: 0o600,
+        TARGETS[6]: 0o644,
+        TARGETS[7]: 0o600,
     }
     prior: dict[str, dict[str, object]] = {}
     for target in TARGETS:
@@ -8876,12 +8880,12 @@ def test_install_happy_path_is_transactional_and_provenance_bound(tmp_path: Path
         assert path.read_bytes() == fixture["expected_bytes"][target]
         if os.name == "posix":
             assert stat.S_IMODE(path.stat().st_mode) == fixture["expected_modes"][target]
-    environment_target = host_root_path(context.host_root, TARGETS[6])
+    environment_target = host_root_path(context.host_root, TARGETS[7])
     reviewed_environment_example = (
-        context.paths.staged_dir / "reviewed" / SOURCE_ASSETS[6]
+        context.paths.staged_dir / "reviewed" / SOURCE_ASSETS[7]
     )
     assert environment_target.read_bytes() != reviewed_environment_example.read_bytes()
-    assert state["install"]["installed_hashes"][TARGETS[6]] == state["host_stage"][
+    assert state["install"]["installed_hashes"][TARGETS[7]] == state["host_stage"][
         "environment_sha256"
     ]
     actions = [call["action"] for call in fixture["calls"]]

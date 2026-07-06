@@ -2,6 +2,7 @@
 Description=Degen PostgreSQL verified backup
 After=network-online.target postgresql.service
 Wants=network-online.target
+OnFailure=degen-prod-db-backup-alert@%n.service
 RefuseManualStart=yes
 
 [Service]
@@ -15,7 +16,7 @@ RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
 LogsDirectory=degen-prod-db-backup
 LogsDirectoryMode=0700
-TimeoutStartSec=infinity
+TimeoutStartSec=6h
 TimeoutStopSec=90
 KillMode=control-group
 Nice=10

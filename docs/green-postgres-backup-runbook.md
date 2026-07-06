@@ -1,6 +1,6 @@
 # Green PostgreSQL backup retention runbook
 
-Last reviewed: 2026-07-01
+Last reviewed: 2026-07-04
 
 This is the production execution guide for Green/Brev host `openclaw-9902ae`.
 The application directory remains `/opt/degen/app`, but no production source is
@@ -27,7 +27,7 @@ the production remote is accessed by Green, not by the desktop sync client.
 
 ## Fixed reviewed source contract
 
-The archive contains exactly the manifest plus these seven non-secret assets.
+The archive contains exactly the manifest plus these eight non-secret assets.
 It excludes the runbook, tests, plans, real environment files, database dumps,
 operation snapshots/state, and `/etc/degen/rclone.conf`.
 
@@ -38,6 +38,7 @@ ARCHIVE_PATHS=(
   deploy/linux/degen-prod-db-backup-ops.py
   deploy/linux/degen-prod-db-backup.sh
   deploy/linux/degen-prod-db-retention.py
+  deploy/systemd/degen-prod-db-backup-alert@.service
   deploy/systemd/degen-prod-db-backup.env.example
   deploy/systemd/degen-prod-db-backup.service
   deploy/systemd/degen-prod-db-backup.timer
@@ -52,6 +53,7 @@ EXPECTED_ARCHIVE_MEMBERS=(
   deploy/linux/degen-prod-db-backup.sh
   deploy/linux/degen-prod-db-retention.py
   deploy/systemd/
+  deploy/systemd/degen-prod-db-backup-alert@.service
   deploy/systemd/degen-prod-db-backup.env.example
   deploy/systemd/degen-prod-db-backup.service
   deploy/systemd/degen-prod-db-backup.timer
@@ -69,11 +71,12 @@ The corresponding install targets are:
 /usr/local/sbin/degen-prod-db-backup-env
 /usr/local/sbin/degen-prod-db-backup-ops
 /etc/systemd/system/degen-prod-db-backup.service
+/etc/systemd/system/degen-prod-db-backup-alert@.service
 /etc/systemd/system/degen-prod-db-backup.timer
 /etc/degen/prod-db-backup.env
 ```
 
-The service also owns one operational path outside those seven snapshotted
+The service also owns one operational path outside those eight snapshotted
 install targets: `/var/log/degen-prod-db-backup` must be a root:root mode-`0700`
 real directory, and `prod-db-backup.log`, when present, must be a root:root
 mode-`0600`, single-link regular file. Systemd and the runtime logger create or
@@ -221,7 +224,7 @@ the still-equal remote branch SHA. Then present this exact preflight and wait
 for a new explicit `proceed`:
 
 - Target: host `openclaw-9902ae`, exact `OPERATION_DIR`, temporary
-  `REMOTE_ARCHIVE`, the seven install targets listed above, and the dedicated
+  `REMOTE_ARCHIVE`, the eight install targets listed above, and the dedicated
   operational log path `/var/log/degen-prod-db-backup`.
 - Changes: create a root-only operation directory; transfer `source.tar`;
   bootstrap-verify it; snapshot current host state; install the reviewed
@@ -576,6 +579,36 @@ readable. `pg_restore --list` does not prove an end-to-end logical restore. The
 canceled full restore rehearsal remains an explicit recovery limitation and
 must not be described as restore proof.
 
+The backup unit has a finite six-hour runtime bound. A timeout or any other
+unit failure starts `degen-prod-db-backup-alert@%n.service`, which emits a
+priority-`alert` journal record with identifier `degen-prod-db-backup-alert`.
+Inspect it with `journalctl -t degen-prod-db-backup-alert -p alert`; no webhook,
+token, or other notification credential is required by this alert path.
+
+## Protected orphan cleanup
+
+The planner deliberately protects `.degen-upload-*` temporary objects,
+unknown names, and any incomplete pair after an interrupted upload or publish.
+Never delete protected objects automatically: ambiguity is resolved in favor of
+preserving backup data, even when that consumes storage.
+
+Storage cleanup is a separate production mutation. Before removing a protected
+object, present a separate explicit cleanup preflight and approval naming every
+local and remote target. Prove the backup service is inactive, capture the timer
+state, verify the matching remote dump size and checksum sidecar for any local
+dump proposed for removal, and retain at least two newer structurally readable
+local pairs. For a remote `.degen-upload-*` object or incomplete pair, prove its
+age, exact name, relationship to a completed published pair, and the remote
+inventory before proposing deletion. Never infer ownership from a filename
+alone, never delete an untracked object, and never combine local and remote
+cleanup approvals.
+
+After an approved cleanup, re-list local and remote inventories, re-run
+`pg_restore --list` on retained local dumps, confirm the timer and service state,
+and record reclaimed filesystem space. A local object may be restored by
+downloading its verified OneDrive copy; a deleted remote object may not be
+recoverable.
+
 ## Separately approved manual rollback
 
 Stable-phase rollback is a new production mutation. Present a fresh preflight
@@ -608,7 +641,7 @@ does not automatically restore `rclone.conf.audit`, because that file is audit
 evidence rather than a rollback target. It cannot restore deleted local backups
 or deleted OneDrive objects, and it does not restart the application, worker,
 bot, or PostgreSQL. It also leaves `/var/log/degen-prod-db-backup` and its log
-in place because they are operational evidence outside the seven install
+in place because they are operational evidence outside the eight install
 targets; do not delete them without a separate explicit cleanup decision.
 If rollback fails or leaves a recovery phase, use Conditional recovery only;
 never copy snapshot files into place by hand.
