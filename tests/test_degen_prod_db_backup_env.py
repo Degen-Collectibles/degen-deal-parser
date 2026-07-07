@@ -139,6 +139,27 @@ def test_postgres_uri_is_split_into_exact_libpq_environment_without_retaining_ur
     assert all("://" not in value for value in environment.values())
 
 
+def test_postgres_uri_without_query_skips_version_sensitive_strict_parser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def reject_empty_query(*_args: object, **_kwargs: object) -> list[tuple[str, str]]:
+        raise ValueError("Python 3.10 rejects an empty query in strict mode")
+
+    monkeypatch.setattr(module, "parse_qsl", reject_empty_query)
+
+    environment = module.postgres_environment_from_url(
+        "postgresql://degen:p%40ss@127.0.0.1:5432/degen_green_prod"
+    )
+
+    assert environment == {
+        "PGDATABASE": "degen_green_prod",
+        "PGHOST": "127.0.0.1",
+        "PGPASSWORD": "p@ss",
+        "PGPORT": "5432",
+        "PGUSER": "degen",
+    }
+
+
 def test_postgres_exec_rejects_database_uri_in_target_argv_before_exec(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

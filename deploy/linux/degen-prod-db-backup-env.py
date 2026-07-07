@@ -287,13 +287,17 @@ def postgres_environment_from_url(database_url: str) -> dict[str, str]:
         "PGUSER": username,
     }
     try:
-        query_items = parse_qsl(
-            parsed.query,
-            keep_blank_values=True,
-            strict_parsing=True,
-            encoding="utf-8",
-            errors="strict",
-            separator="&",
+        query_items = (
+            []
+            if not parsed.query
+            else parse_qsl(
+                parsed.query,
+                keep_blank_values=True,
+                strict_parsing=True,
+                encoding="utf-8",
+                errors="strict",
+                separator="&",
+            )
         )
     except (UnicodeDecodeError, ValueError) as exc:
         raise ValueError("PostgreSQL URI query is invalid") from exc
