@@ -156,6 +156,13 @@ _DEFAULT_COMMAND_TIMEOUT_SECONDS = 15 * 60
 _COMMAND_CLEANUP_GRACE_SECONDS = 2.0
 _MAX_DRY_RUN_NAME_BYTES = 512
 _MAX_DATABASE_URL_BYTES = 4096
+_MAX_LIBPQ_ENVIRONMENT_BYTES = 8192
+_LIBPQ_REQUIRED_KEYS = frozenset(
+    {"PGDATABASE", "PGHOST", "PGPASSWORD", "PGPORT", "PGUSER"}
+)
+_LIBPQ_OPTIONAL_KEYS = frozenset(
+    {"PGAPPNAME", "PGCONNECT_TIMEOUT", "PGSSLMODE"}
+)
 _MAX_APP_ENV_BYTES = 256 * 1024
 _MAX_BACKUP_ENTRIES = 4096
 _MAX_BACKUP_DUMP_BYTES = 1 << 50
@@ -233,14 +240,43 @@ if mode == "pgdatabase":
         if not chunk:
             break
         total += len(chunk)
-        if total > 4096:
+        if total > 8192:
             raise SystemExit(125)
         chunks.append(chunk)
     os.close(fd)
-    value = b"".join(chunks).decode("utf-8", errors="strict")
-    if not value or "\\x00" in value or "\\r" in value or "\\n" in value:
+    import json
+    try:
+        values = json.loads(b"".join(chunks).decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, ValueError):
         raise SystemExit(125)
-    os.execve(executable, argv, {"PGDATABASE": value})
+    required = {"PGDATABASE", "PGHOST", "PGPASSWORD", "PGPORT", "PGUSER"}
+    allowed = required | {"PGAPPNAME", "PGCONNECT_TIMEOUT", "PGSSLMODE"}
+    if (
+        type(values) is not dict
+        or not required.issubset(values)
+        or not set(values).issubset(allowed)
+        or any(
+            type(key) is not str
+            or type(value) is not str
+            or not value
+            or "\\x00" in value
+            or "\\r" in value
+            or "\\n" in value
+            for key, value in values.items()
+        )
+    ):
+        raise SystemExit(125)
+    os.execve(
+        executable,
+        argv,
+        {
+            "LANG": "C",
+            "LC_ALL": "C",
+            "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+            "PGPASSFILE": "/dev/null",
+            **values,
+        },
+    )
 raise SystemExit(125)
 """
 _TOP_LEVEL_KEYS = frozenset(
@@ -11276,7 +11312,7 @@ def _parse_app_environment(raw: bytes) -> str:
 
 
 def _write_secret_pipe(payload: bytes) -> tuple[int, int]:
-    if len(payload) > _MAX_DATABASE_URL_BYTES:
+    if len(payload) > _MAX_LIBPQ_ENVIRONMENT_BYTES:
         raise OperationStateError("database transport payload is oversized")
     if hasattr(os, "pipe2") and os.name == "posix":
         return os.pipe2(getattr(os, "O_CLOEXEC", 0))
@@ -11294,8 +11330,39 @@ def _write_secret_pipe(payload: bytes) -> tuple[int, int]:
     return read_fd, write_fd
 
 
-def _query_current_database(context: OperationsContext, database_url: str) -> str:
-    payload = database_url.encode("utf-8")
+def _query_current_database(
+    context: OperationsContext,
+    database_url: str,
+    environment_builder: Callable[[str], dict[str, str]],
+) -> str:
+    try:
+        environment = environment_builder(database_url)
+    except Exception:
+        raise OperationStateError("PostgreSQL environment construction failed") from None
+    if (
+        type(environment) is not dict
+        or not _LIBPQ_REQUIRED_KEYS.issubset(environment)
+        or not set(environment).issubset(
+            _LIBPQ_REQUIRED_KEYS | _LIBPQ_OPTIONAL_KEYS
+        )
+        or any(
+            type(key) is not str
+            or type(value) is not str
+            or not value
+            or "\x00" in value
+            or "\r" in value
+            or "\n" in value
+            for key, value in environment.items()
+        )
+    ):
+        raise OperationStateError("PostgreSQL environment construction failed")
+    payload = json.dumps(
+        environment,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("ascii")
     read_fd: int | None = None
     write_fd: int | None = None
     writer: threading.Thread | None = None
@@ -11418,6 +11485,7 @@ def _load_verified_environment_helper(raw: bytes) -> types.ModuleType:
         or not callable(getattr(module, "parse_simple_environment", None))
         or not callable(getattr(module, "validate_effective_configuration", None))
         or not callable(getattr(module, "render_managed_environment", None))
+        or not callable(getattr(module, "postgres_environment_from_url", None))
         or not callable(getattr(module, "_render_bytes", None))
     ):
         raise OperationStateError("manifest-verified environment helper API is invalid")
@@ -13034,6 +13102,7 @@ def _commit_staging_prepared_receipt(
     app_environment: _HostFileProof,
     app_environment_raw: bytes,
     database_url: str,
+    environment_builder: Callable[[str], dict[str, str]],
     database_name: str,
     hostname: str,
 ) -> dict[str, object]:
@@ -13062,7 +13131,11 @@ def _commit_staging_prepared_receipt(
                     "application environment changed before state replacement"
                 )
             _revalidate_host_stage_proof(stage_proof, stage_manifest)
-            fresh_database = _query_current_database(context, database_url)
+            fresh_database = _query_current_database(
+                context,
+                database_url,
+                environment_builder,
+            )
             fresh_hostname = _query_hostname(context)
             if (
                 fresh_database != database_name
@@ -13142,7 +13215,12 @@ def prepare_host_staging(context: OperationsContext) -> dict[str, object]:
                         app_environment, _MAX_APP_ENV_BYTES
                     )
                     database_url = _parse_app_environment(app_environment_raw)
-                    database_name = _query_current_database(context, database_url)
+                    environment_builder = helper.postgres_environment_from_url
+                    database_name = _query_current_database(
+                        context,
+                        database_url,
+                        environment_builder,
+                    )
                     hostname = _query_hostname(context)
                     expected_prefix = f"{database_name}_{hostname}_"
                     configured_prefix = base_effective.get("BACKUP_PREFIX")
@@ -13205,6 +13283,7 @@ def prepare_host_staging(context: OperationsContext) -> dict[str, object]:
                         app_environment,
                         app_environment_raw,
                         database_url,
+                        environment_builder,
                         database_name,
                         hostname,
                     )

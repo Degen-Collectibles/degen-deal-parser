@@ -117,6 +117,195 @@ def test_sources_parse_with_python_310_grammar() -> None:
         ast.parse(path.read_text(encoding="utf-8"), filename=str(path), feature_version=(3, 10))
 
 
+def test_postgres_uri_is_split_into_exact_libpq_environment_without_retaining_uri() -> None:
+    database_url = (
+        "postgresql+psycopg://degen%2Dbackup:p%40ss%3Aword@127.0.0.1:5432/"
+        "degen_green_prod?sslmode=require&connect_timeout=15&application_name=degen%20backup"
+    )
+
+    environment = module.postgres_environment_from_url(database_url)
+
+    assert environment == {
+        "PGAPPNAME": "degen backup",
+        "PGCONNECT_TIMEOUT": "15",
+        "PGDATABASE": "degen_green_prod",
+        "PGHOST": "127.0.0.1",
+        "PGPASSWORD": "p@ss:word",
+        "PGPORT": "5432",
+        "PGSSLMODE": "require",
+        "PGUSER": "degen-backup",
+    }
+    assert database_url not in repr(environment)
+    assert all("://" not in value for value in environment.values())
+
+
+def test_postgres_exec_rejects_database_uri_in_target_argv_before_exec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = "postgresql://degen:never-in-argv@127.0.0.1/degen"
+    monkeypatch.setattr(module, "_read_database_url_fd", lambda _fd: database_url)
+
+    def forbidden_exec(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("os.execve must not receive a database URI in argv")
+
+    monkeypatch.setattr(module.os, "execve", forbidden_exec)
+
+    with pytest.raises(ValueError, match="argument"):
+        module.exec_postgres_command(
+            0,
+            ("psql", "--dbname", database_url, "--command", "SELECT 1;"),
+        )
+
+
+@pytest.mark.parametrize(
+    "database_url",
+    [
+        "postgresql://user@127.0.0.1/database",
+        "postgresql://user:@127.0.0.1/database",
+        "postgresql://user:password@127.0.0.1/database/extra",
+        "postgresql://user:password@127.0.0.1/database#fragment",
+        "postgresql://user:pass%0Aword@127.0.0.1/database",
+        "postgresql://user:pass%ZZword@127.0.0.1/database",
+        "postgresql://user:password@127.0.0.1:0/database",
+        "postgresql://user:password@db1,db2/database",
+        "postgresql://user:password@127.0.0.1/database?unknown=value",
+        "postgresql://user:password@127.0.0.1/database?sslmode=require&sslmode=disable",
+    ],
+)
+def test_postgres_uri_rejects_incomplete_ambiguous_or_unsafe_inputs(
+    database_url: str,
+) -> None:
+    with pytest.raises(ValueError) as raised:
+        module.postgres_environment_from_url(database_url)
+
+    assert database_url not in str(raised.value)
+
+
+def test_postgres_exec_uses_fixed_binary_and_clean_child_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = "postgresql://degen:p%40ss@127.0.0.1:5432/degen?sslmode=require"
+    monkeypatch.setattr(module, "_read_database_url_fd", lambda _fd: database_url)
+    captured: dict[str, object] = {}
+
+    def capture_exec(executable: str, argv: tuple[str, ...], environment: dict[str, str]) -> None:
+        captured.update(
+            executable=executable,
+            argv=argv,
+            environment=environment,
+        )
+
+    monkeypatch.setattr(module.os, "execve", capture_exec)
+
+    module.exec_postgres_command(
+        0,
+        ("psql", "--no-psqlrc", "--command", "SELECT current_database();"),
+    )
+
+    assert captured == {
+        "executable": "/usr/bin/psql",
+        "argv": ("psql", "--no-psqlrc", "--command", "SELECT current_database();"),
+        "environment": {
+            "LANG": "C",
+            "LC_ALL": "C",
+            "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+            "PGPASSFILE": "/dev/null",
+            "PGDATABASE": "degen",
+            "PGHOST": "127.0.0.1",
+            "PGPASSWORD": "p@ss",
+            "PGPORT": "5432",
+            "PGSSLMODE": "require",
+            "PGUSER": "degen",
+        },
+    }
+    assert database_url not in repr(captured)
+
+
+def test_cli_postgres_exec_reads_real_fd_and_strips_argument_separator(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    database_url = "postgresql+psycopg://degen:cli-secret@127.0.0.1:5432/degen"
+    read_fd, write_fd = os.pipe()
+    try:
+        os.write(write_fd, database_url.encode("ascii"))
+    finally:
+        os.close(write_fd)
+    captured: dict[str, object] = {}
+
+    def capture_exec(executable: str, argv: tuple[str, ...], environment: dict[str, str]) -> None:
+        captured.update(
+            executable=executable,
+            argv=argv,
+            environment=environment,
+        )
+
+    monkeypatch.setattr(module.os, "execve", capture_exec)
+    try:
+        result = module.main(
+            [
+                "postgres-exec",
+                "--database-url-fd",
+                str(read_fd),
+                "--",
+                "psql",
+                "--no-psqlrc",
+                "--command",
+                "SELECT 1;",
+            ]
+        )
+    finally:
+        os.close(read_fd)
+
+    assert result == 0
+    assert capsys.readouterr() == ("", "")
+    assert captured == {
+        "executable": "/usr/bin/psql",
+        "argv": ("psql", "--no-psqlrc", "--command", "SELECT 1;"),
+        "environment": {
+            "LANG": "C",
+            "LC_ALL": "C",
+            "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+            "PGPASSFILE": "/dev/null",
+            "PGDATABASE": "degen",
+            "PGHOST": "127.0.0.1",
+            "PGPASSWORD": "cli-secret",
+            "PGPORT": "5432",
+            "PGUSER": "degen",
+        },
+    }
+    assert database_url not in repr(captured)
+
+
+def test_cli_postgres_exec_rejects_bad_stdin_uri_without_echoing_secret() -> None:
+    database_url = (
+        "postgresql://degen:unique-cli-secret@127.0.0.1/degen?unknown=value"
+    )
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(HELPER),
+            "postgres-exec",
+            "--",
+            "psql",
+            "--no-psqlrc",
+            "--command",
+            "SELECT 1;",
+        ],
+        input=database_url,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    assert completed.stdout == ""
+    assert database_url not in completed.stderr
+    assert "unique-cli-secret" not in completed.stderr
+    assert "Traceback" not in completed.stderr
+
+
 def test_parse_accepts_blank_comments_and_simple_literal_assignments(tmp_path: Path) -> None:
     raw = (
         b"\n"
