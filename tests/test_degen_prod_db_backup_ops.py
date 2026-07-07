@@ -5367,6 +5367,38 @@ def staging_source_asset_bytes() -> dict[str, bytes]:
     return assets
 
 
+def test_parse_app_environment_allows_spaces_in_unrelated_printable_values() -> None:
+    module = load_ops_helper()
+    database_url = "postgresql+psycopg://degen:sentinel@db.internal/degen"
+    raw = (
+        b"ADMIN_DISPLAY_NAME=Degen Admin\n"
+        b"REVIEWER_DISPLAY_NAME=Degen Reviewer\n"
+        b"RUNTIME_LABEL=Green Brev\n"
+        b"WORKER_RUNTIME_LABEL=Green Worker A\n"
+        b"PASSWORD_RESET_EMAIL_FROM_NAME='Degen Team'\n"
+        + f"DATABASE_URL='{database_url}'\n".encode("ascii")
+    )
+
+    assert module._parse_app_environment(raw) == database_url.replace(
+        "postgresql+psycopg://", "postgresql://", 1
+    )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"DATABASE_URL=postgresql://degen:sentinel@db.internal/degen database\n",
+        b"DATABASE_URL='postgresql://degen:sentinel@db.internal/degen database'\n",
+    ],
+    ids=("unquoted", "quoted"),
+)
+def test_parse_app_environment_still_rejects_spaces_in_database_url(raw: bytes) -> None:
+    module = load_ops_helper()
+
+    with pytest.raises(module.OperationStateError, match="value is unsafe"):
+        module._parse_app_environment(raw)
+
+
 def host_root_path(host_root: Path, absolute_path: str) -> Path:
     assert absolute_path.startswith("/")
     return host_root.joinpath(*absolute_path.split("/")[1:])

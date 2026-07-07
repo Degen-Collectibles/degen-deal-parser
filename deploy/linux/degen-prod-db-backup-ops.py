@@ -11255,7 +11255,11 @@ def _parse_app_environment(raw: bytes) -> str:
             value = value[1:-1]
         elif value.startswith(("'", '"')) or value.endswith(("'", '"')):
             raise OperationStateError("application environment quoting is unsafe")
-        if not value or any(ord(character) < 0x21 or ord(character) > 0x7E for character in value):
+        minimum_codepoint = 0x21 if key == "DATABASE_URL" else 0x20
+        if not value or any(
+            ord(character) < minimum_codepoint or ord(character) > 0x7E
+            for character in value
+        ):
             raise OperationStateError("application environment value is unsafe")
         values[key] = value
     if "DATABASE_URL" not in values:
