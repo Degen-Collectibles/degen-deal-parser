@@ -292,12 +292,21 @@ def fail_if(label, code=71):
         raise SystemExit(code)
 
 
-def require_pgdatabase():
-    value = os.environ.get("PGDATABASE", "")
-    expected = os.environ.get("FAKE_EXPECT_PGDATABASE")
-    if not value or any("://" in item for item in args) or (expected is not None and value != expected):
-        print("PGDATABASE transport contract violated", file=sys.stderr)
+def require_split_libpq_environment():
+    keys = ("PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGDATABASE")
+    values = {key: os.environ.get(key, "") for key in keys}
+    if (
+        any(not values[key] for key in keys)
+        or any("://" in item for item in (*args, *values.values()))
+        or "DATABASE_URL" in os.environ
+    ):
+        print("split libpq environment contract violated", file=sys.stderr)
         raise SystemExit(72)
+    for key in keys:
+        expected = os.environ.get(f"FAKE_EXPECT_{key}")
+        if expected is not None and values[key] != expected:
+            print("split libpq environment contract violated", file=sys.stderr)
+            raise SystemExit(72)
 
 
 def block_if(label):
@@ -347,7 +356,7 @@ elif name == "df":
     print("Avail")
     print(os.environ.get("FAKE_DF_AVAILABLE", "1000000000"))
 elif name == "psql":
-    require_pgdatabase()
+    require_split_libpq_environment()
     query = " ".join(args)
     if "pg_database_size" in query:
         trace("psql:size")
@@ -356,7 +365,7 @@ elif name == "psql":
         trace("psql:database")
         print(os.environ.get("FAKE_DB_NAME", "degen_green_prod"))
 elif name == "pg_dump":
-    require_pgdatabase()
+    require_split_libpq_environment()
     trace("pg_dump")
     output = None
     for index, item in enumerate(args):
@@ -629,13 +638,49 @@ TEST_ENV_HELPER = r'''#!/usr/bin/env python3
 import os
 from pathlib import Path
 import sys
+from urllib.parse import parse_qsl, unquote, urlsplit
 
-if len(sys.argv) != 4 or sys.argv[1:3] != ["emit", "--file"]:
+args = sys.argv[1:]
+if len(args) == 3 and args[:2] == ["emit", "--file"]:
+    source = Path(args[2])
+    with Path(os.environ["FAKE_TRACE"]).open("a", encoding="utf-8") as handle:
+        handle.write(f"env-helper:emit:{source}\n")
+    sys.stdout.buffer.write(source.read_bytes())
+elif len(args) >= 3 and args[0:2] == ["postgres-exec", "--"]:
+    raw_url = sys.stdin.buffer.read()
+    if not raw_url or len(raw_url) > 4096 or any(byte in raw_url for byte in (0, 10, 13)):
+        raise SystemExit(64)
+    value = raw_url.decode("utf-8", errors="strict")
+    if value.startswith("postgresql+psycopg://"):
+        value = "postgresql://" + value[len("postgresql+psycopg://"):]
+    parts = urlsplit(value)
+    command = args[2:]
+    if parts.scheme not in {"postgresql", "postgres"} or not command or command[0] not in {"psql", "pg_dump"}:
+        raise SystemExit(64)
+    environment = os.environ.copy()
+    environment.pop("DATABASE_URL", None)
+    for key in tuple(environment):
+        if key.startswith("PG"):
+            environment.pop(key, None)
+    environment.update({
+        "PGHOST": parts.hostname or "",
+        "PGPORT": str(parts.port or 5432),
+        "PGUSER": unquote(parts.username or ""),
+        "PGPASSWORD": unquote(parts.password or ""),
+        "PGDATABASE": unquote(parts.path.lstrip("/")),
+    })
+    query_mapping = {
+        "application_name": "PGAPPNAME",
+        "connect_timeout": "PGCONNECT_TIMEOUT",
+        "sslmode": "PGSSLMODE",
+    }
+    for key, item in parse_qsl(parts.query, keep_blank_values=True):
+        environment[query_mapping[key]] = item
+    with Path(os.environ["FAKE_TRACE"]).open("a", encoding="utf-8") as handle:
+        handle.write(f"env-helper:postgres-exec:{command[0]}\n")
+    os.execvpe(command[0], command, environment)
+else:
     raise SystemExit(64)
-source = Path(sys.argv[3])
-with Path(os.environ["FAKE_TRACE"]).open("a", encoding="utf-8") as handle:
-    handle.write(f"env-helper:emit:{source}\n")
-sys.stdout.buffer.write(source.read_bytes())
 '''
 
 
@@ -834,6 +879,11 @@ exit "$status"
             "FAKE_DB_SIZE": "4096",
             "FAKE_DF_AVAILABLE": "1000000000",
             "FAKE_DB_NAME": "degen_green_prod",
+            "FAKE_EXPECT_PGDATABASE": "degen_green_prod",
+            "FAKE_EXPECT_PGHOST": "db.internal",
+            "FAKE_EXPECT_PGPASSWORD": "do-not-log-this",
+            "FAKE_EXPECT_PGPORT": "5432",
+            "FAKE_EXPECT_PGUSER": "degen",
             "FAKE_HOST": "green",
             "FAKE_NOW": STAMP,
             "BACKUP_SCRIPT": _posix_path(SCRIPT),
@@ -3964,26 +4014,33 @@ def test_duplicate_database_url_assignments_fail_closed_without_logging(
 
 
 @pytest.mark.parametrize(
-    ("database_url", "expected_pgdatabase"),
+    "database_url",
     [
-        ("postgresql://degen:uri-secret@db/degen", "postgresql://degen:uri-secret@db/degen"),
-        ("postgres://degen:uri-secret@db/degen", "postgres://degen:uri-secret@db/degen"),
-        ("postgresql+psycopg://degen:uri-secret@db/degen", "postgresql://degen:uri-secret@db/degen"),
+        "postgresql://degen:uri-secret@db/degen",
+        "postgres://degen:uri-secret@db/degen",
+        "postgresql+psycopg://degen:uri-secret@db/degen",
     ],
 )
-def test_postgres_database_uri_forms_are_normalized_only_when_required(
+def test_postgres_database_uri_forms_are_split_for_libpq_without_uri_argv_or_environment(
     harness: BackupHarness,
     database_url: str,
-    expected_pgdatabase: str,
 ) -> None:
     harness.app_env.write_text(f"DATABASE_URL='{database_url}'\n", encoding="utf-8")
 
-    result = harness.run("preflight", overrides={"FAKE_EXPECT_PGDATABASE": expected_pgdatabase})
+    result = harness.run(
+        "preflight",
+        overrides={
+            "FAKE_EXPECT_PGDATABASE": "degen",
+            "FAKE_EXPECT_PGHOST": "db",
+            "FAKE_EXPECT_PGPASSWORD": "uri-secret",
+        },
+    )
 
     assert result.returncode == 0, result.stdout + result.stderr
     combined = result.stdout + result.stderr + harness.log_file.read_text(encoding="utf-8")
     assert database_url not in combined
-    assert expected_pgdatabase not in combined
+    assert "uri-secret" not in combined
+    assert harness.trace_lines().count("env-helper:postgres-exec:psql") == 2
 
 
 @pytest.mark.parametrize("database_url", ["mysql://degen:bad-secret@db/degen", "postgresql+asyncpg://degen:bad-secret@db/degen"])
@@ -4011,7 +4068,10 @@ def test_preset_database_url_takes_precedence_without_logging_or_sourcing(
     marker = harness.root / "preset-must-not-source"
     overrides: dict[str, str | None] = {
         "DATABASE_URL": preset,
-        "FAKE_EXPECT_PGDATABASE": preset,
+        "FAKE_EXPECT_PGDATABASE": "preset",
+        "FAKE_EXPECT_PGHOST": "db",
+        "FAKE_EXPECT_PGPASSWORD": "preset-secret",
+        "FAKE_EXPECT_PGUSER": "preset",
     }
     if app_file_state == "missing":
         overrides["APP_ENV_FILE"] = _posix_path(harness.root / "missing-web.env")

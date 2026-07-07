@@ -93,6 +93,17 @@ directory/file descriptors plus repeated path/inode checks prevent that parent
 mode from redirecting root writes. Any parent ownership change, world-write
 bit, symlink, or path/descriptor drift stops the run.
 
+The application `DATABASE_URL` is not passed as a command argument and is not
+placed wholesale in `PGDATABASE`: libpq treats a URI in that environment
+variable as a literal database name rather than expanding its connection
+fields. The manifest-verified environment helper reads the bounded URI from an
+inherited pipe, validates and splits it into child-only `PGHOST`, `PGPORT`,
+`PGUSER`, `PGPASSWORD`, and database-name `PGDATABASE` values, and then executes
+only the fixed `psql` or `pg_dump` binary in a clean environment. Supported URI
+query fields are mapped to their explicit libpq environment equivalents;
+unknown, duplicate, malformed, or control-bearing fields fail closed. No
+credential crosses argv or enters operation state, logs, or receipts.
+
 ## Gate 1: push the exact reviewed commit
 
 This gate authorizes only a normal, non-force push of the reviewed local commit

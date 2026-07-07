@@ -21,6 +21,7 @@ import time
 import types
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 import pytest
 
@@ -5494,9 +5495,25 @@ def host_staging_fixture(
                 if not chunk:
                     break
                 payload.extend(chunk)
-            assert bytes(payload).decode("utf-8") == database_url.replace(
+            normalized_url = database_url.replace(
                 "postgresql+psycopg://", "postgresql://", 1
             )
+            parts = urlsplit(normalized_url)
+            expected_environment = {
+                "PGDATABASE": unquote(parts.path.lstrip("/")),
+                "PGHOST": parts.hostname,
+                "PGPASSWORD": unquote(parts.password or ""),
+                "PGPORT": str(parts.port or 5432),
+                "PGUSER": unquote(parts.username or ""),
+            }
+            query_mapping = {
+                "application_name": "PGAPPNAME",
+                "connect_timeout": "PGCONNECT_TIMEOUT",
+                "sslmode": "PGSSLMODE",
+            }
+            for key, value in parse_qsl(parts.query, keep_blank_values=True):
+                expected_environment[query_mapping[key]] = value
+            assert json.loads(bytes(payload).decode("utf-8")) == expected_environment
             completed = subprocess.CompletedProcess(argv_tuple, 0, database_name + "\n", "")
         elif argv_tuple == ("/bin/hostname", "-s"):
             events.append("hostname")
@@ -6844,6 +6861,74 @@ def test_pgdatabase_default_runner_scrubs_ambient_secret_environment(
     }
 
 
+@pytest.mark.skipif(os.name != "posix", reason="pass_fds requires POSIX")
+def test_pgdatabase_exec_shim_receives_only_split_libpq_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    monkeypatch.setenv("DATABASE_URL", "postgresql://ambient:SECRET@db/degen")
+    monkeypatch.setenv("PGPASSWORD", "AMBIENT_PGPASSWORD_SENTINEL")
+    expected = {
+        "PGDATABASE": "degen",
+        "PGHOST": "127.0.0.1",
+        "PGPASSWORD": "split-secret",
+        "PGPORT": "5432",
+        "PGSSLMODE": "require",
+        "PGUSER": "degen",
+    }
+    read_fd, write_fd = os.pipe()
+    try:
+        os.write(
+            write_fd,
+            json.dumps(
+                expected,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("ascii"),
+        )
+    finally:
+        os.close(write_fd)
+    script = (
+        "import json,os;"
+        "print(json.dumps(dict(os.environ),sort_keys=True,separators=(',',':')))"
+    )
+    argv = (
+        sys.executable,
+        "-c",
+        module._INHERITED_FD_EXEC_SHIM,
+        "pgdatabase",
+        str(read_fd),
+        sys.executable,
+        sys.executable,
+        "-c",
+        script,
+    )
+    try:
+        completed = module._default_command_runner(argv, (read_fd,))
+    finally:
+        os.close(read_fd)
+
+    child_environment = json.loads(completed.stdout)
+    assert child_environment == {
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+        "PGPASSFILE": "/dev/null",
+        **expected,
+    }
+    assert "DATABASE_URL" not in child_environment
+    assert "AMBIENT_PGPASSWORD_SENTINEL" not in repr(child_environment)
+
+
+def test_pgdatabase_exec_shim_literals_match_parent_contract_constants() -> None:
+    module = load_ops_helper()
+    shim = module._INHERITED_FD_EXEC_SHIM
+
+    assert f"if total > {module._MAX_LIBPQ_ENVIRONMENT_BYTES}:" in shim
+    for key in module._LIBPQ_REQUIRED_KEYS | module._LIBPQ_OPTIONAL_KEYS:
+        assert f'"{key}"' in shim
+
+
 def test_pgdatabase_writer_start_failure_is_generic_and_closes_both_pipe_fds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -6879,7 +6964,17 @@ def test_pgdatabase_writer_start_failure_is_generic_and_closes_both_pipe_fds(
     monkeypatch.setattr(module.threading, "Thread", FailingThread)
 
     with pytest.raises(module.OperationStateError) as raised:
-        module._query_current_database(context, "postgresql://user:secret@db/degen")
+        module._query_current_database(
+            context,
+            "postgresql://user:secret@db/degen",
+            lambda _url: {
+                "PGDATABASE": "degen",
+                "PGHOST": "db",
+                "PGPASSWORD": "secret",
+                "PGPORT": "5432",
+                "PGUSER": "user",
+            },
+        )
 
     assert "THREAD_START_SECRET_SENTINEL" not in str(raised.value)
     assert not runner_called

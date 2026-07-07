@@ -10,6 +10,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
+from urllib.parse import parse_qsl, unquote_to_bytes, urlsplit
 
 
 MANAGED_DEFAULTS = {
@@ -36,6 +37,17 @@ _ASSIGNMENT_PATTERN = re.compile(
 )
 _LITERAL_PATTERN = re.compile(r"[A-Za-z0-9_./:@%+,?=-]+", re.ASCII)
 _BACKUP_PREFIX_PATTERN = re.compile(r"[A-Za-z0-9._-]+_", re.ASCII)
+_INVALID_PERCENT_ESCAPE_PATTERN = re.compile(r"%(?![0-9A-Fa-f]{2})", re.ASCII)
+_MAX_DATABASE_URL_BYTES = 4096
+_POSTGRES_QUERY_ENVIRONMENT = {
+    "application_name": "PGAPPNAME",
+    "connect_timeout": "PGCONNECT_TIMEOUT",
+    "sslmode": "PGSSLMODE",
+}
+_POSTGRES_EXECUTABLES = {
+    "pg_dump": "/usr/bin/pg_dump",
+    "psql": "/usr/bin/psql",
+}
 
 
 @dataclass(frozen=True)
@@ -214,6 +226,87 @@ def _physical_lines(raw: bytes) -> tuple[tuple[bytes, bytes, bytes], ...]:
 def _validate_literal(value: str) -> None:
     if not _LITERAL_PATTERN.fullmatch(value):
         raise ValueError("assignment value uses unsupported literal syntax")
+
+
+def _decode_postgres_uri_component(value: str, label: str) -> str:
+    try:
+        decoded = unquote_to_bytes(value).decode("utf-8", errors="strict")
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ValueError(f"PostgreSQL URI {label} is invalid") from exc
+    if not decoded or any(ord(character) < 0x20 or character == "\x7f" for character in decoded):
+        raise ValueError(f"PostgreSQL URI {label} is invalid")
+    return decoded
+
+
+def postgres_environment_from_url(database_url: str) -> dict[str, str]:
+    if not isinstance(database_url, str):
+        raise TypeError("database_url must be a string")
+    try:
+        encoded = database_url.encode("ascii", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError("PostgreSQL URI must use printable ASCII") from exc
+    if (
+        not encoded
+        or len(encoded) > _MAX_DATABASE_URL_BYTES
+        or any(byte < 0x21 or byte > 0x7E for byte in encoded)
+        or _INVALID_PERCENT_ESCAPE_PATTERN.search(database_url) is not None
+    ):
+        raise ValueError("PostgreSQL URI must use printable ASCII")
+    if database_url.startswith("postgresql+psycopg://"):
+        database_url = "postgresql://" + database_url[len("postgresql+psycopg://") :]
+    try:
+        parsed = urlsplit(database_url)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("PostgreSQL URI authority is invalid") from exc
+    if port is None:
+        port = 5432
+    if parsed.scheme not in {"postgres", "postgresql"}:
+        raise ValueError("PostgreSQL URI scheme is unsupported")
+    if parsed.fragment or parsed.hostname is None or parsed.username is None or parsed.password is None:
+        raise ValueError("PostgreSQL URI authority is incomplete")
+    if not 1 <= port <= 65535:
+        raise ValueError("PostgreSQL URI port is invalid")
+    if not parsed.path.startswith("/") or parsed.path.count("/") != 1:
+        raise ValueError("PostgreSQL URI database path is invalid")
+
+    host = _decode_postgres_uri_component(parsed.hostname, "host")
+    username = _decode_postgres_uri_component(parsed.username, "username")
+    password = _decode_postgres_uri_component(parsed.password, "password")
+    database = _decode_postgres_uri_component(parsed.path[1:], "database")
+    if any(character in host for character in ("/", "\\", "@", ",")):
+        raise ValueError("PostgreSQL URI host is invalid")
+    if any(character in database for character in ("/", "\\")):
+        raise ValueError("PostgreSQL URI database is invalid")
+
+    environment = {
+        "PGDATABASE": database,
+        "PGHOST": host,
+        "PGPASSWORD": password,
+        "PGPORT": str(port),
+        "PGUSER": username,
+    }
+    try:
+        query_items = parse_qsl(
+            parsed.query,
+            keep_blank_values=True,
+            strict_parsing=True,
+            encoding="utf-8",
+            errors="strict",
+            separator="&",
+        )
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ValueError("PostgreSQL URI query is invalid") from exc
+    seen_query_keys: set[str] = set()
+    for key, value in query_items:
+        target = _POSTGRES_QUERY_ENVIRONMENT.get(key)
+        if target is None or key in seen_query_keys or not value:
+            raise ValueError("PostgreSQL URI query is unsupported")
+        if any(ord(character) < 0x20 or character == "\x7f" for character in value):
+            raise ValueError("PostgreSQL URI query is invalid")
+        seen_query_keys.add(key)
+        environment[target] = value
+    return environment
 
 
 def parse_simple_environment(path: os.PathLike[str] | str) -> ParsedEnvironment:
@@ -711,6 +804,47 @@ def _updates_from_cli(items: Sequence[str]) -> dict[str, str]:
     return updates
 
 
+def _read_database_url_fd(descriptor: int) -> str:
+    if isinstance(descriptor, bool) or not isinstance(descriptor, int) or descriptor < 0:
+        raise ValueError("database URL descriptor is invalid")
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = os.read(descriptor, 4096)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > _MAX_DATABASE_URL_BYTES:
+            raise ValueError("database URL transport is oversized")
+        chunks.append(chunk)
+    try:
+        return b"".join(chunks).decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ValueError("database URL transport is invalid") from exc
+
+
+def exec_postgres_command(database_url_fd: int, command: Sequence[str]) -> None:
+    if not isinstance(command, Sequence) or isinstance(command, (str, bytes)) or not command:
+        raise ValueError("PostgreSQL command is missing")
+    argv = tuple(command)
+    if any(not isinstance(item, str) or not item or "\x00" in item for item in argv):
+        raise ValueError("PostgreSQL command is invalid")
+    executable = _POSTGRES_EXECUTABLES.get(argv[0])
+    if executable is None:
+        raise ValueError("PostgreSQL command is unsupported")
+    database_url = _read_database_url_fd(database_url_fd)
+    if any(database_url in item for item in argv):
+        raise ValueError("PostgreSQL command argument is unsafe")
+    environment = {
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+        "PGPASSFILE": "/dev/null",
+        **postgres_environment_from_url(database_url),
+    }
+    os.execve(executable, argv, environment)
+
+
 def _inspect_payload(parsed: ParsedEnvironment, effective_uid: int) -> dict[str, object]:
     managed = validate_effective_configuration(parsed.values, effective_uid=effective_uid)
     return {
@@ -741,6 +875,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     render_parser.add_argument("--destination", type=Path, required=True)
     render_parser.add_argument("--set", dest="updates", action="append", default=[])
 
+    postgres_exec_parser = subparsers.add_parser("postgres-exec")
+    postgres_exec_parser.add_argument("--database-url-fd", type=int, default=0)
+    postgres_exec_parser.add_argument("postgres_command", nargs=argparse.REMAINDER)
+
     args = parser.parse_args(argv)
     try:
         effective_uid = _current_effective_uid()
@@ -753,7 +891,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             sys.stdout.write(
                 emit_runtime_configuration(args.file, effective_uid=effective_uid)
             )
-        else:
+        elif args.command == "render":
             updates = _updates_from_cli(args.updates)
             render_managed_environment(
                 args.source,
@@ -761,6 +899,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 updates,
                 effective_uid=effective_uid,
             )
+        else:
+            postgres_command = list(args.postgres_command)
+            if postgres_command[:1] == ["--"]:
+                postgres_command = postgres_command[1:]
+            exec_postgres_command(args.database_url_fd, postgres_command)
     except (OSError, TypeError, ValueError, RuntimeError) as exc:
         parser.error(str(exc))
     return 0

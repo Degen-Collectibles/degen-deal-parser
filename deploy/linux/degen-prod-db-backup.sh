@@ -882,6 +882,11 @@ load_database_url() {
 }
 
 
+run_postgres_command() {
+    printf '%s' "$database_url" | "$runtime_env_helper" postgres-exec -- "$@"
+}
+
+
 validate_backup_directory() {
     local owner mode
     [[ ! -L "$BACKUP_DIR" ]] || die "Backup directory must not be a symlink"
@@ -908,7 +913,7 @@ validate_label() {
 
 derive_backup_prefix() {
     local database_name host expected_prefix
-    if ! database_name=$(PGDATABASE="$database_url" psql --no-psqlrc --tuples-only --no-align --command 'SELECT current_database();' 2>/dev/null); then
+    if ! database_name=$(run_postgres_command psql --no-psqlrc --tuples-only --no-align --command 'SELECT current_database();' 2>/dev/null); then
         die "Unable to query the PostgreSQL database name"
     fi
     database_name=${database_name//$'\r'/}
@@ -935,7 +940,7 @@ check_remote_access() {
 
 check_capacity() {
     local database_size free_bytes
-    if ! database_size=$(PGDATABASE="$database_url" psql --no-psqlrc --tuples-only --no-align --command 'SELECT pg_database_size(current_database());' 2>/dev/null); then
+    if ! database_size=$(run_postgres_command psql --no-psqlrc --tuples-only --no-align --command 'SELECT pg_database_size(current_database());' 2>/dev/null); then
         die "Unable to query PostgreSQL database size"
     fi
     database_size=${database_size//$'\r'/}
@@ -1692,7 +1697,7 @@ create_backup() {
     fi
 
     log "Creating PostgreSQL custom-format backup: $dump_name"
-    if ! PGDATABASE="$database_url" pg_dump \
+    if ! run_postgres_command pg_dump \
         --format=custom \
         --compress=6 \
         --no-owner \
