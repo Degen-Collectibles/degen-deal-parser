@@ -1,0 +1,8 @@
+cefc6dff26378d235a46c5638617aba74c8b771056c1800dac5c8ac4a6a27855  deploy/linux/degen-prod-db-backup-env.py
+b795321dc70710e0b4cdd93f080fc7b70039f687dad80478b4e24f26ea8ebfea  deploy/linux/degen-prod-db-backup-ops.py
+15d19a593e358f9ce5cdb33cc2cb760bcc1e9e4e7a790d0bacece84de9803380  deploy/linux/degen-prod-db-backup.sh
+cd61b8a9dc710ae4b5b82bdb003bce62724f8d35e06f7c93fd466eae6bd82c26  deploy/linux/degen-prod-db-retention.py
+d412a95708f18589b987e321570302bbd1c9c2a494654153ab25ad00ae28fde4  deploy/systemd/degen-prod-db-backup-alert@.service
+0db78d39b9deb3df15316704aa159bc33b0f24eecb1b5ce1d53172ac49ba01bc  deploy/systemd/degen-prod-db-backup.env.example
+7a7bf43acda7669b4c36be0f18bdcee9073d323138647065d431d187b069e3c6  deploy/systemd/degen-prod-db-backup.service
+f34745842409053468d46360c1f24fadca833870ecc745619db47a0206d3d8cd  deploy/systemd/degen-prod-db-backup.timer
