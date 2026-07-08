@@ -273,6 +273,14 @@ for a new explicit `proceed`:
   rollback gate. Neither path deletes `/var/log/degen-prod-db-backup` or its
   log; removal requires a separate explicit cleanup preflight and approval.
 
+On Green's systemd 249 runtime, disabling and stopping the timer may clear the
+volatile `LastTriggerUSec` readback. The helper retains the original trigger in
+the durable runtime baseline, but its quiesced readback accepts either that
+exact trigger or no trigger while still requiring the exact disabled/inactive
+timer state and unchanged protected PIDs. Any different non-empty trigger is
+treated as a timer race and fails closed. Timer restoration continues to
+require the exact prior runtime baseline.
+
 No production mutation described below this point is run before that
 production approval.
 

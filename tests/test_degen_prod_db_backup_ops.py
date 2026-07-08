@@ -13797,6 +13797,32 @@ def test_task8_guard_rejects_stubborn_quiesce_success_without_readback_change(
     assert advanced == []
 
 
+def test_task8_quiesce_accepts_systemd_clearing_last_trigger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    baseline = recovery_runtime_baseline()
+    baseline["preinstall_trigger_epoch"] = 1_783_419_518
+    observed = copy.deepcopy(baseline)
+    observed["timer_enabled"] = False
+    observed["timer_active"] = False
+    observed["preinstall_trigger_epoch"] = None
+    actions: list[str] = []
+
+    monkeypatch.setattr(
+        module,
+        "_task7_systemctl",
+        lambda _context, action: actions.append(action),
+    )
+    monkeypatch.setattr(module, "_require_backup_service_inactive", lambda _context: None)
+    monkeypatch.setattr(module, "_capture_prior_runtime", lambda _context: observed)
+
+    module._quiesce_backup_timer(object(), baseline)
+
+    assert actions == ["disable", "stop"]
+    assert baseline["preinstall_trigger_epoch"] == 1_783_419_518
+
+
 def test_task8_task7_primitives_keep_optional_callback_compatibility() -> None:
     module = load_ops_helper()
     expectations = {
