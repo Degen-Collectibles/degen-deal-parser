@@ -14383,6 +14383,10 @@ def _quiesce_backup_timer(
     expected = copy.deepcopy(prior_runtime)
     expected["timer_enabled"] = False
     expected["timer_active"] = False
+    # systemd 249 may clear LastTriggerUSec when the timer becomes inactive.
+    # Only that nulling is tolerated; a different non-null trigger still drifts.
+    if observed["preinstall_trigger_epoch"] is None:
+        expected["preinstall_trigger_epoch"] = None
     if observed != expected:
         raise OperationStateError(
             "backup timer did not reach the exact quiesced runtime state"
