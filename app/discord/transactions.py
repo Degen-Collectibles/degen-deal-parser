@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections import defaultdict
 from datetime import datetime
 from typing import Optional
@@ -26,6 +27,9 @@ from ..models import (
     utcnow,
 )
 from .financials import compute_financials
+
+
+logger = logging.getLogger(__name__)
 
 
 NON_OPERATING_ENTRY_KINDS = {"loan_draw", "loan_repayment", "transfer"}
@@ -85,6 +89,12 @@ def sync_transaction_from_message(session: Session, row: DiscordMessage) -> Opti
     ).first()
 
     if existing is not None and (existing.source_kind or "discord") != "discord":
+        logger.info(
+            "sync_skipped_external_source transaction_id=%s source_kind=%s source_message_id=%s",
+            existing.id,
+            existing.source_kind,
+            row.id,
+        )
         return existing
 
     if not is_transaction_message(row):
