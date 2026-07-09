@@ -140,6 +140,8 @@ class DiscordMessage(SQLModel, table=True):
     parse_attempts: int = Field(default=0)
     last_error: Optional[str] = None
     active_reparse_run_id: Optional[str] = Field(default=None, index=True)
+    last_parse_input_fingerprint: Optional[str] = None
+    last_successful_parse_status: Optional[str] = None
 
     deal_type: Optional[str] = None
     amount: Optional[float] = None

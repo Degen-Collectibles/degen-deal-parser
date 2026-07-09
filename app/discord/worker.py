@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import hashlib
 import mimetypes
 import json
 import logging
@@ -52,6 +53,7 @@ STALE_PROCESSING_AFTER = timedelta(minutes=10)
 STALE_RECOVERY_ERROR = "Recovered from stale processing state after worker interruption."
 MAX_ATTEMPTS_ERROR = "Maximum parse attempts reached; requeue with attempt reset to retry."
 OFFLINE_EDIT_REPARSE_ERROR = "Recovered refreshed message after offline audit."
+PARSE_INPUT_FINGERPRINT_VERSION = 1
 logger = logging.getLogger(__name__)
 
 
@@ -64,6 +66,127 @@ def canonical_status(row: DiscordMessage) -> str:
         row.parse_status,
         is_deleted=bool(row.is_deleted),
         needs_review=bool(row.needs_review),
+    )
+
+
+def build_parse_input_fingerprint(
+    group_rows: list[DiscordMessage],
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+) -> str:
+    payload = {
+        "version": PARSE_INPUT_FINGERPRINT_VERSION,
+        "provider": provider or get_provider(),
+        "model": model or get_model(),
+        "rows": [
+            {
+                "id": item.id,
+                "content": item.content or "",
+                "attachments": parse_attachment_urls_json(item.attachment_urls_json),
+                "author_name": item.author_name or "",
+                "channel_name": item.channel_name or "",
+            }
+            for item in group_rows
+        ],
+    }
+    serialized = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(serialized).hexdigest()
+
+
+def external_source_transaction(
+    session: Session,
+    row: DiscordMessage,
+) -> Transaction | None:
+    transaction = session.exec(
+        select(Transaction).where(Transaction.source_message_id == row.id)
+    ).first()
+    if transaction is None or (transaction.source_kind or "discord") == "discord":
+        return None
+    return transaction
+
+
+def finish_attempt_as_noop(attempt: ParseAttempt | None) -> None:
+    if attempt is None:
+        return
+    attempt.success = True
+    attempt.error = None
+    attempt.finished_at = utcnow()
+    attempt.input_tokens = 0
+    attempt.cached_input_tokens = 0
+    attempt.output_tokens = 0
+    attempt.total_tokens = 0
+    attempt.estimated_cost_usd = 0.0
+
+
+def explicit_reparse_requested(
+    row: DiscordMessage,
+    active_reparse_run_id: str | None,
+) -> bool:
+    if active_reparse_run_id:
+        return True
+    reason = (row.last_error or "").strip().lower()
+    return reason.startswith("manual ") or reason.startswith("cli ")
+
+
+def record_row_failure(
+    session: Session,
+    *,
+    row_id: int,
+    error: str,
+    active_reparse_run_id: str | None,
+) -> None:
+    session.rollback()
+    failed_row = session.get(DiscordMessage, row_id)
+    if failed_row is None:
+        worker_log(
+            action="parse_failure_row_missing",
+            level="error",
+            success=False,
+            error=error,
+            session=session,
+            message_id=row_id,
+        )
+        session.commit()
+        safe_record_reparse_run_outcome(
+            run_id=active_reparse_run_id,
+            success=False,
+            error_message=error,
+        )
+        return
+
+    set_row_status(failed_row, PARSE_FAILED, error=error)
+    failed_row.active_reparse_run_id = None
+    attempt = session.exec(
+        select(ParseAttempt)
+        .where(ParseAttempt.message_id == row_id)
+        .order_by(ParseAttempt.id.desc())
+    ).first()
+    if attempt is not None and attempt.finished_at is None:
+        attempt.success = False
+        attempt.error = error
+        attempt.finished_at = utcnow()
+        session.add(attempt)
+
+    session.add(failed_row)
+    worker_log(
+        action="parse_failed",
+        row=failed_row,
+        level="error",
+        success=False,
+        error=error,
+        session=session,
+    )
+    session.commit()
+    safe_record_reparse_run_outcome(
+        run_id=active_reparse_run_id,
+        success=False,
+        error_message=error,
     )
 
 
@@ -435,7 +558,6 @@ def queue_recent_stitch_audit_candidates(session: Session, *, batch_size: int | 
             continue
 
         reset_for_reprocess(row, reason=requeue_reason, reset_attempts=False)
-        row.parse_attempts = max((row.parse_attempts or 0) - 1, 0)
         session.add(row)
         worker_log(
             action="recent_stitch_audit_requeued",
@@ -513,7 +635,6 @@ def close_or_recover_unfinished_attempts(session: Session) -> None:
 
         if normalized_status == PARSE_PROCESSING and attempt_started_at and attempt_started_at < cutoff:
             set_row_status(row, PARSE_PENDING, error=STALE_RECOVERY_ERROR)
-            row.parse_attempts = max((row.parse_attempts or 0) - 1, 0)
             attempt.finished_at = recovery_now
             attempt.success = False
             attempt.error = "recovered stale processing attempt"
@@ -530,17 +651,6 @@ def close_or_recover_unfinished_attempts(session: Session) -> None:
                 parse_attempts=row.parse_attempts,
             )
             changed = True
-
-    recovered_rows = session.exec(
-        select(DiscordMessage)
-        .where(DiscordMessage.parse_status.in_(sorted(expand_parse_status_filter_values([PARSE_PENDING]))))
-        .where(DiscordMessage.parse_attempts >= settings.parser_max_attempts)
-        .where(DiscordMessage.last_error == STALE_RECOVERY_ERROR)
-    ).all()
-    for row in recovered_rows:
-        row.parse_attempts = max(settings.parser_max_attempts - 1, 0)
-        session.add(row)
-        changed = True
 
     exhausted_rows = session.exec(
         select(DiscordMessage)
@@ -562,7 +672,6 @@ def close_or_recover_unfinished_attempts(session: Session) -> None:
         if row.id in unfinished_attempt_message_ids:
             continue
         set_row_status(row, PARSE_PENDING, error="Recovered processing row without an active parse attempt.")
-        row.parse_attempts = max((row.parse_attempts or 0) - 1, 0)
         session.add(row)
         worker_log(
             action="orphaned_processing_recovered",
@@ -845,7 +954,16 @@ async def process_once():
         session.commit()
 
     for row_id in row_ids:
-        await process_row(row_id)
+        try:
+            await process_row(row_id)
+        except Exception as exc:
+            worker_log(
+                action="row_processing_unhandled",
+                level="error",
+                success=False,
+                error=str(exc),
+                message_id=row_id,
+            )
 
 
 def row_may_benefit_from_auto_reprocess(row: DiscordMessage) -> bool:
@@ -923,8 +1041,6 @@ def queue_auto_reprocess_candidates(
             reason="manual reprocess" if force else "auto reprocess",
             reset_attempts=force,
         )
-        if not force:
-            row.parse_attempts = max((row.parse_attempts or 0) - 1, 0)
         session.add(row)
         worker_log(
             action="reprocess_queued",
@@ -1199,6 +1315,36 @@ async def process_row(row_id: int):
             )
             return
 
+        attempt = session.exec(
+            select(ParseAttempt)
+            .where(ParseAttempt.message_id == row.id)
+            .order_by(ParseAttempt.id.desc())
+        ).first()
+        external_transaction = external_source_transaction(session, row)
+        if external_transaction is not None:
+            restored_status = normalize_parse_status(
+                external_transaction.parse_status,
+                needs_review=bool(external_transaction.needs_review),
+            )
+            set_row_status(row, restored_status, clear_error=True)
+            row.needs_review = bool(external_transaction.needs_review)
+            row.active_reparse_run_id = None
+            finish_attempt_as_noop(attempt)
+            session.add(row)
+            if attempt is not None:
+                session.add(attempt)
+            worker_log(
+                action="processing_skipped_external_source",
+                row=row,
+                success=True,
+                session=session,
+                source_kind=external_transaction.source_kind,
+                transaction_id=external_transaction.id,
+            )
+            session.commit()
+            safe_record_reparse_run_outcome(run_id=active_reparse_run_id, success=True)
+            return
+
         group_rows = [row]
         if settings.stitch_enabled:
             group_rows = build_stitch_group(
@@ -1210,8 +1356,34 @@ async def process_row(row_id: int):
 
         group_rows = sorted(group_rows, key=lambda r: r.created_at)
         primary_row = group_rows[0]
-        stale_rows = clear_stale_group_members(session, group_rows, primary_row)
+        parse_input_fingerprint = build_parse_input_fingerprint(group_rows)
+        grouped_row_ids = [grouped_row.id for grouped_row in group_rows if grouped_row.id is not None]
+        unchanged_successful_input = all(
+            grouped_row.last_parse_input_fingerprint == parse_input_fingerprint
+            and bool(grouped_row.last_successful_parse_status)
+            for grouped_row in group_rows
+        )
+        if unchanged_successful_input and not explicit_reparse_requested(row, active_reparse_run_id):
+            restored_status = normalize_parse_status(row.last_successful_parse_status)
+            set_row_status(row, restored_status, clear_error=True)
+            row.active_reparse_run_id = None
+            finish_attempt_as_noop(attempt)
+            session.add(row)
+            if attempt is not None:
+                session.add(attempt)
+            worker_log(
+                action="parse_skipped_unchanged",
+                row=row,
+                success=True,
+                session=session,
+                grouped_message_ids=grouped_row_ids,
+                fingerprint_version=PARSE_INPUT_FINGERPRINT_VERSION,
+            )
+            session.commit()
+            safe_record_reparse_run_outcome(run_id=active_reparse_run_id, success=True)
+            return
 
+        stale_rows = clear_stale_group_members(session, group_rows, primary_row)
         combined_text, combined_attachments, grouped_row_ids = combine_group_payload(group_rows)
         parser_attachment_inputs = await build_parser_attachment_inputs(
             session,
@@ -1222,11 +1394,6 @@ async def process_row(row_id: int):
         group_id = str(uuid.uuid4()) if len(group_rows) > 1 else None
         stitched_at = utcnow() if group_id else None
 
-        attempt = session.exec(
-            select(ParseAttempt)
-            .where(ParseAttempt.message_id == row.id)
-            .order_by(ParseAttempt.id.desc())
-        ).first()
         worker_log(
             action="parse_started",
             row=row,
@@ -1331,6 +1498,10 @@ async def process_row(row_id: int):
             for grouped_row in group_rows:
                 if grouped_row.id != primary_row.id:
                     mark_grouped_child_ignored(grouped_row)
+
+            for grouped_row in group_rows:
+                grouped_row.last_parse_input_fingerprint = parse_input_fingerprint
+                grouped_row.last_successful_parse_status = canonical_status(grouped_row)
 
             if attempt:
                 attempt.success = True
@@ -1441,30 +1612,25 @@ async def process_row(row_id: int):
             )
 
         except Exception as e:
-            set_row_status(row, PARSE_FAILED, error=str(e))
-            row.active_reparse_run_id = None
-
-            if attempt:
-                attempt.success = False
-                attempt.error = str(e)
-                attempt.finished_at = utcnow()
-                session.add(attempt)
-
-            session.add(row)
-            worker_log(
-                action="parse_failed",
-                row=row,
-                level="error",
-                success=False,
-                  error=row.last_error,
-                  session=session,
-              )
-            session.commit()
-            safe_record_reparse_run_outcome(
-                run_id=active_reparse_run_id,
-                success=False,
-                error_message=row.last_error,
-            )
+            original_error = str(e)
+            try:
+                record_row_failure(
+                    session,
+                    row_id=row_id,
+                    error=original_error,
+                    active_reparse_run_id=active_reparse_run_id,
+                )
+            except Exception as recording_error:
+                session.rollback()
+                worker_log(
+                    action="parse_failure_recording_failed",
+                    level="error",
+                    success=False,
+                    error=str(recording_error),
+                    message_id=row_id,
+                    original_error=original_error,
+                )
+                raise
 def looks_like_fragment(row: DiscordMessage) -> bool:
     text = (row.content or "").strip().lower()
     has_images = bool(json.loads(row.attachment_urls_json or "[]"))

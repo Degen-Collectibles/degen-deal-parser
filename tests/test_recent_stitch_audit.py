@@ -101,6 +101,7 @@ class RecentStitchAuditTests(unittest.TestCase):
 
         self.assertEqual(queued, 1)
         self.assertEqual(watched_row.parse_status, PARSE_PENDING)
+        self.assertEqual(watched_row.parse_attempts, 1)
         self.assertEqual(watched_row.last_error, "recent stitch audit: fragment-like")
         self.assertEqual(other_row.parse_status, PARSE_PARSED)
 

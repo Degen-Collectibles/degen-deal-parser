@@ -54,7 +54,7 @@ The current deploy script also rewrites the primary NVIDIA model to the non-ECCN
 - Change the deploy-time primary model default to `us/azure/openai/eccn-gpt-5.5`.
 - Add validated deploy-time defaults that write both periodic inference toggles as `false` to web, worker, and legacy environment files.
 - Change application configuration defaults for both periodic inference loops to `false`.
-- Add unchanged-input fingerprinting for successful Discord parses and an automatic no-op path before attachment materialization and model invocation.
+- Add unchanged-input fingerprinting plus persisted terminal status for successful Discord parses and an automatic no-op path before attachment materialization and model invocation.
 - Make retry accounting monotonic for automatic claims and recovery.
 - Add external-source ownership guards in the worker and transaction synchronizer.
 - Make row-level worker failure handling rollback-safe and continue processing later rows.
@@ -95,7 +95,7 @@ Application defaults in `app/config.py` will also be `false`. The deploy script 
 
 ### 2. Unchanged-input idempotency
 
-Add nullable `last_parse_input_fingerprint` metadata to `DiscordMessage` with additive SQLite and PostgreSQL migrations.
+Add nullable `last_parse_input_fingerprint` and `last_successful_parse_status` metadata to `DiscordMessage` with additive SQLite and PostgreSQL migrations. The status field is required because queue transitions intentionally clear `needs_review`; a skipped row cannot otherwise distinguish its prior `parsed`, `review_required`, or grouped-child `ignored` state.
 
 The fingerprint is a versioned SHA-256 digest of the actual parser inputs that can change the result:
 
@@ -106,7 +106,7 @@ The fingerprint is a versioned SHA-256 digest of the actual parser inputs that c
 - ordered attachment source URLs for each grouped message
 - author and channel values passed to the parser
 
-The fingerprint is computed after stitch-group selection but before attachment bytes are materialized or encoded. After a successful parse it is stored on every row in the effective group.
+The fingerprint is computed after stitch-group selection but before attachment bytes are materialized or encoded. After a successful parse it and each row's terminal status are stored on every row in the effective group.
 
 When an automatic requeue reaches `process_row()` and the computed fingerprint matches the stored successful fingerprint, the worker will:
 
@@ -174,7 +174,7 @@ The generic `process_row()` failure path currently tries to write failure state 
 - **Stitch-group status restoration error:** tests will cover primary, grouped-child, review-required, and changed-group cases. The no-op runs before stale-group mutation or transaction synchronization.
 - **More rows reach retry exhaustion:** this is intended. The current system hides persistent failures by refunding attempts. Exhausted rows remain visible and can be explicitly reset after diagnosis.
 - **External-source guard masks a malformed transaction:** the guard logs every skip and preserves source ownership. Gmail repair remains in the Gmail workflow instead of the Discord parser.
-- **Additive schema deployment fails:** migration tests cover SQLite and PostgreSQL migration maps. Production preflight verifies migration behavior and a database backup before deployment.
+- **Additive schema deployment fails:** migration tests cover both nullable columns in the SQLite and PostgreSQL migration maps. Production preflight verifies migration behavior and a database backup before deployment.
 - **Deploy override typo disables intended behavior:** boolean deploy overrides are validated and fail closed before environment files or services are changed.
 
 ## Verification
@@ -215,7 +215,7 @@ Before deployment, present a separate preflight naming:
 - database and environment-file backup paths;
 - post-deploy checks for health, model identity, loop settings, queue drainage, Gmail FK errors, and token deltas.
 
-Rollback is to the previous reviewed application commit plus the snapshotted environment files, followed by the normal web/worker restart and verification. The additive nullable fingerprint column may remain; old code ignores it. Historical audit rows are not deleted. Re-enabling either periodic inference loop after rollback requires an explicit decision because those loops caused 86.53% of observed tokens.
+Rollback is to the previous reviewed application commit plus the snapshotted environment files, followed by the normal web/worker restart and verification. The two additive nullable parse-identity columns may remain; old code ignores them. Historical audit rows are not deleted. Re-enabling either periodic inference loop after rollback requires an explicit decision because those loops caused 86.53% of observed tokens.
 
 ## Open Questions
 
