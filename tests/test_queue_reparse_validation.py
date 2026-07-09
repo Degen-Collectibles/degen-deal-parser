@@ -42,7 +42,12 @@ from app.discord.reparse_runs import (
 )
 from app.reporting import get_financial_rows
 from app.discord.transactions import get_transactions, sync_transaction_from_message
-from app.discord.worker import MAX_ATTEMPTS_ERROR, close_or_recover_unfinished_attempts, queue_reparse_range
+from app.discord.worker import (
+    MAX_ATTEMPTS_ERROR,
+    close_or_recover_unfinished_attempts,
+    queue_auto_reprocess_candidates,
+    queue_reparse_range,
+)
 from app.discord.worker import process_once, process_row
 
 
@@ -153,6 +158,68 @@ class QueueReparseValidationTests(unittest.TestCase):
                 select(OperationsLog).where(OperationsLog.event_type == "queue.max_attempts_reached")
             ).all()
             self.assertEqual(len(logs), 1)
+
+    def test_auto_reprocess_does_not_refund_parse_attempt(self) -> None:
+        with self.session() as session:
+            row = self.make_message(
+                discord_message_id="auto-reprocess-attempt",
+                parse_status=PARSE_REVIEW_REQUIRED,
+                parse_attempts=1,
+                needs_review=True,
+                created_at=utcnow() - timedelta(hours=1),
+            )
+            session.add(row)
+            session.commit()
+
+            queued = queue_auto_reprocess_candidates(session, batch_size=1)
+
+            session.refresh(row)
+            self.assertEqual(queued, 1)
+            self.assertEqual(row.parse_status, PARSE_PENDING)
+            self.assertEqual(row.parse_attempts, 1)
+
+    def test_stale_processing_recovery_does_not_refund_parse_attempt(self) -> None:
+        with self.session() as session:
+            row = self.make_message(
+                discord_message_id="stale-processing-attempt",
+                parse_status=PARSE_PROCESSING,
+                parse_attempts=2,
+            )
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            session.add(
+                ParseAttempt(
+                    message_id=row.id,
+                    attempt_number=2,
+                    started_at=utcnow() - timedelta(minutes=20),
+                    finished_at=None,
+                    success=False,
+                )
+            )
+            session.commit()
+
+            close_or_recover_unfinished_attempts(session)
+
+            session.refresh(row)
+            self.assertEqual(row.parse_status, PARSE_PENDING)
+            self.assertEqual(row.parse_attempts, 2)
+
+    def test_orphaned_processing_recovery_does_not_refund_parse_attempt(self) -> None:
+        with self.session() as session:
+            row = self.make_message(
+                discord_message_id="orphaned-processing-attempt",
+                parse_status=PARSE_PROCESSING,
+                parse_attempts=2,
+            )
+            session.add(row)
+            session.commit()
+
+            close_or_recover_unfinished_attempts(session)
+
+            session.refresh(row)
+            self.assertEqual(row.parse_status, PARSE_PENDING)
+            self.assertEqual(row.parse_attempts, 2)
 
     def test_process_once_prioritizes_recent_pending_rows_before_old_backlog(self) -> None:
         now = utcnow()
