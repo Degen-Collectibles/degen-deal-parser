@@ -3336,15 +3336,87 @@ def _task8_parse_observation_epoch(raw: str, label: str) -> int:
     return int(raw[:-1])
 
 
+def _task8_run_observation_snapshot_command(
+    context: OperationsContext,
+    state: dict[str, object],
+    *,
+    argv: tuple[str, ...],
+    label: str,
+    max_output_bytes: int = _MAX_COMMAND_OUTPUT_BYTES,
+    revalidate: Callable[[], None] | None = None,
+) -> str:
+    transaction = state.get("active_transaction")
+    if (
+        state.get("phase") != "observing"
+        or not isinstance(transaction, dict)
+        or transaction.get("kind") != "observe"
+    ):
+        raise OperationStateError(
+            "observation invocation snapshot requires the observing transaction"
+        )
+    if revalidate is None:
+        raise OperationStateError(
+            "observation invocation snapshot requires live revalidation"
+        )
+    revalidate()
+    completed = _checked_command(
+        context,
+        argv,
+        (),
+        label,
+        max_output_bytes=max_output_bytes,
+    )
+    try:
+        if completed.stderr:
+            raise OperationStateError(f"{label} returned unexpected stderr")
+        output = completed.stdout
+    finally:
+        _scrub_completed_process(completed)
+    revalidate()
+    return output
+
+
+def _task8_run_observation_capture_command(
+    context: OperationsContext,
+    binding: _OperationDirectoryBinding,
+    state: dict[str, object],
+    *,
+    argv: tuple[str, ...],
+    label: str,
+    runtime_lock_fd: int | None,
+    max_output_bytes: int = _MAX_COMMAND_OUTPUT_BYTES,
+    revalidate: Callable[[], None] | None = None,
+) -> str:
+    if runtime_lock_fd is None:
+        return _task8_run_observation_snapshot_command(
+            context,
+            state,
+            argv=argv,
+            label=label,
+            max_output_bytes=max_output_bytes,
+            revalidate=revalidate,
+        )
+    return _task8_run_observation_readonly_command(
+        context,
+        binding,
+        state,
+        argv=argv,
+        label=label,
+        runtime_lock_fd=runtime_lock_fd,
+        max_output_bytes=max_output_bytes,
+        revalidate=revalidate,
+    )
+
+
 def _task8_capture_observation_service(
     context: OperationsContext,
     binding: _OperationDirectoryBinding,
     state: dict[str, object],
     *,
-    runtime_lock_fd: int,
+    runtime_lock_fd: int | None,
     revalidate: Callable[[], None] | None = None,
 ) -> dict[str, object]:
-    raw = _task8_run_observation_readonly_command(
+    raw = _task8_run_observation_capture_command(
         context,
         binding,
         state,
@@ -3363,7 +3435,7 @@ def _task8_capture_observation_service(
         revalidate=revalidate,
     )
     decoded = _task8_decode_observation_service(raw)
-    start_raw = _task8_run_observation_readonly_command(
+    start_raw = _task8_run_observation_capture_command(
         context,
         binding,
         state,
@@ -3377,7 +3449,7 @@ def _task8_capture_observation_service(
         runtime_lock_fd=runtime_lock_fd,
         revalidate=revalidate,
     )
-    exit_raw = _task8_run_observation_readonly_command(
+    exit_raw = _task8_run_observation_capture_command(
         context,
         binding,
         state,
@@ -3410,10 +3482,10 @@ def _task8_capture_observation_timer(
     binding: _OperationDirectoryBinding,
     state: dict[str, object],
     *,
-    runtime_lock_fd: int,
+    runtime_lock_fd: int | None,
     revalidate: Callable[[], None] | None = None,
 ) -> dict[str, object]:
-    raw = _task8_run_observation_readonly_command(
+    raw = _task8_run_observation_capture_command(
         context,
         binding,
         state,
@@ -3432,7 +3504,7 @@ def _task8_capture_observation_timer(
         revalidate=revalidate,
     )
     decoded = _task8_decode_observation_timer(raw)
-    monotonic_raw = _task8_run_observation_readonly_command(
+    monotonic_raw = _task8_run_observation_capture_command(
         context,
         binding,
         state,
@@ -3451,7 +3523,7 @@ def _task8_capture_observation_timer(
     trigger_monotonic_usec = _task8_decode_observation_timer_monotonic(
         monotonic_raw
     )
-    epoch_raw = _task8_run_observation_readonly_command(
+    epoch_raw = _task8_run_observation_capture_command(
         context,
         binding,
         state,
@@ -14629,6 +14701,7 @@ def _task8_acquire_guard(
     state: dict[str, object],
     *,
     revalidate: Callable[[], None] | None = None,
+    before_quiesce: Callable[[], None] | None = None,
 ) -> MigrationLocks:
     transaction = state.get("active_transaction")
     if not isinstance(transaction, dict):
@@ -14643,18 +14716,29 @@ def _task8_acquire_guard(
     if not isinstance(guard, dict) or any(guard.values()):
         raise OperationStateError("Task 8 guard acquisition requires zero guard progress")
 
+    before_quiesce_completed = False
+
     def checkpoint(action: str) -> None:
+        nonlocal before_quiesce_completed
         if revalidate is not None:
             revalidate()
         _task8_force_checkpoint(context, binding, state, action)
         if revalidate is not None:
             revalidate()
-
+        if action == "timer_disable" and before_quiesce is not None:
+            if before_quiesce_completed:
+                raise OperationStateError(
+                    "Task 8 pre-quiesce validation may run only once"
+                )
+            before_quiesce()
+            before_quiesce_completed = True
     _quiesce_backup_timer(
         context,
         runtime_baseline,
         before_action=checkpoint,
     )
+    if before_quiesce is not None and not before_quiesce_completed:
+        raise OperationStateError("Task 8 pre-quiesce validation did not run")
     _task8_advance_guard(context, binding, state, "timer_stopped")
     if revalidate is not None:
         revalidate()
@@ -22583,6 +22667,8 @@ def observe_scheduled_backup(context: OperationsContext) -> dict[str, object]:
         expected_install_bytes: dict[str, bytes] | None = None
         enabled_environment: bytes | None = None
         runtime_baseline: dict[str, object] | None = None
+        timer: dict[str, object] | None = None
+        service: dict[str, object] | None = None
         immutable_stack: contextlib.ExitStack | None = None
         immutable_proofs: dict[str, _SnapshotTargetProof] | None = None
         local_stack: contextlib.ExitStack | None = None
@@ -22717,8 +22803,7 @@ def observe_scheduled_backup(context: OperationsContext) -> dict[str, object]:
                 require_policy_environment()
 
             validate_live_observation_targets()
-            failure_stage = "observation_guard_acquire"
-            guard_actions_started = True
+            failure_stage = "observation_invocation_snapshot"
             with _task8_open_exact_guard_recovery_material(
                 context,
                 state,
@@ -22733,35 +22818,72 @@ def observe_scheduled_backup(context: OperationsContext) -> dict[str, object]:
                         )
                     validate_live_observation_targets()
 
+                def revalidate_observation_snapshot() -> None:
+                    revalidate_observation_guard()
+                    if _capture_prior_runtime(context) != runtime_baseline:
+                        raise OperationStateError(
+                            "protected runtime changed during invocation snapshot"
+                        )
+
+                timer = _task8_capture_observation_timer(
+                    context,
+                    binding,
+                    state,
+                    runtime_lock_fd=None,
+                    revalidate=revalidate_observation_snapshot,
+                )
+                service = _task8_capture_observation_service(
+                    context,
+                    binding,
+                    state,
+                    runtime_lock_fd=None,
+                    revalidate=revalidate_observation_snapshot,
+                )
+                service["timer_trigger_epoch"] = timer["trigger_epoch"]
+                service["timer_trigger_monotonic_usec"] = timer[
+                    "trigger_monotonic_usec"
+                ]
+
+                def revalidate_observation_invocation() -> None:
+                    current_timer = _task8_capture_observation_timer(
+                        context,
+                        binding,
+                        state,
+                        runtime_lock_fd=None,
+                        revalidate=revalidate_observation_snapshot,
+                    )
+                    current_service = _task8_capture_observation_service(
+                        context,
+                        binding,
+                        state,
+                        runtime_lock_fd=None,
+                        revalidate=revalidate_observation_snapshot,
+                    )
+                    current_service["timer_trigger_epoch"] = current_timer[
+                        "trigger_epoch"
+                    ]
+                    current_service["timer_trigger_monotonic_usec"] = current_timer[
+                        "trigger_monotonic_usec"
+                    ]
+                    if current_timer != timer or current_service != service:
+                        raise OperationStateError(
+                            "scheduled backup service invocation changed before timer quiescence"
+                        )
+
+                failure_stage = "observation_guard_acquire"
+                guard_actions_started = True
                 locks = _task8_acquire_guard(
                     context,
                     binding,
                     state,
                     revalidate=revalidate_observation_guard,
+                    before_quiesce=revalidate_observation_invocation,
                 )
                 revalidate_observation_guard()
 
             assert locks is not None
-            failure_stage = "observation_timer"
-            timer = _task8_capture_observation_timer(
-                context,
-                binding,
-                state,
-                runtime_lock_fd=locks.runtime_fd,
-                revalidate=validate_live_observation_targets,
-            )
-            failure_stage = "observation_service"
-            service = _task8_capture_observation_service(
-                context,
-                binding,
-                state,
-                runtime_lock_fd=locks.runtime_fd,
-                revalidate=validate_live_observation_targets,
-            )
-            service["timer_trigger_epoch"] = timer["trigger_epoch"]
-            service["timer_trigger_monotonic_usec"] = timer[
-                "trigger_monotonic_usec"
-            ]
+            assert timer is not None
+            assert service is not None
             failure_stage = "observation_journal"
             journal = _task8_capture_observation_journal(
                 context,
@@ -22798,29 +22920,6 @@ def observe_scheduled_backup(context: OperationsContext) -> dict[str, object]:
                 journal=journal,
                 revalidate=validate_live_observation_targets,
             )
-            failure_stage = "observation_service_recheck"
-            timer_after = _task8_capture_observation_timer(
-                context,
-                binding,
-                state,
-                runtime_lock_fd=locks.runtime_fd,
-                revalidate=validate_live_observation_targets,
-            )
-            service_after = _task8_capture_observation_service(
-                context,
-                binding,
-                state,
-                runtime_lock_fd=locks.runtime_fd,
-                revalidate=validate_live_observation_targets,
-            )
-            service_after["timer_trigger_epoch"] = timer_after["trigger_epoch"]
-            service_after["timer_trigger_monotonic_usec"] = timer_after[
-                "trigger_monotonic_usec"
-            ]
-            if timer_after != timer or service_after != service:
-                raise OperationStateError(
-                    "scheduled backup service invocation changed during observation"
-                )
             validate_live_observation_targets()
             failure_stage = "observation_local_proof_close"
             local_close_error = close_local_evidence()
