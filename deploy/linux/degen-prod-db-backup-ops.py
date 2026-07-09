@@ -14875,6 +14875,21 @@ def _task7_revalidate_live_target_proofs(
         _revalidate_snapshot_target_proof(proof)
 
 
+def _task8_require_exact_installed_hash_receipt(
+    state: dict[str, object],
+) -> dict[str, str]:
+    install = state.get("install")
+    if not isinstance(install, dict):
+        raise OperationStateError("live installed target receipt is missing")
+    installed_hashes = install.get("installed_hashes")
+    if (
+        not isinstance(installed_hashes, dict)
+        or frozenset(installed_hashes) != frozenset(_TARGET_ORDER)
+    ):
+        raise OperationStateError("live installed target hash receipt is incomplete")
+    return installed_hashes
+
+
 def _task8_validate_live_installed_target_proofs(
     state: dict[str, object],
     expected_bytes: dict[str, bytes],
@@ -14882,12 +14897,7 @@ def _task8_validate_live_installed_target_proofs(
 ) -> None:
     if tuple(expected_bytes) != _TARGET_ORDER or tuple(proofs) != _TARGET_ORDER:
         raise OperationStateError("live installed target proof order is incomplete")
-    install = state.get("install")
-    if not isinstance(install, dict):
-        raise OperationStateError("live installed target receipt is missing")
-    installed_hashes = install.get("installed_hashes")
-    if not isinstance(installed_hashes, dict) or tuple(installed_hashes) != _TARGET_ORDER:
-        raise OperationStateError("live installed target hash receipt is incomplete")
+    installed_hashes = _task8_require_exact_installed_hash_receipt(state)
     _task7_revalidate_live_target_proofs(proofs)
     for target in _TARGET_ORDER:
         proof = proofs[target]
@@ -14930,12 +14940,7 @@ def _task8_validate_live_installed_immutable_target_proofs(
         raise OperationStateError(
             "live immutable installed target proof order is incomplete"
         )
-    install = state.get("install")
-    if not isinstance(install, dict):
-        raise OperationStateError("live installed target receipt is missing")
-    installed_hashes = install.get("installed_hashes")
-    if not isinstance(installed_hashes, dict) or tuple(installed_hashes) != _TARGET_ORDER:
-        raise OperationStateError("live installed target hash receipt is incomplete")
+    installed_hashes = _task8_require_exact_installed_hash_receipt(state)
     for target in immutable_targets:
         proof = proofs[target]
         _revalidate_snapshot_target_proof(proof)

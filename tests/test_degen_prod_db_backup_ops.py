@@ -23285,6 +23285,36 @@ def test_task8_policy_cleanup_removes_only_exact_owned_temp(
     assert temp.read_bytes() == b"attacker-owned\n"
 
 
+def test_task8_installed_hash_receipt_accepts_canonical_state_key_order(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    state = state_at_phase(tmp_path / "20260708T234727Z", "probed")
+    reloaded = json.loads(json.dumps(state, sort_keys=True))
+    installed_hashes = reloaded["install"]["installed_hashes"]
+    assert tuple(installed_hashes) != TARGETS
+
+    assert module._task8_require_exact_installed_hash_receipt(reloaded) == (
+        installed_hashes
+    )
+
+    missing = copy.deepcopy(reloaded)
+    del missing["install"]["installed_hashes"][TARGETS[0]]
+    with pytest.raises(
+        module.OperationStateError,
+        match="live installed target hash receipt is incomplete",
+    ):
+        module._task8_require_exact_installed_hash_receipt(missing)
+
+    extra = copy.deepcopy(reloaded)
+    extra["install"]["installed_hashes"]["/unexpected"] = HASH_A
+    with pytest.raises(
+        module.OperationStateError,
+        match="live installed target hash receipt is incomplete",
+    ):
+        module._task8_require_exact_installed_hash_receipt(extra)
+
+
 def test_task8_policy_immutable_proofs_survive_only_environment_replace(
     tmp_path: Path,
 ) -> None:
