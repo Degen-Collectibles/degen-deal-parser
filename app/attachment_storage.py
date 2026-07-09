@@ -1,16 +1,27 @@
 import io
 import logging
 import mimetypes
+import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Optional
 
+from PIL import Image
+
 from .config import get_settings
+from .image_security import (
+    DISCORD_ATTACHMENT_PROFILE,
+    ImageSecurityError,
+    image_decode_slot,
+    validate_image_file,
+)
 
 logger = logging.getLogger(__name__)
 
 SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 THUMB_MAX_SIZE = (240, 240)
+THUMB_CACHE_MAX_BYTES = 512 * 1024
 
 
 def _attachment_cache_dir() -> Path:
@@ -147,24 +158,66 @@ def warm_attachment_cache(session, *, throttle_seconds: float = 0.1) -> tuple[in
 
 
 def generate_thumbnail(source_path: Path, asset_id: int) -> Optional[Path]:
-    try:
-        from PIL import Image
-    except ImportError:
-        return None
-
     thumb_path = thumbnail_cache_path(asset_id)
-    if thumb_path.exists():
-        return thumb_path
+    temp_path: Path | None = None
 
     try:
-        with Image.open(source_path) as img:
-            img.thumbnail(THUMB_MAX_SIZE, Image.LANCZOS)
-            if img.mode in ("RGBA", "P"):
-                img = img.convert("RGB")
-            buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=80, optimize=True)
-            thumb_path.write_bytes(buf.getvalue())
+        with image_decode_slot():
+            if thumb_path.exists():
+                try:
+                    cached = validate_image_file(
+                        thumb_path,
+                        allowed_formats=frozenset({"JPEG"}),
+                        max_bytes=THUMB_CACHE_MAX_BYTES,
+                        max_dimension=max(THUMB_MAX_SIZE),
+                        max_pixels=THUMB_MAX_SIZE[0] * THUMB_MAX_SIZE[1],
+                        max_frames=1,
+                    )
+                    with Image.open(io.BytesIO(cached.decoded_bytes)) as cached_image:
+                        cached_image.load()
+                    return thumb_path
+                except ImageSecurityError:
+                    pass
+                except (OSError, SyntaxError, ValueError, TypeError):
+                    pass
+
+            validated = validate_image_file(
+                source_path,
+                max_bytes=DISCORD_ATTACHMENT_PROFILE.max_decoded_bytes,
+                max_dimension=DISCORD_ATTACHMENT_PROFILE.max_dimension,
+                max_pixels=DISCORD_ATTACHMENT_PROFILE.max_pixels,
+                max_frames=1,
+            )
+            with Image.open(io.BytesIO(validated.decoded_bytes)) as source_image:
+                source_image.load()
+                converted = source_image.convert("RGB") if source_image.mode != "RGB" else None
+                image = converted or source_image
+                try:
+                    image.thumbnail(THUMB_MAX_SIZE, Image.LANCZOS)
+                    buf = io.BytesIO()
+                    image.save(buf, format="JPEG", quality=80, optimize=True)
+                finally:
+                    if converted is not None:
+                        converted.close()
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=thumb_path.parent,
+                prefix=f".{thumb_path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temp_file:
+                temp_path = Path(temp_file.name)
+                temp_file.write(buf.getvalue())
+                temp_file.flush()
+            os.replace(temp_path, thumb_path)
+            temp_path = None
         return thumb_path
     except Exception:
-        logger.debug("thumbnail generation failed for asset %s", asset_id, exc_info=True)
+        logger.debug("thumbnail generation failed for asset %s", asset_id)
         return None
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                logger.debug("thumbnail temporary-file cleanup failed for asset %s", asset_id)

@@ -16,9 +16,97 @@ from ..shared import *  # noqa: F401,F403 -- shared helpers, constants, state
 from ..discord.backfill_requests import list_recent_backfill_requests
 from ..discord.channels import get_available_channel_choices
 from ..discord.corrections import save_review_correction, snapshot_message_parse
+from ..discord.transactions import (
+    SourceRefreshRequiredError,
+    StaleSourceRevisionError,
+    capture_source_group_mutation_guards,
+    lock_source_group_mutation_guards,
+)
 from ..db import get_session
 
 router = APIRouter(route_class=CSRFProtectedRoute)
+MAX_FILTERED_REPARSE_ROWS = 500
+MAX_FILTERED_REPARSE_SOURCE_GUARDS = 4096
+FILTERED_REPARSE_LIMIT_DETAIL = (
+    "Filtered reparse matches more than 500 rows; narrow the filters and retry."
+)
+FILTERED_REPARSE_SOURCE_LIMIT_DETAIL = (
+    "Filtered reparse source set exceeds 4096 rows; narrow the filters and retry."
+)
+
+
+def _merge_source_mutation_guards(guard_by_id: dict, guards) -> None:
+    for guard in guards:
+        existing = guard_by_id.get(guard.id)
+        if existing is not None and existing != guard:
+            raise StaleSourceRevisionError(
+                f"conflicting source mutation snapshots for message_id={guard.id}"
+            )
+        guard_by_id[guard.id] = guard
+
+
+def _merge_filtered_source_mutation_guards(guard_by_id: dict, guards) -> None:
+    for guard in guards:
+        existing = guard_by_id.get(guard.id)
+        if existing is not None:
+            if existing != guard:
+                raise StaleSourceRevisionError(
+                    f"conflicting source mutation snapshots for message_id={guard.id}"
+                )
+            continue
+        if len(guard_by_id) >= MAX_FILTERED_REPARSE_SOURCE_GUARDS:
+            raise HTTPException(
+                status_code=409,
+                detail=FILTERED_REPARSE_SOURCE_LIMIT_DETAIL,
+            )
+        guard_by_id[guard.id] = guard
+
+
+def _require_manual_source_mutations(
+    session: Session,
+    rows: list[DiscordMessage],
+) -> None:
+    try:
+        guard_by_id = {}
+        for row in rows:
+            _merge_source_mutation_guards(
+                guard_by_id,
+                capture_source_group_mutation_guards(session, row),
+            )
+        lock_source_group_mutation_guards(session, list(guard_by_id.values()))
+    except (SourceRefreshRequiredError, StaleSourceRevisionError) as exc:
+        session.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def _require_manual_source_mutation(session: Session, row: DiscordMessage) -> None:
+    _require_manual_source_mutations(session, [row])
+
+
+def _sync_manual_transaction(session: Session, row: DiscordMessage):
+    try:
+        return sync_transaction_from_message(session, row)
+    except (SourceRefreshRequiredError, StaleSourceRevisionError) as exc:
+        session.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def _reparse_manual_rows(
+    session: Session,
+    rows: list[DiscordMessage],
+    *,
+    reason: str,
+) -> int:
+    try:
+        return reparse_message_rows(
+            session,
+            rows,
+            reason=reason,
+            reset_attempts=True,
+        )
+    except (SourceRefreshRequiredError, StaleSourceRevisionError) as exc:
+        session.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 def _apply_table_detail_urls(
@@ -63,11 +151,12 @@ def retry_message(request: Request, message_id: int, session: Session = Depends(
     if not row:
         raise HTTPException(status_code=404, detail="Message not found")
 
+    _require_manual_source_mutation(session, row)
     row.parse_status = PARSE_PENDING
     row.parse_attempts = 0
     row.last_error = None
     session.add(row)
-    sync_transaction_from_message(session, row)
+    _sync_manual_transaction(session, row)
     session.commit()
 
     return {"ok": True, "message": f"Message {message_id} re-queued for parsing."}
@@ -80,12 +169,13 @@ def approve_message(request: Request, message_id: int, session: Session = Depend
     if not row:
         raise HTTPException(status_code=404, detail="Message not found")
 
+    _require_manual_source_mutation(session, row)
     parsed_before = snapshot_message_parse(row)
     row.needs_review = False
     row.parse_status = PARSE_PARSED
     session.add(row)
     save_review_correction(session, row, parsed_before=parsed_before)
-    sync_transaction_from_message(session, row)
+    _sync_manual_transaction(session, row)
     session.commit()
     return {"ok": True, "message": f"Message {message_id} approved."}
 
@@ -111,6 +201,7 @@ def approve_message_form(
     reviewer_label = current_user_label(request)
     row = session.get(DiscordMessage, message_id)
     if row:
+        _require_manual_source_mutation(session, row)
         parsed_before = snapshot_message_parse(row)
         row.needs_review = False
         row.parse_status = PARSE_PARSED
@@ -118,7 +209,7 @@ def approve_message_form(
         row.reviewed_at = utcnow()
         session.add(row)
         save_review_correction(session, row, parsed_before=parsed_before)
-        sync_transaction_from_message(session, row)
+        _sync_manual_transaction(session, row)
         session.commit()
     selected_expense_category = filter_expense_category or expense_category
     redirect_url = build_return_url(
@@ -157,10 +248,13 @@ def bulk_approve_messages_form(
         return denial
     reviewer_label = current_user_label(request)
     updated = 0
-    for message_id in message_ids:
-        row = session.get(DiscordMessage, message_id)
-        if not row:
-            continue
+    rows = [
+        row
+        for row in (session.get(DiscordMessage, message_id) for message_id in message_ids)
+        if row is not None
+    ]
+    _require_manual_source_mutations(session, rows)
+    for row in rows:
         parsed_before = snapshot_message_parse(row)
         row.needs_review = False
         row.parse_status = PARSE_PARSED
@@ -168,7 +262,7 @@ def bulk_approve_messages_form(
         row.reviewed_at = utcnow()
         session.add(row)
         save_review_correction(session, row, parsed_before=parsed_before)
-        sync_transaction_from_message(session, row)
+        _sync_manual_transaction(session, row)
         updated += 1
     session.commit()
 
@@ -216,7 +310,12 @@ def bulk_reparse_messages_form(
         )
         if row is not None
     ]
-    updated = reparse_message_rows(session, rows, reason="manual bulk reparse", reset_attempts=True)
+    _require_manual_source_mutations(session, rows)
+    updated = _reparse_manual_rows(
+        session,
+        rows,
+        reason="manual bulk reparse",
+    )
 
     selected_expense_category = filter_expense_category or expense_category
     redirect_url = build_return_url(
@@ -260,22 +359,84 @@ def bulk_reparse_filtered_messages_form(
         after=after,
         before=before,
     )
-    row_ids = [
-        row_id
-        for row_id in session.exec(stmt.with_only_columns(DiscordMessage.id)).all()
-        if row_id is not None
-    ]
-
-    def reparse_chunk(chunk_ids: list[int]) -> int:
-        rows = session.exec(
-            select(DiscordMessage).where(DiscordMessage.id.in_(chunk_ids))
-        ).all()
-        return reparse_message_rows(session, rows, reason="manual filtered reparse", reset_attempts=True)
-
-    updated = 0
     chunk_size = 25
-    for start_index in range(0, len(row_ids), chunk_size):
-        updated += reparse_chunk(row_ids[start_index:start_index + chunk_size])
+    try:
+        frozen_rows = session.exec(
+            stmt.order_by(None)
+            .order_by(DiscordMessage.id)
+            .limit(MAX_FILTERED_REPARSE_ROWS + 1)
+        ).all()
+        if len(frozen_rows) > MAX_FILTERED_REPARSE_ROWS:
+            session.rollback()
+            raise HTTPException(status_code=409, detail=FILTERED_REPARSE_LIMIT_DETAIL)
+        frozen_ids = [row.id for row in frozen_rows]
+
+        captured_guard_by_id = {}
+        for offset in range(0, len(frozen_ids), chunk_size):
+            chunk_ids = frozen_ids[offset : offset + chunk_size]
+            rows = session.exec(
+                select(DiscordMessage)
+                .where(DiscordMessage.id.in_(chunk_ids))
+                .order_by(DiscordMessage.id)
+            ).all()
+            if [row.id for row in rows] != chunk_ids:
+                raise StaleSourceRevisionError(
+                    "filtered reparse source set changed before lock acquisition"
+                )
+            for row in rows:
+                _merge_filtered_source_mutation_guards(
+                    captured_guard_by_id,
+                    capture_source_group_mutation_guards(session, row)
+                )
+
+        locked_guards = lock_source_group_mutation_guards(
+            session,
+            list(captured_guard_by_id.values()),
+        )
+        locked_guard_by_id = {guard.id: guard for guard in locked_guards}
+
+        session.expire_all()
+        if frozen_ids:
+            refreshed_rows = session.exec(
+                stmt.order_by(None)
+                .where(DiscordMessage.id.in_(frozen_ids))
+                .order_by(DiscordMessage.id)
+            ).all()
+        else:
+            refreshed_rows = []
+        if [row.id for row in refreshed_rows] != frozen_ids:
+            raise StaleSourceRevisionError(
+                "filtered reparse selection changed during manual mutation"
+            )
+
+        revalidated_guard_by_id = {}
+        for row in refreshed_rows:
+            _merge_filtered_source_mutation_guards(
+                revalidated_guard_by_id,
+                capture_source_group_mutation_guards(session, row)
+            )
+        if revalidated_guard_by_id != locked_guard_by_id:
+            raise StaleSourceRevisionError(
+                "filtered reparse source group changed during manual mutation"
+            )
+
+        updated = 0
+        for offset in range(0, len(refreshed_rows), chunk_size):
+            rows = refreshed_rows[offset : offset + chunk_size]
+            updated += reparse_message_rows(
+                session,
+                rows,
+                reason="manual filtered reparse",
+                reset_attempts=True,
+                commit=False,
+            )
+        session.commit()
+    except HTTPException:
+        session.rollback()
+        raise
+    except (SourceRefreshRequiredError, StaleSourceRevisionError) as exc:
+        session.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     redirect_url = build_return_url(
         return_path,
@@ -315,7 +476,14 @@ def reparse_message_form(
 ):
     if denial := require_role_response(request, "reviewer"):
         return denial
-    reparse_message_row(session, message_id, reason="manual row reparse", reset_attempts=True)
+    row = session.get(DiscordMessage, message_id)
+    if row is not None:
+        _require_manual_source_mutation(session, row)
+        _reparse_manual_rows(
+            session,
+            [row],
+            reason="manual row reparse",
+        )
 
     selected_expense_category = filter_expense_category or expense_category
     redirect_url = build_return_url(
@@ -356,13 +524,14 @@ def mark_incorrect_message_form(
     if not row:
         raise HTTPException(status_code=404, detail="Message not found")
 
+    _require_manual_source_mutation(session, row)
     row.needs_review = True
     row.parse_status = PARSE_REVIEW_REQUIRED
     row.last_error = "Manually marked incorrect for review."
     row.reviewed_by = None
     row.reviewed_at = None
     session.add(row)
-    sync_transaction_from_message(session, row)
+    _sync_manual_transaction(session, row)
     session.commit()
 
     selected_expense_category = filter_expense_category or expense_category
@@ -440,6 +609,7 @@ def ignore_message_form(
     if not row:
         raise HTTPException(status_code=404, detail="Message not found")
 
+    _require_manual_source_mutation(session, row)
     clear_parsed_fields(row)
     row.parse_status = PARSE_IGNORED
     row.needs_review = False
@@ -448,7 +618,7 @@ def ignore_message_form(
     row.reviewed_at = utcnow()
     row.notes = "Manually ignored by reviewer."
     session.add(row)
-    sync_transaction_from_message(session, row)
+    _sync_manual_transaction(session, row)
     session.commit()
 
     return _redirect_after_message_action(
@@ -525,6 +695,7 @@ def delete_message_form(
     if not row:
         raise HTTPException(status_code=404, detail="Message not found")
 
+    _require_manual_source_mutation(session, row)
     now = utcnow()
     clear_parsed_fields(row)
     row.is_deleted = True
@@ -537,7 +708,7 @@ def delete_message_form(
     row.reviewed_at = now
     row.notes = "Manually deleted duplicate deal."
     session.add(row)
-    sync_transaction_from_message(session, row)
+    _sync_manual_transaction(session, row)
     session.commit()
 
     return _redirect_after_message_action(

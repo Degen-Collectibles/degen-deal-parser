@@ -147,6 +147,10 @@ from .reporting import (
 )
 from .runtime_logging import resolve_runtime_log_path, setup_runtime_file_logging, structured_log_line
 from .runtime_monitor import get_runtime_heartbeat_status, runtime_heartbeat_loop
+from .hit_image_uploads import MAX_HIT_UPLOAD_REQUEST_BYTES
+from .image_security import DETECT_ONLY_REQUEST_MAX_BYTES, FULL_SCAN_REQUEST_MAX_BYTES
+from .discord.bookkeeping import MAX_BOOKKEEPING_UPLOAD_REQUEST_BYTES
+from .request_body_limits import ExactPathBodyLimitMiddleware
 from .schemas import HealthOut
 from .inventory.shopify import shopify_admin_configured
 from .inventory.shopify_ingest import (
@@ -652,6 +656,52 @@ async def handle_operational_error(request: Request, exc: OperationalError):
         return JSONResponse(status_code=503, content=payload, headers=headers)
     return HTMLResponse(html_message, status_code=503, headers=headers)
 
+_INLINE_ATTACHMENT_MEDIA_TYPES = frozenset(
+    {
+        "image/bmp",
+        "image/gif",
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+    }
+)
+_ATTACHMENT_SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "sandbox; default-src 'none'",
+}
+
+
+def _attachment_response_headers(etag: str) -> dict[str, str]:
+    return {
+        "Cache-Control": "private, max-age=3600",
+        "ETag": etag,
+        **_ATTACHMENT_SECURITY_HEADERS,
+    }
+
+
+def _normalize_attachment_content_type(content_type: Optional[str]) -> str:
+    return (content_type or "").split(";", 1)[0].strip().lower()
+
+
+def _attachment_file_response(
+    *,
+    path: Path,
+    content_type: Optional[str],
+    filename: Optional[str],
+    headers: dict[str, str],
+) -> FileResponse:
+    normalized_content_type = _normalize_attachment_content_type(content_type)
+    is_inline = normalized_content_type in _INLINE_ATTACHMENT_MEDIA_TYPES
+    response_filename = filename if is_inline else (filename or "attachment")
+    return FileResponse(
+        path=path,
+        media_type=normalized_content_type if is_inline else "application/octet-stream",
+        headers=headers,
+        filename=response_filename,
+        content_disposition_type="inline" if is_inline else "attachment",
+    )
+
+
 @app.get("/attachments/{asset_id}")
 def attachment_asset(request: Request, asset_id: int, session: Session = Depends(get_session)):
     if denial := require_role_response(request, "viewer"):
@@ -666,9 +716,10 @@ def attachment_asset(request: Request, asset_id: int, session: Session = Depends
     _, filename, content_type = asset_meta
 
     etag = f'"{asset_id}"'
+    headers = _attachment_response_headers(etag)
     if_none_match = request.headers.get("if-none-match")
     if if_none_match and if_none_match.strip() == etag:
-        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "private, max-age=3600"})
+        return Response(status_code=304, headers=headers)
 
     file_path = attachment_cache_path(
         asset_id,
@@ -686,23 +737,18 @@ def attachment_asset(request: Request, asset_id: int, session: Session = Depends
             data=asset.data,
         )
 
-    media_type = content_type or "application/octet-stream"
-    headers = {
-        "Cache-Control": "private, max-age=3600",
-        "ETag": etag,
-    }
-    if filename:
-        headers["Content-Disposition"] = f'inline; filename="{filename}"'
-    return FileResponse(path=file_path, media_type=media_type, headers=headers)
+    return _attachment_file_response(
+        path=file_path,
+        content_type=content_type,
+        filename=filename,
+        headers=headers,
+    )
 
 @app.get("/attachments/{asset_id}/thumb")
 def attachment_thumbnail(request: Request, asset_id: int, session: Session = Depends(get_session)):
     if denial := require_role_response(request, "viewer"):
         return denial
-    etag = f'"thumb-{asset_id}"'
-    if_none_match = request.headers.get("if-none-match")
-    if if_none_match and if_none_match.strip() == etag:
-        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "private, max-age=3600"})
+    failure_headers = _attachment_response_headers(f'"thumb-{asset_id}"')
 
     asset_meta = session.exec(
         select(AttachmentAsset.id, AttachmentAsset.filename, AttachmentAsset.content_type, AttachmentAsset.is_image)
@@ -726,16 +772,24 @@ def attachment_thumbnail(request: Request, asset_id: int, session: Session = Dep
 
     thumb_path = generate_thumbnail(file_path, asset_id)
     if thumb_path and thumb_path.exists():
+        try:
+            thumb_stat = thumb_path.stat()
+        except OSError:
+            return Response(status_code=415, headers=failure_headers)
+        etag = (
+            f'"thumb-{asset_id}-{thumb_stat.st_size:x}-'
+            f'{thumb_stat.st_mtime_ns:x}"'
+        )
+        headers = _attachment_response_headers(etag)
+        if_none_match = request.headers.get("if-none-match")
+        if if_none_match and if_none_match.strip() == etag:
+            return Response(status_code=304, headers=headers)
         return FileResponse(
             path=thumb_path,
             media_type="image/jpeg",
-            headers={"Cache-Control": "private, max-age=3600", "ETag": etag},
+            headers=headers,
         )
-    return FileResponse(
-        path=file_path,
-        media_type=content_type or "application/octet-stream",
-        headers={"Cache-Control": "private, max-age=3600", "ETag": etag},
-    )
+    return Response(status_code=415, headers=failure_headers)
 
 @app.get("/messages/{message_id}/attachments/{attachment_index}")
 async def message_attachment_fallback(
@@ -790,9 +844,9 @@ async def attach_current_user(request: Request, call_next):
     return await call_next(request)
 
 
-# Register SessionMiddleware AFTER attach_current_user so it ends up as the
-# outermost middleware. Order matters: Starlette's add_middleware inserts at
-# position 0, so the last-added middleware runs first on the request. This
+# Register SessionMiddleware after attach_current_user so it runs outside the
+# auth middleware. The narrow body-limit middleware registered below may run
+# outside both, but it does not read authentication or session state. This
 # guarantees scope["session"] is populated before attach_current_user tries
 # to read session["user_id"]. Without this, every team-portal route thinks
 # the user is anonymous (because scope["session"] was still empty when the
@@ -805,6 +859,20 @@ app.add_middleware(
     https_only=settings.session_https_only,
     same_site=settings.session_same_site,
     domain=settings.effective_session_domain or None,
+)
+app.add_middleware(
+    ExactPathBodyLimitMiddleware,
+    limits={
+        ("POST", "/api/hits/upload-image"): MAX_HIT_UPLOAD_REQUEST_BYTES,
+        ("POST", "/bookkeeping/import-form"): MAX_BOOKKEEPING_UPLOAD_REQUEST_BYTES,
+        ("POST", "/bookkeeping/bank/import-form"): MAX_BOOKKEEPING_UPLOAD_REQUEST_BYTES,
+        ("POST", "/degen_eye/identify"): FULL_SCAN_REQUEST_MAX_BYTES,
+        ("POST", "/degen_eye/v2/scan"): FULL_SCAN_REQUEST_MAX_BYTES,
+        ("POST", "/degen_eye/v2/scan-init"): FULL_SCAN_REQUEST_MAX_BYTES,
+        ("POST", "/degen_eye/v2/detect-only"): DETECT_ONLY_REQUEST_MAX_BYTES,
+        ("POST", "/inventory/scan/identify"): FULL_SCAN_REQUEST_MAX_BYTES,
+        ("POST", "/inventory/scan/slab-ximilar"): FULL_SCAN_REQUEST_MAX_BYTES,
+    },
 )
 
 @app.get("/health", response_model=HealthOut)

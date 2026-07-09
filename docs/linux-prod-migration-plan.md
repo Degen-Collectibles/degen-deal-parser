@@ -264,15 +264,21 @@ Longer-term improvement: introduce `MEDIA_ROOT` / `DATA_ROOT` env vars so prod d
   - `CLOCKIFY_BASE_URL`
   - `CLOCKIFY_TIMEOUT_SECONDS`
   - `CLOCKIFY_TIMEZONE`
-  - `CLOCKIFY_WEBHOOK_SECRET`
-  - `CLOCKIFY_WEBHOOK_SIGNING_SECRET`
-  - `CLOCKIFY_WEBHOOK_SIGNING_SECRETS`
+  - `CLOCKIFY_WEBHOOK_SIGNING_SECRET` or `CLOCKIFY_WEBHOOK_SIGNING_SECRETS`
+    (the Clockify-generated webhook `authToken`/verification token, not
+    `CLOCKIFY_API_KEY`, a new API key, or an arbitrary app secret; never place it
+    in the callback URL). No new token is needed unless enabling, repairing, or
+    deliberately rotating the webhook. For a rotation/retry window, configure
+    current then previous temporarily and remove the previous token after
+    in-flight deliveries settle; Clockify rotation invalidates the prior token.
 - Shopify/TikTok:
   - `SHOPIFY_API_KEY`
   - `SHOPIFY_STORE_DOMAIN`
   - `SHOPIFY_WEBHOOK_SECRET`
   - `TIKTOK_APP_KEY`
   - `TIKTOK_APP_SECRET`
+  - `TIKTOK_TOKEN_ENCRYPTION_KEYS` (dedicated random key ring; current key first,
+    retain previous keys through migration; do not reuse `SESSION_SECRET`)
   - `TIKTOK_BASE_URL`
   - `TIKTOK_REDIRECT_URI`
   - `TIKTOK_SHOP_ID`
@@ -280,6 +286,23 @@ Longer-term improvement: introduce `MEDIA_ROOT` / `DATA_ROOT` env vars so prod d
   - `TIKTOK_ACCESS_TOKEN`
   - `TIKTOK_LIVE_API_KEY`
   - `TIKTOK_LIVE_USERNAME`
+
+For the first encrypted-token rollout, do not overlap old and upgraded TikTok
+token writers. Stop every old web/worker process that can refresh the OAuth
+rows, configure the dedicated encryption key, start one upgraded instance and
+let startup migrate the rows, verify all nonempty token columns use the
+`enc:v1:` prefix, and only then start the remaining upgraded instances. Later
+key rotations may be rolling once every running instance supports encrypted
+storage and the previous key stays in the ring.
+
+A startup migration conflict is fail-closed: keep that instance stopped and
+retry after the in-flight refresh completes. At-rest encryption cannot remove
+plaintext already copied into PostgreSQL WAL, backups, exports, or SQLite free
+pages. Revoke and reauthorize both Seller and Creator OAuth grants after the
+upgrade, enforce the backup-retention policy, and checkpoint/VACUUM SQLite
+databases that previously stored these tokens. Credential rotation and backup
+destruction are explicit production operations and are not performed by startup.
+
 - Alerts:
   - `TELEGRAM_BOT_TOKEN`
   - `TELEGRAM_ALERT_CHAT_ID`

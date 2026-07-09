@@ -7,12 +7,14 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, MutableMapping, Optional
+from typing import Any, Callable, MutableMapping, NoReturn, Optional
+from urllib.parse import quote, quote_plus
 
 import httpx
 from sqlmodel import Session, select
 
 from ..runtime_logging import structured_log_line
+from .token_storage import sanitize_tiktok_token_payload
 
 TIKTOK_DEFAULT_API_BASE_URL = "https://open.tiktokapis.com"
 TIKTOK_TOKEN_GET_PATH = "/v2/oauth/token/"
@@ -274,6 +276,48 @@ def _parse_token_exchange_data(api_data: dict[str, Any]) -> TikTokTokenExchangeR
     )
 
 
+def _sanitized_tiktok_token_exchange_error(
+    exc: Exception,
+    *,
+    operation: str,
+    method: str,
+    url: str,
+    sensitive_values: tuple[str, ...],
+) -> TikTokIngestError:
+    parsed_url = httpx.URL(url)
+    endpoint = f"{parsed_url.host or 'unknown'}{parsed_url.path}"
+    if isinstance(exc, httpx.HTTPStatusError):
+        status_code = getattr(exc.response, "status_code", None)
+        detail = f"HTTP {status_code}" if status_code is not None else "HTTP status error"
+    elif isinstance(exc, httpx.TransportError):
+        detail = f"transport error ({type(exc).__name__})"
+    elif isinstance(exc, TikTokIngestError):
+        detail = str(exc)
+        sensitive_variants: set[str] = set()
+        for sensitive_value in {value for value in sensitive_values if value}:
+            sensitive_variants.update(
+                {
+                    sensitive_value,
+                    quote(sensitive_value, safe=""),
+                    quote_plus(sensitive_value, safe=""),
+                }
+            )
+        for sensitive_variant in sorted(sensitive_variants, key=len, reverse=True):
+            detail = re.sub(
+                re.escape(sensitive_variant),
+                "[REDACTED]",
+                detail,
+                flags=re.IGNORECASE,
+            )
+    else:
+        detail = type(exc).__name__
+    return TikTokIngestError(f"{operation} failed: {detail} for {method} {endpoint}")
+
+
+def _raise_sanitized_tiktok_token_exchange_error(error: TikTokIngestError) -> NoReturn:
+    raise error
+
+
 def exchange_tiktok_authorization_code(
     *,
     auth_code: str,
@@ -287,12 +331,24 @@ def exchange_tiktok_authorization_code(
     request_signer: Optional[Callable[[MutableMapping[str, Any]], MutableMapping[str, Any]]] = None,
     runtime_name: str = "tiktok_ingest",
 ) -> TikTokTokenExchangeResult:
+    validation_error: Optional[TikTokIngestError] = None
     if not auth_code:
-        raise TikTokIngestError("TikTok authorization code is required")
-    if not app_key:
-        raise TikTokIngestError("TikTok app key is required")
-    if not app_secret:
-        raise TikTokIngestError("TikTok app secret is required")
+        validation_error = TikTokIngestError("TikTok authorization code is required")
+    elif not app_key:
+        validation_error = TikTokIngestError("TikTok app key is required")
+    elif not app_secret:
+        validation_error = TikTokIngestError("TikTok app secret is required")
+
+    if validation_error is not None:
+        safe_error = validation_error
+        del validation_error
+        del auth_code
+        del app_key
+        del app_secret
+        del redirect_uri
+        del request_signer
+        del client
+        _raise_sanitized_tiktok_token_exchange_error(safe_error)
 
     query_params: dict[str, str] = {
         "app_key": app_key,
@@ -303,18 +359,156 @@ def exchange_tiktok_authorization_code(
 
     url = build_tiktok_api_url(api_base_url=api_base_url, path=token_path)
     close_client = client is None
-    http_client = client or httpx.Client(timeout=timeout_seconds)
+    http_client: Optional[httpx.Client] = None
+    exchange_error: Optional[TikTokIngestError] = None
+    response: Optional[httpx.Response] = None
+    api_data: Optional[dict[str, Any]] = None
+    token_result: Optional[TikTokTokenExchangeResult] = None
     try:
+        http_client = client or httpx.Client(timeout=timeout_seconds)
         response = http_client.get(url, params=query_params)
         response.raise_for_status()
         api_data = validate_tiktok_api_response(response.json())
+        token_result = _parse_token_exchange_data(api_data)
     except Exception as exc:
-        raise TikTokIngestError(f"TikTok token exchange failed: {exc}") from exc
+        exchange_error = _sanitized_tiktok_token_exchange_error(
+            exc,
+            operation="TikTok token exchange",
+            method="GET",
+            url=url,
+            sensitive_values=(auth_code, app_secret),
+        )
     finally:
-        if close_client:
-            http_client.close()
+        if close_client and http_client is not None:
+            try:
+                http_client.close()
+            except Exception as exc:
+                if exchange_error is None:
+                    exchange_error = _sanitized_tiktok_token_exchange_error(
+                        exc,
+                        operation="TikTok token exchange",
+                        method="GET",
+                        url=url,
+                        sensitive_values=(auth_code, app_secret),
+                    )
 
-    return _parse_token_exchange_data(api_data)
+    if exchange_error is not None:
+        safe_error = exchange_error
+        if api_data is not None:
+            api_data.clear()
+        query_params.clear()
+        del exchange_error
+        del api_data
+        del query_params
+        del auth_code
+        del app_key
+        del app_secret
+        del redirect_uri
+        del request_signer
+        del client
+        del http_client
+        del response
+        del token_result
+        _raise_sanitized_tiktok_token_exchange_error(safe_error)
+    return token_result  # type: ignore[return-value]
+
+
+def exchange_tiktok_creator_authorization_code(
+    *,
+    auth_code: str,
+    client_key: str,
+    client_secret: str,
+    redirect_uri: str,
+    api_base_url: str = TIKTOK_DEFAULT_API_BASE_URL,
+    token_path: str = TIKTOK_TOKEN_GET_PATH,
+    client: Optional[httpx.Client] = None,
+    timeout_seconds: float = TIKTOK_DEFAULT_TIMEOUT_SECONDS,
+    runtime_name: str = "tiktok_ingest",
+) -> TikTokTokenExchangeResult:
+    validation_error: Optional[TikTokIngestError] = None
+    if not auth_code:
+        validation_error = TikTokIngestError("TikTok creator authorization code is required")
+    elif not client_key:
+        validation_error = TikTokIngestError("TikTok creator client key is required")
+    elif not client_secret:
+        validation_error = TikTokIngestError("TikTok creator client secret is required")
+    elif not redirect_uri:
+        validation_error = TikTokIngestError("TikTok creator redirect URI is required")
+
+    if validation_error is not None:
+        safe_error = validation_error
+        del validation_error
+        del auth_code
+        del client_key
+        del client_secret
+        del redirect_uri
+        del client
+        _raise_sanitized_tiktok_token_exchange_error(safe_error)
+
+    form_data = {
+        "client_key": client_key,
+        "client_secret": client_secret,
+        "code": auth_code,
+        "grant_type": "authorization_code",
+        "redirect_uri": redirect_uri,
+    }
+    url = build_tiktok_api_url(api_base_url=api_base_url, path=token_path)
+    close_client = client is None
+    http_client: Optional[httpx.Client] = None
+    exchange_error: Optional[TikTokIngestError] = None
+    response: Optional[httpx.Response] = None
+    api_data: Optional[dict[str, Any]] = None
+    token_result: Optional[TikTokTokenExchangeResult] = None
+    try:
+        http_client = client or httpx.Client(timeout=timeout_seconds)
+        response = http_client.post(
+            url,
+            data=form_data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        response.raise_for_status()
+        api_data = validate_tiktok_api_response(response.json())
+        token_result = _parse_token_exchange_data(api_data)
+    except Exception as exc:
+        exchange_error = _sanitized_tiktok_token_exchange_error(
+            exc,
+            operation="TikTok creator token exchange",
+            method="POST",
+            url=url,
+            sensitive_values=(auth_code, client_secret),
+        )
+    finally:
+        if close_client and http_client is not None:
+            try:
+                http_client.close()
+            except Exception as exc:
+                if exchange_error is None:
+                    exchange_error = _sanitized_tiktok_token_exchange_error(
+                        exc,
+                        operation="TikTok creator token exchange",
+                        method="POST",
+                        url=url,
+                        sensitive_values=(auth_code, client_secret),
+                    )
+
+    if exchange_error is not None:
+        safe_error = exchange_error
+        if api_data is not None:
+            api_data.clear()
+        form_data.clear()
+        del exchange_error
+        del api_data
+        del form_data
+        del auth_code
+        del client_key
+        del client_secret
+        del redirect_uri
+        del client
+        del http_client
+        del response
+        del token_result
+        _raise_sanitized_tiktok_token_exchange_error(safe_error)
+    return token_result  # type: ignore[return-value]
 
 
 def refresh_tiktok_shop_token(
@@ -328,12 +522,22 @@ def refresh_tiktok_shop_token(
     timeout_seconds: float = TIKTOK_DEFAULT_TIMEOUT_SECONDS,
     runtime_name: str = "tiktok_ingest",
 ) -> TikTokTokenExchangeResult:
+    validation_error: Optional[TikTokIngestError] = None
     if not app_key:
-        raise TikTokIngestError("TikTok app key is required")
-    if not app_secret:
-        raise TikTokIngestError("TikTok app secret is required")
-    if not refresh_token:
-        raise TikTokIngestError("TikTok refresh token is required")
+        validation_error = TikTokIngestError("TikTok app key is required")
+    elif not app_secret:
+        validation_error = TikTokIngestError("TikTok app secret is required")
+    elif not refresh_token:
+        validation_error = TikTokIngestError("TikTok refresh token is required")
+
+    if validation_error is not None:
+        safe_error = validation_error
+        del validation_error
+        del app_key
+        del app_secret
+        del refresh_token
+        del client
+        _raise_sanitized_tiktok_token_exchange_error(safe_error)
 
     query_params: dict[str, str] = {
         "app_key": app_key,
@@ -344,18 +548,56 @@ def refresh_tiktok_shop_token(
 
     url = build_tiktok_api_url(api_base_url=api_base_url, path=token_path)
     close_client = client is None
-    http_client = client or httpx.Client(timeout=timeout_seconds)
+    http_client: Optional[httpx.Client] = None
+    exchange_error: Optional[TikTokIngestError] = None
+    response: Optional[httpx.Response] = None
+    api_data: Optional[dict[str, Any]] = None
+    token_result: Optional[TikTokTokenExchangeResult] = None
     try:
+        http_client = client or httpx.Client(timeout=timeout_seconds)
         response = http_client.get(url, params=query_params)
         response.raise_for_status()
         api_data = validate_tiktok_api_response(response.json())
+        token_result = _parse_token_exchange_data(api_data)
     except Exception as exc:
-        raise TikTokIngestError(f"TikTok token refresh failed: {exc}") from exc
+        exchange_error = _sanitized_tiktok_token_exchange_error(
+            exc,
+            operation="TikTok token refresh",
+            method="GET",
+            url=url,
+            sensitive_values=(app_secret, refresh_token),
+        )
     finally:
-        if close_client:
-            http_client.close()
+        if close_client and http_client is not None:
+            try:
+                http_client.close()
+            except Exception as exc:
+                if exchange_error is None:
+                    exchange_error = _sanitized_tiktok_token_exchange_error(
+                        exc,
+                        operation="TikTok token refresh",
+                        method="GET",
+                        url=url,
+                        sensitive_values=(app_secret, refresh_token),
+                    )
 
-    return _parse_token_exchange_data(api_data)
+    if exchange_error is not None:
+        safe_error = exchange_error
+        if api_data is not None:
+            api_data.clear()
+        query_params.clear()
+        del exchange_error
+        del api_data
+        del query_params
+        del app_key
+        del app_secret
+        del refresh_token
+        del client
+        del http_client
+        del response
+        del token_result
+        _raise_sanitized_tiktok_token_exchange_error(safe_error)
+    return token_result  # type: ignore[return-value]
 
 
 def normalize_tiktok_line_items(value: Any) -> list[dict[str, Any]]:
@@ -693,7 +935,7 @@ def build_tiktok_auth_record(
         "shop_region": str(_pick_first(raw_payload, "shop_region", "shopRegion") or "").strip() or None,
         "seller_name": str(_pick_first(raw_payload, "seller_name", "sellerName", "user_name", "userName") or "").strip() or None,
         "scopes_json": json_dumps(_pick_first(raw_payload, "scopes", "scope", "granted_scopes") or []),
-        "raw_payload": json_dumps(raw_payload),
+        "raw_payload": json_dumps(sanitize_tiktok_token_payload(raw_payload)),
         "source": auth_source,
         "received_at": received_at or datetime.now(timezone.utc),
         "updated_at": received_at or datetime.now(timezone.utc),
@@ -756,7 +998,7 @@ def build_tiktok_creator_auth_record(
         "access_token_expires_at": token_result.access_token_expires_at,
         "refresh_token_expires_at": token_result.refresh_token_expires_at,
         "scopes_json": json_dumps(_pick_first(raw_payload, "scopes", "scope", "granted_scopes") or []),
-        "raw_payload": json_dumps(raw_payload),
+        "raw_payload": json_dumps(sanitize_tiktok_token_payload(raw_payload)),
         "source": source,
         "received_at": timestamp,
         "updated_at": timestamp,
@@ -1469,6 +1711,7 @@ __all__ = [
     "build_tiktok_reconciliation_snapshot",
     "build_tiktok_request_signature",
     "exchange_tiktok_authorization_code",
+    "exchange_tiktok_creator_authorization_code",
     "extract_tiktok_api_data",
     "json_dumps",
     "money_to_float",

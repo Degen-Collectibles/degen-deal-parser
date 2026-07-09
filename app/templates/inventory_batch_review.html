@@ -162,6 +162,12 @@
         .success-icon { font-size:52px; margin-bottom:12px; }
         .success-title { font-size:22px; font-weight:700; letter-spacing:-.025em; margin:0 0 8px; }
         .success-sub { font-size:14px; color:var(--muted); margin:0 0 20px; }
+        .success-warnings {
+            display:none; margin:0 auto 20px; max-width:640px; padding:12px 14px;
+            border:1px solid rgba(234,179,8,.45); border-radius:12px;
+            background:var(--yellow-bg); color:var(--text); font-size:13px;
+            font-weight:600; text-align:left;
+        }
         .barcode-pills { display:flex; flex-wrap:wrap; gap:6px; justify-content:center; margin-bottom:20px; }
         .barcode-pill {
             padding:5px 12px; border-radius:999px; font-size:12px; font-weight:800;
@@ -241,6 +247,7 @@
             <div class="success-icon">&#10003;</div>
             <div class="success-title" id="success-title">Added to Inventory!</div>
             <div class="success-sub" id="success-sub"></div>
+            <div class="success-warnings" id="success-warnings" role="status"></div>
             <div class="barcode-pills" id="barcode-pills"></div>
             <div class="success-actions">
                 <a href="/inventory" class="btn-outline" style="display:inline-block;">View Inventory</a>
@@ -390,6 +397,18 @@
         sc.style.display = '';
         document.getElementById('success-title').textContent = 'Added ' + data.created + ' card' + (data.created !== 1 ? 's' : '') + ' to Inventory!';
         document.getElementById('success-sub').textContent = 'Barcodes generated and items are now in stock.';
+
+        var warningBox = document.getElementById('success-warnings');
+        var warnings = Array.isArray(data.warnings) ? data.warnings : [];
+        if (warnings.length) {
+            warningBox.textContent = warnings.map(function(warning) {
+                return warning && warning.message ? warning.message : 'Scan metadata could not be updated.';
+            }).join(' ');
+            warningBox.style.display = 'block';
+        } else {
+            warningBox.textContent = '';
+            warningBox.style.display = 'none';
+        }
 
         var pills = document.getElementById('barcode-pills');
         pills.innerHTML = '';

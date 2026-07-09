@@ -47,10 +47,13 @@ from .pokemon_scanner import (
 )
 from .degen_eye_v2 import get_v2_scan_history, run_v2_pipeline, run_v2_pipeline_stream
 from .degen_eye_v2_training import (
+    CaptureStorageError,
     attach_confirmed_label,
     attach_prediction,
+    capture_belongs_to_employee,
     capture_stats as training_capture_stats,
     create_scan_capture,
+    is_canonical_capture_id,
     train_confirmed_captures,
 )
 from .phash_scanner import (
@@ -62,6 +65,15 @@ from .price_cache import get_warm_stats as price_cache_stats, warm_price_cache
 from ..config import get_settings
 from ..csrf import CSRFProtectedRoute, issue_token
 from ..db import get_session, managed_session
+from ..image_security import (
+    DETECT_ONLY_PROFILE,
+    FULL_SCAN_PROFILE,
+    ImageDecodeBusy,
+    ImageSecurityError,
+    acquire_image_decode_lease,
+    validate_image_base64,
+)
+from ..runtime_logging import structured_log_line
 from .barcode import (
     LABEL_FIELD_OPTIONS,
     LABEL_LAYOUT_OPTIONS,
@@ -1974,6 +1986,8 @@ def _receive_sealed_stock(
     notes: str = "",
     price_payload: Optional[dict[str, Any]] = None,
     actor_label: Optional[str] = None,
+    dedupe_key: Optional[str] = None,
+    commit: bool = True,
 ) -> tuple[InventoryItem, InventoryStockMovement, bool]:
     if quantity < 1:
         raise ValueError("Quantity must be at least 1.")
@@ -2017,8 +2031,11 @@ def _receive_sealed_stock(
             created_at=utcnow(),
         )
         session.add(item)
-        session.commit()
-        session.refresh(item)
+        if commit:
+            session.commit()
+            session.refresh(item)
+        else:
+            session.flush()
         item.barcode = generate_barcode_value(item.id)
         created = True
     else:
@@ -2067,6 +2084,7 @@ def _receive_sealed_stock(
         location=location.strip() or item.location,
         source=source.strip() or None,
         notes=notes.strip() or None,
+        dedupe_key=dedupe_key,
         created_by=actor_label,
         created_at=utcnow(),
     )
@@ -2082,9 +2100,12 @@ def _receive_sealed_stock(
                 raw_response_json=json.dumps(price_payload or {}, sort_keys=True),
             )
         )
-    session.commit()
-    session.refresh(item)
-    session.refresh(movement)
+    if commit:
+        session.commit()
+        session.refresh(item)
+        session.refresh(movement)
+    else:
+        session.flush()
     return item, movement, created
 
 
@@ -2147,6 +2168,7 @@ def _receive_single_stock(
     notes: str = "",
     price_payload: Optional[dict[str, Any]] = None,
     actor_label: Optional[str] = None,
+    dedupe_key: Optional[str] = None,
     commit: bool = True,
 ) -> tuple[InventoryItem, InventoryStockMovement, bool]:
     if quantity < 1:
@@ -2246,6 +2268,7 @@ def _receive_single_stock(
         location=location.strip() or item.location,
         source=source.strip() or None,
         notes=notes.strip() or None,
+        dedupe_key=dedupe_key,
         created_by=actor_label,
         created_at=utcnow(),
     )
@@ -4439,6 +4462,20 @@ async def inventory_batch_review_page(request: Request, session: Session = Depen
 # Pokemon card scanner (multi-stage pipeline)
 # ---------------------------------------------------------------------------
 
+
+def _image_security_response(exc: ImageSecurityError) -> JSONResponse:
+    return JSONResponse(
+        {"error": exc.public_message, "code": exc.code},
+        status_code=exc.status_code,
+    )
+
+
+def _capture_storage_response(exc: CaptureStorageError) -> JSONResponse:
+    return JSONResponse(
+        {"error": exc.public_message, "code": exc.code},
+        status_code=exc.status_code,
+    )
+
 @router.get("/degen_eye", response_class=HTMLResponse)
 async def inventory_scan_pokemon_page(request: Request, session: Session = Depends(get_session)):
     if denial := _require_employee_permission(request, "ops.degen_eye.view", session):
@@ -4479,17 +4516,22 @@ async def inventory_scan_pokemon_identify(request: Request, session: Session = D
     except Exception:
         return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
-    base64_image = (body.get("image") or "").strip()
-    if not base64_image:
+    raw_image = body.get("image") if isinstance(body, dict) else None
+    if raw_image in (None, ""):
         return JSONResponse({"error": "Missing image field"}, status_code=400)
-
-    if "," in base64_image:
-        base64_image = base64_image.split(",", 1)[1]
+    try:
+        validated_image = validate_image_base64(raw_image, profile=FULL_SCAN_PROFILE)
+    except ImageSecurityError as exc:
+        return _image_security_response(exc)
+    base64_image = validated_image.encoded_b64
 
     category_id = (body.get("category_id") or "3").strip()
     mode = (body.get("mode") or "balanced").strip().lower()
 
-    result = await run_pokemon_pipeline(base64_image, category_id=category_id, mode=mode)
+    try:
+        result = await run_pokemon_pipeline(base64_image, category_id=category_id, mode=mode)
+    except ImageDecodeBusy as exc:
+        return _image_security_response(exc)
 
     status_code = 200
     if result.get("status") == "ERROR":
@@ -4598,9 +4640,14 @@ async def inventory_scan_slab_ximilar(request: Request, session: Session = Depen
     except Exception:
         return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
-    image_b64 = (body.get("image") or "").strip()
-    if not image_b64:
+    raw_image = body.get("image") if isinstance(body, dict) else None
+    if raw_image in (None, ""):
         return JSONResponse({"error": "Missing slab photo."}, status_code=400)
+    try:
+        validated_image = validate_image_base64(raw_image, profile=FULL_SCAN_PROFILE)
+    except ImageSecurityError as exc:
+        return _image_security_response(exc)
+    image_b64 = validated_image.encoded_b64
     if not settings.ximilar_api_token:
         return JSONResponse({"error": "XIMILAR_API_TOKEN is not configured."}, status_code=503)
 
@@ -4614,6 +4661,8 @@ async def inventory_scan_slab_ximilar(request: Request, session: Session = Depen
                 api_token=settings.ximilar_api_token,
                 category_id=category_id,
             )
+    except ImageDecodeBusy as exc:
+        return _image_security_response(exc)
     except Exception as exc:
         logger.warning("[inventory/scan] Ximilar slab scan failed: %s", exc)
         result = None
@@ -5214,22 +5263,34 @@ async def degen_eye_v2_scan(request: Request, session: Session = Depends(get_ses
     except Exception:
         return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
-    image_b64 = (body.get("image") or "").strip()
-    if not image_b64:
+    raw_image = body.get("image") if isinstance(body, dict) else None
+    if raw_image in (None, ""):
         return JSONResponse({"error": "Missing image field"}, status_code=400)
-    if len(image_b64) > _V2_MAX_SCAN_IMAGE_B64_CHARS:
-        return JSONResponse({"error": "Image is too large"}, status_code=413)
+    try:
+        validated_image = validate_image_base64(raw_image, profile=FULL_SCAN_PROFILE)
+        decode_lease = acquire_image_decode_lease()
+    except ImageSecurityError as exc:
+        return _image_security_response(exc)
+    image_b64 = validated_image.encoded_b64
     category_id = (body.get("category_id") or "3").strip()
+    capture_user = _capture_user_payload(request)
 
-    capture_id = await asyncio.to_thread(
-        create_scan_capture,
-        image_b64,
-        source="v2_scan",
-        category_id=category_id,
-        employee=_capture_user_payload(request),
-        request_meta=_capture_request_meta(request),
-    )
-    result = await run_v2_pipeline(image_b64, category_id=category_id)
+    try:
+        with decode_lease.activate():
+            capture_id = await asyncio.to_thread(
+                create_scan_capture,
+                image_b64,
+                source="v2_scan",
+                category_id=category_id,
+                employee=capture_user,
+                owner_user_id=capture_user.get("id"),
+                request_meta=_capture_request_meta(request),
+            )
+            result = await run_v2_pipeline(image_b64, category_id=category_id)
+    except CaptureStorageError as exc:
+        return _capture_storage_response(exc)
+    finally:
+        decode_lease.release()
     _tag_v2_capture_result(result, capture_id)
     if capture_id:
         await asyncio.to_thread(attach_prediction, capture_id, result)
@@ -5253,23 +5314,31 @@ async def degen_eye_v2_scan_init(request: Request, session: Session = Depends(ge
     except Exception:
         return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
-    image_b64 = (body.get("image") or "").strip()
-    if not image_b64:
+    raw_image = body.get("image") if isinstance(body, dict) else None
+    if raw_image in (None, ""):
         return JSONResponse({"error": "Missing image field"}, status_code=400)
-    if len(image_b64) > _V2_MAX_SCAN_IMAGE_B64_CHARS:
-        return JSONResponse({"error": "Image is too large"}, status_code=413)
+    try:
+        validated_image = validate_image_base64(raw_image, profile=FULL_SCAN_PROFILE)
+    except ImageSecurityError as exc:
+        return _image_security_response(exc)
+    image_b64 = validated_image.encoded_b64
     category_id = (body.get("category_id") or "3").strip()
+    capture_user = _capture_user_payload(request)
 
     scan_id = uuid.uuid4().hex
-    capture_id = await asyncio.to_thread(
-        create_scan_capture,
-        image_b64,
-        source="v2_stream",
-        category_id=category_id,
-        employee=_capture_user_payload(request),
-        scan_id=scan_id,
-        request_meta=_capture_request_meta(request),
-    )
+    try:
+        capture_id = await asyncio.to_thread(
+            create_scan_capture,
+            image_b64,
+            source="v2_stream",
+            category_id=category_id,
+            employee=capture_user,
+            owner_user_id=capture_user.get("id"),
+            scan_id=scan_id,
+            request_meta=_capture_request_meta(request),
+        )
+    except CaptureStorageError as exc:
+        return _capture_storage_response(exc)
     try:
         _write_v2_pending_scan(scan_id, image_b64, category_id, capture_id=capture_id)
     except ValueError as exc:
@@ -5287,8 +5356,6 @@ async def degen_eye_v2_scan_init(request: Request, session: Session = Depends(ge
 _V2_PENDING_DIR = Path(__file__).resolve().parent.parent / "data" / "v2_pending_scans"
 _V2_PENDING_TTL = 120.0
 _V2_PENDING_MAX = 200
-_V2_MAX_SCAN_IMAGE_B64_CHARS = 12 * 1024 * 1024
-_V2_MAX_DETECT_IMAGE_B64_CHARS = 2 * 1024 * 1024
 _V2_HEX_CHARS = set("0123456789abcdef")
 
 
@@ -5341,7 +5408,7 @@ def _write_v2_pending_scan(
 ) -> None:
     if not _is_v2_scan_id(scan_id):
         raise ValueError("Invalid scan id")
-    if len(image_b64) > _V2_MAX_SCAN_IMAGE_B64_CHARS:
+    if len(image_b64) > FULL_SCAN_PROFILE.max_encoded_chars:
         raise ValueError("Image is too large")
     _evict_stale_v2_pending()
     payload = {
@@ -5424,6 +5491,12 @@ async def degen_eye_v2_scan_stream(
             status_code=404,
         )
     image_b64, category_id, capture_id = pending
+    try:
+        validated_image = validate_image_base64(image_b64, profile=FULL_SCAN_PROFILE)
+        decode_lease = acquire_image_decode_lease()
+    except ImageSecurityError as exc:
+        return _image_security_response(exc)
+    image_b64 = validated_image.encoded_b64
 
     async def _event_source():
         import json as _json
@@ -5442,16 +5515,26 @@ async def degen_eye_v2_scan_stream(
                     return
         except Exception as exc:
             logger.exception("[degen_eye_v2] SSE pipeline crashed: %s", exc)
-            error_payload = {"status": "ERROR", "error": str(exc), "debug": {"mode": "v2"}}
+            error_payload = {"status": "ERROR", "error": "Image scan failed.", "debug": {"mode": "v2"}}
             _tag_v2_capture_result(error_payload, capture_id)
             if capture_id:
                 await asyncio.to_thread(attach_prediction, capture_id, error_payload)
             yield f"event: error\ndata: {_json.dumps(error_payload, default=str)}\n\n"
 
+    async def _leased_event_source():
+        try:
+            with decode_lease.activate():
+                async for chunk in _event_source():
+                    yield chunk
+        finally:
+            decode_lease.release()
+
     from fastapi.responses import StreamingResponse as _StreamingResponse
+    from starlette.background import BackgroundTask as _BackgroundTask
     return _StreamingResponse(
-        _event_source(),
+        _leased_event_source(),
         media_type="text/event-stream",
+        background=_BackgroundTask(decode_lease.release),
         headers={
             "Cache-Control": "no-cache, no-transform",
             "X-Accel-Buffering": "no",  # disable nginx buffering so events flush
@@ -5481,7 +5564,6 @@ async def degen_eye_v2_detect_only(request: Request, session: Session = Depends(
     """
     if denial := _require_employee_permission(request, "ops.degen_eye.view", session):
         return denial
-    import base64 as _b64
     import time as _time
     from .card_detect import detect_box
 
@@ -5490,20 +5572,19 @@ async def degen_eye_v2_detect_only(request: Request, session: Session = Depends(
     except Exception:
         return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
-    image_b64 = (body.get("image") or "").strip()
-    if not image_b64:
+    raw_image = body.get("image") if isinstance(body, dict) else None
+    if raw_image in (None, ""):
         return JSONResponse({"error": "Missing image field"}, status_code=400)
-    if "," in image_b64:
-        image_b64 = image_b64.split(",", 1)[1]
-    if len(image_b64) > _V2_MAX_DETECT_IMAGE_B64_CHARS:
-        return JSONResponse({"error": "Image is too large"}, status_code=413)
     try:
-        raw = _b64.b64decode(image_b64)
-    except Exception:
-        return JSONResponse({"error": "Invalid base64"}, status_code=400)
+        validated_image = validate_image_base64(raw_image, profile=DETECT_ONLY_PROFILE)
+    except ImageSecurityError as exc:
+        return _image_security_response(exc)
 
     t_start = _time.monotonic()
-    result = await asyncio.to_thread(detect_box, raw)
+    try:
+        result = await asyncio.to_thread(detect_box, validated_image.decoded_bytes)
+    except ImageDecodeBusy as exc:
+        return _image_security_response(exc)
     result["elapsed_ms"] = round((_time.monotonic() - t_start) * 1000, 1)
     return JSONResponse(result)
 
@@ -5716,15 +5797,19 @@ async def inventory_scan_identify(request: Request, session: Session = Depends(g
     except Exception:
         return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
-    base64_image = (body.get("image") or "").strip()
-    if not base64_image:
+    raw_image = body.get("image") if isinstance(body, dict) else None
+    if raw_image in (None, ""):
         return JSONResponse({"error": "Missing image field"}, status_code=400)
+    try:
+        validated_image = validate_image_base64(raw_image, profile=FULL_SCAN_PROFILE)
+    except ImageSecurityError as exc:
+        return _image_security_response(exc)
+    base64_image = validated_image.encoded_b64
 
-    # Strip data URI prefix if the client sent it
-    if "," in base64_image:
-        base64_image = base64_image.split(",", 1)[1]
-
-    card_info = await identify_card_from_image(base64_image)
+    card_info = await identify_card_from_image(
+        base64_image,
+        mime_type=validated_image.mime_type,
+    )
 
     if card_info.get("error"):
         return JSONResponse(
@@ -5829,6 +5914,30 @@ def _parse_batch_quantity(raw_value: Any, *, default: int = 1) -> tuple[Optional
     return value, None
 
 
+def _extract_batch_capture_id(raw: dict[str, Any]) -> tuple[bool, Optional[str]]:
+    """Extract one unambiguous, exact v2 capture ID from a batch row.
+
+    The empty string and ``None`` are the only legacy/no-capture sentinels.
+    In particular, whitespace is not normalized into an empty value and
+    attacker-controlled values are never coerced to strings.
+    """
+    supplied: list[str] = []
+    for field in ("_v2_capture_id", "capture_id"):
+        if field not in raw:
+            continue
+        value = raw[field]
+        if value is None or value == "":
+            continue
+        if type(value) is not str or not is_canonical_capture_id(value):
+            return False, None
+        supplied.append(value)
+    if not supplied:
+        return True, None
+    if any(value != supplied[0] for value in supplied[1:]):
+        return False, None
+    return True, supplied[0]
+
+
 @router.post("/inventory/batch/confirm")
 async def inventory_batch_confirm(
     request: Request,
@@ -5865,15 +5974,32 @@ async def inventory_batch_confirm(
     if not isinstance(body, list) or not body:
         return JSONResponse({"error": "Expected a non-empty JSON array"}, status_code=400)
 
-    created = []
-    confirmed_by = _capture_user_payload(request)
-    capture_label_updates: list[tuple[str, dict[str, Any], int]] = []
+    processable_rows: list[tuple[dict[str, Any], Optional[str]]] = []
     for raw in body:
         if not isinstance(raw, dict):
             continue
         card_name = (raw.get("card_name") or "").strip()
         if not card_name:
             continue
+        valid_capture, capture_id = _extract_batch_capture_id(raw)
+        if not valid_capture:
+            return JSONResponse({"error": "Invalid capture reference"}, status_code=400)
+        processable_rows.append((raw, capture_id))
+
+    current_user = _current_user(request)
+    employee_id = getattr(current_user, "id", None) if current_user is not None else None
+    if any(capture_id is not None for _raw, capture_id in processable_rows):
+        if type(employee_id) is not int:
+            return JSONResponse({"error": "Invalid capture reference"}, status_code=400)
+        for _raw, capture_id in processable_rows:
+            if capture_id is not None and not capture_belongs_to_employee(capture_id, employee_id):
+                return JSONResponse({"error": "Invalid capture reference"}, status_code=400)
+
+    created = []
+    confirmed_by = _capture_user_payload(request)
+    capture_label_updates: list[tuple[str, dict[str, Any], int]] = []
+    for raw, capture_id in processable_rows:
+        card_name = (raw.get("card_name") or "").strip()
         item_type = (raw.get("item_type") or ITEM_TYPE_SINGLE).strip().lower()
 
         if item_type == ITEM_TYPE_SLAB:
@@ -5955,8 +6081,7 @@ async def inventory_batch_confirm(
                     status_code=400,
                 )
         created.append({"id": item.id, "barcode": item.barcode, "card_name": item.card_name})
-        capture_id = (raw.get("_v2_capture_id") or raw.get("capture_id") or "").strip()
-        if capture_id:
+        if capture_id is not None:
             label = dict(raw)
             label.update({
                 "card_name": item.card_name,
@@ -5972,14 +6097,46 @@ async def inventory_batch_confirm(
             capture_label_updates.append((capture_id, label, int(item.id)))
 
     session.commit()
+    warnings: list[dict[str, Any]] = []
     for capture_id, label, inventory_item_id in capture_label_updates:
-        attach_confirmed_label(
-            capture_id,
-            label,
-            inventory_item_id=inventory_item_id,
-            confirmed_by=confirmed_by,
-        )
-    return JSONResponse({"created": len(created), "items": created})
+        update_error: Optional[str] = None
+        try:
+            updated = attach_confirmed_label(
+                capture_id,
+                label,
+                expected_employee_id=employee_id,
+                inventory_item_id=inventory_item_id,
+                confirmed_by=confirmed_by,
+            )
+        except Exception as exc:
+            updated = False
+            update_error = str(exc)[:300]
+            logger.exception(
+                "capture metadata update raised after inventory commit "
+                "user_id=%s inventory_item_id=%s capture_id=%s",
+                employee_id,
+                inventory_item_id,
+                capture_id,
+            )
+        if not updated:
+            warning = {
+                "code": "capture_metadata_update_failed",
+                "inventory_item_id": inventory_item_id,
+                "message": "Inventory was saved, but its scan metadata could not be updated.",
+            }
+            warnings.append(warning)
+            logger.warning(
+                structured_log_line(
+                    runtime=str(getattr(settings, "runtime_name", "app") or "app"),
+                    action="inventory.capture_metadata_update_failed",
+                    success=False,
+                    error=update_error or "capture metadata update returned false",
+                    user_id=employee_id,
+                    inventory_item_id=inventory_item_id,
+                    capture_id=capture_id,
+                )
+            )
+    return JSONResponse({"created": len(created), "items": created, "warnings": warnings})
 
 
 # ---------------------------------------------------------------------------

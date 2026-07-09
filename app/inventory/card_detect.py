@@ -26,7 +26,13 @@ import logging
 from typing import Any, Optional
 
 import numpy as np
-from PIL import Image
+
+from ..image_security import (
+    DETECT_ONLY_PROFILE,
+    ImageDecodeBusy,
+    image_decode_slot,
+    validate_image_bytes,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +131,7 @@ def _warp_to_portrait(img: np.ndarray, rect: np.ndarray) -> np.ndarray:
     return cv2.warpPerspective(img, transform, (_CROP_W, _CROP_H))
 
 
-def detect_and_crop(raw_bytes: bytes) -> tuple[Optional[bytes], dict[str, Any]]:
+def _detect_and_crop_native(raw_bytes: bytes) -> tuple[Optional[bytes], dict[str, Any]]:
     """Find the card in ``raw_bytes`` and return a JPEG-encoded portrait crop.
 
     Returns ``(jpeg_bytes, debug)`` on success or ``(None, debug)`` on
@@ -136,12 +142,17 @@ def detect_and_crop(raw_bytes: bytes) -> tuple[Optional[bytes], dict[str, Any]]:
         return (None, {"reason": "opencv_unavailable"})
 
     debug: dict[str, Any] = {}
+    validated = validate_image_bytes(raw_bytes)
+    raw_bytes = validated.decoded_bytes
 
     try:
         arr = np.frombuffer(raw_bytes, dtype=np.uint8)
-        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    except Exception as exc:
-        return (None, {"reason": f"imdecode_failed: {exc}"})
+        with image_decode_slot():
+            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    except ImageDecodeBusy:
+        raise
+    except Exception:
+        return (None, {"reason": "imdecode_failed"})
     if img is None:
         return (None, {"reason": "imdecode_returned_none"})
 
@@ -234,7 +245,13 @@ def detect_and_crop(raw_bytes: bytes) -> tuple[Optional[bytes], dict[str, Any]]:
     return (bytes(buf), debug)
 
 
-def detect_box(raw_bytes: bytes) -> dict[str, Any]:
+def detect_and_crop(raw_bytes: bytes) -> tuple[Optional[bytes], dict[str, Any]]:
+    """Run the complete OpenCV crop stage under shared native capacity."""
+    with image_decode_slot():
+        return _detect_and_crop_native(raw_bytes)
+
+
+def _detect_box_native(raw_bytes: bytes) -> dict[str, Any]:
     """Lightweight variant used by Phase B auto-capture.
 
     Returns ``{found, box?, stability_hash?, score?, reason}`` without the
@@ -244,9 +261,14 @@ def detect_box(raw_bytes: bytes) -> dict[str, Any]:
     if not _HAVE_CV2:
         return {"found": False, "reason": "opencv_unavailable"}
 
+    validated = validate_image_bytes(raw_bytes, profile=DETECT_ONLY_PROFILE)
+    raw_bytes = validated.decoded_bytes
     try:
         arr = np.frombuffer(raw_bytes, dtype=np.uint8)
-        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        with image_decode_slot():
+            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    except ImageDecodeBusy:
+        raise
     except Exception:
         return {"found": False, "reason": "imdecode_failed"}
     if img is None:
@@ -294,3 +316,9 @@ def detect_box(raw_bytes: bytes) -> dict[str, Any]:
         "stability_hash": stability_hash,
         "reason": "ok",
     }
+
+
+def detect_box(raw_bytes: bytes) -> dict[str, Any]:
+    """Run the complete OpenCV detect stage under shared native capacity."""
+    with image_decode_slot():
+        return _detect_box_native(raw_bytes)

@@ -34,6 +34,14 @@ SCOPE_RANKS = {
     "tiktok": 2,
     "owner": 3,
 }
+SCOPE_SUBSCOPES = {
+    "employee": frozenset({"employee"}),
+    "tiktok": frozenset({"tiktok"}),
+    "partner": frozenset({"employee", "partner"}),
+    "manager": frozenset({"employee", "tiktok", "manager"}),
+    "owner": frozenset({"employee", "tiktok", "partner", "manager", "owner"}),
+}
+LEGACY_FALLBACK_ELIGIBLE_DB_REASONS = {"discord_user_not_linked"}
 
 
 def _csv_set(value: str) -> set[str]:
@@ -132,8 +140,19 @@ def build_discord_context_text(
         "Discord conversation context for resolving follow-ups like 'that', 'it', 'on TikTok', or 'the previous one'."
     ]
     seen = {_message_key(current_message)}
+    current_author_id = str(getattr(getattr(current_message, "author", None), "id", ""))
 
-    if referenced_message is not None:
+    def context_author_allowed(message: Any) -> bool:
+        author_id = str(getattr(getattr(message, "author", None), "id", ""))
+        return bool(
+            author_id
+            and (
+                author_id == current_author_id
+                or (bot_user_id is not None and author_id == str(bot_user_id))
+            )
+        )
+
+    if referenced_message is not None and context_author_allowed(referenced_message):
         seen.add(_message_key(referenced_message))
         sections.append("Replied-to message:")
         sections.append(f"- {_context_line(referenced_message, bot_user_id=bot_user_id)}")
@@ -144,6 +163,8 @@ def build_discord_context_text(
         if key in seen:
             continue
         seen.add(key)
+        if not context_author_allowed(message):
+            continue
         content = _message_content_for_context(message, bot_user_id=bot_user_id)
         if not content:
             continue
@@ -279,7 +300,7 @@ def load_config_from_env(*, dry_run: bool = False) -> BotConfig:
     owner_user_ids = _csv_set(os.getenv("DEGEN_OPS_DISCORD_OWNER_USER_IDS", ""))
     allow_any = _truthy(os.getenv("DEGEN_OPS_DISCORD_ALLOW_ANY_USER_IN_CHANNEL", "false"))
     db_auth_enabled = _truthy(os.getenv("DEGEN_OPS_DISCORD_DB_AUTH_ENABLED", "false"))
-    legacy_allowlist_fallback = _truthy(os.getenv("DEGEN_OPS_DISCORD_LEGACY_ALLOWLIST_FALLBACK", "true"))
+    legacy_allowlist_fallback = _truthy(os.getenv("DEGEN_OPS_DISCORD_LEGACY_ALLOWLIST_FALLBACK", "false"))
     default_allow_dms = "true" if db_auth_enabled and not legacy_allowlist_fallback else "false"
     allow_dms = _truthy(os.getenv("DEGEN_OPS_DISCORD_ALLOW_DMS", default_allow_dms))
     model = os.getenv("DEGEN_OPS_DISCORD_MODEL", "").strip()
@@ -364,10 +385,11 @@ def resolve_discord_scope(
     channel_scope = channel_scopes.get(str(channel_id))
     if not channel_scope:
         return None, "channel_not_mapped"
-    user_rank = SCOPE_RANKS[user_scope]
-    channel_rank = SCOPE_RANKS[channel_scope]
-    effective = user_scope if user_rank <= channel_rank else channel_scope
-    return effective, "ok"
+    if user_scope in SCOPE_SUBSCOPES[channel_scope]:
+        return user_scope, "ok"
+    if channel_scope in SCOPE_SUBSCOPES[user_scope]:
+        return channel_scope, "ok"
+    return None, "incomparable_scopes"
 
 
 def determine_message_scope(
@@ -377,11 +399,16 @@ def determine_message_scope(
     *,
     db_scope: tuple[str | None, str] | None = None,
 ) -> tuple[str | None, str]:
-    if config.db_auth_enabled and db_scope is not None:
+    if config.db_auth_enabled:
+        if db_scope is None:
+            return None, "db_auth_unavailable"
         scope, reason = db_scope
         if scope:
             return scope, reason
-        if not config.legacy_allowlist_fallback:
+        if (
+            not config.legacy_allowlist_fallback
+            or reason not in LEGACY_FALLBACK_ELIGIBLE_DB_REASONS
+        ):
             return None, reason
     if config.scope_config.has_mappings():
         return resolve_discord_scope(author_id, channel_id, config.scope_config)
@@ -724,13 +751,18 @@ def should_respond(
         return False, "bot_author"
     if not content.strip():
         return False, "empty_message"
-    if config.db_auth_enabled and db_scope is not None:
+    if config.db_auth_enabled:
+        if db_scope is None:
+            return False, "db_auth_unavailable"
         scope, reason = db_scope
         if scope:
             if len(content) > config.max_prompt_chars:
                 return False, "prompt_too_long"
             return True, "ok"
-        if not config.legacy_allowlist_fallback:
+        if (
+            not config.legacy_allowlist_fallback
+            or reason not in LEGACY_FALLBACK_ELIGIBLE_DB_REASONS
+        ):
             return False, reason
     if config.scope_config.has_mappings():
         scope, reason = resolve_discord_scope(author_id, channel_id, config.scope_config)

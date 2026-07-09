@@ -1,10 +1,13 @@
 import asyncio
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from app.discord.financials import compute_financials
 from app.discord.parser import TimedOutRowError, parse_message
 from app.discord.transactions import build_transaction_summary, sync_transaction_from_message
+from app.financial_values import InvalidFinancialValueError
 from sqlmodel import select
 
 from app.models import DiscordMessage, PARSE_REVIEW_REQUIRED, Transaction
@@ -460,3 +463,87 @@ def test_loan_principal_is_not_counted_as_sales_or_expense_net() -> None:
     assert summary["totals"]["net"] == -300.0
     assert summary["totals"]["non_operating_money_in"] == 15000.0
     assert summary["totals"]["non_operating_money_out"] == 2500.0
+
+
+@pytest.mark.parametrize(
+    ("field_name", "unsafe_value"),
+    [
+        ("amount", float("inf")),
+        ("money_in", float("nan")),
+        ("money_out", 1_000_000_000.01),
+        ("confidence", 1.01),
+    ],
+)
+def test_sync_rejects_unsafe_reportable_financial_projection_before_session_access(
+    field_name: str,
+    unsafe_value: float,
+) -> None:
+    values = {
+        "amount": 25.0,
+        "money_in": 25.0,
+        "money_out": 0.0,
+        "confidence": 0.9,
+    }
+    values[field_name] = unsafe_value
+    row = DiscordMessage(
+        discord_message_id=f"unsafe-sync-{field_name}",
+        channel_id="sales",
+        channel_name="store-sales-and-trades",
+        author_name="tester",
+        content="sold slab 25 cash",
+        created_at=datetime(2026, 5, 20, 12, tzinfo=timezone.utc),
+        parse_status="parsed",
+        deal_type="sell",
+        entry_kind="sale",
+        amount=values["amount"],
+        money_in=values["money_in"],
+        money_out=values["money_out"],
+        confidence=values["confidence"],
+        needs_review=False,
+    )
+    session = MagicMock()
+
+    with pytest.raises(InvalidFinancialValueError):
+        sync_transaction_from_message(session, row)
+
+    assert session.method_calls == []
+
+
+def test_sync_still_tombstones_nonreportable_row_with_irrelevant_legacy_unsafe_values() -> None:
+    from sqlmodel import Session, SQLModel, create_engine
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        row = DiscordMessage(
+            discord_message_id="unsafe-legacy-pending-cleanup",
+            channel_id="sales",
+            channel_name="store-sales-and-trades",
+            author_name="tester",
+            content="sold slab 25 cash",
+            created_at=datetime(2026, 5, 20, 12, tzinfo=timezone.utc),
+            parse_status="parsed",
+            deal_type="sell",
+            entry_kind="sale",
+            amount=25.0,
+            money_in=25.0,
+            money_out=0.0,
+            confidence=0.9,
+            needs_review=False,
+        )
+        session.add(row)
+        session.commit()
+        transaction = sync_transaction_from_message(session, row)
+        session.commit()
+
+        row.parse_status = "pending"
+        row.amount = float("inf")
+        row.money_in = float("nan")
+        row.money_out = 1_000_000_000.01
+        row.confidence = 1.01
+        result = sync_transaction_from_message(session, row)
+
+        assert result is None
+        assert transaction.is_deleted is True
+        assert transaction.needs_review is True
+    engine.dispose()

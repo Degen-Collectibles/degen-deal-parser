@@ -1,6 +1,10 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+import pytest
 
 from app.shared import (
+    MAX_FINANCE_RANGE_DAYS,
     build_finance_daily_rows,
     build_finance_channel_rows,
     build_finance_kpi_drilldown_rows,
@@ -10,10 +14,93 @@ from app.shared import (
     build_finance_spend_mix_rows,
     build_finance_statement_rows,
     compose_finance_statement,
+    resolve_finance_range,
 )
 from app.models import Transaction
 from app.models import ShopifyOrder
 from app.models import TikTokOrder
+
+
+def test_finance_range_accepts_the_maximum_supported_inclusive_span():
+    result = resolve_finance_range(
+        start="2025-01-01",
+        end="2026-01-01",
+        window="custom",
+    )
+
+    assert result["day_count"] == MAX_FINANCE_RANGE_DAYS == 366
+
+
+def test_finance_range_reversed_dates_preserve_full_inclusive_boundaries():
+    forward = resolve_finance_range(
+        start="2025-01-01",
+        end="2026-01-01",
+        window="custom",
+    )
+    reversed_range = resolve_finance_range(
+        start="2026-01-01",
+        end="2025-01-01",
+        window="custom",
+    )
+
+    assert reversed_range["day_count"] == MAX_FINANCE_RANGE_DAYS
+    assert reversed_range["start_dt"] == forward["start_dt"]
+    assert reversed_range["end_dt"] == forward["end_dt"]
+    assert reversed_range["selected_start"] == "2025-01-01"
+    assert reversed_range["selected_end"] == "2026-01-01"
+
+
+@pytest.mark.parametrize("date_value", ["2026-02-15", "2026-03-08"])
+def test_finance_range_same_day_includes_entire_local_day_across_dst(date_value):
+    result = resolve_finance_range(
+        start=date_value,
+        end=date_value,
+        window="custom",
+    )
+
+    assert result["day_count"] == 1
+    assert result["selected_start"] == date_value
+    assert result["selected_end"] == date_value
+    pacific_start = result["start_dt"].astimezone(ZoneInfo("America/Los_Angeles"))
+    pacific_end = result["end_dt"].astimezone(ZoneInfo("America/Los_Angeles"))
+    assert (pacific_start.hour, pacific_start.minute, pacific_start.second, pacific_start.microsecond) == (0, 0, 0, 0)
+    assert (pacific_end.hour, pacific_end.minute, pacific_end.second, pacific_end.microsecond) == (23, 59, 59, 999999)
+
+
+@pytest.mark.parametrize("missing_end", [None, "not-a-date"])
+def test_finance_range_future_start_with_missing_end_preserves_full_days(missing_end):
+    pacific = ZoneInfo("America/Los_Angeles")
+    today = datetime.now(pacific).date()
+    future = today + timedelta(days=10)
+
+    result = resolve_finance_range(
+        start=future.isoformat(),
+        end=missing_end,
+        window="custom",
+    )
+
+    start_local = result["start_dt"].astimezone(pacific)
+    end_local = result["end_dt"].astimezone(pacific)
+    assert result["selected_start"] == today.isoformat()
+    assert result["selected_end"] == future.isoformat()
+    assert result["day_count"] == 11
+    assert (start_local.hour, start_local.minute, start_local.second, start_local.microsecond) == (0, 0, 0, 0)
+    assert (end_local.hour, end_local.minute, end_local.second, end_local.microsecond) == (23, 59, 59, 999999)
+
+
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [
+        ("1900-01-01", "2026-01-01"),
+        ("2026-01-02", "2025-01-01"),
+    ],
+)
+def test_finance_range_rejects_oversized_forward_and_reversed_spans(start, end):
+    with pytest.raises(Exception) as exc_info:
+        resolve_finance_range(start=start, end=end, window="custom")
+
+    assert getattr(exc_info.value, "status_code", None) == 400
+    assert "366 days" in str(getattr(exc_info.value, "detail", exc_info.value))
 
 
 def test_finance_statement_uses_assumed_gross_margin_and_keeps_inventory_as_cash_deployed():

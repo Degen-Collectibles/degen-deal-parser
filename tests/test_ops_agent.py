@@ -5,17 +5,22 @@ from time import perf_counter
 import pytest
 from sqlmodel import Session, SQLModel, create_engine, select
 
+from app.discord.message_revisions import ensure_message_revision
+from app.discord.transactions import sync_transaction_from_message
 from app.models import (
     BankFeedAccount,
     BankStatementImport,
     BankTransaction,
+    DiscordMessage,
     InventoryItem,
     ShopifyOrder,
     TikTokOrder,
     Transaction,
+    PARSE_PARSED,
 )
 from app.ops_agent import (
     MAX_TARGET_PAYBACK_WEEKS,
+    _build_channel_velocity,
     _target_payback_weeks,
     build_ops_agent_context,
     build_ops_agent_recommendation,
@@ -40,6 +45,63 @@ def add_bank_import(session: Session) -> BankStatementImport:
     session.commit()
     session.refresh(row)
     return row
+
+
+def _add_velocity_transaction(
+    session: Session,
+    *,
+    message_id: int,
+    category: str,
+    occurred_at: datetime,
+) -> tuple[DiscordMessage, Transaction]:
+    row = DiscordMessage(
+        id=message_id,
+        discord_message_id=f"ops-velocity-reportability-{message_id}",
+        channel_id="shows",
+        channel_name="Shows",
+        author_name="tester",
+        content=f"sold {category} 170 zelle",
+        created_at=occurred_at,
+        parse_status=PARSE_PARSED,
+        deal_type="sale",
+        entry_kind="sale",
+        payment_method="zelle",
+        category=category,
+        amount=170.0,
+        money_in=170.0,
+        money_out=0.0,
+        expense_category="sales",
+        needs_review=False,
+    )
+    session.add(row)
+    session.flush()
+    transaction = sync_transaction_from_message(session, row)
+    assert transaction is not None
+    return row, transaction
+
+
+def _add_legacy_source_backed_velocity_transaction(
+    session: Session,
+    transaction: Transaction,
+) -> Transaction:
+    """Add a valid pre-revision Discord source for an older velocity fixture."""
+
+    transaction.parse_status = transaction.parse_status or PARSE_PARSED
+    session.add(
+        DiscordMessage(
+            id=transaction.source_message_id,
+            discord_message_id=f"legacy-ops-source-{transaction.source_message_id}",
+            channel_id=transaction.channel_id or "legacy-ops-channel",
+            channel_name=transaction.channel_name,
+            author_name="tester",
+            content=transaction.source_content,
+            created_at=transaction.occurred_at,
+            parse_status=PARSE_PARSED,
+            needs_review=False,
+        )
+    )
+    session.add(transaction)
+    return transaction
 
 
 def add_feed_account(
@@ -820,7 +882,8 @@ def test_ops_agent_context_collects_existing_orders_inventory_and_loan_evidence_
                 status="in_stock",
             )
         )
-        session.add(
+        _add_legacy_source_backed_velocity_transaction(
+            session,
             Transaction(
                 source_message_id=501,
                 channel_id="shows",
@@ -832,7 +895,7 @@ def test_ops_agent_context_collects_existing_orders_inventory_and_loan_evidence_
                 money_in=170.0,
                 money_out=0.0,
                 source_content="show sale Pokemon 151 ETB",
-            )
+            ),
         )
         session.add(
             BankTransaction(
@@ -895,6 +958,63 @@ def test_ops_agent_context_collects_existing_orders_inventory_and_loan_evidence_
     assert any(row["channel"] == "Shows" and row["matched_category"] == "Pokemon 151 ETB" for row in context["channel_velocity"])
     assert context["inventory_snapshot"]["active_items"] == 1
     assert context["inventory_snapshot"]["estimated_list_value"] == 510.0
+
+
+def test_channel_velocity_excludes_live_transactions_with_unreportable_discord_sources():
+    engine = make_engine()
+    now = datetime(2026, 6, 1, 12, tzinfo=timezone.utc)
+
+    with Session(engine) as session:
+        valid_row, valid_tx = _add_velocity_transaction(
+            session,
+            message_id=9600,
+            category="Valid Pokemon Sale",
+            occurred_at=now - timedelta(days=1),
+        )
+        del valid_row
+
+        quarantined_row, quarantined_tx = _add_velocity_transaction(
+            session,
+            message_id=9601,
+            category="Quarantined Pokemon Sale",
+            occurred_at=now - timedelta(days=1),
+        )
+        quarantined_row.source_refresh_required = True
+
+        pending_row, pending_tx = _add_velocity_transaction(
+            session,
+            message_id=9602,
+            category="Pending Pokemon Sale",
+            occurred_at=now - timedelta(days=1),
+        )
+        pending_row.parse_status = "pending"
+
+        advanced_row, advanced_tx = _add_velocity_transaction(
+            session,
+            message_id=9603,
+            category="Stale Revision Pokemon Sale",
+            occurred_at=now - timedelta(days=1),
+        )
+        advanced_row.content = f"{advanced_row.content} corrected"
+        ensure_message_revision(session, advanced_row)
+        session.add(quarantined_row)
+        session.add(pending_row)
+        session.add(advanced_row)
+        session.commit()
+
+        assert all(
+            transaction.is_deleted is False
+            for transaction in (valid_tx, quarantined_tx, pending_tx, advanced_tx)
+        )
+        rows = _build_channel_velocity(
+            session,
+            start=now - timedelta(days=30),
+            end=now,
+            days=30,
+        )
+
+    assert [row["matched_category"] for row in rows] == ["Valid Pokemon Sale"]
+    engine.dispose()
 
 
 def test_ops_agent_loan_snapshot_dedupes_relinked_bank_rows():

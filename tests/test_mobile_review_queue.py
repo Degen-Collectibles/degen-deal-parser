@@ -6,10 +6,19 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from sqlmodel import Session, SQLModel, create_engine
+from fastapi import HTTPException
+from sqlmodel import Session, SQLModel, create_engine, select
 from starlette.requests import Request
 
-from app.models import DiscordMessage, PARSE_PARSED, PARSE_REVIEW_REQUIRED, utcnow
+from app.models import (
+    DISCORD_SOURCE_REFRESH_REQUIRED_ERROR,
+    AuditLog,
+    DiscordMessage,
+    PARSE_PARSED,
+    PARSE_REVIEW_REQUIRED,
+    ReviewCorrection,
+    utcnow,
+)
 from app.routers.channels_api import edit_message_form
 from app.routers.messages import reviewer_focus_page, reviewer_queue_page
 
@@ -300,6 +309,95 @@ class MobileReviewQueueTests(unittest.TestCase):
         self.assertIn("approved", response.headers["location"])
         self.assertEqual(first.parse_status, PARSE_PARSED)
         self.assertFalse(first.needs_review)
+
+    def test_correction_form_returns_409_and_rolls_back_quarantined_source(self) -> None:
+        with Session(self.engine) as session:
+            row = self._review_row(session, content="sell card 25 cash")
+            row.source_refresh_required = True
+            row.last_error = DISCORD_SOURCE_REFRESH_REQUIRED_ERROR
+            session.add(row)
+            session.commit()
+            row_id = row.id
+            before = (
+                row.parse_status,
+                row.needs_review,
+                row.deal_type,
+                row.amount,
+                row.payment_method,
+                row.expense_category,
+                row.notes,
+                row.last_error,
+                row.source_refresh_required,
+            )
+
+        with Session(self.engine) as session, patch(
+            "app.routers.channels_api.require_role_response",
+            return_value=None,
+        ):
+            with self.assertRaises(HTTPException) as exc:
+                edit_message_form(
+                    make_request(f"/messages/{row_id}/edit-form"),
+                    message_id=row_id,
+                    return_path="/review",
+                    status="review_queue",
+                    channel_id="chan-review",
+                    filter_expense_category="inventory",
+                    after="",
+                    before="",
+                    sort_by="time",
+                    sort_dir="asc",
+                    page=1,
+                    limit=25,
+                    parse_status=PARSE_PARSED,
+                    needs_review=None,
+                    deal_type="sell",
+                    amount="999",
+                    payment_method="zelle",
+                    cash_direction=None,
+                    category="singles",
+                    entry_kind="sale",
+                    expense_category="inventory",
+                    confidence="0.99",
+                    notes="must roll back",
+                    trade_summary=None,
+                    item_names_text=None,
+                    items_in_text=None,
+                    items_out_text=None,
+                    approve_after_save="true",
+                    stay_on_detail=None,
+                    review_action=None,
+                    next_message_id=None,
+                    session=session,
+                )
+            self.assertEqual(exc.exception.status_code, 409)
+            self.assertIn("canonical Discord source refresh", str(exc.exception.detail))
+            self.assertFalse(session.dirty)
+
+        with Session(self.engine) as session:
+            row_after = session.get(DiscordMessage, row_id)
+            self.assertEqual(
+                (
+                    row_after.parse_status,
+                    row_after.needs_review,
+                    row_after.deal_type,
+                    row_after.amount,
+                    row_after.payment_method,
+                    row_after.expense_category,
+                    row_after.notes,
+                    row_after.last_error,
+                    row_after.source_refresh_required,
+                ),
+                before,
+            )
+            self.assertEqual(session.exec(select(ReviewCorrection)).all(), [])
+            self.assertEqual(
+                session.exec(
+                    select(AuditLog).where(
+                        AuditLog.resource_key == f"discordmessage:{row_id}"
+                    )
+                ).all(),
+                [],
+            )
 
 
 if __name__ == "__main__":

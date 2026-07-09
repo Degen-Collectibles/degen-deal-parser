@@ -9,6 +9,13 @@ from typing import Iterable
 from sqlalchemy import select
 from sqlmodel import Session
 
+from .image_security import (
+    DISCORD_ATTACHMENT_PROFILE,
+    ImageDecodeBusy,
+    ImageSecurityError,
+    image_decode_slot,
+    validate_image_bytes,
+)
 from .models import AttachmentAsset, DiscordMessage
 
 logger = logging.getLogger(__name__)
@@ -77,58 +84,60 @@ def shrink_image_to_limit(
     isn't available). The caller can then skip the image rather than
     fail the whole model call.
 
-    Images already under ``max_bytes`` are returned as-is so small PNGs
-    don't get needlessly re-encoded as JPEG.
+    Images already under ``max_bytes`` are returned as-is after validation so
+    small PNGs don't get needlessly re-encoded as JPEG.
     """
-    if not data:
-        return None
-    if len(data) <= max_bytes:
-        return data, content_type
-
     try:
         from PIL import Image
     except ImportError:
-        logger.warning(
-            "display_media: image is %d bytes (> %d) and Pillow is not "
-            "installed; cannot downscale",
-            len(data),
-            max_bytes,
-        )
+        logger.warning("display_media: image processing unavailable; skipping")
         return None
 
     try:
-        img = Image.open(io.BytesIO(data))
-        # JPEG encoder cannot handle RGBA / palette modes
-        if img.mode in ("RGBA", "LA", "P"):
-            img = img.convert("RGB")
-        elif img.mode != "RGB":
-            img = img.convert("RGB")
-
-        for quality in (85, 75, 65, 55):
-            buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=quality, optimize=True)
-            if buf.tell() <= max_bytes:
-                return buf.getvalue(), "image/jpeg"
-
-        for scale in (0.75, 0.60, 0.45, 0.30):
-            width, height = img.size
-            resized = img.resize(
-                (max(1, int(width * scale)), max(1, int(height * scale))),
-                Image.LANCZOS,
+        with image_decode_slot():
+            validated = validate_image_bytes(
+                data,
+                profile=DISCORD_ATTACHMENT_PROFILE,
+                max_frames=1,
             )
-            buf = io.BytesIO()
-            resized.save(buf, format="JPEG", quality=70, optimize=True)
-            if buf.tell() <= max_bytes:
-                return buf.getvalue(), "image/jpeg"
+            with Image.open(io.BytesIO(validated.decoded_bytes)) as source_image:
+                source_image.load()
+                if len(validated.decoded_bytes) <= max_bytes:
+                    return validated.decoded_bytes, validated.mime_type
 
-        logger.warning(
-            "display_media: could not shrink image below %d bytes "
-            "even after aggressive resize; skipping",
-            max_bytes,
-        )
+                converted = source_image.convert("RGB") if source_image.mode != "RGB" else None
+                image = converted or source_image
+                try:
+                    for quality in (85, 75, 65, 55):
+                        buf = io.BytesIO()
+                        image.save(buf, format="JPEG", quality=quality, optimize=True)
+                        if buf.tell() <= max_bytes:
+                            return buf.getvalue(), "image/jpeg"
+
+                    width, height = image.size
+                    for scale in (0.75, 0.60, 0.45, 0.30):
+                        with image.resize(
+                            (max(1, int(width * scale)), max(1, int(height * scale))),
+                            Image.LANCZOS,
+                        ) as resized:
+                            buf = io.BytesIO()
+                            resized.save(buf, format="JPEG", quality=70, optimize=True)
+                            if buf.tell() <= max_bytes:
+                                return buf.getvalue(), "image/jpeg"
+                finally:
+                    if converted is not None:
+                        converted.close()
+
+        logger.warning("display_media: image could not be reduced; skipping")
         return None
-    except Exception as exc:
-        logger.warning("display_media: image compression failed: %s", exc)
+    except ImageDecodeBusy:
+        logger.warning("display_media: image processing busy; skipping")
+        return None
+    except ImageSecurityError:
+        logger.warning("display_media: unsafe image skipped")
+        return None
+    except Exception:
+        logger.warning("display_media: image processing failed; skipping")
         return None
 
 
@@ -162,8 +171,8 @@ def encode_bytes_as_vision_data_url(
 
     try:
         encoded = base64.b64encode(image_bytes).decode("ascii")
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.warning("display_media: base64 encode failed: %s", exc)
+    except Exception:  # pragma: no cover - defensive
+        logger.warning("display_media: image encoding failed; skipping")
         return None
     mime = (resolved_content_type or "").strip() or "image/jpeg"
     return f"data:{mime};base64,{encoded}"

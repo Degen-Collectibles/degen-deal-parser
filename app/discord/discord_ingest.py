@@ -17,6 +17,8 @@ from ..attachment_repair import (
     row_status_snapshot,
 )
 from ..attachment_storage import delete_attachment_cache_file, write_attachment_cache_file
+from . import message_revisions
+from . import transactions as transaction_service
 from .bookkeeping import auto_import_public_google_sheet, extract_google_sheet_url, get_existing_import_by_source_url
 from ..config import get_settings
 from ..db import engine, managed_session, run_write_with_retry
@@ -24,8 +26,14 @@ from ..models import (
     AttachmentAsset,
     AvailableDiscordChannel,
     DiscordMessage,
+    DISCORD_SOURCE_REFRESH_REQUIRED_ERROR,
+    discord_source_refresh_blocked,
+    ParseAttempt,
     PARSE_IGNORED,
+    PARSE_FAILED,
     PARSE_PENDING,
+    PARSE_PROCESSING,
+    Transaction,
     WatchedChannel,
 )
 from .ops_log import write_operations_log
@@ -69,6 +77,7 @@ YEAR_PAST_SHOWS_CATEGORY_RE = re.compile(r"^\d{4}\s+past shows$", re.IGNORECASE)
 # every single message fetched from Discord history.
 BACKFILL_PROGRESS_EVERY_MESSAGES = 5
 RECENT_AUDIT_PROGRESS_EVERY_MESSAGES = 5
+RAW_EDIT_REFRESH_REQUIRED_ERROR = DISCORD_SOURCE_REFRESH_REQUIRED_ERROR
 TRANSACTION_CHANNEL_NAME_HINTS = (
     "deal",
     "deals",
@@ -505,6 +514,17 @@ def get_message_row(session: Session, discord_message_id: str) -> Optional[Disco
     ).first()
 
 
+def _begin_sqlite_transaction_before_revision_savepoint(session: Session) -> None:
+    """Keep revision savepoints inside the caller's rollback boundary on SQLite."""
+
+    connection = session.connection()
+    if connection.dialect.name != "sqlite":
+        return
+    driver_connection = connection.connection.driver_connection
+    if not driver_connection.in_transaction:
+        connection.exec_driver_sql("BEGIN")
+
+
 def coerce_aware_datetime(value: Optional[datetime]) -> Optional[datetime]:
     if value is None:
         return None
@@ -514,6 +534,11 @@ def coerce_aware_datetime(value: Optional[datetime]) -> Optional[datetime]:
 
 
 def recent_message_needs_refresh(existing: DiscordMessage, message: discord.Message) -> bool:
+    if existing.is_deleted or discord_source_refresh_blocked(
+        existing.last_error,
+        existing.source_refresh_required,
+    ):
+        return True
     existing_edited_at = coerce_aware_datetime(existing.edited_at)
     incoming_edited_at = coerce_aware_datetime(getattr(message, "edited_at", None))
     if incoming_edited_at and (existing_edited_at is None or incoming_edited_at > existing_edited_at):
@@ -529,36 +554,151 @@ def recent_message_needs_refresh(existing: DiscordMessage, message: discord.Mess
     return False
 
 
+def _invalidate_source_transactions_with_savepoint(
+    session: Session,
+    row: DiscordMessage,
+    *,
+    reason: str,
+    compatibility_revision_id: int | None,
+) -> str | None:
+    """Bound cleanup so source truth can still fail closed on corrupt fanout."""
+
+    try:
+        with session.begin_nested():
+            transaction_service.invalidate_transactions_for_message(
+                session,
+                row,
+                reason=reason,
+                compatibility_revision_id=compatibility_revision_id,
+            )
+    except (
+        transaction_service.SourceRefreshRequiredError,
+        transaction_service.StaleSourceRevisionError,
+    ) as invalidation_error:
+        return str(invalidation_error)
+    return None
+
+
+def _quarantine_source_after_deferred_invalidation(
+    session: Session,
+    row: DiscordMessage,
+    *,
+    operation: str,
+    invalidation_error: str,
+) -> None:
+    row.source_refresh_required = True
+    row.needs_review = True
+    row.last_error = (
+        f"{DISCORD_SOURCE_REFRESH_REQUIRED_ERROR}: {operation}; "
+        f"transaction invalidation deferred: {invalidation_error}"
+    )
+    session.add(row)
+
+
+def _safe_ingest_log(*, session: Session | None = None, **details) -> None:
+    """Keep an operations-log failure from undoing committed source truth."""
+
+    try:
+        ingest_log(session=session, **details)
+    except Exception as log_error:
+        if session is not None:
+            session.rollback()
+        print(
+            structured_log_line(
+                runtime="worker",
+                action=f"{details.get('action', 'ingest')}_log_failed",
+                success=False,
+                error=str(log_error),
+                message_id=details.get("message_id"),
+                discord_message_id=details.get("discord_message_id"),
+                channel_id=details.get("channel_id"),
+            )
+        )
+
+
 def mark_message_deleted_row(
     session: Session,
     row: DiscordMessage,
     *,
     channel_name: Optional[str] = None,
     reason: str = "message deleted",
+    commit: bool = True,
+    log: bool = True,
 ) -> bool:
     if row.is_deleted:
         return False
 
+    _begin_sqlite_transaction_before_revision_savepoint(session)
+    current_revision = message_revisions.ensure_message_revision(session, row)
+    revoke_parse_claim_for_source_change(session, row, reason=reason)
     row.is_deleted = True
     row.edited_at = utcnow()
     row.deleted_at = utcnow()
     row.parse_status = PARSE_IGNORED
     row.last_error = reason
     session.add(row)
-    sync_transaction_from_message(session, row)
-    session.commit()
-    ingest_log(
-        action="message_deleted",
-        level="warning",
-        success=True,
-        session=session,
-        message_id=row.id,
-        discord_message_id=row.discord_message_id,
-        channel_id=row.channel_id,
-        channel=channel_name or row.channel_name,
-        current_state=row.parse_status,
+    deferred_invalidation_error = _invalidate_source_transactions_with_savepoint(
+        session,
+        row,
+        reason="Unmatched because a source Discord message was deleted.",
+        compatibility_revision_id=current_revision.id,
     )
+    if deferred_invalidation_error is not None:
+        _quarantine_source_after_deferred_invalidation(
+            session,
+            row,
+            operation="source deletion cleanup could not be completed",
+            invalidation_error=deferred_invalidation_error,
+        )
+    if commit:
+        session.commit()
+    if log:
+        _safe_ingest_log(
+            action="message_deleted",
+            level="warning",
+            success=True,
+            session=session,
+            error=deferred_invalidation_error,
+            message_id=row.id,
+            discord_message_id=row.discord_message_id,
+            channel_id=row.channel_id,
+            channel=channel_name or row.channel_name,
+            current_state=row.parse_status,
+            transaction_invalidation_deferred=deferred_invalidation_error is not None,
+        )
     return True
+
+
+def revoke_parse_claim_for_source_change(
+    session: Session,
+    row: DiscordMessage,
+    *,
+    reason: str,
+) -> None:
+    """Revoke the whole group claim owned by a changed source constituent."""
+
+    attempt_id = row.active_parse_attempt_id
+    if attempt_id is None:
+        return
+    claimed_rows = session.exec(
+        select(DiscordMessage).where(
+            DiscordMessage.active_parse_attempt_id == attempt_id
+        )
+    ).all()
+    for claimed_row in claimed_rows:
+        claimed_row.active_parse_attempt_id = None
+        if claimed_row.id != row.id and claimed_row.parse_status == PARSE_PROCESSING:
+            claimed_row.parse_status = PARSE_PENDING
+            claimed_row.parse_attempts = max((claimed_row.parse_attempts or 0) - 1, 0)
+            claimed_row.last_error = reason
+        session.add(claimed_row)
+
+    attempt = session.get(ParseAttempt, attempt_id)
+    if attempt is not None and attempt.finished_at is None:
+        attempt.success = False
+        attempt.error = f"superseded by source change: {reason}"
+        attempt.finished_at = utcnow()
+        session.add(attempt)
 
 
 async def recover_attachment_assets_for_message(
@@ -619,42 +759,128 @@ def insert_or_update_message(
     *,
     is_edit: bool = False,
     watched_channel_ids: Optional[set[int]] = None,
+    canonical_source_refresh: bool = False,
 ) -> tuple[bool, str]:
-    if watched_channel_ids is None:
-        ensure_available_discord_channel(message.channel)
-
-    if not should_track_message(message, watched_channel_ids):
-        return False, "ignored"
-
     attachment_payloads = get_attachment_payloads(message)
     attachment_urls = [payload["url"] for payload in attachment_payloads]
+    incoming_content = message.content or ""
+    incoming_attachment_urls_json = json.dumps(attachment_urls)
 
     with managed_session() as session:
         existing = get_message_row(session, str(message.id))
 
         if existing:
-            existing.guild_id = str(message.guild.id) if message.guild else None
-            existing.channel_id = str(message.channel.id)
-            existing.channel_name = getattr(message.channel, "name", None)
-            existing.author_id = str(message.author.id)
-            existing.author_name = str(message.author)
-            existing.content = message.content or ""
-            existing.attachment_urls_json = json.dumps(attachment_urls)
-            existing.last_seen_at = utcnow()
-            existing.is_deleted = False
-            existing.deleted_at = None
+            existing_row_id = existing.id
+            existing_parse_status = existing.parse_status
+            existing_was_deleted = existing.is_deleted
+            existing_deleted_at = existing.deleted_at
+            refresh_blocked = discord_source_refresh_blocked(
+                existing.last_error,
+                existing.source_refresh_required,
+            )
+            if refresh_blocked and not canonical_source_refresh:
+                if not existing.source_refresh_required:
+                    existing.source_refresh_required = True
+                    session.add(existing)
+                    session.commit()
+                return False, "refresh_required"
+            source_changed = (
+                existing.content != incoming_content
+                or existing.attachment_urls_json != incoming_attachment_urls_json
+                or existing.is_deleted
+                or refresh_blocked
+            )
+            deferred_invalidation_error: str | None = None
+            try:
+                _begin_sqlite_transaction_before_revision_savepoint(session)
+                previous_revision = message_revisions.ensure_message_revision(session, existing)
 
-            discord_edited_at = getattr(message, "edited_at", None)
-            if is_edit:
-                existing.edited_at = discord_edited_at or utcnow()
-                existing.parse_status = PARSE_PENDING
-                existing.parse_attempts = 0
-                existing.last_error = None
-            elif discord_edited_at is not None:
-                existing.edited_at = discord_edited_at
+                existing.guild_id = str(message.guild.id) if message.guild else None
+                existing.channel_id = str(message.channel.id)
+                existing.channel_name = getattr(message.channel, "name", None)
+                existing.author_id = str(message.author.id)
+                existing.author_name = str(message.author)
+                existing.content = incoming_content
+                existing.attachment_urls_json = incoming_attachment_urls_json
+                existing.last_seen_at = utcnow()
+                existing.is_deleted = False
+                existing.deleted_at = None
 
-            session.add(existing)
-            session.commit()
+                discord_edited_at = getattr(message, "edited_at", None)
+                if source_changed:
+                    existing.edited_at = discord_edited_at or utcnow()
+                elif discord_edited_at is not None:
+                    existing.edited_at = discord_edited_at
+
+                message_revisions.ensure_message_revision(session, existing)
+
+                if source_changed:
+                    revoke_parse_claim_for_source_change(
+                        session,
+                        existing,
+                        reason="source Discord message changed while parsing",
+                    )
+                    existing.parse_status = PARSE_PENDING
+                    existing.parse_attempts = 0
+                    existing.last_error = None
+                    if canonical_source_refresh:
+                        existing.source_refresh_required = False
+                    deferred_invalidation_error = _invalidate_source_transactions_with_savepoint(
+                        session,
+                        existing,
+                        reason=(
+                            "Unmatched because a source Discord message changed and must be "
+                            "reparsed."
+                        ),
+                        compatibility_revision_id=previous_revision.id,
+                    )
+                    if deferred_invalidation_error is not None:
+                        if existing_was_deleted:
+                            existing.is_deleted = True
+                            existing.deleted_at = existing_deleted_at
+                            existing.parse_status = PARSE_IGNORED
+                        else:
+                            existing.parse_status = PARSE_FAILED
+                            existing.parse_attempts = settings.parser_max_attempts
+                        _quarantine_source_after_deferred_invalidation(
+                            session,
+                            existing,
+                            operation="source change cleanup could not be completed",
+                            invalidation_error=deferred_invalidation_error,
+                        )
+
+                session.add(existing)
+                session.commit()
+            except Exception as exc:
+                session.rollback()
+                ingest_log(
+                    action="message_update_failed",
+                    level="error",
+                    success=False,
+                    error=str(exc),
+                    message_id=existing_row_id,
+                    discord_message_id=str(message.id),
+                    channel_id=str(message.channel.id),
+                    channel=getattr(message.channel, "name", None),
+                    current_state=existing_parse_status,
+                    is_edit=is_edit,
+                )
+                raise
+            if deferred_invalidation_error is not None:
+                _safe_ingest_log(
+                    action="message_update_invalidation_deferred",
+                    level="error",
+                    success=False,
+                    error=deferred_invalidation_error,
+                    session=session,
+                    message_id=existing.id,
+                    discord_message_id=str(message.id),
+                    channel_id=str(message.channel.id),
+                    channel=getattr(message.channel, "name", None),
+                    current_state=existing.parse_status,
+                    is_edit=is_edit,
+                )
+                return False, "refresh_required"
             if existing.id is not None:
                 sync_attachment_assets(existing.id, attachment_payloads)
             ingest_log(
@@ -669,6 +895,11 @@ def insert_or_update_message(
                 is_edit=is_edit,
             )
             return True, "updated"
+
+        if watched_channel_ids is None:
+            ensure_available_discord_channel(message.channel)
+        if not should_track_message(message, watched_channel_ids):
+            return False, "ignored"
 
         row = DiscordMessage(
             discord_message_id=str(message.id),
@@ -686,7 +917,24 @@ def insert_or_update_message(
             is_deleted=False,
         )
         session.add(row)
-        session.commit()
+        try:
+            session.flush()
+            message_revisions.ensure_message_revision(session, row)
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            ingest_log(
+                action="message_insert_failed",
+                level="error",
+                success=False,
+                error=str(exc),
+                discord_message_id=str(message.id),
+                channel_id=str(message.channel.id),
+                channel=getattr(message.channel, "name", None),
+                current_state=PARSE_PENDING,
+                is_edit=is_edit,
+            )
+            raise
         session.refresh(row)
         if row.id is not None:
             sync_attachment_assets(row.id, attachment_payloads)
@@ -748,6 +996,134 @@ def mark_message_deleted(message: discord.Message) -> bool:
             existing,
             channel_name=getattr(message.channel, "name", None),
         )
+
+
+def mark_message_deleted_by_discord_id(
+    discord_message_id: str | int,
+    *,
+    channel_name: Optional[str] = None,
+) -> bool:
+    with managed_session() as session:
+        existing = get_message_row(session, str(discord_message_id))
+        if not existing:
+            return False
+        return mark_message_deleted_row(
+            session,
+            existing,
+            channel_name=channel_name,
+        )
+
+
+def mark_messages_deleted_by_discord_ids(discord_message_ids: set[int] | list[int]) -> int:
+    deleted_count = 0
+    with managed_session() as session:
+        deleted_log_details: list[dict] = []
+        for discord_message_id in sorted(set(discord_message_ids)):
+            existing = get_message_row(session, str(discord_message_id))
+            if existing is None:
+                continue
+            if mark_message_deleted_row(session, existing, commit=False, log=False):
+                deleted_count += 1
+                deleted_log_details.append(
+                    {
+                        "message_id": existing.id,
+                        "discord_message_id": existing.discord_message_id,
+                        "channel_id": existing.channel_id,
+                        "channel": existing.channel_name,
+                        "current_state": existing.parse_status,
+                        "transaction_invalidation_deferred": existing.source_refresh_required,
+                    }
+                )
+        session.commit()
+        for log_details in deleted_log_details:
+            _safe_ingest_log(
+                action="message_deleted",
+                level="warning",
+                success=True,
+                session=session,
+                **log_details,
+            )
+    return deleted_count
+
+
+def raw_message_edit_warrants_fetch(message_id: str | int, channel_id: str | int) -> bool:
+    with managed_session() as session:
+        if get_message_row(session, str(message_id)) is not None:
+            return True
+    return int(channel_id) in get_enabled_channel_ids()
+
+
+def block_message_after_raw_edit_fetch_failure(
+    discord_message_id: str | int,
+    *,
+    error: Exception,
+) -> bool:
+    """Fail closed until Discord can provide the canonical edited projection."""
+
+    with managed_session() as session:
+        row = get_message_row(session, str(discord_message_id))
+        if row is None:
+            return False
+        _begin_sqlite_transaction_before_revision_savepoint(session)
+        current_revision = message_revisions.ensure_message_revision(session, row)
+        revoke_parse_claim_for_source_change(
+            session,
+            row,
+            reason="group parse claim revoked by raw source edit",
+        )
+        row.parse_status = PARSE_FAILED
+        row.parse_attempts = settings.parser_max_attempts
+        row.needs_review = True
+        row.source_refresh_required = True
+        row.last_error = f"{RAW_EDIT_REFRESH_REQUIRED_ERROR}: {error}"
+        session.add(row)
+        deferred_invalidation_error: str | None = None
+        try:
+            with session.begin_nested():
+                transaction_service.invalidate_transactions_for_message(
+                    session,
+                    row,
+                    reason=(
+                        "Unmatched because Discord reported a source edit but the "
+                        "canonical message could not be fetched."
+                    ),
+                    compatibility_revision_id=current_revision.id,
+                )
+        except (
+            transaction_service.SourceRefreshRequiredError,
+            transaction_service.StaleSourceRevisionError,
+        ) as invalidation_error:
+            deferred_invalidation_error = str(invalidation_error)
+        session.commit()
+        if deferred_invalidation_error is not None:
+            log_details = {
+                "message_id": row.id,
+                "discord_message_id": row.discord_message_id,
+                "channel_id": row.channel_id,
+                "current_state": row.parse_status,
+            }
+            try:
+                with managed_session() as log_session:
+                    ingest_log(
+                        action="raw_edit_transaction_invalidation_deferred",
+                        level="error",
+                        success=False,
+                        error=deferred_invalidation_error,
+                        session=log_session,
+                        **log_details,
+                    )
+            except Exception as log_error:
+                print(
+                    structured_log_line(
+                        runtime="worker",
+                        action="raw_edit_transaction_invalidation_log_failed",
+                        success=False,
+                        error=str(log_error),
+                        invalidation_error=deferred_invalidation_error,
+                        **log_details,
+                    )
+                )
+        return True
 
 
 async def audit_recent_channel_history(
@@ -824,6 +1200,7 @@ async def audit_recent_channel_history(
                     message,
                     is_edit=should_refresh,
                     watched_channel_ids=watched_channel_ids,
+                    canonical_source_refresh=True,
                 )
                 if not ok:
                     skipped_count += 1
@@ -901,6 +1278,7 @@ async def audit_recent_channel_history(
                     fetched_message,
                     is_edit=True,
                     watched_channel_ids=watched_channel_ids,
+                    canonical_source_refresh=True,
                 )
                 if not ok:
                     skipped_count += 1
@@ -1287,15 +1665,63 @@ class DealIngestBot(discord.Client):
             asyncio.create_task(maybe_auto_import_bookkeeping_message(message))
 
     async def on_message_edit(self, before: discord.Message, after: discord.Message):
-        ok, action = insert_or_update_message(after, is_edit=True)
-        if ok:
-            print(f"[discord] edited message {after.id} -> {action}")
-            asyncio.create_task(maybe_auto_import_bookkeeping_message(after))
+        # Raw edit events are authoritative: cached `after` objects can be
+        # partial, while the raw path REST-fetches the canonical message.
+        return None
 
     async def on_message_delete(self, message: discord.Message):
         ok = mark_message_deleted(message)
         if ok:
             print(f"[discord] deleted message {message.id}")
+
+    async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent):
+        payload_data = getattr(payload, "data", {}) or {}
+        if "content" not in payload_data and "attachments" not in payload_data:
+            return
+        if not raw_message_edit_warrants_fetch(payload.message_id, payload.channel_id):
+            return
+        try:
+            channel = self.get_channel(payload.channel_id)
+            if channel is None:
+                channel = await self.fetch_channel(payload.channel_id)
+            message = await channel.fetch_message(payload.message_id)
+            ok, action = insert_or_update_message(
+                message,
+                is_edit=True,
+                canonical_source_refresh=True,
+            )
+            if ok:
+                print(f"[discord] raw-edited message {message.id} -> {action}")
+                asyncio.create_task(maybe_auto_import_bookkeeping_message(message))
+        except discord.NotFound:
+            mark_message_deleted_by_discord_id(payload.message_id)
+        except discord.Forbidden as exc:
+            block_message_after_raw_edit_fetch_failure(payload.message_id, error=exc)
+            ingest_log(
+                action="raw_message_edit_forbidden",
+                level="warning",
+                success=False,
+                error=str(exc),
+                discord_message_id=str(payload.message_id),
+                channel_id=str(payload.channel_id),
+            )
+        except Exception as exc:
+            block_message_after_raw_edit_fetch_failure(payload.message_id, error=exc)
+            ingest_log(
+                action="raw_message_edit_failed",
+                level="error",
+                success=False,
+                error=str(exc),
+                discord_message_id=str(payload.message_id),
+                channel_id=str(payload.channel_id),
+            )
+
+    async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent):
+        if mark_message_deleted_by_discord_id(payload.message_id):
+            print(f"[discord] raw-deleted message {payload.message_id}")
+
+    async def on_raw_bulk_message_delete(self, payload: discord.RawBulkMessageDeleteEvent):
+        mark_messages_deleted_by_discord_ids(payload.message_ids)
 
     async def on_guild_channel_create(self, channel):
         ensure_available_discord_channel(channel, force=True)
@@ -1367,16 +1793,17 @@ class DealIngestBot(discord.Client):
                 before=before,
             ):
                 processed_count += 1
-                if not should_track_message(message, watched_channel_ids):
+                with managed_session() as session:
+                    existing = get_message_row(session, str(message.id))
+                if existing is None and not should_track_message(message, watched_channel_ids):
                     skipped_count += 1
                 else:
-                    with managed_session() as session:
-                        existing = get_message_row(session, str(message.id))
                     should_refresh = bool(existing and recent_message_needs_refresh(existing, message))
                     ok, action = insert_or_update_message(
                         message,
                         is_edit=should_refresh,
                         watched_channel_ids=watched_channel_ids,
+                        canonical_source_refresh=True,
                     )
                     if not ok:
                         skipped_count += 1

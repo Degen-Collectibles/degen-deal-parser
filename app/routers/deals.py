@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from typing import Optional
-from urllib.parse import parse_qsl, urlencode
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Form, Query, Request
@@ -20,8 +20,46 @@ from ..discord.corrections import get_correction_pattern_counts
 from ..db import get_session
 
 _DEALS_DEFAULT_TZ = ZoneInfo("America/Los_Angeles")
+_RETURN_PATH_MAX_LENGTH = 2048
+_RETURN_PATH_MAX_DECODE_ROUNDS = 4
 
 router = APIRouter()
+
+
+def _normalize_return_path(return_path: str) -> str:
+    fallback = "/deals"
+    if not isinstance(return_path, str) or len(return_path) > _RETURN_PATH_MAX_LENGTH:
+        return fallback
+
+    try:
+        canonical_path = return_path
+        for _ in range(_RETURN_PATH_MAX_DECODE_ROUNDS):
+            decoded_path = unquote(canonical_path, errors="strict")
+            if decoded_path == canonical_path:
+                break
+            canonical_path = decoded_path
+        else:
+            return fallback
+        parsed_path = urlsplit(canonical_path)
+    except (TypeError, UnicodeDecodeError, ValueError):
+        return fallback
+
+    if (
+        not canonical_path.startswith("/")
+        or canonical_path.startswith("//")
+        or "\\" in canonical_path
+        or any(ord(character) < 32 or 127 <= ord(character) <= 159 for character in canonical_path)
+        or "?" in canonical_path
+        or "#" in canonical_path
+        or parsed_path.scheme
+        or parsed_path.netloc
+        or parsed_path.query
+        or parsed_path.fragment
+        or parsed_path.path != canonical_path
+    ):
+        return fallback
+
+    return canonical_path
 
 
 def _is_admin_message_detail_return_path(return_path: str) -> bool:
@@ -117,7 +155,7 @@ def deals_page(
 def deal_detail_page(
     message_id: int,
     request: Request,
-    return_path: str = Query(default="/deals"),
+    return_path: str = Query(default="/deals", max_length=_RETURN_PATH_MAX_LENGTH),
     status: Optional[str] = Query(default=None),
     channel_id: Optional[str] = Query(default=None),
     entry_kind: Optional[str] = Query(default=None),
@@ -132,6 +170,7 @@ def deal_detail_page(
     error: Optional[str] = Query(default=None),
     session: Session = Depends(get_session),
 ):
+    return_path = _normalize_return_path(return_path)
     admin_message_detail = _is_admin_message_detail_return_path(return_path)
     if denial := require_role_response(request, _message_detail_required_role(return_path)):
         return denial

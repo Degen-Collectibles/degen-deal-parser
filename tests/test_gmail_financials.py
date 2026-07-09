@@ -1,11 +1,16 @@
+import base64
+import inspect
 import json
 from datetime import date, datetime, timedelta, timezone
 
+import pytest
 from sqlalchemy import event, text
 from sqlmodel import SQLModel, Session, create_engine, select
 
 from app.config import get_settings
+from app.discord.gmail_authentication import persisted_source_trust_decision
 from app.discord.gmail_financials import (
+    GMAIL_RAW_SOURCE_STORAGE_LIMIT,
     access_token_for_gmail_connection,
     build_gmail_financial_search_query,
     encrypt_gmail_token,
@@ -13,7 +18,20 @@ from app.discord.gmail_financials import (
     parse_sortswift_buylist_email,
     upsert_gmail_receipt_from_message,
 )
-from app.models import BankTransaction, GmailConnection, GmailReceipt, GmailReceiptLineItem, Transaction, TransactionItem
+from app.discord.transactions import get_transactions
+from app.models import (
+    BankStatementImport,
+    BankTransaction,
+    BookkeepingEntry,
+    BookkeepingImport,
+    DiscordMessage,
+    GmailConnection,
+    GmailEvidenceLink,
+    GmailReceipt,
+    GmailReceiptLineItem,
+    Transaction,
+    TransactionItem,
+)
 from app.routers.bookkeeping import _gmail_receipt_views
 
 
@@ -38,6 +56,68 @@ def make_engine():
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False})
     SQLModel.metadata.create_all(engine)
     return engine
+
+
+def _install_single_message_gmail_api(
+    monkeypatch,
+    *,
+    authentication_results,
+    sender=None,
+    additional_from_values=(),
+):
+    import app.discord.gmail_financials as gmail_module
+
+    message_id = "gmail-sync-sortswift-1"
+    encoded_body = base64.urlsafe_b64encode(SORTSWIFT_HTML.encode("utf-8")).decode("ascii").rstrip("=")
+    headers = [
+        {"name": "From", "value": sender or "SortSwift Buylist <no-reply@mail.sortswift.com>"},
+        {"name": "To", "value": "Degen Collectibles <degencollectiblesllc@gmail.com>"},
+        {"name": "Subject", "value": "Buylist Confirmation - Degen Collectibles"},
+        {"name": "Date", "value": "Tue, 19 May 2026 19:33:00 +0000"},
+        {"name": "Message-ID", "value": "<sortswift-1@mail.sortswift.com>"},
+    ]
+    headers.extend({"name": "From", "value": value} for value in additional_from_values)
+    headers.extend(
+        {"name": "Authentication-Results", "value": value}
+        for value in authentication_results
+    )
+    full_message = {
+        "id": message_id,
+        "threadId": "thread-gmail-sync-sortswift-1",
+        "labelIds": ["INBOX"],
+        "snippet": "Buylist Confirmation - Degen Collectibles",
+        "historyId": "123456789",
+        "internalDate": str(int(datetime(2026, 5, 19, 19, 33, tzinfo=timezone.utc).timestamp() * 1000)),
+        "sizeEstimate": len(SORTSWIFT_HTML),
+        "payload": {
+            "partId": "",
+            "mimeType": "text/html",
+            "filename": "",
+            "headers": headers,
+            "body": {"attachmentId": None, "size": len(SORTSWIFT_HTML), "data": encoded_body},
+        },
+    }
+
+    def fake_gmail_get(_access_token, path, *, params=None):
+        if path == "/users/me/messages":
+            return {"messages": [{"id": message_id, "threadId": full_message["threadId"]}], "resultSizeEstimate": 1}
+        assert path == f"/users/me/messages/{message_id}"
+        assert params == {"format": "full"}
+        return full_message
+
+    monkeypatch.setattr(gmail_module, "access_token_for_gmail_connection", lambda _session, _connection: "access-token")
+    monkeypatch.setattr(gmail_module, "_gmail_get", fake_gmail_get)
+    return gmail_module
+
+
+def _sized_authentication_result(authserv_id: str, size: int) -> str:
+    prefix = f"{authserv_id}; dmarc=pass ("
+    suffix = ") header.from=sortswift.com"
+    fill_length = size - len(prefix) - len(suffix)
+    assert fill_length >= 0
+    value = prefix + ("x" * fill_length) + suffix
+    assert len(value.encode("utf-8")) == size
+    return value
 
 
 def test_gmail_financial_query_targets_receipts_and_sortswift():
@@ -117,6 +197,575 @@ def test_sync_gmail_connection_can_backfill_from_start_date_and_paginate(monkeyp
     assert list_calls[1]["maxResults"] == 1
 
 
+@pytest.mark.parametrize(
+    ("authentication_results", "expected_reason"),
+    [
+        ([], "auth_missing"),
+        (
+            [
+                "mx.google.com; dmarc=fail header.from=sortswift.com; "
+                "dkim=fail header.i=@mail.sortswift.com; "
+                "spf=fail smtp.mailfrom=no-reply@mail.sortswift.com"
+            ],
+            "auth_no_aligned_pass",
+        ),
+        (
+            [
+                "mail.attacker.example; dmarc=pass header.from=sortswift.com; "
+                "dkim=pass header.i=@mail.sortswift.com"
+            ],
+            "auth_no_google_receiver",
+        ),
+        (
+            [
+                "mx.google.com; dmarc=pass header.from=attacker.example; "
+                "dkim=pass header.i=@attacker.example; spf=pass smtp.mailfrom=attacker@example.net"
+            ],
+            "auth_no_aligned_pass",
+        ),
+        (["mx.google.com; dmarc=pass; dkim=fail header.i=@mail.sortswift.com"], "auth_malformed"),
+        (["mx.google.com; dmarc=pass reason=\"header.from=sortswift.com\""], "auth_malformed"),
+        (["mx.google.com; dmarc=pass header.from=sortswift.com attacker-garbage"], "auth_malformed"),
+        (["mx.google.com; dmarc=pass dmarc=fail header.from=sortswift.com"], "auth_malformed"),
+        (["mx.google.com;; dmarc=pass header.from=sortswift.com"], "auth_malformed"),
+        (["mx.google.com; dmarc=pass header.from=sortswift.com;"], "auth_malformed"),
+        (["; mx.google.com; dmarc=pass header.from=sortswift.com"], "auth_malformed"),
+        (
+            [
+                "mx.google.com; dmarc=pass header.from=sortswift.com; "
+                "mx.google.com; dmarc=fail header.from=sortswift.com"
+            ],
+            "auth_malformed",
+        ),
+        (
+            [
+                "mx.google.com; dmarc=pass header.from=sortswift.com",
+                "mail.attacker.example; dmarc=pass header.from=sortswift.com",
+            ],
+            "auth_mixed_receivers",
+        ),
+        (
+            [
+                "mx.google.com; dmarc=pass header.from=sortswift.com; "
+                "dmarc=fail header.from=sortswift.com"
+            ],
+            "auth_ambiguous_results",
+        ),
+        (
+            [
+                "mx.google.com; "
+                "spf=pass smtp.mailfrom=no-reply@mail.sortswift.com; "
+                "spf=fail smtp.mailfrom=no-reply@mail.sortswift.com"
+            ],
+            "auth_ambiguous_results",
+        ),
+        (
+            [
+                "mx.google.com; dmarc=pass header.from=sortswift.com "
+                "header.from=attacker.example"
+            ],
+            "auth_ambiguous_results",
+        ),
+        (
+            [
+                "mx.google.com; dkim=pass header.i=@mail.sortswift.com "
+                "header.d=attacker.example"
+            ],
+            "auth_ambiguous_results",
+        ),
+        (
+            [
+                "mx.google.com; spf=pass "
+                "smtp.mailfrom=no-reply@mail.sortswift.com smtp.helo=mail.sortswift.com"
+            ],
+            "auth_ambiguous_results",
+        ),
+        (
+            [
+                "mx.google.com; dmarc=pass header.from=sortswift.com; "
+                "spf=fail smtp.mailfrom=no-reply@mail.sortswift.com "
+                "smtp.helo=mail.sortswift.com"
+            ],
+            "auth_ambiguous_results",
+        ),
+        (
+            ["mx.google.com; spf=pass smtp.helo=mail.sortswift.com"],
+            "auth_no_aligned_pass",
+        ),
+        (["mx.google.com; spf=fail"], "auth_malformed"),
+        (["mx.google.com; arc=pass (i=1)"], "auth_no_aligned_pass"),
+        (
+            [
+                "mx.google.com; "
+                "dkim=pass header.i=@mail.sortswift.com header.d=sortswift.com; "
+                "dkim=fail header.i=@bad..example.net header.d=example.net"
+            ],
+            "auth_malformed",
+        ),
+        (
+            [
+                "mx.google.com; dmarc=pass header.from=sortswift.com",
+                "mx.google.com; dmarc=fail header.from=sortswift.com; "
+                "dkim=fail header.i=@mail.sortswift.com; "
+                "spf=fail smtp.mailfrom=no-reply@mail.sortswift.com",
+            ],
+            "auth_ambiguous_google_receiver",
+        ),
+    ],
+)
+def test_sync_quarantines_sortswift_without_unambiguous_google_aligned_authentication(
+    monkeypatch,
+    authentication_results,
+    expected_reason,
+):
+    engine = make_engine()
+    gmail_module = _install_single_message_gmail_api(
+        monkeypatch,
+        authentication_results=authentication_results,
+    )
+
+    with Session(engine) as session:
+        connection = GmailConnection(email_address="degencollectiblesllc@gmail.com", status="active")
+        session.add(connection)
+        session.commit()
+        session.refresh(connection)
+
+        result = gmail_module.sync_gmail_connection(session, connection.id or 0, limit=1)
+        receipt = session.exec(select(GmailReceipt)).one()
+        transactions = session.exec(select(Transaction)).all()
+        synthetic_messages = session.exec(select(DiscordMessage)).all()
+        parsed = json.loads(receipt.parsed_json)
+
+    assert result == {"scanned": 1, "imported": 1, "transactions": 0}
+    assert receipt.status == "quarantined"
+    assert receipt.transaction_id is None
+    assert parsed["source_trusted"] is False
+    assert parsed["source_trust_reason"] == expected_reason
+    assert transactions == []
+    assert synthetic_messages == []
+    assert "Authentication-Results" not in receipt.raw_text
+    assert "mx.google.com" not in receipt.parsed_json
+
+
+@pytest.mark.parametrize(
+    "authentication_result",
+    [
+        "mx.goo(x)gle.com; dmarc=pass header.from=sortswift.com",
+        'mx.google.com; "dmarc"=pass header.from=sortswift.com',
+        'mx.google.com; dmarc=pass header."from"=sortswift.com',
+        'mx.google.com; dmarc=pass "header.from=sortswift.com"',
+        r"mx.google.com; dmarc=pass header.fr\om=sortswift.com",
+        r"mx.google.com; dmarc=pass header.from=sortswift\.com",
+        "mx.google.com; dmarc=pass header.from=sortswift.com header.from=sortswift.com",
+        "mx.google.com; dmarc=pass reason=ok reason=ok header.from=sortswift.com",
+        "mx.google.com; dmarc=pass header.from=sortswift.com evil.foo=<<<",
+        "mx.google.com; dmarc=pass header.from=<sortswift.com>",
+        "mx.google.com; dmarc=pass header.from=<sortswift.com",
+        "mx.google.com; dmarc=pass header.from=sortswift.com>",
+        'mx.google.com; dmarc=pass header.from=" sortswift.com "',
+        "mx.google.com; spf=pass smtp.mailfrom=bad..local@mail.sortswift.com",
+        (
+            "mx.google.com; dkim=pass header.i=@mail.sortswift.com; "
+            "dmarc=fail header.from=sortswift.com header.from=attacker.example"
+        ),
+        "mx.google.com; dmarc=pass\nheader.from=sortswift.com",
+        "mx.google.com; dmarc=pass\vheader.from=sortswift.com",
+        "mx.google.com; dmarc=pass\u00a0header.from=sortswift.com",
+        "mx.google.com; dmarc=pass header.from=sortswift.com reason=late",
+        "mx.google.com; dkim=pass header.i=@a.sortswift.com header.d=b.sortswift.com",
+        "mx.google.com; dkim=pass header.i=@sortswift.com header.d=mail.sortswift.com",
+        (
+            "mx.google.com; dmarc=pass header.from=sortswift.com "
+            "smtp.mailfrom=no-reply@sortswift.com"
+        ),
+        "mx.google.com; dkim=pass header.i=@mail.sortswift.com policy.dmarc=none",
+        (
+            "mx.google.com; spf=pass smtp.mailfrom=no-reply@mail.sortswift.com "
+            "header.from=sortswift.com"
+        ),
+        (
+            "mx.google.com; dmarc=pass header.from=sortswift.com; "
+            "arc=pass header.i=@mail.sortswift.com"
+        ),
+        "mx.google.com 999; dmarc=pass header.from=sortswift.com",
+        "mx.google.com; dmarc=pass reason=foo=bar header.from=sortswift.com",
+        (
+            "mx.google.com; dkim=pass header.i=@mail.sortswift.com; "
+            "dmarc=bogus header.from=sortswift.com"
+        ),
+        (
+            "mx.google.com; dkim=pass header.i=@mail.sortswift.com; "
+            "spf=temp_error smtp.mailfrom=attacker@example.net"
+        ),
+        (
+            "mx.google.com; dkim=pass header.i=@mail.sortswift.com; "
+            "dmarc=softfail header.from=attacker.example"
+        ),
+        (
+            "mx.google.com; dmarc=pass header.from=sortswift.com "
+            "policy.published-domain=sortswift.com"
+        ),
+        "mx.google.com; dmarc=pass header.from=sortswift.com policy.dmarc=none",
+        "mx.google.com; dmarc=pass header.from=sortswift.com policy.spf=none",
+        (
+            "mx.google.com; dkim=pass header.i=@mail.sortswift.com "
+            "header.s=bad..selector"
+        ),
+        "mx.google.com; dkim=pass header.i=@mail.sortswift.com header.b=@@@",
+        "mx.google.com; dkim=pass header.i=@mail.sortswift.com header.b=AbC-",
+        "mx.google.com; dkim=pass header.i=@mail.sortswift.com header.b=AbC_",
+        "mx.google.com; dkim=pass header.i=@mail.sortswift.com header.b=---",
+        "mx.google.com; dkim=pass header.i=@mail.sortswift.com header.b=AbC+/==",
+        "mx.google.com; dkim=pass header.i=@mail.sortswift.com header.b=A=",
+        "mx.google.com; dkim=pass header.i=@mail.sortswift.com header.b=Ab=C",
+        "mx.google.com; dkim=pass header.i=@mail.sortswift.com header.b=AbC===",
+        "mx.google.com; dkim=pass header.i=@mail.sortswift.com header.b=" + ("A" * 1025),
+        (
+            "mx.google.com; dmarc=pass header.from=sortswift.com; "
+            "dkim=fail header.i=@a.sortswift.com header.d=b.sortswift.com"
+        ),
+    ],
+    ids=[
+        "comment_spliced_authserv",
+        "quoted_method",
+        "quoted_property_key_fragment",
+        "quoted_whole_property",
+        "backslash_spliced_property_key",
+        "backslash_spliced_domain",
+        "duplicate_identity_property",
+        "duplicate_reason",
+        "unknown_property",
+        "angle_wrapped_domain",
+        "leading_angle_domain",
+        "trailing_angle_domain",
+        "quoted_surrounding_whitespace",
+        "malformed_mailfrom_local_part",
+        "conflicting_identities_on_failed_method",
+        "line_feed_whitespace",
+        "vertical_tab_whitespace",
+        "nbsp_whitespace",
+        "late_reason",
+        "dkim_sibling_domains",
+        "dkim_reversed_binding",
+        "dmarc_cross_method_property",
+        "dkim_cross_method_property",
+        "spf_cross_method_property",
+        "unknown_method",
+        "authserv_version_999",
+        "bare_reason_tspecial",
+        "unknown_result",
+        "underscored_result",
+        "inapplicable_result",
+        "dmarc_published_domain_policy_property",
+        "dmarc_policy_dmarc_property",
+        "dmarc_policy_spf_property",
+        "dkim_malformed_selector",
+        "dkim_malformed_signature_token",
+        "dkim_urlsafe_hyphen_signature_token",
+        "dkim_urlsafe_underscore_signature_token",
+        "dkim_hyphen_only_signature_token",
+        "dkim_invalid_double_padding_length",
+        "dkim_invalid_single_padding_length",
+        "dkim_internal_padding",
+        "dkim_excess_padding",
+        "dkim_signature_token_over_length_bound",
+        "failed_dkim_sibling_domains",
+    ],
+)
+def test_sync_quarantines_fail_open_authentication_result_grammar(monkeypatch, authentication_result):
+    engine = make_engine()
+    gmail_module = _install_single_message_gmail_api(
+        monkeypatch,
+        authentication_results=[authentication_result],
+    )
+
+    with Session(engine) as session:
+        connection = GmailConnection(email_address="degencollectiblesllc@gmail.com", status="active")
+        session.add(connection)
+        session.commit()
+        session.refresh(connection)
+
+        result = gmail_module.sync_gmail_connection(session, connection.id or 0, limit=1)
+        receipt = session.exec(select(GmailReceipt)).one()
+        parsed = json.loads(receipt.parsed_json)
+        transactions = session.exec(select(Transaction)).all()
+
+    assert result["transactions"] == 0
+    assert receipt.status == "quarantined"
+    assert parsed["source_trusted"] is False
+    assert parsed["source_trust_reason"].startswith("auth_")
+    assert transactions == []
+
+
+@pytest.mark.parametrize(
+    ("authentication_result", "expected_reason"),
+    [
+        (
+            "mx.google.com; dmarc=pass (p=NONE sp=NONE dis=NONE) header.from=sortswift.com; "
+            "dkim=pass header.i=@mail.sortswift.com; "
+            "spf=pass smtp.mailfrom=no-reply@mail.sortswift.com",
+            "trusted_dmarc_aligned",
+        ),
+        (
+            "mx.google.com; dkim=pass header.i=@mail.sortswift.com; "
+            "spf=fail smtp.mailfrom=attacker@example.net",
+            "trusted_dkim_aligned",
+        ),
+        (
+            "mx.google.com; spf=pass smtp.mailfrom=no-reply@mail.sortswift.com",
+            "trusted_spf_aligned",
+        ),
+        (
+            "mx.google.com; dkim=pass header.i=@sub.mail.sortswift.com "
+            "header.d=mail.sortswift.com",
+            "trusted_dkim_aligned",
+        ),
+        (
+            "mx.google.com 1; dmarc=pass header.from=sortswift.com",
+            "trusted_dmarc_aligned",
+        ),
+        (
+            'mx.google.com; dmarc=pass reason="foo=bar; visible" '
+            "header.from=sortswift.com",
+            "trusted_dmarc_aligned",
+        ),
+        (
+            "mx.google.com; dkim=pass header.i=@mail.sortswift.com "
+            "header.s=selector.sub header.b=AbC+/w==",
+            "trusted_dkim_aligned",
+        ),
+        (
+            "mx.google.com; dkim=pass header.i=@mail.sortswift.com "
+            "header.b=AbC123xy",
+            "trusted_dkim_aligned",
+        ),
+        (
+            "mx.google.com; dmarc=pass header.from=sortswift.com; "
+            "dkim=fail header.i=@sub.mail.sortswift.com header.d=mail.sortswift.com",
+            "trusted_dmarc_aligned",
+        ),
+        (
+            "mx.google.com; arc=pass "
+            "(i=1 spf=pass spfdomain=mail.sortswift.com "
+            "dkim=pass dkdomain=mail.sortswift.com "
+            "dmarc=pass fromdomain=sortswift.com); "
+            "dmarc=pass header.from=sortswift.com",
+            "trusted_dmarc_aligned",
+        ),
+        (
+            "mx.google.com; "
+            "dkim=pass header.i=@mail.sortswift.com header.d=sortswift.com "
+            "header.s=selector1 header.b=AbC123xy; "
+            "dkim=pass header.i=@bulk.sortswift.com header.d=sortswift.com "
+            "header.s=selector2 header.b=Def456xy",
+            "trusted_dkim_aligned",
+        ),
+        (
+            "mx.google.com; "
+            "dkim=pass header.i=@mail.sortswift.com header.d=sortswift.com "
+            "header.s=selector1 header.b=AbC123xy; "
+            "dkim=fail header.i=@mailer.example.net header.d=example.net "
+            "header.s=selector2 header.b=Def456xy",
+            "trusted_dkim_aligned",
+        ),
+    ],
+)
+def test_sync_creates_one_transaction_for_google_aligned_sortswift_authentication(
+    monkeypatch,
+    authentication_result,
+    expected_reason,
+):
+    engine = make_engine()
+    gmail_module = _install_single_message_gmail_api(
+        monkeypatch,
+        authentication_results=[authentication_result],
+    )
+
+    with Session(engine) as session:
+        connection = GmailConnection(email_address="degencollectiblesllc@gmail.com", status="active")
+        session.add(connection)
+        session.commit()
+        session.refresh(connection)
+
+        first_result = gmail_module.sync_gmail_connection(session, connection.id or 0, limit=1)
+        second_result = gmail_module.sync_gmail_connection(session, connection.id or 0, limit=1)
+        receipts = session.exec(select(GmailReceipt)).all()
+        transactions = session.exec(select(Transaction)).all()
+        synthetic_messages = session.exec(select(DiscordMessage)).all()
+        parsed = json.loads(receipts[0].parsed_json)
+
+    assert first_result["transactions"] == 1
+    assert second_result["transactions"] == 1
+    assert len(receipts) == 1
+    assert receipts[0].status == "transaction_created"
+    assert parsed["source_trusted"] is True
+    assert parsed["source_trust_reason"] == expected_reason
+    assert len(transactions) == 1
+    assert transactions[0].is_deleted is False
+    assert len(synthetic_messages) == 1
+    assert synthetic_messages[0].is_deleted is False
+
+
+def test_source_authentication_from_header_limit_accepts_exact_and_rejects_over(monkeypatch):
+    suffix = " <no-reply@mail.sortswift.com>"
+    auth = ["mx.google.com; dmarc=pass header.from=sortswift.com"]
+    outcomes = []
+
+    for length in (1024, 1025):
+        sender = ("A" * (length - len(suffix))) + suffix
+        engine = make_engine()
+        gmail_module = _install_single_message_gmail_api(
+            monkeypatch,
+            authentication_results=auth,
+            sender=sender,
+        )
+        with Session(engine) as session:
+            connection = GmailConnection(email_address="degencollectiblesllc@gmail.com", status="active")
+            session.add(connection)
+            session.commit()
+            gmail_module.sync_gmail_connection(session, connection.id or 0, limit=1)
+            receipt = session.exec(select(GmailReceipt)).one()
+            outcomes.append((receipt.status, json.loads(receipt.parsed_json)["source_trust_reason"]))
+
+    assert outcomes == [
+        ("transaction_created", "trusted_dmarc_aligned"),
+        ("quarantined", "from_malformed"),
+    ]
+
+
+def test_source_authentication_per_value_limit_accepts_exact_and_rejects_over(monkeypatch):
+    outcomes = []
+
+    for size in (16 * 1024, (16 * 1024) + 1):
+        engine = make_engine()
+        gmail_module = _install_single_message_gmail_api(
+            monkeypatch,
+            authentication_results=[_sized_authentication_result("mx.google.com", size)],
+        )
+        with Session(engine) as session:
+            connection = GmailConnection(email_address="degencollectiblesllc@gmail.com", status="active")
+            session.add(connection)
+            session.commit()
+            gmail_module.sync_gmail_connection(session, connection.id or 0, limit=1)
+            receipt = session.exec(select(GmailReceipt)).one()
+            outcomes.append((receipt.status, json.loads(receipt.parsed_json)["source_trust_reason"]))
+
+    assert outcomes == [
+        ("transaction_created", "trusted_dmarc_aligned"),
+        ("quarantined", "auth_malformed"),
+    ]
+
+
+def test_source_authentication_header_count_limit_accepts_exact_and_rejects_over(monkeypatch):
+    outcomes = []
+
+    for count in (8, 9):
+        values = ["mx.google.com; dmarc=pass header.from=sortswift.com"]
+        values.extend(
+            f"mx{index}.example; dmarc=pass header.from=sortswift.com"
+            for index in range(1, count)
+        )
+        engine = make_engine()
+        gmail_module = _install_single_message_gmail_api(
+            monkeypatch,
+            authentication_results=values,
+        )
+        with Session(engine) as session:
+            connection = GmailConnection(email_address="degencollectiblesllc@gmail.com", status="active")
+            session.add(connection)
+            session.commit()
+            gmail_module.sync_gmail_connection(session, connection.id or 0, limit=1)
+            receipt = session.exec(select(GmailReceipt)).one()
+            outcomes.append(json.loads(receipt.parsed_json)["source_trust_reason"])
+
+    assert outcomes == ["auth_mixed_receivers", "auth_malformed"]
+
+
+def test_source_authentication_aggregate_limit_accepts_exact_and_rejects_over(monkeypatch):
+    outcomes = []
+    exact_sizes = [13108, 13108, 13107, 13107, 13106]
+
+    for extra_byte in (0, 1):
+        sizes = [*exact_sizes]
+        sizes[-1] += extra_byte
+        values = [
+            _sized_authentication_result(
+                "mx.google.com" if index == 0 else f"mx{index}.example",
+                size,
+            )
+            for index, size in enumerate(sizes)
+        ]
+        assert sum(len(value.encode("utf-8")) for value in values) == (64 * 1024) + extra_byte
+        engine = make_engine()
+        gmail_module = _install_single_message_gmail_api(
+            monkeypatch,
+            authentication_results=values,
+        )
+        with Session(engine) as session:
+            connection = GmailConnection(email_address="degencollectiblesllc@gmail.com", status="active")
+            session.add(connection)
+            session.commit()
+            gmail_module.sync_gmail_connection(session, connection.id or 0, limit=1)
+            receipt = session.exec(select(GmailReceipt)).one()
+            outcomes.append(json.loads(receipt.parsed_json)["source_trust_reason"])
+
+    assert outcomes == ["auth_mixed_receivers", "auth_malformed"]
+
+
+def test_authentication_result_segment_limit_accepts_exact_and_rejects_over():
+    import app.discord.gmail_authentication as gmail_module
+
+    def value(segment_count):
+        segments = ["dmarc=pass header.from=sortswift.com"] * segment_count
+        return "mx.google.com; " + "; ".join(segments)
+
+    assert len(gmail_module._authentication_result_parts(value(32))[1]) == 32
+    assert gmail_module._authentication_result_parts(value(33)) is None
+
+
+def test_authentication_result_token_limit_accepts_exact_and_rejects_over():
+    import app.discord.gmail_authentication as gmail_module
+
+    def segment(token_count):
+        return " ".join(f"property{index}=value" for index in range(token_count))
+
+    assert len(gmail_module._lex_authentication_key_values(segment(32))) == 32
+    assert gmail_module._lex_authentication_key_values(segment(33)) is None
+
+
+def test_authentication_result_comment_depth_accepts_exact_and_rejects_over():
+    import app.discord.gmail_authentication as gmail_module
+
+    def value(depth):
+        return ("(" * depth) + "comment" + (")" * depth)
+
+    assert gmail_module._replace_authentication_result_comments(value(8)) == " "
+    assert gmail_module._replace_authentication_result_comments(value(9)) is None
+
+
+def test_sync_quarantines_multiple_from_headers_even_when_first_header_and_authentication_pass(monkeypatch):
+    engine = make_engine()
+    gmail_module = _install_single_message_gmail_api(
+        monkeypatch,
+        authentication_results=["mx.google.com; dmarc=pass header.from=sortswift.com"],
+        additional_from_values=["Attacker <attacker@example.net>"],
+    )
+
+    with Session(engine) as session:
+        connection = GmailConnection(email_address="degencollectiblesllc@gmail.com", status="active")
+        session.add(connection)
+        session.commit()
+        session.refresh(connection)
+
+        result = gmail_module.sync_gmail_connection(session, connection.id or 0, limit=1)
+        receipt = session.exec(select(GmailReceipt)).one()
+        parsed = json.loads(receipt.parsed_json)
+
+    assert result["transactions"] == 0
+    assert receipt.status == "quarantined"
+    assert parsed["source_trust_reason"] == "from_malformed"
+
+
 def test_parse_sortswift_buylist_email_extracts_total_and_line_items():
     parsed = parse_sortswift_buylist_email(SORTSWIFT_HTML)
 
@@ -133,6 +782,170 @@ def test_parse_sortswift_buylist_email_extracts_total_and_line_items():
     assert parsed.line_items[1]["quantity"] == 2
 
 
+def test_upsert_requires_explicit_source_trust_decision():
+    signature = inspect.signature(upsert_gmail_receipt_from_message)
+
+    assert signature.parameters["source_trusted"].default is inspect.Parameter.empty
+    assert signature.parameters["source_trust_reason"].default is inspect.Parameter.empty
+
+
+@pytest.mark.parametrize(
+    ("parsed_json", "expected"),
+    [
+        (
+            json.dumps(
+                {
+                    "source_trusted": True,
+                    "source_trust_reason": "trusted_dmarc_aligned",
+                }
+            ),
+            (True, True, "trusted_dmarc_aligned"),
+        ),
+        (
+            json.dumps(
+                {
+                    "source_trusted": False,
+                    "source_trust_reason": "auth_no_aligned_pass",
+                }
+            ),
+            (True, False, "auth_no_aligned_pass"),
+        ),
+        ("{}", (False, False, "source_not_evaluated")),
+        (json.dumps({"source_trusted": False}), (False, False, "source_not_evaluated")),
+        (
+            json.dumps(
+                {
+                    "source_trusted": False,
+                    "source_trust_reason": "source_not_evaluated",
+                }
+            ),
+            (False, False, "source_not_evaluated"),
+        ),
+        ("not-json", (False, False, "source_not_evaluated")),
+        (
+            json.dumps(
+                {
+                    "source_trusted": False,
+                    "source_trust_reason": "untrusted_explicit",
+                }
+            ),
+            (False, False, "source_not_evaluated"),
+        ),
+    ],
+)
+def test_persisted_source_trust_decision_is_tri_state(parsed_json, expected):
+    decision = persisted_source_trust_decision(
+        "SortSwift Buylist <no-reply@mail.sortswift.com>",
+        parsed_json,
+    )
+
+    assert (decision.verified, decision.trusted, decision.reason) == expected
+
+
+def test_upsert_persists_source_body_truncation_flag():
+    engine = make_engine()
+    long_body = SORTSWIFT_HTML + ("x" * (GMAIL_RAW_SOURCE_STORAGE_LIMIT + 1))
+
+    with Session(engine) as session:
+        complete = upsert_gmail_receipt_from_message(
+            session,
+            gmail_message_id="gmail-source-body-complete",
+            thread_id="thread-source-body-complete",
+            sender="SortSwift Buylist <no-reply@mail.sortswift.com>",
+            subject="Buylist Confirmation - Degen Collectibles",
+            received_at=datetime(2026, 5, 19, 19, 33, tzinfo=timezone.utc),
+            html_body=SORTSWIFT_HTML,
+            source_trusted=True,
+            source_trust_reason="trusted_dmarc_aligned",
+        )
+        truncated = upsert_gmail_receipt_from_message(
+            session,
+            gmail_message_id="gmail-source-body-truncated",
+            thread_id="thread-source-body-truncated",
+            sender="SortSwift Buylist <no-reply@mail.sortswift.com>",
+            subject="Buylist Confirmation - Degen Collectibles",
+            received_at=datetime(2026, 5, 19, 19, 34, tzinfo=timezone.utc),
+            html_body=long_body,
+            source_trusted=True,
+            source_trust_reason="trusted_dmarc_aligned",
+        )
+        session.commit()
+        complete_parsed = json.loads(complete.parsed_json)
+        truncated_parsed = json.loads(truncated.parsed_json)
+        complete_raw_length = len(complete.raw_text)
+        truncated_raw_length = len(truncated.raw_text)
+
+    assert complete_parsed["source_body_truncated"] is False
+    assert truncated_parsed["source_body_truncated"] is True
+    assert complete_raw_length < GMAIL_RAW_SOURCE_STORAGE_LIMIT
+    assert truncated_raw_length == GMAIL_RAW_SOURCE_STORAGE_LIMIT
+
+
+def test_upsert_sortswift_body_from_attacker_is_quarantined_without_financial_rows():
+    engine = make_engine()
+
+    with Session(engine) as session:
+        receipt = upsert_gmail_receipt_from_message(
+            session,
+            gmail_message_id="gmail-attacker-1",
+            thread_id="thread-attacker-1",
+            sender="Attacker <attacker@example.net>",
+            subject="Buylist Confirmation - Degen Collectibles",
+            received_at=datetime(2026, 5, 19, 19, 33, tzinfo=timezone.utc),
+            html_body=SORTSWIFT_HTML,
+            snippet="Buylist Confirmation - Degen Collectibles",
+            source_trusted=False,
+            source_trust_reason="source_not_evaluated",
+        )
+        session.commit()
+
+        transactions = session.exec(select(Transaction)).all()
+        synthetic_messages = session.exec(select(DiscordMessage)).all()
+        receipt_status = receipt.status
+        receipt_transaction_id = receipt.transaction_id
+        receipt_parsed_json = receipt.parsed_json
+
+    assert receipt_status == "quarantined"
+    assert receipt_transaction_id is None
+    assert json.loads(receipt_parsed_json)["source_trust_reason"] == "source_not_evaluated"
+    assert transactions == []
+    assert synthetic_messages == []
+
+
+@pytest.mark.parametrize(
+    "sender",
+    [
+        "Attacker <attacker@example.net>",
+        "SortSwift <no-reply@mail.sortswift.com>, Attacker <attacker@example.net>",
+        "SortSwift <no-reply@mail.sortswift.com.attacker.example>",
+        "SortSwift <no-reply@mail.sortswift.com>,",
+        "SortSwift <no-reply@mail.sortswift.com>;",
+        "SortSwift <no-reply@mail.sortswift.com>:",
+    ],
+)
+def test_explicit_trust_does_not_bypass_exact_single_sortswift_mailbox(sender):
+    engine = make_engine()
+
+    with Session(engine) as session:
+        receipt = upsert_gmail_receipt_from_message(
+            session,
+            gmail_message_id=f"gmail-strict-from-{abs(hash(sender))}",
+            thread_id="thread-strict-from",
+            sender=sender,
+            subject="Buylist Confirmation - Degen Collectibles",
+            received_at=datetime(2026, 5, 19, 19, 33, tzinfo=timezone.utc),
+            html_body=SORTSWIFT_HTML,
+            source_trusted=True,
+            source_trust_reason="trusted_explicit",
+        )
+        session.commit()
+        receipt_status = receipt.status
+        transaction_count = len(session.exec(select(Transaction)).all())
+
+    assert receipt_status == "quarantined"
+    assert transaction_count == 0
+
+
 def test_upsert_sortswift_email_creates_deduped_gmail_transaction():
     engine = make_engine()
     received_at = datetime(2026, 5, 19, 19, 33, tzinfo=timezone.utc)
@@ -147,6 +960,8 @@ def test_upsert_sortswift_email_creates_deduped_gmail_transaction():
             received_at=received_at,
             html_body=SORTSWIFT_HTML,
             snippet="Buylist Confirmation - Degen Collectibles",
+            source_trusted=True,
+            source_trust_reason="trusted_explicit",
         )
         second = upsert_gmail_receipt_from_message(
             session,
@@ -157,6 +972,8 @@ def test_upsert_sortswift_email_creates_deduped_gmail_transaction():
             received_at=received_at,
             html_body=SORTSWIFT_HTML,
             snippet="Buylist Confirmation - Degen Collectibles",
+            source_trusted=True,
+            source_trust_reason="trusted_explicit",
         )
         session.commit()
 
@@ -180,6 +997,222 @@ def test_upsert_sortswift_email_creates_deduped_gmail_transaction():
     assert tx.needs_review is True
 
 
+@pytest.mark.parametrize("clear_receipt_link", [False, True])
+def test_reprocessing_existing_sortswift_transaction_with_untrusted_evidence_removes_it_from_reports(
+    clear_receipt_link,
+):
+    engine = make_engine()
+    received_at = datetime(2026, 5, 19, 19, 33, tzinfo=timezone.utc)
+
+    with Session(engine) as session:
+        receipt = upsert_gmail_receipt_from_message(
+            session,
+            gmail_message_id="gmail-reprocess-untrusted-1",
+            thread_id="thread-reprocess-untrusted-1",
+            sender="SortSwift Buylist <no-reply@mail.sortswift.com>",
+            subject="Buylist Confirmation - Degen Collectibles",
+            received_at=received_at,
+            html_body=SORTSWIFT_HTML,
+            source_trusted=True,
+            source_trust_reason="trusted_explicit",
+        )
+        session.commit()
+        assert len(get_transactions(session)) == 1
+        if clear_receipt_link:
+            receipt.transaction_id = None
+            session.add(receipt)
+            session.commit()
+
+        for _ in range(2):
+            receipt = upsert_gmail_receipt_from_message(
+                session,
+                gmail_message_id="gmail-reprocess-untrusted-1",
+                thread_id="thread-reprocess-untrusted-1",
+                sender="SortSwift Buylist <no-reply@mail.sortswift.com>",
+                subject="Buylist Confirmation - Degen Collectibles",
+                received_at=received_at,
+                html_body=SORTSWIFT_HTML,
+                source_trusted=False,
+                source_trust_reason="auth_no_aligned_pass",
+            )
+            session.commit()
+
+        transaction = session.exec(select(Transaction)).one()
+        synthetic_message = session.exec(select(DiscordMessage)).one()
+        report_transactions = get_transactions(session)
+        transaction_count = len(session.exec(select(Transaction)).all())
+        synthetic_message_count = len(session.exec(select(DiscordMessage)).all())
+        receipt_status = receipt.status
+        receipt_transaction_id = receipt.transaction_id
+
+    assert receipt_status == "quarantined"
+    assert receipt_transaction_id is None
+    assert transaction.is_deleted is True
+    assert transaction.needs_review is True
+    assert synthetic_message.is_deleted is True
+    assert synthetic_message.parse_status == "ignored"
+    assert report_transactions == []
+    assert transaction_count == 1
+    assert synthetic_message_count == 1
+
+
+def test_untrusted_reprocess_ignores_wrong_receipt_transaction_link():
+    engine = make_engine()
+    received_at = datetime(2026, 5, 19, 19, 33, tzinfo=timezone.utc)
+
+    with Session(engine) as session:
+        first = upsert_gmail_receipt_from_message(
+            session,
+            gmail_message_id="gmail-safe-invalidate-first",
+            thread_id="thread-safe-invalidate-first",
+            sender="SortSwift Buylist <no-reply@mail.sortswift.com>",
+            subject="Buylist Confirmation - Degen Collectibles",
+            received_at=received_at,
+            html_body=SORTSWIFT_HTML,
+            source_trusted=True,
+            source_trust_reason="trusted_dmarc_aligned",
+        )
+        second = upsert_gmail_receipt_from_message(
+            session,
+            gmail_message_id="gmail-safe-invalidate-second",
+            thread_id="thread-safe-invalidate-second",
+            sender="SortSwift Buylist <no-reply@mail.sortswift.com>",
+            subject="Buylist Confirmation - Degen Collectibles",
+            received_at=received_at,
+            html_body=SORTSWIFT_HTML,
+            source_trusted=True,
+            source_trust_reason="trusted_dmarc_aligned",
+        )
+        session.commit()
+        first_transaction_id = first.transaction_id
+        second_transaction_id = second.transaction_id
+        first.transaction_id = second_transaction_id
+        session.add(first)
+        session.commit()
+
+        reparsed = upsert_gmail_receipt_from_message(
+            session,
+            gmail_message_id=first.gmail_message_id,
+            thread_id=first.thread_id,
+            sender=first.sender,
+            subject=first.subject,
+            received_at=first.received_at,
+            html_body=first.raw_text,
+            snippet=first.snippet,
+            source_trusted=False,
+            source_trust_reason="auth_no_aligned_pass",
+        )
+        session.commit()
+        first_transaction = session.get(Transaction, first_transaction_id)
+        second_transaction = session.get(Transaction, second_transaction_id)
+        reparsed_transaction_id = reparsed.transaction_id
+
+    assert reparsed_transaction_id is None
+    assert first_transaction is not None and first_transaction.is_deleted is True
+    assert second_transaction is not None and second_transaction.is_deleted is False
+
+
+def test_untrusted_reprocess_clears_transaction_children_and_reconciliation_matches():
+    engine = make_engine()
+    received_at = datetime(2026, 5, 19, 19, 33, tzinfo=timezone.utc)
+
+    with Session(engine) as session:
+        receipt = upsert_gmail_receipt_from_message(
+            session,
+            gmail_message_id="gmail-cleanup-dependents",
+            thread_id="thread-cleanup-dependents",
+            sender="SortSwift Buylist <no-reply@mail.sortswift.com>",
+            subject="Buylist Confirmation - Degen Collectibles",
+            received_at=received_at,
+            html_body=SORTSWIFT_HTML,
+            source_trusted=True,
+            source_trust_reason="trusted_dmarc_aligned",
+        )
+        session.flush()
+        transaction_id = receipt.transaction_id or 0
+        bookkeeping_import = BookkeepingImport(show_label="Gmail cleanup")
+        bank_import = BankStatementImport(
+            label="Gmail cleanup",
+            account_label="Chase",
+            account_type="checking",
+        )
+        session.add(bookkeeping_import)
+        session.add(bank_import)
+        session.flush()
+        bookkeeping_entry = BookkeepingEntry(
+            import_id=bookkeeping_import.id or 0,
+            row_index=1,
+            matched_transaction_id=transaction_id,
+            match_status="matched_strong",
+        )
+        bank_transaction = BankTransaction(
+            import_id=bank_import.id or 0,
+            row_index=1,
+            account_label="Chase",
+            account_type="checking",
+            description="SortSwift payout",
+            amount=-82.87,
+            classification="logged_in_discord_strong",
+            confidence="high",
+            matched_transaction_id=transaction_id,
+            matched_source_message_id=1,
+            matched_platform="gmail",
+            match_reason="Original match",
+        )
+        session.add(bookkeeping_entry)
+        session.add(bank_transaction)
+        session.flush()
+        evidence_link = GmailEvidenceLink(
+            gmail_receipt_id=receipt.id or 0,
+            bank_transaction_id=bank_transaction.id,
+            transaction_id=transaction_id,
+        )
+        session.add(evidence_link)
+        session.commit()
+        bookkeeping_entry_id = bookkeeping_entry.id
+        bank_transaction_id = bank_transaction.id
+        evidence_link_id = evidence_link.id
+
+        reparsed = upsert_gmail_receipt_from_message(
+            session,
+            gmail_message_id=receipt.gmail_message_id,
+            thread_id=receipt.thread_id,
+            sender=receipt.sender,
+            subject=receipt.subject,
+            received_at=receipt.received_at,
+            html_body=receipt.raw_text,
+            snippet=receipt.snippet,
+            source_trusted=False,
+            source_trust_reason="auth_no_aligned_pass",
+        )
+        session.commit()
+        transaction = session.get(Transaction, transaction_id)
+        remaining_items = session.exec(
+            select(TransactionItem).where(TransactionItem.transaction_id == transaction_id)
+        ).all()
+        bookkeeping_entry = session.get(BookkeepingEntry, bookkeeping_entry_id)
+        bank_transaction = session.get(BankTransaction, bank_transaction_id)
+        evidence_link = session.get(GmailEvidenceLink, evidence_link_id)
+        reparsed_transaction_id = reparsed.transaction_id
+
+    assert reparsed_transaction_id is None
+    assert transaction is not None and transaction.is_deleted is True
+    assert remaining_items == []
+    assert bookkeeping_entry is not None
+    assert bookkeeping_entry.matched_transaction_id is None
+    assert bookkeeping_entry.match_status == "unmatched"
+    assert bank_transaction is not None
+    assert bank_transaction.matched_transaction_id is None
+    assert bank_transaction.matched_source_message_id is None
+    assert bank_transaction.matched_platform is None
+    assert bank_transaction.classification == "needs_review"
+    assert bank_transaction.confidence == "low"
+    assert "Gmail SortSwift" in bank_transaction.match_reason
+    assert evidence_link is not None
+    assert evidence_link.transaction_id is None
+    assert evidence_link.bank_transaction_id == bank_transaction_id
+
+
 def test_gmail_receipt_views_can_filter_sortswift_transactions_needing_review():
     engine = make_engine()
     received_at = datetime(2026, 5, 19, 19, 33, tzinfo=timezone.utc)
@@ -194,6 +1227,8 @@ def test_gmail_receipt_views_can_filter_sortswift_transactions_needing_review():
             received_at=received_at,
             html_body=SORTSWIFT_HTML,
             snippet="Buylist Confirmation - Degen Collectibles",
+            source_trusted=True,
+            source_trust_reason="trusted_explicit",
         )
         invoice = GmailReceipt(
             gmail_message_id="gmail-invoice",
@@ -273,6 +1308,8 @@ def test_upsert_gmail_receipt_handles_concurrent_duplicate_insert(tmp_path):
                 received_at=datetime(2026, 5, 23, 16, 24, 16, tzinfo=timezone.utc),
                 html_body="<html><body>Recognize and Avoid Utility Scams</body></html>",
                 snippet="Recognize and Avoid Utility Scams",
+                source_trusted=False,
+                source_trust_reason="source_not_evaluated",
             )
             session.commit()
             receipts = session.exec(select(GmailReceipt)).all()
@@ -299,6 +1336,8 @@ def test_generic_gmail_receipt_links_to_bank_row_as_evidence():
             received_at=datetime(2026, 5, 20, 15, 0, tzinfo=timezone.utc),
             html_body="<html><body>Receipt total USD $18.44</body></html>",
             snippet="Receipt total USD $18.44",
+            source_trusted=False,
+            source_trust_reason="source_not_evaluated",
         )
         bank_row = BankTransaction(
             import_id=1,

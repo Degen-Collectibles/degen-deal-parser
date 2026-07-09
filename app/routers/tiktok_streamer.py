@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import difflib
 import hashlib
+import html
 import json
 import logging
 import re
@@ -3226,7 +3227,8 @@ def tiktok_streamer_config(request: Request, session: Session = Depends(get_sess
     else:
         auto_end_str = ""
 
-    html = f"""<!DOCTYPE html>
+    escaped_auto_title = html.escape(auto_title, quote=True)
+    page_html = f"""<!DOCTYPE html>
 <html><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Stream Config</title>
@@ -3272,7 +3274,7 @@ def tiktok_streamer_config(request: Request, session: Session = Depends(get_sess
   <h1>Stream Config <span class="source-badge {'source-auto' if source == 'auto' else 'source-manual'}">{source}</span></h1>
   <p class="subtitle">Set the date range for the current stream. GMV will be calculated from orders in this window.</p>
   {'<div class="auto-card" id="auto-card"><h3>Latest Detected Stream</h3>' +
-   '<div class="auto-row"><strong>' + auto_title + '</strong></div>' +
+   '<div class="auto-row"><strong>' + escaped_auto_title + '</strong></div>' +
    '<div class="auto-row">Start: <strong>' + auto_start_str + '</strong></div>' +
    '<div class="auto-row">End: <strong>' + (auto_end_str or 'ongoing') + '</strong></div>' +
    '<div class="auto-row">TikTok GMV: <strong style="color:#22c55e;">$' + f'{auto_gmv:,.2f}' + '</strong></div>' +
@@ -3374,7 +3376,7 @@ function saveGoalSettings() {{
 }}
 </script>
 </body></html>"""
-    return HTMLResponse(content=html)
+    return HTMLResponse(content=page_html)
 
 @router.post("/tiktok/streamer/config")
 def tiktok_streamer_config_save(request: Request, body: dict = None):

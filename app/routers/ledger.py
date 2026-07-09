@@ -13,7 +13,7 @@ import logging
 from io import BytesIO, StringIO
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, Form, Query, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -22,7 +22,19 @@ from sqlmodel import Session
 from ..csrf import CSRFProtectedRoute
 from ..db import get_session
 from ..discord.corrections import save_review_correction, snapshot_message_parse
+from ..discord.transactions import (
+    SourceRefreshRequiredError,
+    StaleSourceRevisionError,
+    require_source_group_mutation_allowed,
+    sync_transaction_from_message,
+)
 from ..financial_audit import record_financial_audit
+from ..financial_values import (
+    InvalidFinancialValueError,
+    parse_optional_money,
+    validate_optional_confidence,
+    validate_optional_money,
+)
 from ..ledger import (
     LEDGER_ACTION_REASON_LABELS,
     LEDGER_AGENT_MAX_LIMIT,
@@ -338,12 +350,64 @@ def ledger_transaction_edit_form(
             ),
             status_code=303,
         )
-
     try:
-        parsed_amount = parse_optional_float(amount) if amount is not None else row.amount
-    except ValueError:
+        parsed_amount = (
+            parse_optional_money(amount, field_name="amount")
+            if amount is not None
+            else validate_optional_money(row.amount, field_name="amount")
+        )
+        normalized_entry_kind = (
+            (entry_kind if entry_kind is not None else row.entry_kind) or "unknown"
+        ).strip().lower() or "unknown"
+        normalized_amount = round(abs(parsed_amount or 0.0), 2)
+        normalized_payment_method = (
+            (payment_method if payment_method is not None else row.payment_method) or "unknown"
+        ).strip().lower() or "unknown"
+        normalized_expense_category = (
+            (expense_category if expense_category is not None else row.expense_category)
+            or "uncategorized"
+        ).strip() or "uncategorized"
+        if normalized_entry_kind == "trade" and amount is None:
+            retained_money_in = validate_optional_money(
+                row.money_in,
+                field_name="money in",
+            )
+            retained_money_out = validate_optional_money(
+                row.money_out,
+                field_name="money out",
+            )
+            money_in = round(retained_money_in or 0.0, 2)
+            money_out = round(retained_money_out or 0.0, 2)
+        else:
+            money_in, money_out = _money_for_ledger_entry(
+                normalized_entry_kind,
+                normalized_amount,
+            )
+        money_in = validate_optional_money(money_in, field_name="money in") or 0.0
+        money_out = validate_optional_money(money_out, field_name="money out") or 0.0
+        try:
+            existing_confidence = validate_optional_confidence(
+                row.confidence,
+                field_name="confidence",
+            )
+        except InvalidFinancialValueError:
+            # This route has no confidence input.  A valid manual edit is the
+            # recovery boundary for legacy corrupt confidence values.
+            existing_confidence = None
+        proposed_confidence = max(existing_confidence or 0.0, 0.99)
+        proposed_confidence = validate_optional_confidence(
+            proposed_confidence,
+            field_name="confidence",
+        )
+    except InvalidFinancialValueError:
         if _wants_json(request):
-            return JSONResponse({"ok": False, "error": "Amount must be a valid number."}, status_code=400)
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "Amount and financial values must be valid finite numbers within supported ranges.",
+                },
+                status_code=400,
+            )
         return RedirectResponse(
             _ledger_redirect_url(
                 account=selected_account,
@@ -357,24 +421,17 @@ def ledger_transaction_edit_form(
                 sort=selected_sort,
                 direction=selected_direction,
                 include_cash=selected_include_cash,
-                error="Amount must be a valid number.",
+                error="Amount and financial values must be valid finite numbers within supported ranges.",
             ),
             status_code=303,
         )
 
-    normalized_entry_kind = ((entry_kind if entry_kind is not None else row.entry_kind) or "unknown").strip().lower() or "unknown"
-    normalized_amount = round(abs(float(parsed_amount or 0.0)), 2)
-    normalized_payment_method = (
-        (payment_method if payment_method is not None else row.payment_method) or "unknown"
-    ).strip().lower() or "unknown"
-    normalized_expense_category = (
-        (expense_category if expense_category is not None else row.expense_category) or "uncategorized"
-    ).strip() or "uncategorized"
-    if normalized_entry_kind == "trade" and amount is None:
-        money_in = round(float(row.money_in or 0.0), 2)
-        money_out = round(float(row.money_out or 0.0), 2)
-    else:
-        money_in, money_out = _money_for_ledger_entry(normalized_entry_kind, normalized_amount)
+    try:
+        require_source_group_mutation_allowed(session, row)
+    except (SourceRefreshRequiredError, StaleSourceRevisionError) as exc:
+        session.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     incomplete = (
         parsed_amount is None
         or normalized_entry_kind == "unknown"
@@ -392,7 +449,7 @@ def ledger_transaction_edit_form(
     row.money_in = money_in
     row.money_out = money_out
     row.notes = (notes or "").strip() or row.notes
-    row.confidence = max(float(row.confidence or 0.0), 0.99)
+    row.confidence = proposed_confidence
     row.parse_status = PARSE_REVIEW_REQUIRED if incomplete else PARSE_PARSED
     row.needs_review = incomplete
     if incomplete:
@@ -405,7 +462,11 @@ def ledger_transaction_edit_form(
 
     session.add(row)
     save_review_correction(session, row, parsed_before=parsed_before)
-    sync_transaction_from_message(session, row)
+    try:
+        sync_transaction_from_message(session, row)
+    except (SourceRefreshRequiredError, StaleSourceRevisionError) as exc:
+        session.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     parsed_after = snapshot_message_parse(row)
     if parsed_before != parsed_after:
         user = getattr(request.state, "current_user", None)
@@ -963,7 +1024,19 @@ def ledger_rule_apply_form(
         direction=selected_direction,
         include_cash=selected_include_cash,
     )
-    result = apply_ledger_rule(session, rule, filters=filters, applied_by=current_user_label(request))
+    try:
+        result = apply_ledger_rule(
+            session,
+            rule,
+            filters=filters,
+            applied_by=current_user_label(request),
+        )
+        success = f"Applied {rule.name} to {result['updated_count']} row(s)"
+        error = ""
+    except ValueError as exc:
+        session.rollback()
+        success = ""
+        error = str(exc)
     return RedirectResponse(
         url=_ledger_redirect_url(
             account=selected_account,
@@ -977,7 +1050,8 @@ def ledger_rule_apply_form(
             sort=selected_sort,
             direction=selected_direction,
             include_cash=selected_include_cash,
-            success=f"Applied {rule.name} to {result['updated_count']} row(s)",
+            success=success,
+            error=error,
         ),
         status_code=303,
     )

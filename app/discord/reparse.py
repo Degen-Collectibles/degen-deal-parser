@@ -10,7 +10,12 @@ from ..models import DiscordMessage
 from .reparse_runs import safe_create_reparse_run, safe_finalize_reparse_run_queue
 from ..reporting import parse_report_datetime
 from .transactions import sync_transaction_from_message
-from .worker import process_once, queue_reparse_range, reset_for_reprocess
+from .worker import (
+    RangeReparseSelectionLimitError,
+    process_once,
+    queue_reparse_range,
+    reset_for_reprocess,
+)
 
 
 def reparse_message_rows(
@@ -19,15 +24,18 @@ def reparse_message_rows(
     *,
     reason: str,
     reset_attempts: bool = True,
+    commit: bool = True,
 ) -> int:
     updated = 0
     for row in rows:
-        reset_for_reprocess(row, reason=reason, reset_attempts=reset_attempts)
+        if not reset_for_reprocess(row, reason=reason, reset_attempts=reset_attempts):
+            session.add(row)
+            continue
         row.active_reparse_run_id = None
         session.add(row)
         sync_transaction_from_message(session, row)
         updated += 1
-    if updated:
+    if updated and commit:
         session.commit()
     return updated
 
@@ -97,17 +105,31 @@ def main() -> None:
         requested_statuses=include_statuses,
     )
 
-    with managed_session() as session:
-        result = queue_reparse_range(
-            session,
-            start=start,
-            end=end,
-            channel_id=args.channel_id or None,
-            include_statuses=include_statuses,
-            include_reviewed=args.include_reviewed,
-            reason="cli range reparse",
-            reparse_run_id=run_id,
+    try:
+        with managed_session() as session:
+            result = queue_reparse_range(
+                session,
+                start=start,
+                end=end,
+                channel_id=args.channel_id or None,
+                include_statuses=include_statuses,
+                include_reviewed=args.include_reviewed,
+                reason="cli range reparse",
+                reparse_run_id=run_id,
+            )
+    except RangeReparseSelectionLimitError as exc:
+        safe_finalize_reparse_run_queue(
+            run_id=run_id,
+            selected_count=0,
+            queued_count=0,
+            already_queued_count=0,
+            skipped_reviewed_count=0,
+            first_message_id=None,
+            last_message_id=None,
+            first_message_created_at=None,
+            last_message_created_at=None,
         )
+        parser.error(str(exc))
     safe_finalize_reparse_run_queue(
         run_id=run_id,
         selected_count=result["matched"],
@@ -121,9 +143,20 @@ def main() -> None:
     )
 
     print(
-        "Queued {queued} of {matched} matched rows for range reparse (run_id={run_id}).".format(
+        (
+            "Queued {queued} of {matched} matched rows for range reparse "
+            "(already_queued={already_queued}, skipped_reviewed={skipped_reviewed}, "
+            "skipped_quarantined={skipped_quarantined}, "
+            "skipped_integrity={skipped_integrity}, skipped_changed={skipped_changed}, "
+            "run_id={run_id})."
+        ).format(
             queued=result["queued"],
             matched=result["matched"],
+            already_queued=result["already_queued"],
+            skipped_reviewed=result["skipped_reviewed"],
+            skipped_quarantined=result["skipped_quarantined"],
+            skipped_integrity=result["skipped_integrity"],
+            skipped_changed=result["skipped_changed"],
             run_id=run_id or "unavailable",
         )
     )

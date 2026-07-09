@@ -16,9 +16,13 @@ from .discord_ingest import (
     seed_channels_from_env,
 )
 from .ops_log import write_operations_log
-from ..runtime_logging import setup_runtime_file_logging
+from ..runtime_logging import setup_runtime_file_logging, structured_log_line
 from ..runtime_monitor import runtime_heartbeat_loop
-from ..tiktok.tiktok_auth_refresh import refresh_tiktok_auth_if_needed
+from ..tiktok.tiktok_auth_refresh import (
+    refresh_tiktok_auth_if_needed,
+    refresh_tiktok_creator_token_if_needed,
+)
+from ..tiktok.tiktok_ingest import TIKTOK_SHOP_TOKEN_REFRESH_PATH, TIKTOK_TOKEN_REFRESH_PATH
 from .worker import (
     parser_loop,
     periodic_stitch_audit_loop,
@@ -38,6 +42,42 @@ def _resolve_tiktok_base_url() -> str:
     return "https://open-api.tiktokglobalshop.com"
 
 
+def _log_tiktok_token_refresh_failure(
+    exc: Exception,
+    *,
+    error: str,
+    method: str,
+    endpoint_host: str,
+    endpoint_path: str,
+) -> None:
+    response = getattr(exc, "response", None)
+    raw_status = getattr(response, "status_code", None)
+    if not isinstance(raw_status, int):
+        raw_status = getattr(exc, "status_code", None)
+    status_code = raw_status if isinstance(raw_status, int) and 100 <= raw_status <= 599 else None
+    raw_code = getattr(exc, "tiktok_error_code", None)
+    if isinstance(raw_code, int):
+        error_code = str(raw_code) if 1 <= len(str(raw_code)) <= 12 else None
+    elif isinstance(raw_code, str) and raw_code.isdigit() and 1 <= len(raw_code) <= 12:
+        error_code = raw_code
+    else:
+        error_code = None
+    print(
+        structured_log_line(
+            runtime=settings.runtime_name,
+            action="tiktok.auth.refresh_failed",
+            success=False,
+            error=error,
+            error_type=type(exc).__name__,
+            error_code=error_code,
+            method=method,
+            status_code=status_code,
+            endpoint_host=endpoint_host,
+            endpoint_path=endpoint_path,
+        )
+    )
+
+
 async def periodic_tiktok_token_refresh_loop(stop_event: asyncio.Event) -> None:
     interval = max(settings.tiktok_token_refresh_interval_minutes, 1.0)
     while not stop_event.is_set():
@@ -54,7 +94,28 @@ async def periodic_tiktok_token_refresh_loop(stop_event: asyncio.Event) -> None:
                     update_state=None,
                 )
         except Exception as exc:
-            print(f"[worker] tiktok-token-refresh error: {exc}")
+            _log_tiktok_token_refresh_failure(
+                exc,
+                error="TikTok token refresh failed",
+                method="GET",
+                endpoint_host="auth.tiktok-shops.com",
+                endpoint_path=TIKTOK_SHOP_TOKEN_REFRESH_PATH,
+            )
+        try:
+            with managed_session() as session:
+                await asyncio.to_thread(
+                    refresh_tiktok_creator_token_if_needed,
+                    session,
+                    runtime_name=settings.runtime_name,
+                )
+        except Exception as exc:
+            _log_tiktok_token_refresh_failure(
+                exc,
+                error="TikTok Creator token refresh failed",
+                method="POST",
+                endpoint_host="open.tiktokapis.com",
+                endpoint_path=TIKTOK_TOKEN_REFRESH_PATH,
+            )
 
 
 def worker_runtime_details() -> dict:

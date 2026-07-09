@@ -293,6 +293,122 @@ class TableExpenseCategoryTests(unittest.TestCase):
         self.assertTrue(save_review_correction.called)
         self.assertTrue(sync_transaction_from_message.called)
 
+    def test_review_table_edit_rejects_unsafe_financial_values_before_source_guard_or_mutation(self) -> None:
+        invalid_cases = [
+            ("amount", value)
+            for value in ("nan", "inf", "-inf", "1e309", "1000000000.01")
+        ] + [
+            ("confidence", value)
+            for value in ("nan", "inf", "-inf", "1e309", "-0.01", "1.01")
+        ]
+
+        for index, (field_name, invalid_value) in enumerate(invalid_cases, start=1):
+            with self.subTest(field_name=field_name, invalid_value=invalid_value), Session(
+                self.engine
+            ) as session, patch(
+                "app.routers.channels_api.require_role_response", return_value=None
+            ), patch(
+                "app.routers.channels_api.require_source_group_mutation_allowed"
+            ) as source_guard, patch(
+                "app.routers.channels_api.save_review_correction"
+            ) as save_review_correction, patch(
+                "app.routers.channels_api.sync_transaction_from_message"
+            ) as sync_transaction, patch(
+                "app.routers.channels_api.record_financial_audit"
+            ) as record_financial_audit:
+                row = DiscordMessage(
+                    discord_message_id=f"unsafe-edit-{index}",
+                    channel_id="chan-1",
+                    channel_name="deals",
+                    author_name="tester",
+                    content="sold slab 25 cash",
+                    created_at=utcnow(),
+                    parse_status=PARSE_PARSED,
+                    deal_type="sell",
+                    amount=25.0,
+                    payment_method="cash",
+                    entry_kind="sale",
+                    money_in=25.0,
+                    money_out=0.0,
+                    expense_category="inventory",
+                    confidence=0.75,
+                )
+                session.add(row)
+                session.commit()
+                row_id = row.id
+                before = (
+                    row.deal_type,
+                    row.amount,
+                    row.payment_method,
+                    row.entry_kind,
+                    row.money_in,
+                    row.money_out,
+                    row.expense_category,
+                    row.confidence,
+                )
+
+                request = make_request(f"/messages/{row_id}/edit-form")
+                request.state.current_user = SimpleNamespace(
+                    id=42,
+                    username="reviewer",
+                    display_name="Reviewer",
+                )
+                response = edit_message_form(
+                    request,
+                    message_id=row_id,
+                    return_path="/table",
+                    status=None,
+                    channel_id=None,
+                    filter_expense_category=None,
+                    after=None,
+                    before=None,
+                    sort_by="time",
+                    sort_dir="desc",
+                    page=1,
+                    limit=100,
+                    parse_status=PARSE_PARSED,
+                    needs_review=None,
+                    deal_type="sell",
+                    amount=invalid_value if field_name == "amount" else "25",
+                    payment_method="zelle",
+                    cash_direction=None,
+                    category="inventory",
+                    entry_kind="sale",
+                    expense_category="inventory",
+                    confidence=invalid_value if field_name == "confidence" else "0.75",
+                    notes="must not persist",
+                    trade_summary=None,
+                    item_names_text=None,
+                    items_in_text=None,
+                    items_out_text=None,
+                    approve_after_save=None,
+                    stay_on_detail=None,
+                    review_action=None,
+                    next_message_id=None,
+                    session=session,
+                )
+
+                session.expire_all()
+                persisted = session.get(DiscordMessage, row_id)
+                after = (
+                    persisted.deal_type,
+                    persisted.amount,
+                    persisted.payment_method,
+                    persisted.entry_kind,
+                    persisted.money_in,
+                    persisted.money_out,
+                    persisted.expense_category,
+                    persisted.confidence,
+                )
+
+                self.assertEqual(response.status_code, 303)
+                self.assertIn("valid+numbers", response.headers["location"])
+                self.assertEqual(after, before)
+                source_guard.assert_not_called()
+                save_review_correction.assert_not_called()
+                sync_transaction.assert_not_called()
+                record_financial_audit.assert_not_called()
+
     def test_message_financial_edit_invalidates_report_and_finance_caches(self) -> None:
         cache_module.cache_set("reports:test", {"stale": True})
         cache_module.cache_set("finance:v4:test", {"stale": True})
@@ -429,7 +545,7 @@ class TableExpenseCategoryTests(unittest.TestCase):
         self.assertEqual(payload["after"]["amount"], 25.0)
         self.assertEqual(payload["after"]["payment_method"], "zelle")
 
-    def test_manual_ignore_deal_clears_transaction_without_marking_discord_deleted(self) -> None:
+    def test_manual_ignore_deal_tombstones_transaction_without_marking_discord_deleted(self) -> None:
         with Session(self.engine) as session, patch("app.routers.messages.require_role_response", return_value=None):
             row = DiscordMessage(
                 discord_message_id="duplicate-ignore",
@@ -481,9 +597,13 @@ class TableExpenseCategoryTests(unittest.TestCase):
         self.assertFalse(row.is_deleted)
         self.assertFalse(row.needs_review)
         self.assertIsNone(row.amount)
-        self.assertIsNone(transaction)
+        self.assertIsNotNone(transaction)
+        self.assertTrue(transaction.is_deleted)
+        self.assertTrue(transaction.needs_review)
+        self.assertEqual(transaction.parse_status, PARSE_IGNORED)
+        self.assertEqual(transaction.amount, 25.0)
 
-    def test_manual_delete_duplicate_deal_marks_deleted_and_clears_transaction(self) -> None:
+    def test_manual_delete_duplicate_deal_marks_deleted_and_tombstones_transaction(self) -> None:
         with Session(self.engine) as session, patch("app.routers.messages.require_role_response", return_value=None):
             row = DiscordMessage(
                 discord_message_id="duplicate-delete",
@@ -535,7 +655,11 @@ class TableExpenseCategoryTests(unittest.TestCase):
         self.assertTrue(row.is_deleted)
         self.assertIsNotNone(row.deleted_at)
         self.assertIsNone(row.amount)
-        self.assertIsNone(transaction)
+        self.assertIsNotNone(transaction)
+        self.assertTrue(transaction.is_deleted)
+        self.assertTrue(transaction.needs_review)
+        self.assertEqual(transaction.parse_status, PARSE_IGNORED)
+        self.assertEqual(transaction.amount, 25.0)
 
     def test_table_and_deal_templates_expose_ignore_and_delete_duplicate_actions(self) -> None:
         table_source = Path("app/templates/messages_table.html").read_text(encoding="utf-8")

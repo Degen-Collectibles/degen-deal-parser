@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-import csv
 import hashlib
 import json
 import re
 from collections import Counter
 from datetime import date, datetime, time, timedelta, timezone
-from io import StringIO
 from typing import Any, Optional
 
 from sqlmodel import Session, delete, select
 
 from ..models import BankFeedAccount, BankStatementImport, BankTransaction, Transaction, normalize_money_value, utcnow
+from .bookkeeping import read_bounded_csv_dict_rows
 from .transactions import transaction_base_query
 
 
@@ -720,9 +719,7 @@ def categorize_bank_payload(payload: dict[str, Any], matched_transaction: Option
 
 
 def parse_bank_csv(content: bytes, *, account_label: str, account_type: str | None = None) -> tuple[list[dict[str, Any]], str]:
-    text = content.decode("utf-8-sig")
-    reader = csv.DictReader(StringIO(text))
-    headers = reader.fieldnames or []
+    headers, rows = read_bounded_csv_dict_rows(content)
     if not headers:
         raise ValueError("CSV file has no header row")
 
@@ -740,7 +737,7 @@ def parse_bank_csv(content: bytes, *, account_label: str, account_type: str | No
         raise ValueError("CSV must include date, description, and amount columns")
 
     parsed_rows: list[dict[str, Any]] = []
-    for row_index, row in enumerate(reader, start=2):
+    for row_index, row in enumerate(rows, start=2):
         posted_at = parse_bank_date(row.get(date_header))
         transaction_at = parse_bank_date(row.get(transaction_date_header)) if transaction_date_header else None
         description = str(row.get(description_header) or "").strip()

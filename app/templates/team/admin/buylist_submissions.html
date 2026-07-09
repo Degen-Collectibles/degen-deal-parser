@@ -193,6 +193,9 @@
             <td>
               <strong>{{ line.get('name') }}</strong>
               <div class="buylist-muted">{{ line.get('set_name') }}{% if line.get('number') %} #{{ line.get('number') }}{% endif %}</div>
+              {% if line.get('quoted_at') %}
+                <div class="buylist-muted">Signed {{ line.get('quote_source', 'server quote') }} · {{ line.get('quoted_at') }}</div>
+              {% endif %}
             </td>
             <td>
               {% if line.get('sealed_product_kind') %}

@@ -24,6 +24,7 @@ from .discord.bank_reconciliation import (
     expense_category_label,
     transaction_bank_match_block_reason,
 )
+from .discord.transactions import transaction_base_query
 from .models import (
     AvailableDiscordChannel,
     BankTransaction,
@@ -92,6 +93,17 @@ LEDGER_TRANSACTION_PAYMENT_METHOD_CHOICES = [
 
 RULE_ALLOWED_REVIEW_STATUSES = {"open", "reviewed", "ignored"}
 RULE_ALLOWED_MATCH_OVERRIDES = {"force_unmatched", "clear", "none", ""}
+RULE_ALLOWED_CONDITION_KEYS = {
+    "description_contains",
+    "amount_sign",
+    "amount_min",
+    "amount_max",
+    "account_type",
+    "payment_rail",
+    "classification",
+    "category",
+    "provider",
+}
 
 LEDGER_AUTOMATION_ACTIONS = {
     "mark_needs_log_checked": {
@@ -1219,8 +1231,8 @@ def _load_unbanked_cash_transactions(session: Session) -> list[Transaction]:
     }
     transactions = list(
         session.exec(
-            select(Transaction)
-            .where(Transaction.is_deleted == False)  # noqa: E712
+            transaction_base_query()
+            .order_by(None)
             .order_by(Transaction.occurred_at.desc(), Transaction.id.desc())
         ).all()
     )
@@ -1246,8 +1258,8 @@ def _load_discord_financial_transactions(session: Session) -> list[Transaction]:
     }
     transactions = list(
         session.exec(
-            select(Transaction)
-            .where(Transaction.is_deleted == False)  # noqa: E712
+            transaction_base_query()
+            .order_by(None)
             .where(
                 Transaction.parse_status.in_(
                     sorted(expand_parse_status_filter_values([PARSE_PARSED, PARSE_REVIEW_REQUIRED]))
@@ -1286,8 +1298,8 @@ def _load_discord_deal_transactions(session: Session) -> list[Transaction]:
     }
     transactions = list(
         session.exec(
-            select(Transaction)
-            .where(Transaction.is_deleted == False)  # noqa: E712
+            transaction_base_query()
+            .order_by(None)
             .where(
                 Transaction.parse_status.in_(
                     sorted(expand_parse_status_filter_values([PARSE_PARSED, PARSE_REVIEW_REQUIRED]))
@@ -1684,7 +1696,7 @@ def draft_ledger_rule_with_ai(instruction: str) -> dict[str, Any]:
     prompt = (
         "You are a page-local Ledger Assistant for a collectibles business. "
         "Convert the operator request into JSON only. The rule can only target bank rows. "
-        "Allowed condition keys: description_contains, description_regex, amount_sign, amount_min, "
+        "Allowed condition keys: description_contains, amount_sign, amount_min, "
         "amount_max, account_type, payment_rail, classification, category, provider. "
         "Allowed action keys: category, classification, review_status, match_override_status, note. "
         "review_status must be open, reviewed, or ignored. match_override_status can be force_unmatched or clear. "
@@ -1717,20 +1729,31 @@ def _condition_value_list(value: Any) -> list[str]:
     return [str(value).strip().lower()] if str(value).strip() else []
 
 
+def validate_ledger_rule_conditions(conditions: dict[str, Any]) -> None:
+    """Reject rule programs that cannot be evaluated with bounded work."""
+
+    if "description_regex" in conditions:
+        raise ValueError(
+            "description_regex is not supported; use description_contains instead."
+        )
+    unknown_keys = sorted(set(conditions) - RULE_ALLOWED_CONDITION_KEYS)
+    if unknown_keys:
+        raise ValueError(
+            f"Ledger rule contains unsupported condition key: {unknown_keys[0]}"
+        )
+
+
 def row_matches_rule(row: BankTransaction, conditions: dict[str, Any]) -> bool:
     if not conditions:
+        return False
+    try:
+        validate_ledger_rule_conditions(conditions)
+    except ValueError:
         return False
     description_text = " ".join([row.description or "", row.details or "", row.raw_row_json or ""]).lower()
     contains = _condition_value_list(conditions.get("description_contains"))
     if contains and not any(token in description_text for token in contains):
         return False
-    regex = str(conditions.get("description_regex") or "").strip()
-    if regex:
-        try:
-            if not re.search(regex, description_text, flags=re.IGNORECASE):
-                return False
-        except re.error:
-            return False
     amount = _money(row.amount)
     sign = str(conditions.get("amount_sign") or "").lower()
     if sign in {"debit", "negative", "outflow"} and amount >= 0:
@@ -1763,8 +1786,6 @@ def _rule_summary(conditions: dict[str, Any], actions: dict[str, Any]) -> str:
     condition_bits = []
     if conditions.get("description_contains"):
         condition_bits.append(f"description contains {conditions['description_contains']}")
-    if conditions.get("description_regex"):
-        condition_bits.append("description matches regex")
     if conditions.get("amount_sign"):
         condition_bits.append(f"amount is {conditions['amount_sign']}")
     if conditions.get("account_type"):
@@ -1810,6 +1831,7 @@ def preview_ledger_rule(
     filters: Optional[LedgerFilters] = None,
     sample_limit: int = 8,
 ) -> dict[str, Any]:
+    validate_ledger_rule_conditions(conditions)
     selected = filters or LedgerFilters(status="all")
     rows = [row for row in _load_bank_rows(session) if _row_matches_filters(row, selected) and row_matches_rule(row, conditions)]
     sample = [_preview_sample_view(row) for row in _sort_rows(rows, selected.sort, selected.direction)[:sample_limit]]
@@ -1835,6 +1857,7 @@ def create_ledger_rule(
     actions: dict[str, Any],
     created_by: str,
 ) -> LedgerRule:
+    validate_ledger_rule_conditions(conditions)
     rule = LedgerRule(
         name=(name or "Ledger rule").strip()[:160],
         description=(description or _rule_summary(conditions, actions)).strip(),
@@ -1857,6 +1880,7 @@ def apply_ledger_rule(
 ) -> dict[str, Any]:
     conditions = _as_dict(rule.conditions_json)
     actions = _as_dict(rule.actions_json)
+    validate_ledger_rule_conditions(conditions)
     selected = filters or LedgerFilters(status="all")
     rows = [row for row in _load_bank_rows(session) if _row_matches_filters(row, selected) and row_matches_rule(row, conditions)]
     now = utcnow()

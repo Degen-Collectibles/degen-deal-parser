@@ -7,26 +7,35 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+from fastapi import HTTPException
 from openpyxl import load_workbook
 from sqlmodel import Session, SQLModel, create_engine, select
 from starlette.requests import Request
 
 import app.cache as cache_module
 from app.discord.bank_reconciliation import rerun_bank_reconciliation
+from app.discord.message_revisions import ensure_message_revision
+from app.discord.transactions import sync_transaction_from_message
 from app.ledger import (
     LedgerFilters,
+    _load_discord_deal_transactions,
+    _load_discord_financial_transactions,
+    _load_unbanked_cash_transactions,
     apply_ledger_automation,
     apply_ledger_rule,
     build_ledger_page_data,
+    create_ledger_rule,
     draft_ledger_rule_from_instruction,
     ledger_filters_from_values,
     ledger_status_for_bank_row,
     preview_ledger_automation,
     preview_ledger_review_agent,
     preview_ledger_rule,
+    row_matches_rule,
     run_ledger_review_agent,
 )
-from app.models import AuditLog, AvailableDiscordChannel, BankStatementImport, BankTransaction, LedgerRule, Transaction
+from app.models import AuditLog, AvailableDiscordChannel, BankStatementImport, BankTransaction, LedgerRule, ParseAttempt, ReviewCorrection, Transaction
 from app.models import DiscordMessage, PARSE_PARSED, PARSE_REVIEW_REQUIRED
 import app.routers.ledger as ledger_routes
 from app.routers.ledger import (
@@ -67,6 +76,43 @@ def make_engine():
     return engine
 
 
+def _call_ledger_transaction_edit_json(
+    session: Session,
+    source_message_id: int,
+    *,
+    entry_kind: str | None = "sale",
+    amount: str | None = "25",
+    payment_method: str | None = "cash",
+    expense_category: str | None = "inventory",
+    notes: str | None = None,
+):
+    return ledger_routes.ledger_transaction_edit_form(
+        make_request(
+            f"/ledger/transactions/{source_message_id}/edit-form",
+            method="POST",
+            headers=[(b"x-requested-with", b"fetch")],
+        ),
+        source_message_id=source_message_id,
+        entry_kind=entry_kind,
+        amount=amount,
+        payment_method=payment_method,
+        expense_category=expense_category,
+        notes=notes,
+        selected_account="",
+        selected_start="",
+        selected_end="",
+        selected_status="all",
+        selected_category="",
+        selected_source="cash",
+        selected_action_reason="",
+        selected_search="",
+        selected_sort="posted_at",
+        selected_direction="desc",
+        selected_include_cash="true",
+        session=session,
+    )
+
+
 def add_import(session: Session) -> BankStatementImport:
     row = BankStatementImport(
         label="Chase feed",
@@ -79,6 +125,87 @@ def add_import(session: Session) -> BankStatementImport:
     session.commit()
     session.refresh(row)
     return row
+
+
+def _add_reportable_ledger_transaction(
+    session: Session,
+    *,
+    message_id: int,
+    channel_id: str,
+    channel_name: str,
+    occurred_at: datetime,
+    payment_method: str,
+    entry_kind: str = "sale",
+    amount: float = 100.0,
+) -> tuple[DiscordMessage, Transaction]:
+    row = DiscordMessage(
+        id=message_id,
+        discord_message_id=f"ledger-reportability-{message_id}",
+        channel_id=channel_id,
+        channel_name=channel_name,
+        author_name="tester",
+        content=f"{entry_kind} cards {amount:g} {payment_method}",
+        created_at=occurred_at,
+        parse_status=PARSE_PARSED,
+        deal_type=entry_kind,
+        entry_kind=entry_kind,
+        payment_method=payment_method,
+        amount=amount,
+        money_in=amount if entry_kind == "sale" else 0.0,
+        money_out=amount if entry_kind != "sale" else 0.0,
+        expense_category="sales" if entry_kind == "sale" else "inventory",
+        needs_review=False,
+    )
+    session.add(row)
+    session.flush()
+    transaction = sync_transaction_from_message(session, row)
+    assert transaction is not None
+    return row, transaction
+
+
+def _invalidate_source_without_resync(
+    session: Session,
+    row: DiscordMessage,
+    *,
+    mode: str,
+) -> None:
+    if mode == "quarantine":
+        row.source_refresh_required = True
+    elif mode == "pending":
+        row.parse_status = "pending"
+    elif mode == "advanced_revision":
+        row.content = f"{row.content} corrected"
+        ensure_message_revision(session, row)
+    else:  # pragma: no cover - test helper contract
+        raise AssertionError(f"unsupported source invalidation mode: {mode}")
+    session.add(row)
+
+
+def _add_legacy_source_backed_transaction(
+    session: Session,
+    transaction: Transaction,
+) -> Transaction:
+    """Add a pre-revision transaction fixture with its valid Discord source row."""
+
+    transaction.parse_status = transaction.parse_status or PARSE_PARSED
+    session.add(
+        DiscordMessage(
+            id=transaction.source_message_id,
+            discord_message_id=(
+                transaction.discord_message_id
+                or f"legacy-ledger-source-{transaction.source_message_id}"
+            ),
+            channel_id=transaction.channel_id or "legacy-ledger-channel",
+            channel_name=transaction.channel_name,
+            author_name="tester",
+            content=transaction.source_content,
+            created_at=transaction.occurred_at,
+            parse_status=PARSE_PARSED,
+            needs_review=False,
+        )
+    )
+    session.add(transaction)
+    return transaction
 
 
 def test_ledger_builder_counts_bank_rows_and_separates_unbanked_cash():
@@ -127,9 +254,9 @@ def test_ledger_builder_counts_bank_rows_and_separates_unbanked_cash():
             money_out=55.0,
             source_content="buy inventory 55 cash app",
         )
-        session.add(matched_tx)
-        session.add(cash_tx)
-        session.add(cash_app_tx)
+        _add_legacy_source_backed_transaction(session, matched_tx)
+        _add_legacy_source_backed_transaction(session, cash_tx)
+        _add_legacy_source_backed_transaction(session, cash_app_tx)
         session.add(
             BankTransaction(
                 id=10,
@@ -204,6 +331,63 @@ def test_ledger_builder_counts_bank_rows_and_separates_unbanked_cash():
     assert "cash-503" not in {row["id"] for row in with_cash["rows"]}
     assert "cash-501" not in {row["id"] for row in needs_action_with_cash["rows"]}
     assert with_cash["summary"]["bank_net_total"] == 70.0
+
+
+def test_money_loaders_exclude_live_transactions_with_unreportable_discord_sources():
+    engine = make_engine()
+    occurred_at = datetime(2026, 5, 20, 12, tzinfo=timezone.utc)
+
+    with Session(engine) as session:
+        session.add(
+            AvailableDiscordChannel(
+                channel_id="show-deals",
+                channel_name="show-deals",
+                category_name="Show Deals",
+                label="Show Deals / #show-deals",
+            )
+        )
+        expected: dict[str, int] = {}
+        message_id = 9000
+        for loader_kind, channel_id, channel_name, payment_method in (
+            ("cash", "cash-deals", "cash-deals", "cash"),
+            ("financial", "financials", "Financials", "zelle"),
+            ("deal", "show-deals", "show-deals", "zelle"),
+        ):
+            valid_row, valid_tx = _add_reportable_ledger_transaction(
+                session,
+                message_id=message_id,
+                channel_id=channel_id,
+                channel_name=channel_name,
+                occurred_at=occurred_at,
+                payment_method=payment_method,
+            )
+            del valid_row
+            expected[loader_kind] = valid_tx.id
+            message_id += 1
+
+            for mode in ("quarantine", "pending", "advanced_revision"):
+                invalid_row, invalid_tx = _add_reportable_ledger_transaction(
+                    session,
+                    message_id=message_id,
+                    channel_id=channel_id,
+                    channel_name=channel_name,
+                    occurred_at=occurred_at,
+                    payment_method=payment_method,
+                )
+                _invalidate_source_without_resync(session, invalid_row, mode=mode)
+                assert invalid_tx.is_deleted is False
+                message_id += 1
+
+        session.commit()
+
+        cash_ids = {row.id for row in _load_unbanked_cash_transactions(session)}
+        financial_ids = {row.id for row in _load_discord_financial_transactions(session)}
+        deal_ids = {row.id for row in _load_discord_deal_transactions(session)}
+
+    assert cash_ids == {expected["cash"]}
+    assert financial_ids == {expected["financial"]}
+    assert deal_ids == {expected["deal"]}
+    engine.dispose()
 
 
 def test_ledger_builder_labels_money_events_with_combined_evidence():
@@ -690,7 +874,8 @@ def test_ledger_page_data_builds_tax_cleanup_summary():
                 category_confidence="medium",
             )
         )
-        session.add(
+        _add_legacy_source_backed_transaction(
+            session,
             Transaction(
                 id=2450,
                 source_message_id=2450,
@@ -703,7 +888,7 @@ def test_ledger_page_data_builds_tax_cleanup_summary():
                 money_in=0.0,
                 money_out=80.0,
                 source_content="buy inventory 80 cash",
-            )
+            ),
         )
         session.commit()
 
@@ -1068,7 +1253,8 @@ def test_ledger_export_handles_cash_rows():
                 expense_category="cash_deposits",
             )
         )
-        session.add(
+        _add_legacy_source_backed_transaction(
+            session,
             Transaction(
                 id=504,
                 source_message_id=1504,
@@ -1081,7 +1267,7 @@ def test_ledger_export_handles_cash_rows():
                 money_in=0.0,
                 money_out=90.0,
                 source_content="buy inventory 90 cash",
-            )
+            ),
         )
         session.commit()
 
@@ -1129,7 +1315,8 @@ def test_ledger_export_xlsx_downloads_excel_with_editable_ledger_rows():
                 review_note="Needs owner source.",
             )
         )
-        session.add(
+        _add_legacy_source_backed_transaction(
+            session,
             Transaction(
                 id=504,
                 source_message_id=1504,
@@ -1142,7 +1329,7 @@ def test_ledger_export_xlsx_downloads_excel_with_editable_ledger_rows():
                 money_in=0.0,
                 money_out=90.0,
                 source_content="buy inventory 90 cash",
-            )
+            ),
         )
         session.commit()
 
@@ -1269,7 +1456,8 @@ def test_ledger_includes_non_cash_discord_financial_channel_rows():
     engine = make_engine()
     posted_at = datetime(2026, 5, 19, 12, tzinfo=timezone.utc)
     with Session(engine) as session:
-        session.add(
+        _add_legacy_source_backed_transaction(
+            session,
             Transaction(
                 id=610,
                 source_message_id=1610,
@@ -1285,9 +1473,10 @@ def test_ledger_includes_non_cash_discord_financial_channel_rows():
                 money_in=0.0,
                 money_out=6500.0,
                 source_content="Pay Sam payroll of may 6500$",
-            )
+            ),
         )
-        session.add(
+        _add_legacy_source_backed_transaction(
+            session,
             Transaction(
                 id=611,
                 source_message_id=1611,
@@ -1303,7 +1492,7 @@ def test_ledger_includes_non_cash_discord_financial_channel_rows():
                 money_in=100.0,
                 money_out=0.0,
                 source_content="sold slab 100 zelle",
-            )
+            ),
         )
         session.commit()
 
@@ -1335,7 +1524,8 @@ def test_ledger_includes_non_cash_year_past_show_discord_deal_rows():
                 label="2026 Past Shows / #2026-may-9-eastbaycardshow",
             )
         )
-        session.add(
+        _add_legacy_source_backed_transaction(
+            session,
             Transaction(
                 id=612,
                 source_message_id=1612,
@@ -1351,7 +1541,7 @@ def test_ledger_includes_non_cash_year_past_show_discord_deal_rows():
                 money_in=225.0,
                 money_out=0.0,
                 source_content="sold slab 225 zelle",
-            )
+            ),
         )
         session.commit()
 
@@ -1382,7 +1572,8 @@ def test_ledger_includes_non_cash_offline_purchase_discord_deal_rows():
                 label="Offline Deals / #alex-purchases",
             )
         )
-        session.add(
+        _add_legacy_source_backed_transaction(
+            session,
             Transaction(
                 id=613,
                 source_message_id=1613,
@@ -1398,7 +1589,7 @@ def test_ledger_includes_non_cash_offline_purchase_discord_deal_rows():
                 money_in=0.0,
                 money_out=500.0,
                 source_content="Buy $500 zelle",
-            )
+            ),
         )
         session.commit()
 
@@ -1419,7 +1610,8 @@ def test_ledger_page_links_discord_matches_to_deal_detail():
     posted_at = datetime(2026, 5, 19, 12, tzinfo=timezone.utc)
     with Session(engine) as session:
         bank_import = add_import(session)
-        session.add(
+        _add_legacy_source_backed_transaction(
+            session,
             Transaction(
                 id=620,
                 source_message_id=1620,
@@ -1432,9 +1624,10 @@ def test_ledger_page_links_discord_matches_to_deal_detail():
                 money_in=0.0,
                 money_out=250.0,
                 source_content="buy cards 250 zelle",
-            )
+            ),
         )
-        session.add(
+        _add_legacy_source_backed_transaction(
+            session,
             Transaction(
                 id=621,
                 source_message_id=1621,
@@ -1448,7 +1641,7 @@ def test_ledger_page_links_discord_matches_to_deal_detail():
                 money_in=0.0,
                 money_out=650.0,
                 source_content="payroll 650 zelle",
-            )
+            ),
         )
         session.add(
             BankTransaction(
@@ -1664,6 +1857,281 @@ def test_ledger_transaction_edit_form_can_return_json_for_in_place_updates():
     assert transaction.expense_category == "inventory_purchases"
 
 
+def test_ledger_transaction_edit_form_returns_409_and_rolls_back_stale_source_revision():
+    from app.routers import ledger as ledger_router
+
+    edit_form = ledger_router.ledger_transaction_edit_form
+    engine = make_engine()
+    occurred_at = datetime(2026, 5, 19, 13, tzinfo=timezone.utc)
+    with Session(engine) as session:
+        message = DiscordMessage(
+            id=1811,
+            discord_message_id="stale-ledger-source",
+            channel_id="offline-cash-channel",
+            channel_name="offline-cash",
+            author_name="tester",
+            content="Bought singles 90 cash",
+            created_at=occurred_at,
+            parse_status=PARSE_PARSED,
+            deal_type="buy",
+            entry_kind="buy",
+            payment_method="cash",
+            amount=90.0,
+            money_in=0.0,
+            money_out=90.0,
+            expense_category="inventory",
+            needs_review=False,
+        )
+        session.add(message)
+        session.flush()
+        ensure_message_revision(session, message)
+        transaction = sync_transaction_from_message(session, message)
+        session.commit()
+
+        message.content = "Bought singles 125 cash"
+        ensure_message_revision(session, message)
+        session.commit()
+        transaction_id = transaction.id
+        before = (
+            message.deal_type,
+            message.entry_kind,
+            message.amount,
+            message.payment_method,
+            message.expense_category,
+            message.notes,
+            message.parse_status,
+            message.needs_review,
+        )
+
+    with Session(engine) as session, patch(
+        "app.routers.ledger.require_role_response",
+        return_value=None,
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            edit_form(
+                make_request(
+                    "/ledger/transactions/1811/edit-form",
+                    method="POST",
+                    headers=[(b"x-requested-with", b"fetch")],
+                ),
+                source_message_id=1811,
+                entry_kind="sale",
+                amount="999",
+                payment_method="zelle",
+                expense_category="sales",
+                notes="must roll back",
+                selected_source="cash",
+                session=session,
+            )
+        assert exc_info.value.status_code == 409
+        assert "bound source revision changed" in str(exc_info.value.detail)
+        assert not session.dirty
+
+    with Session(engine) as session:
+        message_after = session.get(DiscordMessage, 1811)
+        transaction_after = session.get(Transaction, transaction_id)
+        assert (
+            message_after.deal_type,
+            message_after.entry_kind,
+            message_after.amount,
+            message_after.payment_method,
+            message_after.expense_category,
+            message_after.notes,
+            message_after.parse_status,
+            message_after.needs_review,
+        ) == before
+        assert transaction_after.amount == 90.0
+        assert transaction_after.expense_category == "inventory"
+        assert transaction_after.is_deleted is False
+    engine.dispose()
+
+
+def test_ledger_transaction_edit_rejects_concurrent_stitch_change_before_source_lock():
+    from app.discord import transactions as transaction_module
+    from app.routers import ledger as ledger_router
+
+    engine = make_engine()
+    occurred_at = datetime(2026, 5, 19, 14, tzinfo=timezone.utc)
+    with Session(engine) as session:
+        message = DiscordMessage(
+            id=1812,
+            discord_message_id="concurrent-stitch-ledger-source",
+            channel_id="offline-cash-channel",
+            channel_name="offline-cash",
+            author_name="tester",
+            content="Bought singles 90 cash",
+            created_at=occurred_at,
+            parse_status=PARSE_PARSED,
+            deal_type="buy",
+            entry_kind="buy",
+            payment_method="cash",
+            amount=90.0,
+            money_in=0.0,
+            money_out=90.0,
+            expense_category="inventory",
+            needs_review=False,
+        )
+        session.add(message)
+        session.flush()
+        ensure_message_revision(session, message)
+        transaction = sync_transaction_from_message(session, message)
+        session.commit()
+        transaction_id = transaction.id
+
+    original_lock = transaction_module.lock_source_group_mutation_guards
+
+    def stitch_then_lock(session: Session, guards):
+        message = session.get(DiscordMessage, 1812)
+        message.stitched_group_id = "concurrent-new-group"
+        message.stitched_primary = True
+        message.stitched_message_ids_json = "[1812]"
+        session.add(message)
+        session.commit()
+        return original_lock(session, guards)
+
+    with Session(engine) as session, patch(
+        "app.routers.ledger.require_role_response",
+        return_value=None,
+    ), patch(
+        "app.discord.transactions.lock_source_group_mutation_guards",
+        side_effect=stitch_then_lock,
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            ledger_router.ledger_transaction_edit_form(
+                make_request(
+                    "/ledger/transactions/1812/edit-form",
+                    method="POST",
+                    headers=[(b"x-requested-with", b"fetch")],
+                ),
+                source_message_id=1812,
+                entry_kind="sale",
+                amount="999",
+                payment_method="zelle",
+                expense_category="sales",
+                notes="must roll back",
+                selected_source="cash",
+                session=session,
+            )
+        assert exc_info.value.status_code == 409
+        assert "changed during manual mutation" in str(exc_info.value.detail)
+        assert not session.dirty
+
+    with Session(engine) as session:
+        message = session.get(DiscordMessage, 1812)
+        transaction = session.get(Transaction, transaction_id)
+        assert message.stitched_group_id == "concurrent-new-group"
+        assert message.stitched_primary is True
+        assert message.stitched_message_ids_json == "[1812]"
+        assert message.amount == 90.0
+        assert message.money_in == 0.0
+        assert message.money_out == 90.0
+        assert message.entry_kind == "buy"
+        assert message.expense_category == "inventory"
+        assert transaction.amount == 90.0
+        assert transaction.money_out == 90.0
+        assert transaction.entry_kind == "buy"
+        assert transaction.expense_category == "inventory"
+        assert transaction.is_deleted is False
+        assert session.exec(select(ReviewCorrection)).all() == []
+        assert session.exec(select(AuditLog)).all() == []
+    engine.dispose()
+
+
+def test_ledger_transaction_edit_rejects_worker_claim_created_before_source_lock():
+    from app.discord import transactions as transaction_module
+    from app.routers import ledger as ledger_router
+
+    engine = make_engine()
+    occurred_at = datetime(2026, 5, 19, 15, tzinfo=timezone.utc)
+    with Session(engine) as session:
+        message = DiscordMessage(
+            id=1813,
+            discord_message_id="concurrent-claim-ledger-source",
+            channel_id="offline-cash-channel",
+            channel_name="offline-cash",
+            author_name="tester",
+            content="Bought singles 90 cash",
+            created_at=occurred_at,
+            parse_status=PARSE_PARSED,
+            deal_type="buy",
+            entry_kind="buy",
+            payment_method="cash",
+            amount=90.0,
+            money_in=0.0,
+            money_out=90.0,
+            expense_category="inventory",
+            needs_review=False,
+        )
+        session.add(message)
+        session.flush()
+        ensure_message_revision(session, message)
+        transaction = sync_transaction_from_message(session, message)
+        session.commit()
+        transaction_id = transaction.id
+
+    original_lock = transaction_module.lock_source_group_mutation_guards
+    claimed_attempt_id = None
+
+    def claim_then_lock(session: Session, guards):
+        nonlocal claimed_attempt_id
+        message = session.get(DiscordMessage, 1813)
+        attempt = ParseAttempt(message_id=message.id, attempt_number=1)
+        session.add(attempt)
+        session.flush()
+        claimed_attempt_id = attempt.id
+        message.active_parse_attempt_id = attempt.id
+        message.parse_status = "processing"
+        message.parse_attempts = 1
+        session.add(message)
+        session.commit()
+        return original_lock(session, guards)
+
+    with Session(engine) as session, patch(
+        "app.routers.ledger.require_role_response",
+        return_value=None,
+    ), patch(
+        "app.discord.transactions.lock_source_group_mutation_guards",
+        side_effect=claim_then_lock,
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            ledger_router.ledger_transaction_edit_form(
+                make_request(
+                    "/ledger/transactions/1813/edit-form",
+                    method="POST",
+                    headers=[(b"x-requested-with", b"fetch")],
+                ),
+                source_message_id=1813,
+                entry_kind="sale",
+                amount="999",
+                payment_method="zelle",
+                expense_category="sales",
+                notes="must roll back",
+                selected_source="cash",
+                session=session,
+            )
+        assert exc_info.value.status_code == 409
+        assert "changed during manual mutation" in str(exc_info.value.detail)
+        assert not session.dirty
+
+    with Session(engine) as session:
+        message = session.get(DiscordMessage, 1813)
+        transaction = session.get(Transaction, transaction_id)
+        attempt = session.get(ParseAttempt, claimed_attempt_id)
+        assert message.active_parse_attempt_id == claimed_attempt_id
+        assert message.parse_status == "processing"
+        assert message.amount == 90.0
+        assert message.money_out == 90.0
+        assert message.entry_kind == "buy"
+        assert transaction.amount == 90.0
+        assert transaction.money_out == 90.0
+        assert transaction.entry_kind == "buy"
+        assert transaction.is_deleted is False
+        assert attempt.finished_at is None
+        assert session.exec(select(ReviewCorrection)).all() == []
+        assert session.exec(select(AuditLog)).all() == []
+    engine.dispose()
+
+
 def test_ledger_transaction_edit_form_preserves_missing_financial_fields_on_partial_post():
     from app.routers import ledger as ledger_router
 
@@ -1820,6 +2288,256 @@ def test_ledger_transaction_edit_form_preserves_trade_cash_legs_on_partial_post(
     assert transaction.money_in == 195.0
     assert transaction.money_out == 400.0
     assert transaction.expense_category == "inventory_purchases"
+
+
+@pytest.mark.parametrize("invalid_amount", ["nan", "inf", "-inf", "1e309", "1000000000.01"])
+def test_ledger_transaction_edit_json_rejects_unsafe_amount_before_source_guard_or_mutation(
+    invalid_amount: str,
+):
+    engine = make_engine()
+    with Session(engine) as session:
+        message = DiscordMessage(
+            discord_message_id=f"unsafe-ledger-amount-{invalid_amount}",
+            channel_id="offline-cash-channel",
+            channel_name="offline-cash",
+            author_name="tester",
+            content="Sold slab 25 cash",
+            created_at=datetime(2026, 5, 19, 12, tzinfo=timezone.utc),
+            parse_status=PARSE_PARSED,
+            deal_type="sell",
+            entry_kind="sale",
+            payment_method="cash",
+            amount=25.0,
+            money_in=25.0,
+            money_out=0.0,
+            expense_category="inventory",
+            confidence=0.75,
+            needs_review=False,
+        )
+        session.add(message)
+        session.commit()
+        message_id = message.id
+        before = (
+            message.deal_type,
+            message.entry_kind,
+            message.amount,
+            message.payment_method,
+            message.money_in,
+            message.money_out,
+            message.expense_category,
+            message.confidence,
+            message.notes,
+        )
+
+        with patch("app.routers.ledger.require_role_response", return_value=None), patch(
+            "app.routers.ledger.require_source_group_mutation_allowed"
+        ) as source_guard, patch(
+            "app.routers.ledger.save_review_correction"
+        ) as save_review_correction, patch(
+            "app.routers.ledger.sync_transaction_from_message"
+        ) as sync_transaction, patch(
+            "app.routers.ledger.record_financial_audit"
+        ) as record_financial_audit:
+            response = _call_ledger_transaction_edit_json(
+                session,
+                message_id,
+                amount=invalid_amount,
+                notes="must not persist",
+            )
+
+        session.expire_all()
+        persisted = session.get(DiscordMessage, message_id)
+        after = (
+            persisted.deal_type,
+            persisted.entry_kind,
+            persisted.amount,
+            persisted.payment_method,
+            persisted.money_in,
+            persisted.money_out,
+            persisted.expense_category,
+            persisted.confidence,
+            persisted.notes,
+        )
+
+        payload = json.loads(response.body)
+        assert response.status_code == 400
+        assert payload["ok"] is False
+        assert "valid" in payload["error"].lower()
+        assert after == before
+        source_guard.assert_not_called()
+        save_review_correction.assert_not_called()
+        sync_transaction.assert_not_called()
+        record_financial_audit.assert_not_called()
+    engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("unsafe_field", "unsafe_value"),
+    [
+        ("money_in", 1_000_000_000.01),
+        ("money_out", -1_000_000_000.01),
+    ],
+)
+def test_ledger_partial_trade_edit_validates_retained_financial_projection_before_source_guard(
+    unsafe_field: str,
+    unsafe_value: float,
+):
+    engine = make_engine()
+    with Session(engine) as session:
+        values = {
+            "money_in": 195.0,
+            "money_out": 400.0,
+            "confidence": 0.75,
+        }
+        values[unsafe_field] = unsafe_value
+        message = DiscordMessage(
+            discord_message_id=f"unsafe-ledger-trade-{unsafe_field}",
+            channel_id="offline-cash-channel",
+            channel_name="offline-cash",
+            author_name="tester",
+            content="Trade top out bottom in plus 195 zelle",
+            created_at=datetime(2026, 5, 19, 12, tzinfo=timezone.utc),
+            parse_status=PARSE_PARSED,
+            deal_type="trade",
+            entry_kind="trade",
+            payment_method="zelle",
+            cash_direction="to_store",
+            amount=195.0,
+            money_in=values["money_in"],
+            money_out=values["money_out"],
+            expense_category="inventory",
+            confidence=values["confidence"],
+            needs_review=False,
+        )
+        session.add(message)
+        session.commit()
+        message_id = message.id
+        before = (
+            message.amount,
+            message.money_in,
+            message.money_out,
+            message.confidence,
+            message.expense_category,
+            message.notes,
+        )
+
+        with patch("app.routers.ledger.require_role_response", return_value=None), patch(
+            "app.routers.ledger.require_source_group_mutation_allowed"
+        ) as source_guard, patch(
+            "app.routers.ledger.save_review_correction"
+        ) as save_review_correction, patch(
+            "app.routers.ledger.sync_transaction_from_message"
+        ) as sync_transaction, patch(
+            "app.routers.ledger.record_financial_audit"
+        ) as record_financial_audit:
+            response = _call_ledger_transaction_edit_json(
+                session,
+                message_id,
+                entry_kind=None,
+                amount=None,
+                payment_method=None,
+                expense_category="inventory_purchases",
+                notes="must not persist",
+            )
+
+        session.expire_all()
+        persisted = session.get(DiscordMessage, message_id)
+        after = (
+            persisted.amount,
+            persisted.money_in,
+            persisted.money_out,
+            persisted.confidence,
+            persisted.expense_category,
+            persisted.notes,
+        )
+
+        payload = json.loads(response.body)
+        assert response.status_code == 400
+        assert payload["ok"] is False
+        assert after == before
+        source_guard.assert_not_called()
+        save_review_correction.assert_not_called()
+        sync_transaction.assert_not_called()
+        record_financial_audit.assert_not_called()
+    engine.dispose()
+
+
+@pytest.mark.parametrize("legacy_confidence", [1.01, float("inf"), float("-inf")])
+def test_ledger_valid_edit_repairs_legacy_unsafe_confidence(
+    legacy_confidence: float,
+):
+    engine = make_engine()
+    with Session(engine) as session:
+        message = DiscordMessage(
+            discord_message_id=f"repair-ledger-confidence-{legacy_confidence}",
+            channel_id="offline-cash-channel",
+            channel_name="offline-cash",
+            author_name="tester",
+            content="Sold slab 25 cash",
+            created_at=datetime(2026, 5, 19, 12, tzinfo=timezone.utc),
+            parse_status=PARSE_PARSED,
+            deal_type="sell",
+            entry_kind="sale",
+            payment_method="cash",
+            amount=25.0,
+            money_in=25.0,
+            money_out=0.0,
+            expense_category="inventory",
+            confidence=legacy_confidence,
+            needs_review=False,
+        )
+        session.add(message)
+        session.commit()
+        message_id = message.id
+
+        with patch("app.routers.ledger.require_role_response", return_value=None), patch(
+            "app.routers.ledger.require_source_group_mutation_allowed"
+        ) as source_guard, patch(
+            "app.routers.ledger.sync_transaction_from_message"
+        ) as sync_transaction, patch(
+            "app.discord.corrections.compute_correction_confidence",
+            return_value=0.99,
+        ):
+            response = _call_ledger_transaction_edit_json(
+                session,
+                message_id,
+                entry_kind="sale",
+                amount="30",
+                payment_method="cash",
+                expense_category="inventory",
+                notes="repaired legacy confidence",
+            )
+
+        session.expire_all()
+        persisted = session.get(DiscordMessage, message_id)
+        payload = json.loads(response.body)
+        assert response.status_code == 200
+        assert payload["ok"] is True
+        assert persisted.amount == 30.0
+        assert persisted.money_in == 30.0
+        assert persisted.confidence == 0.99
+        assert persisted.notes == "repaired legacy confidence"
+        correction = session.exec(
+            select(ReviewCorrection).where(ReviewCorrection.source_message_id == message_id)
+        ).one()
+        audit = session.exec(
+            select(AuditLog).where(
+                AuditLog.action == "financial.ledger_transaction.edit",
+                AuditLog.resource_key == f"discordmessage:{message_id}",
+            )
+        ).one()
+        for serialized in (
+            correction.parsed_before_json,
+            correction.corrected_after_json,
+            correction.field_diffs_json,
+            audit.details_json,
+        ):
+            json.dumps(json.loads(serialized), allow_nan=False)
+            assert "Infinity" not in serialized
+            assert "NaN" not in serialized
+        source_guard.assert_called_once()
+        sync_transaction.assert_called_once()
+    engine.dispose()
 
 
 def test_ledger_transaction_edit_form_updates_discord_source_transaction():
@@ -2106,6 +2824,145 @@ def test_rule_draft_preview_and_apply_updates_only_matching_rows():
     assert apple.review_status == "reviewed"
     assert psa.expense_category == "uncategorized"
     assert psa.review_status == "open"
+
+
+def test_ledger_rule_regex_condition_is_fail_closed_without_calling_regex_engine():
+    row = BankTransaction(
+        description=("a" * 10_000) + "!",
+        details="",
+        raw_row_json="{}",
+        amount=-1.0,
+    )
+
+    with patch(
+        "app.ledger.re.search",
+        side_effect=AssertionError("untrusted regex engine must not run"),
+    ):
+        assert row_matches_rule(
+            row,
+            {"description_regex": "^(a+)+$"},
+        ) is False
+
+
+def test_ledger_rule_preview_rejects_regex_before_loading_bank_rows():
+    engine = make_engine()
+    with Session(engine) as session, patch(
+        "app.ledger._load_bank_rows",
+        side_effect=AssertionError("rows must not load for a rejected rule"),
+    ) as load_rows:
+        with pytest.raises(ValueError, match="description_regex"):
+            preview_ledger_rule(
+                session,
+                conditions={"description_regex": "^(a+)+$"},
+                actions={"review_status": "reviewed"},
+                filters=LedgerFilters(status="all"),
+            )
+
+        load_rows.assert_not_called()
+    engine.dispose()
+
+
+def test_ledger_rule_preview_rejects_unknown_condition_before_loading_bank_rows():
+    engine = make_engine()
+    with Session(engine) as session, patch(
+        "app.ledger._load_bank_rows",
+        side_effect=AssertionError("rows must not load for a rejected rule"),
+    ) as load_rows:
+        with pytest.raises(ValueError, match="unsupported condition"):
+            preview_ledger_rule(
+                session,
+                conditions={"attacker_unknown_key": "matches everything"},
+                actions={"review_status": "reviewed"},
+                filters=LedgerFilters(status="all"),
+            )
+
+        load_rows.assert_not_called()
+    engine.dispose()
+
+
+def test_ledger_rule_create_rejects_regex_without_persisting_rule():
+    engine = make_engine()
+    with Session(engine) as session:
+        with pytest.raises(ValueError, match="description_regex"):
+            create_ledger_rule(
+                session,
+                name="unsafe regex",
+                description="must be rejected",
+                conditions={"description_regex": "^(a+)+$"},
+                actions={"review_status": "reviewed"},
+                created_by="tester",
+            )
+
+        assert session.exec(select(LedgerRule)).all() == []
+    engine.dispose()
+
+
+def test_legacy_ledger_regex_rule_is_rejected_before_apply_loads_rows():
+    engine = make_engine()
+    with Session(engine) as session:
+        rule = LedgerRule(
+            name="legacy unsafe regex",
+            conditions_json=json.dumps({"description_regex": "^(a+)+$"}),
+            actions_json=json.dumps({"review_status": "reviewed"}),
+        )
+        session.add(rule)
+        session.commit()
+
+        with patch(
+            "app.ledger._load_bank_rows",
+            side_effect=AssertionError("rows must not load for a rejected rule"),
+        ) as load_rows:
+            with pytest.raises(ValueError, match="description_regex"):
+                apply_ledger_rule(
+                    session,
+                    rule,
+                    filters=LedgerFilters(status="all"),
+                    applied_by="tester",
+                )
+
+            load_rows.assert_not_called()
+    engine.dispose()
+
+
+def test_legacy_ledger_regex_apply_route_returns_safe_error_without_loading_rows():
+    engine = make_engine()
+    with Session(engine) as session:
+        rule = LedgerRule(
+            name="legacy unsafe regex",
+            conditions_json=json.dumps({"description_regex": "^(a+)+$"}),
+            actions_json=json.dumps({"review_status": "reviewed"}),
+        )
+        session.add(rule)
+        session.commit()
+
+        with patch(
+            "app.routers.ledger.require_role_response",
+            return_value=None,
+        ), patch(
+            "app.ledger._load_bank_rows",
+            side_effect=AssertionError("rows must not load for a rejected rule"),
+        ) as load_rows:
+            response = ledger_routes.ledger_rule_apply_form(
+                make_request(f"/ledger/rules/{rule.id}/apply-form", method="POST"),
+                rule_id=rule.id,
+                selected_account="",
+                selected_start="",
+                selected_end="",
+                selected_status="all",
+                selected_category="",
+                selected_source="",
+                selected_action_reason="",
+                selected_search="",
+                selected_sort="posted_at",
+                selected_direction="desc",
+                selected_include_cash="",
+                session=session,
+            )
+
+        assert response.status_code == 303
+        assert "description_regex" in response.headers["location"]
+        load_rows.assert_not_called()
+    engine.dispose()
 
 
 def test_preview_ledger_automation_targets_needs_log_check_rows_only():
@@ -2427,7 +3284,8 @@ def test_ledger_route_renders_default_needs_action_grid():
                 expense_category="inventory_purchases",
             )
         )
-        session.add(
+        _add_legacy_source_backed_transaction(
+            session,
             Transaction(
                 id=502,
                 source_message_id=2502,
@@ -2440,7 +3298,7 @@ def test_ledger_route_renders_default_needs_action_grid():
                 money_in=0.0,
                 money_out=75.0,
                 source_content="cash buy 75",
-            )
+            ),
         )
         session.commit()
 
@@ -2530,7 +3388,8 @@ def test_ledger_defaults_to_all_transactions_with_discord_cash_in_grid():
                 expense_category="platform_payouts",
             )
         )
-        session.add(
+        _add_legacy_source_backed_transaction(
+            session,
             Transaction(
                 id=591,
                 source_message_id=2591,
@@ -2543,7 +3402,7 @@ def test_ledger_defaults_to_all_transactions_with_discord_cash_in_grid():
                 money_in=40.0,
                 money_out=0.0,
                 source_content="sold pokemon singles 40 cash",
-            )
+            ),
         )
         session.commit()
 

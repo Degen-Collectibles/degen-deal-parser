@@ -1,14 +1,70 @@
 import asyncio
 import json
+import time
 from copy import deepcopy
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.routers import team_admin, team_buylist
 from app.routers.team_buylist import DEFAULT_BUYLIST_CONFIG, calculate_buylist_offer
-from app.models import AppSetting, AuditLog, BuylistSubmission, InventoryItem, RolePermission, User
+from app.models import (
+    AppSetting,
+    AuditLog,
+    BuylistSubmission,
+    InventoryItem,
+    InventoryStockMovement,
+    RolePermission,
+    User,
+)
+
+
+TEST_BUYLIST_QUOTE_KEY = "staff-buylist-test-signing-key-000000000000000001"
+
+
+@pytest.fixture(autouse=True)
+def _configured_buylist_quote_keys(monkeypatch):
+    monkeypatch.setattr(
+        team_buylist,
+        "get_settings",
+        lambda: SimpleNamespace(
+            employee_portal_enabled=True,
+            buylist_quote_signing_keys=TEST_BUYLIST_QUOTE_KEY,
+            session_secret="separate-session-test-key-000000000000000001",
+        ),
+    )
+
+
+def _signed_candidate_token(user: User, card: dict) -> str:
+    snapshot = team_buylist._candidate_snapshot(card)
+    return team_buylist._sign_buylist_payload(
+        {
+            "version": team_buylist.BUYLIST_QUOTE_TOKEN_VERSION,
+            "purpose": "buylist_candidate",
+            "source": f"search:{snapshot['identity']['item_type']}",
+            "issued_at": int(time.time()),
+            "employee_id": user.id,
+            "candidate": snapshot,
+        }
+    )
+
+
+def _attested_line(user: User, card: dict, **selections) -> dict:
+    token = _signed_candidate_token(user, card)
+    line = team_buylist._quote_signed_candidate(
+        {
+            "candidate_token": token,
+            "quantity": selections.get("quantity", 1),
+            "condition": selections.get("condition", "NM"),
+            "language": selections.get("language", "English"),
+            "variant": selections.get("variant", card.get("variant") or "Normal"),
+        },
+        employee_id=user.id,
+        config=deepcopy(DEFAULT_BUYLIST_CONFIG),
+    )
+    return team_buylist._stored_buylist_line(line)
 
 
 class FakeJsonRequest:
@@ -533,6 +589,19 @@ def test_staff_buylist_save_creates_submission(monkeypatch):
         session.add(user)
         session.commit()
         monkeypatch.setattr(team_buylist, "_require_team_user", lambda request, sess: (None, user))
+        card = {
+            "id": "card-1",
+            "product_id": "card-1",
+            "item_type": "card",
+            "game": "Pokemon",
+            "name": "Test Card",
+            "set_name": "Test Set",
+            "number": "1",
+            "variant": "Normal",
+            "base_market_price": 10.0,
+            "market_price": 10.0,
+            "available_variants": [{"name": "Normal", "price": 10.0}],
+        }
         request = FakeJsonRequest(
             {
                 "customer_name": "Ash",
@@ -541,17 +610,10 @@ def test_staff_buylist_save_creates_submission(monkeypatch):
                 "notes": "ID checked",
                 "items": [
                     {
-                        "id": "card-1",
-                        "item_type": "card",
-                        "game": "Pokemon",
-                        "name": "Test Card",
-                        "set_name": "Test Set",
-                        "number": "1",
+                        "candidate_token": _signed_candidate_token(user, card),
                         "variant": "Normal",
                         "condition": "NM",
                         "language": "English",
-                        "market_price": 10.0,
-                        "base_market_price": 10.0,
                         "quantity": 2,
                     }
                 ],
@@ -597,23 +659,29 @@ def test_staff_buylist_save_rejects_manager_review_lines(monkeypatch):
         session.add(user)
         session.commit()
         monkeypatch.setattr(team_buylist, "_require_team_user", lambda request, sess: (None, user))
+        card = {
+            "id": "card-zero",
+            "product_id": "card-zero",
+            "item_type": "card",
+            "game": "Magic",
+            "name": "Unpriced Card",
+            "set_name": "Test Set",
+            "number": "1",
+            "variant": "Normal",
+            "base_market_price": 0.0,
+            "market_price": 0.0,
+            "available_variants": [{"name": "Normal", "price": 0.0}],
+        }
         request = FakeJsonRequest(
             {
                 "customer_name": "Brock",
                 "payment_view": "cash",
                 "items": [
                     {
-                        "id": "card-zero",
-                        "item_type": "card",
-                        "game": "Magic",
-                        "name": "Unpriced Card",
-                        "set_name": "Test Set",
-                        "number": "1",
+                        "candidate_token": _signed_candidate_token(user, card),
                         "variant": "Normal",
                         "condition": "NM",
                         "language": "English",
-                        "market_price": 0.0,
-                        "base_market_price": 0.0,
                         "quantity": 1,
                     }
                 ],
@@ -743,6 +811,22 @@ def test_staff_buylist_approval_receives_inventory(monkeypatch):
         submitter = _user(21, role="employee")
         session.add(actor)
         session.add(submitter)
+        line = _attested_line(
+            submitter,
+            {
+                "id": "card-1",
+                "product_id": "card-1",
+                "item_type": "card",
+                "game": "Pokemon",
+                "name": "Test Card",
+                "set_name": "Test Set",
+                "number": "1",
+                "variant": "Normal",
+                "base_market_price": 10.0,
+                "market_price": 10.0,
+                "available_variants": [{"name": "Normal", "price": 10.0}],
+            },
+        )
         session.add(
             BuylistSubmission(
                 submitted_by_user_id=submitter.id,
@@ -750,27 +834,7 @@ def test_staff_buylist_approval_receives_inventory(monkeypatch):
                 payment_view="cash",
                 status="submitted",
                 totals_json=json.dumps({"cash": 5.0, "trade": 6.0, "quantity": 1, "items": 1}),
-                lines_json=json.dumps(
-                    [
-                        {
-                            "id": "card-1",
-                            "item_type": "card",
-                            "game": "Pokemon",
-                            "name": "Test Card",
-                            "set_name": "Test Set",
-                            "number": "1",
-                            "variant": "Normal",
-                            "condition": "NM",
-                            "language": "English",
-                            "market_price": 10.0,
-                            "base_market_price": 10.0,
-                            "unit_cash": 5.0,
-                            "unit_trade": 6.0,
-                            "quantity": 1,
-                        }
-                    ],
-                    sort_keys=True,
-                ),
+                lines_json=json.dumps([line], sort_keys=True),
             )
         )
         session.commit()
@@ -788,6 +852,7 @@ def test_staff_buylist_approval_receives_inventory(monkeypatch):
         refreshed = session.get(BuylistSubmission, submission.id)
         item = session.exec(select(InventoryItem).where(InventoryItem.card_name == "Test Card")).one()
         result = json.loads(refreshed.inventory_result_json)
+        movement = session.exec(select(InventoryStockMovement)).one()
 
         assert response.status_code == 303
         assert refreshed.status == "approved"
@@ -795,6 +860,296 @@ def test_staff_buylist_approval_receives_inventory(monkeypatch):
         assert item.cost_basis == 5.0
         assert item.location == "Case A"
         assert result["items"][0]["inventory_item_id"] == item.id
+        assert movement.dedupe_key == f"staff-buylist:{submission.id}:line:0"
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_staff_buylist_approval_rolls_back_every_line_when_later_receive_fails(monkeypatch):
+    from fastapi import HTTPException
+    from app.inventory import routes as inventory_routes
+
+    engine, session = _memory_session()
+    try:
+        actor = _user(22, role="admin")
+        submitter = _user(23, role="employee")
+        session.add(actor)
+        session.add(submitter)
+        lines = [
+            _attested_line(
+                submitter,
+                {
+                    "id": f"atomic-{index}",
+                    "product_id": f"atomic-{index}",
+                    "item_type": "card",
+                    "game": "Pokemon",
+                    "name": f"Atomic Card {index}",
+                    "set_name": "Atomic Set",
+                    "number": str(index),
+                    "variant": "Normal",
+                    "base_market_price": 10.0,
+                    "market_price": 10.0,
+                    "available_variants": [{"name": "Normal", "price": 10.0}],
+                },
+            )
+            for index in (1, 2)
+        ]
+        session.add(
+            BuylistSubmission(
+                submitted_by_user_id=submitter.id,
+                customer_name="Atomic Customer",
+                payment_view="cash",
+                status="submitted",
+                totals_json=json.dumps(
+                    {"cash": 10.0, "trade": 12.0, "quantity": 2, "items": 2}
+                ),
+                lines_json=json.dumps(lines, sort_keys=True),
+            )
+        )
+        session.commit()
+        submission = session.exec(select(BuylistSubmission)).one()
+        original_receive = inventory_routes._receive_single_stock
+        calls = 0
+
+        def fail_second_receive(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise ValueError("deterministic later-line failure")
+            return original_receive(*args, **kwargs)
+
+        monkeypatch.setattr(inventory_routes, "_receive_single_stock", fail_second_receive)
+        monkeypatch.setattr(
+            team_buylist,
+            "_permission_gate",
+            lambda request, sess, key: (None, actor),
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(
+                team_buylist.admin_buylist_submission_approve(
+                    FakeJsonRequest({}, actor),
+                    submission_id=submission.id,
+                    location="Case Atomic",
+                    session=session,
+                )
+            )
+
+        assert exc_info.value.status_code == 409
+        assert session.exec(select(InventoryItem)).all() == []
+        assert session.exec(select(InventoryStockMovement)).all() == []
+        assert session.get(BuylistSubmission, submission.id).status == "submitted"
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_staff_buylist_approval_claim_rejects_stale_concurrent_approver(monkeypatch, tmp_path):
+    from fastapi import HTTPException
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'buylist-claim.db'}")
+    SQLModel.metadata.create_all(engine)
+    first_session = Session(engine)
+    stale_session = Session(engine, expire_on_commit=False)
+    stale_reject_session = Session(engine, expire_on_commit=False)
+    try:
+        actor = _user(24, role="admin")
+        submitter = _user(25, role="employee")
+        first_session.add(actor)
+        first_session.add(submitter)
+        line = _attested_line(
+            submitter,
+            {
+                "id": "claim-card",
+                "product_id": "claim-card",
+                "item_type": "card",
+                "game": "Pokemon",
+                "name": "Claim Card",
+                "set_name": "Claim Set",
+                "number": "1",
+                "variant": "Normal",
+                "base_market_price": 10.0,
+                "market_price": 10.0,
+                "available_variants": [{"name": "Normal", "price": 10.0}],
+            },
+        )
+        submission = BuylistSubmission(
+            submitted_by_user_id=submitter.id,
+            customer_name="Claim Customer",
+            payment_view="cash",
+            status="submitted",
+            totals_json=json.dumps({"cash": 5.0, "trade": 6.0, "quantity": 1, "items": 1}),
+            lines_json=json.dumps([line], sort_keys=True),
+        )
+        first_session.add(submission)
+        first_session.commit()
+        first_session.refresh(submission)
+        stale = stale_session.get(BuylistSubmission, submission.id)
+        assert stale.status == "submitted"
+        stale_session.commit()
+        stale_reject = stale_reject_session.get(BuylistSubmission, submission.id)
+        assert stale_reject.status == "submitted"
+        stale_reject_session.commit()
+
+        receive_calls = 0
+
+        def receive_once(*args, **kwargs):
+            nonlocal receive_calls
+            receive_calls += 1
+            return {"items": [], "location": "Case", "payment_view": "cash"}
+
+        monkeypatch.setattr(
+            team_buylist,
+            "_permission_gate",
+            lambda request, sess, key: (None, actor),
+        )
+        monkeypatch.setattr(team_buylist, "_receive_submission_inventory", receive_once)
+
+        first_response = asyncio.run(
+            team_buylist.admin_buylist_submission_approve(
+                FakeJsonRequest({}, actor),
+                submission_id=submission.id,
+                location="Case",
+                session=first_session,
+            )
+        )
+        assert first_response.status_code == 303
+
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(
+                team_buylist.admin_buylist_submission_approve(
+                    FakeJsonRequest({}, actor),
+                    submission_id=submission.id,
+                    location="Case",
+                    session=stale_session,
+                )
+            )
+
+        assert exc_info.value.status_code == 409
+        assert receive_calls == 1
+
+        with pytest.raises(HTTPException) as reject_exc:
+            asyncio.run(
+                team_buylist.admin_buylist_submission_reject(
+                    FakeJsonRequest({}, actor),
+                    submission_id=submission.id,
+                    decision_notes="stale rejection",
+                    session=stale_reject_session,
+                )
+            )
+        assert reject_exc.value.status_code == 409
+        with Session(engine) as verify:
+            assert verify.get(BuylistSubmission, submission.id).status == "approved"
+    finally:
+        stale_reject_session.close()
+        stale_session.close()
+        first_session.close()
+        engine.dispose()
+
+
+def test_staff_buylist_approval_blocks_legacy_partial_receipt_retry(monkeypatch):
+    from fastapi import HTTPException
+
+    engine, session = _memory_session()
+    try:
+        actor = _user(26, role="admin")
+        submitter = _user(27, role="employee")
+        session.add(actor)
+        session.add(submitter)
+        line = _attested_line(
+            submitter,
+            {
+                "id": "legacy-receipt-card",
+                "product_id": "legacy-receipt-card",
+                "item_type": "card",
+                "game": "Pokemon",
+                "name": "Legacy Receipt Card",
+                "set_name": "Legacy Set",
+                "number": "1",
+                "variant": "Normal",
+                "base_market_price": 10.0,
+                "market_price": 10.0,
+                "available_variants": [{"name": "Normal", "price": 10.0}],
+            },
+        )
+        submission = BuylistSubmission(
+            submitted_by_user_id=submitter.id,
+            customer_name="Legacy Customer",
+            payment_view="cash",
+            status="submitted",
+            totals_json=json.dumps({"cash": 5.0, "trade": 6.0, "quantity": 1, "items": 1}),
+            lines_json=json.dumps([line], sort_keys=True),
+        )
+        session.add(submission)
+        session.flush()
+        existing_item = InventoryItem(
+            barcode="DGN-LEGACY",
+            item_type="single",
+            game="Pokemon",
+            card_name="Previously Received",
+            quantity=1,
+            status="in_stock",
+        )
+        session.add(existing_item)
+        session.flush()
+        session.add(
+            InventoryStockMovement(
+                item_id=existing_item.id,
+                reason="receive",
+                quantity_delta=1,
+                quantity_before=0,
+                quantity_after=1,
+                source=f"Staff Buylist #{submission.id}",
+                dedupe_key=None,
+            )
+        )
+        session.commit()
+        monkeypatch.setattr(
+            team_buylist,
+            "_permission_gate",
+            lambda request, sess, key: (None, actor),
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(
+                team_buylist.admin_buylist_submission_approve(
+                    FakeJsonRequest({}, actor),
+                    submission_id=submission.id,
+                    location="Case Legacy",
+                    session=session,
+                )
+            )
+
+        assert exc_info.value.status_code == 409
+        assert session.get(BuylistSubmission, submission.id).status == "submitted"
+        assert len(session.exec(select(InventoryStockMovement)).all()) == 1
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_sealed_receive_commit_false_rolls_back_item_and_movement():
+    from app.inventory.routes import _receive_sealed_stock
+
+    engine, session = _memory_session()
+    try:
+        _receive_sealed_stock(
+            session,
+            game="Pokemon",
+            product_name="Rollback Booster Box",
+            quantity=1,
+            unit_cost=50.0,
+            dedupe_key="staff-buylist:rollback:line:0",
+            commit=False,
+        )
+        assert session.exec(select(InventoryItem)).one().quantity == 1
+        assert session.exec(select(InventoryStockMovement)).one().dedupe_key
+
+        session.rollback()
+
+        assert session.exec(select(InventoryItem)).all() == []
+        assert session.exec(select(InventoryStockMovement)).all() == []
     finally:
         session.close()
         engine.dispose()
@@ -807,33 +1162,32 @@ def test_staff_buylist_approval_defaults_missing_jp_language(monkeypatch):
         submitter = _user(31, role="employee")
         session.add(actor)
         session.add(submitter)
+        line = _attested_line(
+            submitter,
+            {
+                "id": "jp-card-1",
+                "product_id": "jp-card-1",
+                "item_type": "card",
+                "game": "Pokemon JP",
+                "name": "Gengar VMAX",
+                "set_name": "Gengar VMAX High-Class Deck",
+                "number": "002/019",
+                "variant": "Holofoil",
+                "base_market_price": 10.0,
+                "market_price": 10.0,
+                "available_variants": [{"name": "Holofoil", "price": 10.0}],
+            },
+            language="Japanese",
+            variant="Holofoil",
+        )
         session.add(
             BuylistSubmission(
                 submitted_by_user_id=submitter.id,
                 customer_name="Erika",
                 payment_view="cash",
                 status="submitted",
-                totals_json=json.dumps({"cash": 5.0, "trade": 6.0, "quantity": 1, "items": 1}),
-                lines_json=json.dumps(
-                    [
-                        {
-                            "id": "jp-card-1",
-                            "item_type": "card",
-                            "game": "Pokemon JP",
-                            "name": "Gengar VMAX",
-                            "set_name": "Gengar VMAX High-Class Deck",
-                            "number": "002/019",
-                            "variant": "Holofoil",
-                            "condition": "NM",
-                            "market_price": 10.0,
-                            "base_market_price": 10.0,
-                            "unit_cash": 5.0,
-                            "unit_trade": 6.0,
-                            "quantity": 1,
-                        }
-                    ],
-                    sort_keys=True,
-                ),
+                totals_json=json.dumps({"cash": 4.5, "trade": 5.4, "quantity": 1, "items": 1}),
+                lines_json=json.dumps([line], sort_keys=True),
             )
         )
         session.commit()
