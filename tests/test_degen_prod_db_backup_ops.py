@@ -25739,6 +25739,57 @@ def test_task8_normal_observation_success_is_read_only_and_records_receipt(
     )
 
 
+def test_task8_normal_observation_captures_invocation_before_timer_quiesce(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    operation_dir, _uid = private_operation_dir(tmp_path)
+    context, harness = task8_install_normal_observation_harness(
+        module,
+        monkeypatch,
+        operation_dir,
+    )
+    capture_timer = module._task8_capture_observation_timer
+    capture_service = module._task8_capture_observation_service
+    capture_events: list[str] = []
+
+    def require_live_timer(label: str) -> None:
+        runtime = harness["live_runtime"]
+        assert runtime["timer_enabled"] is True, label
+        assert runtime["timer_active"] is True, label
+        capture_events.append(label)
+
+    def capture_timer_before_quiesce(*args: object, **kwargs: object) -> dict[str, object]:
+        require_live_timer("timer")
+        return capture_timer(*args, **kwargs)
+
+    def capture_service_before_quiesce(
+        *args: object,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        require_live_timer("service")
+        return capture_service(*args, **kwargs)
+
+    monkeypatch.setattr(
+        module,
+        "_task8_capture_observation_timer",
+        capture_timer_before_quiesce,
+    )
+    monkeypatch.setattr(
+        module,
+        "_task8_capture_observation_service",
+        capture_service_before_quiesce,
+    )
+
+    result = module.observe_scheduled_backup(context)
+
+    assert result["phase"] == "observed"
+    assert capture_events == ["timer", "service", "timer", "service"]
+    assert harness["external_actions"][0] == "timer_disable"
+    module.validate_operation_state(result, operation_dir)
+
+
 def test_task8_normal_observation_failure_routes_to_read_only_guard_recovery(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -26391,3 +26442,77 @@ def test_task8_observation_service_and_journal_capture_use_exact_readonly_comman
         "--output=json",
         "--no-pager",
     )
+
+
+def test_task8_observation_snapshot_command_is_pre_guard_and_descriptor_free(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    operation_dir, _uid = private_operation_dir(tmp_path)
+    state = state_at_phase(operation_dir, "observing")
+    argv = ("/usr/bin/systemctl", "show", "degen-prod-db-backup.timer")
+    calls: list[tuple[tuple[str, ...], tuple[int, ...]]] = []
+    checks: list[str] = []
+    completed = subprocess.CompletedProcess(argv, 0, "safe-output\n", "")
+
+    def runner(
+        command: object,
+        pass_fds: tuple[int, ...],
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append((tuple(str(value) for value in command), pass_fds))
+        return completed
+
+    context = types.SimpleNamespace(command_runner=runner)
+
+    output = module._task8_run_observation_snapshot_command(
+        context,
+        state,
+        argv=argv,
+        label="scheduled observation snapshot",
+        revalidate=lambda: checks.append("check"),
+    )
+
+    assert output == "safe-output\n"
+    assert calls == [(argv, ())]
+    assert checks == ["check", "check"]
+    assert completed.args == ("[REDACTED]",)
+    assert completed.stdout == "[REDACTED]"
+    assert completed.stderr == "[REDACTED]"
+
+
+def test_task8_observation_snapshot_command_rejects_non_observing_state(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    operation_dir, _uid = private_operation_dir(tmp_path)
+    state = state_at_phase(operation_dir, "policy_enabled")
+    context = types.SimpleNamespace(
+        command_runner=lambda *_args, **_kwargs: pytest.fail("must not run")
+    )
+
+    with pytest.raises(module.OperationStateError, match="observing transaction"):
+        module._task8_run_observation_snapshot_command(
+            context,
+            state,
+            argv=("/usr/bin/systemctl", "show", "degen-prod-db-backup.timer"),
+            label="scheduled observation snapshot",
+        )
+
+
+def test_task8_observation_snapshot_command_requires_live_revalidation(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    operation_dir, _uid = private_operation_dir(tmp_path)
+    state = state_at_phase(operation_dir, "observing")
+    context = types.SimpleNamespace(
+        command_runner=lambda *_args, **_kwargs: pytest.fail("must not run")
+    )
+
+    with pytest.raises(module.OperationStateError, match="live revalidation"):
+        module._task8_run_observation_snapshot_command(
+            context,
+            state,
+            argv=("/usr/bin/systemctl", "show", "degen-prod-db-backup.timer"),
+            label="scheduled observation snapshot",
+        )

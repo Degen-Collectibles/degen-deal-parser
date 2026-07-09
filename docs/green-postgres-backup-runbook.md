@@ -564,6 +564,17 @@ Do not manually start the backup service. Wait for the next scheduled timer run
 and record its actual completion evidence. Then re-check the installed helper
 and observe that scheduled run:
 
+The observation helper captures two identical timer/service invocation
+snapshots while the timer is still active. The second snapshot runs at the
+final checkpoint immediately before `systemctl disable`; any trigger, service,
+PID, installed-target, policy-environment, operation-state, or verified-source
+drift fails before quiescence. The helper then freezes that invocation evidence
+while the timer is stopped and both migration locks protect the journal, local,
+and remote checks. Do not move timer/service capture after quiescence: systemd
+249 may clear `LastTriggerUSec`, `ExecMainStartTimestamp`,
+`ExecMainExitTimestamp`, and `InvocationID` when the inactive timer/service
+loses its active reference, even though the scheduled run succeeded.
+
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
