@@ -25,6 +25,15 @@ require_cmd() {
   }
 }
 
+require_bool() {
+  local key="$1"
+  local value="$2"
+  if [[ "$value" != "true" && "$value" != "false" ]]; then
+    echo "ERROR: $key must be true or false" >&2
+    exit 2
+  fi
+}
+
 require_cmd git
 require_cmd systemctl
 require_cmd curl
@@ -219,13 +228,25 @@ with open("$stamp_path", "w", encoding="utf-8") as f:
 PY
 log "Wrote deploy stamp: $APP_DIR/$stamp_path ($git_sha)"
 
-# Keep production web/worker on the intended heavy model. This intentionally
-# updates only the model selector in env files and never prints secret values.
-PRIMARY_NVIDIA_MODEL="${DEGEN_PRIMARY_NVIDIA_MODEL:-openai/openai/gpt-5.5}"
+# Keep production web/worker on the approved export-controlled model and stop
+# periodic inference unless a deploy explicitly opts back in. Values are never
+# printed because set_env_var logs only the key and target file.
+PRIMARY_NVIDIA_MODEL="${DEGEN_PRIMARY_NVIDIA_MODEL:-us/azure/openai/eccn-gpt-5.5}"
+PARSER_REPROCESS_VALUE="${DEGEN_PARSER_REPROCESS_ENABLED:-false}"
+STITCH_AUDIT_VALUE="${DEGEN_PERIODIC_STITCH_AUDIT_ENABLED:-false}"
+require_bool DEGEN_PARSER_REPROCESS_ENABLED "$PARSER_REPROCESS_VALUE"
+require_bool DEGEN_PERIODIC_STITCH_AUDIT_ENABLED "$STITCH_AUDIT_VALUE"
+
 set_env_var /opt/degen/web.env NVIDIA_MODEL "$PRIMARY_NVIDIA_MODEL"
+set_env_var /opt/degen/web.env PARSER_REPROCESS_ENABLED "$PARSER_REPROCESS_VALUE"
+set_env_var /opt/degen/web.env PERIODIC_STITCH_AUDIT_ENABLED "$STITCH_AUDIT_VALUE"
 set_env_var /opt/degen/worker.env NVIDIA_MODEL "$PRIMARY_NVIDIA_MODEL"
+set_env_var /opt/degen/worker.env PARSER_REPROCESS_ENABLED "$PARSER_REPROCESS_VALUE"
+set_env_var /opt/degen/worker.env PERIODIC_STITCH_AUDIT_ENABLED "$STITCH_AUDIT_VALUE"
 # Older service templates used /opt/degen/.env; keep it aligned if present.
 set_env_var /opt/degen/.env NVIDIA_MODEL "$PRIMARY_NVIDIA_MODEL"
+set_env_var /opt/degen/.env PARSER_REPROCESS_ENABLED "$PARSER_REPROCESS_VALUE"
+set_env_var /opt/degen/.env PERIODIC_STITCH_AUDIT_ENABLED "$STITCH_AUDIT_VALUE"
 
 log "Restarting $WEB_UNIT"
 sudo -n systemctl restart "$WEB_UNIT"

@@ -130,7 +130,7 @@ class Settings(BaseSettings):
     parser_batch_size: int = Field(default=10, alias="PARSER_BATCH_SIZE")
     parser_max_attempts: int = Field(default=3, alias="PARSER_MAX_ATTEMPTS")
     parser_live_priority_lookback_hours: float = Field(default=24.0, alias="PARSER_LIVE_PRIORITY_LOOKBACK_HOURS")
-    parser_reprocess_enabled: bool = Field(default=True, alias="PARSER_REPROCESS_ENABLED")
+    parser_reprocess_enabled: bool = Field(default=False, alias="PARSER_REPROCESS_ENABLED")
     parser_reprocess_interval_hours: float = Field(default=4.0, alias="PARSER_REPROCESS_INTERVAL_HOURS")
     parser_reprocess_batch_size: int = Field(default=20, alias="PARSER_REPROCESS_BATCH_SIZE")
     parser_reprocess_min_age_minutes: int = Field(default=15, alias="PARSER_REPROCESS_MIN_AGE_MINUTES")
@@ -166,7 +166,7 @@ class Settings(BaseSettings):
         default=24.0,
         alias="PERIODIC_OFFLINE_AUDIT_LOOKBACK_HOURS",
     )
-    periodic_stitch_audit_enabled: bool = Field(default=True, alias="PERIODIC_STITCH_AUDIT_ENABLED")
+    periodic_stitch_audit_enabled: bool = Field(default=False, alias="PERIODIC_STITCH_AUDIT_ENABLED")
     periodic_stitch_audit_interval_minutes: float = Field(
         default=45.0,
         alias="PERIODIC_STITCH_AUDIT_INTERVAL_MINUTES",

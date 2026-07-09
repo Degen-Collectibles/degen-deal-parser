@@ -84,6 +84,9 @@ def sync_transaction_from_message(session: Session, row: DiscordMessage) -> Opti
         select(Transaction).where(Transaction.source_message_id == row.id)
     ).first()
 
+    if existing is not None and (existing.source_kind or "discord") != "discord":
+        return existing
+
     if not is_transaction_message(row):
         if existing:
             bookkeeping_rows = session.exec(
