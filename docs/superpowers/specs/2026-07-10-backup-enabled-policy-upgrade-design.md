@@ -1,7 +1,7 @@
 # Green Backup Enabled-Policy Upgrade Design
 
 Date: 2026-07-10
-Status: Architecture approved by Jeffrey; written-spec review pending
+Status: Approved by Jeffrey; written-spec review completed 2026-07-10
 
 ## Problem
 
