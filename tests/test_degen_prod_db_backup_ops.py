@@ -5827,6 +5827,7 @@ def test_host_stage_explicitly_authorizes_enabled_policy_transition(
     result = module.prepare_host_staging(
         context,
         allow_live_prune_disable=True,
+        expected_live_environment_sha256=hashlib.sha256(enabled).hexdigest(),
     )
 
     manifest = json.loads(
@@ -5840,6 +5841,61 @@ def test_host_stage_explicitly_authorizes_enabled_policy_transition(
         "staged_remote_prune_enabled": False,
     }
     assert result["effective_config"]["REMOTE_PRUNE_ENABLED"] == "0"
+
+
+def test_host_stage_enabled_authorization_requires_expected_live_environment_hash(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = host_staging_fixture(module, tmp_path)
+    managed_path = fixture["managed_path"]
+    managed_path.write_bytes(
+        managed_path.read_bytes().replace(
+            b"REMOTE_PRUNE_ENABLED=0\n", b"REMOTE_PRUNE_ENABLED=1\n"
+        )
+    )
+    managed_path.chmod(0o600)
+    before = context.paths.state_file.read_bytes()
+
+    with pytest.raises(
+        module.OperationStateError,
+        match="allow-live-prune-disable requires expected live environment SHA-256",
+    ):
+        module.prepare_host_staging(context, allow_live_prune_disable=True)
+
+    assert context.paths.state_file.read_bytes() == before
+    assert not context.paths.staged_dir.exists()
+
+
+@pytest.mark.parametrize("live_enabled", [False, True])
+def test_host_stage_rejects_operator_approved_live_environment_hash_mismatch(
+    tmp_path: Path,
+    live_enabled: bool,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = host_staging_fixture(module, tmp_path)
+    managed_path = fixture["managed_path"]
+    if live_enabled:
+        managed_path.write_bytes(
+            managed_path.read_bytes().replace(
+                b"REMOTE_PRUNE_ENABLED=0\n", b"REMOTE_PRUNE_ENABLED=1\n"
+            )
+        )
+        managed_path.chmod(0o600)
+    before = context.paths.state_file.read_bytes()
+
+    with pytest.raises(
+        module.OperationStateError,
+        match="live managed environment does not match the approved SHA-256",
+    ):
+        module.prepare_host_staging(
+            context,
+            allow_live_prune_disable=live_enabled,
+            expected_live_environment_sha256="0" * 64,
+        )
+
+    assert context.paths.state_file.read_bytes() == before
+    assert not context.paths.staged_dir.exists()
 
 
 def test_host_stage_rejects_unnecessary_disable_authorization(tmp_path: Path) -> None:
@@ -5961,6 +6017,9 @@ def test_host_stage_v1_cannot_authorize_enabled_policy_transition(
         module.prepare_host_staging(
             context,
             allow_live_prune_disable=True,
+            expected_live_environment_sha256=hashlib.sha256(
+                managed_path.read_bytes()
+            ).hexdigest(),
         )
 
     assert context.paths.state_file.read_bytes() == before
@@ -7333,7 +7392,8 @@ def test_prepare_staging_cli_has_only_operation_dir_and_reconstructs_sealed_cont
     operation_dir_raw = "/opt/degen/backups/config/20260701T123456Z"
     operation_dir = Path(operation_dir_raw)
     state = source_verified_state(operation_dir)
-    observed: list[tuple[object, bool]] = []
+    approved_live_hash = "a" * 64
+    observed: list[tuple[object, bool, str | None]] = []
     monkeypatch.setattr(module, "_effective_uid", lambda: 0)
     monkeypatch.setattr(module, "_require_posix_descriptor_primitives", lambda: None)
     monkeypatch.setattr(module, "load_operation_state", lambda path, *, effective_uid: state)
@@ -7346,8 +7406,11 @@ def test_prepare_staging_cli_has_only_operation_dir_and_reconstructs_sealed_cont
         context: object,
         *,
         allow_live_prune_disable: bool = False,
+        expected_live_environment_sha256: str | None = None,
     ) -> dict[str, object]:
-        observed.append((context, allow_live_prune_disable))
+        observed.append(
+            (context, allow_live_prune_disable, expected_live_environment_sha256)
+        )
         return {"effective_config": {}, "host_stage": {}}
 
     monkeypatch.setattr(module, "prepare_host_staging", capture_prepare)
@@ -7358,12 +7421,22 @@ def test_prepare_staging_cli_has_only_operation_dir_and_reconstructs_sealed_cont
         capture_output=True,
         check=False,
     )
-    result = module.main(["prepare-staging", "--operation-dir", operation_dir_raw])
+    result = module.main(
+        [
+            "prepare-staging",
+            "--operation-dir",
+            operation_dir_raw,
+            "--expected-live-environment-sha256",
+            approved_live_hash,
+        ]
+    )
     allowed_result = module.main(
         [
             "prepare-staging",
             "--operation-dir",
             operation_dir_raw,
+            "--expected-live-environment-sha256",
+            approved_live_hash,
             "--allow-live-prune-disable",
         ]
     )
@@ -7371,6 +7444,7 @@ def test_prepare_staging_cli_has_only_operation_dir_and_reconstructs_sealed_cont
     captured = capsys.readouterr()
     assert help_result.returncode == 0
     assert "--operation-dir" in help_result.stdout
+    assert "--expected-live-environment-sha256" in help_result.stdout
     assert "--allow-live-prune-disable" in help_result.stdout
     for forbidden in ("archive", "digest", "commit", "manifest", "host-root", "runner"):
         assert forbidden not in help_result.stdout.lower()
@@ -7379,7 +7453,11 @@ def test_prepare_staging_cli_has_only_operation_dir_and_reconstructs_sealed_cont
     assert captured.out == ""
     assert captured.err == ""
     assert len(observed) == 2
-    assert [allowed for _context, allowed in observed] == [False, True]
+    assert [allowed for _context, allowed, _hash in observed] == [False, True]
+    assert [approved for _context, _allowed, approved in observed] == [
+        approved_live_hash,
+        approved_live_hash,
+    ]
     context = observed[0][0]
     assert context.paths == module.build_operation_paths(operation_dir)
     assert context.operation_id == operation_dir.name
@@ -7407,6 +7485,47 @@ def test_live_prune_disable_flag_is_prepare_staging_only() -> None:
     assert result.returncode == 2
     assert result.stdout == ""
     assert "unrecognized arguments: --allow-live-prune-disable" in result.stderr
+
+
+def test_expected_live_environment_hash_is_prepare_staging_only() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(OPS_HELPER),
+            "snapshot",
+            "--operation-dir",
+            "/opt/degen/backups/config/20260701T123456Z",
+            "--expected-live-environment-sha256",
+            "a" * 64,
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "unrecognized arguments: --expected-live-environment-sha256" in result.stderr
+
+
+def test_prepare_staging_cli_requires_expected_live_environment_hash() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(OPS_HELPER),
+            "prepare-staging",
+            "--operation-dir",
+            "/opt/degen/backups/config/20260701T123456Z",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "--expected-live-environment-sha256" in result.stderr
+    assert "required" in result.stderr
 
 
 @pytest.mark.parametrize("invalid_kind", ["missing", "extra", "enabled-prune", "bad-prefix"])
@@ -7450,6 +7569,9 @@ def host_snapshot_fixture(
     module.prepare_host_staging(
         context,
         allow_live_prune_disable=live_prune_enabled,
+        expected_live_environment_sha256=hashlib.sha256(
+            live_environment_bytes
+        ).hexdigest(),
     )
     source_runner = context.command_runner
     target_bytes: dict[str, bytes] = {}
@@ -7703,6 +7825,92 @@ def test_snapshot_accepts_exact_legacy_v1_stage_manifest(tmp_path: Path) -> None
         effective_uid=context.effective_uid,
     )
     assert state["phase"] == "snapshotted"
+
+
+def test_snapshot_rejects_enabled_live_policy_for_legacy_v1_stage_manifest(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = host_snapshot_fixture(module, tmp_path)
+    manifest_raw = rewrite_host_stage_manifest_as_v1(context)
+    rebind_staging_state_to_manifest(module, context, manifest_raw)
+    environment_path = host_root_path(context.host_root, TARGETS[-1])
+    environment_path.write_bytes(
+        environment_path.read_bytes().replace(
+            b"REMOTE_PRUNE_ENABLED=0\n",
+            b"REMOTE_PRUNE_ENABLED=1\n",
+        )
+    )
+    environment_path.chmod(0o600)
+    before = context.paths.state_file.read_bytes()
+
+    with pytest.raises(
+        module.OperationStateError,
+        match="legacy v1 staging receipt requires live remote prune policy to remain disabled",
+    ):
+        module.snapshot_host_state(context)
+
+    assert context.paths.state_file.read_bytes() == before
+    assert not context.paths.snapshot_dir.exists()
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        b"",
+        b"REMOTE_PRUNE_ENABLED=0\nREMOTE_PRUNE_ENABLED=0\n",
+        b"REMOTE_PRUNE_ENABLED=2\n",
+        b"# REMOTE_PRUNE_ENABLED=0\n",
+        b"REMOTE_PRUNE_ENABLED=0\nREMOTE_PRUNE_ENABLED=1 \n",
+        b"REMOTE_PRUNE_ENABLED=0\nREMOTE_PRUNE_ENABLED=\"1\"\n",
+    ],
+)
+def test_snapshot_rejects_invalid_live_policy_for_legacy_v1_stage_manifest(
+    tmp_path: Path,
+    replacement: bytes,
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = host_snapshot_fixture(module, tmp_path)
+    manifest_raw = rewrite_host_stage_manifest_as_v1(context)
+    rebind_staging_state_to_manifest(module, context, manifest_raw)
+    environment_path = host_root_path(context.host_root, TARGETS[-1])
+    environment_path.write_bytes(
+        environment_path.read_bytes().replace(
+            b"REMOTE_PRUNE_ENABLED=0\n",
+            replacement,
+        )
+    )
+    environment_path.chmod(0o600)
+    before = context.paths.state_file.read_bytes()
+
+    with pytest.raises(
+        module.OperationStateError,
+        match="legacy v1 staging receipt requires live remote prune policy to remain disabled",
+    ):
+        module.snapshot_host_state(context)
+
+    assert context.paths.state_file.read_bytes() == before
+    assert not context.paths.snapshot_dir.exists()
+
+
+def test_snapshot_rejects_missing_live_environment_for_legacy_v1_stage_manifest(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = host_snapshot_fixture(module, tmp_path)
+    manifest_raw = rewrite_host_stage_manifest_as_v1(context)
+    rebind_staging_state_to_manifest(module, context, manifest_raw)
+    host_root_path(context.host_root, TARGETS[-1]).unlink()
+    before = context.paths.state_file.read_bytes()
+
+    with pytest.raises(
+        module.OperationStateError,
+        match="legacy v1 staging receipt requires live remote prune policy to remain disabled",
+    ):
+        module.snapshot_host_state(context)
+
+    assert context.paths.state_file.read_bytes() == before
+    assert not context.paths.snapshot_dir.exists()
 
 
 @pytest.mark.parametrize(
@@ -8523,7 +8731,23 @@ def task7_transaction_fixture(
     if legacy_v1_stage:
         manifest_raw = rewrite_host_stage_manifest_as_v1(context)
         rebind_staging_state_to_manifest(module, context, manifest_raw)
-    module.snapshot_host_state(context)
+    original_policy_validator = module._validate_snapshot_policy_transition
+    if legacy_v1_stage and TARGETS[-1] in absent_targets:
+        # Reproduce an already-durable snapshot accepted by the pre-upgrade v1
+        # helper so current recovery remains covered for that historical shape.
+        def validate_with_legacy_v1_semantics(
+            manifest: dict[str, object],
+            targets: dict[str, object],
+        ) -> None:
+            if manifest.get("schema_version") == 1:
+                return
+            original_policy_validator(manifest, targets)
+
+        module._validate_snapshot_policy_transition = validate_with_legacy_v1_semantics
+    try:
+        module.snapshot_host_state(context)
+    finally:
+        module._validate_snapshot_policy_transition = original_policy_validator
     readonly_runner = context.command_runner
     snapshot_fixture["calls"].clear()
 

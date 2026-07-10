@@ -1944,7 +1944,8 @@ def test_task9_runbook_bootstrap_and_source_success_path_are_ordered() -> None:
         verify_source,
     )
     prepare_arguments = runbook.index(
-        'PREPARE_STAGING_ARGS=(--operation-dir "$OPERATION_DIR")'
+        'PREPARE_STAGING_ARGS=(--operation-dir "$OPERATION_DIR" '
+        '--expected-live-environment-sha256 "$LIVE_ENV_SHA256")'
     )
     prepare = runbook.index(
         '"$SOURCE_OPS" prepare-staging "${PREPARE_STAGING_ARGS[@]}"'

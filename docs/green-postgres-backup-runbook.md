@@ -479,7 +479,7 @@ printf '%s  %s\n' "$MANIFEST_SHA256" "$SOURCE_MANIFEST" | sha256sum --check --st
 
 /usr/bin/python3 "$SOURCE_OPS" verify-source --operation-dir "$OPERATION_DIR" --archive "$OPERATION_DIR/source.tar" --expected-commit "$REVIEWED_SHA" --expected-archive-sha256 "$ARCHIVE_SHA256" --expected-manifest-sha256 "$MANIFEST_SHA256"
 printf '%s  %s\n' "$LIVE_ENV_SHA256" /etc/degen/prod-db-backup.env | sha256sum --check --strict -
-PREPARE_STAGING_ARGS=(--operation-dir "$OPERATION_DIR")
+PREPARE_STAGING_ARGS=(--operation-dir "$OPERATION_DIR" --expected-live-environment-sha256 "$LIVE_ENV_SHA256")
 case "$LIVE_REMOTE_PRUNE_ENABLED" in
   0) ;;
   1) PREPARE_STAGING_ARGS+=(--allow-live-prune-disable) ;;
@@ -506,10 +506,13 @@ brev exec openclaw-9902ae --host "@$BOOTSTRAP_SCRIPT"
 
 Stop if the helper fails. Do not skip to pruning. Preserve `OPERATION_DIR`, the
 approved hashes, all helper output, and the dry-run report for review.
-Preparation itself does not change the live environment. Snapshot rechecks the
-manifest-bound live hash before installation. A successful Gate 2 installation
-leaves remote pruning disabled; the preparation authorization does not authorize
-Gate 3 or any production-prefix deletion.
+Preparation itself does not change the live environment. The source helper
+compares its descriptor-read bytes to the operator-approved hash before it
+persists the transition receipt, closing the gap between the shell rebind and
+the helper open. Snapshot rechecks that manifest-bound live hash before
+installation. A successful Gate 2 installation leaves remote pruning disabled;
+the preparation authorization does not authorize Gate 3 or any production-prefix
+deletion.
 
 ## Conditional recovery only
 
@@ -574,7 +577,7 @@ single next action shown here:
 
 | Stable phase | Next action |
 |---|---|
-| `source_verified` | rebind the approved live environment hash, then source `prepare-staging`; add `--allow-live-prune-disable` only when the approved live bit is `1` |
+| `source_verified` | rebind the approved live environment hash, then source `prepare-staging` with `--expected-live-environment-sha256`; add `--allow-live-prune-disable` only when the approved live bit is `1` |
 | `staging_prepared` | source `snapshot` |
 | `snapshotted` | source `install` |
 | `installed` | reverify installed helper, then `probe-remote` |

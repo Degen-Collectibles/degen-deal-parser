@@ -31,14 +31,16 @@ Directly editing /etc/degen/prod-db-backup.env, using an old operation rollback 
 
 ## Decision Summary
 
-Add one narrow authorization flag:
+Add one narrow authorization flag plus a required non-secret preflight binding:
 
-    prepare-staging --allow-live-prune-disable
+    prepare-staging \
+      --expected-live-environment-sha256 <approved SHA-256> \
+      --allow-live-prune-disable
 
 The flag authorizes only this transition:
 
 1. The verified live configuration is currently enabled.
-2. Preparation records the exact live environment SHA-256 and the explicit authorization in a strict host-stage manifest v2.
+2. The helper compares its descriptor-read live bytes to the operator-approved SHA-256, then records that exact hash and the explicit authorization in a strict host-stage manifest v2.
 3. Staging renders the reviewed configuration with remote pruning disabled.
 4. Snapshot proves the live environment still matches the authorized receipt before accepting the snapshot.
 5. Installation uses the existing guarded timer, service, lock, snapshot, and recovery transaction.
@@ -53,7 +55,7 @@ The flag is not a general force option. It does not authorize direct configurati
 2. Omitting the flag while the live policy is enabled preserves today's exact fail-closed behavior and creates no staging or state change.
 3. Supplying the flag while the live policy is already disabled fails as an unnecessary or stale authorization and creates no staging or state change.
 4. Preparation itself performs no live mutation, timer change, service action, lock acquisition, backup run, local deletion, or remote operation.
-5. Every new stage records a strict, manifest-bound policy-transition receipt containing the exact live environment SHA-256, the live enabled state, the explicit authorization state, and the required disabled staged state.
+5. Every CLI preparation requires the operator-approved live environment SHA-256, enforces it inside the helper, and records a strict manifest-bound receipt containing that exact hash, the live enabled state, the explicit authorization state, and the required disabled staged state.
 6. Snapshot fails before committing a snapshot receipt if the live environment no longer matches the authorized staging receipt.
 7. Installation failure after any target replacement restores the exact prior enabled environment bytes, metadata, and timer state through verified recovery.
 8. Successful installation leaves REMOTE_PRUNE_ENABLED=0 and requires the existing probe, dry run, and separate Gate 3 approval before pruning can be enabled again.
@@ -64,7 +66,7 @@ The flag is not a general force option. It does not authorize direct configurati
 
 ## Scope
 
-- Extend the operations helper CLI and preparation API with the narrow authorization flag.
+- Extend the operations helper CLI and preparation API with the narrow authorization flag and operator-approved live environment hash.
 - Separate live environment parsing from the current unconditional enabled-policy refusal so the caller can apply the explicit truth table.
 - Add strict host-stage manifest schema v2 with a policy_transition receipt.
 - Keep strict validation support for existing host-stage manifest schema v1.
@@ -105,9 +107,14 @@ The CLI becomes:
 
     degen-prod-db-backup-ops.py prepare-staging \
       --operation-dir /opt/degen/backups/config/<UTC stamp> \
+      --expected-live-environment-sha256 <64 lowercase hex> \
       [--allow-live-prune-disable]
 
-The flag is a boolean acknowledgment with no value. It is valid only when the verified effective live configuration has REMOTE_PRUNE_ENABLED=1.
+The hash is required and non-secret. The helper compares it to the exact bytes
+read from its already-validated file descriptor, so a change between the shell
+preflight check and the helper open fails closed. The flag is a boolean
+acknowledgment with no value and is valid only when the verified effective live
+configuration has REMOTE_PRUNE_ENABLED=1.
 
 The exact decision table is:
 
@@ -126,7 +133,7 @@ The default remains safe for callers that do not know about the new flag. No exi
 
 The verified environment parser continues to enforce file identity, stable bytes, strict syntax, safe paths, effective configuration validity, and secret-safe errors. It returns the parsed and effective configuration without unconditionally rejecting REMOTE_PRUNE_ENABLED=1.
 
-prepare_host_staging applies the decision table after parsing. Its public Python signature becomes prepare_host_staging(context, *, allow_live_prune_disable: bool = False). The CLI passes the parsed flag explicitly. Internal callers and existing tests that omit it retain fail-closed behavior.
+prepare_host_staging applies the decision table after parsing. Its public Python signature becomes prepare_host_staging(context, *, allow_live_prune_disable: bool = False, expected_live_environment_sha256: str | None = None). The CLI requires and passes the approved hash; an enabled-policy authorization without that hash fails closed. Internal disabled-policy test callers may omit the optional Python argument, while the production CLI cannot.
 
 No other command receives this flag. In particular, snapshot, install, recover, probe-remote, record-dry-run, enable-prune, and observe cannot use it as a bypass.
 
@@ -171,7 +178,7 @@ Operation-state schema_version remains 1. Its strict host_stage receipt remains 
 
 ### 4. Preparation and crash resume
 
-Preparation reads and validates the live managed environment once, captures its SHA-256, derives the live policy boolean, applies the authorization table, renders the staged environment with pruning disabled, and writes the canonical v2 manifest.
+Preparation reads and validates the live managed environment once, applies the authorization table, compares its exact descriptor-read SHA-256 to the operator-approved value, renders the staged environment with pruning disabled, and writes the canonical v2 manifest.
 
 Before committing staging_prepared, existing identity and byte revalidation runs again for the reviewed source, backup pair, live managed environment, application environment, and stage. If any input changes, preparation fails closed.
 
@@ -185,7 +192,7 @@ For manifest v2, that target hash must equal policy_transition.live_environment_
 
 The receipt check is in addition to, not instead of, existing path identity, ownership, mode, content, timer, service, process, rclone-audit, and manifest checks.
 
-For manifest v1, snapshot uses the existing behavior because v1 has no transition receipt and could only have been created by the old helper after proving the live policy disabled.
+For manifest v1, snapshot has no historical hash receipt, so it parses the captured live target only far enough to require exactly one disabled REMOTE_PRUNE_ENABLED assignment. Any other line that mentions that key but is not a strict unquoted assignment, including a trailing-space or quoted variant, also fails closed. A missing, invalid, duplicate, or enabled live policy fails before snapshot acceptance. This preserves v1 disabled-policy resume without allowing a stale v1 stage to reverse a policy enabled later.
 
 ### 6. Installation and recovery
 
@@ -224,6 +231,8 @@ Errors remain fail-closed, secret-safe, and phase-specific.
 
 - Enabled live policy without the flag keeps the exact current error: live remote prune policy is enabled and cannot be silently reversed.
 - Flag supplied for a disabled live policy reports: allow-live-prune-disable requires live remote prune policy to be enabled.
+- Enabled live policy plus the flag but without an approved hash reports that the authorization requires the expected live environment SHA-256.
+- Any supplied approved hash that differs from the helper's descriptor-read bytes fails before staging acceptance.
 - Invalid or inconsistent v2 receipt reports a policy-transition manifest validation error without printing configuration contents.
 - Snapshot drift reports that the live managed environment no longer matches the authorized staging receipt without printing either version.
 - A preparation error leaves operation state at source_verified and creates no accepted stage receipt.
@@ -239,7 +248,7 @@ Implementation follows test-driven development. Focused tests are written or cha
 
 ### CLI and authorization tests
 
-- CLI help documents --allow-live-prune-disable only on prepare-staging.
+- CLI help requires --expected-live-environment-sha256 and documents --allow-live-prune-disable only on prepare-staging.
 - The flag is rejected on every other subcommand.
 - Existing callers without the flag retain the enabled-policy refusal.
 - Enabled plus flag prepares successfully and records the exact receipt.
@@ -253,14 +262,14 @@ Implementation follows test-driven development. Focused tests are written or cha
 - v2 manifest and operation-state manifest_sha256 binding are deterministic.
 - The live environment hash is computed from exact raw bytes, while the staged environment hash independently binds the disabled rendered bytes.
 - Every missing, extra, mistyped, non-boolean, invalid-hash, or logically inconsistent policy_transition value is rejected.
-- Existing exact schema v1 fixtures remain accepted and unchanged.
+- Existing exact schema v1 fixtures remain accepted and unchanged only while the captured live policy remains disabled.
 - V1 adoption succeeds only with a verified disabled live policy and no transition flag; enabled live policy or a supplied flag rejects v1 adoption.
 - v1 with v2 fields, v2 without v2 fields, and unknown schema versions fail closed.
 - Preexisting staged residue or a manifest that does not reproduce exact expected bytes is rejected.
 
 ### Race and snapshot tests
 
-- Live environment byte drift during preparation is rejected by existing revalidation.
+- Live environment byte drift from the operator-approved preflight hash is rejected inside preparation, and later byte drift is rejected by existing descriptor revalidation.
 - Policy or unrelated-byte drift after preparation but before snapshot is rejected by the v2 live hash.
 - Path replacement, symlink, inode, metadata, and read-time drift remain rejected.
 - A snapshot mismatch does not advance state or start install.
@@ -294,8 +303,8 @@ The Green runbook will:
 
 1. Explain that a previously enabled policy requires the new explicit flag for a reviewed helper upgrade.
 2. Require a fresh immutable commit, archive, manifest digest, transfer directory, and operation directory; the blocked 20260710T042901Z operation is evidence only.
-3. Add the flag only after the Gate 2 preflight proves the effective live policy is enabled and identifies the exact live environment hash without printing contents.
-4. State that prepare-staging makes no live change and that snapshot must bind the same live hash.
+3. Pass the approved live environment hash to every prepare-staging invocation, and add the flag only after the Gate 2 preflight proves the effective live policy is enabled.
+4. State that prepare-staging makes no live change, enforces the approved hash inside the helper, and that snapshot must bind the same live hash.
 5. State that failed installation restores the exact prior enabled policy automatically through verified recovery.
 6. State that successful installation intentionally leaves remote pruning disabled.
 7. Preserve the separate probe, dry-run, Gate 3 approval, scheduled-run observation, and recovery boundaries.

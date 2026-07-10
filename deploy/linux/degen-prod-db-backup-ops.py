@@ -208,6 +208,10 @@ _APP_ENV_ASSIGNMENT_RE = re.compile(
     r"\A(?P<key>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>[^\r\n]*)\Z",
     re.ASCII,
 )
+_REMOTE_PRUNE_ASSIGNMENT_RE = re.compile(
+    rb"\A[ \t]*REMOTE_PRUNE_ENABLED[ \t]*=[ \t]*(?P<value>[01])\Z",
+    re.ASCII,
+)
 _INHERITED_FD_EXEC_SHIM = """import os
 import sys
 mode = sys.argv[1]
@@ -334,6 +338,7 @@ _PRIOR_STABLE_PHASES = frozenset(
 _RECOVERY_KINDS = frozenset(
     {"install", "policy", "manual_rollback", "probe", "guard"}
 )
+_MANAGED_ENVIRONMENT_TARGET = "/etc/degen/prod-db-backup.env"
 _TARGET_ORDER = (
     "/usr/local/sbin/degen-prod-db-backup",
     "/usr/local/sbin/degen-prod-db-retention",
@@ -342,7 +347,7 @@ _TARGET_ORDER = (
     "/etc/systemd/system/degen-prod-db-backup.service",
     "/etc/systemd/system/degen-prod-db-backup-alert@.service",
     "/etc/systemd/system/degen-prod-db-backup.timer",
-    "/etc/degen/prod-db-backup.env",
+    _MANAGED_ENVIRONMENT_TARGET,
 )
 _SNAPSHOT_TARGET_NAMES = {
     "/usr/local/sbin/degen-prod-db-backup": "degen-prod-db-backup",
@@ -11625,6 +11630,26 @@ def _policy_transition_receipt(
     }
 
 
+def _remote_prune_enabled_from_environment_bytes(raw: bytes) -> bool:
+    if type(raw) is not bytes or not raw:
+        raise OperationStateError("live managed environment is invalid")
+    assignments: list[bytes] = []
+    for line in raw.splitlines():
+        if b"REMOTE_PRUNE_ENABLED" not in line:
+            continue
+        match = _REMOTE_PRUNE_ASSIGNMENT_RE.fullmatch(line)
+        if match is None:
+            raise OperationStateError(
+                "live managed environment remote prune assignment is invalid"
+            )
+        assignments.append(match.group("value"))
+    if len(assignments) != 1:
+        raise OperationStateError(
+            "live managed environment must contain one remote prune assignment"
+        )
+    return assignments[0] == b"1"
+
+
 def _unsafe_environment_payload(raw: bytes) -> bool:
     try:
         text = raw.decode("utf-8", errors="strict")
@@ -13433,6 +13458,7 @@ def prepare_host_staging(
     context: OperationsContext,
     *,
     allow_live_prune_disable: bool = False,
+    expected_live_environment_sha256: str | None = None,
 ) -> dict[str, object]:
     """Verify live host readiness and persist one staging_prepared receipt."""
     _validate_source_context(context, context.paths.source_dir)
@@ -13468,6 +13494,22 @@ def prepare_host_staging(
                 base_effective,
                 allow_live_prune_disable=allow_live_prune_disable,
             )
+            approved_live_hash = _require_optional_hash(
+                expected_live_environment_sha256,
+                "expected live environment SHA-256",
+            )
+            if approved_live_hash is None:
+                if allow_live_prune_disable:
+                    raise OperationStateError(
+                        "allow-live-prune-disable requires expected live environment SHA-256"
+                    )
+            elif not secrets.compare_digest(
+                hashlib.sha256(managed_raw).hexdigest(),
+                approved_live_hash,
+            ):
+                raise OperationStateError(
+                    "live managed environment does not match the approved SHA-256"
+                )
             backup_dir = base_effective.get("BACKUP_DIR")
             app_env_file = base_effective.get("APP_ENV_FILE")
             if type(backup_dir) is not str or type(app_env_file) is not str:
@@ -13680,12 +13722,26 @@ def _validate_snapshot_policy_transition(
         "host-stage manifest schema version",
         minimum=None,
     )
+    environment = targets.get(_MANAGED_ENVIRONMENT_TARGET)
     if schema_version == 1:
+        try:
+            live_enabled = (
+                environment is None
+                or environment.contents is None
+                or _remote_prune_enabled_from_environment_bytes(environment.contents)
+            )
+        except OperationStateError:
+            raise OperationStateError(
+                "legacy v1 staging receipt requires live remote prune policy to remain disabled"
+            ) from None
+        if live_enabled:
+            raise OperationStateError(
+                "legacy v1 staging receipt requires live remote prune policy to remain disabled"
+            )
         return
     if schema_version != 2:
         raise OperationStateError("host-stage manifest schema is invalid")
     transition = _validate_policy_transition(stage_manifest.get("policy_transition"))
-    environment = targets.get(_TARGET_ORDER[-1])
     if environment is None or environment.contents is None:
         raise OperationStateError(
             "live managed environment no longer matches the authorized staging receipt"
@@ -23411,6 +23467,12 @@ def _build_parser() -> argparse.ArgumentParser:
     prepare_staging = subparsers.add_parser("prepare-staging", allow_abbrev=False)
     prepare_staging.add_argument("--operation-dir", required=True, action=_StoreOnce)
     prepare_staging.add_argument(
+        "--expected-live-environment-sha256",
+        required=True,
+        action=_StoreOnce,
+        help="bind preparation to the operator-approved live environment SHA-256",
+    )
+    prepare_staging.add_argument(
         "--allow-live-prune-disable",
         action="store_true",
         help=(
@@ -23522,6 +23584,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             prepare_host_staging(
                 context,
                 allow_live_prune_disable=args.allow_live_prune_disable,
+                expected_live_environment_sha256=(
+                    args.expected_live_environment_sha256
+                ),
             )
         elif args.command == "snapshot":
             paths = build_operation_paths(operation_dir)
