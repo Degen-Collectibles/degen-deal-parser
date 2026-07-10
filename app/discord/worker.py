@@ -1683,12 +1683,27 @@ def build_stitch_group(
         candidates.append(row)
 
     group_rows = [row]
+
+    def _candidate_order(candidate: DiscordMessage) -> tuple[int, float, datetime]:
+        delta_seconds = (candidate.created_at - row.created_at).total_seconds()
+        complementary_image_state = has_images(candidate) != has_images(row)
+
+        # Deal logs are normally image-first, followed by their text. In an
+        # alternating image/text sequence, preferring absolute distance alone
+        # lets a text row steal the next deal's image (or an image steal the
+        # previous deal's text). Keep text-then-image as the fallback when no
+        # candidate exists in the normal direction.
+        if complementary_image_state:
+            normal_direction = delta_seconds >= 0 if has_images(row) else delta_seconds <= 0
+            direction_rank = 0 if normal_direction else 1
+        else:
+            direction_rank = 2
+
+        return direction_rank, abs(delta_seconds), candidate.created_at
+
     nearby_candidates = sorted(
         [candidate for candidate in candidates if candidate.id != row.id],
-        key=lambda candidate: (
-            abs((candidate.created_at - row.created_at).total_seconds()),
-            candidate.created_at,
-        ),
+        key=_candidate_order,
     )
 
     for candidate in nearby_candidates:
@@ -1760,6 +1775,21 @@ def is_payment_method_only_text(text: str) -> bool:
     return bool(re.fullmatch(r"(zelle|venmo|paypal|cash|tap|card|cc|dc)", text, re.I))
 
 
+def is_bare_amount_fragment_text(text: str) -> bool:
+    text = normalize_text(text)
+    match = re.fullmatch(r"(\$?)\s*(\d[\d,]*)(?:\.\d{1,2})?", text)
+    if not match:
+        return False
+
+    has_currency_marker = bool(match.group(1))
+    digit_count = len(match.group(2).replace(",", ""))
+    return has_currency_marker or digit_count >= 2
+
+
+def is_payment_fragment_text(text: str) -> bool:
+    return is_payment_only_text(text) or is_bare_amount_fragment_text(text)
+
+
 def is_trade_fragment_text(text: str) -> bool:
     text = normalize_text(text)
     patterns = [
@@ -1789,7 +1819,7 @@ def is_short_fragment(row: DiscordMessage) -> bool:
         return False
     if has_images(row) and len(text) <= 20:
         return True
-    if is_payment_only_text(text):
+    if is_payment_fragment_text(text):
         return True
     if is_payment_method_only_text(text):
         return True
@@ -1815,7 +1845,7 @@ def contains_amount(text: str) -> bool:
 
 def has_descriptive_text(row: DiscordMessage) -> bool:
     text = normalize_text(row.content)
-    if not text or is_payment_only_text(text):
+    if not text or is_payment_fragment_text(text):
         return False
     if is_explicit_buy_sell_text(text):
         return True
@@ -1834,7 +1864,7 @@ def stitch_profile(rows: list[DiscordMessage]) -> dict[str, int]:
         text = normalize_text(row.content)
         if has_images(row):
             profile["images"] += 1
-        if is_payment_only_text(text) or is_payment_method_only_text(text):
+        if is_payment_fragment_text(text) or is_payment_method_only_text(text):
             profile["payment_fragments"] += 1
         if has_descriptive_text(row):
             profile["descriptions"] += 1
@@ -1897,7 +1927,7 @@ def should_force_stitch(base_row: DiscordMessage, candidate_rows: list[DiscordMe
         return False
 
     def _has_deal_text(text: str) -> bool:
-        return is_explicit_buy_sell_text(text) or is_trade_fragment_text(text) or is_payment_only_text(text)
+        return is_explicit_buy_sell_text(text) or is_trade_fragment_text(text) or is_payment_fragment_text(text)
 
     image_then_text = has_images(first_row) and len(first_text) <= 20 and _has_deal_text(second_text)
     text_then_image = has_images(second_row) and len(second_text) <= 20 and _has_deal_text(first_text)
@@ -1939,7 +1969,7 @@ def should_stitch_rows(base_row: DiscordMessage, candidate_rows: list[DiscordMes
 
     for r in candidate_rows:
         text = normalize_text(r.content)
-        if is_payment_only_text(text):
+        if is_payment_fragment_text(text):
             payment_fragments += 1
         if is_short_fragment(r):
             short_fragments += 1
