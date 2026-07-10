@@ -11,7 +11,9 @@ Manual execution without `DEGEN_EXPECTED_GIT_SHA` retains the script's existing 
 
 ### Current Green rollback contract
 
-Rollback is repository-driven and exact-SHA: create a canonical GitHub revert or corrective commit on `main`, then let the SHA-pinned workflow synchronize `/opt/degen/app` to that new `$GITHUB_SHA` and redeploy it with `DEGEN_EXPECTED_GIT_SHA="$GITHUB_SHA"`.
+Preferred rollback is repository-driven and exact-SHA: create a corrective commit on `main`, or a targeted content revert that preserves the hardened `.github/workflows/deploy.yml` and `scripts/redeploy-linux.sh`; then let the SHA-pinned workflow synchronize `/opt/degen/app` to that new `$GITHUB_SHA` and redeploy it with `DEGEN_EXPECTED_GIT_SHA="$GITHUB_SHA"`.
+
+A full revert of the deploy-hardening branch is a separate rollback mode because it restores the legacy workflow and script. GitHub evaluates that restored legacy deploy entrypoint at the full-revert commit, so this path is not SHA-pinned. It requires separate explicit approval, a preflight for Green/Brev `openclaw-9902ae` that verifies branch `main`, tracked cleanliness, the intended full-revert commit, and the expected legacy entrypoint behavior, followed by post-deploy verification of the deployed `HEAD`, service health, and the public health endpoint.
 
 Do not use `git reset --hard`, force-push, force checkout, or deletion of untracked operational files as deployment or rollback mechanisms. Investigate tracked drift and resolve it through the canonical repository.
 

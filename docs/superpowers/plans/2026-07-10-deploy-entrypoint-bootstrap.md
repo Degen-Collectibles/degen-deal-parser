@@ -409,7 +409,7 @@ Present:
 - Pull-request base: current `origin/main`.
 - Reversible actions: push branch and open draft PR; no production effect.
 - Irreversible/external boundary: merging the PR triggers production synchronization, environment rewrite, and service restarts.
-- Rollback: revert the PR through GitHub; no database rollback is required.
+- Rollback: prefer a corrective commit or targeted content revert that preserves the hardened workflow/script; a full branch revert is separately approval-gated because it restores the legacy deploy entrypoint. No database rollback is required.
 
 Wait for explicit approval before pushing.
 
@@ -504,7 +504,7 @@ State that merging will:
 - restart web, worker, and configured bot services; and
 - run health verification.
 
-Rollback is a GitHub revert followed by the same synchronized deployment. Wait for explicit merge approval.
+Preferred rollback is a corrective commit or targeted content revert that preserves the hardened workflow/script, followed by the same synchronized exact-SHA deployment. A full revert of the deploy-hardening branch instead restores the legacy entrypoint, is not SHA-pinned, and requires separate explicit approval, a Green/Brev preflight, and post-deploy verification. Wait for explicit merge approval.
 
 - [ ] **Step 5: Merge and monitor both workflows**
 
