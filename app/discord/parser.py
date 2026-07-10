@@ -313,6 +313,12 @@ def parse_trade_hint(message_text: str) -> Dict[str, Any] | None:
         )
     if not payment_match:
         payment_match = re.search(
+            r"\b(\d+(?:\.\d{1,2})?)\s+on\s+(zelle|venmo|paypal|cash|card|tap|apple_pay)\b",
+            lower,
+            re.I,
+        )
+    if not payment_match:
+        payment_match = re.search(
             r"\b(\d+(?:\.\d{1,2})?)\s*(zelle|venmo|paypal|cash|card|tap|apple_pay)?\s*(?:on\s+top|top)\b",
             lower,
             re.I,
@@ -347,7 +353,7 @@ def parse_trade_hint(message_text: str) -> Dict[str, Any] | None:
     items_out = []
 
     # Parse side-based shorthand
-    if "top out" in lower:
+    if "top out" in lower or re.search(r"\btop\b.*?\b(?:store\s+)?credit\s+out\b", lower, re.I):
         items_out.append("top case items")
     if "bottom out" in lower:
         items_out.append("bottom case items")
@@ -364,6 +370,14 @@ def parse_trade_hint(message_text: str) -> Dict[str, Any] | None:
         items_in.append("left side items")
     if "right side in" in lower or "right in" in lower:
         items_in.append("right side items")
+
+    credit_out_match = re.search(
+        r"\b(\d+(?:\.\d{1,2})?)\s*(?:store\s+)?credit\s+out\b",
+        lower,
+        re.I,
+    )
+    if credit_out_match:
+        items_out.append(f"${float(credit_out_match.group(1)):g} store credit")
 
     # More general category hints
     if "singles in" in lower:
@@ -501,6 +515,7 @@ GRADE_WORDS = ("psa", "bgs", "sgc", "cgc", "grade")
 _APPLE_PAY_RE = re.compile(r'\bapple\s+pay\b|\bapplepay\b|\bappstd\b', re.I)
 _PAYPAL_RE = re.compile(r'\bpay\s*pal\b', re.I)
 _ZELLED_RE = re.compile(r'\bzelled\b', re.I)
+_REGISTER_RE = re.compile(r'\bregister\b', re.I)
 
 
 def _normalize_payment_tokens(text: str) -> str:
@@ -508,6 +523,7 @@ def _normalize_payment_tokens(text: str) -> str:
     normalized = _APPLE_PAY_RE.sub('apple_pay', text)
     normalized = _PAYPAL_RE.sub('paypal', normalized)
     normalized = _ZELLED_RE.sub('zelle', normalized)
+    normalized = _REGISTER_RE.sub('card', normalized)
     return normalized
 
 
@@ -556,6 +572,16 @@ def _normalize_amount_text(text: str) -> str:
 def is_payment_method_only_message_text(text: str) -> bool:
     lower = _normalize_payment_tokens(normalize_message_part(text).lower())
     return bool(re.fullmatch(r"(zelle|venmo|paypal|cash|card|tap|cc|dc|apple_pay)", lower, re.I))
+
+
+def extract_bare_amount_message(text: str) -> float | None:
+    lower = _normalize_amount_text(normalize_message_part(text).lower()).strip()
+    match = re.fullmatch(r"(\$?)\s*(\d+(?:\.\d{1,2})?)", lower)
+    if not match:
+        return None
+    if not match.group(1) and len(match.group(2).split(".", 1)[0]) < 2:
+        return None
+    return float(match.group(2))
 
 
 def extract_payment_segments(text: str) -> list[tuple[float, str]]:
@@ -629,9 +655,10 @@ def extract_unlabeled_amount(text: str) -> float | None:
     if not lower:
         return None
 
-    candidates: list[float] = []
+    candidates: list[tuple[bool, float]] = []
     for match in re.finditer(r"\$?\d+(?:\.\d{1,2})?", lower):
-        token = match.group(0).replace("$", "")
+        raw_token = match.group(0)
+        token = raw_token.replace("$", "")
         try:
             amount = float(token)
         except Exception as e:
@@ -650,9 +677,15 @@ def extract_unlabeled_amount(text: str) -> float | None:
             continue
         if has_quantity_multiplier_after(lower, match.end()):
             continue
-        candidates.append(amount)
+        candidates.append((raw_token.startswith("$"), amount))
 
-    return candidates[-1] if candidates else None
+    if not candidates:
+        return None
+
+    currency_candidates = [amount for has_currency, amount in candidates if has_currency]
+    if currency_candidates:
+        return currency_candidates[-1]
+    return candidates[-1][1]
 
 
 def extract_payment_summary(text: str) -> dict[str, Any] | None:
@@ -677,6 +710,45 @@ def summarize_payment_breakdown(segments: list[tuple[float, str]]) -> dict[str, 
         "amount": total_amount,
         "payment_method": "mixed",
         "payment_breakdown": segments,
+    }
+
+
+def infer_remainder_payment_summary(
+    text: str,
+    payment_summary: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not payment_summary:
+        return None
+
+    lower = _normalize_payment_tokens(_normalize_amount_text(normalize_message_part(text).lower()))
+    remainder_match = re.search(
+        r"\brest\s+(cash|zelle|venmo|paypal|card|tap|cc|dc|apple_pay|register)\b",
+        lower,
+        re.I,
+    )
+    if not remainder_match:
+        return None
+
+    total_match = re.search(
+        r"\b(?:buy|bought|bougjt|sell|sold)\b.*?\$?\s*(\d+(?:\.\d{1,2})?)\s*[,;]",
+        lower,
+        re.I,
+    )
+    if not total_match:
+        return None
+
+    total_amount = float(total_match.group(1))
+    known_amount = round(sum(amount for amount, _ in payment_summary["payment_breakdown"]), 2)
+    remainder_amount = round(total_amount - known_amount, 2)
+    if remainder_amount <= 0:
+        return None
+
+    remainder_method = normalize_payment_method(remainder_match.group(1).lower())
+    breakdown = [*payment_summary["payment_breakdown"], (remainder_amount, remainder_method)]
+    return {
+        "amount": total_amount,
+        "payment_method": "mixed",
+        "payment_breakdown": breakdown,
     }
 
 
@@ -1272,6 +1344,7 @@ def parse_stitched_rule_hint(message_text: str) -> Dict[str, Any] | None:
     trade_part: str | None = None
     payment_breakdown: list[tuple[float, str]] = []
     payment_method_only: str | None = None
+    bare_amount_followup: float | None = None
     saw_image_only_lead = bool(message_parts and has_no_text_placeholder(message_parts[0]))
 
     for original_part, normalized_part in zip(message_parts, normalized_parts):
@@ -1292,10 +1365,18 @@ def parse_stitched_rule_hint(message_text: str) -> Dict[str, Any] | None:
             payment_breakdown.extend(payment_summary["payment_breakdown"])
         elif is_payment_method_only_message_text(normalized_part) and payment_method_only is None:
             payment_method_only = normalize_payment_method(normalized_part.lower())
+        else:
+            bare_amount = extract_bare_amount_message(normalized_part)
+            if bare_amount is not None:
+                bare_amount_followup = bare_amount
 
     combined_payment = summarize_payment_breakdown(payment_breakdown)
     payment_amount = combined_payment["amount"] if combined_payment else None
     payment_method = combined_payment["payment_method"] if combined_payment else None
+    if payment_amount is None:
+        payment_amount = bare_amount_followup
+    if payment_amount is None and explicit_part:
+        payment_amount = extract_unlabeled_amount(explicit_part)
 
     if explicit_type and explicit_part and not any(has_explicit_trade_signal(part) for part in nonempty_parts):
         notes = "stitched explicit buy/sell override"
@@ -1433,7 +1514,10 @@ def parse_by_rules(message_text: str, channel_name: str | None = None) -> Dict[s
 
     explicit_type = infer_explicit_buy_sell_type(text)
     payment_summary = extract_payment_summary(text)
-    multi_payment = extract_multi_payment_summary(text)
+    remainder_payment_summary = infer_remainder_payment_summary(text, payment_summary)
+    if remainder_payment_summary:
+        payment_summary = remainder_payment_summary
+    multi_payment = remainder_payment_summary or extract_multi_payment_summary(text)
     inferred_category = infer_category_from_text(text) or "unknown"
     if (
         payment_summary
