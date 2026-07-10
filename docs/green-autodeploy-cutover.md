@@ -1,5 +1,16 @@
 # Green autodeploy cutover plan
 
+## Current Green deployment contract (2026-07-10)
+
+Green/Brev `openclaw-9902ae` is the active production host. GitHub Actions deploys pushes to `main` through two fail-closed stages:
+
+1. `.github/workflows/deploy.yml` verifies branch `main`, rejects tracked checkout changes, fetches `origin/main`, fast-forwards `/opt/degen/app` to the triggering `$GITHUB_SHA`, and verifies exact equality.
+2. The workflow invokes `scripts/redeploy-linux.sh` with `DEGEN_EXPECTED_GIT_SHA="$GITHUB_SHA"`. The script rechecks branch, tracked cleanliness, SHA shape, and exact `HEAD` before dependencies, environment updates, or service restarts. It does not fetch or pull in this mode.
+
+Manual execution without `DEGEN_EXPECTED_GIT_SHA` retains the script's existing `git fetch origin main` and `git pull --rebase origin main` behavior.
+
+Do not use `git reset --hard`, force checkout, or delete untracked operational files to unblock a deployment. Investigate tracked drift and resolve it through the canonical repository.
+
 Current production deploys from GitHub Actions to Machine B using a Windows self-hosted runner named `DESKTOP-PPF7VK9`. The live workflow is intentionally **not** changed in this prep commit because any push to `main` currently autodeploys Machine B.
 
 ## Current Machine B flow
@@ -103,12 +114,43 @@ jobs:
         working-directory: /opt/degen/app
 
     steps:
+      - name: Synchronize production checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          current_branch="$(git rev-parse --abbrev-ref HEAD)"
+          if [[ "$current_branch" != "main" ]]; then
+            echo "ERROR: expected branch main, got $current_branch" >&2
+            exit 3
+          fi
+
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo "ERROR: tracked production checkout changes must be resolved before deploy" >&2
+            git status --short --untracked-files=no >&2
+            exit 6
+          fi
+
+          git fetch origin main
+          if ! git merge --ff-only "$GITHUB_SHA"; then
+            echo "ERROR: production checkout cannot fast-forward to $GITHUB_SHA" >&2
+            exit 7
+          fi
+
+          actual_sha="$(git rev-parse HEAD)"
+          if [[ "$actual_sha" != "$GITHUB_SHA" ]]; then
+            echo "ERROR: expected checkout $GITHUB_SHA, got $actual_sha" >&2
+            exit 8
+          fi
+
       - name: Redeploy app
-        run: ./scripts/redeploy-linux.sh
+        run: DEGEN_EXPECTED_GIT_SHA="$GITHUB_SHA" ./scripts/redeploy-linux.sh
 
       - name: Verify health
         run: curl -fsS http://127.0.0.1:8000/health >/dev/null
 ```
+
+The synchronization step must remain before `Redeploy app`; otherwise a commit that changes `redeploy-linux.sh` can execute the prior in-memory script on its first deployment.
 
 Do not leave `runs-on: self-hosted` after both runners exist.
 
