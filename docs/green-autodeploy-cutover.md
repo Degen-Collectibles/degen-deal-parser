@@ -1,5 +1,26 @@
 # Green autodeploy cutover plan
 
+## Current Green deployment contract (2026-07-10)
+
+Green/Brev `openclaw-9902ae` is the active production host. GitHub Actions deploys pushes to `main` through two fail-closed stages:
+
+1. `.github/workflows/deploy.yml` verifies branch `main`, rejects tracked checkout changes, fetches `origin/main`, fast-forwards `/opt/degen/app` to the triggering `$GITHUB_SHA`, and verifies exact equality.
+2. The workflow invokes `scripts/redeploy-linux.sh` with `DEGEN_EXPECTED_GIT_SHA="$GITHUB_SHA"`. The script rechecks branch, tracked cleanliness, SHA shape, and exact `HEAD` before dependencies, environment updates, or service restarts. It does not fetch or pull in this mode.
+
+Manual execution without `DEGEN_EXPECTED_GIT_SHA` retains the script's existing `git fetch origin main` and `git pull --rebase origin main` behavior.
+
+### Current Green rollback contract
+
+Preferred rollback is repository-driven and exact-SHA: create a corrective commit on `main`, or a targeted content revert that preserves the hardened `.github/workflows/deploy.yml` and `scripts/redeploy-linux.sh`; then let the SHA-pinned workflow synchronize `/opt/degen/app` to that new `$GITHUB_SHA` and redeploy it with `DEGEN_EXPECTED_GIT_SHA="$GITHUB_SHA"`.
+
+A full revert of the deploy-hardening branch is a separate rollback mode because it restores the legacy workflow and script. GitHub evaluates that restored legacy deploy entrypoint at the full-revert commit, so this path is not SHA-pinned. It requires separate explicit approval, a preflight for Green/Brev `openclaw-9902ae` that verifies branch `main`, tracked cleanliness, the intended full-revert commit, and the expected legacy entrypoint behavior, followed by post-deploy verification of the deployed `HEAD`, service health, and the public health endpoint.
+
+Do not use `git reset --hard`, force-push, force checkout, or deletion of untracked operational files as deployment or rollback mechanisms. Investigate tracked drift and resolve it through the canonical repository.
+
+Any urgent manual deployment requires separate explicit approval. Before it runs, verify branch `main`, tracked cleanliness of both the working tree and index, and that `HEAD` equals the intended 40-character lowercase Git SHA; invoke the script with that SHA in `DEGEN_EXPECTED_GIT_SHA` so it rechecks exact equality before any deployment side effects.
+
+**Historical-record boundary:** All remaining Machine B and cutover material below is a historical preparation record preserved for context only. It is not current production instruction; the current Green contract above governs production today.
+
 Current production deploys from GitHub Actions to Machine B using a Windows self-hosted runner named `DESKTOP-PPF7VK9`. The live workflow is intentionally **not** changed in this prep commit because any push to `main` currently autodeploys Machine B.
 
 ## Current Machine B flow
@@ -103,12 +124,43 @@ jobs:
         working-directory: /opt/degen/app
 
     steps:
+      - name: Synchronize production checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          current_branch="$(git rev-parse --abbrev-ref HEAD)"
+          if [[ "$current_branch" != "main" ]]; then
+            echo "ERROR: expected branch main, got $current_branch" >&2
+            exit 3
+          fi
+
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo "ERROR: tracked production checkout changes must be resolved before deploy" >&2
+            git status --short --untracked-files=no >&2
+            exit 6
+          fi
+
+          git fetch origin main
+          if ! git merge --ff-only "$GITHUB_SHA"; then
+            echo "ERROR: production checkout cannot fast-forward to $GITHUB_SHA" >&2
+            exit 7
+          fi
+
+          actual_sha="$(git rev-parse HEAD)"
+          if [[ "$actual_sha" != "$GITHUB_SHA" ]]; then
+            echo "ERROR: expected checkout $GITHUB_SHA, got $actual_sha" >&2
+            exit 8
+          fi
+
       - name: Redeploy app
-        run: ./scripts/redeploy-linux.sh
+        run: DEGEN_EXPECTED_GIT_SHA="$GITHUB_SHA" ./scripts/redeploy-linux.sh
 
       - name: Verify health
         run: curl -fsS http://127.0.0.1:8000/health >/dev/null
 ```
+
+The synchronization step must remain before `Redeploy app`; otherwise a commit that changes `redeploy-linux.sh` can execute the prior in-memory script on its first deployment.
 
 Do not leave `runs-on: self-hosted` after both runners exist.
 

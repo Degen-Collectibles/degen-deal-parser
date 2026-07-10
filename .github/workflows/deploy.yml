@@ -12,8 +12,37 @@ jobs:
         working-directory: /opt/degen/app
 
     steps:
+      - name: Synchronize production checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          current_branch="$(git rev-parse --abbrev-ref HEAD)"
+          if [[ "$current_branch" != "main" ]]; then
+            echo "ERROR: expected branch main, got $current_branch" >&2
+            exit 3
+          fi
+
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo "ERROR: tracked production checkout changes must be resolved before deploy" >&2
+            git status --short --untracked-files=no >&2
+            exit 6
+          fi
+
+          git fetch origin main
+          if ! git merge --ff-only "$GITHUB_SHA"; then
+            echo "ERROR: production checkout cannot fast-forward to $GITHUB_SHA" >&2
+            exit 7
+          fi
+
+          actual_sha="$(git rev-parse HEAD)"
+          if [[ "$actual_sha" != "$GITHUB_SHA" ]]; then
+            echo "ERROR: expected checkout $GITHUB_SHA, got $actual_sha" >&2
+            exit 8
+          fi
+
       - name: Redeploy app
-        run: ./scripts/redeploy-linux.sh
+        run: DEGEN_EXPECTED_GIT_SHA="$GITHUB_SHA" ./scripts/redeploy-linux.sh
 
       - name: Verify health
         run: curl -fsS http://127.0.0.1:8000/health >/dev/null
