@@ -7434,9 +7434,23 @@ def host_snapshot_fixture(
     tmp_path: Path,
     *,
     absent_targets: tuple[str, ...] = (),
+    live_prune_enabled: bool = False,
 ) -> tuple[object, dict[str, object]]:
     context, staging = host_staging_fixture(module, tmp_path)
-    module.prepare_host_staging(context)
+    managed_path = staging["managed_path"]
+    if live_prune_enabled:
+        managed_path.write_bytes(
+            managed_path.read_bytes().replace(
+                b"REMOTE_PRUNE_ENABLED=0\n",
+                b"REMOTE_PRUNE_ENABLED=1\n",
+            )
+        )
+        managed_path.chmod(0o600)
+    live_environment_bytes = managed_path.read_bytes()
+    module.prepare_host_staging(
+        context,
+        allow_live_prune_disable=live_prune_enabled,
+    )
     source_runner = context.command_runner
     target_bytes: dict[str, bytes] = {}
     target_modes = {
@@ -7456,7 +7470,11 @@ def host_snapshot_fixture(
         if target in absent_targets:
             path.parent.mkdir(parents=True, exist_ok=True)
             continue
-        contents = f"prior host bytes {index} for {target}\n".encode("ascii")
+        contents = (
+            live_environment_bytes
+            if target == TARGETS[-1]
+            else f"prior host bytes {index} for {target}\n".encode("ascii")
+        )
         write_private_host_file(path, contents, target_modes[target])
         target_bytes[target] = contents
 
@@ -7580,6 +7598,7 @@ def host_snapshot_fixture(
 
     return dataclasses.replace(context, command_runner=command_runner), {
         "calls": calls,
+        "live_environment_bytes": live_environment_bytes,
         "rclone_bytes": staging["rclone_path"].read_bytes(),
         "rclone_path": staging["rclone_path"],
         "runtime": runtime,
@@ -7738,6 +7757,49 @@ def test_host_stage_v2_policy_transition_is_strict(
     before = context.paths.state_file.read_bytes()
 
     with pytest.raises(module.OperationStateError, match="manifest|policy|schema|SHA-256"):
+        module.snapshot_host_state(context)
+
+    assert context.paths.state_file.read_bytes() == before
+    assert not context.paths.snapshot_dir.exists()
+
+
+def test_snapshot_rejects_live_environment_drift_from_v2_receipt(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = host_snapshot_fixture(module, tmp_path)
+    environment_path = host_root_path(context.host_root, TARGETS[-1])
+    environment_path.write_bytes(
+        fixture["live_environment_bytes"] + b"UNMANAGED_SAFE_DRIFT=changed\n"
+    )
+    environment_path.chmod(0o600)
+    before = context.paths.state_file.read_bytes()
+
+    with pytest.raises(
+        module.OperationStateError,
+        match="live managed environment no longer matches the authorized staging receipt",
+    ):
+        module.snapshot_host_state(context)
+
+    assert context.paths.state_file.read_bytes() == before
+    assert not context.paths.snapshot_dir.exists()
+
+
+def test_snapshot_rejects_missing_live_environment_for_v2_receipt(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = host_snapshot_fixture(
+        module,
+        tmp_path,
+        absent_targets=(TARGETS[-1],),
+    )
+    before = context.paths.state_file.read_bytes()
+
+    with pytest.raises(
+        module.OperationStateError,
+        match="live managed environment no longer matches the authorized staging receipt",
+    ):
         module.snapshot_host_state(context)
 
     assert context.paths.state_file.read_bytes() == before
@@ -8445,16 +8507,22 @@ def task7_transaction_fixture(
     absent_targets: tuple[str, ...] = (),
     timer_enabled: bool = True,
     timer_active: bool = True,
+    live_prune_enabled: bool = False,
+    legacy_v1_stage: bool = False,
 ) -> tuple[object, dict[str, object]]:
     context, snapshot_fixture = host_snapshot_fixture(
         module,
         tmp_path,
         absent_targets=absent_targets,
+        live_prune_enabled=live_prune_enabled,
     )
     runtime = snapshot_fixture["runtime"]
     runtime["timer_enabled"] = "enabled" if timer_enabled else "disabled"
     runtime["timer_active"] = "active" if timer_active else "inactive"
     runtime["timer_substate"] = "waiting" if timer_active else "dead"
+    if legacy_v1_stage:
+        manifest_raw = rewrite_host_stage_manifest_as_v1(context)
+        rebind_staging_state_to_manifest(module, context, manifest_raw)
     module.snapshot_host_state(context)
     readonly_runner = context.command_runner
     snapshot_fixture["calls"].clear()
@@ -10382,6 +10450,79 @@ def test_install_failure_restores_every_prior_target_and_timer(
     assert state["install"]["completed_epoch"] is None
 
 
+def test_authorized_enabled_upgrade_installs_with_pruning_disabled(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(
+        module,
+        tmp_path,
+        live_prune_enabled=True,
+    )
+    prior_environment = fixture["prior"][TARGETS[-1]]["bytes"]
+    assert b"REMOTE_PRUNE_ENABLED=1\n" in prior_environment
+
+    result = module.install_host_configuration(context)
+
+    installed = host_root_path(context.host_root, TARGETS[-1]).read_bytes()
+    assert b"REMOTE_PRUNE_ENABLED=0\n" in installed
+    assert b"REMOTE_PRUNE_ENABLED=1\n" not in installed
+    assert result["phase"] == "installed"
+    assert result["install"]["completed_epoch"] is not None
+    assert fixture["runtime"]["timer_active"] == "active"
+    assert fixture["runtime"]["timer_enabled"] == "enabled"
+
+
+def test_enabled_policy_is_restored_after_failure_beyond_environment_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = task7_transaction_fixture(
+        module,
+        tmp_path,
+        live_prune_enabled=True,
+    )
+    prior_environment = copy.deepcopy(fixture["prior"][TARGETS[-1]])
+    failed_after_environment_replace = False
+
+    def fail(event: str, **details: object) -> None:
+        nonlocal failed_after_environment_replace
+        if event != "task7_after_target_replace" or details.get("target") != TARGETS[-1]:
+            return
+        installed = host_root_path(context.host_root, TARGETS[-1]).read_bytes()
+        assert b"REMOTE_PRUNE_ENABLED=0\n" in installed
+        assert b"REMOTE_PRUNE_ENABLED=1\n" not in installed
+        failed_after_environment_replace = True
+        raise module.OperationStateError("controlled failure after environment replacement")
+
+    monkeypatch.setattr(module, "_atomic_event_hook", fail)
+
+    with pytest.raises(
+        module.OperationStateError,
+        match="controlled failure after environment replacement",
+    ):
+        module.install_host_configuration(context)
+
+    assert failed_after_environment_replace is True
+    assert_task7_prior_targets_restored(context, fixture)
+    restored = host_root_path(context.host_root, TARGETS[-1])
+    assert restored.read_bytes() == prior_environment["bytes"]
+    assert b"REMOTE_PRUNE_ENABLED=1\n" in restored.read_bytes()
+    if os.name == "posix":
+        metadata = restored.stat()
+        assert stat.S_IMODE(metadata.st_mode) == prior_environment["mode"]
+        assert metadata.st_uid == prior_environment["uid"]
+        assert metadata.st_gid == prior_environment["gid"]
+    assert fixture["runtime"]["timer_active"] == "active"
+    assert fixture["runtime"]["timer_enabled"] == "enabled"
+    state = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert state["phase"] == "rolled_back"
+
+
 @pytest.mark.parametrize(
     "fail_action",
     ["disable-timer", "stop-timer", "daemon-reload", "preflight"],
@@ -10938,6 +11079,7 @@ def test_manual_recovery_restart_after_each_absence_unlink(
         module,
         tmp_path,
         absent_targets=(target,),
+        legacy_v1_stage=target == TARGETS[-1],
     )
     module.install_host_configuration(context)
 

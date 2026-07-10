@@ -13671,6 +13671,34 @@ def _snapshotted_state(
     return state
 
 
+def _validate_snapshot_policy_transition(
+    stage_manifest: dict[str, object],
+    targets: dict[str, _SnapshotTargetProof],
+) -> None:
+    schema_version = _require_int(
+        stage_manifest.get("schema_version"),
+        "host-stage manifest schema version",
+        minimum=None,
+    )
+    if schema_version == 1:
+        return
+    if schema_version != 2:
+        raise OperationStateError("host-stage manifest schema is invalid")
+    transition = _validate_policy_transition(stage_manifest.get("policy_transition"))
+    environment = targets.get(_TARGET_ORDER[-1])
+    if environment is None or environment.contents is None:
+        raise OperationStateError(
+            "live managed environment no longer matches the authorized staging receipt"
+        )
+    if (
+        hashlib.sha256(environment.contents).hexdigest()
+        != transition["live_environment_sha256"]
+    ):
+        raise OperationStateError(
+            "live managed environment no longer matches the authorized staging receipt"
+        )
+
+
 def _revalidate_snapshot_inputs(
     material: _VerifiedSourceMaterial,
     stage_proof: _HostStageProof,
@@ -13684,6 +13712,7 @@ def _revalidate_snapshot_inputs(
     _revalidate_host_stage_proof(stage_proof, stage_manifest)
     for proof in targets.values():
         _revalidate_snapshot_target_proof(proof)
+    _validate_snapshot_policy_transition(stage_manifest, targets)
     _revalidate_host_file_proof(rclone)
     if _read_host_file(rclone, _MAX_SNAPSHOT_FILE_BYTES) != rclone_raw:
         raise OperationStateError("rclone audit source changed after capture")
@@ -13740,6 +13769,7 @@ def snapshot_host_state(context: OperationsContext) -> dict[str, object]:
                     )
                     proof = _capture_snapshot_target(directory, logical_path)
                     target_proofs[logical_path] = proof
+                _validate_snapshot_policy_transition(stage_manifest, target_proofs)
                 effective_config = initial_state["effective_config"]
                 assert isinstance(effective_config, dict)
                 if effective_config["RCLONE_CONFIG"] != _RCLONE_CONFIG_PATH:
