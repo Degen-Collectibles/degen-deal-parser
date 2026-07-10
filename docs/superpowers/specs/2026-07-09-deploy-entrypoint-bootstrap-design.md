@@ -1,7 +1,8 @@
 # Production Deploy Entrypoint Bootstrap Design
 
 Date: 2026-07-09
-Status: Approved for planning
+Amended: 2026-07-10
+Status: Approved for planning, including the exact-SHA script contract
 
 ## Problem
 
@@ -9,7 +10,7 @@ The production GitHub Actions workflow runs from `/opt/degen/app` and currently 
 
 This happened while deploying token-efficiency PR #24. Production reached the correct merge SHA, but the first deployment applied the prior script's non-ECCN model default and did not write the two new disabled-loop settings. Rerunning the same workflow after the checkout had advanced opened the new script and applied the intended settings.
 
-The deployment entrypoint must therefore update and verify the production checkout before opening the repository-owned deployment script.
+The deployment entrypoint must therefore update and verify the production checkout before opening the repository-owned deployment script. The workflow must also bind the opened script to that verified SHA so the script cannot pull a different commit before restarting services.
 
 The local Brev CLI also completes cached SSH commands but then reports that its API login is expired. That access should be refreshed without first discarding the still-working cached SSH path.
 
@@ -32,13 +33,17 @@ The local Brev CLI also completes cached SSH commands but then reports that its 
 3. An older queued workflow cannot deploy over a newer production checkout. A SHA mismatch must fail closed.
 4. Existing untracked operational files do not block deployment, matching the current deployment contract.
 5. Focused regression tests enforce synchronization ordering and the exact-SHA guard.
-6. Brev authentication is refreshed without exposing credentials or logging out first, then verified with `brev ls` and one read-only command on `openclaw-9902ae`.
+6. Workflow-driven deployment executes exactly `$GITHUB_SHA`; it cannot advance to a different `origin/main` commit inside `redeploy-linux.sh`.
+7. Manual deployment without a workflow-provided expected SHA retains the existing fetch/pull behavior.
+8. Brev authentication is refreshed without exposing credentials or logging out first, then verified with `brev ls` and one read-only command on `openclaw-9902ae`.
 
 ## Scope
 
 ### In scope
 
 - Add a production-checkout synchronization step to `.github/workflows/deploy.yml` before `Redeploy app`.
+- Pass the triggering SHA into `scripts/redeploy-linux.sh` as `DEGEN_EXPECTED_GIT_SHA`.
+- Add an exact-SHA mode to `scripts/redeploy-linux.sh` that verifies `HEAD` and skips repository synchronization only when that variable is present.
 - Add focused tests for the workflow bootstrap and ordering.
 - Update the Green auto-deploy runbook with the two-stage deployment contract.
 - Publish the change through a separate pull request.
@@ -46,7 +51,7 @@ The local Brev CLI also completes cached SSH commands but then reports that its 
 
 ### Out of scope
 
-- Refactoring `scripts/redeploy-linux.sh` beyond what is required by review findings.
+- Refactoring `scripts/redeploy-linux.sh` beyond the approved expected-SHA guard.
 - Replacing the self-hosted runner or `/opt/degen/app` working-directory deployment model.
 - Cleaning or reconciling Jeffrey's intentionally divergent local `main`.
 - Deleting existing feature worktrees or operational files.
@@ -59,6 +64,7 @@ The local Brev CLI also completes cached SSH commands but then reports that its 
 - Production must never use `git reset --hard`, force checkout, or another command that silently discards tracked work.
 - The workflow must be safe when pushes arrive close together.
 - The existing deployment script remains the owner of dependency installation, environment-file updates, service restarts, bot restart behavior, and health polling.
+- Manual invocations of `scripts/redeploy-linux.sh` must continue to fetch and pull `origin/main` when `DEGEN_EXPECTED_GIT_SHA` is absent.
 - Tests must pass before commit and again in the pull request.
 - Merging the workflow change itself triggers a production deployment and therefore requires a fresh production preflight and explicit merge approval.
 
@@ -66,23 +72,23 @@ The local Brev CLI also completes cached SSH commands but then reports that its 
 
 ### 1. Workflow bootstrap before script invocation - selected
 
-Add a `Synchronize production checkout` step before `Redeploy app`. The workflow runner performs the branch, cleanliness, fetch, fast-forward, and exact-SHA checks. The next workflow step then opens the script from the synchronized checkout.
+Add a `Synchronize production checkout` step before `Redeploy app`. The workflow runner performs the branch, cleanliness, fetch, fast-forward, and exact-SHA checks. The next workflow step then opens the script from the synchronized checkout and passes the same SHA as `DEGEN_EXPECTED_GIT_SHA`. The script verifies that contract and does not fetch or pull in workflow-driven mode.
 
 Advantages:
 
 - Fixes the failure at the correct ownership boundary: the workflow controls which deploy entrypoint it opens.
 - Executes a changed deployment script correctly on the first attempt.
 - Can bind the deployment to `$GITHUB_SHA` and fail stale runs safely.
-- Leaves the script's existing pull as defense-in-depth.
+- Retains the script's existing fetch/pull behavior for manual deployments.
 - Produces clear GitHub Actions evidence before any service mutation.
 
-Trade-off: the branch and cleanliness checks are duplicated between the workflow and the script. The duplication is intentional because they protect two different boundaries.
+Trade-off: the branch and cleanliness checks are duplicated between the workflow and the script, and the script gains a second repository-synchronization mode. The duplication is intentional because the workflow protects entrypoint selection while the script protects both workflow and manual execution.
 
 ### 2. Make the deployment script re-execute itself after pulling
 
 The script could compare its pre-pull and post-pull version, set a recursion guard, and `exec` the updated script.
 
-This would solve the immediate symptom, but it makes a script responsible for replacing itself while running. It adds recursion and environment-marker complexity and leaves the workflow unaware of which script version initially opened. It is retained only as a fallback if workflow bootstrap proves infeasible.
+This would solve the immediate symptom, but it makes a script responsible for replacing itself while running. It adds recursion and environment-marker complexity and leaves the workflow unaware of which script version initially opened. It also does not bind the deployment to the triggering SHA if `origin/main` advances again. It is retained only as a fallback if workflow bootstrap proves infeasible.
 
 ### 3. Force-reset production or deploy from a temporary checkout
 
@@ -112,9 +118,22 @@ Behavior:
 3. Fetching `origin/main` makes the triggering commit available locally.
 4. `git merge --ff-only "$GITHUB_SHA"` advances production without rewriting history.
 5. The final equality check rejects an older queued workflow when production is already ahead of that workflow's SHA.
-6. Only after this step succeeds does the next workflow step open `./scripts/redeploy-linux.sh`.
+6. Only after this step succeeds does the next workflow step open `./scripts/redeploy-linux.sh` with `DEGEN_EXPECTED_GIT_SHA="$GITHUB_SHA"`.
 
-The deployment script keeps its existing fetch, branch, cleanliness, and pull checks. In the normal path its pull becomes a no-op.
+### Deployment-script exact-SHA mode
+
+`scripts/redeploy-linux.sh` will read `DEGEN_EXPECTED_GIT_SHA` after confirming branch `main` and tracked cleanliness.
+
+- When the variable is non-empty, the script verifies it is a 40-character lowercase hexadecimal Git SHA, compares it to `git rev-parse HEAD`, and fails before dependency installation or service mutation if they differ. It does not run `git fetch` or `git pull` in this mode.
+- When the variable is empty, the script retains the current manual behavior: fetch `origin/main`, confirm branch `main`, reject tracked changes, and pull with rebase.
+
+The workflow redeploy step will use:
+
+```bash
+DEGEN_EXPECTED_GIT_SHA="$GITHUB_SHA" ./scripts/redeploy-linux.sh
+```
+
+This ensures the script that the workflow opened cannot advance past the triggering SHA after the bootstrap check.
 
 ### Regression coverage
 
@@ -127,9 +146,15 @@ A focused test module will read `.github/workflows/deploy.yml` as text and asser
 - it fetches `origin main`;
 - it uses `git merge --ff-only "$GITHUB_SHA"` rather than reset, force checkout, or rebase;
 - it asserts final `HEAD` equality with `$GITHUB_SHA`; and
-- the redeploy step still invokes `./scripts/redeploy-linux.sh`.
+- the redeploy step passes `DEGEN_EXPECTED_GIT_SHA="$GITHUB_SHA"` while invoking `./scripts/redeploy-linux.sh`.
 
-The existing redeploy-script tests remain unchanged unless implementation review exposes an actual gap.
+`tests/test_redeploy_linux_script.py` will also assert:
+
+- expected-SHA mode validates the SHA shape;
+- expected-SHA mode compares the expected and actual `HEAD` values before dependency installation;
+- expected-SHA mode does not fetch or pull;
+- manual mode retains `git fetch origin main` and `git pull --rebase origin main`; and
+- both modes retain the existing branch and tracked-cleanliness guards.
 
 ### Runbook update
 
@@ -138,7 +163,7 @@ The existing redeploy-script tests remain unchanged unless implementation review
 1. GitHub Actions synchronizes `/opt/degen/app` to the triggering SHA and fails closed on drift.
 2. The synchronized `redeploy-linux.sh` performs the application deployment and health verification.
 
-It will explicitly warn that deployment-script changes depend on the workflow bootstrap and that the script's internal pull is defense-in-depth, not the bootstrap mechanism.
+It will explicitly warn that deployment-script changes depend on the workflow bootstrap, that workflow mode is bound to `DEGEN_EXPECTED_GIT_SHA`, and that internal fetch/pull is reserved for manual mode.
 
 ### Brev re-authentication
 
@@ -157,6 +182,8 @@ If login fails, stop and preserve the existing cached SSH path. Do not deregiste
 - Every workflow guard exits nonzero before `Redeploy app` begins.
 - A dirty or divergent checkout is reported as a deployment failure; the workflow does not clean it automatically.
 - An exact-SHA mismatch is treated as a stale or out-of-order run and fails instead of deploying a different commit.
+- An invalid `DEGEN_EXPECTED_GIT_SHA` fails before dependencies, environment files, or services are touched.
+- A valid but nonmatching expected SHA fails before mutation and reports both expected and actual values.
 - Existing deployment-script health failures retain their current logs and GitHub Actions failure behavior.
 - Brev authentication failures are reported without logging out or modifying production.
 
@@ -180,6 +207,7 @@ If login fails, stop and preserve the existing cached SSH path. Do not deregiste
 - Preflight current production SHA, branch, tracked cleanliness, service state, and health.
 - Merge only after explicit approval.
 - Confirm the workflow synchronization step reports the merge SHA before `Redeploy app` starts.
+- Confirm `Redeploy app` reports expected-SHA mode and does not fetch or pull after opening the script.
 - Confirm the deploy workflow succeeds without a manual rerun.
 - Verify production `HEAD` and deploy stamp equal the merge SHA.
 - Verify web and worker services are active, health is 200, and post-restart logs contain no severe errors.
@@ -193,6 +221,7 @@ If login fails, stop and preserve the existing cached SSH path. Do not deregiste
 ## Risks and Mitigations
 
 - **Concurrent pushes:** An older run may start after a newer run. The exact-SHA assertion fails the older run instead of rolling production backward.
+- **`origin/main` advances after workflow synchronization:** The script remains pinned to `DEGEN_EXPECTED_GIT_SHA` and does not pull the newer commit. That newer commit is handled by its own workflow run.
 - **Tracked production drift:** The workflow fails before mutation and surfaces the drift for investigation.
 - **Untracked operational files:** They remain allowed and untouched.
 - **Workflow syntax error:** Focused tests plus GitHub's workflow parsing and PR checks catch this before merge.
@@ -211,4 +240,4 @@ No database or environment rollback is required because this change does not alt
 
 ## Open Questions
 
-None. The selected workflow-bootstrap design, fail-closed behavior, separate Brev credential flow, and production verification contract are fully specified.
+None. The selected workflow-bootstrap design, expected-SHA script mode, manual fallback behavior, separate Brev credential flow, and production verification contract are fully specified.
