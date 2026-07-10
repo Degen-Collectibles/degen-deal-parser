@@ -9,7 +9,15 @@ Green/Brev `openclaw-9902ae` is the active production host. GitHub Actions deplo
 
 Manual execution without `DEGEN_EXPECTED_GIT_SHA` retains the script's existing `git fetch origin main` and `git pull --rebase origin main` behavior.
 
-Do not use `git reset --hard`, force checkout, or delete untracked operational files to unblock a deployment. Investigate tracked drift and resolve it through the canonical repository.
+### Current Green rollback contract
+
+Rollback is repository-driven and exact-SHA: create a canonical GitHub revert or corrective commit on `main`, then let the SHA-pinned workflow synchronize `/opt/degen/app` to that new `$GITHUB_SHA` and redeploy it with `DEGEN_EXPECTED_GIT_SHA="$GITHUB_SHA"`.
+
+Do not use `git reset --hard`, force-push, force checkout, or deletion of untracked operational files as deployment or rollback mechanisms. Investigate tracked drift and resolve it through the canonical repository.
+
+Any urgent manual deployment requires separate explicit approval. Before it runs, verify branch `main`, tracked cleanliness of both the working tree and index, and that `HEAD` equals the intended 40-character lowercase Git SHA; invoke the script with that SHA in `DEGEN_EXPECTED_GIT_SHA` so it rechecks exact equality before any deployment side effects.
+
+**Historical-record boundary:** All remaining Machine B and cutover material below is a historical preparation record preserved for context only. It is not current production instruction; the current Green contract above governs production today.
 
 Current production deploys from GitHub Actions to Machine B using a Windows self-hosted runner named `DESKTOP-PPF7VK9`. The live workflow is intentionally **not** changed in this prep commit because any push to `main` currently autodeploys Machine B.
 
