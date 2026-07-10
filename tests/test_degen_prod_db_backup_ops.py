@@ -5550,10 +5550,13 @@ def expected_host_stage_manifest(
     enabled_environment_sha256: str,
     dump_name: str,
     dump_sha256: str,
+    *,
+    schema_version: int = 2,
+    policy_transition: dict[str, object] | None = None,
 ) -> dict[str, object]:
     target_by_source = dict(zip(SOURCE_ASSETS[:7], TARGETS[:7], strict=True))
-    return {
-        "schema_version": 1,
+    manifest: dict[str, object] = {
+        "schema_version": schema_version,
         "operation": {
             "archive_sha256": context.expected_archive_sha256,
             "commit": context.expected_commit,
@@ -5583,6 +5586,42 @@ def expected_host_stage_manifest(
             "target": "/etc/degen/prod-db-backup.env",
         },
     }
+    if schema_version == 2:
+        assert policy_transition is not None
+        manifest["policy_transition"] = policy_transition
+    else:
+        assert schema_version == 1
+        assert policy_transition is None
+    return manifest
+
+
+def rewrite_host_stage_manifest_as_v1(context: object) -> bytes:
+    manifest_path = context.paths.staged_dir / "host-stage-manifest.json"
+    manifest = json.loads(manifest_path.read_text("ascii"))
+    assert manifest.pop("policy_transition")["staged_remote_prune_enabled"] is False
+    manifest["schema_version"] = 1
+    raw = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n"
+    manifest_path.write_bytes(raw)
+    manifest_path.chmod(0o600)
+    return raw
+
+
+def rebind_staging_state_to_manifest(
+    module: object,
+    context: object,
+    manifest_raw: bytes,
+) -> None:
+    state = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    state["host_stage"]["manifest_sha256"] = hashlib.sha256(manifest_raw).hexdigest()
+    state["phase_history"][-1]["evidence_sha256"] = hashlib.sha256(
+        module._staging_evidence(state["effective_config"], state["host_stage"])
+    ).hexdigest()
+    context.paths.state_file.write_bytes(module._canonical_state_bytes(state))
+    context.paths.state_file.chmod(0o600)
+    module.validate_operation_state_for_context(state, context)
 
 
 def test_prepare_host_staging_builds_exact_assets_manifest_and_state(tmp_path: Path) -> None:
@@ -5634,6 +5673,14 @@ def test_prepare_host_staging_builds_exact_assets_manifest_and_state(tmp_path: P
     environment_sha256 = hashlib.sha256(environment_bytes).hexdigest()
     enabled_environment_bytes = task8_enabled_environment_bytes(environment_bytes)
     enabled_environment_sha256 = hashlib.sha256(enabled_environment_bytes).hexdigest()
+    policy_transition = {
+        "live_environment_sha256": hashlib.sha256(
+            fixture["managed_path"].read_bytes()
+        ).hexdigest(),
+        "live_remote_prune_enabled": False,
+        "explicit_disable_authorized": False,
+        "staged_remote_prune_enabled": False,
+    }
     expected_manifest = expected_host_stage_manifest(
         context,
         fixture["assets"],
@@ -5641,6 +5688,7 @@ def test_prepare_host_staging_builds_exact_assets_manifest_and_state(tmp_path: P
         enabled_environment_sha256,
         fixture["dump_name"],
         hashlib.sha256(fixture["dump_bytes"]).hexdigest(),
+        policy_transition=policy_transition,
     )
     expected_manifest_bytes = (
         json.dumps(expected_manifest, sort_keys=True, separators=(",", ":")).encode("ascii")
@@ -5754,8 +5802,56 @@ def test_host_stage_refuses_to_reverse_live_enabled_prune_policy(tmp_path: Path)
     managed_path.chmod(0o600)
     before = context.paths.state_file.read_bytes()
 
-    with pytest.raises(module.OperationStateError, match="prune|enabled"):
+    with pytest.raises(
+        module.OperationStateError,
+        match="live remote prune policy is enabled and cannot be silently reversed",
+    ):
         module.prepare_host_staging(context)
+
+    assert context.paths.state_file.read_bytes() == before
+    assert not context.paths.staged_dir.exists()
+
+
+def test_host_stage_explicitly_authorizes_enabled_policy_transition(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = host_staging_fixture(module, tmp_path)
+    managed_path = fixture["managed_path"]
+    enabled = managed_path.read_bytes().replace(
+        b"REMOTE_PRUNE_ENABLED=0\n", b"REMOTE_PRUNE_ENABLED=1\n"
+    )
+    managed_path.write_bytes(enabled)
+    managed_path.chmod(0o600)
+
+    result = module.prepare_host_staging(
+        context,
+        allow_live_prune_disable=True,
+    )
+
+    manifest = json.loads(
+        (context.paths.staged_dir / "host-stage-manifest.json").read_text("ascii")
+    )
+    assert manifest["schema_version"] == 2
+    assert manifest["policy_transition"] == {
+        "live_environment_sha256": hashlib.sha256(enabled).hexdigest(),
+        "live_remote_prune_enabled": True,
+        "explicit_disable_authorized": True,
+        "staged_remote_prune_enabled": False,
+    }
+    assert result["effective_config"]["REMOTE_PRUNE_ENABLED"] == "0"
+
+
+def test_host_stage_rejects_unnecessary_disable_authorization(tmp_path: Path) -> None:
+    module = load_ops_helper()
+    context, _fixture = host_staging_fixture(module, tmp_path)
+    before = context.paths.state_file.read_bytes()
+
+    with pytest.raises(
+        module.OperationStateError,
+        match="allow-live-prune-disable requires live remote prune policy to be enabled",
+    ):
+        module.prepare_host_staging(context, allow_live_prune_disable=True)
 
     assert context.paths.state_file.read_bytes() == before
     assert not context.paths.staged_dir.exists()
@@ -5810,6 +5906,67 @@ def test_host_stage_resumes_only_an_exact_fully_verified_preexisting_stage(
         for path in context.paths.staged_dir.rglob("*")
         if path.is_file()
     } == identities
+
+
+def test_host_stage_resumes_exact_v1_stage_only_for_disabled_policy(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = host_staging_fixture(module, tmp_path)
+    source_state_bytes = context.paths.state_file.read_bytes()
+    module.prepare_host_staging(context)
+    manifest_raw = rewrite_host_stage_manifest_as_v1(context)
+    context.paths.state_file.write_bytes(source_state_bytes)
+    context.paths.state_file.chmod(0o600)
+
+    result = module.prepare_host_staging(context)
+
+    assert (
+        context.paths.staged_dir / "host-stage-manifest.json"
+    ).read_bytes() == manifest_raw
+    assert result["host_stage"]["manifest_sha256"] == hashlib.sha256(
+        manifest_raw
+    ).hexdigest()
+    state = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert state["phase"] == "staging_prepared"
+
+
+def test_host_stage_v1_cannot_authorize_enabled_policy_transition(
+    tmp_path: Path,
+) -> None:
+    module = load_ops_helper()
+    context, fixture = host_staging_fixture(module, tmp_path)
+    source_state_bytes = context.paths.state_file.read_bytes()
+    module.prepare_host_staging(context)
+    manifest_raw = rewrite_host_stage_manifest_as_v1(context)
+    context.paths.state_file.write_bytes(source_state_bytes)
+    context.paths.state_file.chmod(0o600)
+    managed_path = fixture["managed_path"]
+    managed_path.write_bytes(
+        managed_path.read_bytes().replace(
+            b"REMOTE_PRUNE_ENABLED=0\n",
+            b"REMOTE_PRUNE_ENABLED=1\n",
+        )
+    )
+    managed_path.chmod(0o600)
+    before = context.paths.state_file.read_bytes()
+
+    with pytest.raises(
+        module.OperationStateError,
+        match="host-stage manifest v1 cannot authorize live prune disable",
+    ):
+        module.prepare_host_staging(
+            context,
+            allow_live_prune_disable=True,
+        )
+
+    assert context.paths.state_file.read_bytes() == before
+    assert (
+        context.paths.staged_dir / "host-stage-manifest.json"
+    ).read_bytes() == manifest_raw
 
 
 def test_host_stage_exact_resume_does_not_create_or_unlink_render_scratch(
@@ -7176,7 +7333,7 @@ def test_prepare_staging_cli_has_only_operation_dir_and_reconstructs_sealed_cont
     operation_dir_raw = "/opt/degen/backups/config/20260701T123456Z"
     operation_dir = Path(operation_dir_raw)
     state = source_verified_state(operation_dir)
-    observed: list[object] = []
+    observed: list[tuple[object, bool]] = []
     monkeypatch.setattr(module, "_effective_uid", lambda: 0)
     monkeypatch.setattr(module, "_require_posix_descriptor_primitives", lambda: None)
     monkeypatch.setattr(module, "load_operation_state", lambda path, *, effective_uid: state)
@@ -7185,12 +7342,15 @@ def test_prepare_staging_cli_has_only_operation_dir_and_reconstructs_sealed_cont
         # it as drive-relative on Windows; real context validation is covered by
         # the direct API tests and by the Linux follow-up.
         monkeypatch.setattr(module, "validate_operation_state_for_context", lambda *_: None)
-    monkeypatch.setattr(
-        module,
-        "prepare_host_staging",
-        lambda context: observed.append(context)
-        or {"effective_config": {}, "host_stage": {}},
-    )
+    def capture_prepare(
+        context: object,
+        *,
+        allow_live_prune_disable: bool = False,
+    ) -> dict[str, object]:
+        observed.append((context, allow_live_prune_disable))
+        return {"effective_config": {}, "host_stage": {}}
+
+    monkeypatch.setattr(module, "prepare_host_staging", capture_prepare)
 
     help_result = subprocess.run(
         [sys.executable, str(OPS_HELPER), "prepare-staging", "--help"],
@@ -7199,23 +7359,54 @@ def test_prepare_staging_cli_has_only_operation_dir_and_reconstructs_sealed_cont
         check=False,
     )
     result = module.main(["prepare-staging", "--operation-dir", operation_dir_raw])
+    allowed_result = module.main(
+        [
+            "prepare-staging",
+            "--operation-dir",
+            operation_dir_raw,
+            "--allow-live-prune-disable",
+        ]
+    )
 
     captured = capsys.readouterr()
     assert help_result.returncode == 0
     assert "--operation-dir" in help_result.stdout
+    assert "--allow-live-prune-disable" in help_result.stdout
     for forbidden in ("archive", "digest", "commit", "manifest", "host-root", "runner"):
         assert forbidden not in help_result.stdout.lower()
     assert result == 0
+    assert allowed_result == 0
     assert captured.out == ""
     assert captured.err == ""
-    assert len(observed) == 1
-    context = observed[0]
+    assert len(observed) == 2
+    assert [allowed for _context, allowed in observed] == [False, True]
+    context = observed[0][0]
     assert context.paths == module.build_operation_paths(operation_dir)
     assert context.operation_id == operation_dir.name
     assert context.expected_commit == state["reviewed_source"]["commit"]
     assert context.expected_archive_sha256 == state["reviewed_source"]["archive_sha256"]
     assert context.expected_manifest_sha256 == state["reviewed_source"]["manifest_sha256"]
     assert context.host_root == Path("/")
+
+
+def test_live_prune_disable_flag_is_prepare_staging_only() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(OPS_HELPER),
+            "snapshot",
+            "--operation-dir",
+            "/opt/degen/backups/config/20260701T123456Z",
+            "--allow-live-prune-disable",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "unrecognized arguments: --allow-live-prune-disable" in result.stderr
 
 
 @pytest.mark.parametrize("invalid_kind", ["missing", "extra", "enabled-prune", "bad-prefix"])
@@ -7477,6 +7668,80 @@ def test_snapshot_host_state_saves_exact_targets_manifest_and_receipt(
         "staging_prepared",
         "snapshotted",
     ]
+
+
+def test_snapshot_accepts_exact_legacy_v1_stage_manifest(tmp_path: Path) -> None:
+    module = load_ops_helper()
+    context, _fixture = host_snapshot_fixture(module, tmp_path)
+    manifest_raw = rewrite_host_stage_manifest_as_v1(context)
+    rebind_staging_state_to_manifest(module, context, manifest_raw)
+
+    result = module.snapshot_host_state(context)
+
+    assert result["snapshot"]["targets"]
+    state = module.load_operation_state(
+        context.paths.state_file,
+        effective_uid=context.effective_uid,
+    )
+    assert state["phase"] == "snapshotted"
+
+
+@pytest.mark.parametrize(
+    "invalid_kind",
+    [
+        "missing-field",
+        "extra-field",
+        "bad-hash",
+        "integer-boolean",
+        "staged-enabled",
+        "authorization-mismatch",
+        "missing-transition",
+        "unknown-version",
+        "v1-with-transition",
+    ],
+)
+def test_host_stage_v2_policy_transition_is_strict(
+    tmp_path: Path,
+    invalid_kind: str,
+) -> None:
+    module = load_ops_helper()
+    context, _fixture = host_snapshot_fixture(module, tmp_path)
+    manifest_path = context.paths.staged_dir / "host-stage-manifest.json"
+    manifest = json.loads(manifest_path.read_text("ascii"))
+    transition = manifest["policy_transition"]
+    if invalid_kind == "missing-field":
+        transition.pop("live_environment_sha256")
+    elif invalid_kind == "extra-field":
+        transition["unexpected"] = False
+    elif invalid_kind == "bad-hash":
+        transition["live_environment_sha256"] = "A" * 64
+    elif invalid_kind == "integer-boolean":
+        transition["live_remote_prune_enabled"] = 0
+    elif invalid_kind == "staged-enabled":
+        transition["staged_remote_prune_enabled"] = True
+    elif invalid_kind == "authorization-mismatch":
+        transition["explicit_disable_authorized"] = True
+    elif invalid_kind == "missing-transition":
+        manifest.pop("policy_transition")
+    elif invalid_kind == "unknown-version":
+        manifest["schema_version"] = 3
+    else:
+        assert invalid_kind == "v1-with-transition"
+        manifest["schema_version"] = 1
+    manifest_raw = (
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("ascii")
+        + b"\n"
+    )
+    manifest_path.write_bytes(manifest_raw)
+    manifest_path.chmod(0o600)
+    rebind_staging_state_to_manifest(module, context, manifest_raw)
+    before = context.paths.state_file.read_bytes()
+
+    with pytest.raises(module.OperationStateError, match="manifest|policy|schema|SHA-256"):
+        module.snapshot_host_state(context)
+
+    assert context.paths.state_file.read_bytes() == before
+    assert not context.paths.snapshot_dir.exists()
 
 
 def test_absence_marker_is_mutually_exclusive_and_manifested(tmp_path: Path) -> None:

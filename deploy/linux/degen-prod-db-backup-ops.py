@@ -11594,11 +11594,35 @@ def _parse_live_managed_environment(
         for key, value in effective.items()
     ):
         raise OperationStateError("live managed configuration result is invalid")
-    if effective.get("REMOTE_PRUNE_ENABLED") != "0":
+    return parsed, effective
+
+
+def _policy_transition_receipt(
+    live_environment_raw: bytes,
+    live_effective: dict[str, str],
+    *,
+    allow_live_prune_disable: bool,
+) -> dict[str, object]:
+    if type(allow_live_prune_disable) is not bool:
+        raise OperationStateError("allow-live-prune-disable must be a boolean")
+    live_value = live_effective.get("REMOTE_PRUNE_ENABLED")
+    if live_value not in {"0", "1"}:
+        raise OperationStateError("live remote prune policy is invalid")
+    live_enabled = live_value == "1"
+    if live_enabled and not allow_live_prune_disable:
         raise OperationStateError(
             "live remote prune policy is enabled and cannot be silently reversed"
         )
-    return parsed, effective
+    if not live_enabled and allow_live_prune_disable:
+        raise OperationStateError(
+            "allow-live-prune-disable requires live remote prune policy to be enabled"
+        )
+    return {
+        "live_environment_sha256": hashlib.sha256(live_environment_raw).hexdigest(),
+        "live_remote_prune_enabled": live_enabled,
+        "explicit_disable_authorized": allow_live_prune_disable,
+        "staged_remote_prune_enabled": False,
+    }
 
 
 def _unsafe_environment_payload(raw: bytes) -> bool:
@@ -12228,17 +12252,59 @@ def _read_stage_file_once(
                 pass
 
 
+def _validate_policy_transition(value: object) -> dict[str, object]:
+    transition = _require_object(
+        value,
+        frozenset(
+            {
+                "live_environment_sha256",
+                "live_remote_prune_enabled",
+                "explicit_disable_authorized",
+                "staged_remote_prune_enabled",
+            }
+        ),
+        "host-stage manifest policy transition",
+    )
+    _require_hash(
+        transition["live_environment_sha256"],
+        "host-stage manifest live environment sha256",
+    )
+    live_enabled = _require_bool(
+        transition["live_remote_prune_enabled"],
+        "host-stage manifest live remote prune enabled",
+    )
+    authorized = _require_bool(
+        transition["explicit_disable_authorized"],
+        "host-stage manifest explicit disable authorized",
+    )
+    staged_enabled = _require_bool(
+        transition["staged_remote_prune_enabled"],
+        "host-stage manifest staged remote prune enabled",
+    )
+    if staged_enabled or authorized != live_enabled:
+        raise OperationStateError("host-stage manifest policy transition is invalid")
+    return transition
+
+
 def _validate_existing_stage_manifest(
     context: OperationsContext,
-    state: dict[str, object],
+    effective_config: dict[str, str],
     manifest: dict[str, object],
     asset_bytes: dict[str, bytes],
     environment_sha256: str,
     enabled_environment_sha256: str,
-) -> None:
-    root = _require_object(
-        manifest,
-        frozenset(
+    *,
+    expected_policy_transition: dict[str, object] | None = None,
+) -> int:
+    if type(manifest) is not dict:
+        raise OperationStateError("host-stage manifest must be an object")
+    schema_version = _require_int(
+        manifest.get("schema_version"),
+        "host-stage manifest schema version",
+        minimum=None,
+    )
+    if schema_version == 1:
+        expected_root_keys = frozenset(
             {
                 "schema_version",
                 "operation",
@@ -12246,11 +12312,25 @@ def _validate_existing_stage_manifest(
                 "reviewed_assets",
                 "host_environment",
             }
-        ),
+        )
+    elif schema_version == 2:
+        expected_root_keys = frozenset(
+            {
+                "schema_version",
+                "operation",
+                "selected_pair",
+                "reviewed_assets",
+                "host_environment",
+                "policy_transition",
+            }
+        )
+    else:
+        raise OperationStateError("host-stage manifest schema is invalid")
+    root = _require_object(
+        manifest,
+        expected_root_keys,
         "host-stage manifest",
     )
-    if root["schema_version"] != 1:
-        raise OperationStateError("host-stage manifest schema is invalid")
     operation = _require_object(
         root["operation"],
         frozenset(
@@ -12285,8 +12365,6 @@ def _validate_existing_stage_manifest(
     )
     _require_hash(selected["dump_sha256"], "host-stage manifest dump sha256")
     match = _BACKUP_NAME_RE.fullmatch(dump_basename)
-    effective_config = state["effective_config"]
-    assert isinstance(effective_config, dict)
     if (
         match is None
         or match.group("sidecar") is not None
@@ -12315,6 +12393,20 @@ def _validate_existing_stage_manifest(
     }
     if root["host_environment"] != expected_environment:
         raise OperationStateError("host-stage manifest environment binding is invalid")
+    if schema_version == 2:
+        transition = _validate_policy_transition(root["policy_transition"])
+        if (
+            expected_policy_transition is not None
+            and transition != expected_policy_transition
+        ):
+            raise OperationStateError(
+                "host-stage manifest policy transition does not match verified live state"
+            )
+    elif expected_policy_transition is not None:
+        raise OperationStateError(
+            "host-stage manifest v1 cannot authorize live prune disable"
+        )
+    return schema_version
 
 
 def _open_existing_host_stage_proof(
@@ -12349,9 +12441,12 @@ def _open_existing_host_stage_proof(
             exact_mode=0o600,
         )
         manifest = _decode_strict_manifest(manifest_raw)
+        effective_config = material.state["effective_config"]
+        if type(effective_config) is not dict:
+            raise OperationStateError("host-stage effective configuration is invalid")
         _validate_existing_stage_manifest(
             context,
-            material.state,
+            effective_config,
             manifest,
             asset_bytes,
             environment_sha256,
@@ -12829,7 +12924,24 @@ def _host_stage_manifest(
     environment_sha256: str,
     enabled_environment_sha256: str,
     pair: _BackupPairProof,
+    *,
+    schema_version: int = 2,
+    policy_transition: dict[str, object] | None,
 ) -> dict[str, object]:
+    if schema_version == 1:
+        if policy_transition is not None:
+            raise OperationStateError(
+                "host-stage manifest v1 cannot contain a policy transition"
+            )
+        verified_transition = None
+    elif schema_version == 2:
+        if policy_transition is None:
+            raise OperationStateError(
+                "host-stage manifest v2 requires a policy transition"
+            )
+        verified_transition = dict(_validate_policy_transition(policy_transition))
+    else:
+        raise OperationStateError("host-stage manifest schema is invalid")
     target_by_source = dict(_SOURCE_TO_TARGET)
     reviewed_assets: list[dict[str, object]] = []
     for source in sorted(_SOURCE_ASSETS):
@@ -12842,8 +12954,8 @@ def _host_stage_manifest(
                 "target": target_by_source.get(source),
             }
         )
-    return {
-        "schema_version": 1,
+    manifest: dict[str, object] = {
+        "schema_version": schema_version,
         "operation": {
             "archive_sha256": context.expected_archive_sha256,
             "commit": context.expected_commit,
@@ -12864,6 +12976,9 @@ def _host_stage_manifest(
             "target": "/etc/degen/prod-db-backup.env",
         },
     }
+    if verified_transition is not None:
+        manifest["policy_transition"] = verified_transition
+    return manifest
 
 
 def _canonical_host_stage_manifest(manifest: dict[str, object]) -> bytes:
@@ -12975,6 +13090,7 @@ def _prepare_or_resume_stage(
     effective_config: dict[str, str],
     asset_bytes: dict[str, bytes],
     pair: _BackupPairProof,
+    policy_transition: dict[str, object],
     operation_directory_fd: int | None,
 ) -> tuple[_HostStageProof, dict[str, object], bytes, dict[str, object]]:
     asset_hashes = {
@@ -13054,15 +13170,86 @@ def _prepare_or_resume_stage(
         enabled_environment_sha256 = hashlib.sha256(
             _task8_enabled_environment_bytes(environment_bytes)
         ).hexdigest()
-        manifest = _host_stage_manifest(
-            context,
-            asset_hashes,
-            environment_sha256,
-            enabled_environment_sha256,
-            pair,
-        )
-        manifest_bytes = _canonical_host_stage_manifest(manifest)
-        if not existing:
+        if existing:
+            manifest_bytes = _read_stage_file_once(
+                context,
+                stage_directories,
+                "host-stage-manifest.json",
+                maximum_size=_MAX_STAGED_MANIFEST_BYTES,
+                exact_mode=0o600,
+            )
+            manifest = _decode_strict_manifest(manifest_bytes)
+            if _canonical_host_stage_manifest(manifest) != manifest_bytes:
+                raise OperationStateError("host-stage manifest is not canonical")
+            if type(manifest) is not dict:
+                raise OperationStateError("host-stage manifest must be an object")
+            schema_version = _require_int(
+                manifest.get("schema_version"),
+                "host-stage manifest schema version",
+                minimum=None,
+            )
+            if schema_version == 1:
+                if (
+                    policy_transition["live_remote_prune_enabled"] is not False
+                    or policy_transition["explicit_disable_authorized"] is not False
+                ):
+                    raise OperationStateError(
+                        "host-stage manifest v1 cannot authorize live prune disable"
+                    )
+                expected_manifest = _host_stage_manifest(
+                    context,
+                    asset_hashes,
+                    environment_sha256,
+                    enabled_environment_sha256,
+                    pair,
+                    schema_version=1,
+                    policy_transition=None,
+                )
+                expected_transition = None
+            elif schema_version == 2:
+                expected_manifest = _host_stage_manifest(
+                    context,
+                    asset_hashes,
+                    environment_sha256,
+                    enabled_environment_sha256,
+                    pair,
+                    schema_version=2,
+                    policy_transition=policy_transition,
+                )
+                expected_transition = policy_transition
+            else:
+                raise OperationStateError("host-stage manifest schema is invalid")
+            if manifest != expected_manifest:
+                raise OperationStateError("preexisting host-stage manifest is not exact")
+            _validate_existing_stage_manifest(
+                context,
+                effective_config,
+                manifest,
+                asset_bytes,
+                environment_sha256,
+                enabled_environment_sha256,
+                expected_policy_transition=expected_transition,
+            )
+        else:
+            manifest = _host_stage_manifest(
+                context,
+                asset_hashes,
+                environment_sha256,
+                enabled_environment_sha256,
+                pair,
+                schema_version=2,
+                policy_transition=policy_transition,
+            )
+            manifest_bytes = _canonical_host_stage_manifest(manifest)
+            _validate_existing_stage_manifest(
+                context,
+                effective_config,
+                manifest,
+                asset_bytes,
+                environment_sha256,
+                enabled_environment_sha256,
+                expected_policy_transition=policy_transition,
+            )
             _write_exclusive_staged_file(
                 context.paths.staged_dir / "host-stage-manifest.json",
                 manifest_bytes,
@@ -13242,7 +13429,11 @@ def _commit_staging_prepared_receipt(
         _close_host_stage_proof(stage_proof)
 
 
-def prepare_host_staging(context: OperationsContext) -> dict[str, object]:
+def prepare_host_staging(
+    context: OperationsContext,
+    *,
+    allow_live_prune_disable: bool = False,
+) -> dict[str, object]:
     """Verify live host readiness and persist one staging_prepared receipt."""
     _validate_source_context(context, context.paths.source_dir)
     initial_state = load_operation_state(
@@ -13271,6 +13462,11 @@ def prepare_host_staging(context: OperationsContext) -> dict[str, object]:
                 managed_environment,
                 managed_raw,
                 context.effective_uid,
+            )
+            policy_transition = _policy_transition_receipt(
+                managed_raw,
+                base_effective,
+                allow_live_prune_disable=allow_live_prune_disable,
             )
             backup_dir = base_effective.get("BACKUP_DIR")
             app_env_file = base_effective.get("APP_ENV_FILE")
@@ -13338,6 +13534,7 @@ def prepare_host_staging(context: OperationsContext) -> dict[str, object]:
                             effective_config,
                             asset_bytes,
                             pair,
+                            policy_transition,
                             material.directory_fd,
                         )
                     )
@@ -23183,6 +23380,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     prepare_staging = subparsers.add_parser("prepare-staging", allow_abbrev=False)
     prepare_staging.add_argument("--operation-dir", required=True, action=_StoreOnce)
+    prepare_staging.add_argument(
+        "--allow-live-prune-disable",
+        action="store_true",
+        help=(
+            "explicitly authorize staging a currently enabled live prune policy "
+            "as disabled"
+        ),
+    )
     snapshot = subparsers.add_parser("snapshot", allow_abbrev=False)
     snapshot.add_argument("--operation-dir", required=True, action=_StoreOnce)
     for command in ("install", "recover", "rollback"):
@@ -23284,7 +23489,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 host_root=_PRODUCTION_HOST_ROOT,
             )
             validate_operation_state_for_context(state, context)
-            prepare_host_staging(context)
+            prepare_host_staging(
+                context,
+                allow_live_prune_disable=args.allow_live_prune_disable,
+            )
         elif args.command == "snapshot":
             paths = build_operation_paths(operation_dir)
             state = load_operation_state(
