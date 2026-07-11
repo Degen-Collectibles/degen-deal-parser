@@ -164,6 +164,85 @@ class ParserStoreRulesTests(unittest.TestCase):
         self.assertEqual(parsed["parsed_amount"], 145.0)
         self.assertFalse(parsed["needs_review"])
 
+    def test_explicit_currency_total_beats_unlabeled_item_quantities(self):
+        parsed = parse_by_rules(
+            "Buy $8500 50 mega dream 50 abyss eye",
+            channel_name="jeff-purchases",
+        )
+
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["parsed_type"], "buy")
+        self.assertEqual(parsed["parsed_amount"], 8500.0)
+
+    def test_explicit_total_with_cash_and_rest_zelle_uses_total_and_mixed_payment(self):
+        parsed = parse_by_rules(
+            "Buy sealed 3125, 1000 cash, rest zelle",
+            channel_name="burlingame",
+        )
+
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["parsed_type"], "buy")
+        self.assertEqual(parsed["parsed_amount"], 3125.0)
+        self.assertEqual(parsed["parsed_payment_method"], "mixed")
+
+    def test_register_payment_is_card_and_sums_with_cash(self):
+        parsed = parse_by_rules(
+            "Sold 15 packs 200 cash 25 register",
+            channel_name="store-sales-and-trades",
+        )
+
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["parsed_type"], "sell")
+        self.assertEqual(parsed["parsed_amount"], 225.0)
+        self.assertEqual(parsed["parsed_payment_method"], "mixed")
+
+    def test_stitched_bare_amount_followup_supplies_purchase_total(self):
+        parsed = parse_by_rules(
+            "Message 1: [no text]\n\n"
+            "Message 2: Bought slabs and singles\n\n"
+            "Message 3: 2162",
+            channel_name="store-buys",
+        )
+
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["parsed_type"], "buy")
+        self.assertEqual(parsed["parsed_amount"], 2162.0)
+
+    def test_stitched_explicit_sale_keeps_unlabeled_trailing_amount(self):
+        parsed = parse_by_rules(
+            "Message 1: [no text]\n\nMessage 2: Sold 4 packs 80",
+            channel_name="store-sales-and-trades",
+        )
+
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["parsed_type"], "sell")
+        self.assertEqual(parsed["parsed_amount"], 80.0)
+
+    def test_trade_register_amount_is_card_money_to_store(self):
+        parsed = parse_by_rules(
+            "Top out 63 on register bottom in",
+            channel_name="store-sales-and-trades",
+        )
+
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["parsed_type"], "trade")
+        self.assertEqual(parsed["parsed_amount"], 63.0)
+        self.assertEqual(parsed["parsed_payment_method"], "card")
+        self.assertEqual(parsed["parsed_cash_direction"], "to_store")
+
+    def test_trade_top_and_store_credit_out_keeps_both_outgoing_parts(self):
+        parsed = parse_by_rules(
+            "Top and 25 credit out bottom in",
+            channel_name="store-sales-and-trades",
+        )
+
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["parsed_type"], "trade")
+        self.assertIn("top case items", parsed["parsed_items_out"])
+        self.assertIn("$25 store credit", parsed["parsed_items_out"])
+        self.assertIn("bottom case items", parsed["parsed_items_in"])
+        self.assertIsNone(parsed["parsed_amount"])
+
     def test_cash_direction_only_changes_trade_financials(self):
         buy_financials = compute_financials(
             parsed_type="buy",

@@ -52,3 +52,36 @@ def test_periodic_inference_defaults_are_disabled():
 
     assert settings.parser_reprocess_enabled is False
     assert settings.periodic_stitch_audit_enabled is False
+
+
+def test_redeploy_expected_sha_mode_is_fail_closed_before_deploy_mutations():
+    script = Path("scripts/redeploy-linux.sh").read_text(encoding="utf-8")
+
+    assignment = 'EXPECTED_GIT_SHA="${DEGEN_EXPECTED_GIT_SHA:-}"'
+    mode_start = 'if [[ -n "$EXPECTED_GIT_SHA" ]]; then'
+    dirty_guard = 'if ! git diff --quiet || ! git diff --cached --quiet; then'
+    install_start = 'if [[ "$INSTALL_DEPS" != "0" ]]; then'
+
+    assert assignment in script
+    assert mode_start in script
+    assert 'if [[ ! "$EXPECTED_GIT_SHA" =~ ^[0-9a-f]{40}$ ]]; then' in script
+    assert 'actual_sha="$(git rev-parse HEAD)"' in script
+    assert 'if [[ "$actual_sha" != "$EXPECTED_GIT_SHA" ]]; then' in script
+    assert dirty_guard in script
+    assert script.index(dirty_guard) < script.index(mode_start)
+    assert script.index(mode_start) < script.index(install_start)
+
+
+def test_redeploy_expected_sha_mode_skips_sync_but_manual_mode_keeps_it():
+    script = Path("scripts/redeploy-linux.sh").read_text(encoding="utf-8")
+
+    block_start = script.index('if [[ -n "$EXPECTED_GIT_SHA" ]]; then')
+    block_end = script.index('\nfi\n\nif [[ "$INSTALL_DEPS"', block_start)
+    sync_block = script[block_start:block_end]
+    expected_section, manual_section = sync_block.split("\nelse\n", 1)
+
+    assert "git fetch origin main" not in expected_section
+    assert "git pull --rebase origin main" not in expected_section
+    assert 'log "Using workflow-synchronized checkout at $actual_sha"' in expected_section
+    assert "git fetch origin main" in manual_section
+    assert "git pull --rebase origin main" in manual_section

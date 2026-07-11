@@ -13,6 +13,7 @@ HEALTH_URL="${DEGEN_HEALTH_URL:-http://127.0.0.1:8000/health}"
 MAX_WAIT_SECONDS="${DEGEN_HEALTH_MAX_WAIT_SECONDS:-120}"
 INTERVAL_SECONDS="${DEGEN_HEALTH_INTERVAL_SECONDS:-5}"
 INSTALL_DEPS="${DEGEN_INSTALL_DEPS:-1}"
+EXPECTED_GIT_SHA="${DEGEN_EXPECTED_GIT_SHA:-}"
 
 log() {
   printf '[%s] %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*"
@@ -181,17 +182,36 @@ fi
 cd "$APP_DIR"
 
 log "Starting Linux redeploy in $APP_DIR"
-log "Fetching origin/main"
-git fetch origin main
-
 current_branch="$(git rev-parse --abbrev-ref HEAD)"
 if [[ "$current_branch" != "main" ]]; then
   echo "ERROR: expected branch main, got $current_branch" >&2
   exit 3
 fi
 
-log "Rebasing onto origin/main"
-git pull --rebase origin main
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "ERROR: tracked production checkout changes must be resolved before deploy" >&2
+  git status --short --untracked-files=no >&2
+  exit 6
+fi
+
+if [[ -n "$EXPECTED_GIT_SHA" ]]; then
+  if [[ ! "$EXPECTED_GIT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "ERROR: DEGEN_EXPECTED_GIT_SHA must be a 40-character lowercase Git SHA" >&2
+    exit 7
+  fi
+
+  actual_sha="$(git rev-parse HEAD)"
+  if [[ "$actual_sha" != "$EXPECTED_GIT_SHA" ]]; then
+    echo "ERROR: expected checkout $EXPECTED_GIT_SHA, got $actual_sha" >&2
+    exit 8
+  fi
+  log "Using workflow-synchronized checkout at $actual_sha"
+else
+  log "Fetching origin/main"
+  git fetch origin main
+  log "Rebasing onto origin/main"
+  git pull --rebase origin main
+fi
 
 if [[ "$INSTALL_DEPS" != "0" ]]; then
   if [[ ! -x .venv/bin/pip ]]; then

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from contextlib import contextmanager
 from datetime import timedelta
 from unittest.mock import AsyncMock, patch
@@ -146,7 +147,7 @@ def parsed_result() -> dict:
     }
 
 
-def test_discord_sync_preserves_gmail_owned_transaction():
+def test_discord_sync_preserves_gmail_owned_transaction(caplog):
     engine = make_engine()
     with Session(engine) as session:
         row = make_message()
@@ -174,12 +175,14 @@ def test_discord_sync_preserves_gmail_owned_transaction():
         session.add(receipt)
         session.commit()
 
-        result = sync_transaction_from_message(session, row)
+        with caplog.at_level(logging.INFO, logger="app.discord.transactions"):
+            result = sync_transaction_from_message(session, row)
         session.commit()
 
         assert result is not None
         assert session.get(Transaction, transaction.id) is not None
         assert session.get(GmailReceipt, receipt.id).transaction_id == transaction.id
+        assert any(message.startswith("sync_skipped_external_source ") for message in caplog.messages)
 
 
 def test_process_row_skips_external_source_before_attachment_or_ai_work():

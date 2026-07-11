@@ -1863,6 +1863,7 @@ def test_root_execution_rejects_explicit_harness_injection(
 
 def test_task9_runbook_bootstrap_and_source_success_path_are_ordered() -> None:
     runbook = RUNBOOK.read_text(encoding="utf-8")
+    normalized_runbook = " ".join(runbook.split())
     old_plan = OLD_PLAN.read_text(encoding="utf-8")
     expected_archive_paths = (
         "deploy/linux/degen-prod-db-backup-assets.sha256",
@@ -1922,6 +1923,8 @@ def test_task9_runbook_bootstrap_and_source_success_path_are_ordered() -> None:
         'OPERATION_DIR="/opt/degen/backups/config/$UTC_STAMP"',
         'SOURCE_OPS="$OPERATION_DIR/source/deploy/linux/degen-prod-db-backup-ops.py"',
         'MANIFEST_SHA256="${APPROVED_MANIFEST_SHA256:?set the approved reviewed-manifest SHA-256}"',
+        'LIVE_ENV_SHA256="${APPROVED_LIVE_ENV_SHA256:?set the approved live environment SHA-256}"',
+        'LIVE_REMOTE_PRUNE_ENABLED="${APPROVED_LIVE_REMOTE_PRUNE_ENABLED:?set approved 0 or 1}"',
     )
     assignment_positions = [runbook.index(value) for value in assignments]
     operation_creation = runbook.index('mkdir -m 0700 -- "$OPERATION_DIR"')
@@ -1936,7 +1939,17 @@ def test_task9_runbook_bootstrap_and_source_success_path_are_ordered() -> None:
     manifest_digest = runbook.index('printf \'%s  %s\\n\' "$MANIFEST_SHA256"')
     manifest_parity = runbook.index("sha256sum --check --strict", extraction)
     verify_source = runbook.index('"$SOURCE_OPS" verify-source --operation-dir "$OPERATION_DIR"')
-    prepare = runbook.index('"$SOURCE_OPS" prepare-staging --operation-dir "$OPERATION_DIR"')
+    live_environment_rebind = runbook.index(
+        'printf \'%s  %s\\n\' "$LIVE_ENV_SHA256" /etc/degen/prod-db-backup.env',
+        verify_source,
+    )
+    prepare_arguments = runbook.index(
+        'PREPARE_STAGING_ARGS=(--operation-dir "$OPERATION_DIR" '
+        '--expected-live-environment-sha256 "$LIVE_ENV_SHA256")'
+    )
+    prepare = runbook.index(
+        '"$SOURCE_OPS" prepare-staging "${PREPARE_STAGING_ARGS[@]}"'
+    )
     snapshot = runbook.index('"$SOURCE_OPS" snapshot --operation-dir "$OPERATION_DIR"')
     install = runbook.index('"$SOURCE_OPS" install --operation-dir "$OPERATION_DIR"')
 
@@ -1945,7 +1958,8 @@ def test_task9_runbook_bootstrap_and_source_success_path_are_ordered() -> None:
     assert archive_creation < local_embedded_commit < local_member_types < local_extraction
     assert local_extraction < local_manifest_parity < production_gate
     assert 'REMOTE_REF="${APPROVED_REMOTE_REF:?set the exact approved refs/heads/... ref}"' in runbook
-    assert "test \"$REMOTE_REF\" = refs/heads/codex/backup-retention-hardening" in runbook
+    assert runbook.count('git check-ref-format "$REMOTE_REF"') == 2
+    assert '[[ "$REMOTE_REF" == refs/heads/* ]]' in runbook
     assert "https://github.com/Degen-Collectibles/degen-deal-parser.git" in runbook
     assert runbook.count("git remote get-url --all origin") == 2
     assert runbook.count("git remote get-url --push --all origin") == 2
@@ -1964,7 +1978,26 @@ def test_task9_runbook_bootstrap_and_source_success_path_are_ordered() -> None:
     assert 'PREPARE_SCRIPT="$(mktemp /tmp/degen-backup-prepare.XXXXXXXX)"' in runbook
     assert 'BOOTSTRAP_SCRIPT="$(mktemp /tmp/degen-backup-bootstrap.XXXXXXXX)"' in runbook
     assert archive_transfer < archive_digest < embedded_commit < member_types < extraction
-    assert extraction < manifest_digest < manifest_parity < verify_source < prepare < snapshot < install
+    assert (
+        extraction
+        < manifest_digest
+        < manifest_parity
+        < verify_source
+        < live_environment_rebind
+        < prepare_arguments
+        < prepare
+        < snapshot
+        < install
+    )
+    assert 'PREPARE_STAGING_ARGS+=(--allow-live-prune-disable)' in runbook
+    assert "/opt/degen/backups/config/20260710T042901Z" in runbook
+    assert "must not be resumed with different reviewed source" in normalized_runbook
+    assert (
+        "successful Gate 2 installation leaves remote pruning disabled"
+        in normalized_runbook
+    )
+    assert "restores the exact snapshotted enabled environment" in normalized_runbook
+    assert "does not authorize Gate 3" in normalized_runbook
     assert 'test ! -e "$SOURCE_DIR"' in runbook
     assert "umask 077" in runbook
     assert "--no-same-owner" in runbook

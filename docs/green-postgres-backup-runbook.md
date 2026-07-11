@@ -180,6 +180,12 @@ from working-tree content.
 
 ## Gate 2: approve production installation
 
+Every reviewed helper change requires a fresh source archive, manifest digest,
+transfer directory, and operation directory. Preserve
+`/opt/degen/backups/config/20260710T042901Z` at `source_verified` as evidence of
+the safe enabled-policy refusal; it must not be resumed with different reviewed
+source.
+
 Resume the same WSL controller shell. If it was closed, re-evaluate the two
 fixed arrays, restore the printed Gate 1 values, and repeat only the read-only
 validations (never the push) before fixing these exact non-secret values for
@@ -207,7 +213,8 @@ SOURCE_MANIFEST="$SOURCE_DIR/deploy/linux/degen-prod-db-backup-assets.sha256"
 [[ "$TRANSFER_TOKEN" =~ ^[0-9a-f]{32}$ ]]
 test "$OPERATION_DIR" = "/opt/degen/backups/config/$UTC_STAMP"
 test "$SOURCE_OPS" = "$OPERATION_DIR/source/deploy/linux/degen-prod-db-backup-ops.py"
-test "$REMOTE_REF" = refs/heads/codex/backup-retention-hardening
+git check-ref-format "$REMOTE_REF"
+[[ "$REMOTE_REF" == refs/heads/* ]]
 mapfile -t ORIGIN_FETCH_URLS < <(git remote get-url --all origin)
 mapfile -t ORIGIN_PUSH_URLS < <(git remote get-url --push --all origin)
 test "${#ORIGIN_FETCH_URLS[@]}" -eq 1
@@ -227,20 +234,60 @@ read-only preflight. It prints no environment or configuration contents:
 brev exec --help | grep -F -- '--host'
 brev copy --help | grep -F -- '--host'
 brev exec openclaw-9902ae --host 'set -eu; printf "host=%s uid=%s gid=%s\n" "$(hostname -s)" "$(id -u)" "$(id -g)"; test -d /opt/degen/app; test -d /opt/degen/backups; command -v git tar sha256sum python3 find stat cmp id tr grep >/dev/null; test "$(stat -Lc "%U:%G %a %F" /var/log)" = "root:syslog 775 directory"; if id -nG degen | tr " " "\n" | grep -Fx syslog >/dev/null; then printf "%s\n" "ERROR: degen unexpectedly belongs to syslog" >&2; exit 1; fi; printf "%s\n" "log_parent=root:syslog 775 directory" "degen_in_syslog=no"'
+
+LIVE_POLICY_SCRIPT="$(mktemp /tmp/degen-backup-live-policy.XXXXXXXX)"
+cat > "$LIVE_POLICY_SCRIPT" <<'LIVE_POLICY'
+#!/usr/bin/env bash
+set -euo pipefail
+if (( EUID != 0 )); then exec sudo -- /bin/bash "$0"; fi
+ENVIRONMENT=/etc/degen/prod-db-backup.env
+command -v sha256sum stat grep sed awk >/dev/null
+test -f "$ENVIRONMENT"
+test ! -L "$ENVIRONMENT"
+test "$(stat -Lc '%U:%G %a %F %h' "$ENVIRONMENT")" = "root:root 600 regular file 1"
+test "$(grep -Ec '^[[:space:]]*REMOTE_PRUNE_ENABLED[[:space:]]*=' "$ENVIRONMENT")" -eq 1
+LIVE_REMOTE_PRUNE_ENABLED="$(sed -n 's/^REMOTE_PRUNE_ENABLED=\([01]\)$/\1/p' "$ENVIRONMENT")"
+case "$LIVE_REMOTE_PRUNE_ENABLED" in 0|1) ;; *) exit 1 ;; esac
+printf 'live_env_sha256=%s\nlive_remote_prune_enabled=%s\n' \
+  "$(sha256sum "$ENVIRONMENT" | awk '{ print $1 }')" \
+  "$LIVE_REMOTE_PRUNE_ENABLED"
+LIVE_POLICY
+chmod 0700 "$LIVE_POLICY_SCRIPT"
+if brev exec openclaw-9902ae --host "@$LIVE_POLICY_SCRIPT"; then
+  rm -f -- "$LIVE_POLICY_SCRIPT"
+else
+  LIVE_POLICY_STATUS=$?
+  rm -f -- "$LIVE_POLICY_SCRIPT"
+  exit "$LIVE_POLICY_STATUS"
+fi
 ```
 
-Validate both digests as lowercase 64-hex, the commit as lowercase 40-hex, the
-local archive hash, the embedded commit, the exact archive arrays above, and
-the still-equal remote branch SHA. Then present this exact preflight and wait
-for a new explicit `proceed`:
+Copy the two printed live values exactly into `APPROVED_LIVE_ENV_SHA256` and
+`APPROVED_LIVE_REMOTE_PRUNE_ENABLED`; do not infer the bit from an older
+operation. Bind and validate them only after that output exists:
+
+```bash
+LIVE_ENV_SHA256="${APPROVED_LIVE_ENV_SHA256:?set the approved live environment SHA-256}"
+LIVE_REMOTE_PRUNE_ENABLED="${APPROVED_LIVE_REMOTE_PRUNE_ENABLED:?set approved 0 or 1}"
+[[ "$LIVE_ENV_SHA256" =~ ^[0-9a-f]{64}$ ]]
+case "$LIVE_REMOTE_PRUNE_ENABLED" in 0|1) ;; *) exit 1 ;; esac
+```
+
+Validate all three digests as lowercase 64-hex, the commit as
+lowercase 40-hex, the local archive hash, the embedded commit, the exact archive
+arrays above, and the still-equal remote branch SHA. If either live value
+changes before execution, stop and repeat the preflight and approval. Then
+present this exact preflight and wait for a new explicit `proceed`:
 
 - Target: host `openclaw-9902ae`, exact `OPERATION_DIR`, temporary
   `REMOTE_ARCHIVE`, the eight install targets listed above, and the dedicated
   operational log path `/var/log/degen-prod-db-backup`.
 - Changes: create a root-only operation directory; transfer `source.tar`;
-  bootstrap-verify it; snapshot current host state; install the reviewed
-  assets with pruning disabled; normalize only the audited legacy shared log
-  value; create or reuse the dedicated root:root mode-`0700` log directory and
+  bootstrap-verify it; bind the exact live environment hash and policy bit;
+  when that bit is `1`, explicitly authorize staging the currently enabled
+  policy as disabled; snapshot current host state; install the reviewed assets
+  with pruning disabled; normalize only the audited legacy shared log value;
+  create or reuse the dedicated root:root mode-`0700` log directory and
   root:root mode-`0600` log file under the verified root-owned,
   non-world-writable `root:syslog` mode-`0775` parent; let the helper
   quiesce/restore the timer;
@@ -249,9 +296,11 @@ for a new explicit `proceed`:
   ordinary scheduled run before Gate 3 can run a backup and local retention.
 - Reversible: the operation-local source/staging/snapshot/state evidence and
   all installed targets are covered by the helper's verified snapshot and
-  recovery/rollback contract. Database dump files are not part of that
-  snapshot. The dedicated log directory and log file are also outside that
-  snapshot and are deliberately preserved as evidence during rollback.
+  recovery/rollback contract. If the approved live policy is enabled, failed
+  installation restores the exact snapshotted enabled environment, its
+  metadata, and the prior timer state. Database dump files are not part of
+  that snapshot. The dedicated log directory and log file are also outside
+  that snapshot and are deliberately preserved as evidence during rollback.
 - Irreversible: remote retention deletion remains disabled in this gate, but
   any catch-up or later scheduled run after timer restoration can apply the
   approved local newest-2 policy before Gate 3 and irreversibly delete older
@@ -265,6 +314,7 @@ for a new explicit `proceed`:
   worker, bot, or PostgreSQL. `RefuseManualStart=yes` remains enforced for the
   backup service.
 - Verification: durable phase receipts, exact target hashes/modes/ownership,
+  the manifest-bound live environment hash and explicit transition receipt,
   exact log parent/child/file ownership and modes plus `degen` group
   separation, timer restoration (including whether a catch-up run occurred),
   remote probe cleanup, and the zero-remote-deletion dry-run report.
@@ -356,6 +406,8 @@ BOOTSTRAP_SCRIPT="$(mktemp /tmp/degen-backup-bootstrap.XXXXXXXX)"
   printf 'REVIEWED_SHA=%q\n' "$REVIEWED_SHA"
   printf 'ARCHIVE_SHA256=%q\n' "$ARCHIVE_SHA256"
   printf 'MANIFEST_SHA256=%q\n' "$MANIFEST_SHA256"
+  printf 'LIVE_ENV_SHA256=%q\n' "$LIVE_ENV_SHA256"
+  printf 'LIVE_REMOTE_PRUNE_ENABLED=%q\n' "$LIVE_REMOTE_PRUNE_ENABLED"
   declare -p EXPECTED_ARCHIVE_MEMBERS
   cat <<'REMOTE_BOOTSTRAP'
 if (( EUID != 0 )); then exec sudo -- /bin/bash "$0"; fi
@@ -426,7 +478,14 @@ printf '%s  %s\n' "$MANIFEST_SHA256" "$SOURCE_MANIFEST" | sha256sum --check --st
 )
 
 /usr/bin/python3 "$SOURCE_OPS" verify-source --operation-dir "$OPERATION_DIR" --archive "$OPERATION_DIR/source.tar" --expected-commit "$REVIEWED_SHA" --expected-archive-sha256 "$ARCHIVE_SHA256" --expected-manifest-sha256 "$MANIFEST_SHA256"
-/usr/bin/python3 "$SOURCE_OPS" prepare-staging --operation-dir "$OPERATION_DIR"
+printf '%s  %s\n' "$LIVE_ENV_SHA256" /etc/degen/prod-db-backup.env | sha256sum --check --strict -
+PREPARE_STAGING_ARGS=(--operation-dir "$OPERATION_DIR" --expected-live-environment-sha256 "$LIVE_ENV_SHA256")
+case "$LIVE_REMOTE_PRUNE_ENABLED" in
+  0) ;;
+  1) PREPARE_STAGING_ARGS+=(--allow-live-prune-disable) ;;
+  *) exit 1 ;;
+esac
+/usr/bin/python3 "$SOURCE_OPS" prepare-staging "${PREPARE_STAGING_ARGS[@]}"
 /usr/bin/python3 "$SOURCE_OPS" snapshot --operation-dir "$OPERATION_DIR"
 /usr/bin/python3 "$SOURCE_OPS" install --operation-dir "$OPERATION_DIR"
 
@@ -447,6 +506,13 @@ brev exec openclaw-9902ae --host "@$BOOTSTRAP_SCRIPT"
 
 Stop if the helper fails. Do not skip to pruning. Preserve `OPERATION_DIR`, the
 approved hashes, all helper output, and the dry-run report for review.
+Preparation itself does not change the live environment. The source helper
+compares its descriptor-read bytes to the operator-approved hash before it
+persists the transition receipt, closing the gap between the shell rebind and
+the helper open. Snapshot rechecks that manifest-bound live hash before
+installation. A successful Gate 2 installation leaves remote pruning disabled;
+the preparation authorization does not authorize Gate 3 or any production-prefix
+deletion.
 
 ## Conditional recovery only
 
@@ -498,6 +564,9 @@ esac
 Never resolve interrupted recovery through a possibly mixed installed binary.
 If verified source is unavailable or `show-state` cannot prove the exact bound
 transaction, stop and investigate; do not reconstruct state manually.
+For an upgrade that began from an enabled live policy, verified install recovery
+restores the exact snapshotted enabled environment and metadata rather than
+synthesizing configuration or toggling one line in place.
 
 ## Stable checkpoint resume
 
@@ -508,7 +577,7 @@ single next action shown here:
 
 | Stable phase | Next action |
 |---|---|
-| `source_verified` | source `prepare-staging` |
+| `source_verified` | rebind the approved live environment hash, then source `prepare-staging` with `--expected-live-environment-sha256`; add `--allow-live-prune-disable` only when the approved live bit is `1` |
 | `staging_prepared` | source `snapshot` |
 | `snapshotted` | source `install` |
 | `installed` | reverify installed helper, then `probe-remote` |
@@ -524,6 +593,9 @@ new investigation and preflight.
 
 Review the recorded dry-run report and durable operation state. Zero candidates still require approval because this changes future scheduled behavior. Before
 asking for `proceed`, disclose:
+
+The earlier `--allow-live-prune-disable` preparation authorization does not
+authorize Gate 3. Gate 3 always requires a new explicit approval.
 
 - enabling changes only the helper-managed prune flag and preserves all other
   verified configuration;
@@ -563,6 +635,17 @@ printf '%s  %s\n' "$EXPECTED_INSTALLED_OPS_SHA256" /usr/local/sbin/degen-prod-db
 Do not manually start the backup service. Wait for the next scheduled timer run
 and record its actual completion evidence. Then re-check the installed helper
 and observe that scheduled run:
+
+The observation helper captures two identical timer/service invocation
+snapshots while the timer is still active. The second snapshot runs at the
+final checkpoint immediately before `systemctl disable`; any trigger, service,
+PID, installed-target, policy-environment, operation-state, or verified-source
+drift fails before quiescence. The helper then freezes that invocation evidence
+while the timer is stopped and both migration locks protect the journal, local,
+and remote checks. Do not move timer/service capture after quiescence: systemd
+249 may clear `LastTriggerUSec`, `ExecMainStartTimestamp`,
+`ExecMainExitTimestamp`, and `InvocationID` when the inactive timer/service
+loses its active reference, even though the scheduled run succeeded.
 
 ```bash
 #!/usr/bin/env bash
