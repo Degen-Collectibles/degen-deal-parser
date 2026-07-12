@@ -741,7 +741,7 @@ def clear_stale_group_members(
                 continue
             clear_stitch_fields(existing_row)
             clear_parsed_fields(existing_row)
-            if not existing_row.is_deleted:
+            if not existing_row.is_deleted and canonical_status(existing_row) != PARSE_PROCESSING:
                 reset_for_reprocess(existing_row, reason="re-queued after stitch group changed")
             stale_rows.append(existing_row)
 
