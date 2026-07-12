@@ -1,21 +1,31 @@
 # Green Backup Enabled-Policy Upgrade Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+**Status:** Implemented and locally verified on 2026-07-10. It has not been
+pushed to GitHub, merged into GitHub main, deployed, or activated on Green. The
+steps below preserve the TDD execution record, but their examples are
+synchronized to the final post-Fable safety contract and must not be used to
+bypass the current design or runbook.
+
+> **For agentic workers:** This is a completed implementation record. For any
+> follow-up change, use superpowers:subagent-driven-development (recommended)
+> or superpowers:executing-plans with a newly approved plan rather than
+> re-executing these steps.
 
 **Goal:** Let a reviewed Green backup-helper upgrade transactionally stage remote pruning disabled when the verified live policy is enabled, with durable authorization evidence, pre-install drift rejection, and exact enabled-policy restoration on failure.
 
-**Architecture:** Extend only the existing prepare-staging, host-stage manifest, snapshot, install, and recovery flow. New stages use strict host-stage manifest schema v2 with a policy-transition receipt; strict v1 stages remain readable only under their legacy disabled-policy condition, while operation-state schema v1 remains unchanged and binds either manifest through its existing digest. Snapshot compares the exact live environment hash to the v2 receipt before install; existing snapshot-backed recovery restores the exact prior enabled bytes on failure.
+**Architecture:** Extend only the existing prepare-staging, host-stage manifest, snapshot, install, and recovery flow. New stages use strict host-stage manifest schema v2 with a policy-transition receipt; strict v1 stages remain readable only while the captured live environment is present and contains one strict disabled prune assignment, while operation-state schema v1 remains unchanged and binds either manifest through its existing digest. Preparation enforces the operator-approved live environment hash inside the helper, snapshot compares the exact live environment hash to the v2 receipt before install, and existing snapshot-backed recovery restores the exact prior enabled bytes on failure.
 
 **Tech Stack:** Python 3.10-compatible standard library, pytest, PowerShell/Windows test controller, WSL Linux verification, Bash runbook snippets, Git, Claude CLI Fable.
 
 ## Global Constraints
 
-- Work only in branch `codex/backup-upgrade-policy-transition` at `C:\Users\jeffr\OneDrive\Apps\Documents\Degen App\.worktrees\backup-upgrade-policy-transition`.
+- Implementation was isolated in branch `codex/backup-upgrade-policy-transition` at `C:\Users\jeffr\OneDrive\Apps\Documents\Degen App\.worktrees\backup-upgrade-policy-transition`; that removed worktree path is historical evidence, not a reusable production path.
 - Do not mutate Green, reuse `/opt/degen/backups/config/20260710T042901Z`, push, merge, deploy, restart services, alter the timer, or issue rclone deletions during implementation.
 - Keep `operation-state.json` strict schema version 1 unchanged.
 - New host-stage manifests are strict schema version 2; existing exact schema version 1 remains readable but cannot authorize an enabled-to-disabled transition.
-- The only new authorization surface is `prepare-staging --allow-live-prune-disable`.
+- The only new `prepare-staging` inputs are required non-secret `--expected-live-environment-sha256` and optional `--allow-live-prune-disable`; no other subcommand accepts either input.
 - The flag is valid only when the verified effective live policy equals `REMOTE_PRUNE_ENABLED=1`; it fails when omitted for enabled policy and when supplied for disabled policy.
+- Every production CLI preparation requires the approved live environment hash, and an enabled-policy API authorization also fails if that hash is omitted or mismatched.
 - Preparation remains read-only against live host configuration.
 - Successful installation leaves remote pruning disabled; failure restores exact snapshot bytes and metadata, including the prior enabled environment.
 - No application secret, API key, database credential, rclone credential, tracked secret, or application-service change.
@@ -26,8 +36,8 @@
 
 ## File Map
 
-- Modify `deploy/linux/degen-prod-db-backup-ops.py`: CLI flag, authorization truth table, v2 receipt construction/validation, v1 adoption guard, snapshot live-hash check.
-- Modify `tests/test_degen_prod_db_backup_ops.py`: red-green coverage for CLI/API truth table, schema v1/v2 strictness, exact stage resume, snapshot drift, successful disabled install, and exact enabled recovery.
+- Modify `deploy/linux/degen-prod-db-backup-ops.py`: required live-hash CLI binding, authorization flag and truth table, v2 receipt construction/validation, v1 adoption/snapshot guards, named environment target, and snapshot live-hash check.
+- Modify `tests/test_degen_prod_db_backup_ops.py`: red-green coverage for CLI/API hash and authorization truth tables, schema v1/v2 strictness, exact stage resume, v1 strict disabled-policy enforcement, snapshot drift, successful disabled install, and exact enabled recovery.
 - Modify `deploy/linux/degen-prod-db-backup-assets.sha256`: replace only the operations-helper SHA-256 after helper code settles.
 - Modify `docs/green-postgres-backup-runbook.md`: new immutable-operation, live-hash, authorization, success, recovery, local-retention, and Gate 3 instructions.
 - Modify `docs/superpowers/specs/2026-07-10-backup-enabled-policy-upgrade-design.md`: record written-spec approval.
@@ -48,7 +58,7 @@
 
 **Interfaces:**
 - Consumes: existing `OperationsContext`, verified environment parser, `_HostStageProof`, canonical manifest encoding, strict state validation, and `host_staging_fixture`.
-- Produces: `prepare_host_staging(context, *, allow_live_prune_disable: bool = False)`, CLI `--allow-live-prune-disable`, strict manifest v2 `policy_transition`, and v1/v2 validation/adoption behavior used by snapshot.
+- Produces: `prepare_host_staging(context, *, allow_live_prune_disable: bool = False, expected_live_environment_sha256: str | None = None)`, required CLI `--expected-live-environment-sha256`, optional CLI `--allow-live-prune-disable`, strict manifest v2 `policy_transition`, and v1/v2 validation/adoption behavior used by snapshot.
 
 - [ ] **Step 1: Update the expected-manifest test helper for explicit schema versions**
 
@@ -123,7 +133,9 @@ def test_host_stage_explicitly_authorizes_enabled_policy_transition(tmp_path: Pa
     managed_path.chmod(0o600)
 
     result = module.prepare_host_staging(
-        context, allow_live_prune_disable=True
+        context,
+        allow_live_prune_disable=True,
+        expected_live_environment_sha256=hashlib.sha256(enabled).hexdigest(),
     )
 
     manifest = json.loads(
@@ -154,23 +166,28 @@ def test_host_stage_rejects_unnecessary_disable_authorization(tmp_path: Path) ->
     assert not context.paths.staged_dir.exists()
 ```
 
-Strengthen the existing enabled-without-flag test to match the exact existing error. Update the ordinary disabled-stage test to expect schema v2 with false/false/false transition booleans and the exact raw live-environment hash.
+Strengthen the existing enabled-without-flag test to match the exact existing error. Add missing-hash and mismatched-hash tests for the authorized enabled path. Update the ordinary disabled-stage test to expect schema v2 with false/false/false transition booleans and the exact raw live-environment hash.
 
 - [ ] **Step 3: Write failing CLI routing tests**
 
 Change the monkeypatched observer to accept the keyword-only value and assert both invocations:
 
 ```python
-observed: list[tuple[object, bool]] = []
+observed: list[tuple[object, bool, str | None]] = []
 
 def capture_prepare(
-    context: object, *, allow_live_prune_disable: bool = False
+    context: object,
+    *,
+    allow_live_prune_disable: bool = False,
+    expected_live_environment_sha256: str | None = None,
 ) -> dict[str, object]:
-    observed.append((context, allow_live_prune_disable))
+    observed.append(
+        (context, allow_live_prune_disable, expected_live_environment_sha256)
+    )
     return {"effective_config": {}, "host_stage": {}}
 ```
 
-Assert prepare-staging help contains `--allow-live-prune-disable`, an invocation without it records false, and an invocation with it records true. Add a subprocess parser test proving `snapshot --allow-live-prune-disable` exits nonzero as an unrecognized argument.
+Assert prepare-staging help contains both options, every invocation passes the exact approved hash, an invocation without the authorization flag records false, and an invocation with it records true. Add subprocess parser tests proving prepare-staging rejects a missing hash and snapshot rejects either prepare-only option as unrecognized.
 
 - [ ] **Step 4: Run the focused tests and observe RED**
 
@@ -179,12 +196,15 @@ Run:
 ```powershell
 & 'C:\Users\jeffr\OneDrive\Apps\Documents\Degen App\.venv\Scripts\python.exe' -m pytest `
   tests/test_degen_prod_db_backup_ops.py::test_host_stage_explicitly_authorizes_enabled_policy_transition `
+  tests/test_degen_prod_db_backup_ops.py::test_host_stage_enabled_authorization_requires_expected_live_environment_hash `
+  tests/test_degen_prod_db_backup_ops.py::test_host_stage_rejects_operator_approved_live_environment_hash_mismatch `
   tests/test_degen_prod_db_backup_ops.py::test_host_stage_rejects_unnecessary_disable_authorization `
   tests/test_degen_prod_db_backup_ops.py::test_host_stage_refuses_to_reverse_live_enabled_prune_policy `
-  tests/test_degen_prod_db_backup_ops.py::test_prepare_staging_cli_uses_only_recorded_operation_identity -q
+  tests/test_degen_prod_db_backup_ops.py::test_prepare_staging_cli_has_only_operation_dir_and_reconstructs_sealed_context `
+  tests/test_degen_prod_db_backup_ops.py::test_prepare_staging_cli_requires_expected_live_environment_hash -q
 ```
 
-Expected: failures for the unexpected keyword argument, absent CLI flag, and old schema version; the original no-flag refusal must still pass.
+Expected: failures for the initially missing API/CLI hash plumbing, absent authorization flag, and old schema version; the original no-flag refusal must still pass.
 
 - [ ] **Step 5: Implement the authorization truth table**
 
@@ -221,10 +241,15 @@ def prepare_host_staging(
     context: OperationsContext,
     *,
     allow_live_prune_disable: bool = False,
+    expected_live_environment_sha256: str | None = None,
 ) -> dict[str, object]:
 ```
 
-Pass the exact receipt into `_prepare_or_resume_stage` and `_host_stage_manifest`.
+After the authorization truth table, validate the optional API hash as lowercase
+SHA-256. Require it whenever `allow_live_prune_disable` is true, compare it with
+`secrets.compare_digest` to SHA-256 of the descriptor-read live bytes, and fail
+before persistent staging on omission or mismatch. Pass the exact receipt into
+`_prepare_or_resume_stage` and `_host_stage_manifest`.
 
 - [ ] **Step 6: Implement strict v2 construction and v1/v2 validation**
 
@@ -343,11 +368,17 @@ else:
 
 Change `_prepare_or_resume_stage` to accept the exact `policy_transition` alongside the existing verified effective configuration. Preserve canonical bytes and file identities on exact resume.
 
-- [ ] **Step 8: Wire the CLI flag**
+- [ ] **Step 8: Wire the required live-hash binding and authorization flag**
 
 Add only to the prepare-staging parser:
 
 ```python
+prepare_staging.add_argument(
+    "--expected-live-environment-sha256",
+    required=True,
+    action=_StoreOnce,
+    help="bind preparation to the operator-approved live environment SHA-256",
+)
 prepare_staging.add_argument(
     "--allow-live-prune-disable",
     action="store_true",
@@ -361,6 +392,7 @@ Call:
 prepare_host_staging(
     context,
     allow_live_prune_disable=args.allow_live_prune_disable,
+    expected_live_environment_sha256=args.expected_live_environment_sha256,
 )
 ```
 
@@ -402,7 +434,7 @@ Expected: full suite exits 0; commit contains only the helper, its current revie
 - Modify: `deploy/linux/degen-prod-db-backup-ops.py:13477-13668`
 
 **Interfaces:**
-- Consumes: strict v2 `policy_transition`, `_SnapshotTargetProof` for `_TARGET_ORDER[-1]`, existing stage revalidation, `host_snapshot_fixture`, `task7_transaction_fixture`, and verified recovery.
+- Consumes: strict v2 `policy_transition`, `_SnapshotTargetProof` for `_MANAGED_ENVIRONMENT_TARGET`, existing stage revalidation, `host_snapshot_fixture`, `task7_transaction_fixture`, and verified recovery.
 - Produces: `_validate_snapshot_policy_transition(stage_manifest, target_proofs)` and integration tests proving drift rejection, disabled success, and exact enabled rollback.
 
 - [ ] **Step 1: Extend fixtures for an initially enabled live policy**
@@ -413,6 +445,9 @@ Add keyword `live_prune_enabled: bool = False` to `host_snapshot_fixture` and `t
 module.prepare_host_staging(
     context,
     allow_live_prune_disable=live_prune_enabled,
+    expected_live_environment_sha256=hashlib.sha256(
+        live_environment_bytes
+    ).hexdigest(),
 )
 ```
 
@@ -480,13 +515,28 @@ def _validate_snapshot_policy_transition(
     schema_version = _require_int(
         stage_manifest.get("schema_version"),
         "host-stage manifest schema version",
+        minimum=None,
     )
+    environment = targets.get(_MANAGED_ENVIRONMENT_TARGET)
     if schema_version == 1:
+        try:
+            live_enabled = (
+                environment is None
+                or environment.contents is None
+                or _remote_prune_enabled_from_environment_bytes(environment.contents)
+            )
+        except OperationStateError:
+            raise OperationStateError(
+                "legacy v1 staging receipt requires live remote prune policy to remain disabled"
+            ) from None
+        if live_enabled:
+            raise OperationStateError(
+                "legacy v1 staging receipt requires live remote prune policy to remain disabled"
+            )
         return
     if schema_version != 2:
         raise OperationStateError("host-stage manifest schema is invalid")
     transition = _validate_policy_transition(stage_manifest.get("policy_transition"))
-    environment = targets.get(_TARGET_ORDER[-1])
     if environment is None or environment.contents is None:
         raise OperationStateError(
             "live managed environment no longer matches the authorized staging receipt"
@@ -497,7 +547,14 @@ def _validate_snapshot_policy_transition(
         )
 ```
 
-Call it immediately after capturing all target proofs and from `_revalidate_snapshot_inputs` before any snapshot state replacement. Keep all existing identity, metadata, rclone, runtime, and stage checks.
+The helper used above must reject any malformed line mentioning
+`REMOTE_PRUNE_ENABLED`, require exactly one strict assignment, accept only the
+values `0` or `1`, and return true only for value `1`. For schema v1, the only
+acceptable live result is exactly one strict `REMOTE_PRUNE_ENABLED=0`
+assignment. Call the receipt check immediately after capturing all target
+proofs and from `_revalidate_snapshot_inputs` before any snapshot state
+replacement. Keep all existing identity, metadata, rclone, runtime, and stage
+checks.
 
 - [ ] **Step 6: Run focused snapshot/install/recovery tests GREEN**
 
@@ -562,7 +619,10 @@ Immediately before prepare-staging, rebind the live file hash and construct an a
 
 ```bash
 printf '%s  %s\n' "$APPROVED_LIVE_ENV_SHA256" /etc/degen/prod-db-backup.env | sha256sum --check --strict -
-PREPARE_STAGING_ARGS=(--operation-dir "$OPERATION_DIR")
+PREPARE_STAGING_ARGS=(
+  --operation-dir "$OPERATION_DIR"
+  --expected-live-environment-sha256 "$APPROVED_LIVE_ENV_SHA256"
+)
 if test "$APPROVED_LIVE_REMOTE_PRUNE_ENABLED" = 1; then
   PREPARE_STAGING_ARGS+=(--allow-live-prune-disable)
 fi
@@ -636,7 +696,7 @@ Run the global full-suite command fresh. Record exact passed, skipped, warning, 
 
 - [ ] **Step 5: Invoke Claude CLI Fable read-only review**
 
-Give Fable the exact base `d2f3c1d85d691a0762cf9a1167ebfd6a2311417d`, current HEAD, approved design, plan, and diff. Ask it to audit authorization scope, schema strictness/backward compatibility, crash residue, snapshot race closure, recovery exactness, CLI isolation, runbook safety, secrets, and Python 3.10 compatibility. It must not edit files.
+Give Fable the exact implementation base `d4aa6b2db27b8095a0d1f0ae660121169ab42c6a`, current HEAD, approved design, plan, and diff. Ask it to audit authorization scope, schema strictness/backward compatibility, crash residue, snapshot race closure, recovery exactness, CLI isolation, runbook safety, secrets, and Python 3.10 compatibility. It must not edit files.
 
 - [ ] **Step 6: Resolve material findings test-first**
 
@@ -648,10 +708,10 @@ Run:
 
 ```powershell
 git status --short --branch
-git log --oneline --decorate d2f3c1d85d691a0762cf9a1167ebfd6a2311417d..HEAD
-git diff --check d2f3c1d85d691a0762cf9a1167ebfd6a2311417d..HEAD
-git diff --stat d2f3c1d85d691a0762cf9a1167ebfd6a2311417d..HEAD
-git diff --name-status d2f3c1d85d691a0762cf9a1167ebfd6a2311417d..HEAD
+git log --oneline --decorate d4aa6b2db27b8095a0d1f0ae660121169ab42c6a..HEAD
+git diff --check d4aa6b2db27b8095a0d1f0ae660121169ab42c6a..HEAD
+git diff --stat d4aa6b2db27b8095a0d1f0ae660121169ab42c6a..HEAD
+git diff --name-status d4aa6b2db27b8095a0d1f0ae660121169ab42c6a..HEAD
 ```
 
 Expected: clean worktree and only the approved helper, test, checksum, runbook, design, and plan files changed. Do not push, merge, deploy, or start a new production operation without the next explicit integration/production approval.

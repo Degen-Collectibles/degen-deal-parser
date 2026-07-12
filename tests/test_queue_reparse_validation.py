@@ -44,6 +44,7 @@ from app.reporting import get_financial_rows
 from app.discord.transactions import get_transactions, sync_transaction_from_message
 from app.discord.worker import (
     MAX_ATTEMPTS_ERROR,
+    clear_stale_group_members,
     close_or_recover_unfinished_attempts,
     queue_auto_reprocess_candidates,
     queue_reparse_range,
@@ -158,6 +159,68 @@ class QueueReparseValidationTests(unittest.TestCase):
                 select(OperationsLog).where(OperationsLog.event_type == "queue.max_attempts_reached")
             ).all()
             self.assertEqual(len(logs), 1)
+
+    def test_stale_processing_group_member_stays_claimed_in_current_batch(self) -> None:
+        with self.session() as session:
+            now = utcnow()
+            first_image = self.make_message(
+                discord_message_id="first-image",
+                content="",
+                attachment_urls_json='["https://cdn.example/first.jpg"]',
+                created_at=now,
+                parse_status=PARSE_PROCESSING,
+                parse_attempts=1,
+            )
+            first_text = self.make_message(
+                discord_message_id="first-text",
+                content="Top and 25 credit out bottom in",
+                created_at=now + timedelta(seconds=5),
+                parse_status=PARSE_PROCESSING,
+                parse_attempts=1,
+                stitched_group_id="old-overlapping-group",
+                stitched_primary=True,
+                stitched_message_ids_json="[]",
+            )
+            second_image = self.make_message(
+                discord_message_id="second-image",
+                content="",
+                attachment_urls_json='["https://cdn.example/second.jpg"]',
+                created_at=now + timedelta(seconds=10),
+                parse_status=PARSE_PROCESSING,
+                parse_attempts=1,
+                last_error="manual audited reparse",
+                stitched_group_id="old-overlapping-group",
+                stitched_primary=False,
+                stitched_message_ids_json="[]",
+                deal_type="trade",
+                amount=25.0,
+                payment_method="trade",
+            )
+            session.add(first_image)
+            session.add(first_text)
+            session.add(second_image)
+            session.commit()
+            session.refresh(first_image)
+            session.refresh(first_text)
+            session.refresh(second_image)
+
+            stale_rows = clear_stale_group_members(
+                session,
+                [first_image, first_text],
+                first_image,
+            )
+            session.commit()
+            session.refresh(second_image)
+
+            self.assertEqual([row.id for row in stale_rows], [second_image.id])
+            self.assertEqual(second_image.parse_status, PARSE_PROCESSING)
+            self.assertEqual(second_image.parse_attempts, 1)
+            self.assertEqual(second_image.last_error, "manual audited reparse")
+            self.assertIsNone(second_image.stitched_group_id)
+            self.assertEqual(second_image.stitched_message_ids_json, "[]")
+            self.assertIsNone(second_image.deal_type)
+            self.assertIsNone(second_image.amount)
+            self.assertIsNone(second_image.payment_method)
 
     def test_auto_reprocess_does_not_refund_parse_attempt(self) -> None:
         with self.session() as session:

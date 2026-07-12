@@ -27,7 +27,7 @@ Directly editing /etc/degen/prod-db-backup.env, using an old operation rollback 
 - The current staging logic always renders REMOTE_PRUNE_ENABLED=0, computes disabled and future-enabled environment hashes, writes a strict host-stage manifest schema v1, and binds the manifest hash into strict operation-state schema v1.
 - Existing installation and recovery logic already snapshots managed targets and restores snapshotted bytes and runtime state when an installation transaction fails.
 - Green's system Python is 3.10, so all changed helper code must remain Python 3.10 compatible.
-- The implementation branch starts from origin/main commit d2f3c1d85d691a0762cf9a1167ebfd6a2311417d. Production rollout will use a later immutable reviewed implementation commit and a new archive, manifest digest, and operation directory.
+- After conflict-free rebases over intervening reviewed work, the final implementation series starts from origin/main commit d4aa6b2db27b8095a0d1f0ae660121169ab42c6a. Production rollout will use a later immutable reviewed implementation commit and a new archive, manifest digest, and operation directory.
 
 ## Decision Summary
 
