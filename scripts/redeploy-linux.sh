@@ -122,19 +122,38 @@ wait_for_systemd_unit() {
 
 bot_systemctl() {
   if [[ "$BOT_SYSTEMD_SCOPE" == "user" ]]; then
-    systemctl --user "$@"
+    # The system-service Actions runner does not inherit PAM's user-bus variables.
+    # Reconnect to the same login user's lingering systemd manager when they are absent.
+    local runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    local bus_address="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${runtime_dir}/bus}"
+    XDG_RUNTIME_DIR="$runtime_dir" \
+      DBUS_SESSION_BUS_ADDRESS="$bus_address" \
+      systemctl --user "$@"
   else
     sudo -n systemctl "$@"
   fi
 }
 
 bot_unit_installed() {
-  if [[ "$RESTART_BOT" == "0" ]]; then
-    log "Discord bot restart disabled by DEGEN_OPS_DISCORD_BOT_RESTART=0"
-    return 1
+  local load_state
+
+  if ! load_state="$(bot_systemctl show "$BOT_UNIT" -p LoadState --value)"; then
+    echo "ERROR: unable to query Discord bot unit $BOT_UNIT ($BOT_SYSTEMD_SCOPE scope)" >&2
+    return 2
   fi
 
-  bot_systemctl list-unit-files "$BOT_UNIT" --no-legend 2>/dev/null | grep -q "^$BOT_UNIT"
+  case "$load_state" in
+    "loaded")
+      return 0
+      ;;
+    "not-found")
+      return 1
+      ;;
+    *)
+      echo "ERROR: Discord bot unit $BOT_UNIT returned unexpected load state: ${load_state:-empty}" >&2
+      return 2
+      ;;
+  esac
 }
 
 wait_for_bot_unit() {
@@ -165,13 +184,27 @@ wait_for_bot_unit() {
 }
 
 restart_discord_bot() {
-  if bot_unit_installed; then
-    log "Restarting $BOT_UNIT ($BOT_SYSTEMD_SCOPE scope)"
-    bot_systemctl restart "$BOT_UNIT"
-    wait_for_bot_unit "$BOT_UNIT"
-  else
-    log "Discord bot unit $BOT_UNIT not installed in $BOT_SYSTEMD_SCOPE scope; skipping bot restart"
+  local probe_status=0
+
+  if [[ "$RESTART_BOT" == "0" ]]; then
+    log "Discord bot restart disabled by DEGEN_OPS_DISCORD_BOT_RESTART=0"
+    return 0
   fi
+
+  bot_unit_installed || probe_status=$?
+  case "$probe_status" in
+    0)
+      log "Restarting $BOT_UNIT ($BOT_SYSTEMD_SCOPE scope)"
+      bot_systemctl restart "$BOT_UNIT"
+      wait_for_bot_unit "$BOT_UNIT"
+      ;;
+    1)
+      log "Discord bot unit $BOT_UNIT not installed in $BOT_SYSTEMD_SCOPE scope; skipping bot restart"
+      ;;
+    *)
+      return "$probe_status"
+      ;;
+  esac
 }
 
 if [[ ! -d "$APP_DIR/.git" ]]; then

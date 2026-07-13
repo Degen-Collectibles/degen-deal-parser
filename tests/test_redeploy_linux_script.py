@@ -24,6 +24,59 @@ def test_redeploy_restarts_discord_bot_unit_after_worker():
     assert 'restart_discord_bot' in script[script.index(worker_restart) :]
 
 
+def test_redeploy_restores_user_systemd_bus_for_noninteractive_runner():
+    script = Path("scripts/redeploy-linux.sh").read_text(encoding="utf-8")
+    block_start = script.index("bot_systemctl() {")
+    block_end = script.index("\nbot_unit_installed() {", block_start)
+    bot_systemctl = script[block_start:block_end]
+
+    assert 'local runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"' in bot_systemctl
+    assert (
+        'local bus_address="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${runtime_dir}/bus}"'
+        in bot_systemctl
+    )
+    assert 'XDG_RUNTIME_DIR="$runtime_dir"' in bot_systemctl
+    assert 'DBUS_SESSION_BUS_ADDRESS="$bus_address"' in bot_systemctl
+    assert bot_systemctl.index('XDG_RUNTIME_DIR="$runtime_dir"') < bot_systemctl.index(
+        'systemctl --user "$@"'
+    )
+
+
+def test_redeploy_fails_closed_when_discord_bot_unit_probe_errors():
+    script = Path("scripts/redeploy-linux.sh").read_text(encoding="utf-8")
+    probe_start = script.index("bot_unit_installed() {")
+    probe_end = script.index("\nwait_for_bot_unit() {", probe_start)
+    probe = script[probe_start:probe_end]
+
+    assert 'if ! load_state="$(bot_systemctl show "$BOT_UNIT" -p LoadState --value)"' in probe
+    assert '"loaded")' in probe
+    assert '"not-found")' in probe
+    assert "unable to query Discord bot unit" in probe
+    assert "unexpected load state" in probe
+    assert "return 2" in probe
+    assert "2>/dev/null" not in probe
+
+
+def test_redeploy_bot_restart_control_paths_are_explicit_and_fail_closed():
+    script = Path("scripts/redeploy-linux.sh").read_text(encoding="utf-8")
+    restart_start = script.index("restart_discord_bot() {")
+    restart_end = script.index("\nif [[ ! -d \"$APP_DIR/.git\" ]]", restart_start)
+    restart = script[restart_start:restart_end]
+    call_site = script[restart_end:]
+
+    disable_check = 'if [[ "$RESTART_BOT" == "0" ]]; then'
+    probe_call = 'bot_unit_installed || probe_status=$?'
+    assert disable_check in restart
+    assert probe_call in restart
+    assert 'return 0' in restart[restart.index(disable_check) : restart.index(probe_call)]
+    assert 'case "$probe_status" in' in restart
+    assert 'bot_systemctl restart "$BOT_UNIT"' in restart
+    assert "skipping bot restart" in restart
+    assert 'return "$probe_status"' in restart
+    assert "\nrestart_discord_bot\n" in call_site
+    assert "if restart_discord_bot" not in call_site
+
+
 def test_redeploy_defaults_to_approved_eccn_primary_model():
     script = Path("scripts/redeploy-linux.sh").read_text(encoding="utf-8")
 
