@@ -11,7 +11,7 @@
     </button>
     {% set _lt_role = current_user.role if current_user else "viewer" %}
     <a href="{% if _lt_role in ['reviewer', 'admin'] %}/dashboard{% else %}/team/{% endif %}" class="linear-mobile-brand" aria-label="Degen dashboard">
-        <img class="linear-sidebar-logo" src="/static/degen-logo.png" alt="">
+        <img class="linear-sidebar-logo" src="/static/icons/icon-192.png" alt="">
         <span class="linear-sidebar-brand-text">Degen</span>
     </a>
 </div>
