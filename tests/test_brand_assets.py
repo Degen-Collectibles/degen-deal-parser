@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import sys
+import tempfile
 from pathlib import Path
 from unittest import TestCase
 
@@ -119,3 +121,118 @@ class BrandAssetComplianceTests(TestCase):
                 content = (ROOT / relative_path).read_text(encoding="utf-8")
                 self.assertIn("/static/icons/icon-192.png", content)
                 self.assertNotIn("/static/degen-logo.png", content)
+
+    def test_tracked_derivatives_match_fresh_generation_from_approved_master(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            regenerated_static = Path(temp_dir) / "static"
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "generate-pwa-icons.py"),
+                    "--master",
+                    str(STATIC / "degen-logo.png"),
+                    "--static-dir",
+                    str(regenerated_static),
+                ],
+                cwd=ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            for relative_path in EXPECTED_SQUARE_SIZES:
+                with self.subTest(derivative=relative_path):
+                    with Image.open(STATIC / relative_path) as tracked:
+                        with Image.open(regenerated_static / relative_path) as regenerated:
+                            self.assertEqual(
+                                tracked.size,
+                                regenerated.size,
+                                f"{relative_path}: size differs",
+                            )
+                            self.assertEqual(
+                                tracked.convert("RGBA").tobytes(),
+                                regenerated.convert("RGBA").tobytes(),
+                                f"{relative_path}: rendered RGBA pixels differ",
+                            )
+
+            label_path = "degen-logo-label.png"
+            with Image.open(STATIC / "degen-logo.png") as master:
+                scale = min(1.0, 900 / master.width)
+                expected_label_size = (
+                    max(1, round(master.width * scale)),
+                    max(1, round(master.height * scale)),
+                )
+                master_aspect_ratio = master.width / master.height
+
+            label_images = {
+                "tracked": STATIC / label_path,
+                "regenerated": regenerated_static / label_path,
+            }
+            for source, path in label_images.items():
+                with self.subTest(derivative=label_path, source=source):
+                    with Image.open(path) as label:
+                        colors = label.getcolors(maxcolors=256)
+                        self.assertEqual(label.mode, "P", f"{source} {label_path}: mode")
+                        self.assertIsNotNone(
+                            colors,
+                            f"{source} {label_path}: exceeds 256 colors",
+                        )
+                        self.assertLessEqual(
+                            len(colors or ()),
+                            256,
+                            f"{source} {label_path}: exceeds 256 colors",
+                        )
+                        self.assertIn(
+                            "transparency",
+                            label.info,
+                            f"{source} {label_path}: transparency is missing",
+                        )
+                        self.assertEqual(
+                            label.size,
+                            expected_label_size,
+                            f"{source} {label_path}: size differs",
+                        )
+                        self.assertAlmostEqual(
+                            label.width / label.height,
+                            master_aspect_ratio,
+                            places=2,
+                            msg=f"{source} {label_path}: aspect ratio differs",
+                        )
+
+            with Image.open(STATIC / label_path) as tracked_label:
+                with Image.open(regenerated_static / label_path) as regenerated_label:
+                    self.assertEqual(
+                        tracked_label.convert("RGBA").tobytes(),
+                        regenerated_label.convert("RGBA").tobytes(),
+                        f"{label_path}: rendered RGBA pixels differ",
+                    )
+
+            favicon_path = "favicon.ico"
+            expected_favicon_sizes = {
+                (16, 16),
+                (32, 32),
+                (48, 48),
+                (64, 64),
+            }
+            with Image.open(STATIC / favicon_path) as tracked_favicon:
+                with Image.open(regenerated_static / favicon_path) as regenerated_favicon:
+                    self.assertEqual(
+                        tracked_favicon.ico.sizes(),
+                        expected_favicon_sizes,
+                        f"tracked {favicon_path}: frame set differs",
+                    )
+                    self.assertEqual(
+                        regenerated_favicon.ico.sizes(),
+                        expected_favicon_sizes,
+                        f"regenerated {favicon_path}: frame set differs",
+                    )
+                    for frame_size in sorted(expected_favicon_sizes):
+                        frame_name = f"{favicon_path}[{frame_size[0]}x{frame_size[1]}]"
+                        with self.subTest(derivative=frame_name):
+                            tracked_frame = tracked_favicon.ico.getimage(frame_size)
+                            regenerated_frame = regenerated_favicon.ico.getimage(frame_size)
+                            self.assertEqual(
+                                tracked_frame.convert("RGBA").tobytes(),
+                                regenerated_frame.convert("RGBA").tobytes(),
+                                f"{frame_name}: rendered RGBA pixels differ",
+                            )

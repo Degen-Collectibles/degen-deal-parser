@@ -62,7 +62,7 @@ def _fit_on_square(src: Image.Image, size: int, fill_ratio: float) -> Image.Imag
 
 
 def _write_label(src: Image.Image, output_path: Path, max_width: int = LABEL_MAX_WIDTH) -> None:
-    """Write an aspect-preserving RGBA derivative for physical labels."""
+    """Write an aspect-preserving, transparency-preserving adaptive-palette label."""
     scale = min(1.0, max_width / src.width)
     size = (
         max(1, round(src.width * scale)),
