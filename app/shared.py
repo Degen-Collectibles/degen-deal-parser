@@ -251,6 +251,7 @@ def escape_spreadsheet_text(value: object) -> object:
 settings = get_settings()
 
 settings = get_settings()
+TIKTOK_CREATOR_TRACE_STATUS_KEY = "tiktok_creator_trace_status"
 setup_runtime_file_logging("app.log")
 
 REPORT_SOURCE_ALL = "all"
@@ -3083,6 +3084,205 @@ def tiktok_affiliate_order_scope_authorized(session: Optional[Session]) -> bool:
     return any(_tiktok_creator_auth_has_affiliate_order_scope(row) for row in creator_auth_rows)
 
 
+def _load_tiktok_creator_trace_status(session: Session) -> dict[str, dict[str, object]]:
+    row = session.get(AppSetting, TIKTOK_CREATOR_TRACE_STATUS_KEY)
+    if row is None or not (row.value or "").strip():
+        return {}
+    try:
+        parsed = json.loads(row.value)
+    except Exception:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    result: dict[str, dict[str, object]] = {}
+    for raw_handle, raw_status in parsed.items():
+        handle = normalize_tiktok_creator_username(raw_handle)
+        if not handle or not isinstance(raw_status, dict):
+            continue
+        result[handle] = dict(raw_status)
+    return result
+
+
+def _write_tiktok_creator_trace_status(session: Session, statuses: dict[str, dict[str, object]]) -> None:
+    row = session.get(AppSetting, TIKTOK_CREATOR_TRACE_STATUS_KEY)
+    value = json.dumps(statuses, sort_keys=True, default=str)
+    if row is None:
+        session.add(AppSetting(key=TIKTOK_CREATOR_TRACE_STATUS_KEY, value=value))
+    else:
+        row.value = value
+        session.add(row)
+
+
+def _merge_tiktok_creator_trace_summaries(
+    existing: dict[str, dict[str, object]],
+    updates: dict[str, dict[str, object]],
+) -> dict[str, dict[str, object]]:
+    merged = dict(existing)
+    for raw_handle, update in updates.items():
+        handle = normalize_tiktok_creator_username(raw_handle)
+        if not handle:
+            continue
+        prior = dict(merged.get(handle) or {})
+        for key, value in update.items():
+            prior[key] = value
+        merged[handle] = prior
+    return merged
+
+
+def _redact_tiktok_creator_trace_error(value: object, *, secrets: tuple[object, ...] = ()) -> str:
+    raw_error = str(value or "")
+    if not raw_error:
+        return ""
+    redacted = str(redact_log_details({"error": raw_error}).get("error") or "")
+    for secret in secrets:
+        secret_text = str(secret or "")
+        if len(secret_text) >= 6:
+            redacted = redacted.replace(secret_text, "[REDACTED]")
+    return redacted[:500]
+
+
+def _creator_trace_summary_to_status(summary: object, *, observed_at: Optional[datetime] = None) -> dict[str, object]:
+    return {
+        "last_trace_pull_at": (observed_at or utcnow()).isoformat(),
+        "affiliate_attributed": int(getattr(summary, "affiliate_attributed", 0) or 0),
+        "affiliate_missing": int(getattr(summary, "affiliate_missing", 0) or 0),
+        "affiliate_failed": int(getattr(summary, "affiliate_failed", 0) or 0),
+        "affiliate_scope_missing": bool(getattr(summary, "affiliate_scope_missing", False)),
+        "last_error": _redact_tiktok_creator_trace_error(getattr(summary, "last_error", "")),
+    }
+
+
+def _parse_optional_datetime(value: object) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _is_expired(value: object, *, now: Optional[datetime] = None) -> bool:
+    parsed = _parse_optional_datetime(value)
+    if parsed is None:
+        return True
+    now_dt = now or utcnow()
+    if now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=timezone.utc)
+    return parsed <= now_dt
+
+
+def _is_expiring_soon(value: object, *, now: Optional[datetime] = None, days: int = 7) -> bool:
+    parsed = _parse_optional_datetime(value)
+    if parsed is None:
+        return True
+    now_dt = now or utcnow()
+    if now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=timezone.utc)
+    return now_dt < parsed <= now_dt + timedelta(days=days)
+
+
+def build_tiktok_creator_attribution_status(
+    session: Session,
+    *,
+    include_admin_details: bool = False,
+) -> dict[str, object]:
+    trace_status = _load_tiktok_creator_trace_status(session)
+    now_dt = utcnow()
+    seven_day_floor = now_dt - timedelta(days=7)
+    auth_rows = list(
+        session.exec(
+            select(TikTokCreatorAuth).order_by(TikTokCreatorAuth.updated_at.desc(), TikTokCreatorAuth.id.desc())
+        ).all()
+    )
+    shop_auth_rows = list(session.exec(select(TikTokAuth).order_by(TikTokAuth.updated_at.desc(), TikTokAuth.id.desc())).all())
+    creators: list[dict[str, object]] = []
+    seen_handles: set[str] = set()
+
+    for auth_row in auth_rows:
+        handle = normalize_tiktok_creator_username(auth_row.creator_username)
+        if not handle:
+            continue
+        seen_handles.add(handle)
+        status = trace_status.get(handle) or {}
+        attributed_7d = session.exec(
+            select(func.count(TikTokOrder.id)).where(
+                TikTokOrder.affiliate_creator_username == handle,
+                TikTokOrder.created_at >= seven_day_floor,
+            )
+        ).one()
+        row: dict[str, object] = {
+            "handle": handle,
+            "scope_ok": _tiktok_creator_auth_has_affiliate_order_scope(auth_row),
+            "access_expired": _is_expired(auth_row.access_token_expires_at, now=now_dt),
+            "refresh_expired": _is_expired(auth_row.refresh_token_expires_at, now=now_dt),
+            "last_trace_pull_at": str(status.get("last_trace_pull_at") or ""),
+            "last_trace_attributed_count": int(status.get("affiliate_attributed") or 0),
+        }
+        if include_admin_details:
+            row.update({
+                "display_name": auth_row.display_name or "",
+                "access_expiring_soon": _is_expiring_soon(auth_row.access_token_expires_at, now=now_dt),
+                "refresh_expiring_soon": _is_expiring_soon(auth_row.refresh_token_expires_at, now=now_dt),
+                "access_token_expires_at": auth_row.access_token_expires_at.isoformat() if auth_row.access_token_expires_at else "",
+                "refresh_token_expires_at": auth_row.refresh_token_expires_at.isoformat() if auth_row.refresh_token_expires_at else "",
+                "updated_at": auth_row.updated_at.isoformat() if auth_row.updated_at else "",
+                "last_trace_missing_count": int(status.get("affiliate_missing") or 0),
+                "last_trace_failed_count": int(status.get("affiliate_failed") or 0),
+                "last_trace_scope_missing": bool(status.get("affiliate_scope_missing")),
+                "attributed_orders_7d": int(attributed_7d or 0),
+                "last_error": _redact_tiktok_creator_trace_error(
+                    status.get("last_error"),
+                    secrets=(auth_row.access_token, auth_row.refresh_token),
+                ),
+                "creator_oauth_url": f"/integrations/tiktok/oauth/creator-shop-start?{urlencode({'creator': handle})}",
+            })
+        creators.append(row)
+
+    for handle, status in sorted(trace_status.items()):
+        if handle in seen_handles:
+            continue
+        row = {
+            "handle": handle,
+            "scope_ok": False,
+            "access_expired": True,
+            "refresh_expired": True,
+            "last_trace_pull_at": str(status.get("last_trace_pull_at") or ""),
+            "last_trace_attributed_count": int(status.get("affiliate_attributed") or 0),
+        }
+        if include_admin_details:
+            row.update({
+                "display_name": "",
+                "access_expiring_soon": True,
+                "refresh_expiring_soon": True,
+                "access_token_expires_at": "",
+                "refresh_token_expires_at": "",
+                "updated_at": "",
+                "last_trace_missing_count": int(status.get("affiliate_missing") or 0),
+                "last_trace_failed_count": int(status.get("affiliate_failed") or 0),
+                "last_trace_scope_missing": bool(status.get("affiliate_scope_missing")),
+                "attributed_orders_7d": 0,
+                "last_error": _redact_tiktok_creator_trace_error(status.get("last_error")),
+                "creator_oauth_url": f"/integrations/tiktok/oauth/creator-shop-start?{urlencode({'creator': handle})}",
+            })
+        creators.append(row)
+
+    return {
+        "affiliate_order_scope_authorized": any(_tiktok_auth_has_affiliate_order_scope(row) for row in shop_auth_rows)
+        or any(bool(row.get("scope_ok")) for row in creators),
+        "shop_scope_ok": any(_tiktok_auth_has_affiliate_order_scope(row) for row in shop_auth_rows),
+        "creator_count": len(creators),
+        "creators": creators,
+        "runbook_url": "/docs/ops/tiktok-creator-attribution-runbook.md",
+        "default_creator_oauth_urls": [
+            "/integrations/tiktok/oauth/creator-shop-start?creator=degencollectibles",
+            "/integrations/tiktok/oauth/creator-shop-start?creator=degenboss0",
+        ],
+    }
+
+
 def ensure_tiktok_auth_row(session: Session) -> Optional[TikTokAuth]:
     auth_row = get_latest_tiktok_auth_row(session)
     configured_shop_id = (settings.tiktok_shop_id or "").strip()
@@ -3478,6 +3678,14 @@ def run_tiktok_pull_cycle(
             safe_limit: Optional[int] = None
         else:
             safe_limit = max(int(raw_limit), 1)
+        creator_trace_updates: dict[str, dict[str, object]] = {}
+
+        def _collect_creator_trace_summary(creator_handle: str, summary: object) -> None:
+            handle = normalize_tiktok_creator_username(creator_handle)
+            if not handle:
+                return
+            creator_trace_updates[handle] = _creator_trace_summary_to_status(summary)
+
         def _run_pull_with_current_credentials(credential: dict[str, str]):
             return pull_tiktok_orders(
                 session,
@@ -3492,6 +3700,7 @@ def run_tiktok_pull_cycle(
                 dry_run=False,
                 affiliate_attribution=affiliate_attribution_enabled,
                 runtime_name=runtime_name,
+                creator_affiliate_telemetry_callback=_collect_creator_trace_summary,
             )
 
         totals = {
@@ -3549,6 +3758,23 @@ def run_tiktok_pull_cycle(
 
         if shops_pulled == 0 and last_credential_error is not None:
             raise last_credential_error
+
+        if creator_trace_updates:
+            try:
+                existing_trace_status = _load_tiktok_creator_trace_status(session)
+                _write_tiktok_creator_trace_status(
+                    session,
+                    _merge_tiktok_creator_trace_summaries(existing_trace_status, creator_trace_updates),
+                )
+            except Exception as exc:
+                print(
+                    structured_log_line(
+                        runtime=runtime_name,
+                        action="tiktok.creator_affiliate_trace_status.persist_failed",
+                        success=False,
+                        error=str(exc)[:500],
+                    )
+                )
 
         last_pull = {
             "status": "success",
@@ -6124,6 +6350,7 @@ def build_status_snapshot(session: Session) -> dict:
     db_health = get_database_health(session)
     parser_progress = get_parser_progress(session)
     tiktok_sync = build_tiktok_status_snapshot(session)
+    tiktok_creator_attribution = build_tiktok_creator_attribution_status(session)
     background_task_alerts = _background_task_alert_messages()
     latest_ingested_row = session.exec(
         select(DiscordMessage)
@@ -6244,6 +6471,7 @@ def build_status_snapshot(session: Session) -> dict:
             "window_label": recovery_window_label,
         },
         "tiktok_sync": tiktok_sync,
+        "tiktok_creator_attribution": tiktok_creator_attribution,
         "stitch_recovery": {
             "enabled": stitch_enabled,
             "status_label": stitch_status_label,
