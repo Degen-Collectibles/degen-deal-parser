@@ -431,7 +431,17 @@ async def tiktok_orders_webhook(request: Request):
                 )
             )
             enrich_order_id = (order_record.get("tiktok_order_id") or "").strip()
-            _start_tiktok_webhook_enrichment(enrich_order_id)
+            if not _start_tiktok_webhook_enrichment(enrich_order_id):
+                print(
+                    structured_log_line(
+                        runtime=runtime_name,
+                        action="tiktok.webhook.enrichment_enqueue_failed",
+                        success=False,
+                        error="Durable enrichment enqueue failed",
+                        tiktok_order_id=enrich_order_id,
+                    )
+                )
+                return Response(status_code=500)
             # Alert immediately on reverse / cancellation events.
             if envelope_type in (2, 5):  # REVERSE_ORDER_STATUS_CHANGE or CANCELLATION_STATUS_CHANGE
                 _price = order_record.get("total_price")

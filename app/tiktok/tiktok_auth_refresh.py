@@ -82,6 +82,7 @@ def refresh_tiktok_auth_if_needed(
         ).first()
         app_secret = (settings.tiktok_app_secret or "").strip()
 
+        shop_refresh_request: Optional[dict[str, str]] = None
         if auth_row is not None:
             app_key = (settings.tiktok_app_key or auth_row.app_key or "").strip()
             refresh_token = (auth_row.refresh_token or settings.tiktok_refresh_token or "").strip()
@@ -96,50 +97,19 @@ def refresh_tiktok_auth_if_needed(
                     or token_expires_at <= utcnow() + timedelta(minutes=10)
                 )
                 if should_refresh:
-                    with httpx.Client(timeout=40.0, follow_redirects=True) as client:
-                        refreshed = _refresh_fn(
-                            client,
-                            base_url=resolve_base_url(),
-                            app_key=app_key,
-                            app_secret=app_secret,
-                            refresh_token=refresh_token,
-                        )
-
-                    token_data = refreshed
-                    if isinstance(refreshed, dict) and isinstance(refreshed.get("data"), dict):
-                        token_data = refreshed["data"]
-
-                    status, auth_record = upsert_tiktok_auth_from_callback(
-                        session,
-                        TikTokAuth,
-                        token_result=token_data,
-                        app_key=app_key,
-                        redirect_uri=(auth_row.redirect_uri or settings.tiktok_redirect_uri or "").strip(),
-                        fallback_shop_id=(settings.tiktok_shop_id or auth_row.tiktok_shop_id or "").strip(),
-                        source="oauth_refresh",
-                        received_at=utcnow(),
-                        dry_run=False,
-                    )
-
-                    if update_state is not None:
-                        update_state(
-                            is_pull_running=False,
-                            last_pull_started_at=utcnow(),
-                            last_pull_finished_at=utcnow(),
-                            last_error=None,
-                            last_pull_at=utcnow(),
-                            last_pull={
-                                "status": "refresh",
-                                "auth_status": status,
-                                "shop_id": auth_record.get("tiktok_shop_id"),
-                                "runtime": runtime_name,
-                            },
-                        )
-
-                    session.commit()
-                    result = {"status": status, "auth_record": auth_record}
+                    shop_refresh_request = {
+                        "app_key": app_key,
+                        "refresh_token": refresh_token,
+                        "redirect_uri": (
+                            auth_row.redirect_uri or settings.tiktok_redirect_uri or ""
+                        ).strip(),
+                        "fallback_shop_id": (
+                            settings.tiktok_shop_id or auth_row.tiktok_shop_id or ""
+                        ).strip(),
+                    }
 
         creator_auth_refreshed = 0
+        creator_refresh_requests: list[dict[str, Any]] = []
         if not clean_shop_id and not clean_shop_cipher and app_secret:
             creator_rows = list(
                 session.exec(
@@ -166,40 +136,106 @@ def refresh_tiktok_auth_if_needed(
                 if not should_refresh_creator:
                     continue
 
-                with httpx.Client(timeout=40.0, follow_redirects=True) as client:
-                    refreshed = _refresh_fn(
-                        client,
-                        base_url=resolve_base_url(),
-                        app_key=creator_app_key,
-                        app_secret=app_secret,
-                        refresh_token=creator_refresh_token,
-                    )
-
-                token_data = refreshed
-                if isinstance(refreshed, dict) and isinstance(refreshed.get("data"), dict):
-                    token_data = refreshed["data"]
-                if isinstance(token_data, dict):
-                    token_data = dict(token_data)
-                    token_data.setdefault("open_id", creator_row.open_id)
-                    try:
-                        existing_scopes = json.loads(creator_row.scopes_json or "[]")
-                    except Exception:
-                        existing_scopes = []
-                    token_data.setdefault("granted_scopes", existing_scopes)
-
-                upsert_tiktok_creator_auth_from_callback(
-                    session,
-                    TikTokCreatorAuth,
-                    token_result=token_data,
-                    creator_username=creator_row.creator_username,
-                    app_key=creator_app_key,
-                    redirect_uri=(creator_row.redirect_uri or settings.tiktok_redirect_uri or "").strip(),
-                    source="creator_oauth_refresh",
-                    received_at=utcnow(),
-                    dry_run=False,
+                try:
+                    existing_scopes = json.loads(creator_row.scopes_json or "[]")
+                except Exception:
+                    existing_scopes = []
+                creator_refresh_requests.append(
+                    {
+                        "app_key": creator_app_key,
+                        "refresh_token": creator_refresh_token,
+                        "open_id": creator_row.open_id,
+                        "existing_scopes": existing_scopes,
+                        "creator_username": creator_row.creator_username,
+                        "redirect_uri": (
+                            creator_row.redirect_uri or settings.tiktok_redirect_uri or ""
+                        ).strip(),
+                    }
                 )
-                session.commit()
-                creator_auth_refreshed += 1
+
+        # All ORM values needed by the network calls are now plain scalars. Close
+        # the read transaction before waiting on TikTok so the connection returns
+        # to the pool during the potentially slow external request.
+        session.close()
+
+        if shop_refresh_request is not None:
+            with httpx.Client(timeout=40.0, follow_redirects=True) as client:
+                refreshed = _refresh_fn(
+                    client,
+                    base_url=resolve_base_url(),
+                    app_key=shop_refresh_request["app_key"],
+                    app_secret=app_secret,
+                    refresh_token=shop_refresh_request["refresh_token"],
+                )
+
+            token_data = refreshed
+            if isinstance(refreshed, dict) and isinstance(refreshed.get("data"), dict):
+                token_data = refreshed["data"]
+
+            status, auth_record = upsert_tiktok_auth_from_callback(
+                session,
+                TikTokAuth,
+                token_result=token_data,
+                app_key=shop_refresh_request["app_key"],
+                redirect_uri=shop_refresh_request["redirect_uri"],
+                fallback_shop_id=shop_refresh_request["fallback_shop_id"],
+                source="oauth_refresh",
+                received_at=utcnow(),
+                dry_run=False,
+            )
+
+            if update_state is not None:
+                update_state(
+                    is_pull_running=False,
+                    last_pull_started_at=utcnow(),
+                    last_pull_finished_at=utcnow(),
+                    last_error=None,
+                    last_pull_at=utcnow(),
+                    last_pull={
+                        "status": "refresh",
+                        "auth_status": status,
+                        "shop_id": auth_record.get("tiktok_shop_id"),
+                        "runtime": runtime_name,
+                    },
+                )
+
+            session.commit()
+            result = {"status": status, "auth_record": auth_record}
+
+        for creator_request in creator_refresh_requests:
+            # A previous upsert may have opened and committed a transaction. Close
+            # once more so every creator-token HTTP call starts with no DB checkout.
+            session.close()
+            with httpx.Client(timeout=40.0, follow_redirects=True) as client:
+                refreshed = _refresh_fn(
+                    client,
+                    base_url=resolve_base_url(),
+                    app_key=creator_request["app_key"],
+                    app_secret=app_secret,
+                    refresh_token=creator_request["refresh_token"],
+                )
+
+            token_data = refreshed
+            if isinstance(refreshed, dict) and isinstance(refreshed.get("data"), dict):
+                token_data = refreshed["data"]
+            if isinstance(token_data, dict):
+                token_data = dict(token_data)
+                token_data.setdefault("open_id", creator_request["open_id"])
+                token_data.setdefault("granted_scopes", creator_request["existing_scopes"])
+
+            upsert_tiktok_creator_auth_from_callback(
+                session,
+                TikTokCreatorAuth,
+                token_result=token_data,
+                creator_username=creator_request["creator_username"],
+                app_key=creator_request["app_key"],
+                redirect_uri=creator_request["redirect_uri"],
+                source="creator_oauth_refresh",
+                received_at=utcnow(),
+                dry_run=False,
+            )
+            session.commit()
+            creator_auth_refreshed += 1
 
         if creator_auth_refreshed:
             if result is None:

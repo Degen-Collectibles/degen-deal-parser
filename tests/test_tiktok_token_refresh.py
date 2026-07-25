@@ -96,8 +96,10 @@ class RefreshTiktokAuthTests(unittest.TestCase):
                 "access_token_expire_in": 86400,
             }
         }
+        refresh_transaction_states = []
 
         def fake_refresh_fn(client, *, base_url, app_key, app_secret, refresh_token):
+            refresh_transaction_states.append(session.in_transaction())
             return fake_result
 
         with Session(self.engine) as session:
@@ -119,6 +121,7 @@ class RefreshTiktokAuthTests(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertEqual(result["status"], "inserted")
+        self.assertEqual(refresh_transaction_states, [False])
 
     def test_forced_refresh_targets_matching_shop_not_latest_row(self):
         fake_result = {
@@ -235,9 +238,11 @@ class RefreshTiktokAuthTests(unittest.TestCase):
             }
         }
         refresh_tokens = []
+        refresh_transaction_states = []
 
         def fake_refresh_fn(client, *, base_url, app_key, app_secret, refresh_token):
             refresh_tokens.append(refresh_token)
+            refresh_transaction_states.append(session.in_transaction())
             return fake_result
 
         with Session(self.engine) as session:
@@ -272,6 +277,7 @@ class RefreshTiktokAuthTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["creator_auth_refreshed"], 1)
         self.assertEqual(refresh_tokens, ["creator-refresh"])
+        self.assertEqual(refresh_transaction_states, [False])
         self.assertEqual(refreshed.access_token, "creator-new-token")
         self.assertEqual(refreshed.refresh_token, "creator-new-refresh")
 

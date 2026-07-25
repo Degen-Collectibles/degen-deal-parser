@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import shutil
+import threading
 import time
 import unittest
 import uuid
@@ -789,6 +790,48 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(update_tiktok_integration_state.call_args.kwargs["last_webhook"]["topic"], "order.status.change")
         self.assertEqual(update_tiktok_integration_state.call_args.kwargs["last_webhook"]["tiktok_order_id"], "tt-2")
 
+    def test_tiktok_webhook_returns_500_when_durable_enrichment_enqueue_fails(self) -> None:
+        secret = "app-secret"
+        timestamp = str(int(time.time()))
+        body = json.dumps({"order_id": "tt-enqueue-fail", "status": "PAID"}).encode("utf-8")
+        signature = hmac.new(
+            secret.encode("utf-8"),
+            f"{timestamp}.{body.decode('utf-8')}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        request = FakeTikTokRequest(
+            "/webhooks/tiktok/orders",
+            headers={
+                "X-TikTok-Topic": "order.status.change",
+                "x-tiktok-signature": signature,
+                "x-tiktok-timestamp": timestamp,
+            },
+            body=body,
+        )
+
+        with patch.object(main_module.settings, "tiktok_app_secret", secret), patch.object(
+            tiktok_orders_module,
+            "run_write_with_retry",
+            return_value=(
+                "inserted",
+                {"tiktok_order_id": "tt-enqueue-fail", "shop_id": "shop-1"},
+            ),
+        ), patch.object(
+            tiktok_orders_module.asyncio,
+            "to_thread",
+            side_effect=self._immediate_to_thread,
+        ), patch.object(
+            tiktok_orders_module,
+            "_start_tiktok_webhook_enrichment",
+            return_value=False,
+        ), patch.object(
+            tiktok_orders_module,
+            "update_tiktok_integration_state",
+        ):
+            response = asyncio.run(tiktok_orders_module.tiktok_orders_webhook(request))
+
+        self.assertEqual(response.status_code, 500)
+
     def test_tiktok_webhook_invalid_json_returns_400_and_records_error(self) -> None:
         request = FakeTikTokRequest(
             "/webhooks/tiktok/orders",
@@ -1242,6 +1285,66 @@ class TikTokRegressionTests(unittest.TestCase):
             self.assertEqual(job.status, "succeeded")
             self.assertEqual(job.last_error, "")
 
+    def test_tiktok_webhook_enrichment_queue_releases_transaction_before_callback(self) -> None:
+        started_at = datetime(2026, 4, 1, 8, 0, tzinfo=timezone.utc)
+        callback_transactions: list[bool] = []
+
+        with Session(self.engine) as session:
+            enqueue_tiktok_webhook_enrichment(
+                session,
+                "tt-release-1",
+                now=started_at,
+            )
+            session.commit()
+
+            def enrich(order_id: str) -> None:
+                self.assertEqual(order_id, "tt-release-1")
+                callback_transactions.append(session.in_transaction())
+
+            attempted = process_due_tiktok_webhook_enrichment_jobs(
+                session,
+                now=started_at,
+                enrich_fn=enrich,
+                limit=1,
+            )
+
+        self.assertEqual(attempted, 1)
+        self.assertEqual(callback_transactions, [False])
+
+    def test_tiktok_webhook_enqueue_burst_does_not_spawn_enrichment_threads(self) -> None:
+        release_threads = threading.Event()
+        prefix = "tiktok-enrich-tt-burst-"
+        spawned_threads: list[threading.Thread] = []
+
+        try:
+            with patch.object(
+                shared_module,
+                "_enqueue_tiktok_webhook_enrichment_job",
+                return_value=True,
+            ), patch.object(
+                shared_module,
+                "_process_tiktok_webhook_enrichment_queue_once",
+                side_effect=lambda: release_threads.wait(timeout=5),
+            ):
+                results = [
+                    shared_module._start_tiktok_webhook_enrichment(
+                        f"tt-burst-{index}"
+                    )
+                    for index in range(20)
+                ]
+                spawned_threads = [
+                    thread
+                    for thread in threading.enumerate()
+                    if thread.name.startswith(prefix)
+                ]
+
+            self.assertEqual(results, [True] * 20)
+            self.assertEqual(spawned_threads, [])
+        finally:
+            release_threads.set()
+            for thread in spawned_threads:
+                thread.join(timeout=5)
+
     def test_tiktok_webhook_enrichment_queue_duplicate_preserves_pending_backoff(self) -> None:
         started_at = datetime(2026, 4, 1, 8, 0, tzinfo=timezone.utc)
         duplicate_at = started_at + timedelta(seconds=10)
@@ -1392,9 +1495,12 @@ class TikTokRegressionTests(unittest.TestCase):
             self.assertEqual(job.status, "succeeded")
 
     def test_tiktok_webhook_enrichment_uses_existing_order_shop_credentials_first(self) -> None:
+        managed_sessions: list[Session] = []
+
         @contextmanager
         def fake_managed_session():
             with Session(self.engine) as session:
+                managed_sessions.append(session)
                 yield session
 
         with Session(self.engine) as session:
@@ -1423,8 +1529,12 @@ class TikTokRegressionTests(unittest.TestCase):
             session.commit()
 
         fetch_calls: list[tuple[str, str, str]] = []
+        fetch_transaction_states: list[bool] = []
 
         def fake_fetch_details(*args, **kwargs):
+            fetch_transaction_states.append(
+                any(session.in_transaction() for session in managed_sessions)
+            )
             fetch_calls.append((kwargs["shop_id"], kwargs["shop_cipher"], kwargs["access_token"]))
             return [{"order_id": "main-webhook-order", "shop_id": "main-shop"}]
 
@@ -1466,6 +1576,7 @@ class TikTokRegressionTests(unittest.TestCase):
             shared_module._enrich_tiktok_order_from_api("main-webhook-order", raise_errors=True)
 
         self.assertEqual(fetch_calls, [("main-shop", "main-cipher", "main-token")])
+        self.assertEqual(fetch_transaction_states, [False])
 
     def test_tiktok_webhook_enrichment_falls_through_stale_env_token_to_oauth_row(self) -> None:
         @contextmanager
