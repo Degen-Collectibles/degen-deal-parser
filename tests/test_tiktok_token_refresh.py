@@ -96,8 +96,10 @@ class RefreshTiktokAuthTests(unittest.TestCase):
                 "access_token_expire_in": 86400,
             }
         }
+        refresh_transaction_states = []
 
         def fake_refresh_fn(client, *, base_url, app_key, app_secret, refresh_token):
+            refresh_transaction_states.append(session.in_transaction())
             return fake_result
 
         with Session(self.engine) as session:
@@ -119,6 +121,7 @@ class RefreshTiktokAuthTests(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertEqual(result["status"], "inserted")
+        self.assertEqual(refresh_transaction_states, [False])
 
     def test_forced_refresh_targets_matching_shop_not_latest_row(self):
         fake_result = {
@@ -235,9 +238,11 @@ class RefreshTiktokAuthTests(unittest.TestCase):
             }
         }
         refresh_tokens = []
+        refresh_transaction_states = []
 
         def fake_refresh_fn(client, *, base_url, app_key, app_secret, refresh_token):
             refresh_tokens.append(refresh_token)
+            refresh_transaction_states.append(session.in_transaction())
             return fake_result
 
         with Session(self.engine) as session:
@@ -272,8 +277,67 @@ class RefreshTiktokAuthTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["creator_auth_refreshed"], 1)
         self.assertEqual(refresh_tokens, ["creator-refresh"])
+        self.assertEqual(refresh_transaction_states, [False])
         self.assertEqual(refreshed.access_token, "creator-new-token")
         self.assertEqual(refreshed.refresh_token, "creator-new-refresh")
+
+    def test_malformed_creator_scopes_are_logged_before_empty_fallback(self):
+        fake_result = {
+            "data": {
+                "access_token": "creator-new-token",
+                "refresh_token": "creator-new-refresh",
+                "access_token_expire_in": 86400,
+                "open_id": "creator-open-id",
+            }
+        }
+
+        def fake_refresh_fn(client, *, base_url, app_key, app_secret, refresh_token):
+            return fake_result
+
+        with Session(self.engine) as session:
+            creator_auth = TikTokCreatorAuth(
+                creator_username="test-creator",
+                open_id="creator-open-id",
+                app_key="key",
+                access_token="creator-old-token",
+                refresh_token="creator-refresh",
+                access_token_expires_at=_past(5),
+                scopes_json="{malformed",
+                created_at=_utcnow(),
+                updated_at=_utcnow(),
+                source="creator_oauth_callback",
+            )
+            session.add(creator_auth)
+            session.commit()
+            creator_auth_id = creator_auth.id
+
+            with patch("app.tiktok.tiktok_auth_refresh._refresh_fn", fake_refresh_fn), \
+                 patch("app.tiktok.tiktok_auth_refresh.settings") as mock_settings:
+                mock_settings.tiktok_app_key = "key"
+                mock_settings.tiktok_app_secret = "secret"
+                mock_settings.tiktok_refresh_token = ""
+                mock_settings.tiktok_redirect_uri = ""
+                mock_settings.tiktok_shop_id = ""
+                with self.assertLogs(
+                    "app.tiktok.tiktok_auth_refresh",
+                    level="WARNING",
+                ) as captured_logs:
+                    refresh_tiktok_auth_if_needed(
+                        session,
+                        runtime_name="test",
+                        resolve_base_url=lambda: "https://example.com",
+                    )
+
+            refreshed = session.get(TikTokCreatorAuth, creator_auth_id)
+
+        self.assertTrue(
+            any(
+                f"row id={creator_auth_id}" in message
+                and "defaulting to []" in message
+                for message in captured_logs.output
+            )
+        )
+        self.assertEqual(refreshed.scopes_json, "[]")
 
 
 class PeriodicLoopTests(unittest.TestCase):

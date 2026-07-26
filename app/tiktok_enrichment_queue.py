@@ -164,9 +164,11 @@ def process_due_tiktok_webhook_enrichment_jobs(
     for due_job in jobs:
         if due_job.id is None:
             continue
+        job_id = due_job.id
+        order_id = due_job.tiktok_order_id
         claim_result = session.execute(
             update(TikTokWebhookEnrichmentJob)
-            .where(TikTokWebhookEnrichmentJob.id == due_job.id)
+            .where(TikTokWebhookEnrichmentJob.id == job_id)
             .where(TikTokWebhookEnrichmentJob.status == ENRICH_PENDING)
             .where(TikTokWebhookEnrichmentJob.next_attempt_at <= now)
             .execution_options(synchronize_session=False)
@@ -181,13 +183,13 @@ def process_due_tiktok_webhook_enrichment_jobs(
             continue
         session.commit()
 
-        job = session.get(TikTokWebhookEnrichmentJob, due_job.id)
-        if job is None:
-            continue
         attempted += 1
         try:
-            enrich_fn(job.tiktok_order_id)
+            enrich_fn(order_id)
         except Exception as exc:  # noqa: BLE001 - failures are persisted for retry/visibility
+            job = session.get(TikTokWebhookEnrichmentJob, job_id)
+            if job is None:
+                continue
             job.attempts = int(job.attempts or 0) + 1
             job.last_error = _safe_error_text(exc)
             job.updated_at = now
@@ -201,6 +203,9 @@ def process_due_tiktok_webhook_enrichment_jobs(
             session.commit()
             continue
 
+        job = session.get(TikTokWebhookEnrichmentJob, job_id)
+        if job is None:
+            continue
         job.status = ENRICH_SUCCEEDED
         job.last_error = ""
         job.next_attempt_at = None
