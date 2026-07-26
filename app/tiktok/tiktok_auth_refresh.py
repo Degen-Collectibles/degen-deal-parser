@@ -8,6 +8,7 @@ circular imports.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from collections.abc import Callable
 from datetime import timedelta, timezone
@@ -32,6 +33,7 @@ except Exception:
     _refresh_fn = None
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 # Serializes shop + creator refresh so two tasks never consume the same refresh token
 # or interleave commits on the shared TikTokAuth row.
@@ -138,7 +140,13 @@ def refresh_tiktok_auth_if_needed(
 
                 try:
                     existing_scopes = json.loads(creator_row.scopes_json or "[]")
-                except Exception:
+                except (TypeError, ValueError) as exc:
+                    logger.warning(
+                        "TikTok creator auth scopes_json is unparseable for row id=%s "
+                        "(%s); defaulting to []",
+                        creator_row.id,
+                        type(exc).__name__,
+                    )
                     existing_scopes = []
                 creator_refresh_requests.append(
                     {

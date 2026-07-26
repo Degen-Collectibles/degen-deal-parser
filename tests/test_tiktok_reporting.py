@@ -3,7 +3,6 @@ import hashlib
 import hmac
 import json
 import shutil
-import threading
 import time
 import unittest
 import uuid
@@ -1312,38 +1311,20 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(callback_transactions, [False])
 
     def test_tiktok_webhook_enqueue_burst_does_not_spawn_enrichment_threads(self) -> None:
-        release_threads = threading.Event()
-        prefix = "tiktok-enrich-tt-burst-"
-        spawned_threads: list[threading.Thread] = []
+        with patch.object(
+            shared_module,
+            "_enqueue_tiktok_webhook_enrichment_job",
+            return_value=True,
+        ), patch.object(shared_module.threading, "Thread") as thread:
+            results = [
+                shared_module._start_tiktok_webhook_enrichment(
+                    f"tt-burst-{index}"
+                )
+                for index in range(100)
+            ]
 
-        try:
-            with patch.object(
-                shared_module,
-                "_enqueue_tiktok_webhook_enrichment_job",
-                return_value=True,
-            ), patch.object(
-                shared_module,
-                "_process_tiktok_webhook_enrichment_queue_once",
-                side_effect=lambda: release_threads.wait(timeout=5),
-            ):
-                results = [
-                    shared_module._start_tiktok_webhook_enrichment(
-                        f"tt-burst-{index}"
-                    )
-                    for index in range(20)
-                ]
-                spawned_threads = [
-                    thread
-                    for thread in threading.enumerate()
-                    if thread.name.startswith(prefix)
-                ]
-
-            self.assertEqual(results, [True] * 20)
-            self.assertEqual(spawned_threads, [])
-        finally:
-            release_threads.set()
-            for thread in spawned_threads:
-                thread.join(timeout=5)
+        self.assertEqual(results, [True] * 100)
+        thread.assert_not_called()
 
     def test_tiktok_webhook_enrichment_queue_duplicate_preserves_pending_backoff(self) -> None:
         started_at = datetime(2026, 4, 1, 8, 0, tzinfo=timezone.utc)
