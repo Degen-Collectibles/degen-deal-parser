@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import urlencode
 
 import httpx
@@ -79,6 +79,15 @@ class TikTokPullSummary:
     affiliate_missing: int = 0
     affiliate_failed: int = 0
     affiliate_scope_missing: bool = False
+
+
+@dataclass
+class TikTokCreatorAffiliateTraceSummary:
+    affiliate_attributed: int = 0
+    affiliate_missing: int = 0
+    affiliate_failed: int = 0
+    affiliate_scope_missing: bool = False
+    last_error: str = ""
 
 
 def parse_args() -> argparse.Namespace:
@@ -2320,8 +2329,26 @@ def backfill_tiktok_creator_affiliate_attributions(
     until: Optional[datetime],
     dry_run: bool = False,
     runtime_name: str = "tiktok_backfill",
+    telemetry_callback: Optional[Callable[[str, TikTokCreatorAffiliateTraceSummary], None]] = None,
 ) -> TikTokPullSummary:
     summary = TikTokPullSummary()
+
+    def emit_telemetry(creator_username: str, creator_summary: TikTokCreatorAffiliateTraceSummary) -> None:
+        if telemetry_callback is None:
+            return
+        try:
+            telemetry_callback(creator_username, creator_summary)
+        except Exception as exc:
+            print(
+                structured_tiktok_log_line(
+                    runtime=runtime_name,
+                    action="tiktok.creator_affiliate_orders.telemetry_failed",
+                    success=False,
+                    creator_username=creator_username,
+                    error=str(exc)[:500],
+                )
+            )
+
     creator_auth_rows = list(
         session.exec(
             select(TikTokCreatorAuth).order_by(TikTokCreatorAuth.updated_at.desc(), TikTokCreatorAuth.id.desc())
@@ -2335,10 +2362,19 @@ def backfill_tiktok_creator_affiliate_attributions(
             creator_username = _clean_affiliate_creator_username(auth_row.creator_username)
             access_token = str(auth_row.access_token or "").strip()
             row_app_key = str(auth_row.app_key or app_key or "").strip()
-            if not creator_username or not access_token or not row_app_key:
+            if not creator_username:
+                continue
+            creator_summary = TikTokCreatorAffiliateTraceSummary()
+            if not access_token or not row_app_key:
+                creator_summary.affiliate_failed += 1
+                creator_summary.last_error = "missing_creator_affiliate_credentials"
+                emit_telemetry(creator_username, creator_summary)
                 continue
             if not _scope_json_contains(auth_row.scopes_json, TIKTOK_CREATOR_AFFILIATE_ORDER_READ_SCOPE):
                 summary.affiliate_scope_missing = True
+                creator_summary.affiliate_scope_missing = True
+                creator_summary.last_error = "missing_creator_affiliate_scope"
+                emit_telemetry(creator_username, creator_summary)
                 continue
 
             cursor: Optional[str] = None
@@ -2358,6 +2394,8 @@ def backfill_tiktok_creator_affiliate_attributions(
                 except Exception as exc:
                     if tiktok_affiliate_order_error_is_scope_missing(exc):
                         summary.affiliate_scope_missing = True
+                        creator_summary.affiliate_scope_missing = True
+                        creator_summary.last_error = str(exc)[:500]
                         print(
                             structured_tiktok_log_line(
                                 runtime=runtime_name,
@@ -2369,6 +2407,8 @@ def backfill_tiktok_creator_affiliate_attributions(
                         )
                         break
                     summary.affiliate_failed += 1
+                    creator_summary.affiliate_failed += 1
+                    creator_summary.last_error = str(exc)[:500]
                     print(
                         structured_tiktok_log_line(
                             runtime=runtime_name,
@@ -2389,8 +2429,10 @@ def backfill_tiktok_creator_affiliate_attributions(
                     )
                     if result in ("updated", "unchanged"):
                         summary.affiliate_attributed += 1
+                        creator_summary.affiliate_attributed += 1
                     elif result == "missing":
                         summary.affiliate_missing += 1
+                        creator_summary.affiliate_missing += 1
 
                 if not dry_run and affiliate_orders:
                     _commit_retry_delay = 0.4
@@ -2411,6 +2453,7 @@ def backfill_tiktok_creator_affiliate_attributions(
                 if not cursor:
                     break
                 time.sleep(0.5)
+            emit_telemetry(creator_username, creator_summary)
 
     return summary
 
@@ -2429,6 +2472,9 @@ def backfill_tiktok_orders(
     dry_run: bool = False,
     affiliate_attribution: bool = True,
     runtime_name: str = "tiktok_backfill",
+    creator_affiliate_telemetry_callback: Optional[
+        Callable[[str, TikTokCreatorAffiliateTraceSummary], None]
+    ] = None,
 ) -> TikTokPullSummary:
     summary = TikTokPullSummary()
     # limit is "no cap" semantics: None or <=0 means scan exhaustively.
@@ -2600,6 +2646,7 @@ def backfill_tiktok_orders(
             until=until,
             dry_run=dry_run,
             runtime_name=runtime_name,
+            telemetry_callback=creator_affiliate_telemetry_callback,
         )
         summary.affiliate_attributed += creator_affiliate_summary.affiliate_attributed
         summary.affiliate_missing += creator_affiliate_summary.affiliate_missing
