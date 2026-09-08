@@ -272,6 +272,13 @@ class Settings(BaseSettings):
     # Inventory
     shopify_access_token: str = Field(default="", alias="SHOPIFY_ACCESS_TOKEN")
     shopify_location_id: str = Field(default="", alias="SHOPIFY_LOCATION_ID")
+    shopify_pos_tax_sentinel_enabled: bool = Field(default=False, alias="SHOPIFY_POS_TAX_SENTINEL_ENABLED")
+    shopify_pos_location_id: str = Field(default="", alias="SHOPIFY_POS_LOCATION_ID")
+    shopify_pos_tax_city: str = Field(default="San Jose", alias="SHOPIFY_POS_TAX_CITY")
+    shopify_pos_tax_county: str = Field(default="Santa Clara", alias="SHOPIFY_POS_TAX_COUNTY")
+    shopify_pos_expected_tax_rate: float = Field(default=0.10, alias="SHOPIFY_POS_EXPECTED_TAX_RATE")
+    shopify_pos_only: bool = Field(default=True, alias="SHOPIFY_POS_ONLY")
+    shopify_pos_tax_order_lookback_days: int = Field(default=7, alias="SHOPIFY_POS_TAX_ORDER_LOOKBACK_DAYS")
     scrydex_api_key: str = Field(default="", alias="SCRYDEX_API_KEY")
     scrydex_base_url: str = Field(default="https://api.scrydex.io", alias="SCRYDEX_BASE_URL")
     inventory_auto_price_enabled: bool = Field(default=True, alias="INVENTORY_AUTO_PRICE_ENABLED")

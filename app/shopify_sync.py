@@ -28,6 +28,27 @@ SHOPIFY_SYNC_ISSUE_SYNC_ERROR = "sync_error"
 SHOPIFY_SYNC_ISSUE_ORDER_QUANTITY_CHANGED = "order_quantity_changed"
 SHOPIFY_SYNC_ISSUE_INVALID_ORDER_IDENTITY = "invalid_order_identity"
 SHOPIFY_SYNC_ISSUE_INVALID_ORDER_QUANTITY = "invalid_order_quantity"
+SHOPIFY_TAX_ISSUE_TAXABLE_VARIANT_DISABLED = "taxable_variant_disabled"
+SHOPIFY_TAX_ISSUE_POS_TAX_RATE_MISMATCH = "pos_tax_rate_mismatch"
+SHOPIFY_TAX_ISSUE_POS_TAX_LINES_MISSING = "pos_tax_lines_missing"
+SHOPIFY_TAX_ISSUE_POS_LOCATION_MISMATCH = "pos_location_mismatch"
+SHOPIFY_TAX_ISSUE_POS_TAX_OVERRIDE = "pos_tax_override_observed"
+SHOPIFY_TAX_ISSUE_NON_POS_ORDER = "non_pos_order_detected"
+SHOPIFY_TAX_ISSUE_OFFICIAL_RATE_CHANGED = "official_tax_rate_changed"
+SHOPIFY_TAX_ISSUE_OFFICIAL_SOURCE_UNAVAILABLE = "official_tax_source_unavailable"
+
+SHOPIFY_TAX_SENTINEL_ISSUE_TYPES = frozenset(
+    {
+        SHOPIFY_TAX_ISSUE_TAXABLE_VARIANT_DISABLED,
+        SHOPIFY_TAX_ISSUE_POS_TAX_RATE_MISMATCH,
+        SHOPIFY_TAX_ISSUE_POS_TAX_LINES_MISSING,
+        SHOPIFY_TAX_ISSUE_POS_LOCATION_MISMATCH,
+        SHOPIFY_TAX_ISSUE_POS_TAX_OVERRIDE,
+        SHOPIFY_TAX_ISSUE_NON_POS_ORDER,
+        SHOPIFY_TAX_ISSUE_OFFICIAL_RATE_CHANGED,
+        SHOPIFY_TAX_ISSUE_OFFICIAL_SOURCE_UNAVAILABLE,
+    }
+)
 
 SHOPIFY_SYNC_IMPORTABLE_ISSUE_TYPES = frozenset(
     {
@@ -173,6 +194,34 @@ def record_shopify_sync_issue(
     issue.last_seen_at = now
     session.add(issue)
     return issue
+
+
+def resolve_unobserved_shopify_sync_issues(
+    session: Session,
+    *,
+    issue_type: str,
+    observed_issue_keys: set[str],
+    resolution_note: str,
+) -> int:
+    issues = session.exec(
+        select(ShopifySyncIssue).where(
+            ShopifySyncIssue.issue_type == issue_type,
+            ShopifySyncIssue.status == SHOPIFY_SYNC_ISSUE_OPEN,
+        )
+    ).all()
+    now = utcnow()
+    resolved_count = 0
+    for issue in issues:
+        if issue.issue_key in observed_issue_keys:
+            continue
+        issue.status = SHOPIFY_SYNC_ISSUE_RESOLVED
+        issue.resolution_note = resolution_note
+        issue.resolved_by = "shopify_pos_tax_sentinel"
+        issue.resolved_at = now
+        issue.last_seen_at = now
+        session.add(issue)
+        resolved_count += 1
+    return resolved_count
 
 
 def enqueue_shopify_sync_job(
