@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import unittest
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
 from cryptography.fernet import Fernet
@@ -81,6 +81,13 @@ class ClockifyServiceTests(unittest.TestCase):
         self.assertEqual(summary.total_seconds, 9000)
 
     def test_hours_template_renders_summary(self):
+        """/team/hours renders from employee_week_hours(), not a raw summary.
+
+        The page used to be handed a ClockifyWeekSummary and sum its raw
+        durations, which reported more hours than the dashboard and more than
+        payroll pays. It now takes the same break-adjusted week dict the
+        dashboard uses.
+        """
         from types import SimpleNamespace
 
         from app.team.clockify import build_week_summary, format_hours
@@ -102,6 +109,33 @@ class ClockifyServiceTests(unittest.TestCase):
             week_end_local=datetime(2026, 4, 27, 0, 0, tzinfo=tz),
             now=datetime(2026, 4, 20, 20, 0, tzinfo=timezone.utc),
         )
+        monday = date(2026, 4, 20)
+        week = {
+            "linked": True,
+            "error": "",
+            "source_label": "Clockify cache",
+            "week_start": monday,
+            "week_end_inclusive": date(2026, 4, 26),
+            "timezone_name": "America/Los_Angeles",
+            "today": monday,
+            "summary": summary,
+            "entries": list(summary.entries),
+            "days": [
+                {
+                    "day": monday + timedelta(days=offset),
+                    "work_seconds": 2 * 3600 if offset == 0 else 0,
+                    "break_seconds": 0,
+                    "auto_break_seconds": 0,
+                    "is_today": offset == 0,
+                }
+                for offset in range(7)
+            ],
+            "adjusted_by_day": {monday: (2 * 3600, 0, 0)},
+            "total_work_seconds": 2 * 3600,
+            "total_break_seconds": 0,
+            "total_auto_break_seconds": 0,
+            "running_count": 0,
+        }
         html = templates.env.get_template("team/hours.html").render(
             {
                 "request": SimpleNamespace(url=SimpleNamespace(path="/team/hours")),
@@ -110,8 +144,18 @@ class ClockifyServiceTests(unittest.TestCase):
                 "current_user": SimpleNamespace(role="employee", username="emp", display_name="Emp"),
                 "clockify_ready": True,
                 "clockify_user_id": "clock-user",
-                "clockify_summary": summary,
-                "clockify_error": None,
+                "week": week,
+                "pay": {
+                    "estimated_pay_label": "$40.00",
+                    "pay_basis": "This week at $20.00/hr",
+                    "clockify_user_id": "clock-user",
+                },
+                "clockify_error": "",
+                "is_this_week": True,
+                "prev_week": "2026-04-13",
+                "next_week": "2026-04-27",
+                "this_week": "2026-04-20",
+                "can_go_forward": False,
                 "format_hours": format_hours,
                 "csrf_token": "token",
                 "nav_items": [],
@@ -124,6 +168,8 @@ class ClockifyServiceTests(unittest.TestCase):
         self.assertIn("Inventory count", html)
         self.assertIn("2h", html)
         self.assertIn("Daily totals", html)
+        self.assertIn("Paid hours this week", html)
+        self.assertIn("$40.00", html)
 
     def test_client_filters_entries_to_requested_range(self):
         from app.team.clockify import ClockifyClient
@@ -162,7 +208,13 @@ class ClockifyServiceTests(unittest.TestCase):
         )
 
         self.assertEqual([row["id"] for row in rows], ["in-range"])
-        self.assertEqual(client.params_seen[0]["start"], "2026-04-20T07:00:00Z")
+        # The fetch deliberately reaches back before the requested window.
+        # Clockify filters on the entry START, so querying from the window
+        # start alone never returns a shift that began earlier and ran into
+        # the window -- which made refresh_clockify_labor_cache tombstone
+        # overnight shifts as deleted. The returned rows are still clipped to
+        # the requested range (asserted above); only the query widens.
+        self.assertEqual(client.params_seen[0]["start"], "2026-04-18T19:00:00Z")
         self.assertEqual(client.params_seen[0]["page-size"], 50)
 
     def test_workspace_users_request_includes_limited_accounts(self):

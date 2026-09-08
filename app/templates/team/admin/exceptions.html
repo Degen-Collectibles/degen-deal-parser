@@ -93,6 +93,13 @@
     @media (max-width: 520px) {
         .ex-metrics { grid-template-columns: 1fr; }
     }
+
+    .ex-ack-form { display: inline-block; margin: 4px 0 0; }
+    .ex-ack-btn { font-size: 11px; padding: 4px 9px; }
+    .ex-ack-summary { cursor: pointer; font-weight: 700; font-size: 13px; color: var(--lx-muted); }
+    .ex-table tr.is-acked { opacity: 0.6; }
+    .ex-ack-note { font-size: 11px; color: var(--lx-muted); margin-top: 4px; }
+    .ex-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 </style>
 {% endblock %}
 {% block content %}
@@ -178,14 +185,80 @@
                         {% else %}
                             <a class="ta-btn" href="{{ row.action_href }}">{{ row.action_label }}</a>
                         {% endif %}
+                        {% if can_ack %}
+                        <form method="post" action="/team/admin/exceptions/ack" class="ex-ack-form">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
+                            <input type="hidden" name="fingerprint" value="{{ row.fingerprint }}"/>
+                            <input type="hidden" name="week" value="{{ exceptions.week_start.isoformat() }}"/>
+                            <input type="hidden" name="category" value="{{ row.category }}"/>
+                            <input type="hidden" name="detail" value="{{ row.detail }}"/>
+                            <input type="hidden" name="user_id" value="{{ row.user_id or '' }}"/>
+                            <button class="ta-btn ex-ack-btn" type="submit"
+                                    title="Hide this row. It comes back if the underlying details change.">Mark handled</button>
+                        </form>
+                        {% endif %}
                     </td>
                 </tr>
                 {% endfor %}
                 {% if not exceptions.rows %}
-                <tr><td colspan="5" style="padding:20px 14px; color:var(--lx-muted); text-align:center;">No exceptions in this window.</td></tr>
+                <tr><td colspan="5" style="padding:20px 14px; color:var(--lx-muted); text-align:center;">
+                    {% if exceptions.acked_count %}Nothing left to review &mdash; {{ exceptions.acked_count }} handled below.{% else %}No exceptions in this window.{% endif %}
+                </td></tr>
                 {% endif %}
             </tbody>
         </table>
     </div>
 </div>
+
+{#
+   Handled rows stay visible on purpose. The condition is still recomputed
+   every load -- an ack hides a row from the working list, it does not
+   suppress the underlying problem.
+#}
+{% if exceptions.acked_rows %}
+<div class="ta-card" style="margin-top:16px;">
+    <details>
+        <summary class="ex-ack-summary">
+            {{ exceptions.acked_count }} handled this week
+        </summary>
+        <div class="ex-table-wrap" style="margin-top:12px;">
+            <table class="ex-table">
+                <thead>
+                    <tr>
+                        <th>Severity</th>
+                        <th>Category</th>
+                        <th>Employee</th>
+                        <th>Detail</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in exceptions.acked_rows %}
+                    <tr class="is-acked">
+                        <td><span class="ex-pill {{ row.severity }}">{{ row.severity }}</span></td>
+                        <td><strong>{{ row.category }}</strong></td>
+                        <td>{{ row.employee_name }}</td>
+                        <td class="ex-detail">
+                            {{ row.detail }}
+                            {% if row.ack_note %}<div class="ex-ack-note">{{ row.ack_note }}</div>{% endif %}
+                        </td>
+                        <td>
+                            {% if can_ack %}
+                            <form method="post" action="/team/admin/exceptions/ack" class="ex-ack-form">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
+                                <input type="hidden" name="fingerprint" value="{{ row.fingerprint }}"/>
+                                <input type="hidden" name="week" value="{{ exceptions.week_start.isoformat() }}"/>
+                                <input type="hidden" name="undo" value="1"/>
+                                <button class="ta-btn ex-ack-btn" type="submit">Put back</button>
+                            </form>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </details>
+</div>
+{% endif %}
 {% endblock %}

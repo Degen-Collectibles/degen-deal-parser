@@ -50,6 +50,12 @@ from ..models import (
     utcnow,
 )
 from ..team.pii import decrypt_pii
+from ..team.shift_labels import (
+    NON_SHIFT_TOKENS,
+    parse_shift_ranges,
+    parse_time_to_minutes,
+    shift_total_hours,
+)
 from ..shared import templates
 from .team_admin import _permission_gate
 from .team_admin_employees import (
@@ -135,69 +141,13 @@ def _week_start_for(value: Optional[str], today: date) -> date:
     return parsed - timedelta(days=parsed.weekday())
 
 
-_TIME_RE = re.compile(
-    r"^\s*(?P<h>\d{1,2})(?::(?P<m>\d{2}))?\s*(?P<ap>[ap](?:\.?m\.?)?)?\s*$",
-    re.IGNORECASE,
-)
-_RANGE_SPLIT_RE = re.compile(r"\s*[/,&]\s*")
-_NON_SHIFT_TOKENS = {"OFF", "SHOW", "REQUEST", "IF NEEDED", "STREAM"}
+_NON_SHIFT_TOKENS = NON_SHIFT_TOKENS
 
-
-def _parse_time_to_minutes(s: str) -> Optional[int]:
-    m = _TIME_RE.match(s)
-    if not m:
-        return None
-    h = int(m.group("h"))
-    mm = int(m.group("m") or 0)
-    ap = (m.group("ap") or "").lower().replace(".", "").replace("m", "")
-    if mm > 59 or h > 23:
-        return None
-    if ap == "p" and h < 12:
-        h += 12
-    elif ap == "a" and h == 12:
-        h = 0
-    return h * 60 + mm
-
-
-def _parse_shift_ranges(label: str) -> list[tuple[int, int]]:
-    """Return list of (start_min, end_min) for a shift label.
-
-    End may exceed 1440 to indicate overnight wrap. Returns [] for
-    non-shift tokens or anything unparseable.
-    """
-    if not label:
-        return []
-    if label.strip().upper() in _NON_SHIFT_TOKENS:
-        return []
-    out: list[tuple[int, int]] = []
-    for part in _RANGE_SPLIT_RE.split(label):
-        m = re.match(
-            r"^\s*(?P<a>[0-9:.apm\s]+?)\s*[-–—]\s*(?P<b>[0-9:.apm\s]+?)\s*$",
-            part,
-            re.IGNORECASE,
-        )
-        if not m:
-            continue
-        a_raw = m.group("a").strip()
-        b_raw = m.group("b").strip()
-        a_has_ap = bool(re.search(r"[ap]\.?m?\.?$", a_raw, re.I))
-        b_has_ap = bool(re.search(r"[ap]\.?m?\.?$", b_raw, re.I))
-        a = _parse_time_to_minutes(a_raw)
-        b = _parse_time_to_minutes(b_raw)
-        if a is None or b is None:
-            continue
-        if not a_has_ap and not b_has_ap:
-            a_h, b_h = a // 60, b // 60
-            if b_h < a_h and a_h <= 11:
-                b += 12 * 60
-        if b <= a:
-            b += 24 * 60
-        out.append((a, b))
-    return out
-
-
-def _shift_total_hours(ranges: list[tuple[int, int]]) -> float:
-    return round(sum((b - a) for a, b in ranges) / 60.0, 2)
+# Shift-label time math lives in app/team/shift_labels.py so the schedule grid,
+# timecards, pay-rates summary, and employee dashboard all agree.
+_parse_time_to_minutes = parse_time_to_minutes
+_parse_shift_ranges = parse_shift_ranges
+_shift_total_hours = shift_total_hours
 
 
 def _fmt_time(dt: Optional[datetime]) -> str:

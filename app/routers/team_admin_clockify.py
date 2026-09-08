@@ -31,6 +31,7 @@ from ..team.clockify import (
     clockify_today,
     clockify_client_from_settings,
     clockify_is_configured,
+    entry_fetch_start,
     format_hours,
     parse_clockify_datetime,
     parse_iso_duration_seconds,
@@ -43,6 +44,7 @@ from ..models import (
     AuditLog,
     ClockifyTimeEntry,
     ClockifyWebhookEvent,
+    TimecardExceptionAck,
     EmployeeProfile,
     SHIFT_KIND_ALL,
     SHIFT_KIND_WORK,
@@ -2462,6 +2464,30 @@ def lock_payroll_window(
     return {"locked": locked, "skipped_rejected": skipped_rejected}
 
 
+def exception_fingerprint(
+    *,
+    week_start: date,
+    user_id: Optional[int],
+    category: str,
+    detail: str,
+) -> str:
+    """Stable id for one exception row so an ack can stick to it.
+
+    Deliberately includes the detail text: if the underlying facts change the
+    fingerprint changes and the row reappears, because a manager acked the old
+    information, not the new.
+    """
+    raw = "|".join(
+        [
+            week_start.isoformat(),
+            str(user_id if user_id is not None else ""),
+            (category or "").strip(),
+            (detail or "").strip(),
+        ]
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def _exception_row(
     *,
     severity: str,
@@ -2470,7 +2496,9 @@ def _exception_row(
     detail: str,
     action_href: str,
     action_label: str,
+    week_start: Optional[date] = None,
 ) -> dict[str, Any]:
+    user_id = employee.id if employee is not None else None
     return {
         "severity": severity,
         "category": category,
@@ -2479,9 +2507,22 @@ def _exception_row(
             if employee is not None
             else "-"
         ),
+        "user_id": user_id,
         "detail": detail,
         "action_href": action_href,
         "action_label": action_label,
+        "fingerprint": (
+            exception_fingerprint(
+                week_start=week_start,
+                user_id=user_id,
+                category=category,
+                detail=detail,
+            )
+            if week_start is not None
+            else ""
+        ),
+        "acknowledged": False,
+        "ack_note": "",
     }
 
 
@@ -2536,6 +2577,7 @@ def build_timecard_exceptions(
             if compensation_type != COMPENSATION_TYPE_UNPAID:
                 rows.append(
                     _exception_row(
+                        week_start=week_start,
                         severity="warn",
                         category="Missing Clockify mapping",
                         employee=user,
@@ -2547,6 +2589,7 @@ def build_timecard_exceptions(
         else:
             rows.append(
                 _exception_row(
+                    week_start=week_start,
                     severity="warn",
                     category="Missing Clockify mapping",
                     employee=user,
@@ -2568,6 +2611,7 @@ def build_timecard_exceptions(
             ):
                 rows.append(
                     _exception_row(
+                        week_start=week_start,
                         severity="warn",
                         category="Missing pay rate",
                         employee=user,
@@ -2582,6 +2626,7 @@ def build_timecard_exceptions(
             ):
                 rows.append(
                     _exception_row(
+                        week_start=week_start,
                         severity="warn",
                         category="Missing salary",
                         employee=user,
@@ -2611,6 +2656,7 @@ def build_timecard_exceptions(
             if started and now_utc - started > timedelta(hours=10):
                 rows.append(
                     _exception_row(
+                        week_start=week_start,
                         severity="danger",
                         category="Long running timer",
                         employee=users_by_id.get(user_id),
@@ -2659,6 +2705,7 @@ def build_timecard_exceptions(
         if approval.status == _TIMECARD_REJECTED:
             rows.append(
                 _exception_row(
+                    week_start=week_start,
                     severity="danger",
                     category="Rejected timecard",
                     employee=users_by_id.get(user_id),
@@ -2675,6 +2722,7 @@ def build_timecard_exceptions(
             if status == _TIMECARD_PENDING:
                 rows.append(
                     _exception_row(
+                        week_start=week_start,
                         severity="info",
                         category="Pending timecard",
                         employee=users_by_id.get(user_id),
@@ -2687,6 +2735,7 @@ def build_timecard_exceptions(
             if key in work_seconds_by_user_day and key not in scheduled_labor_days:
                 rows.append(
                     _exception_row(
+                        week_start=week_start,
                         severity="warn",
                         category="Unscheduled clock-in",
                         employee=users_by_id.get(user_id),
@@ -2698,6 +2747,7 @@ def build_timecard_exceptions(
             if key in scheduled_labor_days and key not in work_seconds_by_user_day and work_day < today:
                 rows.append(
                     _exception_row(
+                        week_start=week_start,
                         severity="danger",
                         category="Possible no-show",
                         employee=users_by_id.get(user_id),
@@ -2716,16 +2766,40 @@ def build_timecard_exceptions(
             row["detail"],
         )
     )
-    counts: dict[str, int] = {}
+
+    # Acknowledged rows stay computed and counted, but drop out of the working
+    # list. Hiding them entirely would let a real problem vanish; leaving them
+    # in was what made the page unreadable.
+    acks = {
+        row.fingerprint: row
+        for row in session.exec(
+            select(TimecardExceptionAck).where(
+                TimecardExceptionAck.week_start == week_start
+            )
+        ).all()
+    }
     for row in rows:
+        ack = acks.get(row["fingerprint"])
+        if ack is not None:
+            row["acknowledged"] = True
+            row["ack_note"] = (ack.note or "").strip()
+
+    open_rows = [row for row in rows if not row["acknowledged"]]
+    acked_rows = [row for row in rows if row["acknowledged"]]
+
+    counts: dict[str, int] = {}
+    for row in open_rows:
         counts[row["category"]] = counts.get(row["category"], 0) + 1
     return {
-        "rows": rows,
+        "rows": open_rows,
+        "acked_rows": acked_rows,
+        "all_rows": rows,
         "counts": counts,
-        "total_count": len(rows),
-        "danger_count": sum(1 for row in rows if row["severity"] == "danger"),
-        "warn_count": sum(1 for row in rows if row["severity"] == "warn"),
-        "info_count": sum(1 for row in rows if row["severity"] == "info"),
+        "total_count": len(open_rows),
+        "acked_count": len(acked_rows),
+        "danger_count": sum(1 for row in open_rows if row["severity"] == "danger"),
+        "warn_count": sum(1 for row in open_rows if row["severity"] == "warn"),
+        "info_count": sum(1 for row in open_rows if row["severity"] == "info"),
         "week_start": week_start,
         "week_end": week_end,
         "week_label": _format_labor_date_range(week_start, week_end),
@@ -2748,6 +2822,9 @@ def refresh_clockify_labor_cache(
     )
     start_utc = start_local.astimezone(timezone.utc)
     end_utc = end_local.astimezone(timezone.utc)
+    # Mirrors the widened window ClockifyClient.get_user_time_entries actually
+    # queries; the response is only authoritative from here forward.
+    fetch_start_utc = entry_fetch_start(start_utc)
     employees = (
         employee_rows
         if employee_rows is not None
@@ -2759,6 +2836,7 @@ def refresh_clockify_labor_cache(
     refreshed_users = 0
     cached_entries = 0
     errors: list[str] = []
+    skipped_tombstones: list[str] = []
     received_at = utcnow()
 
     for row in mapped_rows:
@@ -2803,20 +2881,48 @@ def refresh_clockify_labor_cache(
             if cached is not None:
                 cached_entries += 1
 
+        # Tombstone sweep: anything cached for this window that Clockify no
+        # longer reports was deleted upstream. Two guards on what we are
+        # allowed to conclude from an absence.
+        #
+        # 1. Only entries starting at or after `fetch_start_utc`. Clockify
+        #    filters on the entry's start, so the response says nothing about a
+        #    shift that began before that point -- previously an overnight shift
+        #    crossing into the window was "missing" from the response and got
+        #    marked deleted, silently removing its hours from labor stats,
+        #    timecards, and payroll every time an admin hit Refresh.
         existing_rows = session.exec(
             select(ClockifyTimeEntry).where(
                 ClockifyTimeEntry.clockify_user_id == clockify_user_id,
                 ClockifyTimeEntry.is_deleted == False,  # noqa: E712
+                ClockifyTimeEntry.start_at >= fetch_start_utc,
                 ClockifyTimeEntry.start_at < end_utc,
                 or_(ClockifyTimeEntry.end_at == None, ClockifyTimeEntry.end_at > start_utc),  # noqa: E711
             )
         ).all()
-        for existing in existing_rows:
-            if existing.clockify_entry_id not in seen_entry_ids:
-                existing.is_deleted = True
-                existing.is_running = False
-                existing.updated_at = received_at
-                session.add(existing)
+        # 2. An empty response that would wipe out every cached row is far more
+        #    likely an API/permission failure than a genuine mass deletion, and
+        #    the cost of guessing wrong is unpaid hours. Skip and report it so a
+        #    real bulk delete can still be applied deliberately.
+        if existing_rows and not seen_entry_ids:
+            employee = row.get("user")
+            employee_name = (
+                getattr(employee, "display_name", None)
+                or getattr(employee, "username", None)
+                or _mask_id(clockify_user_id)
+            )
+            skipped_tombstones.append(
+                f"{employee_name}: Clockify returned no entries for this window "
+                f"but {len(existing_rows)} are cached; kept them. Re-check the "
+                f"Clockify connection before trusting these hours."
+            )
+        else:
+            for existing in existing_rows:
+                if existing.clockify_entry_id not in seen_entry_ids:
+                    existing.is_deleted = True
+                    existing.is_running = False
+                    existing.updated_at = received_at
+                    session.add(existing)
         refreshed_users += 1
 
     session.commit()
@@ -2826,8 +2932,47 @@ def refresh_clockify_labor_cache(
         "cached_entries": cached_entries,
         "error_count": len(errors),
         "errors": errors,
+        "skipped_tombstones": skipped_tombstones,
+        "skipped_tombstone_count": len(skipped_tombstones),
         "range_label": _format_labor_date_range(start_day, end_day),
     }
+
+
+def reconcile_clockify_cache(
+    session: Session,
+    *,
+    settings=None,
+    lookback_days: int = 14,
+    today: Optional[date] = None,
+) -> dict[str, Any]:
+    """Re-pull a rolling window so the webhook-driven cache self-heals.
+
+    Ingest is webhook-only: a dropped, delayed or mis-routed event leaves hours
+    missing from labor stats, timecards and payroll with nothing to notice it.
+    The only repair was an admin pressing Refresh on exactly the right window.
+
+    Locked payroll days are re-pulled deliberately -- a lock records a review
+    decision, it does not freeze the underlying hours, so skipping them would
+    hide an upstream correction rather than surface it.
+    """
+    settings = settings or get_settings()
+    if not clockify_is_configured(settings):
+        return {"ran": False, "reason": "clockify-not-configured"}
+    end_day = today or _clockify_today(settings=settings)
+    start_day = end_day - timedelta(days=max(0, int(lookback_days)))
+    result = refresh_clockify_labor_cache(
+        session,
+        clockify_client_from_settings(settings),
+        start_day=start_day,
+        end_day=end_day,
+        settings=settings,
+        include_inactive=True,
+        source_event="SCHEDULED_RECONCILE",
+    )
+    result["ran"] = True
+    result["start_day"] = start_day.isoformat()
+    result["end_day"] = end_day.isoformat()
+    return result
 
 
 def refresh_clockify_shift_tracker_cache(
@@ -3402,6 +3547,10 @@ async def admin_labor_stats_refresh(
         )
     qs = dict(qs_base)
     qs["flash"] = flash
+    # The tombstone guard kept cached hours Clockify did not return. That is a
+    # warning, not a success detail -- it means these numbers may be stale.
+    if result.get("skipped_tombstones"):
+        qs["error"] = " ".join(result["skipped_tombstones"])[:600]
     return RedirectResponse(
         "/team/admin/labor-stats?" + urlencode(qs),
         status_code=303,
@@ -3574,6 +3723,8 @@ def admin_exceptions_page(
             "next_week_iso": next_week,
             "this_week_iso": this_week.isoformat(),
             "include_inactive": include_inactive,
+            "can_ack": has_permission(session, user, "admin.employees.edit"),
+            "csrf_token": issue_token(request),
             "can_view_labor_financials": can_view_labor_financials,
             "can_view_payroll": has_permission(
                 session, user, "admin.payroll.view"
@@ -3583,6 +3734,102 @@ def admin_exceptions_page(
             ) and has_permission(session, user, "admin.labor_financials.view"),
         },
     )
+
+
+@router.post(
+    "/team/admin/exceptions/ack",
+    dependencies=[Depends(require_csrf)],
+)
+async def admin_exception_ack(
+    request: Request,
+    fingerprint: str = Form(...),
+    week: str = Form(...),
+    category: str = Form(default=""),
+    detail: str = Form(default=""),
+    user_id: str = Form(default=""),
+    note: str = Form(default=""),
+    undo: str = Form(default="0"),
+    session: Session = Depends(get_session),
+):
+    """Mark one exception row handled, or put it back.
+
+    Acks are per-row and audit-logged. They hide the row from the working list
+    without deleting the underlying condition, which is still recomputed on
+    every load -- so nothing is suppressed permanently or silently.
+    """
+    denial, current = _admin_gate(request, session, "admin.employees.edit")
+    if denial:
+        return denial
+
+    fingerprint = (fingerprint or "").strip()
+    try:
+        week_start = date.fromisoformat((week or "").strip())
+    except ValueError:
+        return RedirectResponse("/team/admin/exceptions", status_code=303)
+    week_start = week_start - timedelta(days=week_start.weekday())
+    redirect_to = f"/team/admin/exceptions?week={week_start.isoformat()}"
+    if not fingerprint:
+        return RedirectResponse(redirect_to, status_code=303)
+
+    existing = session.exec(
+        select(TimecardExceptionAck).where(
+            TimecardExceptionAck.fingerprint == fingerprint
+        )
+    ).first()
+    undoing = _parse_boolish(undo, default=False)
+
+    if undoing:
+        if existing is not None:
+            session.delete(existing)
+            session.add(
+                AuditLog(
+                    actor_user_id=current.id,
+                    action="admin.exception.unack",
+                    resource_key=f"exception:{fingerprint[:16]}",
+                    details_json=json.dumps(
+                        {"week_start": week_start.isoformat(), "category": category},
+                        sort_keys=True,
+                    ),
+                    ip_address=request.client.host if request.client else None,
+                )
+            )
+            session.commit()
+        return RedirectResponse(redirect_to, status_code=303)
+
+    if existing is None:
+        try:
+            target_user_id = int(user_id) if (user_id or "").strip() else None
+        except ValueError:
+            target_user_id = None
+        session.add(
+            TimecardExceptionAck(
+                fingerprint=fingerprint,
+                week_start=week_start,
+                user_id=target_user_id,
+                category=(category or "").strip()[:120],
+                detail=(detail or "").strip()[:500],
+                note=(note or "").strip()[:500],
+                acked_by_user_id=current.id,
+            )
+        )
+        session.add(
+            AuditLog(
+                actor_user_id=current.id,
+                target_user_id=target_user_id,
+                action="admin.exception.ack",
+                resource_key=f"exception:{fingerprint[:16]}",
+                details_json=json.dumps(
+                    {
+                        "week_start": week_start.isoformat(),
+                        "category": (category or "").strip()[:120],
+                    },
+                    sort_keys=True,
+                ),
+                ip_address=request.client.host if request.client else None,
+            )
+        )
+        session.commit()
+    return RedirectResponse(redirect_to, status_code=303)
 
 
 @router.post(

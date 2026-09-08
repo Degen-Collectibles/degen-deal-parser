@@ -1,12 +1,12 @@
 {% extends "team/base.html" %}
 {% block header_sub %}
-<div class="pt-h1-sub">Your Clockify time for the current week.</div>
+<div class="pt-h1-sub">Your paid Clockify time, week by week.</div>
 {% endblock %}
 {% block content %}
 
 {% if not clockify_ready %}
 <div class="pt-card pt-hero" style="text-align:center; padding:48px 32px;">
-    <div style="font-size:42px; margin-bottom:14px;">T</div>
+    <div style="font-size:42px; margin-bottom:14px;" aria-hidden="true">&#9201;</div>
     <h2 class="pt-card-title" style="font-size:22px; margin-bottom:12px;">Hours are being set up.</h2>
     <p class="pt-card-sub" style="max-width:520px; margin:0 auto;">
         If you worked this week and this still looks blank, tap Ask for help and your manager can check the connection.
@@ -14,7 +14,7 @@
 </div>
 {% elif not clockify_user_id %}
 <div class="pt-card pt-hero" style="text-align:center; padding:48px 32px;">
-    <div style="font-size:42px; margin-bottom:14px;">T</div>
+    <div style="font-size:42px; margin-bottom:14px;" aria-hidden="true">&#9201;</div>
     <h2 class="pt-card-title" style="font-size:22px; margin-bottom:12px;">Your hours are not linked yet.</h2>
     <p class="pt-card-sub" style="max-width:520px; margin:0 auto;">
         Ask a manager to connect your Clockify account so your hours and estimated pay show here.
@@ -22,40 +22,98 @@
 </div>
 {% elif clockify_error %}
 <div class="pt-card pt-hero" style="text-align:center; padding:48px 32px; border-color:rgba(239,68,68,0.35);">
-    <div style="font-size:42px; margin-bottom:14px;">!</div>
-    <h2 class="pt-card-title" style="font-size:22px; margin-bottom:12px;">Clockify could not load your hours.</h2>
-    <p class="pt-card-sub" style="max-width:620px; margin:0 auto;">{{ clockify_error }}</p>
+    <div style="font-size:42px; margin-bottom:14px;" aria-hidden="true">!</div>
+    <h2 class="pt-card-title" style="font-size:22px; margin-bottom:12px;">Your hours could not be loaded.</h2>
+    <p class="pt-card-sub" style="max-width:620px; margin:0 auto;">
+        This is usually temporary. If it keeps happening, tap Ask for help so a manager can check the Clockify connection.
+    </p>
 </div>
 {% else %}
-{% set summary = clockify_summary %}
+<div class="pt-hours-nav">
+    <a class="pt-hours-navbtn" href="/team/hours?week={{ prev_week }}">&larr; Previous</a>
+    <a class="pt-hours-navbtn {% if is_this_week %}is-current{% endif %}" href="/team/hours?week={{ this_week }}">This week</a>
+    {% if can_go_forward %}
+    <a class="pt-hours-navbtn" href="/team/hours?week={{ next_week }}">Next &rarr;</a>
+    {% else %}
+    <span class="pt-hours-navbtn is-disabled" aria-disabled="true">Next &rarr;</span>
+    {% endif %}
+</div>
+
+{% if week.needs_fix_days %}
+<div class="pt-hours-alert">
+    <strong>{{ week.needs_fix_days|length }} day(s) need a fix.</strong>
+    Your manager flagged these and they will not be paid until they are sorted out.
+    {% for day in week.needs_fix_days %}
+    <div class="pt-hours-alert-day">
+        {{ day.day.strftime('%a %b %d') }}{% if day.status_note %} &mdash; {{ day.status_note }}{% endif %}
+    </div>
+    {% endfor %}
+    <div style="margin-top:8px;">Tap Ask for help if you are not sure what to do.</div>
+</div>
+{% endif %}
+
 <div class="pt-widget-grid">
     <div class="pt-widget">
-        <div class="pt-widget-label">This week</div>
-        <div class="pt-widget-value">{{ format_hours(summary.total_seconds) }}</div>
+        <div class="pt-widget-label">{% if is_this_week %}Paid hours this week{% else %}Paid hours{% endif %}</div>
+        <div class="pt-widget-value">{{ format_hours(week.total_work_seconds) }}</div>
         <div class="pt-widget-sub">
-            {{ summary.week_start.strftime('%b %d') }} - {{ summary.week_end_inclusive.strftime('%b %d') }}
+            {{ week.week_start.strftime('%b %d') }} - {{ week.week_end_inclusive.strftime('%b %d') }}
         </div>
     </div>
+    {% if is_this_week and pay.estimated_pay_label %}
+    <div class="pt-widget">
+        <div class="pt-widget-label">Estimated pay</div>
+        <div class="pt-widget-value">{{ pay.estimated_pay_label }}</div>
+        <div class="pt-widget-sub">{{ pay.pay_basis }}</div>
+    </div>
+    {% endif %}
     <div class="pt-widget">
         <div class="pt-widget-label">Clockify status</div>
         <div class="pt-widget-value" style="font-size:18px; font-weight:650;">
-            {% if summary.running_count %}Timer running{% else %}No running timer{% endif %}
+            {% if week.running_count %}Timer running{% else %}No running timer{% endif %}
         </div>
-        <div class="pt-widget-sub">{{ summary.timezone_name }}</div>
+        <div class="pt-widget-sub">{{ week.timezone_name }}</div>
     </div>
 </div>
+
+{#
+   Breaks and the automatic missed-break deduction are subtracted from paid
+   time. This page used to show the raw Clockify total, which was higher than
+   both the dashboard and the amount actually paid, with nothing explaining
+   the gap.
+#}
+{% if week.total_break_seconds or week.total_auto_break_seconds %}
+<div class="pt-card" style="margin-top:20px;">
+    <div class="pt-card-title">Breaks this week</div>
+    <p class="pt-card-sub" style="margin-top:6px;">
+        {{ format_hours(week.total_break_seconds) }} of break time is not counted as paid hours.
+        {% if week.total_auto_break_seconds %}
+        That includes {{ format_hours(week.total_auto_break_seconds) }} deducted automatically on
+        days over 5 hours where no break was clocked. If that looks wrong, tap Ask for help.
+        {% endif %}
+    </p>
+</div>
+{% endif %}
 
 <div class="pt-card" style="margin-top:20px;">
     <div style="display:flex; justify-content:space-between; align-items:center; gap:16px; flex-wrap:wrap; margin-bottom:12px;">
         <div class="pt-card-title">Daily totals</div>
         <a class="pt-link" href="https://app.clockify.me/tracker" target="_blank" rel="noreferrer" style="font-size:13px;">Open Clockify</a>
     </div>
-    <div style="display:grid; grid-template-columns:repeat(7, minmax(92px, 1fr)); gap:8px; overflow:auto;">
-        {% for day in summary.daily_totals %}
-        <div style="padding:12px; border:1px solid var(--pt-border); border-radius:8px; background:var(--pt-surface-raised); min-width:92px;">
-            <div style="font-size:12px; color:var(--pt-muted); font-weight:600;">{{ day.day.strftime('%a') }}</div>
-            <div style="font-size:18px; font-weight:750; margin-top:4px;">{{ format_hours(day.duration_seconds) }}</div>
-            <div style="font-size:11px; color:var(--pt-muted); margin-top:2px;">{{ day.day.strftime('%b %d') }}</div>
+    <div class="pt-hours-days">
+        {% for day in week.days %}
+        <div class="pt-hours-day {% if day.is_today %}is-today{% endif %}">
+            <div class="pt-hours-day-wd">{{ day.day.strftime('%a') }}</div>
+            <div class="pt-hours-day-val">{{ format_hours(day.work_seconds) }}</div>
+            <div class="pt-hours-day-date">{{ day.day.strftime('%b %d') }}</div>
+            {% if day.auto_break_seconds %}
+            <div class="pt-hours-day-note">-{{ format_hours(day.auto_break_seconds) }} break</div>
+            {% elif day.break_seconds %}
+            <div class="pt-hours-day-note">{{ format_hours(day.break_seconds) }} break</div>
+            {% endif %}
+            {% if day.status_label %}
+            <div class="pt-hours-day-status tone-{{ day.status_tone }}">{{ day.status_label }}</div>
+            {% endif %}
         </div>
         {% endfor %}
     </div>
@@ -63,9 +121,9 @@
 
 <div class="pt-card" style="margin-top:20px;">
     <div class="pt-card-title">Entries</div>
-    {% if summary.entries %}
+    {% if week.entries %}
         <div style="display:grid; gap:0; margin-top:12px;">
-            {% for entry in summary.entries %}
+            {% for entry in week.entries %}
             <div style="display:grid; grid-template-columns:minmax(140px, 1fr) 110px; gap:16px; padding:12px 0; border-top:{% if not loop.first %}1px solid var(--pt-border){% else %}0{% endif %};">
                 <div>
                     <div style="font-weight:700;">{{ entry.description }}</div>
@@ -83,10 +141,78 @@
             </div>
             {% endfor %}
         </div>
+        <p class="pt-card-sub" style="margin-top:12px; font-size:11.5px;">
+            Entry times are exactly as recorded in Clockify. Paid hours above exclude breaks.
+        </p>
     {% else %}
         <div class="pt-card-sub" style="margin-top:8px;">No time entries this week yet.</div>
     {% endif %}
 </div>
 {% endif %}
 
+<style>
+    /* Seven fixed columns needed ~700px and scrolled sideways on a phone,
+       which is the device employees actually check this on. */
+    .pt-hours-days {
+        display: grid;
+        grid-template-columns: repeat(7, minmax(0, 1fr));
+        gap: 8px;
+    }
+    .pt-hours-day {
+        padding: 12px 8px;
+        border: 1px solid var(--pt-border);
+        border-radius: 8px;
+        background: var(--pt-surface-raised);
+        min-width: 0;
+    }
+    .pt-hours-day.is-today { border-color: rgba(59,130,246,0.55); }
+    .pt-hours-day-wd { font-size: 12px; color: var(--pt-muted); font-weight: 600; }
+    .pt-hours-day-val { font-size: 18px; font-weight: 750; margin-top: 4px; }
+    .pt-hours-day-date { font-size: 11px; color: var(--pt-muted); margin-top: 2px; }
+    .pt-hours-day-note { font-size: 10.5px; color: #fcd34d; margin-top: 4px; }
+    .pt-hours-day-status {
+        font-size: 9.5px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        margin-top: 5px;
+        line-height: 1.25;
+    }
+    .pt-hours-day-status.tone-ok { color: #86efac; }
+    .pt-hours-day-status.tone-danger { color: #fca5a5; }
+    .pt-hours-day-status.tone-info { color: #93c5fd; }
+    .pt-hours-day-status.tone-muted { color: var(--pt-muted); }
+
+    .pt-hours-nav { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+    .pt-hours-navbtn {
+        padding: 8px 14px;
+        border: 1px solid var(--pt-border);
+        border-radius: 8px;
+        background: var(--pt-surface-raised);
+        color: var(--pt-text);
+        font-size: 13px;
+        font-weight: 600;
+        text-decoration: none;
+    }
+    .pt-hours-navbtn.is-current { border-color: rgba(59,130,246,0.55); color: #93c5fd; }
+    .pt-hours-navbtn.is-disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .pt-hours-alert {
+        border: 1px solid rgba(239,68,68,0.4);
+        background: rgba(239,68,68,0.08);
+        border-radius: 10px;
+        padding: 14px 16px;
+        margin-bottom: 16px;
+        font-size: 13px;
+        line-height: 1.5;
+    }
+    .pt-hours-alert-day { margin-top: 6px; color: var(--pt-muted); font-size: 12.5px; }
+    @media (max-width: 720px) {
+        .pt-hours-days { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    }
+    @media (max-width: 420px) {
+        .pt-hours-days { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+        .pt-hours-day-val { font-size: 16px; }
+    }
+</style>
 {% endblock %}

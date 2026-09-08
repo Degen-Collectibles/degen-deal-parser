@@ -70,11 +70,13 @@ from ..models import (
     SupplyRequest,
     TeamAnnouncement,
     TeamPolicy,
+    TimecardApproval,
     TimeOffRequest,
     User,
     utcnow,
 )
 from ..team.pii import PIIDecryptError, decrypt_pii, encrypt_pii
+from ..team.shift_labels import parse_shift_start_minutes
 from ..rate_limit import rate_limited_or_429
 from ..shared import app_home_for_role, templates
 from ..team.email import email_address_fingerprint, mask_email_address, send_email
@@ -983,11 +985,195 @@ def _entry_overlap_seconds(entry: Any, start_local: datetime, end_local: datetim
     return int((overlap_end - overlap_start).total_seconds())
 
 
+# Employee-facing view of TimecardApproval.status. "rejected" is deliberately
+# worded as "Needs fix" -- it describes an action for the employee, not a
+# judgement about them, and matches the wording managers see.
+_EMPLOYEE_TIMECARD_STATUS_LABELS = {
+    "pending": "Not reviewed yet",
+    "approved": "Approved",
+    "rejected": "Needs fix",
+    "locked": "Final",
+}
+_EMPLOYEE_TIMECARD_STATUS_TONES = {
+    "pending": "info",
+    "approved": "ok",
+    "rejected": "danger",
+    "locked": "muted",
+}
+
+
+def employee_week_hours(
+    session: Session,
+    user: User,
+    *,
+    today: Optional[date] = None,
+    week_of: Optional[date] = None,
+    settings=None,
+) -> dict[str, Any]:
+    """One source of truth for an employee's own weekly hours.
+
+    Both the dashboard widget and /team/hours read from here. They used to
+    compute the week independently -- the dashboard excluded break entries and
+    applied the missed-break deduction, /team/hours summed raw Clockify
+    durations -- so the same week showed two different totals one click apart,
+    and the larger of the two sat on the page titled "My Hours".
+
+    The numbers returned here are the ones payroll pays: break entries
+    excluded, missed-break deduction applied.
+    """
+    today = today or _portal_today()
+    settings = settings or get_settings()
+    profile = session.get(EmployeeProfile, user.id)
+    clockify_user_id = (profile.clockify_user_id or "").strip() if profile else ""
+    # `week_of` picks which week to report; `today` stays the real date so the
+    # is_today marker and the dashboard's "today" figures remain correct when
+    # an employee pages back through history.
+    start_local, end_local = clockify_week_bounds(week_of or today, settings=settings)
+
+    out: dict[str, Any] = {
+        "linked": bool(clockify_user_id),
+        "error": "",
+        "source_label": "",
+        "week_start": start_local.date(),
+        "week_end_inclusive": (end_local - timedelta(seconds=1)).date(),
+        "timezone_name": str(getattr(start_local.tzinfo, "key", start_local.tzinfo)),
+        "start_local": start_local,
+        "end_local": end_local,
+        "today": today,
+        "summary": None,
+        "entries": [],
+        "days": [],
+        "adjusted_by_day": {},
+        "total_work_seconds": 0,
+        "total_break_seconds": 0,
+        "total_auto_break_seconds": 0,
+        "running_count": 0,
+    }
+    if not clockify_user_id:
+        return out
+
+    from .team_admin_clockify import (
+        _apply_missed_break_deduction,
+        _cached_clockify_entries_by_user,
+        _clockify_entry_is_break,
+    )
+
+    source_label = "Clockify cache"
+    try:
+        cached = _cached_clockify_entries_by_user(
+            session,
+            [clockify_user_id],
+            start_local=start_local,
+            end_local=end_local,
+        )
+        raw_entries = cached.get(clockify_user_id, [])
+        # Live fallback only for the current week, where the cache may lag a
+        # webhook. For a past week the cache is authoritative, and falling
+        # through would hit Clockify once per empty week as an employee pages
+        # back through history -- rendering an API error as if the week itself
+        # had failed to load.
+        is_current_week = start_local.date() == (today - timedelta(days=today.weekday()))
+        if not raw_entries and is_current_week and clockify_is_configured(settings):
+            raw_entries = clockify_client_from_settings(settings).get_user_time_entries(
+                clockify_user_id,
+                start_utc=start_local.astimezone(timezone.utc),
+                end_utc=end_local.astimezone(timezone.utc),
+            )
+            source_label = "Clockify live"
+        summary = build_week_summary(
+            raw_entries,
+            week_start_local=start_local,
+            week_end_local=end_local,
+            settings=settings,
+            now=datetime.now(timezone.utc),
+        )
+    except (ClockifyApiError, ClockifyConfigError) as exc:
+        out["error"] = str(exc)
+        return out
+
+    daily_work_seconds: dict[date, int] = {}
+    daily_break_seconds: dict[date, int] = {}
+    last_range_day = (end_local - timedelta(seconds=1)).date()
+    range_day = start_local.date()
+    while range_day <= last_range_day:
+        day_start = datetime.combine(range_day, time.min, tzinfo=start_local.tzinfo)
+        day_end = day_start + timedelta(days=1)
+        for row in summary.entries:
+            seconds = _entry_overlap_seconds(row, day_start, day_end)
+            if seconds <= 0:
+                continue
+            if _clockify_entry_is_break(row):
+                daily_break_seconds[range_day] = (
+                    daily_break_seconds.get(range_day, 0) + seconds
+                )
+            else:
+                daily_work_seconds[range_day] = (
+                    daily_work_seconds.get(range_day, 0) + seconds
+                )
+        range_day += timedelta(days=1)
+
+    adjusted_by_day: dict[date, tuple[int, int, int]] = {}
+    for day_key in set(daily_work_seconds) | set(daily_break_seconds):
+        adjusted_by_day[day_key] = _apply_missed_break_deduction(
+            daily_work_seconds.get(day_key, 0),
+            daily_break_seconds.get(day_key, 0),
+        )
+
+    # An employee could not previously see whether their own day was approved,
+    # rejected or locked -- a manager marking a day "Needs fix" with a note was
+    # invisible to the only person who could act on it.
+    approvals = {
+        row.work_date: row
+        for row in session.exec(
+            select(TimecardApproval).where(
+                TimecardApproval.user_id == user.id,
+                TimecardApproval.work_date >= start_local.date(),
+                TimecardApproval.work_date <= last_range_day,
+            )
+        ).all()
+    }
+
+    days: list[dict[str, Any]] = []
+    cursor = start_local.date()
+    while cursor <= last_range_day:
+        work, brk, auto = adjusted_by_day.get(cursor, (0, 0, 0))
+        approval = approvals.get(cursor)
+        status = (approval.status if approval else "") or ""
+        days.append(
+            {
+                "day": cursor,
+                "work_seconds": work,
+                "break_seconds": brk,
+                "auto_break_seconds": auto,
+                "is_today": cursor == today,
+                "status": status,
+                "status_label": _EMPLOYEE_TIMECARD_STATUS_LABELS.get(status, ""),
+                "status_tone": _EMPLOYEE_TIMECARD_STATUS_TONES.get(status, ""),
+                "status_note": (approval.note or "").strip() if approval else "",
+            }
+        )
+        cursor += timedelta(days=1)
+
+    out["source_label"] = source_label
+    out["summary"] = summary
+    out["entries"] = list(summary.entries)
+    out["days"] = days
+    out["adjusted_by_day"] = adjusted_by_day
+    out["total_work_seconds"] = sum(row[0] for row in adjusted_by_day.values())
+    out["total_break_seconds"] = sum(row[1] for row in adjusted_by_day.values())
+    out["total_auto_break_seconds"] = sum(row[2] for row in adjusted_by_day.values())
+    out["running_count"] = sum(1 for row in summary.entries if row.running)
+    out["days"] = days
+    out["needs_fix_days"] = [row for row in days if row["status"] == "rejected"]
+    return out
+
+
 def _employee_dashboard_pay_summary(
     session: Session,
     user: User,
     *,
     today: Optional[date] = None,
+    week: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     today = today or _portal_today()
     profile = session.get(EmployeeProfile, user.id)
@@ -1009,81 +1195,32 @@ def _employee_dashboard_pay_summary(
         return base
 
     settings = get_settings()
-    start_local, end_local = clockify_week_bounds(today, settings=settings)
-    today_start_local = datetime.combine(today, time.min, tzinfo=start_local.tzinfo)
-    today_end_local = today_start_local + timedelta(days=1)
-    work_seconds = 0
-    source_label = "Clockify cache"
-    try:
-        from .team_admin_clockify import (
-            _apply_missed_break_deduction,
-            _cached_clockify_entries_by_user,
-            _clockify_entry_is_break,
-        )
+    if week is None:
+        week = employee_week_hours(session, user, today=today, settings=settings)
+    start_local = week["start_local"]
+    work_seconds = week["total_work_seconds"]
+    if week["error"]:
+        base["error"] = week["error"]
+    else:
+        from .team_admin_clockify import _clockify_entry_is_break
 
-        cached = _cached_clockify_entries_by_user(
-            session,
-            [clockify_user_id],
-            start_local=start_local,
-            end_local=end_local,
-        )
-        raw_entries = cached.get(clockify_user_id, [])
-        if not raw_entries and clockify_is_configured(settings):
-            raw_entries = clockify_client_from_settings(settings).get_user_time_entries(
-                clockify_user_id,
-                start_utc=start_local.astimezone(timezone.utc),
-                end_utc=end_local.astimezone(timezone.utc),
-            )
-            source_label = "Clockify live"
-        summary = build_week_summary(
-            raw_entries,
-            week_start_local=start_local,
-            week_end_local=end_local,
-            settings=settings,
-            now=datetime.now(timezone.utc),
-        )
-        daily_work_seconds: dict[date, int] = {}
-        daily_break_seconds: dict[date, int] = {}
-        range_day = start_local.date()
-        last_range_day = (end_local - timedelta(seconds=1)).date()
-        while range_day <= last_range_day:
-            day_start = datetime.combine(range_day, time.min, tzinfo=start_local.tzinfo)
-            day_end = day_start + timedelta(days=1)
-            for row in summary.entries:
-                seconds = _entry_overlap_seconds(row, day_start, day_end)
-                if seconds <= 0:
-                    continue
-                if _clockify_entry_is_break(row):
-                    daily_break_seconds[range_day] = (
-                        daily_break_seconds.get(range_day, 0) + seconds
-                    )
-                else:
-                    daily_work_seconds[range_day] = (
-                        daily_work_seconds.get(range_day, 0) + seconds
-                    )
-            range_day += timedelta(days=1)
-        adjusted_by_day: dict[date, tuple[int, int, int]] = {}
-        for day_key in set(daily_work_seconds) | set(daily_break_seconds):
-            adjusted_by_day[day_key] = _apply_missed_break_deduction(
-                daily_work_seconds.get(day_key, 0),
-                daily_break_seconds.get(day_key, 0),
-            )
-        work_seconds = sum(row[0] for row in adjusted_by_day.values())
+        today_start_local = datetime.combine(today, time.min, tzinfo=start_local.tzinfo)
+        today_end_local = today_start_local + timedelta(days=1)
         today_work_entries = [
             row
-            for row in summary.entries
+            for row in week["entries"]
             if not _clockify_entry_is_break(row)
             and _entry_overlap_seconds(row, today_start_local, today_end_local) > 0
         ]
         today_break_entries = [
             row
-            for row in summary.entries
+            for row in week["entries"]
             if _clockify_entry_is_break(row)
             and _entry_overlap_seconds(row, today_start_local, today_end_local) > 0
         ]
-        today_work_seconds, today_break_seconds, today_missed_break_seconds = (
-            adjusted_by_day.get(today, (0, 0, 0))
-        )
+        today_work_seconds, today_break_seconds, today_missed_break_seconds = week[
+            "adjusted_by_day"
+        ].get(today, (0, 0, 0))
         running_break = any(row.running for row in today_break_entries)
         base["clocked_in_today_label"] = (
             _format_time_label(today_work_entries[0].start_local)
@@ -1099,8 +1236,6 @@ def _employee_dashboard_pay_summary(
             prefix = "On break" if running_break else "Taken"
             base["break_today_label"] = f"{prefix} ({format_hours(today_break_seconds)})"
         base["hours_label"] = format_hours(work_seconds)
-    except (ClockifyApiError, ClockifyConfigError) as exc:
-        base["error"] = str(exc)
 
     try:
         from .team_admin_employees import (
@@ -1705,34 +1840,9 @@ def team_tool_live_stream(
     return RedirectResponse("/tiktok/streamer?team_shell=1", status_code=303)
 
 
-_SHIFT_START_RE = re.compile(
-    r"^\s*(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<ampm>a|am|p|pm)?\b",
-    re.IGNORECASE,
-)
-
-
-def _parse_shift_start_minutes(label: str) -> Optional[int]:
-    """Best-effort sort key for schedule labels like "10:30 AM - 6 PM"."""
-    match = _SHIFT_START_RE.search((label or "").strip())
-    if not match:
-        return None
-    hour = int(match.group("hour"))
-    minute = int(match.group("minute") or "0")
-    if minute > 59:
-        return None
-    ampm = (match.group("ampm") or "").lower()
-    if ampm.startswith("p"):
-        if hour != 12:
-            hour += 12
-    elif ampm.startswith("a"):
-        if hour == 12:
-            hour = 0
-    elif 1 <= hour <= 5:
-        # Store shifts written as "3-7" usually mean afternoon.
-        hour += 12
-    if hour > 23:
-        return None
-    return hour * 60 + minute
+# Shift-label time math lives in app/team/shift_labels.py so the schedule grid,
+# timecards, pay-rates summary, and employee dashboard all agree.
+_parse_shift_start_minutes = parse_shift_start_minutes
 
 
 def _schedule_calendar_label(calendar_kind: str) -> str:
@@ -2280,9 +2390,31 @@ async def team_policies_acknowledge(
     return RedirectResponse("/team/policies?flash=Acknowledged.", status_code=303)
 
 
+def _parse_employee_week(value: Optional[str], this_week_start: date) -> date:
+    """Monday of the requested week, clamped to a sane range.
+
+    Anything unparseable falls back to the current week rather than erroring --
+    this is a read-only view of the employee's own hours.
+    """
+    if not value:
+        return this_week_start
+    try:
+        parsed = date.fromisoformat(value.strip())
+    except (ValueError, AttributeError):
+        return this_week_start
+    week_start = parsed - timedelta(days=parsed.weekday())
+    # No forward paging past the current week, and two years of history is
+    # more than any payroll question needs.
+    if week_start > this_week_start:
+        return this_week_start
+    earliest = this_week_start - timedelta(days=730)
+    return max(week_start, earliest)
+
+
 @router.get("/team/hours", response_class=HTMLResponse)
 def team_hours(
     request: Request,
+    week: Optional[str] = Query(default=None),
     session: Session = Depends(get_session),
 ):
     denial, user = _require_employee(request, session, resource_key="page.hours")
@@ -2290,19 +2422,31 @@ def team_hours(
         return denial
     settings = get_settings()
     clockify_ready = clockify_is_configured(settings)
-    profile = session.get(EmployeeProfile, user.id)
-    clockify_user_id = (profile.clockify_user_id or "").strip() if profile else ""
-    clockify_summary = None
-    clockify_error = None
-    if clockify_ready and clockify_user_id:
-        try:
-            clockify_summary = clockify_client_from_settings(settings).user_week_summary(
-                clockify_user_id,
-                today=_portal_today(settings=settings),
-                settings=settings,
-            )
-        except (ClockifyApiError, ClockifyConfigError) as exc:
-            clockify_error = str(exc)
+    # Employees could only ever see the current week, so they had no way to
+    # check a past week against a paycheck. Reads are scoped to their own rows.
+    today = _portal_today(settings=settings)
+    this_week_start = today - timedelta(days=today.weekday())
+    week_of = _parse_employee_week(week, this_week_start)
+    # Same helper the dashboard widget uses. This page used to call Clockify
+    # directly and sum raw durations, so it reported more hours than the
+    # dashboard -- and more than payroll pays -- for the same week.
+    week_data = employee_week_hours(
+        session, user, today=today, week_of=week_of, settings=settings
+    )
+    # Estimated pay is only meaningful for the current week; the dashboard
+    # summary is week-relative and would otherwise misreport a past window.
+    is_this_week = week_data["week_start"] == this_week_start
+    pay = (
+        _employee_dashboard_pay_summary(session, user, week=week_data)
+        if is_this_week
+        else {
+            "estimated_pay_label": "",
+            "pay_basis": "",
+            "clockify_user_id": week_data["linked"]
+            and (session.get(EmployeeProfile, user.id).clockify_user_id or "")
+            or "",
+        }
+    )
     return templates.TemplateResponse(
         request,
         "team/hours.html",
@@ -2312,9 +2456,15 @@ def team_hours(
             "active": "hours",
             "current_user": user,
             "clockify_ready": clockify_ready,
-            "clockify_user_id": clockify_user_id,
-            "clockify_summary": clockify_summary,
-            "clockify_error": clockify_error,
+            "clockify_user_id": pay["clockify_user_id"],
+            "week": week_data,
+            "pay": pay,
+            "is_this_week": is_this_week,
+            "prev_week": (week_data["week_start"] - timedelta(days=7)).isoformat(),
+            "next_week": (week_data["week_start"] + timedelta(days=7)).isoformat(),
+            "this_week": this_week_start.isoformat(),
+            "can_go_forward": week_data["week_start"] < this_week_start,
+            "clockify_error": week_data["error"],
             "format_hours": format_hours,
             "csrf_token": issue_token(request),
             **_nav_context(session, user),

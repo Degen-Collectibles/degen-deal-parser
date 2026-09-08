@@ -227,6 +227,38 @@
     .sch-block.sch-k-blank:hover { border-color: #3b82f6; color: #93c5fd; }
     .sch-block.sch-k-blank .sch-block-add { font-size: 16px; font-weight: 400; line-height: 1; }
 
+    /* Pending time-off flag (managers only). Hatched amber outline, not a
+       solid fill: approved time off is the solid red .sch-k-request pill,
+       and a request that hasn't been decided must not read like a
+       commitment. Sits above the shift stack so a day that is both
+       scheduled and requested-off shows the conflict plainly. */
+    .sch-pto-flag {
+        display: block;
+        margin-bottom: 3px;
+        padding: 2px 5px;
+        border: 1px dashed #f59e0b;
+        border-radius: 5px;
+        background: repeating-linear-gradient(
+            45deg,
+            rgba(245,158,11,0.13),
+            rgba(245,158,11,0.13) 4px,
+            transparent 4px,
+            transparent 8px
+        );
+        color: #fcd34d;
+        font-size: 9.5px;
+        font-weight: 700;
+        letter-spacing: 0.03em;
+        text-transform: uppercase;
+        text-align: center;
+        line-height: 1.25;
+        cursor: help;
+    }
+    /* A pending request on a day that already has work assigned is the
+       case this overlay exists to catch — make it louder. */
+    .sch-cell.has-pending-pto .sch-block.sch-k-work ~ .sch-block,
+    .sch-cell.has-pending-pto .sch-cell-stack .sch-k-work { outline: 1px solid rgba(245,158,11,0.55); }
+
     /* Read-only variant (Stream grid + /team/schedule): same look but
        not interactive. */
     .sch-block.is-ro { cursor: default; }
@@ -1315,12 +1347,29 @@
                         {% set shift_count = entries_list|length if kind_slug != 'stream' else hints_list|length %}
                         {% set has_shifts = shift_count > 0 %}
                         {% set is_today = (d == today) %}
-                        <td class="sch-cell {% if edit %}sch-cell-edit{% endif %} {% if is_today %}is-today{% endif %}"
+                        {% set pending_pto = (ctx.pending_timeoff_map|default({})).get((u.id, d.isoformat())) or [] %}
+                        <td class="sch-cell {% if edit %}sch-cell-edit{% endif %} {% if is_today %}is-today{% endif %} {% if pending_pto %}has-pending-pto{% endif %}"
                             data-user-id="{{ u.id }}"
                             data-user-name="{{ u.display_name or u.username }}"
                             data-date="{{ d.isoformat() }}"
                             data-date-label="{{ d.strftime('%A, %b') }} {{ d.day }}"
                             data-kind-slug="{{ kind_slug }}">
+                            {#
+                               Manager-only pending time-off flag. Deliberately
+                               NOT a .sch-block and deliberately outside
+                               .sch-cell-stack: the edit-mode JS selects pills
+                               with cell.querySelectorAll('.sch-block...') and
+                               rebuilds the stack's innerHTML, so anything in
+                               there would be read as a shift or wiped on
+                               re-render. Empty for the employee view and the
+                               screenshot export, which never receive the map.
+                            #}
+                            {% if pending_pto %}
+                            <div class="sch-pto-flag"
+                                 title="Pending time-off request{% if pending_pto|length > 1 %}s{% endif %}: {% for r in pending_pto %}{{ r.start_date.strftime('%b %d') }}–{{ r.end_date.strftime('%b %d') }}{% if not loop.last %}, {% endif %}{% endfor %} · not yet approved">
+                                Requested off
+                            </div>
+                            {% endif %}
                             {% if edit %}
                             {#
                                Hidden JSON array input. One per cell so JS can

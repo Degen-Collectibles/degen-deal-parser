@@ -57,6 +57,34 @@ async def periodic_tiktok_token_refresh_loop(stop_event: asyncio.Event) -> None:
             print(f"[worker] tiktok-token-refresh error: {exc}")
 
 
+async def periodic_clockify_reconcile_loop(stop_event: asyncio.Event) -> None:
+    interval = max(settings.clockify_reconcile_interval_minutes, 1.0)
+    while not stop_event.is_set():
+        await asyncio.sleep(interval * 60)
+        if stop_event.is_set():
+            break
+        try:
+            from ..routers.team_admin_clockify import reconcile_clockify_cache
+
+            with managed_session() as session:
+                result = await asyncio.to_thread(
+                    reconcile_clockify_cache,
+                    session,
+                    settings=settings,
+                    lookback_days=settings.clockify_reconcile_lookback_days,
+                )
+            if result.get("skipped_tombstone_count"):
+                # The refresh guard kept cached hours Clockify did not return.
+                # Running unattended, that needs to be loud.
+                print(
+                    "[worker] clockify-reconcile kept "
+                    f"{result['skipped_tombstone_count']} suspicious window(s): "
+                    f"{'; '.join(result.get('skipped_tombstones') or [])}"
+                )
+        except Exception as exc:
+            print(f"[worker] clockify-reconcile error: {exc}")
+
+
 def worker_runtime_details() -> dict:
     return {
         "discord_status": discord_runtime_state.get("status"),
@@ -72,6 +100,9 @@ def worker_runtime_details() -> dict:
         "periodic_attachment_repair_lookback_hours": settings.periodic_attachment_repair_lookback_hours,
         "periodic_attachment_repair_limit": settings.periodic_attachment_repair_limit,
         "periodic_attachment_repair_min_age_minutes": settings.periodic_attachment_repair_min_age_minutes,
+        "clockify_reconcile_enabled": settings.clockify_reconcile_enabled,
+        "clockify_reconcile_interval_minutes": settings.clockify_reconcile_interval_minutes,
+        "clockify_reconcile_lookback_days": settings.clockify_reconcile_lookback_days,
         "service_mode": "worker-host",
         "last_recent_audit_at": discord_runtime_state.get("last_recent_audit_at"),
         "last_recent_audit_summary": discord_runtime_state.get("last_recent_audit_summary"),
@@ -99,6 +130,9 @@ def _recreate_task(task_name: str, stop_event: asyncio.Event) -> asyncio.Task | 
         "parser-worker": lambda: asyncio.create_task(parser_loop(stop_event), name="parser-worker"),
         "tiktok-token-refresh": lambda: asyncio.create_task(
             periodic_tiktok_token_refresh_loop(stop_event), name="tiktok-token-refresh"
+        ),
+        "clockify-reconcile": lambda: asyncio.create_task(
+            periodic_clockify_reconcile_loop(stop_event), name="clockify-reconcile"
         ),
         "ai-review-resolver": lambda: asyncio.create_task(
             ai_review_resolver_loop(stop_event), name="ai-review-resolver"
@@ -193,6 +227,13 @@ async def run_worker_service() -> None:
             asyncio.create_task(
                 periodic_tiktok_token_refresh_loop(stop_event),
                 name="tiktok-token-refresh",
+            )
+        )
+    if settings.clockify_reconcile_enabled:
+        background_tasks.append(
+            asyncio.create_task(
+                periodic_clockify_reconcile_loop(stop_event),
+                name="clockify-reconcile",
             )
         )
 

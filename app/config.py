@@ -340,6 +340,21 @@ class Settings(BaseSettings):
     clockify_base_url: str = Field(default="https://api.clockify.me/api/v1", alias="CLOCKIFY_BASE_URL")
     clockify_timezone: str = Field(default="America/Los_Angeles", alias="CLOCKIFY_TIMEZONE")
     clockify_timeout_seconds: float = Field(default=12.0, alias="CLOCKIFY_TIMEOUT_SECONDS")
+    # Clockify ingest is webhook-driven. A dropped or mis-delivered event left
+    # hours missing from labor stats, timecards and payroll until somebody
+    # remembered to press Refresh on exactly the right window. This loop
+    # re-pulls a rolling window so the cache self-heals.
+    clockify_reconcile_enabled: bool = Field(
+        default=False, alias="CLOCKIFY_RECONCILE_ENABLED"
+    )
+    clockify_reconcile_interval_minutes: float = Field(
+        default=30.0,
+        alias="CLOCKIFY_RECONCILE_INTERVAL_MINUTES",
+    )
+    clockify_reconcile_lookback_days: int = Field(
+        default=14,
+        alias="CLOCKIFY_RECONCILE_LOOKBACK_DAYS",
+    )
     session_hours: int = Field(default=8, alias="SESSION_HOURS")
 
     @property

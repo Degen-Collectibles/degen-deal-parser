@@ -1,5 +1,23 @@
 {% extends "team/admin/base.html" %}
 {% set active = 'shift-tracker' %}
+{% block extra_head %}
+<style>
+    .st-metrics { display: grid; gap: 10px; margin-top: 12px; }
+    .st-metrics-6 { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+    .st-metrics-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .st-metrics > div { min-width: 0; }
+    @media (max-width: 900px) {
+        .st-metrics-6 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    }
+    @media (max-width: 640px) {
+        .st-metrics-6, .st-metrics-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .st-metrics > div div:last-child { font-size: 20px; }
+    }
+    /* The roster table is wide by nature; let it scroll inside its card
+       instead of stretching the page on a phone. */
+    .st-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+</style>
+{% endblock %}
 {% block content %}
 {% if flash %}<div class="ta-flash success">{{ flash }}</div>{% endif %}
 {% if error %}<div class="ta-flash warn">{{ error }}</div>{% endif %}
@@ -39,7 +57,7 @@
 
 <div class="ta-card">
     <h2>{% if can_view_labor_financials %}Live pay tracker{% else %}Live shift tracker{% endif %}</h2>
-    <div style="display:grid; grid-template-columns:repeat({% if can_view_labor_financials %}6{% else %}4{% endif %}, minmax(120px, 1fr)); gap:10px; margin-top:12px;">
+    <div class="st-metrics {% if can_view_labor_financials %}st-metrics-6{% else %}st-metrics-4{% endif %}">
         <div style="padding:12px; border-radius:8px; background:var(--lx-s2); border:1px solid var(--lx-br);">
             <div style="font-size:11px; color:var(--lx-muted); text-transform:uppercase;">Clocked in</div>
             <div style="font-size:24px; font-weight:750;">{{ pay_summary.clocked_in_count }}</div>
@@ -97,7 +115,7 @@
     <p style="font-size:13px; color:var(--lx-muted); margin:0; padding:0 22px 18px;">Match employees to Clockify users before using the shift tracker.</p>
     {% else %}
     <div style="overflow:auto;">
-        <table style="width:100%; border-collapse:collapse; font-size:13px; min-width:1040px;">
+        <div class="st-table-wrap"><table style="width:100%; border-collapse:collapse; font-size:13px; min-width:1040px;">
             <thead>
                 <tr style="text-align:left; color:var(--lx-muted); font-size:11px; text-transform:uppercase; letter-spacing:0.05em;">
                     <th style="padding:10px 14px; border-top:1px solid var(--lx-br); border-bottom:1px solid var(--lx-br);">Employee</th>
@@ -143,7 +161,7 @@
                 <tr><td colspan="{% if can_view_labor_financials %}8{% else %}6{% endif %}" style="padding:20px 14px; color:var(--lx-muted); text-align:center;">No cached shift data yet.</td></tr>
                 {% endif %}
             </tbody>
-        </table>
+        </table></div>
     </div>
     {% endif %}
 </div>
