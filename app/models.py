@@ -869,6 +869,36 @@ class TimecardApproval(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utcnow, index=True)
 
 
+class TimecardExceptionAck(SQLModel, table=True):
+    """A manager marking one exception row as handled.
+
+    The exceptions page is derived, not stored -- rows are recomputed from
+    Clockify entries, shifts and approvals on every load. With no way to say
+    "seen, it is fine", anything a manager had already decided about
+    re-rendered forever and the genuinely new rows stopped standing out.
+
+    `fingerprint` is a hash of the week, employee, category and detail text, so
+    an ack sticks to that specific row. If the underlying detail changes the
+    fingerprint changes and the row comes back -- which is what we want, since
+    the information is now different.
+    """
+
+    __tablename__ = "timecard_exception_ack"
+    __table_args__ = (
+        UniqueConstraint("fingerprint", name="uq_timecard_exception_ack_fingerprint"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    fingerprint: str = Field(index=True)
+    week_start: date = Field(index=True)
+    user_id: Optional[int] = Field(default=None, foreign_key="user.id", index=True)
+    category: str = Field(default="", index=True)
+    detail: str = Field(default="")
+    note: str = Field(default="")
+    acked_by_user_id: Optional[int] = Field(default=None, foreign_key="user.id", index=True)
+    acked_at: datetime = Field(default_factory=utcnow, index=True)
+
+
 class InviteToken(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     token_hash: str = Field(index=True, unique=True)

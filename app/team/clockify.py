@@ -26,6 +26,18 @@ DEFAULT_CLOCKIFY_ACCOUNT_STATUSES = (
     "LIMITED",
 )
 
+# Clockify's time-entry endpoint filters on the entry's START, so a query for
+# [window_start, window_end] never returns a shift that began before the window
+# and ran into it. We therefore fetch from `window_start - LOOKBACK` and let the
+# local _entry_intersects_range filter decide what actually overlaps.
+#
+# This matters in two places: an overnight shift crossing into a payroll week
+# was invisible to the refresh (and got tombstoned as deleted -- see
+# refresh_clockify_labor_cache), and a timer started before midnight was missing
+# from the "who is on the clock now" tracker. 36h covers a long overnight shift
+# plus a forgotten clock-out into the next day.
+CLOCKIFY_ENTRY_FETCH_LOOKBACK_HOURS = 36
+
 
 class ClockifyConfigError(RuntimeError):
     """Raised when the Clockify integration is not configured enough to call."""
@@ -181,6 +193,15 @@ def _entry_duration_seconds(entry: dict[str, Any], now_utc: datetime) -> int:
         if parsed is not None:
             return parsed
     return 0 if not running else 0
+
+
+def entry_fetch_start(start_utc: datetime) -> datetime:
+    """Widen a fetch window backwards so entries that started earlier are seen.
+
+    Callers that reconcile the local cache against Clockify must only treat the
+    response as authoritative for entries starting at or after this point.
+    """
+    return start_utc - timedelta(hours=CLOCKIFY_ENTRY_FETCH_LOOKBACK_HOURS)
 
 
 def _entry_intersects_range(
@@ -427,13 +448,14 @@ class ClockifyClient:
         if not user_id:
             raise ClockifyConfigError("Clockify user id is not set for this employee.")
         page_size = max(1, min(page_size, 1000))
+        fetch_start_utc = entry_fetch_start(start_utc)
         out: list[dict[str, Any]] = []
         for page in range(1, max_pages + 1):
             data = self._request(
                 "GET",
                 f"/workspaces/{self.workspace_id}/user/{user_id}/time-entries",
                 params={
-                    "start": _to_clockify_iso(start_utc),
+                    "start": _to_clockify_iso(fetch_start_utc),
                     "page": page,
                     "page-size": page_size,
                 },
