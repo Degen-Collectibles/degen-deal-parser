@@ -158,7 +158,18 @@ def _chown(path: Path, uid: int) -> None:
             check=True,
         )
     else:
-        os.chown(path, uid, -1)
+        try:
+            os.chown(path, uid, -1)
+        except PermissionError:
+            # Linux CI runs pytest unprivileged. Elevate only fixture setup
+            # (and restoration), so the backup still runs as the tested user.
+            subprocess.run(
+                ["sudo", "-n", "chown", "--", str(uid), str(path)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=True,
+            )
 
 
 def _chgrp(path: Path, gid: int) -> None:
@@ -171,7 +182,16 @@ def _chgrp(path: Path, gid: int) -> None:
             check=True,
         )
     else:
-        os.chown(path, -1, gid)
+        try:
+            os.chown(path, -1, gid)
+        except PermissionError:
+            subprocess.run(
+                ["sudo", "-n", "chgrp", "--", str(gid), str(path)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=True,
+            )
 
 
 def _effective_uid() -> int:

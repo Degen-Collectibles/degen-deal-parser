@@ -192,6 +192,15 @@
     }
     .tc-save-btn:hover { background: rgba(134,239,172,0.2); }
     .tc-approval-note { font-size: 11px; color: var(--lx-muted); line-height: 1.35; overflow-wrap: anywhere; }
+    .tc-locked-note {
+        font-size: 11px;
+        line-height: 1.35;
+        color: #fde68a;
+        background: rgba(234,179,8,0.10);
+        border: 1px solid rgba(234,179,8,0.28);
+        border-radius: 8px;
+        padding: 7px 8px;
+    }
 
     .tc-bar-wrap {
         margin-top: 6px;
@@ -432,7 +441,21 @@
             {% if row.approval.note %}
             <div class="tc-approval-note">{{ row.approval.note }}</div>
             {% endif %}
-            <form class="tc-approval-form" method="post" action="/team/admin/employees/{{ employee.id }}/timecards/day-status">
+            {% if row.approval.status == 'locked' %}
+            {#
+               A locked day cannot be changed back -- set_timecard_day_status
+               rejects any edit to a locked row and there is no unlock route.
+               Rendering the controls anyway just produced an error on Save, so
+               state the situation instead of inviting the click.
+            #}
+            <div class="tc-locked-note">
+                Locked for payroll. The approval status and note cannot be edited.
+                Hours and pay can still change when time entries or rates change.
+            </div>
+            {% else %}
+            <form class="tc-approval-form" method="post"
+                  action="/team/admin/employees/{{ employee.id }}/timecards/day-status"
+                  data-confirm-lock="Lock {{ row.date_label }} for {{ employee_name }}?&#10;&#10;Locking the approval status is permanent -- there is no unlock.&#10;&#10;Hours and pay are not frozen and can still change when time entries or rates change.&#10;&#10;Only do this as part of closing payroll.">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <input type="hidden" name="week" value="{{ week_start_iso }}">
                 <input type="hidden" name="work_date" value="{{ row.day.isoformat() }}">
@@ -444,6 +467,7 @@
                 <input class="tc-note-input" type="text" name="note" value="{{ row.approval.note }}" placeholder="Note">
                 <button class="tc-save-btn" type="submit">Save</button>
             </form>
+            {% endif %}
         </div>
     </div>
     {% endfor %}
@@ -474,4 +498,22 @@
 <div style="margin-top:18px; font-size:11px; color:var(--lx-muted);">
     Anomaly rules: late arrival if clock-in is more than {{ 15 }} minutes after scheduled start; left early if clock-out is more than {{ 15 }} minutes before scheduled end. Past scheduled days with no clock entries are flagged as no-shows.
 </div>
+<script>
+(function () {
+    // "Locked" sits in the same dropdown as routine triage states, one row
+    // below "Needs fix", and choosing it is irreversible. Confirm only for
+    // that value so ordinary approve/reject stays a single click.
+    document.querySelectorAll('form[data-confirm-lock]').forEach(function (form) {
+        form.addEventListener('submit', function (event) {
+            var select = form.querySelector('select[name="status"]');
+            if (!select || select.value !== 'locked') {
+                return;
+            }
+            if (!window.confirm(form.getAttribute('data-confirm-lock'))) {
+                event.preventDefault();
+            }
+        });
+    });
+})();
+</script>
 {% endblock %}

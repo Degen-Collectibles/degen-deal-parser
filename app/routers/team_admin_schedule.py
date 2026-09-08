@@ -48,11 +48,17 @@ from ..models import (
     StreamAccount,
     Streamer,
     StreamSchedule,
+    TimeOffRequest,
     User,
     classify_shift_label,
     utcnow,
 )
 from ..team.pii import decrypt_pii
+from ..team.shift_labels import (
+    NON_SHIFT_TOKENS,
+    parse_shift_hours,
+    parse_time_to_minutes,
+)
 from ..shared import templates
 from ..team.team_notifications import notify_employee
 from .team_admin import _admin_gate, _permission_gate
@@ -358,77 +364,16 @@ def _fmt_time_12h(t24: str) -> str:
 # a number of hours. The parser is deliberately forgiving: if we can't make
 # sense of a label, we return 0 hours rather than raising, so one weird cell
 # never hides the rest of the week's totals.
+#
+# The math itself lives in app/team/shift_labels.py so the schedule grid,
+# timecards, pay-rates summary, and employee dashboard all read a label the
+# same way. See that module for the bare-number convention.
 # ---------------------------------------------------------------------------
 
-_RANGE_SPLIT_RE = re.compile(r"\s*[/,&]\s*")
-_TIME_RE = re.compile(
-    r"^\s*(?P<h>\d{1,2})(?::(?P<m>\d{2}))?\s*(?P<ap>[ap](?:\.?m\.?)?)?\s*$",
-    re.IGNORECASE,
-)
-
-_NON_SHIFT_TOKENS = {"OFF", "SHOW", "REQUEST", "IF NEEDED", "STREAM"}
+_NON_SHIFT_TOKENS = NON_SHIFT_TOKENS
 _LABOR_SHIFT_KINDS = {SHIFT_KIND_WORK, SHIFT_KIND_ALL}
-
-
-def _parse_time_to_minutes(s: str) -> Optional[int]:
-    m = _TIME_RE.match(s)
-    if not m:
-        return None
-    h = int(m.group("h"))
-    mins = int(m.group("m") or 0)
-    ap = (m.group("ap") or "").lower().replace(".", "").replace("m", "")
-    if mins < 0 or mins > 59 or h < 0 or h > 23:
-        return None
-    if ap == "p" and h < 12:
-        h += 12
-    elif ap == "a" and h == 12:
-        h = 0
-    return h * 60 + mins
-
-
-def _parse_shift_hours(label: str) -> float:
-    """Return total hours in the label, or 0.0 if unparseable.
-
-    Supports:
-      - "10:30 AM - 6:30 PM", "10:30am-6:30pm", "10-6pm"
-      - Bare "9-5" → assumed 9 AM to 5 PM (business-day heuristic)
-      - Multiple ranges separated by '/', ',', or '&' (summed)
-      - Overnight ranges (end <= start) wrap to next day
-      - Labels like "OFF", "SHOW", "REQUEST" → 0 hours (they aren't shifts)
-    """
-    if not label:
-        return 0.0
-    upper = label.strip().upper()
-    if upper in _NON_SHIFT_TOKENS:
-        return 0.0
-
-    total = 0.0
-    for part in _RANGE_SPLIT_RE.split(label):
-        m = re.match(
-            r"^\s*(?P<a>[0-9:.apm\s]+?)\s*[-\u2013\u2014]\s*(?P<b>[0-9:.apm\s]+?)\s*$",
-            part,
-            re.IGNORECASE,
-        )
-        if not m:
-            continue
-        a_raw = m.group("a").strip()
-        b_raw = m.group("b").strip()
-        a_has_ap = bool(re.search(r"[ap]\.?m?\.?$", a_raw, re.I))
-        b_has_ap = bool(re.search(r"[ap]\.?m?\.?$", b_raw, re.I))
-        a = _parse_time_to_minutes(a_raw)
-        b = _parse_time_to_minutes(b_raw)
-        if a is None or b is None:
-            continue
-        # "9-5" business-day heuristic: no AM/PM on either side, bump
-        # the smaller end into PM so the total comes out to 8h not 20h.
-        if not a_has_ap and not b_has_ap:
-            a_h, b_h = a // 60, b // 60
-            if b_h < a_h and a_h <= 11:
-                b += 12 * 60
-        if b <= a:
-            b += 24 * 60  # overnight wrap
-        total += (b - a) / 60.0
-    return round(total, 2)
+_parse_time_to_minutes = parse_time_to_minutes
+_parse_shift_hours = parse_shift_hours
 
 
 def _counts_for_storefront_labor(entry: ShiftEntry) -> bool:
@@ -603,6 +548,43 @@ def _stream_schedule_hint_map(
     return hint_map, legend
 
 
+def _pending_timeoff_map(
+    session: Session,
+    *,
+    user_ids: set[int],
+    first_day: date,
+    last_day: date,
+) -> dict[tuple[int, str], list[TimeOffRequest]]:
+    """Map (user_id, day_iso) -> undecided TimeOffRequest rows covering that day.
+
+    Read-only overlay. Submitting time off writes no ShiftEntry (those are
+    created only on approval, in team_admin_timeoff), so without this the
+    schedule grid shows nothing at all until a manager works the queue —
+    and they schedule over the request in the meantime. Managers only; see
+    _grid_context's include_pending_timeoff.
+    """
+    if not user_ids:
+        return {}
+    rows = session.exec(
+        select(TimeOffRequest)
+        .where(
+            TimeOffRequest.submitted_by_user_id.in_(user_ids),  # type: ignore[attr-defined]
+            TimeOffRequest.status == "submitted",
+            TimeOffRequest.start_date <= last_day,
+            TimeOffRequest.end_date >= first_day,
+        )
+        .order_by(TimeOffRequest.start_date, TimeOffRequest.id)
+    ).all()
+    out: dict[tuple[int, str], list[TimeOffRequest]] = {}
+    for row in rows:
+        day = max(row.start_date, first_day)
+        stop = min(row.end_date, last_day)
+        while day <= stop:
+            out.setdefault((row.submitted_by_user_id, day.isoformat()), []).append(row)
+            day += timedelta(days=1)
+    return out
+
+
 def _grid_context(
     session: Session,
     week_start: date,
@@ -610,6 +592,7 @@ def _grid_context(
     staff_kind: Optional[str] = None,
     flash: Optional[str] = None,
     include_financials: bool = True,
+    include_pending_timeoff: bool = False,
 ) -> dict:
     """Collect all the data the schedule grid template needs.
 
@@ -820,6 +803,16 @@ def _grid_context(
         "week_days": week_days,
         "users": users,
         "entry_map": entry_map,
+        "pending_timeoff_map": (
+            _pending_timeoff_map(
+                session,
+                user_ids=grid_user_ids,
+                first_day=first_day,
+                last_day=last_day,
+            )
+            if include_pending_timeoff
+            else {}
+        ),
         "stream_hint_map": {},
         "stream_legend": [],
         "day_note_map": day_note_map,
@@ -893,6 +886,9 @@ def _stream_grid_context(
         # Stream grid never uses ShiftEntry data. Kept as an empty map
         # so the shared macro's `ctx.entry_map.get(...)` calls stay safe.
         "entry_map": {},
+        # Same reason: the Stream grid is a read-only projection of
+        # StreamSchedule, so it carries no pending-PTO overlay.
+        "pending_timeoff_map": {},
         "stream_hint_map": hint_map,
         "stream_legend": legend,
         # Per-day location headers are a Storefront-only concept.
@@ -996,18 +992,25 @@ def admin_schedule_view(
             )
         if carried_names:
             session.commit()
+    # Pending time off is a manager-only overlay: it is a request, not a
+    # commitment, and a denial should not be inferable by peers watching a
+    # marker disappear. The employee view (/team/schedule) and the
+    # shareable screenshot export both leave it off, so the data never
+    # reaches a template staff can see.
     storefront_ctx = _grid_context(
         session,
         week_start,
         staff_kind=SCHEDULE_CALENDAR_STOREFRONT,
         flash=flash,
         include_financials=can_view_labor_financials,
+        include_pending_timeoff=True,
     )
     packing_ctx = _grid_context(
         session,
         week_start,
         staff_kind=SCHEDULE_CALENDAR_PACKING,
         include_financials=can_view_labor_financials,
+        include_pending_timeoff=True,
     )
     stream_ctx = _grid_context(
         session,
