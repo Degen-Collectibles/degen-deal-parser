@@ -158,6 +158,11 @@ from .inventory.shopify_ingest import (
     validate_shopify_webhook,
 )
 from .shopify_sync_worker import periodic_shopify_sync_loop
+from .shopify_tax_sentinel import (
+    periodic_shopify_pos_tax_sentinel_loop,
+    shopify_pos_tax_runtime_name,
+    shopify_pos_tax_sentinel_configured,
+)
 from .display_media import (
     extract_image_urls,
     get_cached_attachment_map,
@@ -254,6 +259,30 @@ from .tiktok_enrichment_queue import requeue_interrupted_tiktok_webhook_enrichme
 
 settings = get_settings()
 setup_runtime_file_logging("app.log")
+
+
+def _start_shopify_pos_tax_sentinel_task(
+    app: FastAPI,
+    stop_event: asyncio.Event,
+    background_tasks: list[asyncio.Task],
+) -> asyncio.Task | None:
+    if not shopify_pos_tax_sentinel_configured(settings):
+        app.state.shopify_pos_tax_sentinel_task = None
+        return None
+
+    task = track_background_task(
+        asyncio.create_task(
+            periodic_shopify_pos_tax_sentinel_loop(stop_event),
+            name="shopify-pos-tax-sentinel",
+        ),
+        runtime_name=shopify_pos_tax_runtime_name(settings),
+        task_name="shopify-pos-tax-sentinel",
+        stop_event=stop_event,
+    )
+    background_tasks.append(task)
+    app.state.shopify_pos_tax_sentinel_task = task
+    return task
+
 
 async def lifespan(app: FastAPI):
     if settings.employee_portal_enabled:
@@ -496,6 +525,8 @@ async def lifespan(app: FastAPI):
         app.state.shopify_sync_task = shopify_sync_task
     else:
         app.state.shopify_sync_task = None
+
+    _start_shopify_pos_tax_sentinel_task(app, stop_event, background_tasks)
 
     if settings.disable_external_warmups:
         price_cache_task = None

@@ -112,7 +112,7 @@ def _graphql_error_messages(payload: dict[str, Any]) -> list[str]:
     return [message for message in messages if message]
 
 
-async def _graphql_post(
+async def shopify_graphql_request(
     client: httpx.AsyncClient,
     *,
     store_domain: str,
@@ -197,7 +197,7 @@ async def unpublish_non_pos_product_publications(
 
     async def _run(active_client: httpx.AsyncClient) -> tuple[bool, list[str]]:
         try:
-            publication_payload = await _graphql_post(
+            publication_payload = await shopify_graphql_request(
                 active_client,
                 store_domain=store_domain,
                 access_token=access_token,
@@ -226,7 +226,7 @@ async def unpublish_non_pos_product_publications(
         cleanup_errors: list[str] = []
         for publication_id in publication_ids:
             try:
-                unpublish_payload = await _graphql_post(
+                unpublish_payload = await shopify_graphql_request(
                     active_client,
                     store_domain=store_domain,
                     access_token=access_token,
@@ -332,7 +332,7 @@ async def find_shopify_variant_by_sku(
 
     async def _run(active_client: httpx.AsyncClient) -> Optional[ShopifyVariantRef]:
         try:
-            payload = await _graphql_post(
+            payload = await shopify_graphql_request(
                 active_client,
                 store_domain=store_domain,
                 access_token=access_token,
@@ -406,32 +406,51 @@ async def list_shopify_product_variants(
         return await _run(active_client)
 
 
+async def get_shopify_locations(
+    *,
+    store_domain: str,
+    access_token: str,
+    client: Optional[httpx.AsyncClient] = None,
+) -> list[dict[str, Any]]:
+    if not store_domain or not access_token:
+        return []
+    url = f"{_shopify_base(store_domain)}/locations.json"
+
+    async def _run(active_client: httpx.AsyncClient) -> list[dict[str, Any]]:
+        response = await active_client.get(url, headers=_shopify_headers(access_token))
+        response.raise_for_status()
+        locations = response.json().get("locations") or []
+        return [row for row in locations if isinstance(row, dict)]
+
+    if client is not None:
+        return await _run(client)
+    async with httpx.AsyncClient(timeout=20.0) as active_client:
+        return await _run(active_client)
+
+
 async def get_shopify_primary_location_id(
     *,
     store_domain: str,
     access_token: str,
     client: Optional[httpx.AsyncClient] = None,
 ) -> Optional[str]:
-    if not store_domain or not access_token:
+    try:
+        locations = await get_shopify_locations(
+            store_domain=store_domain,
+            access_token=access_token,
+            client=client,
+        )
+    except Exception as exc:
+        logger.warning("[shopify-inventory] location lookup failed: %s", exc)
         return None
-    url = f"{_shopify_base(store_domain)}/locations.json"
-
-    async def _run(active_client: httpx.AsyncClient) -> Optional[str]:
-        try:
-            response = await active_client.get(url, headers=_shopify_headers(access_token))
-            response.raise_for_status()
-        except Exception as exc:
-            logger.warning("[shopify-inventory] location lookup failed: %s", exc)
-            return None
-        locations = response.json().get("locations") or []
-        active_locations = [row for row in locations if row and row.get("active", True)]
-        selected = active_locations[0] if active_locations else (locations[0] if locations else None)
-        return _shopify_legacy_id((selected or {}).get("id")) if selected else None
-
-    if client is not None:
-        return await _run(client)
-    async with httpx.AsyncClient(timeout=20.0) as active_client:
-        return await _run(active_client)
+    nonempty_locations = [row for row in locations if row]
+    active_locations = [row for row in nonempty_locations if row.get("active", True)]
+    selected = (
+        active_locations[0]
+        if active_locations
+        else (nonempty_locations[0] if nonempty_locations else None)
+    )
+    return _shopify_legacy_id((selected or {}).get("id")) if selected else None
 
 
 async def get_shopify_inventory_item_location_id(
@@ -758,7 +777,7 @@ async def sync_shopify_inventory_quantity(
 
     async def _run(active_client: httpx.AsyncClient) -> tuple[bool, Optional[str]]:
         try:
-            payload = await _graphql_post(
+            payload = await shopify_graphql_request(
                 active_client,
                 store_domain=store_domain,
                 access_token=access_token,
