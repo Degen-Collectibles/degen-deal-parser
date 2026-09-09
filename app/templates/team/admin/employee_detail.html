@@ -35,20 +35,12 @@
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
                 <button class="ta-btn" type="submit">Generate fresh copy link</button>
             </form>
-            {% if can_text_invite and has_phone_on_file %}
-            <form method="post" action="/team/admin/employees/{{ employee.id }}/text-invite" style="margin:0;">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
-                <button class="ta-btn" type="submit" style="background:#3b82f6; color:white; border-color:#3b82f6;">Text fresh invite</button>
-            </form>
-            {% endif %}
         </div>
         {% endif %}
         <p style="font-size:11px; color:var(--lx-muted); margin:6px 0 0;">
-            For security, each link is only shown once. Generating or texting a fresh link invalidates the old one.
+            For security, each link is only shown once. Generating a fresh link invalidates the old one.
         </p>
-        {% if can_text_invite and not has_phone_on_file %}
-        <p style="font-size:11px; color:#fcd34d; margin:6px 0 0;">Add a phone number before texting an invite.</p>
-        {% endif %}
+        <p style="font-size:11px; color:#fcd34d; margin:6px 0 0;">SMS invites are unavailable during the owners/managers alert pilot. Use a copy link.</p>
     </div>
     {% elif can_issue_invite %}
     <form method="post" action="/team/admin/employees/{{ employee.id }}/send-invite" style="margin:0;">
@@ -57,14 +49,7 @@
             Generate copy link
         </button>
     </form>
-    {% if can_text_invite and has_phone_on_file %}
-    <form method="post" action="/team/admin/employees/{{ employee.id }}/text-invite" style="display:inline-block; margin:8px 0 0 8px;">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
-        <button class="ta-btn" type="submit">Text invite link</button>
-    </form>
-    {% elif can_text_invite %}
-    <p style="font-size:12px; color:#fcd34d; margin:8px 0 0;">Add a phone number before texting an invite.</p>
-    {% endif %}
+    <p style="font-size:12px; color:#fcd34d; margin:8px 0 0;">SMS invites are unavailable during the owners/managers alert pilot. Use a copy link.</p>
     {% else %}
     <p style="font-size:12px; color:var(--lx-muted);">An admin with invite permissions needs to send the link.</p>
     {% endif %}

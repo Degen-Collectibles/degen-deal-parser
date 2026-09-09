@@ -164,13 +164,8 @@
                     {% else %}
                         <span style="padding:2px 8px; border-radius:999px; background:rgba(252,165,165,0.15); color:#fca5a5; font-size:11px; font-weight:500; letter-spacing:0.03em;">inactive</span>
                     {% endif %}
-                    {% if draft and can_text_invite and profile and profile.phone_enc %}
-                    <form method="post" action="/team/admin/employees/{{ u.id }}/text-invite" style="margin:8px 0 0;">
-                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
-                        <button class="ta-btn" type="submit" style="font-size:11px; padding:4px 8px;">Text invite</button>
-                    </form>
-                    {% elif draft and can_text_invite %}
-                    <div style="font-size:11px; color:#fcd34d; margin-top:6px;">No phone</div>
+                    {% if draft and can_issue_invite %}
+                    <div style="font-size:11px; color:#fcd34d; margin-top:6px;">Use a copy link</div>
                     {% endif %}
                 </td>
             </tr>

@@ -14,6 +14,7 @@ from sqlmodel import Session, select
 from ..config import get_settings
 from ..models import AuditLog, EmployeeProfile, User
 from .pii import PIIDecryptError, decrypt_pii
+from .sms_consent import consent_allows_sms
 from .sms import (
     mask_sms_phone,
     normalize_sms_phone,
@@ -52,6 +53,10 @@ def _employee_phone(session: Session, user_id: int) -> tuple[Optional[str], str]
     normalized = normalize_sms_phone(raw_phone)
     if not normalized:
         return None, "phone_invalid"
+    if not consent_allows_sms(session, user_id, normalized):
+        return None, "consent_required"
+    if not get_settings().sms_operational_alerts_enabled:
+        return None, "pilot_not_enabled"
     return normalized, "ok"
 
 
@@ -88,9 +93,9 @@ def notify_employee(
             sms_details["phone"] = mask_sms_phone(phone)
             sms_details["phone_fingerprint"] = sms_phone_fingerprint(phone)
             message = (
-                f"{details['title']}\n"
-                f"{details['body']}\n"
-                f"{_notification_url(str(details['link_path']))}"
+                "Degen Collectibles: A team operations update is available.\n"
+                f"{_notification_url('/team/notifications')}\n"
+                "Reply STOP to unsubscribe or HELP for help."
             ).strip()[:1500]
             result = send_sms(to_phone=phone, body=message)
             sms_details.update(
