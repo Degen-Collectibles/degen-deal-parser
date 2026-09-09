@@ -315,6 +315,9 @@ class Settings(BaseSettings):
     sms_provider: str = Field(default="dry_run", alias="SMS_PROVIDER")
     # Consent collection can be deployed independently of live alert delivery.
     sms_operational_alerts_enabled: bool = Field(default=False, alias="SMS_OPERATIONAL_ALERTS_ENABLED")
+    sms_dispatcher_enabled: bool = Field(default=False, alias="SMS_DISPATCHER_ENABLED")
+    sms_webhooks_enabled: bool = Field(default=False, alias="SMS_WEBHOOKS_ENABLED")
+    sms_callback_base_url: str = Field(default="", alias="SMS_CALLBACK_BASE_URL")
     sms_from_number: str = Field(default="", alias="SMS_FROM_NUMBER")
     sms_twilio_account_sid: str = Field(default="", alias="TWILIO_ACCOUNT_SID")
     sms_twilio_auth_token: str = Field(default="", alias="TWILIO_AUTH_TOKEN")

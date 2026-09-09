@@ -68,6 +68,7 @@ def send_sms(
     to_phone: str,
     body: str,
     settings: Optional[Settings] = None,
+    status_callback: str = "",
 ) -> SmsSendResult:
     settings = settings or get_settings()
     provider = (settings.sms_provider or "dry_run").strip().lower()
@@ -104,19 +105,23 @@ def send_sms(
         )
 
     payload = {"To": to_phone, "Body": body}
+    if status_callback:
+        payload["StatusCallback"] = status_callback
     if messaging_service_sid:
         payload["MessagingServiceSid"] = messaging_service_sid
     else:
         payload["From"] = from_number
     url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
     try:
-        with httpx.Client(timeout=settings.sms_timeout_seconds) as client:
+        with httpx.Client(timeout=min(settings.sms_timeout_seconds, 30)) as client:
             response = client.post(url, data=payload, auth=(account_sid, auth_token))
-    except httpx.HTTPError as exc:
+    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout):
+        return SmsSendResult(provider="twilio", status="not_connected", error="Connection was not established.")
+    except httpx.HTTPError:
         return SmsSendResult(
             provider="twilio",
             status="transport_error",
-            error=str(exc),
+            error="Provider outcome unknown; reconcile before retrying.",
         )
 
     try:
@@ -124,12 +129,14 @@ def send_sms(
     except ValueError:
         data = {}
     if response.status_code >= 400:
-        message = str(data.get("message") or response.text or "Twilio send failed")
+        code = str(data.get("code") or "") if isinstance(data, dict) else ""
         return SmsSendResult(
             provider="twilio",
             status=f"http_{response.status_code}",
-            error=message[:240],
+            error=code if code.isdigit() else "provider_rejected",
         )
+    if not isinstance(data, dict) or not re.fullmatch(r"SM[0-9a-fA-F]{32}", str(data.get("sid") or "")):
+        return SmsSendResult(provider="twilio", status="unknown", error="Provider acceptance could not be verified.")
     return SmsSendResult(
         provider="twilio",
         status=str(data.get("status") or "queued"),

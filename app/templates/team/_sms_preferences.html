@@ -11,6 +11,8 @@
       {% if sms_consent.opted_in %}
         <p>You can unsubscribe at any time without losing app access.</p>
         <button class="pt-btn" name="action" value="unsubscribe" type="submit">Unsubscribe from texts</button>
+      {% elif sms_consent.provider_blocked %}
+        <p>Your number is blocked after STOP. Reply START to our texting number, then return here to opt in again. App access is unaffected.</p>
       {% elif sms_consent.phone_ready %}
         <input type="hidden" name="consent_version" value="{{ sms_consent.version }}">
         <input type="hidden" name="phone_binding" value="{{ sms_consent.phone_binding }}">

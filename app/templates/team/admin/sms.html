@@ -1,0 +1,33 @@
+{% extends "team/admin/base.html" %}
+{% set active = 'sms' %}
+{% block extra_head %}
+<style>
+.sms-summary { margin: 0 0 20px; line-height: 1.6; max-width: 850px; color: var(--lx-muted); }
+.sms-table-wrap { overflow-x:auto; border:1px solid var(--lx-br); border-radius:12px; background:var(--lx-s1); }
+.sms-table { width:100%; border-collapse:collapse; font-size:13px; }
+.sms-table th, .sms-table td { padding:14px 16px; text-align:left; border-bottom:1px solid var(--lx-br); vertical-align:top; }
+.sms-table th { color:var(--lx-muted); font-size:11px; text-transform:uppercase; letter-spacing:.05em; white-space:nowrap; }
+.sms-table tr:last-child td { border-bottom:0; }
+.sms-table td { min-width:100px; }
+.sms-state { display:inline-block; border:1px solid var(--lx-br); border-radius:6px; padding:3px 7px; background:var(--lx-s2); white-space:nowrap; }
+.sms-state-delivered { color:#86efac; }
+.sms-state-failed, .sms-state-undelivered { color:#fca5a5; }
+.sms-state-unknown { color:#fde68a; }
+.sms-code { overflow-wrap:anywhere; max-width:200px; }
+.sms-note { margin-top:20px; line-height:1.6; color:var(--lx-muted); font-size:13px; }
+</style>
+{% endblock %}
+{% block content %}
+<p><strong>{{ 'Delivery configured' if delivery_ready else 'Delivery paused' }}</strong> · Owners and managers pilot</p>
+<p class="sms-summary">Accepted means Twilio received the request. Delivered requires a provider receipt. Unknown outcomes are held for review and are never automatically resent.</p>
+<div class="sms-table-wrap">
+<table class="sms-table">
+  <thead><tr><th>Created (UTC)</th><th>Recipient</th><th>Status</th><th>Attempts</th><th>Provider message</th><th>Reason</th></tr></thead>
+  <tbody>{% for row in rows %}<tr>
+    <td>{{ row.created_at.strftime('%Y-%m-%d %H:%M') }}<br>Alert #{{ row.id }}</td><td>User {{ row.user_id }}<br>{{ row.phone_label }}</td>
+    <td><span class="sms-state sms-state-{{ row.status }}">{{ row.status|capitalize }}</span></td><td>{{ row.attempts }}</td><td class="sms-code">{{ row.provider_sid or '—' }}</td><td>{{ 'Recipient opted out (21610)' if row.error_code == '21610' else row.error_code|replace('_', ' ') or '—' }}</td>
+  </tr>{% else %}<tr><td colspan="6">No text alerts queued. Portal notifications continue while SMS is paused.</td></tr>{% endfor %}</tbody>
+</table></div>
+{% if next_before %}<p><a href="/team/admin/sms?before={{ next_before }}">Older alerts →</a></p>{% endif %}
+<p class="sms-note">For an unknown outcome, reconcile the notification time and provider message in Twilio before taking further action. No resend action is available here.</p>
+{% endblock %}

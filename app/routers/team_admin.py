@@ -44,6 +44,7 @@ TEAM_ADMIN_NAV_SECTIONS: tuple[tuple[str, tuple[tuple[str, str, str, str], ...]]
         (
             ("overview", "Overview", "/team/admin", "admin.permissions.view"),
             ("permissions", "Permissions", "/team/admin/permissions", "admin.permissions.view"),
+            ("sms", "Text alerts", "/team/admin/sms", "admin.permissions.view"),
         ),
     ),
     (

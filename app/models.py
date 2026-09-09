@@ -6,6 +6,45 @@ from typing import Optional
 from sqlalchemy import Column, Index, LargeBinary, UniqueConstraint
 from sqlmodel import SQLModel, Field
 
+
+class SmsOutbox(SQLModel, table=True):
+    """One delivery intent per committed portal notification; no plaintext PII."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    notification_id: int = Field(unique=True, index=True)
+    user_id: int = Field(index=True)
+    phone_binding: str
+    phone_fingerprint: str = Field(index=True)
+    phone_label: str
+    status: str = Field(default="queued", index=True)
+    attempts: int = 0
+    attempt_token: str = Field(default="", index=True)
+    provider_sid: str = Field(default="", index=True)
+    error_code: str = ""
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    next_attempt_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+    expires_at: datetime
+
+
+class SmsSuppression(SQLModel, table=True):
+    phone_fingerprint: str = Field(primary_key=True)
+    blocked: bool = True
+    # START does not erase this: a fresh app opt-in is required after STOP.
+    stopped_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class SmsInboundEvent(SQLModel, table=True):
+    message_sid: str = Field(primary_key=True)
+    phone_fingerprint: str = Field(index=True)
+    event: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class SmsDispatchLease(SQLModel, table=True):
+    id: int = Field(default=1, primary_key=True)
+    owner: str = ""
+    until: datetime = Field(default_factory=lambda: datetime(1970, 1, 1, tzinfo=timezone.utc))
+
 PARSE_PENDING = "pending"
 PARSE_PROCESSING = "processing"
 PARSE_PARSED = "parsed"
