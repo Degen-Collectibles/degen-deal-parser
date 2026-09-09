@@ -1,7 +1,7 @@
 """Employee portal notification helpers.
 
 Notifications are stored in AuditLog rows so we do not need a schema migration.
-SMS delivery uses the same provider adapter as invite links.
+SMS intents commit with notifications; a separate dispatcher contacts the provider.
 """
 from __future__ import annotations
 
@@ -18,7 +18,6 @@ from .sms_consent import consent_allows_sms
 from .sms import (
     mask_sms_phone,
     normalize_sms_phone,
-    send_sms,
     sms_phone_fingerprint,
 )
 
@@ -72,7 +71,7 @@ def notify_employee(
     request: Optional[Request] = None,
     send_text: bool = True,
 ) -> AuditLog:
-    """Queue an employee notification and optionally send an SMS.
+    """Queue an employee notification and optional transactional SMS intent.
 
     The caller owns commit/rollback. This keeps admin actions transactional:
     the notification log is committed with the schedule/time-off/announcement
@@ -86,28 +85,14 @@ def notify_employee(
         "sms": {"status": "not_requested"},
     }
 
+    phone = None
     if send_text:
         phone, phone_status = _employee_phone(session, user_id)
         sms_details: dict[str, object] = {"status": phone_status}
         if phone:
             sms_details["phone"] = mask_sms_phone(phone)
             sms_details["phone_fingerprint"] = sms_phone_fingerprint(phone)
-            message = (
-                "Degen Collectibles: A team operations update is available.\n"
-                f"{_notification_url('/team/notifications')}\n"
-                "Reply STOP to unsubscribe or HELP for help."
-            ).strip()[:1500]
-            result = send_sms(to_phone=phone, body=message)
-            sms_details.update(
-                {
-                    "provider": result.provider,
-                    "delivery_status": result.status,
-                    "message_id": result.message_id,
-                    "dry_run": result.dry_run,
-                }
-            )
-            if result.error:
-                sms_details["error"] = result.error[:240]
+            sms_details["status"] = "queued"
         details["sms"] = sms_details
 
     row = AuditLog(
@@ -119,6 +104,9 @@ def notify_employee(
         ip_address=_client_ip(request),
     )
     session.add(row)
+    if phone:
+        from .sms_outbox import enqueue
+        enqueue(session, row, phone)
     return row
 
 

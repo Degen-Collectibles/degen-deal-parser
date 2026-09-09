@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import timezone
 
 from sqlmodel import Session, select
 
-from ..models import AuditLog, EmployeeProfile, User
+from ..models import AuditLog, EmployeeProfile, User, SmsSuppression
 from .pii import PIIDecryptError, decrypt_pii
-from .sms import mask_sms_phone, normalize_sms_phone
+from .sms import mask_sms_phone, normalize_sms_phone, sms_phone_fingerprint
 
 CONSENT_ACTION = "sms.consent"
 CONSENT_VERSION = "2026-09-08"
@@ -50,14 +51,19 @@ def consent_context(session: Session, user_id: int) -> dict:
         evidence = {}
     if not isinstance(evidence, dict):
         evidence = {}
+    suppression = session.get(SmsSuppression, sms_phone_fingerprint(phone)) if phone else None
+    provider_blocked = bool(suppression and suppression.blocked)
+    after_stop = not suppression or bool(latest and
+        latest.created_at.replace(tzinfo=timezone.utc) > suppression.stopped_at.replace(tzinfo=timezone.utc))
     opted_in = bool(
         eligible and binding and evidence.get("opted_in") is True
+        and not provider_blocked and after_stop
         and evidence.get("version") == CONSENT_VERSION
         and evidence.get("phone_binding") == binding
         and latest.actor_user_id == user_id
     )
     return {
-        "eligible": eligible, "opted_in": opted_in,
+        "eligible": eligible, "opted_in": opted_in, "provider_blocked": provider_blocked,
         "phone_ready": bool(phone), "phone_label": mask_sms_phone(phone) if phone else "",
         "phone_binding": binding, "version": CONSENT_VERSION, "text": CONSENT_TEXT,
     }
@@ -73,6 +79,8 @@ def record_consent(
             raise ValueError("Text alerts are currently limited to active owners and managers.")
         if not state["phone_ready"]:
             raise ValueError("Save a valid phone number in Your info before opting in.")
+        if state["provider_blocked"]:
+            raise ValueError("Your number is blocked after STOP. Reply START to the texting number, then opt in here again.")
         if version != CONSENT_VERSION or phone_binding != state["phone_binding"]:
             raise ValueError("Your phone or the consent terms changed. Refresh this page and try again.")
     # Withdrawals always append evidence, even after a role or phone change.

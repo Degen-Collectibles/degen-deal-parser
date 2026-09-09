@@ -53,6 +53,9 @@ os.environ["TEAM_SUPPLY_DISCORD_ENABLED"] = "false"
 # Notification providers and provider credentials must be forced inert for
 # pytest even when the developer shell or repo-root .env contains live values.
 os.environ["SMS_PROVIDER"] = "dry_run"
+os.environ["SMS_OPERATIONAL_ALERTS_ENABLED"] = "false"
+os.environ["SMS_DISPATCHER_ENABLED"] = "false"
+os.environ["SMS_WEBHOOKS_ENABLED"] = "false"
 os.environ["PASSWORD_RESET_EMAIL_PROVIDER"] = "dry_run"
 for _external_notification_key in (
     "TWILIO_ACCOUNT_SID",

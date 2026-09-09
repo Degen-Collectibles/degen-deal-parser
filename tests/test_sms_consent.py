@@ -51,7 +51,7 @@ class SmsConsentTests(unittest.TestCase, _PortalHarness):
 
     def test_phone_alone_never_sends_but_portal_notice_survives(self):
         from app.team.team_notifications import notify_employee
-        with patch("app.team.team_notifications.send_sms") as sender:
+        with patch("app.team.sms_outbox.send_sms") as sender:
             row = notify_employee(self.session, user_id=self.user.id, actor_user_id=None,
                                   kind="schedule", title="Schedule", body="Private content")
             self.session.commit()
@@ -112,20 +112,20 @@ class SmsConsentTests(unittest.TestCase, _PortalHarness):
         from app.team.sms import SmsSendResult
         self._grant()
         from app.config import get_settings
-        with patch.object(get_settings(), "sms_operational_alerts_enabled", True), patch("app.team.team_notifications.send_sms", return_value=SmsSendResult("dry_run", "dry_run", dry_run=True)) as sender:
+        with patch.object(get_settings(), "sms_operational_alerts_enabled", True), patch("app.team.sms_outbox.send_sms", return_value=SmsSendResult("dry_run", "dry_run", dry_run=True)) as sender:
             notify_employee(self.session, user_id=self.user.id, actor_user_id=None,
                             kind="schedule", title="Private salary", body="Sensitive details")
-        body = sender.call_args.kwargs["body"]
-        self.assertIn("Degen Collectibles", body)
-        self.assertIn("STOP", body)
-        self.assertNotIn("Private salary", body)
-        self.assertNotIn("Sensitive details", body)
+        sender.assert_not_called()
+        from app.models import SmsOutbox
+        queued = self.session.exec(select(SmsOutbox)).one()
+        self.assertEqual(queued.status, "queued")
+        self.assertNotIn("Sensitive details", str(queued))
 
     def test_consent_collection_does_not_activate_delivery(self):
         from app.config import get_settings
         from app.team.team_notifications import notify_employee
         self._grant()
-        with patch.object(get_settings(), "sms_operational_alerts_enabled", False), patch("app.team.team_notifications.send_sms") as sender:
+        with patch.object(get_settings(), "sms_operational_alerts_enabled", False), patch("app.team.sms_outbox.send_sms") as sender:
             row = notify_employee(self.session, user_id=self.user.id, actor_user_id=None,
                                   kind="schedule", title="Schedule", body="Details")
         sender.assert_not_called()

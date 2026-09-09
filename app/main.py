@@ -528,6 +528,12 @@ async def lifespan(app: FastAPI):
 
     _start_shopify_pos_tax_sentinel_task(app, stop_event, background_tasks)
 
+    if settings.employee_portal_enabled and settings.sms_dispatcher_enabled:
+        from .team.sms_outbox import sms_dispatch_loop
+        background_tasks.append(track_background_task(
+            asyncio.create_task(sms_dispatch_loop(stop_event), name="sms-dispatch"),
+            runtime_name=APP_HEARTBEAT_RUNTIME_NAME, task_name="sms-dispatch", stop_event=stop_event))
+
     if settings.disable_external_warmups:
         price_cache_task = None
         print("[price_cache] external warmups disabled by configuration")
@@ -560,6 +566,8 @@ async def lifespan(app: FastAPI):
         app_heartbeat_thread.join(timeout=5)
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
+from .routers.team_sms import router as team_sms_router
+app.include_router(team_sms_router)
 # NOTE: SessionMiddleware is registered LATER in this module (just after
 # the attach_current_user decorator) so it ends up as the OUTERMOST
 # middleware at runtime. Starlette's add_middleware inserts at position 0
