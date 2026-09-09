@@ -102,112 +102,29 @@ class EmployeeInviteSmsTests(unittest.TestCase):
         self.session.commit()
         return draft
 
-    def test_text_invite_creates_unique_token_and_sends_safe_sms(self):
-        from app.models import AuditLog, InviteToken
-        from app.routers import team_admin_employees as mod
-        from app.team.sms import SmsSendResult
-
-        draft = self._draft_with_phone("(555) 010-0123")
-        sent: dict[str, str] = {}
-
-        def fake_send_sms(*, to_phone, body, settings=None):
-            sent["to_phone"] = to_phone
-            sent["body"] = body
-            return SmsSendResult(provider="dry_run", status="dry_run", dry_run=True)
-
-        with patch.object(mod, "get_settings", return_value=self._settings()), patch.object(
-            mod, "send_sms", side_effect=fake_send_sms
-        ):
-            response = asyncio.run(
-                mod.admin_employee_text_invite(
-                    self._request(),
-                    draft.id,
-                    session=self.session,
-                )
-            )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(sent["to_phone"], "+15550100123")
-        self.assertIn("https://team.example.test/team/invite/accept/", sent["body"])
-
-        invites = list(
-            self.session.exec(
-                select(InviteToken).where(InviteToken.target_user_id == draft.id)
-            ).all()
-        )
-        self.assertEqual(len(invites), 1)
-
-        audit_rows = list(
-            self.session.exec(
-                select(AuditLog).where(AuditLog.target_user_id == draft.id)
-            ).all()
-        )
-        actions = {row.action for row in audit_rows}
-        self.assertIn("pii.use_for_invite_sms", actions)
-        self.assertIn("invite.issued_for_draft", actions)
-        self.assertIn("invite.text_dry_run", actions)
-        details_blob = "\n".join(row.details_json for row in audit_rows)
-        self.assertNotIn("https://team.example.test/team/invite/accept/", details_blob)
-        self.assertNotIn("5550100123", details_blob)
-        self.assertIn("***-***-0123", details_blob)
-
-        text_audit = next(row for row in audit_rows if row.action == "invite.text_dry_run")
-        details = json.loads(text_audit.details_json)
-        self.assertTrue(details["dry_run"])
-        self.assertTrue(details["success"])
-        self.assertEqual(details["phone"], "***-***-0123")
-        self.assertIn("phone_fingerprint", details)
-
-    def test_text_invite_rejects_invalid_phone_without_issuing_token(self):
-        from app.models import AuditLog, InviteToken
+    def test_sms_invite_pilot_block_does_not_issue_a_token_or_send(self):
+        from app.models import InviteToken
         from app.routers import team_admin_employees as mod
 
-        draft = self._draft_with_phone("not a phone")
-        with patch.object(mod, "get_settings", return_value=self._settings()), patch.object(
-            mod, "send_sms"
-        ) as send_sms:
-            response = asyncio.run(
-                mod.admin_employee_text_invite(
-                    self._request(),
-                    draft.id,
-                    session=self.session,
-                )
-            )
-
+        draft = self._draft_with_phone("2025550123")
+        with patch("app.team.sms.send_sms") as sender:
+            response = asyncio.run(mod.admin_employee_text_invite(
+                self._request(), draft.id, session=self.session,
+            ))
         self.assertEqual(response.status_code, 303)
-        send_sms.assert_not_called()
-        invites = list(
-            self.session.exec(
-                select(InviteToken).where(InviteToken.target_user_id == draft.id)
-            ).all()
-        )
-        self.assertEqual(invites, [])
-        failure = self.session.exec(
-            select(AuditLog).where(
-                AuditLog.target_user_id == draft.id,
-                AuditLog.action == "invite.text_failed",
-            )
-        ).first()
-        self.assertIsNotNone(failure)
-        self.assertEqual(json.loads(failure.details_json)["reason"], "invalid_phone")
+        self.assertIn("pilot", response.headers["location"])
+        sender.assert_not_called()
+        self.assertEqual(self.session.exec(select(InviteToken)).all(), [])
 
-    def test_employee_list_exposes_text_invite_for_drafts_with_phone(self):
+    def test_employee_list_does_not_offer_unconsented_sms_invites(self):
         from app.routers.team_admin_employees import admin_employees_list
 
-        draft = self._draft_with_phone("555-010-0123")
+        draft = self._draft_with_phone("2025550123")
         response = admin_employees_list(
-            self._request(),
-            q=None,
-            flash=None,
-            show_inactive=None,
-            session=self.session,
+            self._request(), q=None, flash=None, show_inactive=None, session=self.session,
         )
-
         self.assertEqual(response.status_code, 200)
-        html = response.body.decode("utf-8")
-        self.assertIn(f"/team/admin/employees/{draft.id}/text-invite", html)
-        self.assertIn("Text invite", html)
-
+        self.assertNotIn(f"/team/admin/employees/{draft.id}/text-invite", response.body.decode())
 
 class PasswordResetEmailTests(unittest.TestCase):
     def setUp(self):

@@ -1,0 +1,30 @@
+<section class="pt-card" id="sms-preferences" aria-labelledby="sms-heading">
+  <h2 id="sms-heading">Optional text alerts</h2>
+  <p>Text alerts are separate from your profile and account access. Saving a phone number does not subscribe you.</p>
+  {% if sms_consent.eligible %}
+    <p>Owners and managers pilot · <strong>{{ 'Subscribed' if sms_consent.opted_in else 'Not subscribed' }}</strong></p>
+    {% if sms_consent.phone_ready %}
+      <p>Saved phone: {{ sms_consent.phone_label }}. Changing your saved phone requires a new opt-in.</p>
+    {% endif %}
+    <form method="post" action="/team/profile/sms">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      {% if sms_consent.opted_in %}
+        <p>You can unsubscribe at any time without losing app access.</p>
+        <button class="pt-btn" name="action" value="unsubscribe" type="submit">Unsubscribe from texts</button>
+      {% elif sms_consent.phone_ready %}
+        <input type="hidden" name="consent_version" value="{{ sms_consent.version }}">
+        <input type="hidden" name="phone_binding" value="{{ sms_consent.phone_binding }}">
+        <label for="sms-opt-in" style="display:flex; align-items:flex-start; gap:12px; line-height:1.6; margin:16px 0;">
+          <input type="checkbox" id="sms-opt-in" name="sms_opt_in" value="yes" style="min-width:24px; min-height:24px; margin-top:3px; flex-shrink:0; appearance:auto; accent-color:#ff6b4a;">
+          <span>{{ sms_consent.text }}</span>
+        </label>
+        <button class="pt-btn primary" name="action" value="subscribe" type="submit">Save text preference</button>
+      {% else %}
+        <p>Save a valid phone number in Your info first. You can keep using the app without subscribing.</p>
+      {% endif %}
+    </form>
+  {% else %}
+    <p>The text pilot is limited to owners and managers. Team notifications remain available in the portal.</p>
+  {% endif %}
+  <p><a href="/static/compliance/team-sms-consent.html">SMS terms and privacy</a> · <a href="mailto:info@degencollectibles.com">Contact Degen</a></p>
+</section>

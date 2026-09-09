@@ -52,7 +52,7 @@ from ..team.fingerprints import keyed_fingerprint
 from ..team.pii import decrypt_pii, email_lookup_hash, encrypt_pii
 from ..rate_limit import rate_limited_or_429
 from ..shared import templates
-from ..team.sms import mask_sms_phone, normalize_sms_phone, send_sms, sms_phone_fingerprint
+
 from .team_admin import _admin_denied_response, _admin_gate, _permission_gate
 
 router = APIRouter()
@@ -1008,166 +1008,12 @@ async def admin_employee_text_invite(
     denial, current = _admin_gate(request, session, "admin.invites.issue")
     if denial:
         return denial
-    pii_denial, _ = _admin_gate(request, session, "admin.employees.reveal_pii")
-    if pii_denial:
-        return pii_denial
-    if limited := rate_limited_or_429(
-        request,
-        key_prefix=f"text_invite:{current.id}",
-        max_requests=20,
-        window_seconds=900,
-    ):
-        return limited
-
-    employee = session.get(User, user_id)
-    if employee is None:
-        return HTMLResponse("Employee not found", status_code=404)
-    if not is_draft_user(employee):
-        return _employee_detail_redirect(
-            user_id, "This employee already has an active account."
-        )
-
-    profile = session.get(EmployeeProfile, user_id)
-    if profile is None or not profile.phone_enc:
-        return _employee_detail_redirect(
-            user_id, "Add a phone number before texting an invite."
-        )
-
-    ip_address = request.client.host if request.client else None
-    _audit_then_commit(
-        session,
-        AuditLog(
-            actor_user_id=current.id,
-            target_user_id=user_id,
-            action="pii.use_for_invite_sms",
-            resource_key="admin.employees.reveal_pii",
-            details_json=json.dumps({"field": "phone", "purpose": "invite_sms"}),
-            ip_address=ip_address,
-        ),
+    # Draft recipients cannot opt in through their own authenticated account.
+    # Keep the copy-link invitation path for onboarding. This pilot only sends
+    # operational alerts to consenting owners/managers.
+    return _employee_detail_redirect(
+        user_id, "SMS invites are unavailable during the owners/managers alert pilot. Use Generate copy link."
     )
-
-    try:
-        phone_plain = _safe_decrypt(profile.phone_enc) or ""
-    except PIIDecryptError:
-        session.add(
-            AuditLog(
-                actor_user_id=current.id,
-                target_user_id=user_id,
-                action="invite.text_failed",
-                resource_key="admin.invites.issue",
-                details_json=json.dumps(
-                    {"reason": "phone_decrypt_failed"}, sort_keys=True
-                ),
-                ip_address=ip_address,
-            )
-        )
-        session.commit()
-        return _employee_detail_redirect(
-            user_id, "Could not text invite because the saved phone could not be decrypted."
-        )
-
-    to_phone = normalize_sms_phone(phone_plain)
-    if not to_phone:
-        session.add(
-            AuditLog(
-                actor_user_id=current.id,
-                target_user_id=user_id,
-                action="invite.text_failed",
-                resource_key="admin.invites.issue",
-                details_json=json.dumps({"reason": "invalid_phone"}, sort_keys=True),
-                ip_address=ip_address,
-            )
-        )
-        session.commit()
-        return _employee_detail_redirect(
-            user_id, "Saved phone number is not a valid SMS number."
-        )
-
-    try:
-        raw = generate_invite_token(
-            session,
-            role=employee.role or "employee",
-            created_by_user_id=current.id,
-            email_hint=(employee.display_name or "").strip() or None,
-            target_user_id=user_id,
-        )
-    except ValueError as exc:
-        return _employee_detail_redirect(user_id, f"Could not issue invite: {exc}")
-
-    invite_url = _invite_accept_url(request, raw)
-    body = _invite_sms_body(invite_url)
-    sms_result = send_sms(
-        to_phone=to_phone,
-        body=body,
-        settings=get_settings(),
-    )
-    invite_row = session.exec(
-        select(InviteToken)
-        .where(InviteToken.target_user_id == user_id)
-        .order_by(InviteToken.created_at.desc())
-    ).first()
-    invite_id = invite_row.id if invite_row is not None else None
-    phone_label = mask_sms_phone(to_phone)
-    safe_details = {
-        "provider": sms_result.provider,
-        "status": sms_result.status,
-        "dry_run": sms_result.dry_run,
-        "success": sms_result.success,
-        "invite_id": invite_id,
-        "phone": phone_label,
-        "phone_fingerprint": sms_phone_fingerprint(to_phone),
-    }
-    if sms_result.message_id:
-        safe_details["message_id"] = sms_result.message_id
-    if sms_result.error:
-        safe_details["error"] = sms_result.error[:240]
-    session.add(
-        AuditLog(
-            actor_user_id=current.id,
-            target_user_id=user_id,
-            action="invite.issued_for_draft",
-            resource_key="admin.invites.issue",
-            details_json=json.dumps(
-                {"role": employee.role, "delivery": "sms", "invite_id": invite_id},
-                sort_keys=True,
-            ),
-            ip_address=ip_address,
-        )
-    )
-    session.add(
-        AuditLog(
-            actor_user_id=current.id,
-            target_user_id=user_id,
-            action=(
-                "invite.text_dry_run"
-                if sms_result.success and sms_result.dry_run
-                else "invite.text_sent"
-                if sms_result.success
-                else "invite.text_failed"
-            ),
-            resource_key="admin.invites.issue",
-            details_json=json.dumps(safe_details, sort_keys=True),
-            ip_address=ip_address,
-        )
-    )
-    session.commit()
-
-    return templates.TemplateResponse(
-        request,
-        "team/admin/invite_issued.html",
-        {
-            "request": request,
-            "title": "Invite issued",
-            "current_user": current,
-            "invite_url": invite_url,
-            "role": employee.role,
-            "email_hint": employee.display_name or "",
-            "csrf_token": issue_token(request),
-            "sms_result": sms_result,
-            "sms_phone_label": phone_label,
-        },
-    )
-
 
 def _pay_rate_rows(session: Session, *, include_inactive: bool = False) -> list[dict]:
     stmt = select(User).order_by(User.is_active.desc(), User.display_name, User.username)

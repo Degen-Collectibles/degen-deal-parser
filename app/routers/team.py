@@ -76,6 +76,7 @@ from ..models import (
     utcnow,
 )
 from ..team.pii import PIIDecryptError, decrypt_pii, encrypt_pii
+from ..team.sms_consent import consent_context, record_consent
 from ..team.shift_labels import parse_shift_start_minutes
 from ..rate_limit import rate_limited_or_429
 from ..shared import app_home_for_role, templates
@@ -1415,7 +1416,7 @@ def _profile_completion_for(
             "label": "Phone number",
             "done": phone_done,
             "href": "/team/profile",
-            "hint": "Needed for schedule and time-off texts.",
+            "hint": "Contact number; SMS is a separate optional choice.",
         },
         {
             "key": "emergency",
@@ -1694,7 +1695,7 @@ def team_notifications(
             "active_announcements": _active_announcements_for(session, limit=5),
             "timeoff_rows": list(timeoff_rows),
             "profile_completion": profile_completion,
-            "sms_enabled": bool(profile_completion.get("phone_ready")),
+            "sms_enabled": consent_context(session, user.id)["opted_in"],
             "csrf_token": issue_token(request),
             **_nav_context(session, user),
         },
@@ -2073,9 +2074,42 @@ def team_profile(
             "profile_completion": profile_completion,
             "flash": flash,
             "csrf_token": issue_token(request),
+            "sms_consent": consent_context(session, user.id),
             **_nav_context(session, user),
         },
     )
+
+
+@router.post("/team/profile/sms", dependencies=[Depends(require_csrf)])
+def team_sms_preference(
+    request: Request,
+    action: str = Form(default=""),
+    sms_opt_in: str = Form(default=""),
+    consent_version: str = Form(default=""),
+    phone_binding: str = Form(default=""),
+    session: Session = Depends(get_session),
+):
+    denial, user = _require_employee(request, session, resource_key="page.profile")
+    if denial:
+        return denial
+    if limited := rate_limited_or_429(
+        request, key_prefix=f"team:sms-consent:{user.id}", max_requests=20, window_seconds=900,
+    ):
+        return limited
+    if action not in {"subscribe", "unsubscribe"}:
+        return HTMLResponse("Choose a text preference.", status_code=400)
+    if action == "subscribe" and sms_opt_in != "yes":
+        return RedirectResponse("/team/profile?flash=No+subscription+added.+SMS+is+optional.#sms-preferences", status_code=303)
+    try:
+        record_consent(
+            session, user_id=user.id, opted_in=action == "subscribe",
+            version=consent_version, phone_binding=phone_binding,
+            ip_address=request.client.host if request.client else None,
+        )
+    except ValueError as exc:
+        return HTMLResponse(str(exc), status_code=400)
+    session.commit()
+    return RedirectResponse("/team/profile?flash=Text+preference+saved.#sms-preferences", status_code=303)
 
 
 @router.post("/team/profile", dependencies=[Depends(require_csrf)])
