@@ -150,6 +150,7 @@
       const text = document.createElement('span'); text.textContent = [p.name, p.language, p.market_price_source === 'TCGPlayer Market' && p.market_price ? '$' + p.market_price + ' market' : ''].filter(Boolean).join(' · '); b.append(text);
       b.onclick = () => task(async () => {hydrate(await api(path('/select'), {version: draft.version, index})); step(2); notice('Looking up product facts and matching your shop settings…'); await loadDefaults();}); $('candidates').append(b);
     });
+    if (!(draft.candidates || []).length && Object.hasOwn(draft, 'search_warning')) {const p = document.createElement('p'); p.textContent = 'No matching catalog products found. Try a different name or upload a clean product image.'; $('candidates').append(p);}
     if (draft.search_warning) {const p = document.createElement('p'); p.textContent = draft.search_warning; $('candidates').append(p);}
   }
   function renderReview() {
@@ -177,9 +178,7 @@
     $('shop-warning').textContent = 'Shop settings loaded. You can edit the suggested values here.';
   }
   async function shopFields() {
-    const result = await api('/shop-fields?category_id=' + encodeURIComponent(draft.fields.category_id || ''));
-    draft.shop_metadata = result;
-    applyShopFields(result);
+    hydrate(await api(path('/shop-fields'), {version: draft.version}));
   }
   async function loadDefaults() {
     hydrate(await api(path('/autofill'), {version: draft.version}));

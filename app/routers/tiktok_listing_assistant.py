@@ -285,7 +285,7 @@ def autofill(draft_id: str, body: dict, user=Depends(authorized), session: Sessi
             details = defaults.catalog_details(product)
         except Exception:
             warnings.append('Product contents/language lookup is unavailable. Catalog identity is retained; review the details.')
-        metadata = {'categories': [], 'warehouses': [], 'attributes': []}
+        metadata = draft.get('shop_metadata') or {'categories': [], 'warehouses': [], 'attributes': []}
         try:
             # Rank synced listings locally, then verify the selected source live.
             rows = session.exec(select(TikTokProduct).order_by(TikTokProduct.synced_at.desc()).limit(1000)).all()
@@ -307,10 +307,11 @@ def autofill(draft_id: str, body: dict, user=Depends(authorized), session: Sessi
             if current_category and (not category or current_category != draft.get('defaults', {}).get('values', {}).get('category_id')):
                 category = str(current_category)
             metadata = shop_fields(category, user, session)
+            metadata['category_id'] = category
             if not listing:
                 warnings.append('No verified shop listing matches this product type, language and order option. Complete the missing shop/package details.')
         except Exception:
-            warnings.append('Shop defaults could not be verified. Your product is saved; use Edit details or retry defaults.')
+            warnings.append('Shop defaults could not be verified. Previously loaded requirements are retained. Your product is saved; use Edit details or retry defaults.')
         proposed, sources = defaults.suggestions(product, draft['fields'], details, listing, metadata)
         defaults.apply_defaults(draft, proposed, sources, details, ' '.join(warnings))
         draft['shop_metadata'] = metadata
@@ -368,25 +369,42 @@ def save(draft_id: str, body: dict, user=Depends(authorized), session: Session =
             for key in defaults.PACKAGE_KEYS:
                 clean[key] = ''
             draft['assets'].pop('source', None)
-        if old.get('language') and clean.get('language', old.get('language')) != old.get('language'):
+        if clean.get('language', old.get('language')) != old.get('language'):
             options = draft.get('language_options', [])
             if draft.get('selected_product', {}).get('external_id') and options and clean['language'] not in options:
                 raise ValueError('Choose an available language for this product: ' + ', '.join(options) + '. Search for a different catalog edition if needed.')
             baseline = draft.get('defaults', {}).get('values', {})
             for key in ('title', 'description'):
-                if clean.get(key, old.get(key)) == baseline.get(key) and baseline.get(key):
-                    before = (' — ' + old['language'] + ' — ') if key == 'title' else ('Language: ' + old['language'])
+                if baseline.get(key):
+                    before = (' — ' + old['language'] + ' — ') if key == 'title' and old.get('language') else ('Language: ' + old['language']) if old.get('language') else ''
                     after = (' — ' + clean['language'] + ' — ') if key == 'title' else ('Language: ' + clean['language'])
-                    clean[key] = str(baseline[key]).replace(before, after)
-            clean.update(product_confirmed=False, image_confirmed=False, shipping_confirmed=False)
-            if clean.get('price', old.get('price')) == old.get('price'):
-                clean['price'] = ''
-            draft.get('defaults', {}).get('sources', {}).pop('price', None)
-            for key in defaults.PACKAGE_KEYS:
-                clean[key] = ''
-            # A catalog photo from a different language is not a valid source.
-            if draft.get('selected_product', {}).get('external_id'):
-                draft['assets'].pop('source', None)
+                    generated = str(baseline[key])
+                    if before:
+                        updated = generated.replace(before, after)
+                    elif key == 'title':
+                        head, separator, tail = generated.rpartition(' — ')
+                        updated = head + after + tail if separator else generated
+                    else:
+                        head, separator, tail = generated.partition('\n\n')
+                        updated = head + '\n\n' + after + (separator + tail if separator else '')
+                    if clean.get(key, old.get(key)) == baseline[key]:
+                        clean[key] = updated
+                    baseline[key] = updated
+            if old.get('language'):
+                clean.update(product_confirmed=False, image_confirmed=False, shipping_confirmed=False)
+                for key in ('price', 'rip_price'):
+                    if clean.get(key, old.get(key)) == old.get(key):
+                        clean[key] = ''
+                        if key in baseline:
+                            baseline[key] = ''
+                draft.get('defaults', {}).get('sources', {}).pop('price', None)
+                for key in defaults.PACKAGE_KEYS:
+                    clean[key] = ''
+                    if key in baseline:
+                        baseline[key] = ''
+                # A catalog photo from a different language is not a valid source.
+                if draft.get('selected_product', {}).get('external_id'):
+                    draft['assets'].pop('source', None)
         if any(old.get(k) for k in defaults.PACKAGE_KEYS) and clean.get('fulfillment_mode', old.get('fulfillment_mode')) != old.get('fulfillment_mode'):
             # Rip packaging does not describe a complete sealed box.
             for key in defaults.PACKAGE_KEYS:
@@ -405,6 +423,7 @@ def save(draft_id: str, body: dict, user=Depends(authorized), session: Session =
             draft.pop('image_history', None)
         if clean.get("category_id", old.get("category_id")) != old.get("category_id"):
             clean["attributes"] = {}
+            draft.pop('shop_metadata', None)
         draft["fields"].update(clean)
         draft['missing_defaults'] = defaults.missing_fields(draft['fields'], draft.get('shop_metadata', {}))
         draft["duplicates"] = duplicates(session, draft["fields"].get("product_name", ""))
@@ -429,6 +448,16 @@ def design(draft_id: str, body: dict, background_tasks: BackgroundTasks, user=De
         revision = revision.strip()
         if revision and not draft['assets'].get('designed'):
             raise ValueError('Generate an image before requesting changes to it.')
+        missing = defaults.missing_fields(draft['fields'], draft.get('shop_metadata', {}))
+        if missing:
+            raise ValueError('Complete these details before generating: ' + ', '.join(missing) + '.')
+        service.stock_allocation(draft['fields'])
+        service.decimal_field(draft['fields'].get('price'), 'Price', '999999.99')
+        if service.fulfillment(draft['fields']) == 'both' and draft['fields'].get('rip_price'):
+            service.decimal_field(draft['fields']['rip_price'], 'Live Rip price', '999999.99')
+        service.decimal_field(draft['fields'].get('weight'), 'Packed weight', '150', 3)
+        for key in ('length', 'width', 'height'):
+            service.decimal_field(draft['fields'].get(key), 'Packed ' + key, '120', 0)
         draft["image_job"] = {"id": job_id, "status": "running", "started_at": time.time(), 'revision': revision}
         service.save_draft(session, draft, previous, user.id, "image_job_started")
         background_tasks.add_task(run_design, session.get_bind(), draft_id, job_id, user.id)
@@ -497,6 +526,26 @@ def shop_fields(category_id: str = "", user=Depends(authorized), session: Sessio
                  for a in attrs if a.get("type", "PRODUCT_PROPERTY") == "PRODUCT_PROPERTY"]
         return {"categories": available_categories(categories), "attributes": attrs,
                 "warehouses": [{"id": w["id"], "name": w["name"]} for w in warehouses if w.get("effect_status") == "ENABLED" and w.get("type") == "SALES_WAREHOUSE"]}
+    except Exception as exc:
+        fail(exc)
+
+
+@router.post('/drafts/{draft_id}/shop-fields')
+def draft_shop_fields(draft_id: str, body: dict, user=Depends(authorized), session: Session = Depends(get_session)):
+    try:
+        draft, previous = editable(session, draft_id, body.get('version'))
+        category = str(draft['fields'].get('category_id') or '')
+        metadata = shop_fields(category, user, session)
+        metadata['category_id'] = category
+        draft['shop_metadata'] = metadata
+        allowed = {str(a['id']) for a in metadata['attributes']}
+        draft['fields']['attributes'] = {k: v for k, v in draft['fields'].get('attributes', {}).items() if k in allowed}
+        for attr in metadata['attributes']:
+            if str(attr.get('name', '')).lower() in {'language', 'card language'}:
+                draft['fields']['attributes'][str(attr['id'])] = draft['fields'].get('language', '')
+        draft['fields']['review_confirmed'] = False
+        draft['missing_defaults'] = defaults.missing_fields(draft['fields'], metadata)
+        return public(service.save_draft(session, draft, previous, user.id, 'shop_fields_loaded'))
     except Exception as exc:
         fail(exc)
 
