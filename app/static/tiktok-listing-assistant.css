@@ -10,3 +10,25 @@ html:has(.listing-app){scroll-behavior:auto}
 @media(min-width:1000px){body:has(.linear-sidebar) .listing-app{margin:0 auto}}
 
 #edit-details {margin:24px 0;padding:18px;border:1px solid var(--border,#34404e);border-radius:12px} #edit-details summary {cursor:pointer;font-weight:600;margin-bottom:16px} .product-summary {display:flex;align-items:center;gap:20px;margin:20px 0} .product-summary img {width:100px;height:110px;object-fit:contain} #defaults-warning {color:#dfad61} #image-revisions {margin:24px 0;padding-top:20px;border-top:1px solid var(--border,#34404e)} #image-history img {max-height:180px;object-fit:contain}
+/* Expanded details must not size the mobile viewport from intrinsic form widths. */
+.listing-app #edit-details{min-width:0;max-width:100%}
+.listing-app #edit-details .fields{grid-template-columns:minmax(0,1fr)}
+.listing-app #edit-details .two{grid-template-columns:repeat(2,minmax(0,1fr))}
+.listing-app #edit-details .four{grid-template-columns:repeat(4,minmax(0,1fr))}
+.listing-app #edit-details .search-row{grid-template-columns:minmax(0,2fr) minmax(0,1fr) auto}
+.listing-app #edit-details select{width:0;min-width:100%;max-width:100%}
+.listing-app .preset-save>label,.listing-app .product-summary>div{min-width:0}
+.listing-app .product-summary img{flex-shrink:0}
+@media(max-width:700px){
+ .listing-app #edit-details .two,.listing-app #edit-details .search-row{grid-template-columns:minmax(0,1fr)}
+ .listing-app #edit-details .four{grid-template-columns:repeat(2,minmax(0,1fr))}
+ .listing-app .preset-save{flex-direction:column;align-items:stretch}
+ .listing-app input,.listing-app select,.listing-app textarea{font-size:16px}
+}
+
+/* Price stays visible beside stock entry and wraps at phone widths. */
+.listing-app .listing-price{margin-top:20px;min-width:0;max-width:100%}
+.listing-app .price-adjustments{display:flex;flex-wrap:wrap;gap:8px}
+.listing-app .price-adjustments button{flex:1 1 80px;min-width:0}
+.listing-app .price-adjustments button[aria-pressed="true"]{background:#2b1c26;border-color:#e74b63;color:#fff}
+.listing-app .price-adjustments button:disabled{cursor:default}

@@ -63,13 +63,19 @@ class BrandAssetComplianceTests(TestCase):
     def test_master_is_the_approved_character_free_wordmark(self) -> None:
         self.assertEqual(sha256(STATIC / "degen-logo.png"), APPROVED_MASTER_SHA256)
 
-    def test_retired_artwork_bytes_are_absent_from_tracked_files(self) -> None:
+    def test_retired_artwork_bytes_are_absent_outside_listing_reference(self) -> None:
+        # The photo-to-listing flow explicitly uses the original full logo.
+        # This exception does not change the app/PWA/label branding contract.
         matches = [
             str(path.relative_to(ROOT))
             for path in tracked_files()
-            if sha256(path) in RETIRED_SHA256
+            if path != STATIC / 'listing-degen-full-logo.png' and sha256(path) in RETIRED_SHA256
         ]
         self.assertEqual(matches, [])
+
+    def test_listing_reference_is_the_unmodified_original_full_logo(self) -> None:
+        self.assertEqual(sha256(STATIC / 'listing-degen-full-logo.png'),
+                         'F0420343AE82811DB997D2A17B2EC020F75A450BB913FCD21F87070567EE4EBB')
 
     def test_managed_square_icons_have_expected_dimensions(self) -> None:
         for relative_path, expected_size in EXPECTED_SQUARE_SIZES.items():

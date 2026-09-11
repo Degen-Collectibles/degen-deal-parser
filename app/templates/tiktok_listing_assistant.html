@@ -30,17 +30,27 @@
     </section>
     <section data-panel="2" class="panel" hidden>
       <h2>How many do you have?</h2>
-      <div class="product-summary"><img id="summary-image" alt="Selected product" hidden><div><h3 id="summary-product"></h3><p id="defaults-summary" class="muted"></p><p id="market-reference"></p></div></div>
+      <div class="product-summary"><img id="summary-image" alt="Selected product" hidden><div><h3 id="summary-product"></h3><p id="defaults-summary" class="muted"></p></div></div>
       <label>Quantity available<input data-field="quantity" inputmode="numeric" type="number" min="0" max="999999" step="1" placeholder="Enter your total stock"></label>
+      <div class="listing-price">
+        <label for="listing-price">Price (USD)</label><input id="listing-price" data-field="price" inputmode="decimal" type="number" min="0.01" max="999999.99" step="0.01" placeholder="Enter your price" aria-describedby="market-reference price-state price-scope">
+        <input type="hidden" data-field="price_mode">
+        <p id="market-reference"></p>
+        <div class="price-adjustments" role="group" aria-label="Adjust price from verified market" aria-describedby="market-reference">
+          <button type="button" data-price-adjustment="0" aria-pressed="false">0% · Market</button>
+          <button type="button" data-price-adjustment="5" aria-pressed="false">+5%</button>
+          <button type="button" data-price-adjustment="10" aria-pressed="false">+10%</button>
+        </div>
+        <p id="price-state" role="status"></p><p id="price-scope" class="muted"></p>
+      </div>
       <p id="defaults-warning" role="status"></p>
-      <details id="edit-details"><summary>Edit details <span class="muted">— price, order options, language, shipping and copy</span></summary>
+      <details id="edit-details"><summary>Edit details <span class="muted">— order options, language, shipping and copy</span></summary>
       <button type="button" id="refresh-defaults">Look up defaults again</button>
       <div class="fields two"><label>Exact product name<input data-field="product_name" maxlength="180" placeholder="Set and product type"></label><label>Language / edition<input data-field="language" list="product-languages" maxlength="80" placeholder="Choose the product language"><datalist id="product-languages"></datalist></label></div>
       <p class="muted">Languages come from this catalog product. Changing edition requires its matching photo and price.</p>
       <label>Order options<select id="fulfillment-mode" data-field="fulfillment_mode"><option value="rip">Live Rip</option><option value="sealed">Shipped Sealed</option><option value="both">Both — two variants</option></select></label>
       <p id="fulfillment-copy" class="muted"></p>
       <div class="fields"><label>Listing title<input data-field="title" maxlength="255"></label><label>Description<textarea data-field="description" rows="5" maxlength="8000"></textarea></label></div>
-      <div class="fields two"><label>Price (USD)<input data-field="price" inputmode="decimal" type="number" min="0.01" step="0.01" placeholder="0.00"></label></div>
       <div id="variant-allocation" hidden><h3>Allocate your total stock</h3><p class="muted">Quantity available is the total across both variants. Start with 10% sealed, rounded up to a whole unit; the rest goes to Live Rip. Adjust before submitting.</p><div class="fields two"><label>Shipped Sealed quantity<input id="sealed-quantity" data-field="sealed_quantity" type="number" min="0" max="999999" step="1" placeholder="10% by default"></label><label>Live Rip price (USD)<input data-field="rip_price" type="number" min="0.01" step="0.01" placeholder="Same as base price"></label></div><p id="allocation-summary" role="status"></p><button type="button" id="reset-allocation">Use 10% sealed / 90% live rip</button></div>
       <div class="section-head"><h3>TikTok category & dispatch</h3><button id="load-shop">Load shop fields</button></div><p id="shop-warning" class="muted">Load your shop’s categories and warehouses. You can save progress before connecting TikTok.</p>
       <div class="fields two"><label>Filter categories<input id="category-filter" type="search" placeholder="Trading cards"></label><label>Category<select data-field="category_id" id="category"><option value="">Choose category</option></select></label><label>Dispatch warehouse<select data-field="warehouse_id" id="warehouse"><option value="">Choose warehouse</option></select></label><label>Brand (if required)<select data-field="brand_id" id="brand"><option value="">No brand selected</option></select></label></div>

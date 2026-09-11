@@ -346,7 +346,7 @@ async def upload_source(draft_id: str, request: Request, file: UploadFile = File
         fail(exc)
 
 
-TEXT_FIELDS = {"product_name", "title", "description", "language", "image_heading", "theme", "category_id", "brand_id", "warehouse_id", "price", "quantity", "weight", "length", "width", "height", "fulfillment_mode", "sealed_quantity", "rip_price"}
+TEXT_FIELDS = {"product_name", "title", "description", "language", "image_heading", "theme", "category_id", "brand_id", "warehouse_id", "price", "price_mode", "quantity", "weight", "length", "width", "height", "fulfillment_mode", "sealed_quantity", "rip_price"}
 BOOL_FIELDS = {"product_confirmed", "image_confirmed", "shipping_confirmed", "review_confirmed", "duplicates_confirmed"}
 
 
@@ -364,6 +364,10 @@ def save(draft_id: str, body: dict, user=Depends(authorized), session: Session =
             raise ValueError("Invalid category attributes.")
         clean["attributes"] = {str(k)[:100]: str(v)[:200] for k, v in attrs.items()}
         old = draft["fields"]
+        if 'price_mode' in clean and clean['price_mode'] not in {'', 'custom', '0', '5', '10'}:
+            raise ValueError('Choose a market adjustment or enter a custom price.')
+        if 'price' in clean and clean['price'] != old.get('price') and 'price_mode' not in clean:
+            clean['price_mode'] = 'custom'
         for attr in draft.get('shop_metadata', {}).get('attributes', []):
             if str(attr.get('name', '')).lower() in {'language', 'card language'}:
                 clean['attributes'][str(attr['id'])] = clean.get('language', old.get('language', ''))
@@ -371,7 +375,7 @@ def save(draft_id: str, body: dict, user=Depends(authorized), session: Session =
             draft['selected_product'] = {'source_name': 'Manual product details'}
             draft.pop('defaults', None)
             draft.pop('language_options', None)
-            clean.update(price='', product_confirmed=False, image_confirmed=False)
+            clean.update(price='', rip_price='', price_mode='', product_confirmed=False, image_confirmed=False)
             for key in defaults.PACKAGE_KEYS:
                 clean[key] = ''
             draft['assets'].pop('source', None)
@@ -401,6 +405,8 @@ def save(draft_id: str, body: dict, user=Depends(authorized), session: Session =
                 for key in ('price', 'rip_price'):
                     if clean.get(key, old.get(key)) == old.get(key):
                         clean[key] = ''
+                        if key == 'price':
+                            clean['price_mode'] = ''
                         if key in baseline:
                             baseline[key] = ''
                 draft.get('defaults', {}).get('sources', {}).pop('price', None)
