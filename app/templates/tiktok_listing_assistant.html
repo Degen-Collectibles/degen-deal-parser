@@ -19,24 +19,28 @@
   </section>
   <div id="workspace" hidden>
     <div class="workspace-bar"><button id="all-drafts" class="quiet">← All drafts</button><span id="save-status" class="muted"></span><button id="save-draft">Save progress</button></div>
-    <nav class="steps" aria-label="Listing steps"><button data-step="1" aria-current="step"><span>1</span> Identify</button><button data-step="2"><span>2</span> Details</button><button data-step="3"><span>3</span> Review</button></nav>
+    <nav class="steps" aria-label="Listing steps"><button data-step="1" aria-current="step"><span>1</span> Product</button><button data-step="2"><span>2</span> Quantity</button><button data-step="3"><span>3</span> Review</button></nav>
     <section data-panel="1" class="panel">
       <h2>What are we listing?</h2>
       <div class="capture-grid"><div class="capture"><label for="photo">Take a photo or upload one</label><p class="muted">Show the product name and packaging clearly.</p><input id="photo" type="file" accept="image/jpeg,image/png,image/webp" capture="environment"><img id="photo-preview" alt="Your identification photo" hidden></div><div><h3 id="identification-title">AI helps identify the product</h3><p id="identification" class="muted">Confirm the edition, language and product type before continuing.</p></div></div>
-      <div class="search-row"><label>Product name<input id="search-query" type="search" maxlength="180" placeholder="e.g. Destined Rivals Elite Trainer Box"></label><label>Game<select id="search-game"><option>Pokemon</option><option>Magic</option><option>Yu-Gi-Oh</option><option>One Piece</option><option>Lorcana</option></select></label><button id="search-products">Find product images</button></div>
+      <div class="search-row"><label>Product name<input id="search-query" type="search" maxlength="180" placeholder="e.g. Destined Rivals Elite Trainer Box"></label><label>Game<select id="search-game"><option>Pokemon</option><option>Magic</option><option>Yu-Gi-Oh</option><option>One Piece</option><option>Lorcana</option></select></label><button id="search-products">Find product</button></div>
       <div id="candidates" class="candidates"></div>
       <div class="selected-product"><img id="source-preview" alt="Selected clean product image" hidden><div><p id="source-info" class="muted">No product image selected.</p><label class="upload-label">Or upload a clean image you can use<input id="source" type="file" accept="image/jpeg,image/png,image/webp"></label></div></div>
-      <div class="fields two"><label>Exact product name<input data-field="product_name" maxlength="180" placeholder="Set and product type"></label><label>Language / edition<input data-field="language" maxlength="80" placeholder="Confirm from packaging"></label></div>
-      <label class="check"><input type="checkbox" data-field="product_confirmed">I confirmed the exact sealed product, edition, language and contents.</label>
-      <label class="check"><input type="checkbox" data-field="image_confirmed">The image matches this product and we have permission to use it.</label>
-      <div class="actions"><button id="to-details" class="primary">Continue to details →</button></div>
+      <div class="actions"><button id="to-details" class="primary">Continue →</button></div>
     </section>
     <section data-panel="2" class="panel" hidden>
-      <h2>Make it listing-ready</h2><p class="muted">Choose how customers can order. All generated details are editable.</p>
-      <label>Order options<select id="fulfillment-mode" data-field="fulfillment_mode"><option value="sealed">Shipped Sealed</option><option value="rip">Live Rip</option><option value="both">Both — two variants</option></select></label>
+      <h2>How many do you have?</h2>
+      <div class="product-summary"><img id="summary-image" alt="Selected product" hidden><div><h3 id="summary-product"></h3><p id="defaults-summary" class="muted"></p><p id="market-reference"></p></div></div>
+      <label>Quantity available<input data-field="quantity" inputmode="numeric" type="number" min="0" max="999999" step="1" placeholder="Enter your total stock"></label>
+      <p id="defaults-warning" role="status"></p>
+      <details id="edit-details"><summary>Edit details <span class="muted">— price, order options, language, shipping and copy</span></summary>
+      <button type="button" id="refresh-defaults">Look up defaults again</button>
+      <div class="fields two"><label>Exact product name<input data-field="product_name" maxlength="180" placeholder="Set and product type"></label><label>Language / edition<input data-field="language" list="product-languages" maxlength="80" placeholder="Choose the product language"><datalist id="product-languages"></datalist></label></div>
+      <p class="muted">Languages come from this catalog product. Changing edition requires its matching photo and price.</p>
+      <label>Order options<select id="fulfillment-mode" data-field="fulfillment_mode"><option value="rip">Live Rip</option><option value="sealed">Shipped Sealed</option><option value="both">Both — two variants</option></select></label>
       <p id="fulfillment-copy" class="muted"></p>
       <div class="fields"><label>Listing title<input data-field="title" maxlength="255"></label><label>Description<textarea data-field="description" rows="5" maxlength="8000"></textarea></label></div>
-      <div class="fields two"><label>Price (USD)<input data-field="price" inputmode="decimal" type="number" min="0.01" step="0.01" placeholder="0.00"></label><label>Quantity available<input data-field="quantity" inputmode="numeric" type="number" min="0" max="999999" step="1" placeholder="0"></label></div>
+      <div class="fields two"><label>Price (USD)<input data-field="price" inputmode="decimal" type="number" min="0.01" step="0.01" placeholder="0.00"></label></div>
       <div id="variant-allocation" hidden><h3>Allocate your total stock</h3><p class="muted">Quantity available is the total across both variants. Start with 10% sealed, rounded up to a whole unit; the rest goes to Live Rip. Adjust before submitting.</p><div class="fields two"><label>Shipped Sealed quantity<input id="sealed-quantity" data-field="sealed_quantity" type="number" min="0" max="999999" step="1" placeholder="10% by default"></label><label>Live Rip price (USD)<input data-field="rip_price" type="number" min="0.01" step="0.01" placeholder="Same as base price"></label></div><p id="allocation-summary" role="status"></p><button type="button" id="reset-allocation">Use 10% sealed / 90% live rip</button></div>
       <div class="section-head"><h3>TikTok category & dispatch</h3><button id="load-shop">Load shop fields</button></div><p id="shop-warning" class="muted">Load your shop’s categories and warehouses. You can save progress before connecting TikTok.</p>
       <div class="fields two"><label>Filter categories<input id="category-filter" type="search" placeholder="Trading cards"></label><label>Category<select data-field="category_id" id="category"><option value="">Choose category</option></select></label><label>Dispatch warehouse<select data-field="warehouse_id" id="warehouse"><option value="">Choose warehouse</option></select></label><label>Brand (if required)<select data-field="brand_id" id="brand"><option value="">No brand selected</option></select></label></div>
@@ -45,16 +49,18 @@
       <h3>Packed shipping measurements</h3><p class="muted">Measure the product with its shipping packaging. Dimensions are in whole inches.</p>
       <div class="fields two"><label>Saved packaging<select id="packaging-preset"><option value="">Enter measurements</option></select></label><div class="preset-save"><label>Save as a new preset<input id="preset-name" placeholder="e.g. ETB with outer box"></label><button id="save-preset">Save preset</button></div></div>
       <div class="fields four"><label>Weight (lb)<input data-field="weight" type="number" inputmode="decimal" min="0.001" step="0.001"></label><label>Length (in)<input data-field="length" type="number" inputmode="numeric" min="1" step="1"></label><label>Width (in)<input data-field="width" type="number" inputmode="numeric" min="1" step="1"></label><label>Height (in)<input data-field="height" type="number" inputmode="numeric" min="1" step="1"></label></div>
-      <label class="check"><input data-field="shipping_confirmed" type="checkbox">I confirmed these packed measurements for this product.</label>
-      <h3>Degen listing image</h3><div class="fields two"><label>Image headline<input data-field="image_heading" maxlength="70"></label><label>Stage color<select data-field="theme"><option value="blue">Electric blue</option><option value="purple">Purple</option><option value="green">Emerald</option><option value="red">Crimson</option></select></label></div>
-      <p class="muted">GPT Image 2 uses your product photo and our Degen design reference. Check generated packaging details against the source before submitting.</p>
-      <div class="actions"><button data-back="1">← Identify</button><button id="use-source-image">Use original product photo</button><button id="generate-preview" class="primary">Build listing preview →</button></div>
+      <h3>Degen listing image</h3><div class="fields two"><label>Image headline<input data-field="image_heading" maxlength="70"></label></div>
+      <p class="muted">GPT Image 2 chooses a background suited to the product and follows our Degen design reference.</p>
+      </details>
+      <div class="actions"><button data-back="1">← Identify</button><button id="use-source-image">Use original product photo</button><button id="generate-preview" class="primary">Generate listing →</button></div>
     </section>
     <section data-panel="3" class="panel" hidden>
       <h2>Review your listing</h2><div class="review-grid"><img id="designed-preview" alt="Finished Degen listing image" hidden><div><span class="badge" id="fulfillment-badge">Shipped Sealed</span><h3 id="review-title"></h3><p id="review-description"></p><p id="review-fulfillment"></p><p id="review-allocation"></p><dl id="review-details"></dl><p id="review-source" class="muted"></p></div></div>
+      <section id="image-revisions"><label>Describe changes to the image <span class="muted">(optional)</span><textarea id="image-change" rows="2" maxlength="1500" placeholder="e.g. A darker background, green lighting, and a larger product"></textarea></label><button id="regenerate-image" type="button">Regenerate image</button><p class="muted">Uses this image, the original product photo and our Degen reference. Listing details stay the same.</p><details id="previous-images"><summary>Previous images</summary><div id="image-history" class="candidates"></div></details></section>
       <div id="duplicates" hidden><h3>Check existing listings</h3><p class="muted">Possible matches in the last synced catalog:</p><ul id="duplicate-list"></ul><label class="check"><input data-field="duplicates_confirmed" type="checkbox">I checked the matches and intend to create a separate listing.</label></div>
       <p>AI-generated art can change packaging details. Compare the artwork, edition, language and product shape against the source photo before submitting.</p>
-      <label class="check"><input data-field="review_confirmed" type="checkbox">I verified the product packaging and reviewed the image, copy, price, quantity, category and shipping details.</label>
+      <input hidden type="checkbox" data-field="product_confirmed"><input hidden type="checkbox" data-field="image_confirmed"><input hidden type="checkbox" data-field="shipping_confirmed">
+      <label class="check"><input data-field="review_confirmed" type="checkbox">I verified the product, language, image and permission to use it, and reviewed the copy, price, quantity, category and packed shipping settings.</label>
       <div class="actions"><button data-back="2">← Edit details</button><button id="tiktok-draft">Save as TikTok draft</button><button id="submit-listing" class="primary">Submit to TikTok for review</button></div>
       <p class="muted small">Submission sends this listing to TikTok. TikTok’s review determines when it becomes available.</p>
     </section>

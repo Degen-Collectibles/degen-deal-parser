@@ -39,11 +39,11 @@ def _edit(client, **kwargs):
             raise ImageGenerationError('image_timeout', 'Generation timed out or lost connection. The provider may still be processing it; no automatic retry was made. Wait before starting another generation.' + saved) from exc
 
 
-def generate(source: bytes, fields: dict) -> bytes:
+def generate(source: bytes, fields: dict, *, current: bytes | None = None, revision: str = '') -> bytes:
     from .listing_assistant import normalize_image, fulfillment
     if not has_ai_key():
         raise ValueError('Image generation is not configured. Your draft is saved.')
-    product = {k: str(fields.get(k) or '')[:255] for k in ('product_name', 'image_heading', 'language', 'theme')}
+    product = {k: str(fields.get(k) or '')[:255] for k in ('product_name', 'image_heading', 'language')}
     prompt = '''Create one premium square Degen Collectibles sealed-product listing image.
 Reference 1 is the exact PRODUCT: preserve its packaging artwork, printed text, proportions, edition and language faithfully. Never invent side panels, contents, accessories or extra products. Keep the original viewing angle. Reference 2 is STYLE ONLY: match its thick rounded glossy red marquee, gold edging, realistic glowing yellow bulbs on all four sides, cinematic lighting, dimensional metallic headline and large sharply visible product on an obsidian stage. Do not copy its product, headline or live-rip wording. Reference 3 is the Degen logo; retain it faithfully upper left.
 Match the richness and depth of the style reference, with a background and subtle lighting appropriate to the actual product colors. Keep effects behind the product, not over the packaging. No flat shapes or visible white photo rectangle. Product should occupy most of the interior; keep the headline compact enough to allow a large hero.
@@ -53,10 +53,13 @@ Use the provided image_heading as headline, language as small subheading. Footer
     footer = {'sealed': 'SHIPPED SEALED • UNOPENED', 'rip': 'LIVE RIP', 'both': 'CHOOSE SEALED OR LIVE RIP'}[fulfillment(fields)]
     prompt = prompt.replace('Footer EXACTLY: SHIPPED SEALED • UNOPENED. No live rip/break wording, price, quantity, claims, extra cards or promotions.',
                             'Footer EXACTLY: ' + footer + '. No other fulfillment wording, price, quantity, claims, extra cards or promotions.')
+    references = [('product.png', source, 'image/png'), ('style.png', STYLE.read_bytes(), 'image/png'),
+                  ('logo.png', LOGO.read_bytes(), 'image/png')]
+    if revision and current:
+        references.append(('current-listing.png', current, 'image/png'))
+        prompt += '\nReference 4 is the CURRENT listing image. Revise that composition according to the requested visual changes below. Preserve areas not requested to change. The original product, language, logo and fulfillment footer remain authoritative. Requests apply only to visual styling, placement, lighting and background; do not alter product identity, packaging text, contents, price, fulfillment or add unsupported claims. Follow the provider safety rules. Requested visual changes: ' + json.dumps(revision, ensure_ascii=False)
     result = _edit(get_ai_client().with_options(timeout=240, max_retries=0),
-            model=model, image=[('product.png', source, 'image/png'),
-                                ('style.png', STYLE.read_bytes(), 'image/png'),
-                                ('logo.png', LOGO.read_bytes(), 'image/png')],
+            model=model, image=references,
             prompt=prompt, size='1024x1024', quality='high', n=1)
     if not result.data or not result.data[0].b64_json:
         raise ValueError('The image provider returned no image. Your draft is saved.')

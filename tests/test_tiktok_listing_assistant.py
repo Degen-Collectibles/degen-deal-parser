@@ -9,7 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from PIL import Image
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.csrf import issue_token
@@ -106,7 +106,7 @@ def prepared(client):
     result = client.post(f"{BASE}/drafts/{d['id']}/source", data={'version': d['version']}, files={'file': ('photo.png', png(), 'image/png')})
     assert result.status_code == 200, result.text
     d = result.json()
-    fields = dict(product_name='Destined Rivals Elite Trainer Box', image_heading='DESTINED RIVALS', language='English',
+    fields = dict(fulfillment_mode='sealed', product_name='Destined Rivals Elite Trainer Box', image_heading='DESTINED RIVALS', language='English',
                   title='Destined Rivals Elite Trainer Box — Shipped Sealed', description='One English Elite Trainer Box.',
                   price='59.99', quantity='4', weight='1.5', length='8', width='7', height='5', theme='blue',
                   category_id='123', warehouse_id='456', product_confirmed=True, image_confirmed=True,
@@ -197,6 +197,7 @@ def test_submit_once_and_readback(client, fulfillment_mode):
     d = prepared(client)
     if fulfillment_mode != 'sealed':
         d = write(client, d, 'save', {'fields':{**d['fields'], 'fulfillment_mode':fulfillment_mode, 'title':'Test product', 'description':'One English box.', 'quantity':'10'}})
+        d = write(client, d, 'save', {'fields':{**d['fields'], 'weight':'1.5', 'length':'8', 'width':'7', 'height':'5', 'shipping_confirmed':True}})
         with patch('app.tiktok.listing_images.generate', return_value=png()):
             d = write(client, d, 'design', {})
         d = write(client, d, 'save', {'fields':{**d['fields'], 'review_confirmed':True}})
@@ -456,6 +457,7 @@ def stock_case(client):
     import copy
     d = prepared(client)
     d = write(client,d,'save',{'fields':{**d['fields'],'fulfillment_mode':'both','quantity':'10','sealed_quantity':'3','title':'Test product','description':'One box.'}})
+    d = write(client,d,'save',{'fields':{**d['fields'],'weight':'1.5','length':'8','width':'7','height':'5','shipping_confirmed':True}})
     with patch('app.tiktok.listing_images.generate',return_value=png()):
         d = write(client,d,'design',{})
     d = write(client,d,'save',{'fields':{**d['fields'],'review_confirmed':True}})
@@ -660,3 +662,404 @@ def test_interrupted_image_job_expires_visibly_without_retry(client):
     generate.assert_not_called()
     client.headers['X-CSRF-Token'] = client.get('/csrf').json()['token']
     assert write(client, saved, 'save', {'fields': {'title':'Editable again'}})['fields']['title'] == 'Editable again'
+
+
+# Autofill and revision regressions: exact catalog identity, safe defaults and recovery.
+from app.tiktok import listing_defaults as defaults
+
+
+def catalog_product(**overrides):
+    return {"name":"Destined Rivals Booster Box", "set_name":"SV10: Destined Rivals", "set_id":"24269",
+            "kind":"Booster Box", "game":"Pokemon", "category_id":"3", "external_id":"624679",
+            "image_url":"https://cdn.tcgtracking.com/product/624679_400w.jpg", "source_name":"TCGTracking",
+            "market_price":434.63, "market_price_source":"TCGPlayer Market", "price_checked_at":"2026-09-10T12:00:00+00:00", **overrides}
+
+
+def shop_template(**overrides):
+    return {"id":"987", "title":"Pokemon TCG Evolving Skies Booster Box English Live Rip Only", "status":"ACTIVATE",
+            "category_chains":[{"id":"123","is_leaf":True}], "brand":{"id":"789"},
+            "product_attributes":[{"id":"type","name":"Type","values":[{"name":"Box"}]}],
+            "package_weight":{"value":"0.1","unit":"POUND"},
+            "package_dimensions":{"length":"6","width":"6","height":"1","unit":"INCH"},
+            "skus":[{"inventory":[{"warehouse_id":"456","quantity":10}]}], **overrides}
+
+
+def autofill_metadata(*a, **kw):
+    return {"categories":[{"id":"123","name":"Boxes and Packs"}],"warehouses":[{"id":"456","name":"Main"}],
+            "attributes":[{"id":"language","name":"Language","is_required":True}]}
+
+
+def selected(client, product=None):
+    from unittest.mock import AsyncMock
+    d=create(client)
+    with patch('app.inventory.routes._search_sealed_products', new=AsyncMock(return_value=([product or catalog_product()], ''))):
+        d=write(client,d,'search',{'query':'Destined Rivals Booster Box','game':'Pokemon'})
+    with patch.object(service,'fetch_product_image',return_value=png()):
+        return write(client,d,'select',{'index':0})
+
+
+def fill(client, d, template=None):
+    template=template or shop_template()
+    gen=client.app.dependency_overrides[get_session]()
+    session=next(gen)
+    existing=session.exec(select(TikTokProduct).where(TikTokProduct.tiktok_product_id==template['id'])).first()
+    if not existing:
+        session.add(TikTokProduct(tiktok_product_id=template['id'],title=template['title'],status=template['status'],raw_payload=json.dumps(template)))
+        session.commit()
+    gen.close()
+    with patch.object(defaults,'catalog_details',return_value={'description':'Contains 36 booster packs.','language_options':['English','French']}), patch.object(routes,'context',return_value={}), patch.object(routes,'shop_call',return_value=template), patch.object(routes,'shop_fields',side_effect=autofill_metadata):
+        return write(client,d,'autofill',{})
+
+
+def test_new_drafts_default_to_live_rip_but_old_drafts_keep_sealed(client):
+    assert create(client)['fields']['fulfillment_mode']=='rip'
+    assert service.fulfillment({})=='sealed'
+
+
+@pytest.mark.parametrize('category,expected', [('3','English'),('85','Japanese'),('1','')])
+def test_language_uses_catalog_identity(category,expected):
+    assert defaults.language(catalog_product(category_id=category))==expected
+
+
+def test_autofill_populates_market_copy_and_shop_settings(client):
+    d=fill(client,selected(client))
+    f=d['fields']
+    assert f['fulfillment_mode']=='rip' and f['language']=='English'
+    assert f['price']=='434.63' and f['category_id']=='123' and f['warehouse_id']=='456'
+    assert f['weight']=='0.1' and f['attributes']['language']=='English'
+    assert '36 booster packs' in f['description'] and 'Evolving Skies' not in f['description']
+    assert d['missing_defaults']==['Quantity']
+    assert d['defaults']['sources']['shop']['id']=='987'
+    assert d['defaults']['sources']['price']['language']=='English'
+    assert d['fields']['review_confirmed'] is False
+
+
+def test_autofill_refresh_preserves_staff_overrides(client):
+    d=fill(client,selected(client))
+    d=write(client,d,'save',{'fields':{**d['fields'],'price':'449.00','description':'Our edited product facts.','weight':'0.4','quantity':'10'}})
+    d=fill(client,d)
+    assert d['fields']['price']=='449.00' and d['fields']['weight']=='0.4'
+    assert d['fields']['description']=='Our edited product facts.'
+    assert d['missing_defaults']==[]
+
+
+@pytest.mark.parametrize('name,lang,mode', [
+    ('Pokemon TCG Evolving Skies Booster Pack English Live Rip Only','English','rip'),
+    ('Pokemon TCG Evolving Skies Half Booster Box English Live Rip Only','English','rip'),
+    ('Pokemon TCG Evolving Skies Booster Box Case English Live Rip Only','English','rip'),
+    ('Pokemon TCG Black Bolt Booster Box Japanese Live Rip Only','English','rip'),
+    ('Pokemon TCG Evolving Skies Booster Box English Shipped Sealed','English','rip'),
+    ('Pokemon TCG Evolving Skies Booster Box English Live Rip Only','English','both'),
+])
+def test_incompatible_listings_never_supply_packaging(name,lang,mode):
+    product=catalog_product()
+    f={'language':lang,'fulfillment_mode':mode}
+    template=shop_template(title=name)
+    assert defaults.rank_listings(product,f,[template])==[]
+    values,_=defaults.suggestions(product,f,{},template,autofill_metadata())
+    assert 'weight' not in values and 'category_id' not in values
+
+
+@pytest.mark.parametrize('source,price', [('TCGPlayer Low',12),('TCGPlayer Market',None),('TCGPlayer Market',0),('TCGPlayer Market','NaN')])
+def test_missing_or_non_market_price_is_never_defaulted(source,price):
+    values,sources=defaults.suggestions(catalog_product(market_price=price,market_price_source=source),{'language':'English','fulfillment_mode':'rip'},{},None,autofill_metadata())
+    assert values['price']=='' and 'price' not in sources
+
+
+def test_language_change_invalidates_price_photo_and_package(client):
+    d=fill(client,selected(client))
+    d=write(client,d,'save',{'fields':{**d['fields'],'language':'French'}})
+    assert d['fields']['price']=='' and d['fields']['weight']==''
+    assert not d['assets'].get('source') and not d['fields']['image_confirmed']
+    assert 'price' not in d['defaults']['sources']
+    assert 'French' in d['fields']['title'] and 'Language: French' in d['fields']['description']
+
+
+def test_new_product_clears_stale_details_and_art(client):
+    d=fill(client,selected(client))
+    with patch.object(service,'fetch_product_image',return_value=png()):
+        d=write(client,d,'select',{'index':0})
+    assert not d.get('defaults') and not d['fields'].get('price')
+    assert not d.get('language_options') and not d.get('missing_defaults')
+    assert not d['fields'].get('category_id') and not d['fields'].get('weight')
+
+
+def test_autofill_unavailable_preserves_draft_and_exposes_missing_fields(client):
+    d=selected(client)
+    with patch.object(defaults,'catalog_details',side_effect=httpx.ReadTimeout('unavailable')), patch.object(routes,'context',side_effect=ValueError('not connected')):
+        d=write(client,d,'autofill',{})
+    assert d['assets']['source'] and d['defaults']['warning']
+    assert 'Category' in d['missing_defaults'] and 'Packed weight' in d['missing_defaults']
+
+
+def test_catalog_lookup_returns_actual_supported_languages_and_contents():
+    from unittest.mock import MagicMock
+    raw={'id':624679,'name':'Destined Rivals Booster Box','ext_data':{'CardText':'36 packs.<script>bad()</script>'},
+         'cardtrader':[{'tcg_player_id':624679,'match_confidence':100,'languages':['en','fr','de']},
+                      {'tcg_player_id':999,'match_confidence':100,'languages':['ja']}]}
+    responses=[]
+    for data in ({'products':[raw]}, {'prices':{'624679':{'tcg':{'Normal':{'market':435.00}}}}}):
+        r=MagicMock();r.json.return_value=data;responses.append(r)
+    product=catalog_product()
+    with patch.object(defaults.httpx,'Client') as http:
+        http.return_value.__enter__.return_value.get.side_effect=responses
+        result=defaults.catalog_details(product)
+    assert result['language_options']==['English','French','German']
+    assert result['description']=='36 packs.' and float(product['market_price'])==435
+
+
+def test_image_revision_keeps_listing_fields_and_previous_version(client):
+    d=prepared(client)
+    before=dict(d['fields']);old_url=d['assets']['designed']
+    with patch('app.tiktok.listing_images.generate',return_value=png()) as image_model:
+        d=write(client,d,'design',{'revision':'Use green lighting and make the product larger.'})
+    assert {**d['fields'],'review_confirmed':True}==before
+    assert image_model.call_args.kwargs['revision'].startswith('Use green')
+    assert image_model.call_args.kwargs['current']==png()
+    assert len(d['image_history'])==1 and client.get(old_url).status_code==200
+    key=d['image_history'][0]['key'];expected=d['assets'][key].split('?v=')[1]
+    d=write(client,d,'restore-image',{'key':key})
+    assert d['assets']['designed'].endswith(expected) and d['fields']['review_confirmed'] is False
+    assert d['fields']['price']==before['price']
+
+
+def test_blocked_revision_preserves_current_image_without_auto_retry(client):
+    from app.tiktok.listing_images import ImageGenerationError
+    d=prepared(client);old=d['assets']['designed'];fields=dict(d['fields'])
+    with patch('app.tiktok.listing_images.generate',side_effect=ImageGenerationError('image_blocked','Blocked; previous image saved.')) as model:
+        d=write(client,d,'design',{'revision':'Change the background'})
+    assert model.call_count==1 and d['image_job']['status']=='failed'
+    assert d['assets']['designed']==old and d['fields']==fields
+
+
+def test_revision_length_and_cross_draft_restore_are_rejected(client):
+    d=prepared(client)
+    for suffix,body in [('design',{'revision':'x'*1501}),('restore-image',{'key':'history_other'})]:
+        r=client.post(f"{BASE}/drafts/{d['id']}/{suffix}",json={'version':d['version'],**body})
+        assert r.status_code==422
+
+
+def test_image_revision_prompt_uses_four_references_and_ignores_stage_color():
+    import base64
+    from app.tiktok import listing_images
+    with patch.object(listing_images,'has_ai_key',return_value=True), patch.object(listing_images,'get_ai_client') as ai:
+        ai.return_value.with_options.return_value.images.edit.return_value=SimpleNamespace(data=[SimpleNamespace(b64_json=base64.b64encode(png()).decode())])
+        listing_images.generate(png(),{'fulfillment_mode':'rip','theme':'hot-pink-manual'},current=png(),revision='Softer green lighting')
+        request=ai.return_value.with_options.return_value.images.edit.call_args.kwargs
+    assert len(request['image'])==4 and 'Softer green lighting' in request['prompt']
+    assert 'hot-pink-manual' not in request['prompt'] and 'Footer EXACTLY: LIVE RIP' in request['prompt']
+
+
+def test_pack_multipacks_do_not_inherit_single_pack_settings():
+    assert defaults.unit_key('Destined Rivals Booster Pack Art Bundle [Set of 4]') != defaults.unit_key('Black Bolt Booster Pack')
+    assert defaults.unit_key('Destined Rivals 3 Pack Blister') != defaults.unit_key('Black Bolt Booster Pack')
+
+
+def test_source_replacement_removes_incompatible_restore_versions(client):
+    d=prepared(client)
+    with patch('app.tiktok.listing_images.generate',return_value=png()):
+        d=write(client,d,'design',{'revision':'Darker background'})
+    old_key=d['image_history'][0]['key']
+    r=client.post(f"{BASE}/drafts/{d['id']}/source",data={'version':d['version']},files={'file':('new.png',png(),'image/png')})
+    assert r.status_code==200
+    d=r.json()
+    assert not d.get('image_history') and old_key not in d['assets']
+    r=client.post(f"{BASE}/drafts/{d['id']}/restore-image",json={'version':d['version'],'key':old_key})
+    assert r.status_code==422
+
+
+def test_catalog_identity_manual_edit_clears_price_package_and_source(client):
+    d=fill(client,selected(client))
+    d=write(client,d,'save',{'fields':{**d['fields'],'product_name':'Destined Rivals Booster Pack'}})
+    assert not d['fields']['price'] and not d['fields']['weight'] and not d['assets'].get('source')
+    assert not d.get('defaults')
+
+
+def test_language_attribute_cannot_contradict_product_edition(client):
+    d=fill(client,selected(client))
+    d=write(client,d,'save',{'fields':{**d['fields'],'attributes':{'language':'Japanese'}}})
+    assert d['fields']['language']=='English' and d['fields']['attributes']['language']=='English'
+
+
+def test_unavailable_catalog_language_requires_another_product(client):
+    d=fill(client,selected(client))
+    r=client.post(f"{BASE}/drafts/{d['id']}/save",json={'version':d['version'],'fields':{**d['fields'],'language':'Japanese'}})
+    assert r.status_code==422 and 'available language' in r.json()['detail']
+    unchanged=client.get(f"{BASE}/drafts/{d['id']}").json()
+    assert unchanged['fields']['language']=='English' and unchanged['assets']['source']
+
+@pytest.mark.parametrize('key,value', [
+    ('quantity','1000000'),('quantity','-1'),('quantity','1.5'),('quantity','1e2'),
+    ('price','0'),('price','NaN'),('price','1000000'),('price','1.001'),
+    ('weight','0'),('weight','151'),('weight','1.0001'),
+    ('length','0'),('length','121'),('length','1.5'),('width','-1'),('height','Infinity'),
+])
+def test_invalid_numbers_never_start_paid_image_job(client,key,value):
+    from starlette.background import BackgroundTasks
+    d=prepared(client)
+    d=write(client,d,'save',{'fields':{**d['fields'],key:value}})
+    with patch.object(BackgroundTasks,'add_task') as enqueue:
+        r=client.post(f"{BASE}/drafts/{d['id']}/design",json={'version':d['version']})
+    assert r.status_code==422,r.text
+    enqueue.assert_not_called()
+
+
+@pytest.mark.parametrize('total,sealed,rip', [(0,0,0),(1,1,0),(2,1,1),(9,1,8),(10,1,9),(11,2,9),(99,10,89),(100,10,90),(999999,100000,899999)])
+def test_both_allocation_conserves_total_at_boundaries(total,sealed,rip):
+    assert service.stock_allocation({'fulfillment_mode':'both','quantity':str(total)})=={'sealed':sealed,'rip':rip}
+
+
+@pytest.mark.parametrize('key,value',[('sealed_quantity','11'),('sealed_quantity','-1'),('sealed_quantity','1.5'),('rip_price','-1'),('rip_price','NaN')])
+def test_invalid_variant_allocation_and_price_block_image_job(client,key,value):
+    from starlette.background import BackgroundTasks
+    d=prepared(client)
+    f={**d['fields'],'fulfillment_mode':'both','quantity':'10',key:value}
+    d=write(client,d,'save',{'fields':f})
+    # Changing fulfillment deliberately invalidates packed dimensions.
+    d=write(client,d,'save',{'fields':{**d['fields'],'weight':'2','length':'8','width':'6','height':'4'}})
+    with patch.object(BackgroundTasks,'add_task') as enqueue:
+        r=client.post(f"{BASE}/drafts/{d['id']}/design",json={'version':d['version']})
+    assert r.status_code==422
+    enqueue.assert_not_called()
+
+
+def test_repeated_language_changes_update_generated_copy_and_both_prices(client):
+    d=fill(client,selected(client))
+    d=write(client,d,'save',{'fields':{**d['fields'],'rip_price':'400'}})
+    d=write(client,d,'save',{'fields':{**d['fields'],'language':'French'}})
+    assert d['fields']['rip_price']==''
+    d=write(client,d,'save',{'fields':{**d['fields'],'language':'English'}})
+    assert ' — English — ' in d['fields']['title']
+    assert 'Language: English' in d['fields']['description']
+    assert 'French' not in d['fields']['title']
+
+
+def test_unknown_catalog_language_does_not_default_market_price():
+    values,sources=defaults.suggestions(catalog_product(category_id='1',game='Magic'),{'fulfillment_mode':'rip'},{},None,autofill_metadata())
+    assert values['language']=='' and values['price']=='' and 'price' not in sources
+
+
+def test_first_manual_language_updates_generated_copy(client):
+    d=fill(client,selected(client,catalog_product(category_id='1',game='Magic')))
+    d=write(client,d,'save',{'fields':{**d['fields'],'language':'English'}})
+    assert ' — English — ' in d['fields']['title'] and 'Language: English' in d['fields']['description']
+
+
+def test_transient_lookup_failure_does_not_freeze_generated_packaging():
+    d={'fields':{'weight':'0.1'},'defaults':{'values':{'weight':'0.1'}}}
+    defaults.apply_defaults(d,{}, {},{},'Unavailable')
+    defaults.apply_defaults(d,{'weight':'0.4'}, {},{})
+    assert d['fields']['weight']=='0.4'
+    d['fields']['weight']='0.8'
+    defaults.apply_defaults(d,{}, {},{},'Unavailable')
+    defaults.apply_defaults(d,{'weight':'0.6'}, {},{})
+    assert d['fields']['weight']=='0.8'
+
+
+def test_template_does_not_copy_neighboring_set_or_character_attributes():
+    attrs=[{'id':'type','name':'Type'},{'id':'set','name':'Set'},{'id':'character','name':'Character'}]
+    template=shop_template(product_attributes=[{**a,'values':[{'name':v}]} for a,v in zip(attrs,['Box','Evolving Skies','Rayquaza'])])
+    meta={**autofill_metadata(),'attributes':attrs}
+    values,_=defaults.suggestions(catalog_product(),{'language':'English','fulfillment_mode':'rip'},{},template,meta)
+    assert values['attributes']=={'type':'Box'}
+
+
+def test_manual_category_does_not_inherit_template_attributes_or_brand():
+    meta={**autofill_metadata(),'category_id':'other','categories':[{'id':'123'},{'id':'other'}]}
+    values,_=defaults.suggestions(catalog_product(),{'language':'English','fulfillment_mode':'rip','category_id':'other'},{},shop_template(),meta)
+    assert 'category_id' not in values and 'brand_id' not in values
+    assert values['attributes']=={'language':'English'}
+
+
+def test_catalog_contents_excludes_unrelated_marketing_introduction():
+    raw='<p>A Growing Storm of Stellar Strength!</p><p>Surging Sparks expansion!</p><p>Each Destined Rivals case includes 10 elite trainer boxes.</p><p>Each box contains 9 booster packs.</p>'
+    text=defaults.product_contents(raw)
+    assert text=='Each Destined Rivals case includes 10 elite trainer boxes.\nEach box contains 9 booster packs.'
+    assert defaults.product_contents('36 packs.<script>bad()</script>')=='36 packs.'
+
+@pytest.mark.parametrize('box,pack,game',[
+    ('Modern Horizons 3 Collector Booster Box','Modern Horizons 3 Collector Booster Pack','Magic'),
+    ('Modern Horizons 3 Collector Booster Display','Modern Horizons 3 Collector Booster Pack','Magic'),
+    ('Destined Rivals Three Pack Blister','Destined Rivals Single Pack Blister','Pokemon'),
+    ('Destined Rivals 3 Pack Blister','Destined Rivals Single Pack Blister','Pokemon'),
+    ('Destined Rivals Booster Box Case','Destined Rivals Booster Box','Pokemon'),
+    ('Prismatic Evolutions Mini Tin','Prismatic Evolutions Tin','Pokemon'),
+])
+def test_distinct_units_never_share_shipping(box,pack,game):
+    p=catalog_product(name=box,game=game,language='English')
+    template=shop_template(title=f'{game} {pack} English Shipped Sealed')
+    assert not defaults.comparable(p,{'language':'English','fulfillment_mode':'sealed'},template)
+
+
+def test_unapplied_suggestion_never_becomes_staff_override_baseline():
+    d={'fields':{'price':'434.63'},'defaults':{'values':{'price':'434.63'}}}
+    d['fields']['price']='450'
+    defaults.apply_defaults(d,{'price':'450'}, {},{})
+    defaults.apply_defaults(d,{'price':'475'}, {},{})
+    assert d['fields']['price']=='450'
+    assert d['defaults']['values']['price']=='434.63'
+
+
+def test_changed_category_metadata_survives_save_and_reload(client):
+    d=fill(client,selected(client))
+    d=write(client,d,'save',{'fields':{**d['fields'],'category_id':'222'}})
+    assert not d.get('shop_metadata') and not d['fields']['attributes']
+    meta={'categories':[{'id':'123','name':'Old'},{'id':'222','name':'New'}],
+          'warehouses':[{'id':'456','name':'Main'}],
+          'attributes':[{'id':'new_attr','name':'New required field','is_required':True}]}
+    with patch.object(routes,'shop_fields',return_value=meta):
+        d=write(client,d,'shop-fields',{})
+    d=write(client,d,'save',{'fields':{**d['fields'],'attributes':{'new_attr':'Filled'},'quantity':'5'}})
+    loaded=client.get(f"{BASE}/drafts/{d['id']}").json()
+    assert loaded['shop_metadata']['category_id']=='222'
+    assert loaded['shop_metadata']['attributes'][0]['id']=='new_attr'
+    assert loaded['fields']['attributes']=={'new_attr':'Filled'}
+    assert not loaded['missing_defaults']
+
+
+@pytest.mark.parametrize('endpoint',['autofill','shop-fields','restore-image','design'])
+@pytest.mark.parametrize('role',['owner','reviewer','viewer','employee'])
+def test_new_mutations_reject_non_admin_manager(client,endpoint,role):
+    d=create(client)
+    client.headers['x-role']=role
+    r=client.post(f"{BASE}/drafts/{d['id']}/{endpoint}",json={'version':d['version']})
+    assert r.status_code==403
+
+@pytest.mark.parametrize('large,small',[
+ ('Three Booster Pack Blister','Single Booster Pack Blister'),
+ ('3 Booster Pack Blister','1 Booster Pack Blister'),
+ ('Thirty Six Pack Bundle','Six Pack Bundle'),
+ ('Thirty-Six Pack Bundle','Six Pack Bundle'),
+ ('2 Booster Box','1 Booster Box'),
+ ('2x Booster Box','1x Booster Box'),
+ ('Two Box Bundle','One Box Bundle'),
+ ('2× Booster Box','1× Booster Box'),
+])
+def test_complete_multipack_count_is_part_of_shipping_identity(large,small):
+    p=catalog_product(name='Destined Rivals '+large)
+    t=shop_template(title='Pokemon Destined Rivals '+small+' English Live Rip Only')
+    assert not defaults.comparable(p,{'language':'English','fulfillment_mode':'rip'},t)
+
+
+def test_failed_refresh_retains_known_unanswered_category_requirements(client):
+    from starlette.background import BackgroundTasks
+    d=fill(client,selected(client))
+    metadata={**autofill_metadata(),'attributes':[{'id':'required','name':'Required shop fact','is_required':True}]}
+    with patch.object(routes,'shop_fields',return_value=metadata):
+        d=write(client,d,'shop-fields',{})
+    d=write(client,d,'save',{'fields':{**d['fields'],'quantity':'10'}})
+    with patch.object(defaults,'catalog_details',return_value={}),patch.object(routes,'context',side_effect=ValueError('Unavailable')):
+        d=write(client,d,'autofill',{})
+    assert 'Required shop fact' in d['missing_defaults']
+    with patch.object(BackgroundTasks,'add_task') as enqueue:
+        r=client.post(f"{BASE}/drafts/{d['id']}/design",json={'version':d['version']})
+    assert r.status_code==422 and 'Required shop fact' in r.text
+    enqueue.assert_not_called()
+
+
+def test_new_edition_manual_price_equal_to_old_default_survives_refresh(client):
+    d=fill(client,selected(client))
+    d=write(client,d,'save',{'fields':{**d['fields'],'language':'French'}})
+    d=write(client,d,'save',{'fields':{**d['fields'],'price':'434.63'}})
+    d=fill(client,d)
+    assert d['fields']['language']=='French' and d['fields']['price']=='434.63'
