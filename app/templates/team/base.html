@@ -130,6 +130,11 @@
             </a>
           {% endfor %}
         {% endif %}
+          {% if current_user and current_user.role in ('admin', 'manager') %}
+          <a class="pt-link" href="/tiktok/products/assistant">
+            <span class="pt-link-ico">+</span><span>Photo to listing</span>
+          </a>
+          {% endif %}
         {% if admin_nav_items and portal_privileged %}
           <div class="pt-side-group">Admin</div>
           {% for item in admin_nav_items %}

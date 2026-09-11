@@ -52,6 +52,10 @@ settings = get_settings()
 
 router = APIRouter(route_class=CSRFProtectedRoute)
 
+# Register static assistant paths before the legacy /{product_id} route.
+from .tiktok_listing_assistant import router as listing_assistant_router
+router.include_router(listing_assistant_router)
+
 
 # ---------------------------------------------------------------------------
 # Helpers (only used by tiktok product routes)
