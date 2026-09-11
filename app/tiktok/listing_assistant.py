@@ -155,7 +155,7 @@ def identify(raw: bytes) -> dict:
 
 def create_draft(session: Session, actor_id: int) -> dict:
     draft = {"id": str(uuid4()), "version": 1, "status": "draft", "created_by": actor_id,
-             "updated_at": utcnow().isoformat(), "fields": {}, "candidates": [], "assets": {}}
+             "updated_at": utcnow().isoformat(), "fields": {"fulfillment_mode": "rip"}, "candidates": [], "assets": {}}
     session.add(AppSetting(key=draft_key(draft["id"]), value=json.dumps(draft)))
     session.commit()
     return draft
@@ -260,7 +260,7 @@ def build_payload(draft: dict, mode: str, image_uris: list[str]) -> dict:
         raise ValueError("Generate and review the listing image first.")
     import html
     payload = {
-        "title": title, "description": "<p>" + html.escape(fulfillment_copy(f)).replace("\n", "<br>") + "</p><p>" + html.escape(description).replace("\n", "<br>") + "</p>",
+        "title": title, "description": description_html(f),
         "category_id": str(f["category_id"]), "main_images": [{"uri": uri} for uri in image_uris],
         "category_version": "v2",
         "skus": [{"seller_sku": "DGN-LST-" + draft["id"] + ("-" + option if delivery == "both" else ""),
@@ -277,6 +277,16 @@ def build_payload(draft: dict, mode: str, image_uris: list[str]) -> dict:
     attrs = f.get("attributes", {})
     payload["product_attributes"] = [{"id": str(key), "values": [{"name": str(value)}]} for key, value in attrs.items() if value]
     return payload
+
+
+def description_html(fields):
+    """Store-standard headings with escaped product facts and mode-specific copy."""
+    import html
+    mode = fulfillment(fields)
+    sealed = '<h2>Shipped Sealed</h2><p>You receive the complete product unopened in its original sealed packaging.</p>'
+    rip = '<h2>Live Rip Only</h2><p>This product is opened during a Degen Collectibles TikTok livestream. It will not be shipped sealed.</p><p><strong>Bulk cards:</strong> During the stream, our host usually asks whether you would like your bulk cards included.</p>'
+    header = sealed if mode == 'sealed' else rip if mode == 'rip' else '<h2>Choose Shipped Sealed or Live Rip</h2>' + sealed + rip.replace('Live Rip Only', 'Live Rip')
+    return header + '<h2>Product Details</h2><p>' + html.escape(str(fields.get('description') or '')).replace('\n', '<br>') + '</p>'
 
 
 def font(size: int):

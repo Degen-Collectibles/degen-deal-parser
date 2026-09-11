@@ -17,6 +17,7 @@ from ..db import get_session
 from ..models import AppSetting, TikTokProduct
 from ..shared import get_request_user, templates
 from ..tiktok import listing_assistant as service
+from ..tiktok import listing_defaults as defaults
 
 router = APIRouter(prefix="/tiktok/products/assistant", route_class=CSRFProtectedRoute)
 
@@ -226,8 +227,10 @@ async def search(draft_id: str, body: dict, user=Depends(authorized), session: S
         from ..inventory.routes import _search_sealed_products
         results, warning = await asyncio.wait_for(_search_sealed_products(query, game=str(body.get("game", "Pokemon")), limit=8), timeout=50)
         draft["candidates"] = [{key: str(p.get(key) or "") for key in
-                                ("name", "set_name", "kind", "game", "external_id", "external_url", "image_url", "source_name")} for p in results]
+                                ("name", "set_name", "set_id", "kind", "game", "category_id", "language", "market_price", "market_price_source", "external_id", "external_url", "image_url", "source_name")} for p in results]
         for candidate in draft["candidates"]:
+            candidate['language'] = defaults.language(candidate)
+            candidate['price_checked_at'] = service.utcnow().isoformat()
             if candidate["external_id"].isdigit():
                 candidate["catalog_image_url"] = candidate["image_url"]
                 candidate["image_url"] = "https://product-images.tcgplayer.com/fit-in/800x800/" + candidate["external_id"] + ".jpg"
@@ -254,12 +257,65 @@ def select_product(draft_id: str, body: dict, user=Depends(authorized), session:
             selected["image_url"] = selected["catalog_image_url"]
         draft["selected_product"] = selected
         draft["assets"]["source"] = service.store_asset(raw)
-        draft["assets"].pop("designed", None)
-        draft["fields"].update({"product_name": selected["name"], "image_heading": selected["name"],
-                               "title": selected["name"] + " — " + service.FULFILLMENT_LABELS[service.fulfillment(draft["fields"])], "description": "One " + selected["name"] + ".",
+        draft['assets'] = {k: v for k, v in draft['assets'].items() if k in {'photo', 'source'}}
+        draft.pop('image_history', None)
+        draft.pop('defaults', None)
+        draft.pop('shop_metadata', None)
+        draft.pop('language_options', None)
+        draft.pop('missing_defaults', None)
+        draft.pop('image_job', None)
+        draft['fields'] = {k: v for k, v in draft['fields'].items() if k in {'quantity', 'fulfillment_mode', 'sealed_quantity'}}
+        draft["fields"].update({"product_name": selected["name"], "image_heading": selected["name"], 'language': defaults.language(selected),
                                "product_confirmed": False, "image_confirmed": False, "review_confirmed": False})
         draft["duplicates"] = duplicates(session, selected["name"])
         return public(service.save_draft(session, draft, previous, user.id, "product_selected"))
+    except Exception as exc:
+        fail(exc)
+
+
+@router.post('/drafts/{draft_id}/autofill')
+def autofill(draft_id: str, body: dict, user=Depends(authorized), session: Session = Depends(get_session)):
+    try:
+        draft, previous = editable(session, draft_id, body.get('version'))
+        product = draft.get('selected_product') or {}
+        if not product.get('external_id'):
+            raise ValueError('Choose a catalog product to look up defaults. Uploaded products can be completed in Edit details.')
+        warnings, details, listing = [], {}, None
+        try:
+            details = defaults.catalog_details(product)
+        except Exception:
+            warnings.append('Product contents/language lookup is unavailable. Catalog identity is retained; review the details.')
+        metadata = {'categories': [], 'warehouses': [], 'attributes': []}
+        try:
+            # Rank synced listings locally, then verify the selected source live.
+            rows = session.exec(select(TikTokProduct).order_by(TikTokProduct.synced_at.desc()).limit(1000)).all()
+            catalog = []
+            for row in rows:
+                try:
+                    raw = json.loads(row.raw_payload or '{}')
+                    catalog.append({**raw, 'id': row.tiktok_product_id, 'title': row.title, 'status': row.status})
+                except (ValueError, TypeError):
+                    continue
+            matches = defaults.rank_listings(product, draft['fields'], catalog)
+            ctx = context(session)
+            if matches:
+                fresh = shop_call(ctx, '/product/202309/products/' + str(matches[0]['id']))
+                if defaults.comparable(product, draft['fields'], fresh):
+                    listing = fresh
+            category = str((listing or {}).get('category_id') or next((c['id'] for c in (listing or {}).get('category_chains', []) if c.get('is_leaf')), ''))
+            current_category = draft['fields'].get('category_id')
+            if current_category and (not category or current_category != draft.get('defaults', {}).get('values', {}).get('category_id')):
+                category = str(current_category)
+            metadata = shop_fields(category, user, session)
+            if not listing:
+                warnings.append('No verified shop listing matches this product type, language and order option. Complete the missing shop/package details.')
+        except Exception:
+            warnings.append('Shop defaults could not be verified. Your product is saved; use Edit details or retry defaults.')
+        proposed, sources = defaults.suggestions(product, draft['fields'], details, listing, metadata)
+        defaults.apply_defaults(draft, proposed, sources, details, ' '.join(warnings))
+        draft['shop_metadata'] = metadata
+        draft['missing_defaults'] = defaults.missing_fields(draft['fields'], metadata)
+        return public(service.save_draft(session, draft, previous, user.id, 'defaults_loaded'))
     except Exception as exc:
         fail(exc)
 
@@ -272,6 +328,10 @@ async def upload_source(draft_id: str, request: Request, file: UploadFile = File
         raw = service.normalize_image(await file.read(service.MAX_IMAGE_BYTES + 1))
         draft["assets"]["source"] = service.store_asset(raw)
         draft["assets"].pop("designed", None)
+        for key in list(draft['assets']):
+            if key.startswith('history_'):
+                draft['assets'].pop(key)
+        draft.pop('image_history', None)
         draft["selected_product"] = {"source_name": "Staff upload", "external_url": ""}
         draft["fields"].update({"image_confirmed": False, "review_confirmed": False})
         return public(service.save_draft(session, draft, previous, user.id, "source_uploaded"))
@@ -297,15 +357,56 @@ def save(draft_id: str, body: dict, user=Depends(authorized), session: Session =
             raise ValueError("Invalid category attributes.")
         clean["attributes"] = {str(k)[:100]: str(v)[:200] for k, v in attrs.items()}
         old = draft["fields"]
+        for attr in draft.get('shop_metadata', {}).get('attributes', []):
+            if str(attr.get('name', '')).lower() in {'language', 'card language'}:
+                clean['attributes'][str(attr['id'])] = clean.get('language', old.get('language', ''))
+        if clean.get('product_name', old.get('product_name')) != old.get('product_name') and draft.get('selected_product', {}).get('external_id'):
+            draft['selected_product'] = {'source_name': 'Manual product details'}
+            draft.pop('defaults', None)
+            draft.pop('language_options', None)
+            clean.update(price='', product_confirmed=False, image_confirmed=False)
+            for key in defaults.PACKAGE_KEYS:
+                clean[key] = ''
+            draft['assets'].pop('source', None)
+        if old.get('language') and clean.get('language', old.get('language')) != old.get('language'):
+            options = draft.get('language_options', [])
+            if draft.get('selected_product', {}).get('external_id') and options and clean['language'] not in options:
+                raise ValueError('Choose an available language for this product: ' + ', '.join(options) + '. Search for a different catalog edition if needed.')
+            baseline = draft.get('defaults', {}).get('values', {})
+            for key in ('title', 'description'):
+                if clean.get(key, old.get(key)) == baseline.get(key) and baseline.get(key):
+                    before = (' — ' + old['language'] + ' — ') if key == 'title' else ('Language: ' + old['language'])
+                    after = (' — ' + clean['language'] + ' — ') if key == 'title' else ('Language: ' + clean['language'])
+                    clean[key] = str(baseline[key]).replace(before, after)
+            clean.update(product_confirmed=False, image_confirmed=False, shipping_confirmed=False)
+            if clean.get('price', old.get('price')) == old.get('price'):
+                clean['price'] = ''
+            draft.get('defaults', {}).get('sources', {}).pop('price', None)
+            for key in defaults.PACKAGE_KEYS:
+                clean[key] = ''
+            # A catalog photo from a different language is not a valid source.
+            if draft.get('selected_product', {}).get('external_id'):
+                draft['assets'].pop('source', None)
+        if any(old.get(k) for k in defaults.PACKAGE_KEYS) and clean.get('fulfillment_mode', old.get('fulfillment_mode')) != old.get('fulfillment_mode'):
+            # Rip packaging does not describe a complete sealed box.
+            for key in defaults.PACKAGE_KEYS:
+                clean[key] = ''
+            clean['shipping_confirmed'] = False
+            draft.get('defaults', {}).get('sources', {}).pop('shop', None)
         service.fulfillment({**old, **clean})
         changed = any(clean.get(k, old.get(k)) != old.get(k) for k in TEXT_FIELDS | {"attributes"})
         if changed:
             clean["review_confirmed"] = False
         if any(clean.get(k, old.get(k)) != old.get(k) for k in {"image_heading", "product_name", "language", "theme", "fulfillment_mode"}):
             draft["assets"].pop("designed", None)
+            for key in list(draft['assets']):
+                if key.startswith('history_'):
+                    draft['assets'].pop(key)
+            draft.pop('image_history', None)
         if clean.get("category_id", old.get("category_id")) != old.get("category_id"):
             clean["attributes"] = {}
         draft["fields"].update(clean)
+        draft['missing_defaults'] = defaults.missing_fields(draft['fields'], draft.get('shop_metadata', {}))
         draft["duplicates"] = duplicates(session, draft["fields"].get("product_name", ""))
         return public(service.save_draft(session, draft, previous, user.id))
     except Exception as exc:
@@ -316,18 +417,38 @@ def save(draft_id: str, body: dict, user=Depends(authorized), session: Session =
 def design(draft_id: str, body: dict, background_tasks: BackgroundTasks, user=Depends(authorized), session: Session = Depends(get_session)):
     try:
         draft, previous = editable(session, draft_id, body.get("version"))
-        if not draft["fields"].get("product_confirmed") or not draft["fields"].get("image_confirmed"):
-            raise ValueError("Confirm the exact product and permission to use the source image first.")
         if not draft["assets"].get("source"):
             raise ValueError("Choose or upload a clean product image first.")
         from ..tiktok.listing_jobs import run_design
         from uuid import uuid4
         import time
         job_id = str(uuid4())
-        draft["image_job"] = {"id": job_id, "status": "running", "started_at": time.time()}
+        revision = body.get('revision', '')
+        if not isinstance(revision, str) or len(revision) > 1500:
+            raise ValueError('Describe your image changes in 1,500 characters or fewer.')
+        revision = revision.strip()
+        if revision and not draft['assets'].get('designed'):
+            raise ValueError('Generate an image before requesting changes to it.')
+        draft["image_job"] = {"id": job_id, "status": "running", "started_at": time.time(), 'revision': revision}
         service.save_draft(session, draft, previous, user.id, "image_job_started")
         background_tasks.add_task(run_design, session.get_bind(), draft_id, job_id, user.id)
         return public(draft)
+    except Exception as exc:
+        fail(exc)
+
+
+@router.post('/drafts/{draft_id}/restore-image')
+def restore_image(draft_id: str, body: dict, user=Depends(authorized), session: Session = Depends(get_session)):
+    try:
+        draft, previous = editable(session, draft_id, body.get('version'))
+        key = body.get('key')
+        entry = next((x for x in draft.get('image_history', []) if x['key'] == key), None)
+        if not entry or key not in draft['assets']:
+            raise ValueError('Choose one of this draft’s saved image versions.')
+        draft['assets']['designed'], draft['assets'][key] = draft['assets'][key], draft['assets']['designed']
+        draft['image_generator'], entry['generator'] = entry.get('generator', 'gpt-image-2'), draft.get('image_generator', 'gpt-image-2')
+        draft['fields']['review_confirmed'] = False
+        return public(service.save_draft(session, draft, previous, user.id, 'image_restored'))
     except Exception as exc:
         fail(exc)
 
@@ -352,8 +473,10 @@ def available_categories(categories):
 def use_source_image(draft_id: str, body: dict, user=Depends(authorized), session: Session = Depends(get_session)):
     try:
         draft, previous = editable(session, draft_id, body.get('version'))
-        if not draft['fields'].get('product_confirmed') or not draft['fields'].get('image_confirmed') or not draft['assets'].get('source'):
-            raise ValueError('Confirm the exact product and permission to use its source photo first.')
+        if not draft['assets'].get('source'):
+            raise ValueError('Choose a product photo first.')
+        from ..tiktok.listing_jobs import remember_image
+        remember_image(draft)
         draft['assets']['designed'] = draft['assets']['source']
         draft['image_generator'] = 'original-photo'
         draft['fields']['review_confirmed'] = False

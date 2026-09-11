@@ -24,9 +24,11 @@ def run_design(bind, draft_id, job_id, actor_id):
                 return
             source = service.read_asset(draft["assets"]["source"])
             fields = dict(draft["fields"])
+            revision = draft['image_job'].get('revision', '')
+            current = service.read_asset(draft['assets']['designed']) if revision and draft['assets'].get('designed') else None
         # Release the DB transaction/connection during the provider request.
         try:
-            generated = generate(source, fields)
+            generated = generate(source, fields, current=current, revision=revision) if revision else generate(source, fields)
             error = None
         except ImageGenerationError as exc:
             generated, error = None, {"code": exc.code, "message": str(exc)}
@@ -40,6 +42,7 @@ def run_design(bind, draft_id, job_id, actor_id):
             if error:
                 job.update(status="failed", **error)
             else:
+                remember_image(draft)
                 draft["assets"]["designed"] = service.store_asset(generated)
                 draft["image_generator"] = "gpt-image-2"
                 draft["fields"]["review_confirmed"] = False
@@ -49,3 +52,17 @@ def run_design(bind, draft_id, job_id, actor_id):
         # No provider exception/URL is logged. The durable running record expires
         # visibly on refresh; it is never automatically submitted again.
         logging.getLogger(__name__).exception("Listing image job could not save its outcome", exc_info=False)
+
+
+def remember_image(draft):
+    """Keep five prior private versions. No file is deleted by this operation."""
+    from uuid import uuid4
+    if not draft['assets'].get('designed'):
+        return
+    key = 'history_' + uuid4().hex
+    draft['assets'][key] = draft['assets']['designed']
+    history = draft.setdefault('image_history', [])
+    history.insert(0, {'key': key, 'generator': draft.get('image_generator', 'gpt-image-2')})
+    for entry in history[5:]:
+        draft['assets'].pop(entry['key'], None)
+    del history[5:]

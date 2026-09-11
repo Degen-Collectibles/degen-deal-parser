@@ -64,11 +64,10 @@
   }
   function setImage(id, src) {$(id).hidden = !src; if (src) $(id).src = src; else $(id).removeAttribute('src');}
   function hydrate(d) {
-    if (draft?.id !== d.id) $('stock-counts').textContent = '';
+    if (draft?.id !== d.id) {$('stock-counts').textContent = ''; $('image-change').value = '';}
     draft = d;
     dirty = false;
     document.querySelectorAll('[data-field]').forEach(e => setField(e.dataset.field, d.fields[e.dataset.field]));
-    if (!d.fields.theme) setField('theme', 'blue');
     if (!d.fields.fulfillment_mode) setField('fulfillment_mode', 'sealed');
     $('draft-picker').hidden = true; $('workspace').hidden = false;
     $('save-status').textContent = 'Saved · ' + new Date(d.updated_at).toLocaleTimeString();
@@ -78,6 +77,34 @@
     if (i && !$('search-query').value) { $('search-query').value = i.search_query || i.name; if (i.game) $('search-game').value = i.game; }
     const s = d.selected_product;
     $('source-info').textContent = s ? [s.name, s.source_name].filter(Boolean).join(' · ') : 'No product image selected.';
+    if (d.shop_metadata) applyShopFields(d.shop_metadata);
+    $('product-languages').replaceChildren();
+    (d.language_options || []).forEach(value => option($('product-languages'), value, value));
+    setImage('summary-image', d.assets.source);
+    $('summary-product').textContent = d.fields.product_name || 'Your product';
+    const source = d.defaults?.sources?.shop;
+    if (source?.brand_name) {
+      const brandOption = Array.from($('brand').options).find(o => o.value === d.fields.brand_id);
+      if (brandOption) brandOption.textContent = source.brand_name;
+    }
+    $('defaults-summary').textContent = [fulfillmentLabels[d.fields.fulfillment_mode || 'sealed'], d.fields.language,
+      source ? 'Shop settings from ' + source.title : 'Shop settings need review'].filter(Boolean).join(' · ');
+    const market = d.defaults?.sources?.price;
+    $('market-reference').replaceChildren();
+    if (market) {
+      $('market-reference').textContent = `Market reference: $${Number(market.amount).toFixed(2)} · ${market.language} · looked up ${new Date(market.looked_up_at).toLocaleString()}. `;
+      const a = document.createElement('a'); a.href = market.url; a.target='_blank'; a.rel='noopener noreferrer'; a.textContent='TCGPlayer'; $('market-reference').append(a);
+    } else $('market-reference').textContent = 'No verified market price for this edition. Enter your price in Edit details.';
+    $('defaults-warning').textContent = [d.defaults?.warning, d.missing_defaults?.length ? 'Needed: ' + d.missing_defaults.join(', ') + '.' : ''].filter(Boolean).join(' ');
+    $('image-history').replaceChildren();
+    (d.image_history || []).forEach(entry => {
+      const button = document.createElement('button'); button.type='button'; button.className='candidate';
+      const img = document.createElement('img'); img.src=d.assets[entry.key]; img.alt='Previous listing image';
+      const label = document.createElement('span'); label.textContent='Use this version'; button.append(img,label);
+      button.onclick=()=>task(async()=>{hydrate(await api(path('/restore-image'), {version:draft.version,key:entry.key}));});
+      $('image-history').append(button);
+    });
+    $('previous-images').hidden = !(d.image_history || []).length;
     renderCandidates(); renderReview(); renderAllocation(); lockState();
   }
   function lockState() {
@@ -113,15 +140,15 @@
   }
   async function list() {
     const result = await api('/drafts'); $('draft-list').replaceChildren();
-    result.drafts.forEach(d => {const b = document.createElement('button'); const title = document.createElement('strong'); title.textContent = d.title; const status = document.createElement('span'); status.textContent = d.status; b.append(title, status); b.onclick = () => task(async () => {hydrate(await api('/drafts/' + d.id)); step(d.status === 'draft' ? 1 : 3); if (draft.image_job?.status === 'running') {await waitForDesign(); step(3);}}); $('draft-list').append(b);});
+    result.drafts.forEach(d => {const b = document.createElement('button'); const title = document.createElement('strong'); title.textContent = d.title; const status = document.createElement('span'); status.textContent = d.status; b.append(title, status); b.onclick = () => task(async () => {hydrate(await api('/drafts/' + d.id)); step(d.status !== 'draft' || draft.assets.designed ? 3 : draft.assets.source ? 2 : 1); if (draft.image_job?.status === 'running') {await waitForDesign(); step(3);}}); $('draft-list').append(b);});
   }
   function renderCandidates() {
     $('candidates').replaceChildren();
     (draft.candidates || []).forEach((p, index) => {const b = document.createElement('button'); b.className = 'candidate';
       const url = new URL(p.image_url || 'https://invalid.example');
       if (url.protocol === 'https:' && ['product-images.tcgplayer.com','tcgplayer-cdn.tcgplayer.com','cdn.tcgtracking.com'].includes(url.hostname)) {const img = document.createElement('img'); img.src = url.href; img.alt = p.name; img.referrerPolicy = 'no-referrer'; b.append(img);}
-      const text = document.createElement('span'); text.textContent = p.name; b.append(text);
-      b.onclick = () => task(async () => {hydrate(await api(path('/select'), {version: draft.version, index}));}); $('candidates').append(b);
+      const text = document.createElement('span'); text.textContent = [p.name, p.language, p.market_price_source === 'TCGPlayer Market' && p.market_price ? '$' + p.market_price + ' market' : ''].filter(Boolean).join(' · '); b.append(text);
+      b.onclick = () => task(async () => {hydrate(await api(path('/select'), {version: draft.version, index})); step(2); notice('Looking up product facts and matching your shop settings…'); await loadDefaults();}); $('candidates').append(b);
     });
     if (draft.search_warning) {const p = document.createElement('p'); p.textContent = draft.search_warning; $('candidates').append(p);}
   }
@@ -140,13 +167,23 @@
     (draft.duplicates || []).forEach(d => {const li = document.createElement('li'); li.textContent = `${d.title} (${d.status || 'unknown'}) · ${d.id}`; $('duplicate-list').append(li);});
   }
   function filterCategories() {const current = draft.fields.category_id || ''; const q = $('category-filter').value.toLowerCase(); $('category').replaceChildren(); option($('category'), '', 'Choose category'); categories.filter(c => c.name.toLowerCase().includes(q) || String(c.id) === current).forEach(c => option($('category'), String(c.id), c.name)); setField('category_id', current);}
-  async function shopFields() {
-    const result = await api('/shop-fields?category_id=' + encodeURIComponent(draft.fields.category_id || ''));
+  function applyShopFields(result) {
+    draft.fields.attributes ||= {};
+    result.attributes.forEach(a => {if (['language','card language'].includes(String(a.name).toLowerCase())) draft.fields.attributes[a.id] = draft.fields.language || '';});
     categories = result.categories; filterCategories();
     $('warehouse').replaceChildren(); option($('warehouse'), '', 'Choose warehouse'); result.warehouses.forEach(w => option($('warehouse'), String(w.id), w.name)); setField('warehouse_id', draft.fields.warehouse_id);
     $('category-attributes').replaceChildren();
-    result.attributes.forEach(a => {const label = document.createElement('label'); label.textContent = a.name + (a.is_required || a.requirement?.is_required ? ' *' : ''); const input = document.createElement('input'); input.dataset.attribute = a.id; input.value = draft.fields.attributes?.[a.id] || ''; input.maxLength = 200; if (a.values?.length) {const list = document.createElement('datalist'); list.id = 'attr-' + a.id; a.values.forEach(v => {const opt = document.createElement('option'); opt.value = v.name; list.append(opt);}); input.setAttribute('list', list.id); label.append(list);} label.append(input); $('category-attributes').append(label);});
-    $('shop-warning').textContent = 'Shop fields loaded. Complete the category’s required attributes.';
+    result.attributes.filter(a => !['language','card language'].includes(String(a.name).toLowerCase())).forEach(a => {const label = document.createElement('label'); label.textContent = a.name + (a.is_required || a.requirement?.is_required ? ' *' : ''); const input = document.createElement('input'); input.dataset.attribute = a.id; input.value = draft.fields.attributes?.[a.id] || ''; input.maxLength = 200; if (a.values?.length) {const list = document.createElement('datalist'); list.id = 'attr-' + a.id; a.values.forEach(v => {const opt = document.createElement('option'); opt.value = v.name; list.append(opt);}); input.setAttribute('list', list.id); label.append(list);} label.append(input); $('category-attributes').append(label);});
+    $('shop-warning').textContent = 'Shop settings loaded. You can edit the suggested values here.';
+  }
+  async function shopFields() {
+    const result = await api('/shop-fields?category_id=' + encodeURIComponent(draft.fields.category_id || ''));
+    draft.shop_metadata = result;
+    applyShopFields(result);
+  }
+  async function loadDefaults() {
+    hydrate(await api(path('/autofill'), {version: draft.version}));
+    $('edit-details').open = (draft.missing_defaults || []).some(x => x !== 'Quantity');
   }
   async function upload(input, suffix) {
     if (!input.files[0]) return;
@@ -163,7 +200,8 @@
   $('photo').onchange = () => task(() => upload($('photo'), '/photo'));
   $('source').onchange = () => task(() => upload($('source'), '/source'));
   $('search-products').onclick = () => task(async () => {await save(); hydrate(await api(path('/search'), {version: draft.version, query: $('search-query').value, game: $('search-game').value || 'Pokemon'}));});
-  $('to-details').onclick = () => task(async () => {await save(); if (!draft.fields.product_confirmed || !draft.fields.image_confirmed || !draft.assets.source) throw new Error('Choose a product image and confirm the product and image first.'); step(2);});
+  $('to-details').onclick = () => task(async () => {await save(); if (!draft.assets.source) throw new Error('Choose a product image first.'); step(2); $('edit-details').open = !draft.defaults;});
+  $('refresh-defaults').onclick = () => task(async () => {await save(); await loadDefaults();});
   async function waitForDesign() {
     while (draft.image_job?.status === 'running') {
       notice('Generating with GPT Image 2… Your job is saved. You can reopen this draft to check its progress.');
@@ -176,11 +214,18 @@
       throw error;
     }
   }
-  function generatePreview() { return task(async () => {
+  function generatePreview(revision = '') { return task(async () => {
     await save();
+    if (!revision) {
+      const f = draft.fields;
+      const missing = ['product_name','language','title','description','price','quantity','category_id','warehouse_id','weight','length','width','height'].filter(k => f[k] == null || f[k] === '');
+      (draft.shop_metadata?.attributes || []).forEach(a => {if ((a.is_required || a.requirement?.is_required) && !f.attributes?.[a.id]) missing.push(a.name);});
+      if (missing.length) {$('edit-details').open = true; step(2); throw new Error('Complete these details before generating: ' + missing.join(', ') + '.');}
+      if (!Number.isInteger(Number(f.quantity)) || Number(f.quantity) < 0) throw new Error('Enter a whole-number quantity of zero or more.');
+    }
     notice('Generating with GPT Image 2… This can take several minutes if the provider needs one retry.');
     try {
-      hydrate(await api(path('/design'), {version: draft.version}));
+      hydrate(await api(path('/design'), {version: draft.version, revision}));
       await waitForDesign();
       blockedAttempts.delete(draft.id); step(3);
     } catch (error) {
@@ -194,18 +239,28 @@
       throw error;
     }
   }); }
-  $('generate-preview').onclick = generatePreview;
+  $('generate-preview').onclick = () => generatePreview();
+  $('regenerate-image').onclick = () => {const revision = $('image-change').value.trim(); if (!revision) {notice('Describe the changes you want first.'); return;} generatePreview(revision);};
   $('use-source-image').onclick = () => task(async () => {await save(); hydrate(await api(path('/use-source-image'), {version:draft.version})); step(3);});
-  $('fulfillment-mode').onchange = () => {
+  $('fulfillment-mode').onchange = () => task(async () => {
     const f = fields();
     const title = f.title.replace(/\s*[—–-]\s*(?:Shipped Sealed or Live Rip|Shipped Sealed|Live Rip(?: Only)?)\s*$/i, '');
     setField('title', (title || f.product_name) + ' — ' + fulfillmentLabels[f.fulfillment_mode]);
     // Migrate only the exact boilerplate created by the old assistant.
     if (f.description === 'One ' + f.product_name + '. Supplied unopened.') setField('description', 'One ' + f.product_name + '.');
     setField('review_confirmed', false); dirty = true; renderAllocation();
-  };
+    await save();
+    if (draft.selected_product?.external_id) await loadDefaults();
+  });
+  document.querySelector('[data-field="language"]').onchange = () => task(async () => {
+    const chosen = fields().language;
+    if (chosen === draft.fields.language) return;
+    await save();
+    $('edit-details').open = true;
+    throw new Error('Edition changed. Enter its price and upload a matching product photo using Product → upload a clean image. Review the shipping settings for this edition.');
+  });
   $('reset-allocation').onclick = () => { setField('sealed_quantity', ''); setField('review_confirmed', false); dirty = true; renderAllocation(); };
-  $('retry-image').onclick = generatePreview;
+  $('retry-image').onclick = () => generatePreview(draft.image_job?.revision || '');
   $('change-image').onclick = () => { $('image-recovery').hidden = true; notice('Review the product image and details before generating again.'); step(1); };
   $('load-shop').onclick = () => task(async () => {await save(); await shopFields();});
   $('find-brand').onclick = () => task(async () => {const result = await api('/brands?q=' + encodeURIComponent($('brand-query').value) + '&category_id=' + encodeURIComponent($('category').value)); $('brand').replaceChildren(); option($('brand'), '', 'No brand selected'); result.brands.forEach(b => option($('brand'), b.id, b.name)); if (!result.brands.length) throw new Error('No matching brand returned by TikTok. Try another name.');});
@@ -213,6 +268,8 @@
   $('category').onchange = () => task(async () => {await save(); await shopFields();});
   document.querySelectorAll('[data-step],[data-back]').forEach(b => b.onclick = () => task(async () => {if (draft.status === 'draft') await save(); step(Number(b.dataset.step || b.dataset.back));}));
   async function submit(mode) {
+    const reviewed = fields().review_confirmed;
+    ['product_confirmed','image_confirmed','shipping_confirmed'].forEach(k => setField(k,reviewed));
     await save();
     if (!draft.fields.review_confirmed) throw new Error('Review the preview and check its confirmation before submitting.');
     try {hydrate(await api(path('/submit'), {version: draft.version, mode}));}
