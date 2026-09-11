@@ -5,6 +5,7 @@
   const config = JSON.parse($('listing-config').textContent);
   const csrf = config.csrf;
   let draft = null, categories = [], presets = [], busy = false, dirty = false;
+  let priceDirty = false, priceEditVersion = 0;
   const blockedAttempts = new Map();
   const fulfillmentLabels = {sealed: 'Shipped Sealed', rip: 'Live Rip', both: 'Shipped Sealed or Live Rip'};
   function fulfillmentCopy(mode) {
@@ -23,6 +24,43 @@
     $('variant-allocation').hidden = mode !== 'both';
     $('allocation-summary').textContent = allocationText(f);
     $('fulfillment-copy').textContent = fulfillmentCopy(mode);
+    $('price-scope').textContent = mode === 'both'
+      ? 'This is the Shipped Sealed price. Live Rip uses this price unless you set a separate Live Rip price in Edit details.'
+      : 'Price per ' + (mode === 'rip' ? 'Live Rip' : 'Shipped Sealed') + ' unit.';
+  }
+  function marketPrice() {
+    const market = draft?.defaults?.sources?.price;
+    const product = draft?.selected_product;
+    const amount = Number(market?.amount);
+    return market?.label === 'TCGPlayer Market via TCGTracking'
+      && market.language === fields().language && market.product_name === fields().product_name
+      && product?.external_id && market.url === 'https://www.tcgplayer.com/product/' + product.external_id
+      && Number.isFinite(amount) && amount > 0 && amount <= 999999.99
+      ? { ...market, cents: Math.round(amount * 100) } : null;
+  }
+  function adjustedPrice(market, percent) {
+    return (Math.round(market.cents * (100 + percent) / 100) / 100).toFixed(2);
+  }
+  function renderPrice() {
+    const market = marketPrice(), f = fields();
+    const selected = ['0', '5', '10'].includes(f.price_mode) && market
+      && Number(f.price) === Number(adjustedPrice(market, Number(f.price_mode))) ? f.price_mode : 'custom';
+    const reference = $('market-reference'); reference.replaceChildren();
+    if (market) {
+      const checked = new Date(market.looked_up_at);
+      reference.textContent = `Market reference: $${(market.cents / 100).toFixed(2)} · ${market.language}`
+        + (market.looked_up_at && Number.isFinite(checked.getTime()) ? ' · looked up ' + checked.toLocaleString() : '') + '. ';
+      const link = document.createElement('a'); link.href = market.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.textContent = 'TCGPlayer'; reference.append(link);
+    } else reference.textContent = 'No verified market price for this product and edition. Percentage adjustments are unavailable; enter a price manually.';
+    document.querySelectorAll('[data-price-adjustment]').forEach(button => {
+      const amount = market && Number(adjustedPrice(market, Number(button.dataset.priceAdjustment)));
+      button.disabled = busy || draft?.status !== 'draft' || draft?.image_job?.status === 'running' || !amount || amount > 999999.99;
+      button.setAttribute('aria-pressed', String(selected === button.dataset.priceAdjustment));
+    });
+    $('price-state').textContent = selected !== 'custom'
+      ? (selected === '0' ? 'Market price · 0% adjustment.' : 'Market price + ' + selected + '%.')
+      : !f.price ? 'Enter a custom price' + (market ? ' or choose a market adjustment.' : '.')
+      : 'Custom price · kept as entered.' + (market ? ' Choose a percentage to replace it with the current market reference.' : '');
   }
   function notice(text) { $('notice').textContent = text; $('notice').hidden = !text; }
   async function api(path, body, method) {
@@ -64,13 +102,19 @@
   }
   function setImage(id, src) {$(id).hidden = !src; if (src) $(id).src = src; else $(id).removeAttribute('src');}
   function hydrate(d) {
+    // A late defaults/preview response must not discard an unsaved price edit.
+    const sameProduct = draft?.id === d.id && draft.fields.product_name === d.fields.product_name
+      && draft.fields.language === d.fields.language && draft.selected_product?.external_id === d.selected_product?.external_id;
+    const pendingPrice = sameProduct && priceDirty ? fields() : null;
     if (draft?.id !== d.id) {$('stock-counts').textContent = ''; $('image-change').value = '';}
+    if (!sameProduct) priceDirty = false;
     draft = d;
     dirty = false;
     document.querySelectorAll('[data-field]').forEach(e => setField(e.dataset.field, d.fields[e.dataset.field]));
+    if (pendingPrice) {setField('price', pendingPrice.price); setField('price_mode', pendingPrice.price_mode); setField('review_confirmed', false); dirty = true;}
     if (!d.fields.fulfillment_mode) setField('fulfillment_mode', 'sealed');
     $('draft-picker').hidden = true; $('workspace').hidden = false;
-    $('save-status').textContent = 'Saved · ' + new Date(d.updated_at).toLocaleTimeString();
+    $('save-status').textContent = pendingPrice ? 'Unsaved price change' : 'Saved · ' + new Date(d.updated_at).toLocaleTimeString();
     setImage('photo-preview', d.assets.photo); setImage('source-preview', d.assets.source); setImage('designed-preview', d.assets.designed);
     const i = d.identification;
     $('identification').textContent = i ? [i.name, i.language, 'Confidence: ' + i.confidence, ...i.uncertainties].filter(Boolean).join(' · ') : 'Confirm the edition, language and product type before continuing.';
@@ -89,12 +133,6 @@
     }
     $('defaults-summary').textContent = [fulfillmentLabels[d.fields.fulfillment_mode || 'sealed'], d.fields.language,
       source ? 'Shop settings from ' + source.title : 'Shop settings need review'].filter(Boolean).join(' · ');
-    const market = d.defaults?.sources?.price;
-    $('market-reference').replaceChildren();
-    if (market) {
-      $('market-reference').textContent = `Market reference: $${Number(market.amount).toFixed(2)} · ${market.language} · looked up ${new Date(market.looked_up_at).toLocaleString()}. `;
-      const a = document.createElement('a'); a.href = market.url; a.target='_blank'; a.rel='noopener noreferrer'; a.textContent='TCGPlayer'; $('market-reference').append(a);
-    } else $('market-reference').textContent = 'No verified market price for this edition. Enter your price in Edit details.';
     $('defaults-warning').textContent = [d.defaults?.warning, d.missing_defaults?.length ? 'Needed: ' + d.missing_defaults.join(', ') + '.' : ''].filter(Boolean).join(' ');
     $('image-history').replaceChildren();
     (d.image_history || []).forEach(entry => {
@@ -113,6 +151,7 @@
     const generating = draft.image_job?.status === 'running';
     document.querySelectorAll('[data-panel] input,[data-panel] select,[data-panel] textarea,[data-panel] button').forEach(e => e.disabled = locked || generating || busy);
     $('save-draft').disabled = locked || generating || busy;
+    renderPrice();
     $('submission-result').hidden = !locked;
     $('stock-transfer').hidden = !config.stockTransfersEnabled || draft.status !== 'submitted' || draft.fields.fulfillment_mode !== 'both';
     const transfer = draft.stock_transfer;
@@ -132,7 +171,12 @@
       $('reconcile-panel').hidden = Boolean(draft.product_id);
     }
   }
-  async function save() {const d = await api(path('/save'), {version: draft.version, fields: fields()}); hydrate(d); return d;}
+  async function save() {
+    const editVersion = priceEditVersion;
+    const d = await api(path('/save'), {version: draft.version, fields: fields()});
+    if (editVersion === priceEditVersion) priceDirty = false;
+    hydrate(d); return d;
+  }
   function step(number) {
     document.querySelectorAll('[data-panel]').forEach(el => el.hidden = Number(el.dataset.panel) !== number);
     document.querySelectorAll('[data-step]').forEach(el => {if (Number(el.dataset.step) === number) el.setAttribute('aria-current', 'step'); else el.removeAttribute('aria-current');});
@@ -182,7 +226,7 @@
   }
   async function loadDefaults() {
     hydrate(await api(path('/autofill'), {version: draft.version}));
-    $('edit-details').open = (draft.missing_defaults || []).some(x => x !== 'Quantity');
+    $('edit-details').open = (draft.missing_defaults || []).some(x => !['Quantity', 'Price'].includes(x));
   }
   async function upload(input, suffix) {
     if (!input.files[0]) return;
@@ -288,7 +332,18 @@
   async function loadPresets() {presets = (await api('/packaging')).presets; $('packaging-preset').replaceChildren(); option($('packaging-preset'), '', 'Enter measurements'); presets.forEach((p,i) => option($('packaging-preset'), String(i), p.name));}
   $('packaging-preset').onchange = () => {const p = presets[Number($('packaging-preset').value)]; if ($('packaging-preset').value !== '' && p) {['weight','length','width','height'].forEach(k => setField(k,p[k])); setField('shipping_confirmed',false);dirty=true;}};
   $('save-preset').onclick = () => task(async () => {const f = fields(); await api('/packaging', {name:$('preset-name').value, ...Object.fromEntries(['weight','length','width','height'].map(k => [k,f[k]]))}); await loadPresets(); $('preset-name').value = '';});
-  document.addEventListener('input', e => {if (e.target.matches('[data-field],[data-attribute]')) {dirty=true; renderAllocation();}});
+  document.querySelectorAll('[data-price-adjustment]').forEach(button => button.onclick = () => {
+    const market = marketPrice(); if (!market || button.disabled) return;
+    setField('price', adjustedPrice(market, Number(button.dataset.priceAdjustment)));
+    setField('price_mode', button.dataset.priceAdjustment);
+    setField('review_confirmed', false); dirty = true; priceDirty = true; priceEditVersion++;
+    renderPrice(); renderAllocation();
+  });
+  document.addEventListener('input', e => {if (e.target.matches('[data-field],[data-attribute]')) {
+    dirty=true;
+    if (e.target.dataset.field === 'price') {setField('price_mode', 'custom'); setField('review_confirmed', false); priceDirty = true; priceEditVersion++;}
+    renderAllocation(); renderPrice();
+  }});
   window.addEventListener('beforeunload', e => {if (draft?.status === 'draft' && dirty) {e.preventDefault(); e.returnValue = '';}});
   task(async () => {await list(); await loadPresets();});
 })();

@@ -240,6 +240,14 @@ def apply_defaults(draft, proposed, sources, details, warning=''):
     previous = draft.get('defaults', {}).get('values', {})
     applied = dict(previous)
     for key, value in proposed.items():
+        if key == 'price':
+            # A lookup supplies a reference, never permission to reprice a saved
+            # listing (even when a manual price equals a former default).
+            if fields.get('price') in (None, '') and fields.get('price_mode') != 'custom' and value:
+                fields['price'] = value
+                fields['price_mode'] = '0'
+                applied['price'] = value
+            continue
         if not fields.get(key) or fields.get(key) == previous.get(key):
             fields[key] = value
             applied[key] = value

@@ -1130,3 +1130,57 @@ def test_stale_cached_modes_can_be_shortlisted_but_require_live_verification(suf
 ])
 def test_dual_sources_still_require_same_language_and_product_unit(name):
     assert not defaults.comparable(catalog_product(), {'language':'English','fulfillment_mode':'rip'}, shop_template(title=name))
+
+
+@pytest.mark.parametrize('revision', ['', 'Softer lighting'])
+@pytest.mark.parametrize('mode,footer', [('rip','LIVE RIP'), ('sealed','SHIPPED SEALED • UNOPENED'), ('both','CHOOSE SEALED OR LIVE RIP')])
+def test_full_logo_and_white_flare_references_are_authoritative(mode, footer, revision):
+    import base64
+    import hashlib
+    from app.tiktok import listing_images
+    raw = png()
+    with patch.object(listing_images, 'has_ai_key', return_value=True), patch.object(listing_images, 'get_ai_client') as ai:
+        ai.return_value.with_options.return_value.images.edit.return_value = SimpleNamespace(data=[SimpleNamespace(b64_json=base64.b64encode(raw).decode())])
+        listing_images.generate(raw, {'fulfillment_mode': mode, 'language': 'English'}, current=raw, revision=revision)
+        request = ai.return_value.with_options.return_value.images.edit.call_args.kwargs
+    assert request['image'][0][1] == raw
+    assert request['image'][1] == ('style.jpg', listing_images.STYLE.read_bytes(), 'image/jpeg')
+    assert hashlib.sha256(request['image'][2][1]).hexdigest() == 'f0420343ae82811db997d2a17b2ec020f75a450bb913fcd21f87070567ee4ebb'
+    assert len(request['image']) == (4 if revision else 3)
+    prompt = request['prompt']
+    for text in ['Charizard, Umbreon, Gengar', '17-20%', 'Do not redraw', 'Never invent side panels', 'Keep the original viewing angle', 'Footer EXACTLY: ' + footer]:
+        assert text in prompt
+    if revision:
+        assert 'Reference 4 never overrides the full-logo requirement' in prompt
+    ai.return_value.with_options.assert_called_once_with(timeout=240, max_retries=0)
+
+
+@pytest.mark.parametrize('price,mode', [('434.63','custom'), ('450.00','custom'), ('','custom'), ('456.36','5'), ('434.63','0')])
+def test_price_choice_survives_market_refresh_save_and_reload(client, price, mode):
+    d = fill(client, selected(client))
+    assert d['fields']['price_mode'] == '0'
+    d = write(client, d, 'save', {'fields': {**d['fields'], 'price': price, 'price_mode': mode, 'rip_price': '400'}})
+    def refresh(product):
+        product['market_price'] = '500.00'
+        return {}
+    with patch.object(defaults, 'catalog_details', side_effect=refresh), patch.object(routes, 'context', side_effect=ValueError('offline')):
+        d = write(client, d, 'autofill', {})
+    loaded = client.get(f"{BASE}/drafts/{d['id']}").json()
+    assert loaded['fields']['price'] == price
+    assert loaded['fields']['price_mode'] == mode
+    assert loaded['fields']['rip_price'] == '400'
+    assert loaded['defaults']['sources']['price']['amount'] == '500.00'
+
+
+def test_legacy_saved_price_equal_to_default_is_preserved():
+    d = {'fields': {'price': '100.00'}, 'defaults': {'values': {'price': '100.00'}}}
+    defaults.apply_defaults(d, {'price': '120.00'}, {}, {})
+    assert d['fields']['price'] == '100.00'
+
+
+@pytest.mark.parametrize('rip_price,expected', [('', '456.36'), ('400.00','400.00')])
+def test_adjusted_base_price_keeps_both_variant_semantics(client, rip_price, expected):
+    d = prepared(client)
+    d['fields'].update(fulfillment_mode='both', quantity='10', price='456.36', price_mode='5', rip_price=rip_price)
+    payload = service.build_payload(d, 'AS_DRAFT', ['uploaded-image'])
+    assert [s['price']['amount'] for s in payload['skus']] == ['456.36', expected]
