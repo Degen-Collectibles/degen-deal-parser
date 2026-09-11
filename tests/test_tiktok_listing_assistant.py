@@ -1063,3 +1063,70 @@ def test_new_edition_manual_price_equal_to_old_default_survives_refresh(client):
     d=write(client,d,'save',{'fields':{**d['fields'],'price':'434.63'}})
     d=fill(client,d)
     assert d['fields']['language']=='French' and d['fields']['price']=='434.63'
+
+@pytest.mark.parametrize('mode', ['rip', 'sealed', 'both'])
+def test_dual_option_source_supplies_shared_defaults_and_matching_warehouse(mode):
+    source = shop_template(title='Pokemon TCG Evolving Skies Booster Box English Live Rip / Ship Sealed')
+    source['skus'] = [
+        {'sales_attributes':[{'name':'Order option','value_name':'Live Rip'}],
+         'inventory':[{'warehouse_id':'rip-wh','quantity':0}]},
+        {'sales_attributes':[{'name':'Order option','value_name':'Ship Sealed'}],
+         'inventory':[{'warehouse_id':'sealed-wh','quantity':10}]},
+    ]
+    metadata = autofill_metadata()
+    metadata['warehouses'] = [{'id':'rip-wh'}, {'id':'sealed-wh'}]
+    values, _ = defaults.suggestions(catalog_product(), {'language':'English','fulfillment_mode':mode}, {}, source, metadata)
+    assert values['category_id'] == '123'
+    assert values['weight'] == '0.1'
+    if mode != 'both':
+        assert values['warehouse_id'] == mode + '-wh'
+
+
+def test_dual_source_unknown_variant_does_not_take_other_variant_warehouse():
+    source = shop_template(title='Pokemon TCG Evolving Skies Booster Box English Live Rip / Ship Sealed')
+    source['skus'] = [{'sales_attributes':[{'name':'Order option','value_name':'Ship Sealed'}],
+                       'inventory':[{'warehouse_id':'456','quantity':10}]}]
+    metadata = autofill_metadata()
+    metadata['warehouses'].append({'id':'789'})
+    values, _ = defaults.suggestions(catalog_product(), {'language':'English','fulfillment_mode':'rip'}, {}, source, metadata)
+    assert 'warehouse_id' not in values
+
+
+@pytest.mark.parametrize('first_result', ['incompatible', 'unavailable'])
+def test_autofill_verifies_next_candidate_when_cached_first_is_stale(client, first_result):
+    d = selected(client)
+    gen = client.app.dependency_overrides[get_session]()
+    session = next(gen)
+    for ident in ('111', '222'):
+        template = shop_template()
+        session.add(TikTokProduct(tiktok_product_id=ident, title=template['title'], status=template['status'], raw_payload=json.dumps(template)))
+    session.commit()
+    gen.close()
+    fresh = shop_template(title='Pokemon TCG Evolving Skies Booster Box English Live Rip / Ship Sealed')
+    fresh['id'] = '222'
+    fresh['skus'][0]['sales_attributes'] = [{'name':'Order option','value_name':'Live Rip'}]
+    bad = shop_template(title='Pokemon TCG Evolving Skies Booster Pack English Live Rip')
+    first = ValueError('Source unavailable') if first_result == 'unavailable' else bad
+    with patch.object(defaults,'catalog_details',return_value={'language_options':['English']}), patch.object(routes,'context',return_value={}), patch.object(routes,'shop_call',side_effect=[first,fresh]) as lookup, patch.object(routes,'shop_fields',side_effect=autofill_metadata):
+        result = write(client,d,'autofill',{})
+    assert lookup.call_count == 2
+    assert result['defaults']['sources']['shop']['id'] == '222'
+    assert result['fields']['category_id'] == '123'
+    assert result['fields']['warehouse_id'] == '456'
+    assert result['missing_defaults'] == ['Quantity']
+
+@pytest.mark.parametrize('suffix', ['Shipped Sealed', 'Live Rip / Ship Sealed', ''])
+def test_stale_cached_modes_can_be_shortlisted_but_require_live_verification(suffix):
+    source = shop_template(title='Pokemon TCG Evolving Skies Booster Box English ' + suffix)
+    fields = {'language':'English','fulfillment_mode':'rip'}
+    assert defaults.rank_listings(catalog_product(), fields, [source], allow_stale_mode=True) == [source]
+    assert defaults.comparable(catalog_product(), fields, source) == ('Live Rip' in suffix)
+
+
+@pytest.mark.parametrize('name', [
+    'Pokemon TCG Evolving Skies Booster Pack English Live Rip / Ship Sealed',
+    'Pokemon TCG Black Bolt Booster Box Japanese Live Rip / Ship Sealed',
+    'Pokemon TCG Evolving Skies Booster Box Case English Live Rip / Ship Sealed',
+])
+def test_dual_sources_still_require_same_language_and_product_unit(name):
+    assert not defaults.comparable(catalog_product(), {'language':'English','fulfillment_mode':'rip'}, shop_template(title=name))

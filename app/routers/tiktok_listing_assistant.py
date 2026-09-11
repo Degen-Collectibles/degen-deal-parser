@@ -296,12 +296,18 @@ def autofill(draft_id: str, body: dict, user=Depends(authorized), session: Sessi
                     catalog.append({**raw, 'id': row.tiktok_product_id, 'title': row.title, 'status': row.status})
                 except (ValueError, TypeError):
                     continue
-            matches = defaults.rank_listings(product, draft['fields'], catalog)
+            matches = defaults.rank_listings(product, draft['fields'], catalog, allow_stale_mode=True)
             ctx = context(session)
-            if matches:
-                fresh = shop_call(ctx, '/product/202309/products/' + str(matches[0]['id']))
+            # Cached titles can predate a fulfillment change. Verify a bounded
+            # shortlist live rather than giving up on the first outdated row.
+            for candidate in matches[:5]:
+                try:
+                    fresh = shop_call(ctx, '/product/202309/products/' + str(candidate['id']))
+                except (httpx.HTTPError, ValueError):
+                    continue
                 if defaults.comparable(product, draft['fields'], fresh):
                     listing = fresh
+                    break
             category = str((listing or {}).get('category_id') or next((c['id'] for c in (listing or {}).get('category_chains', []) if c.get('is_leaf')), ''))
             current_category = draft['fields'].get('category_id')
             if current_category and (not category or current_category != draft.get('defaults', {}).get('values', {}).get('category_id')):
