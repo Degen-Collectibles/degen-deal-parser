@@ -136,20 +136,22 @@ def listing_mode(title):
     return 'both' if sealed and rip else 'sealed' if sealed else 'rip' if rip else ''
 
 
-def comparable(product, fields, listing):
+def comparable(product, fields, listing, *, allow_stale_mode=False):
     title = str(listing.get('title') or '')
     game = str(product.get('game') or '').replace(' Japan', '')
     return (bool(game) and game_name(title) == game and bool(unit_key(product.get('name', ''))[0])
             and unit_key(title) == unit_key(product.get('name', ''))
             and bool(fields.get('language')) and title_language(title) == fields['language']
-            and listing_mode(title) == service.fulfillment(fields)
+            and (allow_stale_mode or listing_mode(title) == service.fulfillment(fields)
+                 or listing_mode(title) == 'both')
             and str(listing.get('status') or '') in {'ACTIVATE', 'SELLER_DEACTIVATED'})
 
 
-def rank_listings(product, fields, listings):
+def rank_listings(product, fields, listings, *, allow_stale_mode=False):
     tokens = set(re.findall(r'\w+', product.get('name', '').lower()))
-    matches = [p for p in listings if comparable(product, fields, p)]
-    return sorted(matches, key=lambda p: (-len(tokens & set(re.findall(r'\w+', p.get('title', '').lower()))), str(p.get('id', ''))))
+    matches = [p for p in listings if comparable(product, fields, p, allow_stale_mode=allow_stale_mode)]
+    return sorted(matches, key=lambda p: (listing_mode(p.get('title', '')) != service.fulfillment(fields),
+                                               -len(tokens & set(re.findall(r'\w+', p.get('title', '').lower()))), str(p.get('id', ''))))
 
 
 def description(product, fields, details):
@@ -208,7 +210,13 @@ def suggestions(product, fields, details, listing, metadata):
                 proposed.update(packed)
             except ValueError:
                 pass
-        inventory = [i for sku in listing.get('skus', []) for i in sku.get('inventory', []) if str(i.get('warehouse_id')) in warehouses]
+        skus = listing.get('skus', [])
+        if listing_mode(listing.get('title', '')) == 'both' and service.fulfillment(fields) != 'both':
+            skus = [sku for sku in skus if any(
+                str(a.get('name', '')).lower() == 'order option'
+                and listing_mode(str(a.get('value_name', ''))) == service.fulfillment(fields)
+                for a in sku.get('sales_attributes', []))]
+        inventory = [i for sku in skus for i in sku.get('inventory', []) if str(i.get('warehouse_id')) in warehouses]
         stocked = {str(i['warehouse_id']) for i in inventory if int(i.get('quantity') or 0) > 0}
         all_ids = {str(i['warehouse_id']) for i in inventory}
         chosen = stocked if len(stocked) == 1 else all_ids
