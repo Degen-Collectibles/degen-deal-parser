@@ -2091,19 +2091,15 @@ def upload_tiktok_product_image(
     query_params: dict[str, Any] = {
         "app_key": app_key,
         "timestamp": int(time.time()),
-        "version": TIKTOK_API_VERSION,
     }
-    if shop_id:
-        query_params["shop_id"] = shop_id
-    if shop_cipher:
-        query_params["shop_cipher"] = shop_cipher
+    # Upload is scoped by the access-token header. Shop identifiers are rejected
+    # by this endpoint (36009004); use only its documented query parameters.
     query_params["sign"] = build_tiktok_sign(
         path=IMAGE_UPLOAD_PATH,
         query_params=query_params,
         body="",
         app_secret=app_secret,
     )
-    query_params["access_token"] = access_token
     url = f"{base_url.rstrip('/')}{IMAGE_UPLOAD_PATH}?{urlencode(query_params)}"
     content_type = "image/jpeg"
     if file_name.lower().endswith(".png"):
@@ -2113,6 +2109,7 @@ def upload_tiktok_product_image(
     response = client.post(
         url,
         files={"data": (file_name, image_data, content_type)},
+        data={"use_case": "MAIN_IMAGE"},
         headers={"x-tts-access-token": access_token},
     )
     response.raise_for_status()

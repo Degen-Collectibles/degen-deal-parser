@@ -87,6 +87,7 @@
                     {% if sync_state.get("is_running") %}<span class="status-pill status-running">Syncing...</span>{% endif %}
                     {% if sync_state.get("last_error") %}<span class="status-pill status-bad">{{ sync_state["last_error"][:60] }}</span>{% endif %}
                     <a href="/tiktok/products/new" class="button primary-button" style="padding:8px 16px; font-size:13px;">+ New Product</a>
+                    {% if current_user and current_user.role in ('admin', 'manager') %}<a href="/tiktok/products/assistant" class="button primary-button" style="padding:8px 16px; font-size:13px;">Photo to listing</a>{% endif %}
                 </div>
             </div>
         </section>
