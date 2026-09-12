@@ -38,7 +38,9 @@ def ui(browser):
     page = context.new_page()
     errors = []
     page.on('pageerror', lambda e: errors.append(str(e)))
-    state = {'draft': sample_draft(), 'market': '100.00', 'late_edit': False}
+    state = {'draft': sample_draft(), 'market': '100.00', 'late_edit': False,
+             'games': [{'id': 'catalog:86', 'name': 'Gundam Card Game', 'category_ids': ['86']}],
+             'game_warning': '', 'searches': []}
     # Navigation itself is outside this feature; the listing template is unchanged.
     env = Environment(loader=ChoiceLoader([DictLoader({'_linear_sidebar.html': ''}), FileSystemLoader(ROOT / 'app/templates')]))
     html = env.get_template('tiktok_listing_assistant.html').render(csrf_token='test-only')
@@ -56,6 +58,14 @@ def ui(browser):
             result = {'drafts':[{'id':'test', 'title':'Test draft', 'status':'draft'}]}
         elif path == BASE + '/packaging':
             result = {'presets':[]}
+        elif path == BASE + '/games':
+            result = {'games': state['games'], 'warning': state['game_warning']}
+        elif path == BASE + '/drafts/test/search':
+            request = route.request.post_data_json
+            state['searches'].append(request)
+            game = next((g for g in state['games'] if g['id'] == request['game']), {'id': request['game'], 'name': request['game']})
+            state['draft'].update(search_game=game, search_query=request['query'], candidates=[])
+            result = state['draft']
         elif path == BASE + '/drafts/test':
             result = state['draft']
         elif path == BASE + '/drafts/test/save':
@@ -94,6 +104,71 @@ def ui(browser):
 
 def button(page, percent):
     return page.locator(f'[data-price-adjustment="{percent}"]')
+
+
+@pytest.mark.parametrize('width', [390, 1440])
+def test_other_game_search_persists_exact_game_and_product_query(ui, width):
+    page, state = ui
+    page.set_viewport_size({'width': width, 'height': 900})
+    state['open']()
+    page.locator('[data-step="1"]').click()
+    page.locator('#search-game').select_option('other')
+    expect(page.locator('#other-game-picker')).to_be_visible()
+    page.get_by_label('Search for a game', exact=True).fill('Gundam')
+    page.get_by_label('Search for a game', exact=True).press('Enter')
+    expect(page.locator('#catalog-game')).to_have_value('catalog:86')
+    page.locator('#search-query').fill('Newtype Rising booster pack')
+    page.locator('#search-products').click()
+    expect(page.locator('#search-products')).to_be_enabled()
+    assert state['searches'][-1]['game'] == 'catalog:86'
+    assert state['searches'][-1]['query'] == 'Newtype Rising booster pack'
+    state['open']()
+    page.locator('[data-step="1"]').click()
+    expect(page.locator('#search-game')).to_have_value('other')
+    expect(page.locator('#catalog-game')).to_have_value('catalog:86')
+    expect(page.locator('#search-query')).to_have_value('Newtype Rising booster pack')
+    assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+
+
+def test_unknown_game_and_catalog_outage_leave_manual_path_available(ui):
+    page, state = ui
+    state['open']()
+    page.locator('[data-step="1"]').click()
+    page.locator('#search-game').select_option('other')
+    page.locator('#search-query').fill('Random booster pack')
+    page.locator('#search-products').click()
+    expect(page.locator('#notice')).to_contain_text('choose its catalog')
+    assert not state['searches']
+    state['games'] = []
+    state['game_warning'] = 'Game catalog is unavailable right now.'
+    page.locator('#game-query').fill('Random game')
+    page.locator('#find-games').click()
+    expect(page.locator('#game-search-status')).to_contain_text('unavailable')
+    expect(page.locator('#game-search-status')).to_contain_text('enter details manually')
+    expect(page.locator('#source')).to_be_enabled()
+
+
+@pytest.mark.parametrize('game', ['Riftbound', 'Dragon Ball Super: Fusion World'])
+def test_primary_games_are_direct_choices_and_use_exact_search_value(ui, game):
+    page, state = ui
+    state['open']()
+    page.locator('[data-step="1"]').click()
+    page.locator('#search-game').select_option(game)
+    expect(page.locator('#other-game-picker')).to_be_hidden()
+    page.locator('#search-query').fill('Origins booster pack')
+    page.locator('#search-products').click()
+    expect(page.locator('#search-products')).to_be_enabled()
+    assert state['searches'][-1]['game'] == game
+
+
+def test_unlisted_ai_game_is_visible_in_other_picker_not_pokemon(ui):
+    page, state = ui
+    state['draft']['identification'] = {'name': 'Gundam pack', 'game': 'Gundam Card Game', 'search_query': 'Newtype Rising pack', 'confidence': 'high', 'uncertainties': []}
+    state['open']()
+    page.locator('[data-step="1"]').click()
+    expect(page.locator('#search-game')).to_have_value('other')
+    expect(page.locator('#game-query')).to_have_value('Gundam Card Game')
+    expect(page.locator('#search-query')).to_have_value('Newtype Rising pack')
 
 
 def test_adjustments_use_market_not_current_price_and_manual_survives_reload(ui):

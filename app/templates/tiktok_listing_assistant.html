@@ -23,7 +23,13 @@
     <section data-panel="1" class="panel">
       <h2>What are we listing?</h2>
       <div class="capture-grid"><div class="capture"><label for="photo">Take a photo or upload one</label><p class="muted">Show the product name and packaging clearly.</p><input id="photo" type="file" accept="image/jpeg,image/png,image/webp" capture="environment"><img id="photo-preview" alt="Your identification photo" hidden></div><div><h3 id="identification-title">AI helps identify the product</h3><p id="identification" class="muted">Confirm the edition, language and product type before continuing.</p></div></div>
-      <div class="search-row"><label>Product name<input id="search-query" type="search" maxlength="180" placeholder="e.g. Destined Rivals Elite Trainer Box"></label><label>Game<select id="search-game"><option>Pokemon</option><option>Magic</option><option>Yu-Gi-Oh</option><option>One Piece</option><option>Lorcana</option></select></label><button id="search-products">Find product</button></div>
+      <div class="search-row"><label>Product name<input id="search-query" type="search" maxlength="180" placeholder="e.g. set name and booster pack or box"></label><label>Game<select id="search-game">{% for game in listing_games|default(['Pokemon', 'Magic', 'Yu-Gi-Oh', 'One Piece', 'Lorcana', 'Riftbound', 'Dragon Ball Super: Fusion World']) %}<option>{{ game }}</option>{% endfor %}<option value="other">Other game…</option></select></label><button id="search-products">Find product</button></div>
+      <div id="other-game-picker" class="game-picker" hidden>
+        <div class="game-search-row"><label for="game-query">Search for a game<input id="game-query" type="search" maxlength="180" placeholder="e.g. Gundam, Digimon or Union Arena"></label><button id="find-games" type="button">Find game</button></div>
+        <label for="catalog-game">Matching games<select id="catalog-game"><option value="">Search and choose a game</option></select></label>
+        <p id="game-search-status" class="muted" role="status" aria-live="polite">Search the catalog, choose the exact game, then find your product above.</p>
+        <p class="muted small">Game not found? Upload a clean product image below and enter the listing details manually. An unavailable market price stays blank.</p>
+      </div>
       <div id="candidates" class="candidates"></div>
       <div class="selected-product"><img id="source-preview" alt="Selected clean product image" hidden><div><p id="source-info" class="muted">No product image selected.</p><label class="upload-label">Or upload a clean image you can use<input id="source" type="file" accept="image/jpeg,image/png,image/webp"></label></div></div>
       <div class="actions"><button id="to-details" class="primary">Continue →</button></div>

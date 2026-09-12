@@ -62,6 +62,92 @@ def client(tmp_path, monkeypatch):
 BASE = '/tiktok/products/assistant'
 
 
+@pytest.mark.parametrize('choice,label,ids', [
+    ('Riftbound', 'Riftbound', ('89',)),
+    ('Dragon Ball Super: Fusion World', 'Dragon Ball Super: Fusion World', ('80',)),
+    ('catalog:86', 'Gundam Card Game', ('86',)),
+])
+def test_listing_search_uses_exact_game_catalog_and_persists_choice(client, choice, label, ids):
+    from unittest.mock import AsyncMock
+    from app.tiktok import listing_games
+    d = create(client)
+    discovered = [{'id': 'catalog:86', 'name': 'Gundam Card Game', 'category_ids': ['86']}]
+    with patch.object(listing_games, 'catalog', return_value=(discovered, '')), patch(
+        'app.inventory.routes._search_sealed_products', new=AsyncMock(return_value=([], ''))
+    ) as lookup:
+        d = write(client, d, 'search', {'query': 'Origins booster pack', 'game': choice})
+    lookup.assert_awaited_once_with('Origins booster pack', game=label, limit=8, catalog_category_ids=ids)
+    saved = client.get(f"{BASE}/drafts/{d['id']}").json()
+    assert saved['search_game'] == {'id': choice, 'name': label, 'category_ids': list(ids)}
+    assert saved['search_query'] == 'Origins booster pack'
+
+
+@pytest.mark.parametrize('choice', ['', 'Other', 'Dragon Ball', 'Dragon Ball Super', 'Imaginary Card Game', 'catalog:99999'])
+def test_unknown_or_ambiguous_game_never_searches_pokemon(client, choice):
+    from unittest.mock import AsyncMock
+    from app.tiktok import listing_games
+    d = create(client)
+    with patch.object(listing_games, 'catalog', return_value=([], '')), patch(
+        'app.inventory.routes._search_sealed_products', new=AsyncMock()
+    ) as lookup:
+        response = client.post(f"{BASE}/drafts/{d['id']}/search", json={'version': d['version'], 'query': 'booster pack', 'game': choice})
+    assert response.status_code == 422
+    lookup.assert_not_awaited()
+
+
+def test_game_discovery_filters_results_and_keeps_role_gate(client):
+    from app.tiktok import listing_games
+    catalog = [{'id': 'catalog:86', 'name': 'Gundam Card Game', 'category_ids': ['86']},
+               {'id': 'catalog:80', 'name': 'Dragon Ball Super: Fusion World', 'category_ids': ['80']}]
+    with patch.object(listing_games, 'catalog', return_value=(catalog, '')):
+        response = client.get(BASE + '/games?q=gundam')
+        assert response.status_code == 200
+        assert response.json()['games'] == catalog[:1]
+        assert client.get(BASE + '/games?q=gundam', headers={'x-role': 'employee'}).status_code == 403
+
+
+def test_new_games_remain_available_during_game_discovery_outage(client):
+    from unittest.mock import AsyncMock
+    from app.tiktok import listing_games
+    with patch.object(listing_games, 'catalog', return_value=([], 'Game catalog is unavailable.')):
+        response = client.get(BASE + '/games?q=unknown')
+        assert response.json() == {'games': [], 'warning': 'Game catalog is unavailable.'}
+        d = create(client)
+        with patch('app.inventory.routes._search_sealed_products', new=AsyncMock(return_value=([], ''))):
+            d = write(client, d, 'search', {'query': 'booster pack', 'game': 'Dragon Ball Super: Fusion World'})
+        assert d['search_game']['category_ids'] == ['80']
+
+
+@pytest.mark.parametrize('game,matching,wrong', [
+    ('Dragon Ball Super: Fusion World', 'Dragon Ball Super Fusion World Origins Booster Pack English Live Rip', 'Dragon Ball Super Masters Origins Booster Pack English Live Rip'),
+    ('Gundam Card Game', 'Gundam Card Game Origins Booster Pack English Live Rip', 'Pokemon Origins Booster Pack English Live Rip'),
+    ('Riftbound', 'Riftbound Origins Booster Pack English Live Rip', 'Pokemon Origins Booster Pack English Live Rip'),
+])
+def test_new_game_defaults_do_not_cross_game_boundaries(game, matching, wrong):
+    from app.tiktok import listing_defaults
+    product = {'game': game, 'name': 'Origins Booster Pack'}
+    fields = {'language': 'English', 'fulfillment_mode': 'rip'}
+    assert listing_defaults.comparable(product, fields, {'title': matching, 'status': 'ACTIVATE'})
+    assert not listing_defaults.comparable(product, fields, {'title': wrong, 'status': 'ACTIVATE'})
+
+
+@pytest.mark.parametrize('sku_languages,expected', [(['EN'], 'English'), (['zh-Hans'], 'Simplified Chinese'), (['ZH-HANT'], 'Traditional Chinese'), (['EN', 'JP'], ''), ([''], ''), ([], '')])
+def test_new_game_market_language_requires_exact_sku_evidence(sku_languages, expected):
+    from app.tiktok import listing_defaults
+    product = {'external_id': '123', 'category_id': '80', 'set_id': '9', 'name': 'Test Booster Pack'}
+    payloads = [
+        {'products': [{'id': 123, 'name': 'Test Booster Pack', 'ext_data': {'Description': 'Contains 12 cards.'}}]},
+        {'prices': {}},
+        {'products': {'123': {str(i): {'lng': lang} for i, lang in enumerate(sku_languages)}}},
+    ]
+    with patch.object(listing_defaults.httpx, 'Client') as http, patch('app.inventory.routes._tcgtracking_market_price', return_value=5.0):
+        http.return_value.__enter__.return_value.get.side_effect = [httpx.Response(200, json=p, request=httpx.Request('GET', 'https://example.test')) for p in payloads]
+        details = listing_defaults.catalog_details(product)
+    assert listing_defaults.language(product) == expected
+    assert details['description'] == 'Contains 12 cards.'
+
+
+
 @pytest.mark.parametrize('query,expected', [
     ('Pokemon Scarlet Violet Paldean Fates Quaquaval ex Premium Collection', 'Paldean Fates Quaquaval ex Premium Collection'),
     ('Pokemon Scarlet Violet Surging Sparks Elite Trainer Box', 'Surging Sparks Elite Trainer Box'),
@@ -732,6 +818,24 @@ def test_autofill_populates_market_copy_and_shop_settings(client):
     assert d['defaults']['sources']['shop']['id']=='987'
     assert d['defaults']['sources']['price']['language']=='English'
     assert d['fields']['review_confirmed'] is False
+
+
+def test_new_catalog_language_is_available_on_first_shop_default_lookup(client):
+    d = selected(client, catalog_product(category_id='80', game='Dragon Ball Super: Fusion World'))
+    assert not d['fields']['language']
+
+    def refresh(product):
+        product['language'] = 'English'
+        return {'language_options': ['English']}
+
+    with patch.object(defaults, 'catalog_details', side_effect=refresh), patch.object(
+        defaults, 'rank_listings', return_value=[]
+    ) as rank, patch.object(routes, 'context', return_value={}), patch.object(
+        routes, 'shop_fields', side_effect=autofill_metadata
+    ):
+        result = write(client, d, 'autofill', {})
+    assert rank.call_args.args[1]['language'] == 'English'
+    assert result['fields']['language'] == 'English'
 
 
 def test_autofill_refresh_preserves_staff_overrides(client):

@@ -94,6 +94,32 @@
     return result;
   }
   function option(select, value, label) {const el = document.createElement('option'); el.value = value; el.textContent = label; select.append(el);}
+  function showGamePicker() { $('other-game-picker').hidden = $('search-game').value !== 'other'; }
+  function restoreGame(game) {
+    const id = typeof game === 'object' ? game?.id : game;
+    const name = typeof game === 'object' ? game?.name : game;
+    const known = Array.from($('search-game').options).find(o => o.value !== 'other' && o.value.toLowerCase() === String(id || '').toLowerCase());
+    $('catalog-game').replaceChildren(); option($('catalog-game'), '', 'Search and choose a game');
+    $('game-query').value = '';
+    $('game-search-status').textContent = 'Search the catalog, choose the exact game, then find your product above.';
+    if (known) $('search-game').value = known.value;
+    else if (id || name) {
+      $('search-game').value = 'other'; $('game-query').value = name || '';
+      if (String(id).startsWith('catalog:')) {option($('catalog-game'), id, name); $('catalog-game').value = id;}
+    } else $('search-game').value = 'Pokemon';
+    showGamePicker();
+  }
+  async function findGames() {
+    const query = $('game-query').value.trim();
+    if (!query) throw new Error('Enter the game name to search for.');
+    const result = await api('/games?q=' + encodeURIComponent(query));
+    $('catalog-game').replaceChildren(); option($('catalog-game'), '', 'Choose the exact game');
+    result.games.forEach(g => option($('catalog-game'), g.id, g.name));
+    if (result.games.length === 1) $('catalog-game').value = result.games[0].id;
+    $('game-search-status').textContent = [result.warning, result.games.length
+      ? result.games.length + ' matching game' + (result.games.length === 1 ? '' : 's') + '. Choose the exact game, then find your product.'
+      : 'No matching game found. Try a different name or upload your product image and enter details manually.'].filter(Boolean).join(' ');
+  }
   function setField(key, value) {
     const el = document.querySelector(`[data-field="${key}"]`);
     if (!el) return;
@@ -102,6 +128,8 @@
   }
   function setImage(id, src) {$(id).hidden = !src; if (src) $(id).src = src; else $(id).removeAttribute('src');}
   function hydrate(d) {
+    const changedDraft = draft?.id !== d.id;
+    const changedIdentification = JSON.stringify(draft?.identification) !== JSON.stringify(d.identification);
     // A late defaults/preview response must not discard an unsaved price edit.
     const sameProduct = draft?.id === d.id && draft.fields.product_name === d.fields.product_name
       && draft.fields.language === d.fields.language && draft.selected_product?.external_id === d.selected_product?.external_id;
@@ -118,7 +146,11 @@
     setImage('photo-preview', d.assets.photo); setImage('source-preview', d.assets.source); setImage('designed-preview', d.assets.designed);
     const i = d.identification;
     $('identification').textContent = i ? [i.name, i.language, 'Confidence: ' + i.confidence, ...i.uncertainties].filter(Boolean).join(' · ') : 'Confirm the edition, language and product type before continuing.';
-    if (i && !$('search-query').value) { $('search-query').value = i.search_query || i.name; if (i.game) $('search-game').value = i.game; }
+    if (changedDraft || changedIdentification) {
+      $('search-query').value = (changedIdentification && i ? i.search_query || i.name : d.search_query || i?.search_query || i?.name) || '';
+      restoreGame(changedIdentification && i ? (i.game || 'other') : d.search_game || d.selected_product?.game || i?.game);
+      if (i && !i.game && !d.search_game) {$('search-game').value = 'other'; $('game-query').value = ''; showGamePicker();}
+    }
     const s = d.selected_product;
     $('source-info').textContent = s ? [s.name, s.source_name].filter(Boolean).join(' · ') : 'No product image selected.';
     if (d.shop_metadata) applyShopFields(d.shop_metadata);
@@ -242,7 +274,16 @@
   $('save-draft').onclick = () => task(save);
   $('photo').onchange = () => task(() => upload($('photo'), '/photo'));
   $('source').onchange = () => task(() => upload($('source'), '/source'));
-  $('search-products').onclick = () => task(async () => {await save(); hydrate(await api(path('/search'), {version: draft.version, query: $('search-query').value, game: $('search-game').value || 'Pokemon'}));});
+  $('search-game').onchange = showGamePicker;
+  $('find-games').onclick = () => task(findGames);
+  $('game-query').oninput = () => { $('catalog-game').value = ''; };
+  $('game-query').onkeydown = e => {if (e.key === 'Enter') {e.preventDefault(); task(findGames);}};
+  $('search-products').onclick = () => task(async () => {
+    const game = $('search-game').value === 'other' ? $('catalog-game').value : $('search-game').value;
+    if (!game) throw new Error('Search for a game and choose its catalog before finding a product. You can also upload a product image and enter details manually.');
+    const query = $('search-query').value;
+    await save(); hydrate(await api(path('/search'), {version: draft.version, query, game}));
+  });
   $('to-details').onclick = () => task(async () => {await save(); if (!draft.assets.source) throw new Error('Choose a product image first.'); step(2); $('edit-details').open = !draft.defaults;});
   $('refresh-defaults').onclick = () => task(async () => {await save(); await loadDefaults();});
   async function waitForDesign() {

@@ -119,7 +119,11 @@ def identify(raw: bytes) -> dict:
         "with string fields name, game, set_name, product_type, language, search_query; a confidence field "
         "high/medium/low; and an uncertainties array of short strings. Unknown fields must be empty. "
         "If this is not a sealed product, confidence must be low and explain in uncertainties. "
-        "Game names: Pokemon, Magic, Yu-Gi-Oh, One Piece, Lorcana where applicable."
+        "Game names include Pokemon, Magic, Yu-Gi-Oh, One Piece, Lorcana, Riftbound, "
+        "and Dragon Ball Super: Fusion World. For another game, return its exact name. "
+        "Do not substitute Pokemon for an unknown game. Dragon Ball Super: Masters, "
+        "Dragon Ball Super: Fusion World, and Dragon Ball Z TCG are separate games; "
+        "if the game or system is ambiguous, leave game empty and explain in uncertainties."
     )
     try:
         result = get_ai_client().with_options(timeout=60, max_retries=0).chat.completions.create(

@@ -1349,9 +1349,12 @@ async def _search_sealed_products(
     *,
     game: str = "Pokemon",
     limit: int = 24,
+    catalog_category_ids: tuple[str, ...] | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
-    selected_game = _normalize_add_stock_game(game)
-    category_ids = _add_stock_category_ids_for_game(selected_game)
+    # Listing game discovery supplies validated catalog IDs. Keep the inventory
+    # caller's existing normalization, but never map a discovered game to Pokemon.
+    selected_game = game if catalog_category_ids is not None else _normalize_add_stock_game(game)
+    category_ids = catalog_category_ids if catalog_category_ids is not None else _add_stock_category_ids_for_game(selected_game)
     if not category_ids:
         return [], f"Product search is not set up for {selected_game} yet. You can still create the product below."
 
@@ -1472,6 +1475,9 @@ async def _search_sealed_products(
     warning = ""
     if errors and (not successful_search or (found_sets and not products)):
         warning = f"{selected_game} product search is unavailable right now. You can still create the product below."
+    if catalog_category_ids is not None:
+        for product in products:
+            product["game"] = selected_game
     return products[:limit], warning
 
 

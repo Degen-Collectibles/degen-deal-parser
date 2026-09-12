@@ -18,6 +18,7 @@ from ..models import AppSetting, TikTokProduct
 from ..shared import get_request_user, templates
 from ..tiktok import listing_assistant as service
 from ..tiktok import listing_defaults as defaults
+from ..tiktok import listing_games as games
 
 router = APIRouter(prefix="/tiktok/products/assistant", route_class=CSRFProtectedRoute)
 
@@ -136,7 +137,16 @@ def page(request: Request, user=Depends(authorized)):
         "current_user": user, "csrf_token": issue_token(request), "title": "Photo to listing",
         "preview_mode": getattr(request.state, "listing_preview", False),
         "stock_transfers_enabled": stock_transfers_enabled(),
+        "listing_games": [name for name, _ in games.PRIMARY_GAMES],
     })
+
+
+@router.get("/games")
+def search_games(q: str = "", user=Depends(authorized)):
+    try:
+        return games.search(q.strip())
+    except Exception as exc:
+        fail(exc)
 
 
 @router.get("/drafts")
@@ -223,9 +233,14 @@ async def search(draft_id: str, body: dict, user=Depends(authorized), session: S
         query = str(body.get("query", "")).strip()
         if not 3 <= len(query) <= 180:
             raise ValueError("Enter a product name between 3 and 180 characters.")
-        query = service.product_search_query(query, str(body.get("game", "Pokemon")))
+        game = await run_in_threadpool(games.resolve, str(body.get("game", "Pokemon")))
+        original_query = query
+        query = service.product_search_query(query, game["name"])
         from ..inventory.routes import _search_sealed_products
-        results, warning = await asyncio.wait_for(_search_sealed_products(query, game=str(body.get("game", "Pokemon")), limit=8), timeout=50)
+        results, warning = await asyncio.wait_for(_search_sealed_products(
+            query, game=game["name"], limit=8, catalog_category_ids=tuple(game["category_ids"])), timeout=50)
+        draft["search_game"] = game
+        draft["search_query"] = original_query
         draft["candidates"] = [{key: str(p.get(key) or "") for key in
                                 ("name", "set_name", "set_id", "kind", "game", "category_id", "language", "market_price", "market_price_source", "external_id", "external_url", "image_url", "source_name")} for p in results]
         for candidate in draft["candidates"]:
@@ -285,6 +300,8 @@ def autofill(draft_id: str, body: dict, user=Depends(authorized), session: Sessi
             details = defaults.catalog_details(product)
         except Exception:
             warnings.append('Product contents/language lookup is unavailable. Catalog identity is retained; review the details.')
+        if not draft['fields'].get('language') and defaults.language(product):
+            draft['fields']['language'] = defaults.language(product)
         metadata = draft.get('shop_metadata') or {'categories': [], 'warehouses': [], 'attributes': []}
         try:
             # Rank synced listings locally, then verify the selected source live.
