@@ -32,3 +32,11 @@ html:has(.listing-app){scroll-behavior:auto}
 .listing-app .price-adjustments button{flex:1 1 80px;min-width:0}
 .listing-app .price-adjustments button[aria-pressed="true"]{background:#2b1c26;border-color:#e74b63;color:#fff}
 .listing-app .price-adjustments button:disabled{cursor:default}
+.listing-app .search-row{grid-template-columns:minmax(0,2fr) minmax(0,1.5fr) auto}
+.listing-app #search-game,.listing-app #catalog-game{width:0;min-width:100%;max-width:100%}
+.listing-app .game-picker{padding:18px;margin:0 0 22px;border:1px solid #394251;border-radius:12px;min-width:0}
+.listing-app .game-search-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:end;gap:12px;margin-bottom:16px}
+@media(max-width:700px){
+ .listing-app .search-row{grid-template-columns:minmax(0,1fr)}
+ .listing-app .game-search-row{grid-template-columns:minmax(0,1fr)}
+}

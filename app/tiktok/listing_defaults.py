@@ -88,11 +88,25 @@ def catalog_details(product):
             market = None
         product.update(market_price=market, market_price_source='TCGPlayer Market' if market is not None else '',
                        price_checked_at=datetime.now(timezone.utc).isoformat())
+        # Most game catalogs contain multiple editions. Derive a market-price
+        # language only from the exact product's SKU records, never its game name
+        # or the list of editions sold by another marketplace.
+        if not language(product):
+            try:
+                response = client.get(f'{TCGTRACKING_BASE}/{category}/sets/{set_id}/skus')
+                response.raise_for_status()
+                skus = response.json().get('products', {}).get(product_id, {})
+                language_codes = {code.lower(): name for code, name in LANGUAGES.items()}
+                sku_languages = {language_codes.get(str(sku.get('lng', '')).lower(), '') for sku in skus.values()}
+                if len(sku_languages) == 1 and '' not in sku_languages:
+                    product['language'] = next(iter(sku_languages))
+            except (httpx.HTTPError, ValueError, TypeError, AttributeError):
+                pass  # Missing language remains explicit in the required fields.
         options = {language(product)} - {''}
         for match in raw.get('cardtrader') or []:
             if str(match.get('tcg_player_id')) == product_id and match.get('match_confidence') == 100:
                 options.update(LANGUAGES[x] for x in match.get('languages', []) if x in LANGUAGES)
-        return {'description': product_contents((raw.get('ext_data') or {}).get('CardText'))[:6000],
+        return {'description': product_contents((raw.get('ext_data') or {}).get('CardText') or (raw.get('ext_data') or {}).get('Description'))[:6000],
                 'language_options': sorted(options), 'catalog_name': raw.get('clean_name') or raw.get('name')}
 
 
@@ -108,7 +122,7 @@ def title_language(title):
 def game_name(title):
     text = title.lower().replace('é', 'e')
     for word, game in (('pokemon', 'Pokemon'), ('magic', 'Magic'), ('one piece', 'One Piece'),
-                       ('yu-gi-oh', 'Yu-Gi-Oh'), ('lorcana', 'Lorcana')):
+                       ('yu-gi-oh', 'Yu-Gi-Oh'), ('lorcana', 'Lorcana'), ('riftbound', 'Riftbound')):
         if word in text:
             return game
     return ''
@@ -137,9 +151,10 @@ def listing_mode(title):
 
 
 def comparable(product, fields, listing, *, allow_stale_mode=False):
+    from .listing_games import matches_title
     title = str(listing.get('title') or '')
     game = str(product.get('game') or '').replace(' Japan', '')
-    return (bool(game) and game_name(title) == game and bool(unit_key(product.get('name', ''))[0])
+    return (bool(game) and (game_name(title) == game or matches_title(title, game)) and bool(unit_key(product.get('name', ''))[0])
             and unit_key(title) == unit_key(product.get('name', ''))
             and bool(fields.get('language')) and title_language(title) == fields['language']
             and (allow_stale_mode or listing_mode(title) == service.fulfillment(fields)

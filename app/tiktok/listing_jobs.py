@@ -24,6 +24,7 @@ def run_design(bind, draft_id, job_id, actor_id):
                 return
             source = service.read_asset(draft["assets"]["source"])
             fields = dict(draft["fields"])
+            fields['game'] = (draft.get('selected_product') or {}).get('game', '')
             revision = draft['image_job'].get('revision', '')
             current = service.read_asset(draft['assets']['designed']) if revision and draft['assets'].get('designed') else None
         # Release the DB transaction/connection during the provider request.
