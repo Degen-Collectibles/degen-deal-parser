@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import List
 from urllib.parse import urlparse
 
-from pydantic import Field
+from pydantic import SecretStr, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -268,6 +268,33 @@ class Settings(BaseSettings):
     username_scraper_base_url: str = Field(default="", alias="USERNAME_SCRAPER_BASE_URL")
     username_scraper_api_key: str = Field(default="", alias="USERNAME_SCRAPER_API_KEY")
     username_scraper_timeout_seconds: float = Field(default=8.0, alias="USERNAME_SCRAPER_TIMEOUT_SECONDS")
+
+    # POS balance reads: local implementation does not enable the all-staff policy.
+    loyalty_pos_read_enabled: bool = Field(default=False, alias="LOYALTY_POS_READ_ENABLED")
+    loyalty_pos_all_staff_enabled: bool = Field(default=False, alias="LOYALTY_POS_ALL_STAFF_ENABLED")
+    loyalty_pos_client_id: str = Field(default="", alias="LOYALTY_POS_CLIENT_ID")
+    loyalty_pos_client_secret: SecretStr = Field(default="", repr=False, alias="LOYALTY_POS_CLIENT_SECRET")
+    loyalty_pos_session_requests: int = Field(default=60, ge=1, le=600, alias="LOYALTY_POS_SESSION_REQUESTS")
+    loyalty_pos_total_requests: int = Field(default=600, ge=1, le=12000, alias="LOYALTY_POS_TOTAL_REQUESTS")
+
+    # Internal POS loyalty: separate intake, evaluation and ledger kill switches.
+    loyalty_receiving_enabled: bool = Field(default=False, alias="LOYALTY_RECEIVING_ENABLED")
+    loyalty_processing_enabled: bool = Field(default=False, alias="LOYALTY_PROCESSING_ENABLED")
+    loyalty_posting_enabled: bool = Field(default=False, alias="LOYALTY_POSTING_ENABLED")
+    loyalty_shop_domain: str = Field(default="", alias="LOYALTY_SHOP_DOMAIN")
+    loyalty_shop_id: str = Field(default="", alias="LOYALTY_SHOP_ID")
+    loyalty_location_ids: str = Field(default="", alias="LOYALTY_LOCATION_IDS")
+    loyalty_launch_at: str = Field(default="", alias="LOYALTY_LAUNCH_AT")
+    loyalty_exception_owner: str = Field(default="", alias="LOYALTY_EXCEPTION_OWNER")
+    loyalty_receipt_retention_days: int | None = Field(default=None, gt=0, alias="LOYALTY_RECEIPT_RETENTION_DAYS")
+    loyalty_evidence_retention_days: int | None = Field(default=None, gt=0, alias="LOYALTY_EVIDENCE_RETENTION_DAYS")
+    loyalty_ledger_retention_days: int | None = Field(default=None, gt=0, alias="LOYALTY_LEDGER_RETENTION_DAYS")
+    loyalty_backup_retention_days: int | None = Field(default=None, gt=0, alias="LOYALTY_BACKUP_RETENTION_DAYS")
+    loyalty_budget_cents: int | None = Field(default=None, ge=0, alias="LOYALTY_BUDGET_CENTS")
+    loyalty_read_access_verified: bool = Field(default=False, alias="LOYALTY_READ_ACCESS_VERIFIED")
+    loyalty_read_all_orders_verified: bool = Field(default=False, alias="LOYALTY_READ_ALL_ORDERS_VERIFIED")
+    loyalty_body_limit_bytes: int = Field(default=262144, ge=1024, le=1048576, alias="LOYALTY_BODY_LIMIT_BYTES")
+    loyalty_api_request_limit: int = Field(default=100, ge=1, le=500, alias="LOYALTY_API_REQUEST_LIMIT")
 
     # Inventory
     shopify_access_token: str = Field(default="", alias="SHOPIFY_ACCESS_TOKEN")

@@ -189,7 +189,18 @@ class EmployeeHoursConsistencyTests(unittest.TestCase):
         )
 
     def test_week_bounds_cover_monday_to_sunday(self):
-        week = self._week()
+        from app.routers import team as mod
+
+        # An empty current-week cache uses the live fallback. Keep this calendar
+        # fixture synthetic rather than calling Clockify with dummy credentials.
+        with patch.object(mod, "clockify_client_from_settings") as client:
+            client.return_value.get_user_time_entries.return_value = []
+            week = self._week()
+            client.return_value.get_user_time_entries.assert_called_once_with(
+                "ck-7",
+                start_utc=datetime(2026, 4, 20, 7, tzinfo=timezone.utc),
+                end_utc=datetime(2026, 4, 27, 7, tzinfo=timezone.utc),
+            )
 
         self.assertEqual(week["week_start"], MONDAY)
         self.assertEqual(week["week_end_inclusive"], MONDAY + timedelta(days=6))

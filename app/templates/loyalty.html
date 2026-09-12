@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>POS loyalty · Degen Ops</title>
+{% include '_linear_base_head.html' %}
+<style>
+.loyalty-page {padding:28px;max-width:1300px;margin:auto;color:var(--lx-text)}
+.loyalty-page section {background:var(--lx-s1);border:1px solid var(--lx-br);padding:20px;margin:20px 0;border-radius:10px}
+.loyalty-page input,.loyalty-page select,.loyalty-page button {padding:9px;background:var(--lx-s2);color:var(--lx-text);border:1px solid var(--lx-br);border-radius:5px;max-width:100%;box-sizing:border-box}
+.loyalty-page form {display:flex;flex-wrap:wrap;gap:12px;align-items:end;margin:14px 0}
+.loyalty-page label {display:flex;flex-direction:column;gap:6px;font-size:14px}
+.loyalty-page .muted {color:var(--lx-muted)}
+.loyalty-page .balance {font-size:32px;font-weight:700;margin:18px 0}
+.loyalty-page .alert {border-left:4px solid #eab308}
+.loyalty-page pre {white-space:pre-wrap;word-break:break-word;font-size:12px}
+.loyalty-page details {margin-top:10px}.loyalty-page summary {cursor:pointer}
+.loyalty-page .orders {display:grid;gap:12px}
+.loyalty-page article {border:1px solid var(--lx-br);padding:16px;border-radius:8px;min-width:0}
+.loyalty-page .order-head,.loyalty-page .history-entry {display:flex;justify-content:space-between;gap:16px;align-items:start}
+.loyalty-page .points {font-size:20px;font-weight:650;white-space:nowrap}
+.loyalty-page .status {display:inline-block;padding:4px 8px;background:var(--lx-s2);border-radius:5px;font-size:13px}
+.loyalty-page .facts {display:flex;flex-wrap:wrap;gap:10px 28px;margin:12px 0;font-size:14px}
+.loyalty-page .history-entry {padding:14px 0;border-bottom:1px solid var(--lx-br)}
+.loyalty-page .history-points {text-align:right;flex-shrink:0}
+.loyalty-page .small {font-size:13px}.loyalty-page h2 {font-size:20px}
+.loyalty-page .technical {overflow-wrap:anywhere}
+@media (max-width:767.98px) {
+ .loyalty-body .linear-mobile-topbar {margin:0;width:100%}
+ .loyalty-page {padding:16px} .loyalty-page section {padding:14px}
+ .loyalty-page article {padding:12px} .loyalty-page form>label {width:100%}
+ .loyalty-page form input:not([type=hidden]) {width:100%}
+ .loyalty-page .points {font-size:18px}.loyalty-page .facts {display:grid;gap:7px}
+}
+</style>
+</head>
+<body class="linear-app loyalty-body">
+{% include '_linear_sidebar.html' %}
+<main class="linear-main"><div class="loyalty-page">
+<h1>POS loyalty</h1>
+<p>Earn 1 point per eligible dollar spent in store.</p>
+<p class="muted">Attach an existing customer in Shopify POS using email or phone. Use their Shopify customer ID to check points here.</p>
+{% if gates %}<section class="alert"><strong>Points updates are paused.</strong><p class="small">Displayed balances may be waiting for recent purchases or refunds.</p></section>{% endif %}
+<form method="get" action="/loyalty">
+<label>Shopify customer ID <input name="customer_id" value="{{ customer_id }}" placeholder="Shopify customer ID" maxlength="100"></label>
+<label>Shopify internal order ID <input name="order_id" value="{{ order_id }}" placeholder="Internal ID, not order number" maxlength="100"></label>
+<button type="submit">Look up</button>
+</form>
+{% if balance is not none %}<p class="balance">{{ balance }} points</p>{% endif %}
+<p class="small muted">{% for status,count in counts %}{{ display_reason(status) }}: {{ count }}{% if not loop.last %} · {% endif %}{% endfor %}</p>
+<section><h2>Order entitlements</h2><div class="orders">
+{% for row in rows %}<article>
+<div class="order-head"><div><a title="{{ row.order_id }}" href="/loyalty?order_id={{ display_id(row.order_id) }}"><strong>Order #{{ display_id(row.order_id) }}</strong></a>
+<p class="small muted">{% if row.customer_id %}<a title="{{ row.customer_id }}" href="/loyalty?customer_id={{ display_id(row.customer_id) }}">Customer #{{ display_id(row.customer_id) }}</a>{% else %}No customer attached{% endif %}</p></div>
+<div class="points">{{ row.posted_points }} points</div></div>
+<span class="status">{{ display_reason(row.status) }}</span>
+<p class="small">{{ display_reason(row.reason) }}</p>
+<div class="facts"><span>Eligible merchandise: <strong>{{ display_money(row.net_cents) if row.basis_hash else 'Awaiting verification' }}</strong></span>
+<span class="muted">Checked: {{ row.checked_at.strftime('%b %d, %Y · %H:%M UTC') if row.checked_at else 'Not yet' }}</span></div>
+{% if diagnostics %}<details class="technical"><summary>Administrator details</summary>
+<p>Internal entitlement {{ row.id }} · revision {{ row.revision }} · {{ row.candidate_points }} calculated points</p>
+<p>Reason code: {{ row.reason }}</p><pre>{{ row.observed_evidence_json }}</pre></details>{% endif %}
+{% if can_correct %}
+{% if row.reason in ('attachment_outside_window','attachment_timing_unverified') and row.customer_id %}
+<details><summary>Verify attachment timing</summary><p class="small">Review authoritative evidence that this customer was attached within seven days of payment. Enter the actual attachment time with a UTC offset and a case reference. This queues a fresh Shopify check.</p>
+<form method="post" action="/loyalty/verify-attachment">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="request_key" value="{{ request_key }}-attach-{{ row.id }}">
+<input type="hidden" name="entitlement_id" value="{{ row.id }}"><input type="hidden" name="expected_revision" value="{{ row.revision }}">
+<input type="hidden" name="evidence_hash" value="{{ evidence_hashes[row.id] }}">
+<label>Verified attachment time (UTC) <input name="attached_at" placeholder="YYYY-MM-DDTHH:MM:SSZ" maxlength="40" required></label>
+<label>Case reference (no contact data) <input name="reference" pattern="[A-Za-z0-9_-]{1,80}" maxlength="80" required></label>
+<button type="submit">Verify and queue check</button></form></details>{% endif %}
+{% if row.account_id %}<details><summary>Correct points</summary>
+<p class="small">Records a compensating entry and pauses further changes to this order for administrator review.</p>
+<form method="post" action="/loyalty/correct">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="request_key" value="{{ request_key }}-{{ row.id }}">
+<input type="hidden" name="entitlement_id" value="{{ row.id }}"><input type="hidden" name="expected_revision" value="{{ row.revision }}">
+<label>Correct order points <input type="number" name="target_points" min="0" step="1" required></label>
+<label>Reason <select name="reason"><option value="erroneous_award">Erroneous award</option><option value="refund_review">Refund review</option><option value="reconciliation">Reconciliation</option></select></label>
+<label>Case reference (no contact data) <input name="reference" pattern="[A-Za-z0-9_-]{1,80}" maxlength="80" required></label>
+<button type="submit" {% if gates %}disabled{% endif %}>Record correction</button></form></details>{% endif %}{% endif %}
+</article>{% else %}<p>No matching orders.</p>{% endfor %}</div></section>
+<section><h2>Points history</h2>
+{% for entry in history %}<div class="history-entry"><div><strong>{{ display_reason(entry.reason) }}</strong>
+<p class="small">Order #{{ display_id(history_orders.get(entry.entitlement_id)) }}</p>
+<p class="small muted">{{ entry.created_at.strftime('%b %d, %Y · %H:%M UTC') }}</p>
+{% if diagnostics %}<details class="technical"><summary>Administrator evidence</summary><p>Entry {{ entry.id }} · revision {{ entry.revision }} · {{ entry.rule_version }}</p><pre>{{ entry.evidence_json }}</pre></details>{% endif %}</div>
+<div class="history-points"><span class="points">{{ '%+d'|format(entry.delta) }}</span><p class="small muted">{{ entry.resulting_points }} on order</p></div></div>
+{% else %}<p>No posted points.</p>{% endfor %}</section>
+<nav aria-label="Loyalty pages">{% if page %}<a href="/loyalty?page={{ page-1 }}&customer_id={{ customer_id|urlencode }}&order_id={{ order_id|urlencode }}">Previous</a> · {% endif %}<a href="/loyalty?page={{ page+1 }}&customer_id={{ customer_id|urlencode }}&order_id={{ order_id|urlencode }}">Next</a></nav>
+{% if can_replay %}<section><h2>Reconciliation and exceptions</h2>
+<p>Last completed scan (UTC): {{ scan.completed_through if scan and scan.completed_through else 'Never run' }}</p>
+{% if scan and scan.reason %}<p>{{ display_reason(scan.reason) }}</p>{% endif %}
+<form method="post" action="/loyalty/replay"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="request_key" value="{{ request_key }}">
+<label>Internal entitlement IDs (up to 25, comma separated) <input name="ids" maxlength="300" pattern="[0-9]+(,[0-9]+){0,24}" required></label><button type="submit">Queue Shopify check</button></form>
+<form method="post" action="/loyalty/rebuild-check"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit">Check ledger sums</button></form>
+{% for item in inbox %}<article><strong>{{ 'Order #' + display_id(item.order_id) if item.order_id else 'Customer identity review' }}</strong><p>{{ display_reason(item.status) }} · {{ display_reason(item.reason) }}</p>
+<details class="technical"><summary>Receipt details</summary><p>Receipt {{ item.id }} · {{ item.attempts }} attempts · {{ item.received_at }} UTC</p><pre>{{ item.evidence_json }}</pre></details></article>{% else %}<p>No pending receipts.</p>{% endfor %}
+</section>{% endif %}
+{% if diagnostics %}<section><details class="technical"><summary>Activation and system status</summary><p>Receiving: {{ 'on' if receiving else 'off' }} · Processing: {{ 'on' if processing else 'off' }} · Posting: {{ 'on' if posting else 'off' }}</p><p>{{ gates|join(', ') }}</p></details></section>{% endif %}
+<p class="muted small">Online and TikTok purchases are excluded. Points have no redemption value in this release. Smile remains unchanged.</p>
+</div></main>
+{% include '_csrf_bootstrap.html' %}
+</body></html>

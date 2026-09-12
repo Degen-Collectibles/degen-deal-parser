@@ -528,6 +528,9 @@ async def lifespan(app: FastAPI):
 
     _start_shopify_pos_tax_sentinel_task(app, stop_event, background_tasks)
 
+    from .loyalty.worker import start_loyalty_task
+    start_loyalty_task(app, stop_event, background_tasks, settings)
+
     if settings.employee_portal_enabled and settings.sms_dispatcher_enabled:
         from .team.sms_outbox import sms_dispatch_loop
         background_tasks.append(track_background_task(
@@ -608,6 +611,13 @@ app.include_router(reports_router)
 
 from .routers.shopify import router as shopify_router  # noqa: E402
 app.include_router(shopify_router)
+
+from .routers.loyalty import router as loyalty_router
+from .routers.shopify_loyalty_webhooks import router as shopify_loyalty_webhooks_router
+from .routers.loyalty_pos import build_router as build_loyalty_pos_router
+app.include_router(build_loyalty_pos_router(engine, settings))
+app.include_router(loyalty_router)
+app.include_router(shopify_loyalty_webhooks_router)
 
 from .routers.dashboard import router as dashboard_router  # noqa: E402
 app.include_router(dashboard_router)
@@ -822,7 +832,7 @@ async def message_attachment_fallback(
 
 @app.middleware("http")
 async def attach_current_user(request: Request, call_next):
-    if is_public_path(request.url.path):
+    if is_public_path(request.url.path) or request.url.path.startswith("/api/loyalty/pos/customers/"):
         request.state.current_user = None
         return await call_next(request)
     request.state.current_user = get_request_user(request)

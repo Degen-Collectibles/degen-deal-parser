@@ -1,0 +1,33 @@
+# Phase-two implementation plan — local implementation approved
+
+Jeffrey explicitly authorized phase-two local implementation. The all-staff approved-app/shop read option is implemented as a configurable **default OFF** option. On September 11, Jeffrey approved all cashiers viewing shop-scoped balances/history through this policy, with corrections restricted in Ops, and approved read-only Shopify setup inspection. The policy decision is settled; production access, native-test actions and runtime flag enablement are not authorized. Individual Ops mappings and extra staff login are outside this implementation. This status supersedes the earlier planning-only labels, without authorizing app creation, login, tunnels, installation, credentials, deployment or activation.
+
+## Completed local implementation
+
+1. **App/shop bearer authorization.** `app/loyalty/pos_auth.py` uses pinned PyJWT 2.13.0 with HS256 only, exact app audience/shop issuer/destination, required authenticated-user/session claims, bounded lifetime and strict integer timestamps. Both POS read and all-staff policy flags must be enabled and all app/shop settings present. PIN identity is never verified or used for authorization. No Ops lookup, cookie fallback or individual mappings.
+2. **Consistent ledger reads.** `app/loyalty/queries.py` reads the existing account/ledger in one SQL statement, returning exact whole-point strings and at most 25 display-safe entries. Signed app/shop/customer cursors carry the watermark/count/sum, rejecting tampering, expiry, cross-customer reuse and late lower-ID commits that change the snapshot. No accounts, ledger entries, inbox items, canonical fetches or reconciliation are created by viewing points.
+3. **Dedicated API.** `app/routers/loyalty_pos.py` registers `GET /api/loyalty/pos/customers/{customer_id}` and bounded Shopify-origin OPTIONS preflight. Schema/config/read-policy gates, bearer verification, request/header/query/page limits, per-session and process rate budgets, sanitized failures and no-store responses are enforced. App middleware bypasses Ops cookie lookup only for this dedicated path. Admin corrections stay in Ops; no bulk or contact endpoints.
+4. **Native targets.** `extensions/loyalty-pos/` pins API 2026-07 and locked compatible dependencies. `CustomerBlock.tsx` and `HistoryModal.tsx` render `pos.customer-details.block.render` and `pos.customer-details.action.render`. The shared component reads `shopify.customer.id`, gets a fresh session token, uses the relative app backend URL, and discards stale results across customer/session/PIN/connectivity changes. History is bounded and does not invoke earning. The shared Admin API remains 2026-04.
+5. **Local evidence.** API/security/SQLite/PostgreSQL regression tests, native-component unit tests, type checks, local esbuild bundles and browser interaction tests are recorded in [phase-two-runbook.md](phase-two-runbook.md). The separate loopback preview uses the actual component and read router with synthetic data. It is not proof of native POS behavior. The existing phase-one 8766 demo and accounting implementation are preserved.
+
+## Approved staff policy; activation remains separate
+
+The approved policy permits all cashiers using the approved app/shop authenticated session to read shop-scoped balances/history without an individual Ops binding or extra login. The backend authenticates the Shopify user/session, not the cashier PIN or selected-customer context. This grants bounded individual lookups across the configured shop; the server cannot attest that a supplied customer ID is currently selected in POS.
+
+Only if a future policy requires restricted roles, preserve either explicit Shopify authenticated-user → active Ops user/grant bindings, or a separately designed staff authentication/pairing flow. Neither is implemented here. Resolve any shared-device staff proof, revocation, lifetime and mapping administration before coding that alternative. Do not silently reinterpret unsigned PIN IDs as verified staff identity or pretend the all-staff option enforces restricted cashier/manager roles.
+
+## Separately authorized app/dev-store setup
+
+Use [native-test-preflight.md](native-test-preflight.md), which records local prerequisites, current official setup requirements, exact prospective actions and rollback. Parent handles the authorized read-only browser inspection; no findings have been supplied yet. Fill the app owner/client, Dev Dashboard app/distribution, synthetic development store/device, scopes, HTTPS application URL, real extension UID, secure credential-handling reference, spending implications and test-customer fields without placing secrets in the document. Leave these values unset until supplied. Reuse an existing suitable app only after authorized inspection; do not alter legacy inventory credentials or subscriptions.
+
+After authorization, validate the parent app and extension with the Shopify CLI, then test native iOS/Android POS placement, component support, relative backend URL, CORS, actual ID-token claims, permissions, expiry/revocation delay, context switching, offline/timeouts and application restart. `shopify app dev` connects a dev store and normally opens a tunnel; it was not executed locally. The package’s esbuild pass is not Shopify CLI validation.
+
+Verify installed scopes/protected-data requirements, the target locations’ POS plan/device versions and distribution constraints. The POS read endpoint performs no Admin API call; phase-one reader scopes remain independently required. Do not assume a plan upgrade or spend.
+
+## Release gates and rollback
+
+Review exact code, synthetic and native evidence, enforcement of the approved cashier read/Ops correction policy, app/shop binding, aggregate request/load limits, access-log minimization/retention and spending budget. Supply unchanged phase-one launch inputs separately. No production gate is enabled by registering the route or building a bundle.
+
+Run the repository’s full required suite before a future commit. The completed prior full run and failure rerun retain an unrelated clean-base Clockify fixture blocker; no full-green claim is made and no commit was requested.
+
+Deployment, app version release, installation and placement require separate authorization naming targets. Disable `LOYALTY_POS_READ_ENABLED` or `LOYALTY_POS_ALL_STAFF_ENABLED` through the approved configuration rollout to revoke this read surface; then remove placement through an approved operation if needed. Preserve accounts, ledger history, phase-one subscriptions and accounting flags. Existing Ops remains available under its existing grants.

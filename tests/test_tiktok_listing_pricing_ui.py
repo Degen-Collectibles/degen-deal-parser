@@ -80,7 +80,9 @@ def ui(browser):
             return route.abort()
         return route.fulfill(json=copy.deepcopy(result))
 
-    context.route('**/*', respond)
+    # Page-level fixtures take precedence over the isolation harness guard.
+    # Every response is fulfilled locally or aborted; no network is permitted.
+    page.route('**/*', respond)
     def open_draft():
         page.goto('http://listing.test/')
         page.locator('#draft-list button').click()

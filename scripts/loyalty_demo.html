@@ -1,0 +1,13 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Loyalty demo · synthetic data</title>
+<style>body{margin:0;background:#101113;color:#eee;font:15px system-ui}header{padding:16px;border-bottom:2px solid #ddb343}h1{font-size:20px;margin:0 0 8px}.badge{color:#ffda80}form{display:flex;flex-wrap:wrap;gap:10px;align-items:end;margin:12px 0}label{display:block;margin-bottom:4px}form>div{display:grid;gap:4px}select,button{font:inherit;padding:8px;border-radius:5px;border:1px solid #555;background:#25272b;color:#fff}button{cursor:pointer}p{margin:8px 0}.note{color:#bfc3cb}iframe{display:block;width:100%;height:calc(100vh - 280px);min-height:600px;border:0}.actions{display:flex;gap:16px;flex-wrap:wrap}@media(max-width:600px){header{padding:12px}form>div{width:100%}iframe{height:950px}form{margin:8px 0}}</style></head><body>
+<header><h1><span class="badge">DEMO ONLY</span> · POS loyalty walkthrough</h1><p class="note">Synthetic customers, purchases and staff. No Shopify connection or production data. Restart the launcher for fresh examples.</p>
+<form action="/demo/select" method="post"><input type="hidden" name="csrf_token" value="{{ token }}">
+<div><label for="demo-role">Demo role</label><select id="demo-role" name="role"><option value="cashier" {% if role=='cashier' %}selected{% endif %}>Cashier · balance and history</option><option value="admin" {% if role=='admin' %}selected{% endif %}>Admin · review and corrections</option></select></div>
+<div><label for="demo-sample">Sample</label><select id="demo-sample" name="sample">{% for key,info in samples.items() %}<option value="{{ key }}" {% if sample==key %}selected{% endif %}>{{ info[0] }}</option>{% endfor %}</select></div><button>Open example</button></form>
+{% if role %}<p>{{ description }}</p><div class="actions">
+{% if sample=='pending' %}<form method="post" action="/demo/attach"><input type="hidden" name="csrf_token" value="{{ token }}"><button>Simulate existing customer attachment</button></form>{% endif %}
+{% if role=='admin' %}<form method="post" action="/demo/process"><input type="hidden" name="csrf_token" value="{{ token }}"><input type="hidden" name="sample" value="{{ sample }}"><button>Process queued demo checks</button></form>{% endif %}</div>
+<p class="note">The panel below uses the real loyalty routes, permission checks and forms. Other application sections are unavailable in this demo.</p>
+{% else %}<p>Choose a role and sample to begin. Cashiers have an explicit balance/history grant; administrator actions still enforce permissions and CSRF.</p>{% endif %}</header>
+{% if role %}<iframe title="Actual loyalty application" src="{{ target }}"></iframe>{% endif %}
+</body></html>
