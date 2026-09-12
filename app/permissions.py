@@ -31,6 +31,9 @@ RESOURCE_KEYS: List[str] = [
     "page.documents",
     "page.timeoff",
     "page.supply_requests",
+    "ops.loyalty.view",
+    "admin.loyalty.reconcile",
+    "admin.loyalty.correct",
     "ops.inventory.view",
     "ops.inventory.receive",
     "ops.inventory.manage",
@@ -89,6 +92,9 @@ RESOURCE_KEYS: List[str] = [
 
 
 _LABEL_OVERRIDES: Dict[str, str] = {
+    "ops.loyalty.view": "Ops - POS loyalty balance and history",
+    "admin.loyalty.reconcile": "Admin - Reconcile POS loyalty",
+    "admin.loyalty.correct": "Admin - Correct POS loyalty points",
     "page.dashboard": "Dashboard page",
     "page.profile": "Profile page",
     "page.policies": "Policies page",

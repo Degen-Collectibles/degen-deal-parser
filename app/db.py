@@ -11,6 +11,7 @@ from sqlmodel import SQLModel, Session, create_engine
 
 from .config import get_settings
 from . import models as _models  # noqa: F401
+from .loyalty import models as _loyalty_models  # noqa: F401 -- before create_all
 
 settings = get_settings()
 _db_failure_state_lock = threading.Lock()
@@ -1645,6 +1646,9 @@ DEFAULT_ROLE_PERMISSIONS: tuple[tuple[str, str, bool], ...] = tuple(
         ("page.documents", (True, True, True, True, True)),
         ("page.timeoff", (True, True, True, True, True)),
         ("page.supply_requests", (True, False, True, True, True)),
+        ("ops.loyalty.view", (False, False, False, False, True)),
+        ("admin.loyalty.reconcile", (False, False, False, False, True)),
+        ("admin.loyalty.correct", (False, False, False, False, True)),
         ("ops.inventory.view", (True, True, True, True, True)),
         ("ops.inventory.receive", (True, True, True, True, True)),
         ("ops.inventory.manage", (False, False, True, True, True)),
@@ -1940,6 +1944,14 @@ def init_db() -> None:
             delay_seconds *= 2
     ensure_postgres_schema()
     ensure_sqlite_schema()
+    try:
+        from .loyalty.schema import install_schema
+        install_schema(engine)
+        from .loyalty.access import seed_loyalty_permissions
+        with Session(engine) as session:
+            seed_loyalty_permissions(session)
+    except Exception:
+        print("[loyalty] schema not ready; receiving, processing and posting blocked")
     fixup_transaction_parse_status_aliases()
     try:
         from .discord.backfill_requests import repair_backfill_request_state_rows

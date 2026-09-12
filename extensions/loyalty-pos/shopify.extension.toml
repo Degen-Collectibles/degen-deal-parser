@@ -1,0 +1,18 @@
+api_version = "2026-07"
+
+[[extensions]]
+type = "ui_extension"
+name = "Loyalty points"
+handle = "loyalty-customer-points"
+uid = "a611fd77-b939-c9be-7353-0235da6422209a2e1e4a"
+description = "Read existing customer points and activity."
+# UID generated locally by Shopify CLI 4.5.2 during the approved DEV build.
+# Dashboard registration/linking still requires authenticated DEV setup.
+
+[[extensions.targeting]]
+module = "./src/CustomerBlock.tsx"
+target = "pos.customer-details.block.render"
+
+[[extensions.targeting]]
+module = "./src/HistoryModal.tsx"
+target = "pos.customer-details.action.render"

@@ -1,0 +1,7 @@
+{
+  "name": "degen-loyalty-native-dev",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {"node": ">=22.12.0"},
+  "devDependencies": {"@shopify/cli": "4.5.2"}
+}

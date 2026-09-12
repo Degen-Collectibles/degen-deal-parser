@@ -1,0 +1,19 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Synthetic loyalty POS preview</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#eff3f5;color:#18302c;font:16px/1.5 system-ui,sans-serif}main{max-width:840px;margin:auto;padding:30px 20px}h1{font-size:30px;line-height:1.2;margin:14px 0}p{margin:10px 0}.tag{font-size:12px;letter-spacing:.08em;font-weight:750;color:#086548}aside,.preview{background:white;border:1px solid #c7d4d0;border-radius:14px;padding:20px;margin:22px 0}aside{display:grid;gap:14px;grid-template-columns:1fr 1fr}aside p{grid-column:1/-1;font-size:14px;color:#465e57}label{font-weight:650}select{display:block;width:100%;font:inherit;padding:10px;margin-top:6px;border:1px solid #b0c2ba;border-radius:6px;background:white}.check{grid-column:1/-1;display:flex;gap:10px;align-items:center}input{width:18px;height:18px}.preview{max-width:570px;margin-inline:auto}/* Browser-only approximation of the supported native props and action slots. */
+s-pos-block,s-page{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:16px;align-items:center}
+s-pos-block::before,s-page::before{content:attr(heading);grid-column:1;grid-row:1;font-size:16px;font-weight:650}
+s-pos-block>s-stack,s-page>s-scroll-box{grid-column:1/-1;grid-row:2}
+s-pos-block>[slot="secondary-actions"],s-page>[slot="secondary-actions"]{grid-column:2;grid-row:1;justify-self:end}
+s-scroll-box,s-box,s-text,s-divider{display:block;min-width:0}s-text{overflow-wrap:anywhere}
+s-stack{display:flex;flex-direction:column;gap:12px;min-width:0}
+s-stack[direction="inline"]{flex-direction:row}s-stack[justifycontent="space-between"]{justify-content:space-between}s-stack[alignitems="start"]{align-items:flex-start}
+s-stack[gap="none"]{gap:0}s-stack[gap="small"]{gap:8px}s-stack[gap="small-200"]{gap:4px}
+[padding="base"]{padding:16px}[paddingblock="small"]{padding-block:8px}[paddingblock="base"]{padding-block:16px}[paddingblockstart="small"]{padding-block-start:8px}
+s-text[type="strong"]{font-weight:750}s-text[type="small"]{font-size:13px}s-text[color="subdued"]{color:#65736d}s-text[tone="caution"]{color:#855318}
+s-divider{border-top:1px solid #e2e8e4}
+s-button,button{display:block;width:fit-content;max-width:100%;font:inherit;font-weight:650;padding:10px 16px;color:#fff;background:#075e46;border:0;border-radius:7px;cursor:pointer;text-align:center}
+s-button[variant="secondary"],.back{background:#e8f1ec;color:#174c3b}s-button[slot="secondary-actions"]{background:transparent;color:#075e46;padding:6px 0}
+s-button:focus-visible,button:focus-visible,select:focus-visible{outline:3px solid #e2a20e;outline-offset:3px}.back{margin-bottom:20px}footer{font-size:13px;color:#54685f}
+@media(max-width:500px){main{padding:20px 12px}aside{grid-template-columns:1fr;padding:16px}.preview{padding:16px}h1{font-size:26px}}
+</style><div id="preview"></div><script type="module" src="/assets/preview.js"></script></html>

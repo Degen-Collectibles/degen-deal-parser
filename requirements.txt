@@ -25,3 +25,4 @@ browser-use
 playwright
 bcrypt
 cryptography
+PyJWT==2.13.0

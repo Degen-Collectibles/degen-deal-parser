@@ -458,9 +458,12 @@ def _csrf_template_context(request: Request) -> dict[str, str]:
         return {"csrf_token": ""}
 
 
+from .loyalty.access import loyalty_template_context
+
+
 templates = Jinja2Templates(
     directory=normalize_filesystem_path(BASE_DIR / "templates"),
-    context_processors=[_csrf_template_context],
+    context_processors=[_csrf_template_context, loyalty_template_context],
 )
 PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
 

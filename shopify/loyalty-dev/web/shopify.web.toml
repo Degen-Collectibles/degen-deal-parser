@@ -1,0 +1,6 @@
+# One synthetic read-only process; never app.main or either browser demo.
+roles = ["frontend", "backend"]
+port = 8768
+
+[commands]
+dev = "/tmp/degen-loyalty-test-venv/bin/python ../../../scripts/loyalty_native_web.py"
