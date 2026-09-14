@@ -153,6 +153,7 @@ def test_parent_config_targets_and_no_scopes():
     assert web['port'] == 8768 and 'loyalty_native_web.py' in web['commands']['dev']
 
 
+@pytest.mark.skipif(os.name != 'posix', reason='WSL native launcher requires POSIX owner-only secret handoff')
 def test_launch_check_only_uses_synthetic_secret_without_exposing_listener(tmp_path):
     import subprocess
     import sys

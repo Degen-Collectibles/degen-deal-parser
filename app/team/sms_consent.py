@@ -16,10 +16,12 @@ from .pii import PIIDecryptError, decrypt_pii
 from .sms import mask_sms_phone, normalize_sms_phone, sms_phone_fingerprint
 
 CONSENT_ACTION = "sms.consent"
-CONSENT_VERSION = "2026-09-08"
+CONSENT_VERSION = "2026-09-14"
 CONSENT_TEXT = (
-    "Send me Degen Collectibles operational text alerts about schedules, shifts, "
-    "and team operations. Optional; app access does not require consent. "
+    "By checking this box and choosing Save text preference, I agree to receive "
+    "recurring informational SMS account notifications from Degen Collectibles LLC "
+    "at my saved mobile number about schedules, shifts, and team operations. "
+    "Consent is optional and is not a condition of employment, purchase, or app access. "
     "Message frequency varies. Message and data rates may apply. "
     "Reply STOP to unsubscribe or HELP for help."
 )
