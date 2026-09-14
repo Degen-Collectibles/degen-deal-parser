@@ -58,6 +58,35 @@ class SmsConsentTests(unittest.TestCase, _PortalHarness):
         sender.assert_not_called()
         self.assertEqual(json.loads(row.details_json)["sms"]["status"], "consent_required")
 
+    def test_enrollment_disclosures_and_public_policy_links(self):
+        from bs4 import BeautifulSoup
+        from app.team.sms_consent import CONSENT_TEXT
+        response = self.client.get("/team/profile")
+        soup = BeautifulSoup(response.text, "html.parser")
+        form = soup.select_one('form[action="/team/profile/sms"]')
+        self.assertIn(CONSENT_TEXT, form.get_text(" ", strip=True))
+        for path in ("team-sms-terms.html", "team-sms-privacy.html"):
+            url = "/static/compliance/" + path
+            self.assertIsNotNone(form.select_one(f'a[href="{url}"]'))
+            # Policies must also be available to a reviewer without signing in.
+            self.client.cookies.clear()
+            policy = self.client.get(url)
+            self.assertEqual(policy.status_code, 200)
+            self.assertIn("Degen Collectibles LLC", policy.text)
+            self.assertIn("info@degencollectibles.com", policy.text)
+        guide = self.client.get("/static/compliance/team-sms-consent.html")
+        self.assertIn(CONSENT_TEXT, guide.text)
+
+    def test_previous_wording_requires_fresh_consent(self):
+        self._grant()
+        row = self.session.exec(select(AuditLog).where(AuditLog.action == CONSENT_ACTION)).one()
+        evidence = json.loads(row.details_json)
+        evidence["version"] = "2026-09-08"
+        row.details_json = json.dumps(evidence)
+        self.session.add(row)
+        self.session.commit()
+        self.assertFalse(consent_context(self.session, self.user.id)["opted_in"])
+
     def test_unchecked_post_does_not_grant_consent(self):
         self.assertEqual(self._post(sms_opt_in="").status_code, 303)
         self.assertFalse(consent_context(self.session, self.user.id)["opted_in"])

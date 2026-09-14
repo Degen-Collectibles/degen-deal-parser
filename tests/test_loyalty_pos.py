@@ -120,11 +120,12 @@ def test_defaults_deny_even_valid_bearer_and_secret_not_in_settings_repr(engine)
 
 @pytest.mark.parametrize('change', [
     {'aud':'another-client'}, {'aud':[CLIENT]}, {'dest':'https://other.myshopify.com'},
-    {'iss':f'https://{SHOP}/admin/evil'}, {'exp':1}, {'nbf':int(time.time())+1000},
-    {'iat':int(time.time())+1000}, {'sub':''}, {'sub':42}, {'sid':''},
-    {'exp':True}, {'iat':'1'}, {'exp':int(time.time())+10000},
+    {'iss':f'https://{SHOP}/admin/evil'}, {'exp':1}, {'nbf':lambda: int(time.time())+1000},
+    {'iat':lambda: int(time.time())+1000}, {'sub':''}, {'sub':42}, {'sid':''},
+    {'exp':True}, {'iat':'1'}, {'exp':lambda: int(time.time())+10000},
 ])
 def test_invalid_claims_never_return_customer_data(engine, change):
+    change = {key: value() if callable(value) else value for key, value in change.items()}
     response = read(client(engine), bearer=token(**change))
     assert response.status_code == 401
     assert response.json() == {'error':'authentication_required'}
