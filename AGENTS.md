@@ -135,6 +135,7 @@ These notes capture durable lessons from recent work. Re-verify anything product
 - When Jeffrey says Degen is eligible for Surprise Sets and is only using official TikTok methods, skip eligibility speculation and focus on operational optimization.
 - Keep Surprise Set advice inside official TikTok surfaces. Do not suggest noncompliant chance mechanics.
 - Use existing TikTok primitives first: `TikTokOrder`, `TikTokProduct`, `InventoryItem`, `/tiktok/streamer`, `/tiktok/analytics`, `/tiktok/clients`, GMV goals, high-value alerts, VIP thresholds, buyer lifetime spend, and product velocity reporting.
+- Creator attribution pilot observability lives on `/tiktok/streamer/config` and `/status.json` under `tiktok_creator_attribution`; per-creator trace telemetry is stored in `AppSetting` key `tiktok_creator_trace_status` and must never include token values, raw payloads, raw `scopes_json`, or viewer-visible error strings.
 - The strongest pool guidance from public competitor research was separated sealed-product pools by buyer intent: entry Pokemon, core Pokemon, premium Pokemon, One Piece-only, and themed pools such as Eevee / Charizard / 151.
 - If Surprise Set behavior is app-only/mobile-only, web search is not enough. Ask for phone screen recordings or use an Android `scrcpy` / `adb` bridge, then analyze pool contents, start price, hammer price, cadence, and reveal behavior.
 
@@ -200,7 +201,7 @@ TikTok side:
 - `/tiktok/streamer` — live streamer dashboard (real-time orders, GMV, chat, goal bar, alerts)
 - `/tiktok/analytics` — stream analytics, buyer tracking, product performance, stream comparison
 - `/tiktok/clients` — client & product intelligence (buyer drilldowns, product drilldowns)
-- `/tiktok/streamer/config` — stream time config + GMV goal + alert thresholds
+- `/tiktok/streamer/config` — stream time config + GMV goal + alert thresholds + admin-only creator attribution health
 
 Inventory:
 - `/inventory` — inventory listing with search, filter by type/status/game
