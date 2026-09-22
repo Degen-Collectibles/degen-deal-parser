@@ -159,7 +159,15 @@ def _stream_session_is_stale_open(session_data: Optional[dict], now: Optional[da
     if start_ts <= 0 or end_ts > 0:
         return False
     now_ts = int((_coerce_utc_datetime(now) or datetime.now(timezone.utc)).timestamp())
-    return now_ts >= start_ts and (now_ts - start_ts) > LIVE_SESSION_OPEN_MAX_SECONDS
+    if now_ts < start_ts or (now_ts - start_ts) <= LIVE_SESSION_OPEN_MAX_SECONDS:
+        return False
+    # Marathon streams keep one session open for days. Orders still arriving
+    # mean it is live, not a session TikTok forgot to close.
+    try:
+        last_order_ts = int(session_data.get("last_order_at") or 0)
+    except (TypeError, ValueError):
+        last_order_ts = 0
+    return not (last_order_ts and now_ts - last_order_ts <= LIVE_SESSION_ORDER_ACTIVITY_MAX_GAP_SECONDS)
 
 
 def _stream_session_is_live(session_data: Optional[dict]) -> bool:

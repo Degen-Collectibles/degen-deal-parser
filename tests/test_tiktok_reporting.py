@@ -3770,6 +3770,72 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(payload["latest_updated_at"], shipped_update_at.isoformat())
         self.assertEqual(payload["current_order_ids"], ["new-sale", "earlier-stream-order"])
 
+    def test_open_multi_day_session_is_live_only_while_orders_arrive(self) -> None:
+        import app.routers.tiktok_streamer as streamer_module
+
+        now = datetime(2026, 9, 21, 18, 0, tzinfo=timezone.utc)
+        marathon = {"start_time": int((now - timedelta(days=5)).timestamp()), "end_time": 0}
+        is_stale = lambda session_data: streamer_module._stream_session_is_stale_open(session_data, now=now)
+
+        self.assertFalse(is_stale({**marathon, "last_order_at": int((now - timedelta(minutes=10)).timestamp())}))
+        self.assertTrue(is_stale({**marathon, "last_order_at": int((now - timedelta(hours=4)).timestamp())}))
+        self.assertTrue(is_stale(marathon))
+        self.assertFalse(is_stale({"start_time": int((now - timedelta(hours=5)).timestamp()), "end_time": 0}))
+
+    def test_live_session_poll_records_latest_paid_order_on_open_sessions(self) -> None:
+        now = datetime.now(timezone.utc)
+        paid_at = now - timedelta(minutes=20)
+        with Session(self.engine) as session:
+            session.add(self._live_feed_order("paid-recent", paid_at, paid_at, "AWAITING_SHIPMENT"))
+            session.add(self._live_feed_order("cancelled-newer", now - timedelta(minutes=5), now, "CANCELLED"))
+            session.add(self._live_feed_order("paid-old", now - timedelta(hours=5), now, "AWAITING_SHIPMENT"))
+            session.commit()
+
+        @contextmanager
+        def fake_managed_session():
+            with Session(self.engine) as session:
+                yield session
+
+        marathon = {"id": "marathon", "start_time": int((now - timedelta(days=5)).timestamp()), "end_time": 0}
+        just_started = {"id": "new", "start_time": int((now - timedelta(minutes=10)).timestamp()), "end_time": 0}
+        ended = {"id": "ended", "start_time": int((now - timedelta(days=2)).timestamp()), "end_time": int((now - timedelta(days=1)).timestamp())}
+        with patch.object(shared_module, "managed_session", fake_managed_session):
+            shared_module._annotate_open_sessions_with_order_activity([marathon, just_started, ended], now=now)
+
+        self.assertEqual(marathon["last_order_at"], int(paid_at.timestamp()))
+        self.assertIsNone(just_started["last_order_at"])
+        self.assertNotIn("last_order_at", ended)
+
+    def test_tiktok_streamer_poll_treats_multi_day_session_with_orders_as_live(self) -> None:
+        now = datetime.now(timezone.utc)
+        marathon_start = now - timedelta(days=5)
+        new_sale_at = now - timedelta(minutes=1)
+        with Session(self.engine) as session:
+            session.add(self._live_feed_order(
+                "marathon-day1-order", marathon_start + timedelta(hours=1), now - timedelta(seconds=30), "DELIVERED"
+            ))
+            session.add(self._live_feed_order("new-sale", new_sale_at, new_sale_at, "AWAITING_SHIPMENT"))
+            session.commit()
+
+            payload = self._poll_streamer(
+                session,
+                [{
+                    "id": "marathon",
+                    "title": "Marathon",
+                    "username": "degencollectibles",
+                    "start_time": int(marathon_start.timestamp()),
+                    "end_time": 0,
+                    "last_order_at": int(new_sale_at.timestamp()),
+                }],
+                since=now - timedelta(minutes=2),
+            )
+
+        self.assertTrue(payload["is_live"])
+        self.assertEqual(payload["stream_range_source"], "creator")
+        self.assertEqual(payload["stream_start_utc"], marathon_start.replace(microsecond=0).isoformat())
+        self.assertEqual([row["tiktok_order_id"] for row in payload["orders"]], ["new-sale"])
+        self.assertEqual(payload["current_order_ids"], ["new-sale", "marathon-day1-order"])
+
     def test_tiktok_streamer_template_refund_statuses_match_backend_classifier(self) -> None:
         template = (Path(__file__).parents[1] / "app" / "templates" / "tiktok_streamer.html").read_text()
         for status in (
