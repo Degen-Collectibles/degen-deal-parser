@@ -78,6 +78,59 @@ class AttachmentRouteTests(unittest.TestCase):
         self.assertTrue(expected_path.exists())
         self.assertEqual(expected_path.read_bytes(), b"cached-image-bytes")
 
+    def _serve_attachment(self, *, filename: str, content_type: str, data: bytes):
+        with Session(self.engine) as session:
+            asset = AttachmentAsset(
+                message_id=1,
+                source_url=f"https://cdn.example.com/{filename}",
+                filename=filename,
+                content_type=content_type,
+                is_image=content_type.startswith("image/"),
+                data=data,
+            )
+            session.add(asset)
+            session.commit()
+            session.refresh(asset)
+
+            cache_path = self.cache_dir / f"{asset.id}-cached"
+            cache_path.write_bytes(data)
+            req = make_request(f"/attachments/{asset.id}")
+            with patch("app.main.require_role_response", return_value=None), patch(
+                "app.main.attachment_cache_path", return_value=cache_path,
+            ):
+                return attachment_asset(request=req, asset_id=asset.id, session=session)
+
+    def test_attachment_asset_serves_passive_images_inline_with_nosniff(self) -> None:
+        response = self._serve_attachment(filename="deal.png", content_type="image/png", data=b"png")
+
+        self.assertEqual(response.media_type, "image/png")
+        self.assertTrue(response.headers["content-disposition"].startswith("inline;"))
+        self.assertEqual(response.headers["x-content-type-options"], "nosniff")
+
+    def test_attachment_asset_forces_download_for_active_content_types(self) -> None:
+        for filename, content_type in (
+            ("x.html", "text/html"),
+            ("x.svg", "image/svg+xml"),
+            ("x.xml", "application/xml"),
+            ("x.bin", ""),
+        ):
+            with self.subTest(content_type=content_type):
+                response = self._serve_attachment(
+                    filename=filename, content_type=content_type, data=b"<script>alert(1)</script>",
+                )
+                self.assertEqual(response.media_type, "application/octet-stream")
+                self.assertTrue(response.headers["content-disposition"].startswith("attachment;"))
+                self.assertEqual(response.headers["x-content-type-options"], "nosniff")
+
+    def test_attachment_asset_filename_cannot_break_content_disposition(self) -> None:
+        response = self._serve_attachment(
+            filename='a"; x=1.png', content_type="image/png", data=b"png",
+        )
+
+        disposition = response.headers["content-disposition"]
+        self.assertNotIn('"; x=1', disposition)
+        self.assertIn("filename*=utf-8''", disposition)
+
     def test_message_attachment_fallback_redirects_to_cached_attachment_route(self) -> None:
         with Session(self.engine) as session:
             row = DiscordMessage(

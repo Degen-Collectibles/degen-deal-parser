@@ -426,7 +426,7 @@
                         <div class="streamer-handle">@{{ s.name }}</div>
                     </div>
                     <div class="streamer-actions">
-                        <button class="btn-icon" title="Edit" onclick="openEditStreamer({{ s.id }}, '{{ s.name }}', '{{ s.display_name or '' }}', '{{ s.avatar_emoji or '' }}', '{{ s.color or '' }}')">&#x270E;</button>
+                        <button class="btn-icon" title="Edit" onclick='openEditStreamer({{ s.id }}, {{ s.name|tojson }}, {{ (s.display_name or "")|tojson }}, {{ (s.avatar_emoji or "")|tojson }}, {{ (s.color or "")|tojson }})'>&#x270E;</button>
                         <form method="post" action="/stream-manager/streamer/{{ s.id }}/delete" style="display:inline;" onsubmit="return confirm('Remove this streamer?')">
                             <button class="btn-icon btn-icon-danger" title="Remove" type="submit">&#x2715;</button>
                         </form>
@@ -499,7 +499,7 @@
                         <button class="btn btn-green btn-sm" onclick="toggleAddShift({{ acct.id }})">+ Add Shift</button>
                         {% endif %}
                         {% if not acct.is_default %}
-                        <button class="btn-icon" title="Edit stream" onclick="openEditAccount({{ acct.id }}, '{{ acct.name }}', '{{ acct.platform }}', '{{ acct.handle or '' }}')">&#x270E;</button>
+                        <button class="btn-icon" title="Edit stream" onclick='openEditAccount({{ acct.id }}, {{ acct.name|tojson }}, {{ acct.platform|tojson }}, {{ (acct.handle or "")|tojson }})'>&#x270E;</button>
                         <form method="post" action="/stream-manager/account/{{ acct.id }}/delete" style="display:inline;" onsubmit="return confirm('Remove this stream? Shifts will be preserved.')">
                             <button class="btn-icon btn-icon-danger" title="Remove" type="submit">&#x2715;</button>
                         </form>

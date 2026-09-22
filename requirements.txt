@@ -3,7 +3,10 @@ fastapi
 # tests; keep the pre-1.0 line until the stack is verified together.
 starlette<1.0.0
 uvicorn[standard]
-sqlmodel
+# SQLModel 0.0.45+ rejects naive datetimes on insert (loyalty_inbox and other
+# naive-UTC writes fail with "Datetime values must have timezone information").
+# Keep below 0.0.45 until naive datetime writes are migrated to aware UTC.
+sqlmodel<0.0.45
 discord.py
 openai
 mcp

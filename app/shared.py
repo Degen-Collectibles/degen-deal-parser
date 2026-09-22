@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import urlencode
+from urllib.parse import unquote, urlencode, urlparse
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -4736,6 +4736,30 @@ def _thumb_url(url: str | None) -> str | None:
     return url
 
 
+def safe_return_path(value: Optional[str], default: str = "/deals") -> str:
+    """Return ``value`` only if it is a same-origin local path.
+
+    ``return_path`` arrives from query strings and form fields and is rendered
+    into ``href`` attributes and redirects, so reject schemes (``javascript:``),
+    protocol-relative ``//host`` and backslash tricks.
+    """
+    if not isinstance(value, str):
+        return default
+    candidate = value.strip()
+    decoded = unquote(candidate).strip()
+    if (
+        not decoded.startswith("/")
+        or decoded.startswith("//")
+        or "\\" in decoded
+        or any(ord(ch) < 0x20 for ch in decoded)
+    ):
+        return default
+    parsed = urlparse(decoded)
+    if parsed.scheme or parsed.netloc:
+        return default
+    return candidate
+
+
 def build_return_url(
     return_path: str,
     *,
@@ -4749,6 +4773,7 @@ def build_return_url(
     page: Optional[int] = None,
     limit: Optional[int] = None,
 ) -> str:
+    return_path = safe_return_path(return_path)
     params: dict[str, str] = {}
 
     if status:

@@ -1,10 +1,11 @@
 name: Tests
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
+  # Pushes to main run this suite through deploy.yml, which gates the
+  # production deploy on it.
+  workflow_call:
 
 jobs:
   test:

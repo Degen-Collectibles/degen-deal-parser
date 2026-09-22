@@ -5,8 +5,17 @@ on:
     branches: [main]
 
 jobs:
+  test:
+    uses: ./.github/workflows/test.yml
+
   deploy:
+    # Never ship a commit whose test suite failed.
+    needs: test
     runs-on: [self-hosted, degen-prod]
+    # Serialize production deploys; queue rather than cancel mid-deploy.
+    concurrency:
+      group: degen-prod-deploy
+      cancel-in-progress: false
     defaults:
       run:
         working-directory: /opt/degen/app

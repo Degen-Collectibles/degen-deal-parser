@@ -41,3 +41,15 @@ def test_redeploy_entrypoint_receives_trigger_sha():
     redeploy_section = workflow[workflow.index("- name: Redeploy app") :]
 
     assert 'DEGEN_EXPECTED_GIT_SHA="$GITHUB_SHA" ./scripts/redeploy-linux.sh' in redeploy_section
+
+
+def test_deploy_is_gated_on_the_test_suite():
+    workflow = _workflow_text()
+    tests_workflow = Path(".github/workflows/test.yml").read_text(encoding="utf-8")
+
+    assert "uses: ./.github/workflows/test.yml" in workflow
+    deploy_job = workflow[workflow.index("  deploy:") :]
+    assert "needs: test" in deploy_job.split("steps:")[0]
+    assert "group: degen-prod-deploy" in deploy_job
+    assert "workflow_call:" in tests_workflow
+    assert "pull_request:" in tests_workflow
