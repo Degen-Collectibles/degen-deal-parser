@@ -263,7 +263,13 @@
     var _expandedRow = null;
     var _searchQuery = '';
 
-    function esc(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+    // Buyer names/keys are buyer-controlled and land inside quoted attributes,
+    // so quotes must be escaped too (textContent->innerHTML does not).
+    function esc(s) {
+        return String(s == null ? '' : s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
     function fmt(n) { return '$' + (n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
     function fmtDate(iso) {
         if (!iso) return '—';

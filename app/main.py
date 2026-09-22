@@ -701,6 +701,31 @@ async def handle_operational_error(request: Request, exc: OperationalError):
         return JSONResponse(status_code=503, content=payload, headers=headers)
     return HTMLResponse(html_message, status_code=503, headers=headers)
 
+# Attachment content types come from Discord uploads, so the declared type is
+# attacker-controlled. Only render known-passive media inline on our origin;
+# everything else (HTML, SVG, XML, scripts, unknown) is forced to download so
+# it can never execute in the ops session.
+INLINE_SAFE_ATTACHMENT_TYPES = frozenset(
+    {
+        "image/png",
+        "image/jpeg",
+        "image/gif",
+        "image/webp",
+        "application/pdf",
+        "video/mp4",
+        "video/webm",
+        "video/quicktime",
+    }
+)
+
+
+def _attachment_media_type(content_type: Optional[str]) -> tuple[str, bool]:
+    normalized = (content_type or "").split(";", 1)[0].strip().lower()
+    if normalized in INLINE_SAFE_ATTACHMENT_TYPES:
+        return normalized, True
+    return "application/octet-stream", False
+
+
 @app.get("/attachments/{asset_id}")
 def attachment_asset(request: Request, asset_id: int, session: Session = Depends(get_session)):
     if denial := require_role_response(request, "viewer"):
@@ -735,14 +760,21 @@ def attachment_asset(request: Request, asset_id: int, session: Session = Depends
             data=asset.data,
         )
 
-    media_type = content_type or "application/octet-stream"
+    media_type, inline_safe = _attachment_media_type(content_type)
     headers = {
         "Cache-Control": "private, max-age=3600",
         "ETag": etag,
+        "X-Content-Type-Options": "nosniff",
     }
-    if filename:
-        headers["Content-Disposition"] = f'inline; filename="{filename}"'
-    return FileResponse(path=file_path, media_type=media_type, headers=headers)
+    # Starlette percent-encodes the filename (RFC 5987) when it contains
+    # quotes or non-ASCII, so a crafted Discord filename can't break the header.
+    return FileResponse(
+        path=file_path,
+        media_type=media_type,
+        headers=headers,
+        filename=filename or f"attachment-{asset_id}",
+        content_disposition_type="inline" if inline_safe else "attachment",
+    )
 
 @app.get("/attachments/{asset_id}/thumb")
 def attachment_thumbnail(request: Request, asset_id: int, session: Session = Depends(get_session)):
@@ -780,10 +812,11 @@ def attachment_thumbnail(request: Request, asset_id: int, session: Session = Dep
             media_type="image/jpeg",
             headers={"Cache-Control": "private, max-age=3600", "ETag": etag},
         )
+    media_type, _ = _attachment_media_type(content_type)
     return FileResponse(
         path=file_path,
-        media_type=content_type or "application/octet-stream",
-        headers={"Cache-Control": "private, max-age=3600", "ETag": etag},
+        media_type=media_type,
+        headers={"Cache-Control": "private, max-age=3600", "ETag": etag, "X-Content-Type-Options": "nosniff"},
     )
 
 @app.get("/messages/{message_id}/attachments/{attachment_index}")

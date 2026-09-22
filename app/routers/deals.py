@@ -132,6 +132,7 @@ def deal_detail_page(
     error: Optional[str] = Query(default=None),
     session: Session = Depends(get_session),
 ):
+    return_path = safe_return_path(return_path)
     admin_message_detail = _is_admin_message_detail_return_path(return_path)
     if denial := require_role_response(request, _message_detail_required_role(return_path)):
         return denial
