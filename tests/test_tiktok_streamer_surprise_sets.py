@@ -538,43 +538,127 @@ class StreamerFreshOrderFallbackTests(unittest.TestCase):
         self.assertEqual(recent_cutoff, now - timedelta(minutes=streamer_module.RECENT_ORDER_ACTIVITY_FALLBACK_MINUTES))
         self.assertEqual(fallback_start, current_run_start)
 
-    def test_fresh_order_fallback_uses_persisted_stream_start_when_available(self) -> None:
-        now = datetime(2026, 5, 31, 18, 45, tzinfo=timezone.utc)
-        persisted_start = datetime(2026, 5, 27, 19, 1, 13, tzinfo=timezone.utc)
+    def _fallback_context_with_saved_range(
+        self,
+        now: datetime,
+        saved_start: datetime,
+        saved_end: datetime | None,
+        order_times: list[datetime],
+        sessions: list[dict] | None = None,
+    ) -> dict:
         previous_range = dict(streamer_module._stream_range)
         try:
-            streamer_module._stream_range["start"] = persisted_start
-            streamer_module._stream_range["end"] = datetime(2026, 5, 30, 9, 29, 48, tzinfo=timezone.utc)
+            streamer_module._stream_range["start"] = saved_start
+            streamer_module._stream_range["end"] = saved_end
             stream_context = {
                 "selected_creator": streamer_module.DEFAULT_STREAM_CREATOR,
                 "creator_filter_enabled": True,
                 "live_session": {},
-                "sessions": [],
+                "sessions": sessions or [],
                 "is_live": False,
             }
-
             with Session(self.engine) as session:
-                session.add(
-                    _order(
-                        "recent-activity",
-                        now - timedelta(minutes=5),
-                        [{"product_name": "BANG EX !!!", "sku_type": "UNKNOWN", "sale_price": 93, "quantity": 1}],
-                        subtotal_price=93,
+                for idx, created_at in enumerate(order_times, start=1):
+                    session.add(
+                        _order(
+                            f"activity-{idx}",
+                            created_at,
+                            [{"product_name": "BANG EX !!!", "sku_type": "UNKNOWN", "sale_price": 93, "quantity": 1}],
+                            subtotal_price=93,
+                        )
                     )
-                )
                 session.commit()
-
-                fallback_context = streamer_module._apply_order_activity_fallback(
-                    session,
-                    stream_context,
-                    now=now,
-                )
-
-            self.assertEqual(fallback_context["start"], persisted_start)
-            self.assertIsNone(fallback_context["end"])
+                return streamer_module._apply_order_activity_fallback(session, stream_context, now=now)
         finally:
             streamer_module._stream_range.clear()
             streamer_module._stream_range.update(previous_range)
+
+    def test_fresh_order_fallback_ignores_saved_stream_start_from_finished_stream(self) -> None:
+        # The saved range still points at a stream that ended days ago. Using its
+        # start widened the live feed to every order since then, so shipping
+        # updates on those orders popped in as new orders.
+        now = datetime(2026, 5, 31, 18, 45, tzinfo=timezone.utc)
+        fresh_order_at = now - timedelta(minutes=5)
+
+        fallback_context = self._fallback_context_with_saved_range(
+            now,
+            saved_start=datetime(2026, 5, 27, 19, 1, 13, tzinfo=timezone.utc),
+            saved_end=datetime(2026, 5, 30, 9, 29, 48, tzinfo=timezone.utc),
+            order_times=[fresh_order_at],
+        )
+
+        self.assertEqual(fallback_context["start"], fresh_order_at)
+        self.assertIsNone(fallback_context["end"])
+
+    def test_fresh_order_fallback_ignores_saved_start_of_earlier_stream_same_day(self) -> None:
+        now = datetime(2026, 5, 31, 23, 0, tzinfo=timezone.utc)
+        earlier_start = now - timedelta(hours=10)
+        earlier_end = now - timedelta(hours=6)
+        current_run_start = now - timedelta(minutes=20)
+
+        fallback_context = self._fallback_context_with_saved_range(
+            now,
+            saved_start=earlier_start,
+            saved_end=earlier_end,
+            order_times=[earlier_start + timedelta(hours=1), current_run_start, now - timedelta(minutes=2)],
+            sessions=[{
+                "id": "earlier",
+                "username": streamer_module.DEFAULT_STREAM_CREATOR,
+                "start_time": int(earlier_start.timestamp()),
+                "end_time": int(earlier_end.timestamp()),
+            }],
+        )
+
+        self.assertEqual(fallback_context["start"], current_run_start)
+
+    def test_fresh_order_fallback_uses_saved_start_for_open_current_stream(self) -> None:
+        now = datetime(2026, 5, 31, 23, 0, tzinfo=timezone.utc)
+        saved_start = now - timedelta(hours=3)
+
+        fallback_context = self._fallback_context_with_saved_range(
+            now,
+            saved_start=saved_start,
+            saved_end=None,
+            order_times=[saved_start + timedelta(minutes=5), now - timedelta(minutes=50), now - timedelta(minutes=2)],
+        )
+
+        self.assertEqual(fallback_context["start"], saved_start)
+
+    def test_fresh_order_fallback_keeps_saved_start_of_open_multi_day_session(self) -> None:
+        # TikTok can keep one session open for days during marathon streams.
+        now = datetime(2026, 9, 21, 18, 0, tzinfo=timezone.utc)
+        marathon_start = now - timedelta(days=5)
+
+        fallback_context = self._fallback_context_with_saved_range(
+            now,
+            saved_start=marathon_start,
+            saved_end=None,
+            order_times=[now - timedelta(minutes=3)],
+        )
+
+        self.assertEqual(fallback_context["start"], marathon_start)
+
+    def test_fresh_order_fallback_keeps_saved_start_when_orders_continue_past_lagging_end(self) -> None:
+        # TikTok's reported end_time can lag a stream that is still running.
+        now = datetime(2026, 5, 31, 23, 0, tzinfo=timezone.utc)
+        saved_start = now - timedelta(hours=4)
+        lagging_end = now - timedelta(minutes=40)
+        order_times = [saved_start + timedelta(minutes=minutes) for minutes in range(5, 240, 10)]
+
+        fallback_context = self._fallback_context_with_saved_range(
+            now,
+            saved_start=saved_start,
+            saved_end=lagging_end,
+            order_times=order_times,
+            sessions=[{
+                "id": "current",
+                "username": streamer_module.DEFAULT_STREAM_CREATOR,
+                "start_time": int(saved_start.timestamp()),
+                "end_time": int(lagging_end.timestamp()),
+            }],
+        )
+
+        self.assertEqual(fallback_context["start"], saved_start)
 
     def test_fresh_order_fallback_marks_known_secondary_creator_live(self) -> None:
         now = datetime(2026, 6, 4, 20, 15, tzinfo=timezone.utc)
