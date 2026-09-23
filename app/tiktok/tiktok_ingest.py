@@ -907,6 +907,25 @@ def _tiktok_order_value_is_blank(field_name: str, value: Any, *, missing_in_payl
     return False
 
 
+_TIKTOK_ORDER_UPDATED_AT_ALIASES = ("update_time", "updated_time", "updated_at", "modify_time", "modified_time")
+
+
+def tiktok_order_update_is_older(existing_updated_at: Any, incoming_updated_at: Any) -> bool:
+    """True when an incoming TikTok update_time predates the stored one.
+
+    Webhooks can arrive late or be replayed, and detail lookups for the same
+    order can finish out of order; an older snapshot must not roll back newer
+    order state.
+    """
+    if not isinstance(existing_updated_at, datetime) or not isinstance(incoming_updated_at, datetime):
+        return False
+    if existing_updated_at.tzinfo is None:
+        existing_updated_at = existing_updated_at.replace(tzinfo=timezone.utc)
+    if incoming_updated_at.tzinfo is None:
+        incoming_updated_at = incoming_updated_at.replace(tzinfo=timezone.utc)
+    return incoming_updated_at < existing_updated_at
+
+
 def upsert_tiktok_order(
     session: Session,
     order_model_type: type[Any],
@@ -932,7 +951,19 @@ def upsert_tiktok_order(
             session.add(order_model_type(**model_kwargs))
         return "inserted"
 
+    # Only trust the record's updated_at for ordering when TikTok supplied it;
+    # thin payloads fall back to created_at / received time.
+    has_update_time = source_payload is None or _pick_first(source_payload, *_TIKTOK_ORDER_UPDATED_AT_ALIASES) is not None
+    older_snapshot = has_update_time and tiktok_order_update_is_older(
+        getattr(existing, "updated_at", None), model_kwargs.get("updated_at")
+    )
+
     for field_name, value in model_kwargs.items():
+        if older_snapshot and (
+            field_name == "updated_at"
+            or not _tiktok_order_value_is_blank(field_name, getattr(existing, field_name, None), missing_in_payload=True)
+        ):
+            continue
         if (
             field_name == "created_at"
             and source_payload is not None

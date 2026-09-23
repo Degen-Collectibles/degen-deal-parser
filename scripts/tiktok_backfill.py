@@ -36,6 +36,7 @@ from app.tiktok.tiktok_ingest import (  # noqa: E402
     TIKTOK_TOKEN_REFRESH_PATH,
     exchange_tiktok_authorization_code,
     structured_tiktok_log_line,
+    tiktok_order_update_is_older,
 )
 
 DEFAULT_BASE_URL = TIKTOK_DEFAULT_API_BASE_URL
@@ -700,7 +701,17 @@ def upsert_tiktok_order(
             session.add(TikTokOrder(**record))
         return "inserted"
 
+    # A search page or detail fetch taken before a newer webhook/lookup must not
+    # roll order state back; it may only fill blanks.
+    has_update_time = _first_present(payload, ("update_time", "updated_time", "updated_at", "order_update_time")) is not None
+    older_snapshot = has_update_time and tiktok_order_update_is_older(existing.updated_at, record.get("updated_at"))
+
     for field_name, value in record.items():
+        if older_snapshot and (
+            field_name == "updated_at"
+            or not _tiktok_value_is_blank(field_name, getattr(existing, field_name, None), missing_in_payload=True)
+        ):
+            continue
         if (
             field_name == "created_at"
             and existing.created_at is not None

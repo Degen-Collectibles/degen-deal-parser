@@ -993,6 +993,63 @@ class TikTokRegressionTests(unittest.TestCase):
         self.assertEqual(normalized["financial_status"], "")
         self.assertEqual(normalized["order_status"], "COMPLETED")
 
+    def test_tiktok_webhook_with_older_update_time_does_not_roll_back_order(self) -> None:
+        # A late or replayed webhook must not undo newer order state.
+        def webhook(status: str, update_time: int | None) -> dict:
+            data = {"order_id": "tt-late", "order_status": status}
+            if update_time is not None:
+                data["update_time"] = update_time
+            return {"type": 1, "shop_id": "shop-1", "data": data}
+
+        with Session(self.engine) as session:
+            upsert_tiktok_order_from_payload(session, TikTokOrder, webhook("AWAITING_SHIPMENT", 1_790_000_000))
+            session.commit()
+            upsert_tiktok_order_from_payload(session, TikTokOrder, webhook("DELIVERED", 1_790_000_600))
+            session.commit()
+            # Replay of the first event arrives after the newer one.
+            upsert_tiktok_order_from_payload(session, TikTokOrder, webhook("AWAITING_SHIPMENT", 1_790_000_000))
+            session.commit()
+            stored = session.exec(select(TikTokOrder).where(TikTokOrder.tiktok_order_id == "tt-late")).one()
+            self.assertEqual(stored.order_status, "DELIVERED")
+            self.assertEqual(stored.updated_at.replace(tzinfo=timezone.utc).timestamp(), 1_790_000_600)
+
+            # Without an update_time there is nothing to order by: apply as before.
+            upsert_tiktok_order_from_payload(session, TikTokOrder, webhook("COMPLETED", None))
+            session.commit()
+            session.refresh(stored)
+            self.assertEqual(stored.order_status, "COMPLETED")
+
+    def test_tiktok_order_sync_with_older_snapshot_only_fills_blanks(self) -> None:
+        with Session(self.engine) as session:
+            upsert_tiktok_order_from_payload(
+                session,
+                TikTokOrder,
+                {"type": 1, "shop_id": "shop-1", "data": {"order_id": "tt-sync", "order_status": "CANCELLED", "update_time": 1_790_000_900}},
+            )
+            session.commit()
+            # A search page fetched before the cancellation, now being written.
+            upsert_tiktok_order(
+                session,
+                {
+                    "id": "tt-sync",
+                    "status": "AWAITING_SHIPMENT",
+                    "create_time": 1_790_000_000,
+                    "update_time": 1_790_000_100,
+                    "payment": {"total_amount": "20.00", "sub_total": "18.00"},
+                    "line_items": [{"product_name": "Pack", "quantity": 1, "sale_price": "18.00"}],
+                },
+                shop_id="shop-1",
+                shop_cipher="cipher",
+                source="backfill",
+            )
+            session.commit()
+            stored = session.exec(select(TikTokOrder).where(TikTokOrder.tiktok_order_id == "tt-sync")).one()
+
+        self.assertEqual(stored.order_status, "CANCELLED")
+        self.assertEqual(stored.updated_at.replace(tzinfo=timezone.utc).timestamp(), 1_790_000_900)
+        self.assertEqual(stored.total_price, 20.0)
+        self.assertIn("Pack", stored.line_items_json)
+
     def test_tiktok_order_upsert_persists_and_updates_existing_row(self) -> None:
         with Session(self.engine) as session:
             status, record = upsert_tiktok_order_from_payload(
@@ -3769,6 +3826,21 @@ class TikTokRegressionTests(unittest.TestCase):
         # The cursor still moves past the shipping update so it is not re-sent.
         self.assertEqual(payload["latest_updated_at"], shipped_update_at.isoformat())
         self.assertEqual(payload["current_order_ids"], ["new-sale", "earlier-stream-order"])
+
+    def test_streamer_order_loads_skip_raw_payload(self) -> None:
+        # The live feed re-queries every 10s per tab; raw_payload is ~4 KB per
+        # order and unused there (prod marathon window: 2.3 MB -> 1.0 MB).
+        from sqlalchemy import inspect as sa_inspect
+        import app.routers.tiktok_streamer as streamer_module
+
+        now = datetime.now(timezone.utc)
+        with Session(self.engine) as session:
+            session.add(self._live_feed_order("raw-check", now - timedelta(minutes=5), now, "AWAITING_SHIPMENT"))
+            session.commit()
+            orders, _scope = streamer_module._load_scoped_stream_orders(session, {}, now - timedelta(hours=24))
+
+        self.assertEqual([order.tiktok_order_id for order in orders], ["raw-check"])
+        self.assertIn("raw_payload", sa_inspect(orders[0]).unloaded)
 
     def test_open_multi_day_session_is_live_only_while_orders_arrive(self) -> None:
         import app.routers.tiktok_streamer as streamer_module
