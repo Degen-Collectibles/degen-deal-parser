@@ -98,6 +98,11 @@ RECENT_ORDER_ACTIVITY_FALLBACK_MINUTES = 30
 ORDER_ACTIVITY_FALLBACK_LOOKBACK_HOURS = 12
 ORDER_ACTIVITY_FALLBACK_STREAM_RANGE_MAX_DAYS = 7
 LIVE_SESSION_OPEN_MAX_SECONDS = 24 * 60 * 60
+# The order poll cursor is TikTok's update_time, which also moves when an old
+# order ships or is delivered. Only recent, not-yet-fulfilled orders are pushed
+# to the browser as new sales.
+LIVE_FEED_NEW_ORDER_MAX_AGE_HOURS = 6
+LIVE_FEED_FULFILLED_STATUSES = frozenset(TIKTOK_PAID_STATUSES - {"paid", "awaiting_shipment"})
 _LIVE_PRODUCTS_CACHE_TTL_SECONDS = 10.0
 _live_products_cache: dict[str, Any] = {}
 _live_products_cache_lock = threading.Lock()
@@ -154,7 +159,15 @@ def _stream_session_is_stale_open(session_data: Optional[dict], now: Optional[da
     if start_ts <= 0 or end_ts > 0:
         return False
     now_ts = int((_coerce_utc_datetime(now) or datetime.now(timezone.utc)).timestamp())
-    return now_ts >= start_ts and (now_ts - start_ts) > LIVE_SESSION_OPEN_MAX_SECONDS
+    if now_ts < start_ts or (now_ts - start_ts) <= LIVE_SESSION_OPEN_MAX_SECONDS:
+        return False
+    # Marathon streams keep one session open for days. Orders still arriving
+    # mean it is live, not a session TikTok forgot to close.
+    try:
+        last_order_ts = int(session_data.get("last_order_at") or 0)
+    except (TypeError, ValueError):
+        last_order_ts = 0
+    return not (last_order_ts and now_ts - last_order_ts <= LIVE_SESSION_ORDER_ACTIVITY_MAX_GAP_SECONDS)
 
 
 def _stream_session_is_live(session_data: Optional[dict]) -> bool:
@@ -621,7 +634,18 @@ def _infer_order_activity_fallback_start(
     return activity_start
 
 
-def _persisted_stream_range_fallback_start(*, now: Optional[datetime] = None) -> Optional[datetime]:
+def _persisted_stream_range_fallback_start(
+    activity_start: datetime,
+    stream_context: Optional[dict[str, Any]] = None,
+    *,
+    now: Optional[datetime] = None,
+) -> Optional[datetime]:
+    """Return the saved stream start only when it can describe the current order run.
+
+    The saved range auto-follows TikTok's latest reported session. Once that
+    session has ended, its start must not be reused for a later burst of orders:
+    that widened the live feed back to the previous stream.
+    """
     start = _coerce_utc_datetime(_stream_range.get("start"))
     if start is None:
         return None
@@ -629,6 +653,16 @@ def _persisted_stream_range_fallback_start(*, now: Optional[datetime] = None) ->
     if start > now_utc:
         return None
     if now_utc - start > timedelta(days=ORDER_ACTIVITY_FALLBACK_STREAM_RANGE_MAX_DAYS):
+        return None
+    ended_at = [
+        end
+        for end in (_coerce_utc_datetime(_stream_range.get("end")), _latest_known_stream_end(stream_context))
+        if end is not None and end >= start
+    ]
+    # Orders that kept flowing past a (possibly lagging) end still belong to that
+    # stream; a gap means the current activity is a new run.
+    gap = timedelta(minutes=RECENT_ORDER_ACTIVITY_FALLBACK_MINUTES)
+    if ended_at and max(ended_at) + gap < activity_start:
         return None
     return start
 
@@ -695,14 +729,15 @@ def _apply_order_activity_fallback(
     ):
         return stream_context
     if not has_creator_attributed_activity or _account_scope_has_identity(account_scope):
+        activity_start = _infer_order_activity_fallback_start(
+            session,
+            stream_context,
+            fallback_start,
+            now=now,
+        )
         fallback_start = (
-            _persisted_stream_range_fallback_start(now=now)
-            or _infer_order_activity_fallback_start(
-                session,
-                stream_context,
-                fallback_start,
-                now=now,
-            )
+            _persisted_stream_range_fallback_start(activity_start, stream_context, now=now)
+            or activity_start
         )
 
     stream_context.update(
@@ -2340,6 +2375,21 @@ def _is_refund_update_order(order: TikTokOrder) -> bool:
     return classify_tiktok_reporting_status(order) == "refunded"
 
 
+def _is_live_feed_push_order(order: TikTokOrder, now: datetime) -> bool:
+    """Return True when a changed order should be pushed to the live feed.
+
+    The browser shows any order id it has not seen as a new sale, so status
+    updates on older orders (shipped, delivered, completed) must not be pushed.
+    """
+    created_at = _coerce_utc_datetime(order.created_at)
+    if created_at is None or now - created_at > timedelta(hours=LIVE_FEED_NEW_ORDER_MAX_AGE_HOURS):
+        return False
+    if _is_refund_update_order(order):
+        return True
+    statuses = {(value or "").strip().lower() for value in (order.financial_status, order.order_status)}
+    return not (statuses & LIVE_FEED_FULFILLED_STATUSES)
+
+
 def _is_enriched_order(o: TikTokOrder) -> bool:
     """Return True if the order has been enriched with full API data.
 
@@ -3001,7 +3051,8 @@ def tiktok_streamer_poll(
     stream_context = _build_effective_stream_context(session, creator, legacy_stream_id=stream)
     selected_creator = stream_context.get("selected_creator") or DEFAULT_STREAM_CREATOR
     selected_stream_id = stream_context.get("selected_stream_id") or ""
-    created_at_floor = datetime.now(timezone.utc) - timedelta(hours=24)
+    now_utc = datetime.now(timezone.utc)
+    created_at_floor = now_utc - timedelta(hours=24)
 
     since_dt = None
     if since:
@@ -3026,7 +3077,7 @@ def tiktok_streamer_poll(
         order_by_updated=True,
         include_refund_updates=since_dt is not None,
     )
-    orders = new_orders[:20]
+    orders = [order for order in new_orders if _is_live_feed_push_order(order, now_utc)][:20]
     cards = [_build_streamer_order_card(o) for o in orders]
     if cards:
         buyer_totals = _compute_buyer_lifetime_totals(session)
@@ -3055,10 +3106,17 @@ def tiktok_streamer_poll(
     current_streamer = get_current_streamer(session) or ""
     chat_info = get_chat_status()
     live_room_id = _live_room_id_for_stream(chat_info, stream_context)
+    # The browser keys rows by tiktok_order_id and shows the newest-created
+    # orders, so reconcile against the same id and ordering.
+    newest_created_orders = sorted(
+        scoped_orders,
+        key=lambda o: _coerce_utc_datetime(o.created_at) or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
 
     return {
         "orders": cards,
-        "current_order_ids": [str(o.order_number or o.id) for o in scoped_orders[:500]],
+        "current_order_ids": [str(o.tiktok_order_id) for o in newest_created_orders[:500]],
         "latest_updated_at": latest_updated_at_text,
         "total_count": total_count,
         "session_gmv": gmv_data["session_gmv"],

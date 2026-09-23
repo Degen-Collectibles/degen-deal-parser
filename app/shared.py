@@ -483,6 +483,10 @@ _live_session_lock = threading.Lock()
 _live_sessions_list_cache: list[dict] = []
 _live_sessions_list_lock = threading.Lock()
 _live_sessions_list_checked_at: Optional[datetime] = None
+# An open TikTok session older than 24h still counts as live while paid orders
+# keep arriving within this gap (marathon streams run for days; the longest
+# order gap seen in a 134h marathon was ~2h).
+LIVE_SESSION_ORDER_ACTIVITY_MAX_GAP_SECONDS = 3 * 60 * 60
 
 def _compute_build_version() -> str:
     import subprocess as _sp
@@ -619,6 +623,43 @@ def _poll_tiktok_live_analytics(stop_event: threading.Event) -> None:
 
         stop_event.wait(_LIVE_ANALYTICS_POLL_SECONDS)
 
+def _annotate_open_sessions_with_order_activity(sessions: list, *, now: Optional[datetime] = None) -> None:
+    """Record the latest paid order time (epoch seconds) on each open session.
+
+    TikTok keeps a marathon session open for days, and can also leave a
+    finished session open. The streamer tells them apart by whether orders are
+    still arriving. Orders are counted shop-wide: order shop ids are not stored
+    in the same format as the auth row's shop id.
+    """
+    open_sessions = [
+        session_data
+        for session_data in sessions
+        if isinstance(session_data, dict)
+        and int(session_data.get("start_time") or 0) > 0
+        and not int(session_data.get("end_time") or 0)
+    ]
+    if not open_sessions:
+        return
+    now_utc = now or datetime.now(timezone.utc)
+    floor = now_utc - timedelta(seconds=LIVE_SESSION_ORDER_ACTIVITY_MAX_GAP_SECONDS)
+    with managed_session() as session:
+        rows = session.exec(
+            select(TikTokOrder)
+            .where(TikTokOrder.created_at >= floor)
+            .order_by(TikTokOrder.created_at.desc())
+            .limit(50)
+        ).all()
+    latest_ts = 0
+    for row in rows:
+        if classify_tiktok_reporting_status(row) == "paid" and row.created_at is not None:
+            created_at = row.created_at if row.created_at.tzinfo else row.created_at.replace(tzinfo=timezone.utc)
+            latest_ts = int(created_at.timestamp())
+            break
+    for session_data in open_sessions:
+        started = int(session_data.get("start_time") or 0)
+        session_data["last_order_at"] = latest_ts if latest_ts >= started else None
+
+
 def _poll_live_session_list(runtime_name: str, access_token: str, shop_cipher: str, shop_id: str = "") -> None:
     """Fetch the live session list and auto-update stream range if source is 'auto'."""
     global _stream_range_source, _live_sessions_list_checked_at
@@ -646,6 +687,15 @@ def _poll_live_session_list(runtime_name: str, access_token: str, shop_cipher: s
                 session_data["shop_id"] = shop_id
             if shop_cipher and not session_data.get("shop_cipher"):
                 session_data["shop_cipher"] = shop_cipher
+        try:
+            _annotate_open_sessions_with_order_activity(sessions)
+        except Exception as exc:
+            print(structured_log_line(
+                runtime=runtime_name,
+                action="tiktok.live_session.order_activity_failed",
+                success=False,
+                error=str(exc)[:400],
+            ))
         with _live_sessions_list_lock:
             _live_sessions_list_cache.clear()
             _live_sessions_list_cache.extend(sessions)
