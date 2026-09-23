@@ -21,6 +21,7 @@ import httpx
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import and_, func, or_
+from sqlalchemy.orm import defer
 from sqlmodel import Session, select
 
 from ..csrf import CSRFProtectedRoute
@@ -60,6 +61,12 @@ from ..reporting import (
 
 router = APIRouter(route_class=CSRFProtectedRoute)
 logger = logging.getLogger(__name__)
+
+
+def _order_rows_select():
+    """select(TikTokOrder) without raw_payload (~4 KB per order), which these
+    views never read; the live feed re-queries every 10s per open tab."""
+    return select(TikTokOrder).options(defer(TikTokOrder.raw_payload))
 
 
 def _require_live_stream(request: Request, session: Optional[Session] = None):
@@ -485,7 +492,7 @@ def _has_affiliate_creator_orders(
         return False
     start = _coerce_utc_datetime(stream_context.get("start")) or _coerce_utc_datetime(fallback_start)
     end = _coerce_utc_datetime(stream_context.get("end"))
-    query = select(TikTokOrder).where(TikTokOrder.affiliate_creator_username == selected_creator)
+    query = _order_rows_select().where(TikTokOrder.affiliate_creator_username == selected_creator)
     if start is not None:
         query = query.where(TikTokOrder.created_at >= start)
     if end is not None:
@@ -602,7 +609,7 @@ def _infer_order_activity_fallback_start(
 
     account_scope = _stream_account_scope_for_context(session, stream_context)
     query = (
-        select(TikTokOrder)
+        _order_rows_select()
         .where(TikTokOrder.created_at >= lookback_start, TikTokOrder.created_at <= now_utc)
         .order_by(TikTokOrder.created_at.desc())
     )
@@ -691,7 +698,7 @@ def _has_fresh_creator_order_activity(
     account_scope = _stream_account_scope_for_context(session, stream_context)
     if selected_creator != DEFAULT_STREAM_CREATOR and not _account_scope_has_identity(account_scope):
         return False
-    query = select(TikTokOrder).where(TikTokOrder.created_at >= activity_start)
+    query = _order_rows_select().where(TikTokOrder.created_at >= activity_start)
     query = _apply_tiktok_account_scope(query, account_scope)
     rows = session.exec(query.order_by(TikTokOrder.created_at.desc()).limit(50)).all()
     return any(_is_enriched_order(order) and tiktok_order_is_paid(order) for order in rows)
@@ -1982,7 +1989,7 @@ def _orders_for_session_window(db_session: Session, session_data: Optional[dict]
     start_dt, end_dt = _session_datetime_window(session_data)
     if start_dt is None:
         return []
-    query = select(TikTokOrder).where(TikTokOrder.created_at >= start_dt)
+    query = _order_rows_select().where(TikTokOrder.created_at >= start_dt)
     if end_dt is not None:
         query = query.where(TikTokOrder.created_at <= end_dt)
     account_scope = _stream_account_scope_for_context(
@@ -2278,19 +2285,16 @@ def _load_scoped_stream_orders(
     stream_context: Optional[dict[str, Any]],
     fallback_start: Optional[datetime],
     *,
-    since_updated_at: Optional[datetime] = None,
     order_by_updated: bool = False,
     include_refund_updates: bool = False,
 ) -> tuple[list[TikTokOrder], dict[str, Any]]:
     account_scope = _stream_account_scope_for_context(session, stream_context)
     query = _apply_stream_order_scope(
-        select(TikTokOrder),
+        _order_rows_select(),
         stream_context,
         fallback_start=fallback_start,
         account_scope=account_scope,
     )
-    if since_updated_at is not None:
-        query = query.where(TikTokOrder.updated_at > since_updated_at)
     if order_by_updated:
         query = query.order_by(TikTokOrder.updated_at.desc())
     else:
@@ -2525,7 +2529,7 @@ def _compute_buyer_lifetime_totals(session: Session) -> dict[str, float]:
     paid_list = list(TIKTOK_PAID_STATUSES)
     fin_lower = func.lower(func.trim(func.coalesce(TikTokOrder.financial_status, "")))
     ord_lower = func.lower(func.trim(func.coalesce(TikTokOrder.order_status, "")))
-    candidate_query = select(TikTokOrder).where(
+    candidate_query = _order_rows_select().where(
         (fin_lower.in_(paid_list)) | (ord_lower.in_(paid_list))
     )
     candidate_rows = session.exec(candidate_query).all()
@@ -2595,7 +2599,7 @@ def _streamer_session_gmv_uncached(session: Session, stream_context: Optional[di
     today_start_pacific = now_pacific.replace(hour=0, minute=0, second=0, microsecond=0)
     today_start_utc = today_start_pacific.astimezone(timezone.utc)
 
-    today_query = select(TikTokOrder).where(TikTokOrder.created_at >= today_start_utc)
+    today_query = _order_rows_select().where(TikTokOrder.created_at >= today_start_utc)
     today_query = _apply_tiktok_account_scope(today_query, account_scope)
     today_orders = session.exec(today_query).all()
     today_orders = _filter_orders_to_affiliate_creator(today_orders, stream_context)
@@ -2738,7 +2742,7 @@ def _streamer_session_gmv_uncached(session: Session, stream_context: Optional[di
         stream_items = 0
         stream_product_agg: dict[str, dict] = {}
         stream_customer_agg: dict[str, dict] = {}
-        q = select(TikTokOrder).where(TikTokOrder.created_at >= sr_start)
+        q = _order_rows_select().where(TikTokOrder.created_at >= sr_start)
         if sr_end is not None:
             q = q.where(TikTokOrder.created_at <= sr_end)
         q = _apply_tiktok_account_scope(q, account_scope)
@@ -2871,7 +2875,7 @@ def _compute_order_velocity(session: Session, stream_context: Optional[dict[str,
     else:
         end_dt = stream_context.get("end") or _stream_range.get("end") or datetime.now(timezone.utc)
     orders_query = (
-        select(TikTokOrder)
+        _order_rows_select()
         .where(TikTokOrder.created_at >= start, TikTokOrder.created_at <= end_dt)
         .order_by(TikTokOrder.created_at)
     )
@@ -3063,21 +3067,22 @@ def tiktok_streamer_poll(
         except (ValueError, TypeError):
             since_dt = None
 
-    scoped_orders, _product_scope = _load_scoped_stream_orders(
+    # One load serves both the current scope (paid orders) and the changes since
+    # the cursor (which may also include refund/cancel updates).
+    window_orders, _product_scope = _load_scoped_stream_orders(
         session,
         stream_context,
         created_at_floor,
-        order_by_updated=True,
-    )
-    new_orders, _product_scope = _load_scoped_stream_orders(
-        session,
-        stream_context,
-        created_at_floor,
-        since_updated_at=since_dt,
         order_by_updated=True,
         include_refund_updates=since_dt is not None,
     )
-    orders = [order for order in new_orders if _is_live_feed_push_order(order, now_utc)][:20]
+    scoped_orders = [order for order in window_orders if tiktok_order_is_paid(order)]
+    new_orders = [
+        order
+        for order in window_orders
+        if since_dt is None or (_coerce_utc_datetime(order.updated_at) or since_dt) > since_dt
+    ]
+    orders =[order for order in new_orders if _is_live_feed_push_order(order, now_utc)][:20]
     cards = [_build_streamer_order_card(o) for o in orders]
     if cards:
         buyer_totals = _compute_buyer_lifetime_totals(session)
