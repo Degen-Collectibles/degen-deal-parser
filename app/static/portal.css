@@ -58,6 +58,8 @@
   --pt-neutral-soft: rgba(255, 255, 255, 0.06);
   --pt-dim: #6b6f7e;
   --pt-border-strong: rgba(255, 255, 255, 0.13);
+  --pt-purple: #c4b5fd;
+  --pt-purple-soft: rgba(196, 181, 253, 0.16);
 
   /* Type scale — use these instead of hardcoded px. */
   --pt-fs-xs: 12px;
@@ -1962,6 +1964,13 @@ a { color: inherit; text-decoration: none; }
  *   .pt-week/.pt-day    7-day strip with shift / time-off dots
  *   .pt-sheet           bottom-sheet form container
  *   .pt-count, .pt-dot-unread, .pt-progress, .pt-group-h, .pt-me-card
+ *   (Phase 2, bottom of file)
+ *   .pt-seg             two-way segmented control (links, works without JS)
+ *   .pt-weeknav         prev / week label / next with 44px buttons
+ *   .pt-tag             location tag (.is-storefront / .is-packing / .is-stream)
+ *   .pt-faces/.pt-face  coworker initials bubbles (.is-t1 ... .is-t6)
+ *   .pt-bars/.pt-bar    7-day worked-vs-scheduled bars (.pt-bar-h-0 ... -100)
+ *   .pt-stat, .pt-flag, .pt-row-num, .pt-callout.is-warn / .is-err
  * ====================================================================== */
 
 .pt-i {
@@ -2129,7 +2138,7 @@ a.pt-avatar { width: var(--pt-tap); height: var(--pt-tap); }
 .pt-ico.is-info   { color: var(--pt-info); }
 .pt-ico.is-ok     { color: var(--pt-ok); }
 .pt-ico.is-err    { color: var(--pt-err); }
-.pt-ico.is-purple { color: #c4b5fd; }
+.pt-ico.is-purple { color: var(--pt-purple); }
 
 .pt-dot-unread {
   width: 8px;
@@ -2453,3 +2462,274 @@ a.pt-tile:hover { border-color: var(--pt-border-strong); }
   .pt-mbn-item:hover { color: var(--pt-muted); }
   .pt-home .pt-topline { margin-top: 0; }
 }
+
+/* =========================================================================
+ * Schedule + Hours (employee portal redesign, Phase 2)
+ * Kit pieces first (reusable), then the two page layouts.
+ * ====================================================================== */
+
+/* ---- Segmented control: <nav class="pt-seg"><a aria-current="page"> ---- */
+.pt-seg {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  gap: 2px;
+  padding: 3px;
+  margin: 0 0 var(--pt-sp-3);
+  background: var(--pt-surface);
+  border: 1px solid var(--pt-border);
+  border-radius: var(--pt-radius-md);
+}
+.pt-seg a {
+  display: grid;
+  place-items: center;
+  min-height: var(--pt-tap);
+  border-radius: var(--pt-radius-sm);
+  font-size: var(--pt-fs-sm);
+  font-weight: 600;
+  color: var(--pt-muted);
+  text-decoration: none;
+}
+.pt-seg a:hover { color: var(--pt-text); }
+.pt-seg a[aria-current="page"] { background: var(--pt-surface-hi); color: var(--pt-text); }
+
+/* ---- Week nav ---- */
+.pt-weeknav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--pt-sp-3);
+  margin: 0 0 var(--pt-sp-3);
+}
+.pt-weeknav > .pt-btn { width: var(--pt-tap); padding: 0; flex: none; }
+.pt-weeknav > .pt-btn .pt-i { width: 20px; height: 20px; }
+.pt-btn.is-disabled { opacity: 0.4; pointer-events: none; }
+.pt-weeknav-lbl {
+  flex: 1;
+  min-width: 0;
+  text-align: center;
+  font-size: var(--pt-fs-md);
+  font-weight: 600;
+  line-height: 1.3;
+}
+.pt-weeknav-sub {
+  display: block;
+  font-size: var(--pt-fs-xs);
+  font-weight: 500;
+  color: var(--pt-muted);
+}
+a.pt-weeknav-sub { color: var(--pt-accent); padding: 2px 0; }
+
+/* ---- Location tag ---- */
+.pt-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: var(--pt-fs-xs);
+  font-weight: 650;
+  line-height: 1.5;
+  white-space: nowrap;
+  background: var(--pt-neutral-soft);
+  color: var(--pt-muted);
+}
+.pt-tag.is-storefront { background: var(--pt-accent-soft); color: var(--pt-accent-hover); }
+.pt-tag.is-packing    { background: var(--pt-purple-soft); color: var(--pt-purple); }
+.pt-tag.is-stream     { background: var(--pt-ok-soft); color: var(--pt-ok); }
+
+/* ---- Initials bubbles ---- */
+.pt-faces { display: inline-flex; align-items: center; }
+.pt-face {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  font-size: var(--pt-fs-xs);
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  border: 2px solid var(--pt-surface);
+  /* Tint over an opaque base so overlapping bubbles don't bleed together. */
+  --pt-face-bg: var(--pt-neutral-soft);
+  background: linear-gradient(var(--pt-face-bg), var(--pt-face-bg)), var(--pt-surface-hi);
+  color: var(--pt-text);
+}
+.pt-faces .pt-face + .pt-face { margin-left: -6px; }
+.pt-face.is-lg { width: 32px; height: 32px; border: 0; }
+.pt-face.is-t1 { --pt-face-bg: var(--pt-info-soft); color: var(--pt-info); }
+.pt-face.is-t2 { --pt-face-bg: var(--pt-ok-soft); color: var(--pt-ok); }
+.pt-face.is-t3 { --pt-face-bg: var(--pt-warn-soft); color: var(--pt-warn); }
+.pt-face.is-t4 { --pt-face-bg: var(--pt-purple-soft); color: var(--pt-purple); }
+.pt-face.is-t5 { --pt-face-bg: var(--pt-accent-soft); color: var(--pt-accent-hover); }
+.pt-face.is-t6 { --pt-face-bg: var(--pt-err-soft); color: var(--pt-err); }
+.pt-face.is-more { color: var(--pt-muted); }
+
+/* ---- Callout tones ---- */
+.pt-callout.is-warn { border-color: var(--pt-warn-soft); }
+.pt-callout.is-warn > .pt-i { color: var(--pt-warn); }
+.pt-callout.is-err { border-color: var(--pt-err-soft); background: var(--pt-err-soft); color: var(--pt-text); }
+.pt-callout.is-err > .pt-i { color: var(--pt-err); }
+.pt-callout-line { display: block; margin-top: 4px; color: var(--pt-muted); }
+.pt-inline-link { color: var(--pt-accent); text-decoration: underline; text-underline-offset: 2px; }
+.pt-footnote {
+  margin: var(--pt-sp-3) 4px 0;
+  font-size: var(--pt-fs-xs);
+  color: var(--pt-muted);
+  line-height: 1.45;
+}
+
+/* ---- Row extras: right-hand number + warning line ---- */
+.pt-row-num {
+  flex: none;
+  text-align: right;
+  font-size: var(--pt-fs-lg);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.pt-row-num-sub {
+  display: block;
+  font-size: var(--pt-fs-xs);
+  font-weight: 500;
+  color: var(--pt-muted);
+}
+.pt-flag {
+  display: block;
+  margin-top: 4px;
+  font-size: var(--pt-fs-xs);
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--pt-warn);
+}
+.pt-flag.is-err { color: var(--pt-err); }
+.pt-row-title .pt-pill { margin-left: 6px; vertical-align: 1px; }
+
+/* ---- Big stat line ---- */
+.pt-stat { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.pt-stat-v { font-size: var(--pt-fs-2xl); font-weight: 700; letter-spacing: -0.03em; line-height: 1.1; }
+.pt-stat-s { font-size: var(--pt-fs-md); color: var(--pt-muted); }
+
+/* ---- Worked vs scheduled bars (plain CSS, no chart library) ----
+   Heights snap to 5% steps (.pt-bar-h-N) so there is no inline style=. */
+.pt-bars {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 8px;
+  height: 128px;
+  margin: 16px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.pt-bar { position: relative; min-width: 0; }
+.pt-bar-track { position: absolute; left: 0; right: 0; top: 0; bottom: 22px; }
+.pt-bar-sched,
+.pt-bar-act {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  border-radius: 6px;
+}
+.pt-bar-sched { border: 1.5px dashed var(--pt-border-strong); }
+.pt-bar-act { background: var(--pt-accent); left: 3px; right: 3px; }
+.pt-bar-lb {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  text-align: center;
+  font-size: var(--pt-fs-xs);
+  font-weight: 600;
+  color: var(--pt-muted);
+}
+.pt-bar.is-today .pt-bar-lb { color: var(--pt-accent); }
+.pt-bar-h-0 { height: 0; }
+.pt-bar-h-5 { height: 5%; }
+.pt-bar-h-10 { height: 10%; }
+.pt-bar-h-15 { height: 15%; }
+.pt-bar-h-20 { height: 20%; }
+.pt-bar-h-25 { height: 25%; }
+.pt-bar-h-30 { height: 30%; }
+.pt-bar-h-35 { height: 35%; }
+.pt-bar-h-40 { height: 40%; }
+.pt-bar-h-45 { height: 45%; }
+.pt-bar-h-50 { height: 50%; }
+.pt-bar-h-55 { height: 55%; }
+.pt-bar-h-60 { height: 60%; }
+.pt-bar-h-65 { height: 65%; }
+.pt-bar-h-70 { height: 70%; }
+.pt-bar-h-75 { height: 75%; }
+.pt-bar-h-80 { height: 80%; }
+.pt-bar-h-85 { height: 85%; }
+.pt-bar-h-90 { height: 90%; }
+.pt-bar-h-95 { height: 95%; }
+.pt-bar-h-100 { height: 100%; }
+.pt-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; }
+.pt-swatch.is-worked { background: var(--pt-accent); }
+.pt-swatch.is-sched { border: 1.5px dashed var(--pt-border-strong); }
+
+/* ---- Schedule page ---- */
+.pt-rows > .pt-shift { align-items: flex-start; padding-top: 14px; padding-bottom: 14px; }
+.pt-rows > .pt-shift.is-off { align-items: center; }
+.pt-rows > .pt-shift.is-today { background: var(--pt-accent-soft); }
+.pt-shift-date { width: 44px; flex: none; text-align: center; }
+.pt-shift-wd {
+  display: block;
+  font-size: var(--pt-fs-xs);
+  font-weight: 650;
+  color: var(--pt-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.pt-shift.is-today .pt-shift-wd { color: var(--pt-accent); }
+.pt-shift-dd { display: block; font-size: var(--pt-fs-xl); font-weight: 700; letter-spacing: -0.02em; line-height: 1.15; }
+.pt-shift-one { display: block; }
+.pt-shift-one + .pt-shift-one { margin-top: 10px; }
+.pt-shift-time { display: block; font-size: var(--pt-fs-lg); font-weight: 650; }
+.pt-shift.is-off .pt-shift-time { font-size: var(--pt-fs-md); font-weight: 500; color: var(--pt-dim); }
+.pt-shift .pt-shift-time.is-timeoff { color: var(--pt-info); }
+.pt-shift-time.is-sub { margin-top: 6px; font-size: var(--pt-fs-sm); }
+.pt-shift-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin-top: 4px;
+  font-size: var(--pt-fs-sm);
+  color: var(--pt-muted);
+}
+.pt-rows > .pt-person { min-height: 52px; }
+.pt-person.is-me .pt-row-title { font-weight: 700; }
+.pt-person .pt-row-aside { color: var(--pt-text); font-variant-numeric: tabular-nums; }
+.pt-group-h.is-today { color: var(--pt-accent); }
+.pt-teamday .pt-group-h { margin-top: 18px; }
+.pt-teamday:first-child .pt-group-h { margin-top: 4px; }
+.pt-loc-h {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 4px 6px;
+  font-size: var(--pt-fs-sm);
+  color: var(--pt-muted);
+}
+.pt-schedule.is-team { max-width: 1080px; }
+@media (min-width: 861px) {
+  .pt-schedule.is-team .pt-seg,
+  .pt-schedule.is-team .pt-weeknav { max-width: 640px; }
+  .pt-teamdays {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 4px var(--pt-sp-5);
+    align-items: start;
+  }
+  .pt-teamday .pt-group-h,
+  .pt-teamday:first-child .pt-group-h { margin-top: 12px; }
+}
+
+/* ---- Hours page ---- */
+.pt-hours .pt-weeknav + .pt-callout,
+.pt-hours .pt-hours-fix { margin-bottom: var(--pt-sp-3); }
+.pt-rows > .pt-hours-day { align-items: flex-start; }
+.pt-rows > .pt-hours-day.is-today .pt-row-num { color: var(--pt-ok); }
+.pt-hours-day .pt-row-sub.is-break { color: var(--pt-dim); }

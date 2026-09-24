@@ -78,6 +78,7 @@ from ..models import (
 from ..team.pii import PIIDecryptError, decrypt_pii, encrypt_pii
 from ..team.sms_consent import consent_context, record_consent
 from ..team import home as home_view
+from ..team import schedule_view
 from ..team.shift_labels import parse_shift_start_minutes
 from ..rate_limit import rate_limited_or_429
 from ..shared import app_home_for_role, templates
@@ -977,6 +978,25 @@ def _clock_status_from_week(week: dict[str, Any], *, today: date) -> dict[str, A
     return status
 
 
+def _approved_timeoff_days(
+    session: Session, user_id: int, first_day: date, last_day: date
+) -> set[date]:
+    """Days in [first_day, last_day] covered by the user's approved time off."""
+    days: set[date] = set()
+    for row in session.exec(
+        select(TimeOffRequest)
+        .where(TimeOffRequest.submitted_by_user_id == user_id)
+        .where(TimeOffRequest.status == "approved")
+        .where(TimeOffRequest.start_date <= last_day)
+        .where(TimeOffRequest.end_date >= first_day)
+    ).all():
+        cursor = max(row.start_date, first_day)
+        while cursor <= min(row.end_date, last_day):
+            days.add(cursor)
+            cursor += timedelta(days=1)
+    return days
+
+
 def _week_range_label(start: date) -> str:
     end = start + timedelta(days=6)
     if start.month == end.month:
@@ -1042,18 +1062,7 @@ def _employee_home_context(
     shifts_by_day: dict[date, list[str]] = {}
     for row in week_rows:
         shifts_by_day.setdefault(row.shift_date, []).append((row.label or "").strip())
-    timeoff_days: set[date] = set()
-    for row in session.exec(
-        select(TimeOffRequest)
-        .where(TimeOffRequest.submitted_by_user_id == user.id)
-        .where(TimeOffRequest.status == "approved")
-        .where(TimeOffRequest.start_date <= week_end)
-        .where(TimeOffRequest.end_date >= week_start)
-    ).all():
-        cursor = max(row.start_date, week_start)
-        while cursor <= min(row.end_date, week_end):
-            timeoff_days.add(cursor)
-            cursor += timedelta(days=1)
+    timeoff_days = _approved_timeoff_days(session, user.id, week_start, week_end)
     scheduled = home_view.scheduled_hours(
         label for labels in shifts_by_day.values() for label in labels
     )
@@ -2599,6 +2608,42 @@ def _parse_employee_week(value: Optional[str], this_week_start: date) -> date:
     return max(week_start, earliest)
 
 
+def _my_schedule_calendars(
+    session: Session, user: User, week_days: list[date]
+) -> list[dict[str, Any]]:
+    """The current user's own schedule rows for one week, per calendar.
+
+    Same sources the schedule grid reads (ShiftEntry per calendar, Stream
+    Manager hints for Stream), limited to one person so /team/hours can put
+    scheduled hours next to worked hours without building the whole grid.
+    """
+    from .team_admin_schedule import _stream_schedule_hint_map
+    from ..models import SCHEDULE_CALENDAR_PACKING, SCHEDULE_CALENDAR_STOREFRONT
+
+    by_kind: dict[str, dict[tuple[int, str], list[ShiftEntry]]] = {
+        SCHEDULE_CALENDAR_STOREFRONT: {},
+        SCHEDULE_CALENDAR_PACKING: {},
+    }
+    for row in session.exec(
+        select(ShiftEntry)
+        .where(ShiftEntry.user_id == user.id)
+        .where(ShiftEntry.shift_date >= week_days[0])
+        .where(ShiftEntry.shift_date <= week_days[-1])
+        .order_by(ShiftEntry.shift_date, ShiftEntry.sort_order, ShiftEntry.id)
+    ).all():
+        bucket = by_kind.setdefault(row.calendar_kind or SCHEDULE_CALENDAR_STOREFRONT, {})
+        bucket.setdefault((row.user_id, row.shift_date.isoformat()), []).append(row)
+    stream_hints, _legend = _stream_schedule_hint_map(session, week_days, {user.id})
+    return [
+        {"kind": schedule_view.LOCATION_STOREFRONT, "label": "Storefront",
+         "entries": by_kind.get(SCHEDULE_CALENDAR_STOREFRONT, {})},
+        {"kind": schedule_view.LOCATION_PACKING, "label": "Packing",
+         "entries": by_kind.get(SCHEDULE_CALENDAR_PACKING, {})},
+        {"kind": schedule_view.LOCATION_STREAM, "label": "Stream",
+         "entries": stream_hints},
+    ]
+
+
 @router.get("/team/hours", response_class=HTMLResponse)
 def team_hours(
     request: Request,
@@ -2615,43 +2660,68 @@ def team_hours(
     today = _portal_today(settings=settings)
     this_week_start = today - timedelta(days=today.weekday())
     week_of = _parse_employee_week(week, this_week_start)
-    # Same helper the dashboard widget uses. This page used to call Clockify
-    # directly and sum raw durations, so it reported more hours than the
-    # dashboard -- and more than payroll pays -- for the same week.
+    # Same helper the Home tiles use, so both report the hours payroll pays
+    # (breaks excluded, missed-break deduction applied).
     week_data = employee_week_hours(
         session, user, today=today, week_of=week_of, settings=settings
     )
-    # Estimated pay is only meaningful for the current week; the dashboard
-    # summary is week-relative and would otherwise misreport a past window.
     is_this_week = week_data["week_start"] == this_week_start
-    pay = (
-        _employee_dashboard_pay_summary(session, user, week=week_data)
-        if is_this_week
-        else {
-            "estimated_pay_label": "",
-            "pay_basis": "",
-            "clockify_user_id": week_data["linked"]
-            and (session.get(EmployeeProfile, user.id).clockify_user_id or "")
-            or "",
-        }
+    profile = session.get(EmployeeProfile, user.id)
+    clockify_user_id = (
+        (profile.clockify_user_id or "").strip() if profile and week_data["linked"] else ""
     )
+
+    # No estimated pay on this page, by design (PRD 2026-09 decision): it
+    # was a guess that disagreed with real paychecks.
+    hours_view: dict[str, Any] = {}
+    if clockify_ready and clockify_user_id and not week_data["error"]:
+        from .team_admin_clockify import _clockify_entry_is_break
+
+        week_start = week_data["week_start"]
+        week_days = [week_start + timedelta(days=i) for i in range(7)]
+        my_week = schedule_view.build_my_week(
+            week_days=week_days,
+            today=today,
+            me_id=user.id,
+            calendars=_my_schedule_calendars(session, user, week_days),
+            timeoff_days=_approved_timeoff_days(
+                session, user.id, week_days[0], week_days[-1]
+            ),
+        )
+        entries = [
+            {
+                "start_local": row.start_local,
+                "end_local": row.end_local,
+                "duration_seconds": row.duration_seconds,
+                "running": row.running,
+                "description": row.description,
+                "is_break": _clockify_entry_is_break(row),
+            }
+            for row in week_data["entries"]
+        ]
+        hours_view = schedule_view.build_hours_view(
+            week=week_data, my_days=my_week["days"], entries=entries, today=today
+        )
+
+    week_start = week_data["week_start"]
     return templates.TemplateResponse(
         request,
         "team/hours.html",
         {
             "request": request,
-            "title": "My Hours",
+            "title": "Hours",
             "active": "hours",
             "current_user": user,
             "clockify_ready": clockify_ready,
-            "clockify_user_id": pay["clockify_user_id"],
+            "clockify_user_id": clockify_user_id,
             "week": week_data,
-            "pay": pay,
+            "hours": hours_view,
             "is_this_week": is_this_week,
-            "prev_week": (week_data["week_start"] - timedelta(days=7)).isoformat(),
-            "next_week": (week_data["week_start"] + timedelta(days=7)).isoformat(),
+            "week_label": schedule_view.week_label(week_start),
+            "prev_week": (week_start - timedelta(days=7)).isoformat(),
+            "next_week": (week_start + timedelta(days=7)).isoformat(),
             "this_week": this_week_start.isoformat(),
-            "can_go_forward": week_data["week_start"] < this_week_start,
+            "can_go_forward": week_start < this_week_start,
             "clockify_error": week_data["error"],
             "format_hours": format_hours,
             "csrf_token": issue_token(request),
@@ -2664,37 +2734,111 @@ def team_hours(
 def team_schedule(
     request: Request,
     week: Optional[str] = Query(default=None),
+    view: Optional[str] = Query(default=None),
     session: Session = Depends(get_session),
 ):
     denial, user = _require_employee(request, session, resource_key="page.schedule")
     if denial:
         return denial
-    # Reuse the admin grid builder so the employee view is literally the
-    # same visual — no translation layer, no "my shifts" fork. Everyone
-    # sees the published grid the same way; only the top-level wrapper
-    # differs (admin has inputs, employee has static cells).
-    from .team_admin_schedule import (
-        _build_cell_key,
-        _build_day_loc_key,
-        _grid_context,
-        _parse_week_start,
-    )
+    # Same data the admin grid reads (entry_map per calendar + Stream
+    # Manager hints), reshaped into lists in app/team/schedule_view.py so a
+    # phone never has to scroll a 1000px grid sideways.
+    from .team_admin_schedule import _grid_context, _parse_week_start
     from ..models import (
         SCHEDULE_CALENDAR_PACKING,
         SCHEDULE_CALENDAR_STOREFRONT,
         STAFF_KIND_STREAM,
     )
 
-    week_start = _parse_week_start(week)
+    week_start = _parse_week_start(week if isinstance(week, str) else None)
+    view_mode = schedule_view.normalize_view(view)
+    today = _portal_today()
+    # include_financials=False: pay rates were loaded for the manager labor
+    # total and never shown here.
     storefront_ctx = _grid_context(
-        session, week_start, staff_kind=SCHEDULE_CALENDAR_STOREFRONT
+        session,
+        week_start,
+        staff_kind=SCHEDULE_CALENDAR_STOREFRONT,
+        include_financials=False,
     )
     packing_ctx = _grid_context(
-        session, week_start, staff_kind=SCHEDULE_CALENDAR_PACKING
+        session,
+        week_start,
+        staff_kind=SCHEDULE_CALENDAR_PACKING,
+        include_financials=False,
     )
-    stream_ctx = _grid_context(
-        session, week_start, staff_kind=STAFF_KIND_STREAM
+    stream_ctx = _grid_context(session, week_start, staff_kind=STAFF_KIND_STREAM)
+
+    names: dict[int, str] = {}
+    for ctx in (storefront_ctx, packing_ctx, stream_ctx):
+        for person in ctx["users"]:
+            if person.id is not None:
+                names[person.id] = person.display_name or person.username
+    names.setdefault(user.id, user.display_name or user.username)
+
+    def _visible(entry_map: dict) -> dict:
+        # The grid only drew rows for non-terminated users; keep that contract.
+        return {key: rows for key, rows in entry_map.items() if key[0] in names}
+
+    stream_entries = dict(stream_ctx["stream_hint_map"])
+    if not any(person.id == user.id for person in stream_ctx["users"]):
+        # The Stream grid auto-rosters Stream-role staff only. Someone on
+        # another team who is linked to a Streamer still has stream shifts;
+        # show them in their own list (and in /team/hours) too.
+        from .team_admin_schedule import _stream_schedule_hint_map
+
+        own_hints, _legend = _stream_schedule_hint_map(
+            session, stream_ctx["week_days"], {user.id}
+        )
+        stream_entries.update(own_hints)
+
+    calendars = [
+        {"kind": schedule_view.LOCATION_STOREFRONT, "label": "Storefront",
+         "entries": _visible(storefront_ctx["entry_map"])},
+        {"kind": schedule_view.LOCATION_PACKING, "label": "Packing",
+         "entries": _visible(packing_ctx["entry_map"])},
+        {"kind": schedule_view.LOCATION_STREAM, "label": "Stream",
+         "entries": _visible(stream_entries)},
+    ]
+    week_days = storefront_ctx["week_days"]
+    day_notes = {
+        iso: (note.location_label or "").strip()
+        for iso, note in storefront_ctx["day_note_map"].items()
+        if (note.location_label or "").strip()
+    }
+    my_week = schedule_view.build_my_week(
+        week_days=week_days,
+        today=today,
+        me_id=user.id,
+        calendars=calendars,
+        names=names,
+        timeoff_days=_approved_timeoff_days(
+            session, user.id, week_days[0], week_days[-1]
+        ),
+        day_notes=day_notes,
     )
+    team_days = (
+        schedule_view.build_team_week(
+            week_days=week_days,
+            today=today,
+            me_id=user.id,
+            calendars=calendars,
+            names=names,
+            day_notes=day_notes,
+        )
+        if view_mode == schedule_view.VIEW_TEAM
+        else []
+    )
+
+    nav_ctx = _nav_context(session, user)
+    can_timeoff = any(item["name"] == "time-off" for item in nav_ctx["nav_items"])
+    timeoff_href = ""
+    if can_timeoff:
+        timeoff_href = "/team/timeoff"
+        next_work = my_week["next_work_date"]
+        if next_work is not None:
+            timeoff_href += f"?date={next_work.isoformat()}"
+
     return templates.TemplateResponse(
         request,
         "team/schedule.html",
@@ -2704,20 +2848,19 @@ def team_schedule(
             "active": "schedule",
             "current_user": user,
             "csrf_token": issue_token(request),
-            "build_cell_key": _build_cell_key,
-            "build_day_loc_key": _build_day_loc_key,
-            "storefront": storefront_ctx,
-            "packing": packing_ctx,
-            "stream": stream_ctx,
-            "week_start": storefront_ctx["week_start"],
-            "week_days": storefront_ctx["week_days"],
-            "day_note_map": storefront_ctx["day_note_map"],
+            "view": view_mode,
+            "my_week": my_week,
+            "my_eyebrow": schedule_view.my_week_eyebrow(my_week),
+            "team_days": team_days,
+            "week_start": week_start,
+            "week_label": schedule_view.week_label(week_start),
             "prev_week": storefront_ctx["prev_week"],
             "next_week": storefront_ctx["next_week"],
             "this_week": storefront_ctx["this_week"],
             "is_current_week": storefront_ctx["is_current_week"],
-            "today": _portal_today(),
-            **_nav_context(session, user),
+            "timeoff_href": timeoff_href,
+            "today": today,
+            **nav_ctx,
         },
     )
 

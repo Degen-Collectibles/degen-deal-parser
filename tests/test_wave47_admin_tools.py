@@ -1550,12 +1550,18 @@ class EmployeeScheduleViewTests(unittest.TestCase, _W47Harness):
         self._login_as("employee", user_id=991, username="emp1", password_hash="x", password_salt="x")
         r = self.client.get("/team/schedule")
         self.assertEqual(r.status_code, 200)
-        self.assertIn("FloorStaff", r.text)
-        self.assertIn("10:30 AM - 6:30 PM", r.text)
+        # Default "My shifts" view lists the employee's own shift.
+        self.assertIn("10:30 AM – 6:30 PM", r.text)
+        self.assertIn('data-date="{}"'.format(monday.isoformat()), r.text)
         # No admin-only affordances.
         self.assertNotIn("Save schedule", r.text)
-        # Own row should be visually distinguished.
-        self.assertIn("(you)", r.text)
+        # Whole-team list shows the published shift with the viewer marked.
+        r = self.client.get("/team/schedule?view=team")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("FloorStaff (you)", r.text)
+        self.assertIn("10:30 AM – 6:30 PM", r.text)
+        self.assertIn("pt-row pt-person is-me", r.text)
+        self.assertNotIn("Save schedule", r.text)
 
 
 if __name__ == "__main__":
