@@ -258,6 +258,10 @@ class Settings(BaseSettings):
     tiktok_sync_interval_minutes: int = Field(default=15, alias="TIKTOK_SYNC_INTERVAL_MINUTES")
     tiktok_sync_lookback_hours: float = Field(default=24.0, alias="TIKTOK_SYNC_LOOKBACK_HOURS")
     tiktok_sync_limit: int = Field(default=100, alias="TIKTOK_SYNC_LIMIT")
+    # TikTok statements, fee breakdowns, payouts and returns (read-only pulls).
+    tiktok_finance_sync_enabled: bool = Field(default=False, alias="TIKTOK_FINANCE_SYNC_ENABLED")
+    tiktok_finance_sync_interval_minutes: float = Field(default=60.0, alias="TIKTOK_FINANCE_SYNC_INTERVAL_MINUTES")
+    tiktok_finance_sync_lookback_days: int = Field(default=10, alias="TIKTOK_FINANCE_SYNC_LOOKBACK_DAYS")
     tiktok_startup_backfill_days: int = Field(default=30, alias="TIKTOK_STARTUP_BACKFILL_DAYS")
     tiktok_live_api_key: str = Field(default="", alias="TIKTOK_LIVE_API_KEY")
     tiktok_live_username: str = Field(default="", alias="TIKTOK_LIVE_USERNAME")
