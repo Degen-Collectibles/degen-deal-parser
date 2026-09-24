@@ -720,6 +720,99 @@ class TikTokWebhookEnrichmentJob(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utcnow, index=True)
 
 
+class TikTokStatement(SQLModel, table=True):
+    """One TikTok Shop settlement statement (roughly one per day)."""
+
+    __tablename__ = "tiktok_statements"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    statement_id: str = Field(index=True, unique=True)
+    statement_time: datetime = Field(index=True)
+    currency: str = "USD"
+    revenue_amount: float = 0.0
+    fee_amount: float = 0.0
+    shipping_cost_amount: float = 0.0
+    adjustment_amount: float = 0.0
+    net_sales_amount: float = 0.0
+    settlement_amount: float = 0.0
+    payment_id: Optional[str] = Field(default=None, index=True)
+    payment_status: str = Field(default="", index=True)
+    payment_time: Optional[datetime] = None
+    transaction_count: int = 0
+    transaction_settlement_sum: float = 0.0
+    # True once the stored transactions add up to settlement_amount.
+    reconciled: bool = Field(default=False, index=True)
+    raw_json: str = "{}"
+    synced_at: datetime = Field(default_factory=utcnow)
+
+
+class TikTokStatementTransaction(SQLModel, table=True):
+    """An order or adjustment line inside a statement, with TikTok's fee breakdown."""
+
+    __tablename__ = "tiktok_statement_transactions"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    transaction_id: str = Field(index=True, unique=True)
+    statement_id: str = Field(index=True)
+    transaction_type: str = Field(default="", index=True)
+    order_id: Optional[str] = Field(default=None, index=True)
+    order_create_time: Optional[datetime] = Field(default=None, index=True)
+    currency: str = "USD"
+    revenue_amount: float = 0.0
+    fee_tax_amount: float = 0.0
+    shipping_cost_amount: float = 0.0
+    adjustment_amount: float = 0.0
+    settlement_amount: float = 0.0
+    fee_breakdown_json: str = "{}"
+    raw_json: str = "{}"
+    synced_at: datetime = Field(default_factory=utcnow)
+
+
+class TikTokPayment(SQLModel, table=True):
+    """A TikTok Shop payout to the bank."""
+
+    __tablename__ = "tiktok_payments"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    payment_id: str = Field(index=True, unique=True)
+    create_time: datetime = Field(index=True)
+    paid_time: Optional[datetime] = Field(default=None, index=True)
+    status: str = Field(default="", index=True)
+    currency: str = "USD"
+    amount: float = 0.0
+    settlement_amount: float = 0.0
+    reserve_amount: float = 0.0
+    # Only the last 4 digits are stored; raw_json has the account masked too.
+    bank_account_last4: Optional[str] = None
+    raw_json: str = "{}"
+    synced_at: datetime = Field(default_factory=utcnow)
+
+
+class TikTokReturn(SQLModel, table=True):
+    """A TikTok return/refund or cancellation request."""
+
+    __tablename__ = "tiktok_returns"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    # "return:<return_id>" or "cancellation:<cancel_id>"
+    record_key: str = Field(index=True, unique=True)
+    kind: str = Field(index=True)
+    external_id: str = Field(index=True)
+    order_id: Optional[str] = Field(default=None, index=True)
+    status: str = Field(default="", index=True)
+    request_type: str = ""
+    reason: str = ""
+    reason_text: str = ""
+    initiated_by: str = ""
+    currency: str = "USD"
+    refund_total: float = 0.0
+    create_time: Optional[datetime] = Field(default=None, index=True)
+    update_time: Optional[datetime] = Field(default=None, index=True)
+    line_items_json: str = "[]"
+    raw_json: str = "{}"
+    synced_at: datetime = Field(default_factory=utcnow)
+
+
 class TikTokProduct(SQLModel, table=True):
     __tablename__ = "tiktok_products"
 

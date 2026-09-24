@@ -4,6 +4,7 @@ import socket
 import threading
 
 from ..inventory.ai_resolver import ai_review_resolver_loop
+from ..tiktok.tiktok_finance import tiktok_finance_sync_loop
 from .backfill_requests import backfill_request_loop, requeue_interrupted_backfill_requests
 from ..config import get_settings
 from ..db import init_db, managed_session
@@ -101,6 +102,7 @@ def worker_runtime_details() -> dict:
         "periodic_attachment_repair_limit": settings.periodic_attachment_repair_limit,
         "periodic_attachment_repair_min_age_minutes": settings.periodic_attachment_repair_min_age_minutes,
         "clockify_reconcile_enabled": settings.clockify_reconcile_enabled,
+        "tiktok_finance_sync_enabled": settings.tiktok_finance_sync_enabled,
         "clockify_reconcile_interval_minutes": settings.clockify_reconcile_interval_minutes,
         "clockify_reconcile_lookback_days": settings.clockify_reconcile_lookback_days,
         "service_mode": "worker-host",
@@ -136,6 +138,9 @@ def _recreate_task(task_name: str, stop_event: asyncio.Event) -> asyncio.Task | 
         ),
         "ai-review-resolver": lambda: asyncio.create_task(
             ai_review_resolver_loop(stop_event), name="ai-review-resolver"
+        ),
+        "tiktok-finance-sync": lambda: asyncio.create_task(
+            tiktok_finance_sync_loop(stop_event), name="tiktok-finance-sync"
         ),
     }
     factory = factories.get(task_name)
@@ -234,6 +239,13 @@ async def run_worker_service() -> None:
             asyncio.create_task(
                 periodic_clockify_reconcile_loop(stop_event),
                 name="clockify-reconcile",
+            )
+        )
+    if settings.tiktok_finance_sync_enabled:
+        background_tasks.append(
+            asyncio.create_task(
+                tiktok_finance_sync_loop(stop_event),
+                name="tiktok-finance-sync",
             )
         )
 
