@@ -53,10 +53,14 @@ def main() -> int:
             session.rollback()
 
     unreconciled = summary.pop("unreconciled")
+    errors = summary.pop("errors")
     print("mode:", "APPLIED" if args.apply else "dry run (rolled back)")
     for key, value in summary.items():
         print(f"  {key}: {value}")
     print(f"  unreconciled statements: {len(unreconciled)}" + (f" -> {unreconciled[:20]}" if unreconciled else ""))
+    print(f"  statements that errored (retried next sync): {len(errors)}")
+    for error in errors[:10]:
+        print(f"    {error}")
     return 0
 
 

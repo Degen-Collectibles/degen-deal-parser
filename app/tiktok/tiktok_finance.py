@@ -33,6 +33,10 @@ MAX_PAGES = 200
 # Statements can still change (adjustments, late refunds) for a while after they are issued.
 STATEMENT_RECHECK_DAYS = 7
 RECONCILE_TOLERANCE = 0.01
+RESERVE_TRANSACTION_TYPE = "RESERVE"
+RETRY_ATTEMPTS = 4
+# 66007001 "Rpc error", 36009003 "Internal error. Retry later."
+TRANSIENT_ERROR_CODES = {"66007001", "36009003"}
 
 
 class TikTokFinanceError(RuntimeError):
@@ -82,6 +86,7 @@ class TikTokFinanceApi:
         base_url: str = DEFAULT_SHOP_API_BASE_URL,
         http: Optional[httpx.Client] = None,
         pause_seconds: float = 0.2,
+        retry_backoff_seconds: float = 2.0,
     ) -> None:
         self.app_key = app_key
         self.app_secret = app_secret
@@ -90,6 +95,7 @@ class TikTokFinanceApi:
         self.base_url = base_url or DEFAULT_SHOP_API_BASE_URL
         self.http = http or httpx.Client(timeout=30.0)
         self.pause_seconds = pause_seconds
+        self.retry_backoff_seconds = retry_backoff_seconds
 
     def call(
         self,
@@ -116,16 +122,18 @@ class TikTokFinanceApi:
         )
         headers["Content-Type"] = "application/json"
         last_error = ""
-        for attempt in range(3):
-            if self.pause_seconds:
-                time.sleep(self.pause_seconds * (attempt + 1))
+        for attempt in range(RETRY_ATTEMPTS):
+            if attempt:
+                time.sleep(self.retry_backoff_seconds * attempt)
+            elif self.pause_seconds:
+                time.sleep(self.pause_seconds)
             response = self.http.request(method, url, headers=headers, content=body_json if method == "POST" else None)
             try:
                 payload = response.json()
             except ValueError:
                 payload = {}
-            if response.status_code == 429 or str(payload.get("code")) == "66007001":
-                last_error = f"{path}: rate limited or transient ({payload.get('code') or response.status_code})"
+            if response.status_code == 429 or response.status_code >= 500 or str(payload.get("code")) in TRANSIENT_ERROR_CODES:
+                last_error = f"{path}: transient TikTok error ({payload.get('code') or response.status_code}) after {attempt + 1} attempts"
                 continue
             if payload.get("code") not in (0, "0"):
                 raise TikTokFinanceError(f"{path}: {payload.get('code')} {payload.get('message') or response.status_code}")
@@ -266,7 +274,10 @@ def upsert_statement_transactions(
     settlement_sum = 0.0
     for item in items:
         settlement = _money(item.get("settlement_amount"))
-        settlement_sum += settlement
+        # RESERVE lines hold back or release money in the payout; they are not
+        # part of the statement's settlement_amount (payable = settlement + reserve).
+        if str(item.get("type") or "").upper() != RESERVE_TRANSACTION_TYPE:
+            settlement_sum += settlement
         _upsert(session, TikTokStatementTransaction, "transaction_id", str(item["id"]), {
             "statement_id": statement.statement_id,
             "transaction_type": str(item.get("type") or ""),
@@ -359,15 +370,22 @@ def sync_tiktok_finance(
     now = now or datetime.now(timezone.utc)
     summary: dict[str, Any] = {
         "statements": 0, "transactions_fetched_for": 0, "reconciled": 0, "unreconciled": [],
-        "payments": 0, "returns": 0, "cancellations": 0,
+        "payments": 0, "returns": 0, "cancellations": 0, "errors": [],
     }
     for payload in fetch_statements(api, start, end):
         statement = upsert_statement(session, payload)
         summary["statements"] += 1
         if _needs_transactions(statement, now):
-            envelope, items = fetch_statement_transactions(api, statement.statement_id)
-            upsert_statement_transactions(session, statement, envelope, items)
-            summary["transactions_fetched_for"] += 1
+            try:
+                envelope, items = fetch_statement_transactions(api, statement.statement_id)
+            except TikTokFinanceError as exc:
+                # Leave it unreconciled so the next sync retries it.
+                statement.reconciled = False
+                session.add(statement)
+                summary["errors"].append(f"{statement.statement_id}: {exc}"[:300])
+            else:
+                upsert_statement_transactions(session, statement, envelope, items)
+                summary["transactions_fetched_for"] += 1
         if statement.reconciled:
             summary["reconciled"] += 1
         else:
