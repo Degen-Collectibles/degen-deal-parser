@@ -28,38 +28,38 @@
 
       <div class="pt-tour-panel is-active" data-tour-panel="0">
         <div class="pt-tour-kicker">Step 1 of 7</div>
-        <h2>The left menu gets you everywhere.</h2>
-        <p>Dashboard is home base. Hours, Announcements, Schedule, Time off, Policies, Supply, Profile, and Ops tools all live here.</p>
+        <h2>Five tabs get you everywhere.</h2>
+        <p>On your phone, Home, Schedule, Hours and Requests are one tap away at the bottom. More has your Profile, Policies, Announcements, Documents, Ops tools and Sign out. On a computer the same pages sit in the left menu.</p>
       </div>
       <div class="pt-tour-panel" data-tour-panel="1">
         <div class="pt-tour-kicker">Step 2 of 7</div>
-        <h2>Start with today's shift.</h2>
-        <p>The top card tells you if you work today, whether Clockify has you clocked in, hours so far, and your break status.</p>
+        <h2>Start with the status card.</h2>
+        <p>The top card on Home shows whether Clockify has you on the clock, when today's shift starts, or on a day off, when your next shift is.</p>
       </div>
       <div class="pt-tour-panel" data-tour-panel="2">
         <div class="pt-tour-kicker">Step 3 of 7</div>
-        <h2>Check what needs attention.</h2>
-        <p>The "What do I need to do today?" card flags announcements, unsigned policies, clock issues, and anything else waiting on you.</p>
+        <h2>Check "Needs you".</h2>
+        <p>"Needs you" lists only real to-dos: a policy to sign, a missing phone number or emergency contact, or a timecard day a manager flagged. It's empty when you're caught up.</p>
       </div>
       <div class="pt-tour-panel" data-tour-panel="3">
         <div class="pt-tour-kicker">Step 4 of 7</div>
-        <h2>Hours is for time and pay.</h2>
-        <p>Hours this week and Estimated pay come from Clockify and your pay rate — not the schedule. If pay looks off, open Hours and tap Ask for help.</p>
+        <h2>Hours come from Clockify.</h2>
+        <p>The Last week and This week tiles show your Clockify hours, next to what you were scheduled. Open Hours for the day-by-day list, and tap Ask for help if something looks off.</p>
       </div>
       <div class="pt-tour-panel" data-tour-panel="4">
         <div class="pt-tour-kicker">Step 5 of 7</div>
-        <h2>Catch updates and upcoming shifts.</h2>
-        <p>Announcements has the team updates. Upcoming shows your next shifts. Tap Open schedule for the full calendar.</p>
+        <h2>See your week and your requests.</h2>
+        <p>The week strip marks the days you work (orange dot) and approved time off (blue dot). My requests shows your latest time-off and supply requests and where they stand. The newest announcement sits under Latest.</p>
       </div>
       <div class="pt-tour-panel" data-tour-panel="5">
         <div class="pt-tour-kicker">Step 6 of 7</div>
-        <h2>Finish the profile checklist.</h2>
-        <p>Add your phone, emergency contact, sign policies, and link Clockify — that's how managers reach you and how hours and pay add up right.</p>
+        <h2>Finish your profile.</h2>
+        <p>Add your phone and emergency contact and sign your policies (More, then Profile or Policies). That's how managers reach you. If your hours are blank, ask a manager to connect Clockify.</p>
       </div>
       <div class="pt-tour-panel" data-tour-panel="6">
         <div class="pt-tour-kicker">Step 7 of 7</div>
         <h2>Ask for help from any page.</h2>
-        <p>Hit Ask for help whenever something looks wrong or you're stuck. It tells your manager what page you were on and what you were trying to do.</p>
+        <p>Tap Ask for help at the top of a page, or More, then Get help, whenever something looks wrong or you're stuck. It tells your manager what page you were on and what you were trying to do.</p>
       </div>
 
       <div class="pt-tour-controls">
@@ -69,7 +69,7 @@
 
       {% if tutorial_links|default(false) %}
         <div class="pt-tour-actions">
-          <a href="/team/" class="pt-tour-open">Dashboard</a>
+          <a href="/team/" class="pt-tour-open">Home</a>
           <a href="/team/hours" class="pt-tour-open">Hours</a>
           <a href="{{ schedule_href|default('/team/schedule') }}" class="pt-tour-open">Schedule</a>
           <a href="/team/help" class="pt-tour-open">Help</a>

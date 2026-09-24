@@ -16,6 +16,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlmodel import Session, select
 
 from ..team.clockify import clockify_today
+from ..auth import has_permission
 from ..csrf import issue_token, require_csrf
 from ..db import get_session
 from ..models import AuditLog, TimeOffRequest
@@ -44,7 +45,17 @@ def _parse_iso_date(value: str) -> Optional[date]:
 
 
 @router.get("/team/requests")
-def team_requests_alias():
+def team_requests_alias(
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    """Target of the phone "Requests" tab until /team/requests gets its own
+    combined page (redesign Phase 3). Sends supply-only staff to Supply
+    instead of bouncing them into a 403 on Time off."""
+    user = getattr(request.state, "current_user", None)
+    if user is not None and not has_permission(session, user, "page.timeoff"):
+        if has_permission(session, user, "page.supply_requests"):
+            return RedirectResponse("/team/supply", status_code=303)
     return RedirectResponse("/team/timeoff", status_code=303)
 
 

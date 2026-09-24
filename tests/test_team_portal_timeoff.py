@@ -742,10 +742,33 @@ class TeamTimeOffTests(unittest.TestCase):
     def test_team_requests_alias_redirects_to_timeoff(self):
         from app.routers.team_timeoff import team_requests_alias
 
-        response = team_requests_alias()
+        user = self._seed_user(41, username="emp_requests_tab")
+        response = team_requests_alias(_FakeRequest(user), session=self.session)
 
         self.assertEqual(response.status_code, 303)
         self.assertEqual(response.headers["location"], "/team/timeoff")
+
+    def test_team_requests_alias_sends_supply_only_users_to_supply(self):
+        # The phone "Requests" tab points here; a user without page.timeoff
+        # must land on Supply instead of a 403.
+        from app.models import RolePermission
+        from app.routers.team_timeoff import team_requests_alias
+
+        row = self.session.exec(
+            select(RolePermission).where(
+                RolePermission.role == "employee",
+                RolePermission.resource_key == "page.timeoff",
+            )
+        ).first()
+        self.assertIsNotNone(row)
+        row.is_allowed = False
+        self.session.add(row)
+        self.session.commit()
+        user = self._seed_user(42, username="emp_supply_only")
+
+        response = team_requests_alias(_FakeRequest(user), session=self.session)
+
+        self.assertEqual(response.headers["location"], "/team/supply")
 
     def test_admin_requests_alias_redirects(self):
         from app.routers.team_admin_timeoff import admin_requests_alias

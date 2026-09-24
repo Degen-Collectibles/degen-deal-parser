@@ -167,39 +167,37 @@ class TeamAnnouncementTests(unittest.TestCase):
         )
 
     def _dashboard_html(self, user) -> str:
+        from datetime import time
+
         from app import permissions as perms
         from app.routers.team import (
-            _active_announcements_for,
+            _employee_home_context,
             _nav_context,
             _today_staffing_for,
-            _upcoming_shifts_for,
         )
         from app.shared import templates
 
         today = date.today()
         request = _FakeRequest(user, path="/team/")
+        nav_ctx = _nav_context(self.session, user)
         context = {
             "request": request,
-            "title": "Dashboard",
+            "title": "Home",
             "active": "dashboard",
             "current_user": user,
             "widgets": perms.allowed_widgets_for(self.session, user),
             "clockify_ready": False,
             "supply_queue_count": 0,
-            "upcoming_shifts": _upcoming_shifts_for(
+            "today_staffing": _today_staffing_for(self.session, today=today),
+            **_employee_home_context(
                 self.session,
                 user,
                 today=today,
+                now_local=datetime.combine(today, time(12, 0)),
+                nav_ctx=nav_ctx,
             ),
-            "today_staffing": _today_staffing_for(self.session, today=today),
-            "active_announcements": _active_announcements_for(
-                self.session,
-                limit=3,
-            ),
-            "today_date": today,
-            "now_hour": 12,
             "csrf_token": "test-token",
-            **_nav_context(self.session, user),
+            **nav_ctx,
         }
         return templates.env.get_template("team/dashboard.html").render(context)
 
@@ -362,7 +360,8 @@ class TeamAnnouncementTests(unittest.TestCase):
         html = self._dashboard_html(employee)
 
         self.assertIn("Store meeting", html)
-        self.assertIn("pt-list-stack", html)
+        # Home shows the latest announcement as one "Latest" row.
+        self.assertIn("pt-latest-row", html)
 
     def test_archived_announcement_hidden_from_employee_dashboard(self):
         admin = self._seed_user(7, role="admin", username="poster2")

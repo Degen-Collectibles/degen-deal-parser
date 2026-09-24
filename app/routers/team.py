@@ -77,6 +77,7 @@ from ..models import (
 )
 from ..team.pii import PIIDecryptError, decrypt_pii, encrypt_pii
 from ..team.sms_consent import consent_context, record_consent
+from ..team import home as home_view
 from ..team.shift_labels import parse_shift_start_minutes
 from ..rate_limit import rate_limited_or_429
 from ..shared import app_home_for_role, templates
@@ -777,15 +778,18 @@ def _nav_context(session: Session, user: User) -> dict:
     )
     schedule_href = "/team/schedule"
     keys = (
-        ("dashboard", "Dashboard", "page.dashboard", "/team/"),
+        # Order mirrors the phone tabs (redesign 2026-09): Home, Schedule,
+        # Hours, then Requests, then reading, then Profile. base.html groups
+        # these by name; the flat list stays the permission source of truth.
+        ("dashboard", "Home", "page.dashboard", "/team/"),
+        ("schedule", "Schedule", "page.schedule", schedule_href),
         ("hours", "Hours", "page.hours", "/team/hours"),
+        ("time-off", "Time off", "page.timeoff", "/team/timeoff"),
+        ("supply", "Supply", "page.supply_requests", "/team/supply"),
         ("announcements", "Announcements", "page.announcements", "/team/announcements"),
         ("notifications", "Notifications", "page.announcements", "/team/notifications"),
         ("documents", "Documents", "page.documents", "/team/documents"),
-        ("schedule", "Schedule", "page.schedule", schedule_href),
-        ("time-off", "Time off", "page.timeoff", "/team/timeoff"),
         ("policies", "Policies", "page.policies", "/team/policies"),
-        ("supply", "Supply", "page.supply_requests", "/team/supply"),
         ("profile", "Profile", "page.profile", "/team/profile"),
     )
     nav = []
@@ -886,7 +890,7 @@ def team_dashboard(
     )
     dashboard_context: dict[str, Any] = {
         "request": request,
-        "title": "Dashboard",
+        "title": "Home",
         "active": "dashboard",
         "current_user": user,
         "widgets": widgets,
@@ -910,39 +914,23 @@ def team_dashboard(
                 .where(TimeOffRequest.status == "submitted")
             ).one()
         )
-    today = _portal_today(settings=settings)
-    today_shifts = _today_shifts_for(session, user, today=today)
-    upcoming_shifts = _upcoming_shifts_for(session, user, today=today, limit=5)
-    next_shift = next(
-        (shift for shift in upcoming_shifts if shift["shift_date"] > today),
-        upcoming_shifts[0] if upcoming_shifts else None,
-    )
-    pay_summary = _employee_dashboard_pay_summary(session, user, today=today)
-    active_announcements = _active_announcements_for(session, limit=3)
-    profile_completion = _profile_completion_for(
-        session,
-        user,
-        clockify_ready=clockify_ready,
-    )
+    now_local = _portal_now(settings=settings)
+    today = now_local.date()
     nav_ctx = _nav_context(session, user)
     dashboard_context.update(
+        _employee_home_context(
+            session,
+            user,
+            today=today,
+            now_local=now_local,
+            settings=settings,
+            clockify_ready=clockify_ready,
+            nav_ctx=nav_ctx,
+        )
+    )
+    dashboard_context.update(
         {
-            "dashboard_pay": pay_summary,
-            "today_shifts": today_shifts,
-            "next_shift": next_shift,
-            "upcoming_shifts": upcoming_shifts,
             "today_staffing": _today_staffing_for(session, today=today),
-            "active_announcements": active_announcements,
-            "profile_completion": profile_completion,
-            "today_focus": _today_focus_for(
-                today_shifts=today_shifts,
-                pay_summary=pay_summary,
-                announcements=active_announcements,
-                profile_completion=profile_completion,
-                schedule_href=nav_ctx["schedule_href"],
-            ),
-            "today_date": today,
-            "now_hour": _portal_now(settings=settings).hour,
             "csrf_token": issue_token(request),
             **nav_ctx,
         }
@@ -952,6 +940,218 @@ def team_dashboard(
         "team/dashboard.html",
         dashboard_context,
     )
+
+
+
+def _clock_status_from_week(week: dict[str, Any], *, today: date) -> dict[str, Any]:
+    """Today's Clockify state for the Home hero, from employee_week_hours()."""
+    status: dict[str, Any] = {
+        "linked": bool(week.get("linked")) and not week.get("error"),
+        "running": False,
+        "on_break": False,
+        "since": None,
+        "today_seconds": 0,
+    }
+    if not status["linked"] or not week.get("entries"):
+        return status
+    from .team_admin_clockify import _clockify_entry_is_break
+
+    start_local = week["start_local"]
+    day_start = datetime.combine(today, time.min, tzinfo=start_local.tzinfo)
+    day_end = day_start + timedelta(days=1)
+    todays = [
+        row
+        for row in week["entries"]
+        if _entry_overlap_seconds(row, day_start, day_end) > 0
+    ]
+    work = [row for row in todays if not _clockify_entry_is_break(row)]
+    running_work = [row for row in work if row.running]
+    running_break = [
+        row for row in todays if row.running and _clockify_entry_is_break(row)
+    ]
+    status["running"] = bool(running_work or running_break)
+    status["on_break"] = bool(running_break) and not running_work
+    starts = [row.start_local for row in work if row.start_local is not None]
+    status["since"] = min(starts) if starts else None
+    status["today_seconds"] = week["adjusted_by_day"].get(today, (0, 0, 0))[0]
+    return status
+
+
+def _week_range_label(start: date) -> str:
+    end = start + timedelta(days=6)
+    if start.month == end.month:
+        return f"{home_view.month_day(start)} – {end.day}"
+    return f"{home_view.month_day(start)} – {home_view.month_day(end)}"
+
+
+def _employee_home_context(
+    session: Session,
+    user: User,
+    *,
+    today: date,
+    now_local: datetime,
+    settings=None,
+    clockify_ready: bool = False,
+    nav_ctx: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Everything the Home screen (team/dashboard.html) renders.
+
+    Pay periods are not modelled anywhere in the app (the payroll export
+    works on arbitrary Mon-Sun windows and defaults to last week), so the
+    first tile shows last week's Clockify total and the second shows this
+    week worked vs scheduled. No estimated pay on Home, by design.
+    """
+    settings = settings or get_settings()
+    nav_ctx = nav_ctx if nav_ctx is not None else _nav_context(session, user)
+    nav_names = {item["name"] for item in nav_ctx.get("nav_items", [])}
+    schedule_href = nav_ctx.get("schedule_href") or "/team/schedule"
+    can_timeoff = "time-off" in nav_names
+    can_supply = "supply" in nav_names
+    can_hours = "hours" in nav_names
+
+    today_shifts = _today_shifts_for(session, user, today=today)
+    upcoming_shifts = _upcoming_shifts_for(session, user, today=today, limit=5)
+
+    # --- Clockify: this week + last week (same helper /team/hours uses) ---
+    week_start = today - timedelta(days=today.weekday())
+    last_start = week_start - timedelta(days=7)
+    week = employee_week_hours(session, user, today=today, settings=settings)
+    last_week = (
+        employee_week_hours(
+            session, user, today=today, week_of=last_start, settings=settings
+        )
+        if week.get("linked")
+        else None
+    )
+    clock = _clock_status_from_week(week, today=today)
+
+    # --- This week's own schedule (week strip + scheduled hours) ---
+    week_end = week_start + timedelta(days=6)
+    week_rows = session.exec(
+        select(ShiftEntry)
+        .where(ShiftEntry.user_id == user.id)
+        .where(ShiftEntry.shift_date >= week_start)
+        .where(ShiftEntry.shift_date <= week_end)
+        .where(
+            ~ShiftEntry.kind.in_(
+                (SHIFT_KIND_REQUEST, SHIFT_KIND_OFF, SHIFT_KIND_BLANK)
+            )
+        )
+        .order_by(ShiftEntry.shift_date, ShiftEntry.sort_order, ShiftEntry.id)
+    ).all()
+    shifts_by_day: dict[date, list[str]] = {}
+    for row in week_rows:
+        shifts_by_day.setdefault(row.shift_date, []).append((row.label or "").strip())
+    timeoff_days: set[date] = set()
+    for row in session.exec(
+        select(TimeOffRequest)
+        .where(TimeOffRequest.submitted_by_user_id == user.id)
+        .where(TimeOffRequest.status == "approved")
+        .where(TimeOffRequest.start_date <= week_end)
+        .where(TimeOffRequest.end_date >= week_start)
+    ).all():
+        cursor = max(row.start_date, week_start)
+        while cursor <= min(row.end_date, week_end):
+            timeoff_days.add(cursor)
+            cursor += timedelta(days=1)
+    scheduled = home_view.scheduled_hours(
+        label for labels in shifts_by_day.values() for label in labels
+    )
+
+    linked = bool(week.get("linked"))
+    week_ok = linked and not week.get("error")
+    last_ok = bool(last_week) and not last_week.get("error")
+    tiles = {
+        "linked": linked,
+        "error": week.get("error") or "",
+        "last_week_value": (
+            home_view.hours_number(last_week["total_work_seconds"]) if last_ok else "–"
+        ),
+        "last_week_sub": _week_range_label(last_start),
+        "week_value": (
+            home_view.hours_number(week["total_work_seconds"]) if week_ok else "–"
+        ),
+        "week_scheduled": (
+            home_view.hours_number_from_hours(scheduled) if scheduled else ""
+        ),
+        "href": "/team/hours" if can_hours else "",
+    }
+
+    profile_completion = _profile_completion_for(
+        session, user, clockify_ready=clockify_ready
+    )
+    needs_you = home_view.build_needs_you(
+        profile_completion=profile_completion,
+        needs_fix_days=week.get("needs_fix_days") or [],
+        clockify_configured=clockify_ready,
+    )
+    request_rows = home_view.build_request_rows(
+        timeoff=(
+            session.exec(
+                select(TimeOffRequest)
+                .where(TimeOffRequest.submitted_by_user_id == user.id)
+                .order_by(TimeOffRequest.created_at.desc())
+                .limit(5)
+            ).all()
+            if can_timeoff
+            else []
+        ),
+        supply=(
+            session.exec(
+                select(SupplyRequest)
+                .where(SupplyRequest.submitted_by_user_id == user.id)
+                .order_by(SupplyRequest.created_at.desc())
+                .limit(5)
+            ).all()
+            if can_supply
+            else []
+        ),
+        limit=3,
+    )
+    latest = (
+        _active_announcements_for(session, limit=1)
+        if "announcements" in nav_names
+        else []
+    )
+    hero = home_view.build_hero(
+        now_local=now_local,
+        today=today,
+        today_shifts=today_shifts,
+        upcoming_shifts=upcoming_shifts,
+        clock=clock,
+        schedule_href=schedule_href,
+        timeoff_href="/team/timeoff" if can_timeoff else None,
+        hours_href="/team/hours" if can_hours else None,
+    )
+    name = (user.display_name or user.username or "").strip()
+    return {
+        "today_date": today,
+        "now_hour": now_local.hour,
+        "today_shifts": today_shifts,
+        "upcoming_shifts": upcoming_shifts,
+        "profile_completion": profile_completion,
+        "home": {
+            "eyebrow": f"{today:%A}, {home_view.month_day(today)}",
+            "first_name": name.split()[0] if name else "there",
+            "initials": "".join(part[0] for part in name.split()[:2]).upper() or "?",
+            "hero": hero,
+            "tiles": tiles,
+            "needs_you": needs_you,
+            "week": home_view.build_week_strip(
+                week_start=week_start,
+                today=today,
+                shifts_by_day=shifts_by_day,
+                timeoff_days=timeoff_days,
+            ),
+            "requests": request_rows,
+            "can_requests": can_timeoff or can_supply,
+            "latest": latest[0] if latest else None,
+            "latest_posted": (
+                home_view.month_day(latest[0].published_at) if latest else ""
+            ),
+            "schedule_href": schedule_href,
+        },
+    }
 
 
 def _format_money_label(cents: int) -> str:
@@ -1457,91 +1657,6 @@ def _profile_completion_for(
     }
 
 
-def _today_focus_for(
-    *,
-    today_shifts: list[dict[str, Any]],
-    pay_summary: dict[str, Any],
-    announcements: list[TeamAnnouncement],
-    profile_completion: dict[str, Any],
-    schedule_href: str,
-) -> dict[str, Any]:
-    shift_text = (
-        "; ".join(
-            (row.get("label") or "Shift").strip()
-            for row in today_shifts
-            if (row.get("label") or "").strip()
-        )
-        or "You are scheduled today."
-        if today_shifts
-        else "No shift today."
-    )
-    clocked_in = (pay_summary.get("clocked_in_today_label") or "").strip()
-    break_label = (pay_summary.get("break_today_label") or "Not yet").strip()
-    missing_policies = profile_completion.get("missing_policies") or []
-    items = [
-        {
-            "label": "Shift",
-            "value": shift_text,
-            "href": schedule_href,
-            "state": "ok" if today_shifts else "neutral",
-        },
-        {
-            "label": "Clock status",
-            "value": (
-                f"Clocked in at {clocked_in}."
-                if clocked_in and clocked_in != "Not clocked in"
-                else "Clock in from the shop iPad when you arrive."
-            ),
-            "href": "/team/hours",
-            "state": (
-                "ok"
-                if clocked_in and clocked_in != "Not clocked in"
-                else ("todo" if today_shifts else "neutral")
-            ),
-        },
-        {
-            "label": "Break",
-            "value": (
-                "Break recorded."
-                if break_label.startswith(("Taken", "On break"))
-                else (
-                    "No break clocked yet. If a 5+ hour shift misses a break, 30 minutes is deducted."
-                    if today_shifts
-                    else "No break needed unless you work today."
-                )
-            ),
-            "href": "/team/hours",
-            "state": (
-                "ok"
-                if break_label.startswith(("Taken", "On break"))
-                else ("todo" if today_shifts else "neutral")
-            ),
-        },
-        {
-            "label": "Announcements",
-            "value": (
-                f"{len(announcements)} current update{'s' if len(announcements) != 1 else ''}."
-                if announcements
-                else "Nothing new right now."
-            ),
-            "href": "/team/announcements",
-            "state": "todo" if announcements else "ok",
-        },
-        {
-            "label": "Policies",
-            "value": (
-                f"{len(missing_policies)} unsigned polic{'ies' if len(missing_policies) != 1 else 'y'}."
-                if missing_policies
-                else "All signed."
-            ),
-            "href": "/team/policies",
-            "state": "todo" if missing_policies else "ok",
-        },
-    ]
-    todo_count = sum(1 for item in items if item["state"] == "todo")
-    return {"items": items, "todo_count": todo_count}
-
-
 def _employee_notifications_for(
     session: Session,
     user: User,
@@ -1782,6 +1897,45 @@ async def team_help_post(
     session.commit()
     send_help_request_alert(**alert_context)
     return RedirectResponse("/team/help?flash=Help+request+sent.", status_code=303)
+
+
+@router.get("/team/more", response_class=HTMLResponse)
+def team_more(
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    """Phone "More" tab: profile, reading, ops tools by role, help, sign out.
+
+    No resource gate of its own: every link on the page is filtered through
+    the same `_nav_context` permission checks as the sidebar, so it can only
+    ever list pages this user may open.
+    """
+    denial, user = _require_employee(request, session)
+    if denial:
+        return denial
+    nav_ctx = _nav_context(session, user)
+    nav_names = {item["name"] for item in nav_ctx["nav_items"]}
+    completion = (
+        _profile_completion_for(session, user)
+        if "profile" in nav_names or "policies" in nav_names
+        else None
+    )
+    return templates.TemplateResponse(
+        request,
+        "team/more.html",
+        {
+            "request": request,
+            "title": "More",
+            "active": "more",
+            "current_user": user,
+            "profile_completion": completion,
+            "unsigned_policy_count": (
+                len(completion["missing_policies"]) if completion else 0
+            ),
+            "csrf_token": issue_token(request),
+            **nav_ctx,
+        },
+    )
 
 
 @router.get("/team/help/tutorial", response_class=HTMLResponse)

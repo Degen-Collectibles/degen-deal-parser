@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 import unittest
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from html import unescape
 from types import SimpleNamespace
 
@@ -120,42 +120,59 @@ class EmployeePortalHomepageTests(unittest.TestCase):
         self.session.refresh(row)
         return row
 
-    def _dashboard_html(self) -> str:
+    # A fixed Wednesday keeps week-strip assertions deterministic.
+    TODAY = date(2026, 9, 23)
+    NOW = datetime(2026, 9, 23, 12, 0)
+
+    def _dashboard_html(self, *, now: datetime | None = None) -> str:
         from app import permissions as perms
         from app.routers.team import (
+            _employee_home_context,
             _nav_context,
             _today_staffing_for,
-            _upcoming_shifts_for,
         )
         from app.shared import templates
 
-        today = date.today()
+        today = self.TODAY
         user = self._current_user
         request = SimpleNamespace(url=SimpleNamespace(path="/team/"))
+        nav_ctx = _nav_context(self.session, user)
         context = {
             "request": request,
-            "title": "Dashboard",
+            "title": "Home",
             "active": "dashboard",
             "current_user": user,
             "widgets": perms.allowed_widgets_for(self.session, user),
             "clockify_ready": False,
             "supply_queue_count": 0,
-            "upcoming_shifts": _upcoming_shifts_for(
+            "today_staffing": _today_staffing_for(self.session, today=today),
+            "csrf_token": "test-token",
+            **_employee_home_context(
                 self.session,
                 user,
                 today=today,
+                now_local=now or self.NOW,
+                clockify_ready=False,
+                nav_ctx=nav_ctx,
             ),
-            "today_staffing": _today_staffing_for(self.session, today=today),
-            "today_date": today,
-            "now_hour": 12,
-            "csrf_token": "test-token",
-            **_nav_context(self.session, user),
+            **nav_ctx,
         }
         return templates.env.get_template("team/dashboard.html").render(context)
 
-    def test_upcoming_shifts_shows_users_next_three(self):
+    @staticmethod
+    def _section(html: str, marker: str) -> str:
+        start = html.index(marker)
+        return html[start:html.index("</section>", start)]
+
+    def _week_strip(self, html: str) -> str:
+        start = html.index('<ol class="pt-week">')
+        return html[start:html.index("</ol>", start)]
+
+    def test_hero_shows_next_shift_and_week_strip_marks_own_days(self):
+        # Replaces the old "Upcoming: next five shifts" list, which the
+        # redesign folds into the hero (next shift) and the week strip.
         user = self._login_as("employee", user_id=101, username="emp")
-        today = date.today()
+        today = self.TODAY
         labels = [
             "9:00 AM - 1:00 PM",
             "10:00 AM - 2:00 PM",
@@ -165,32 +182,29 @@ class EmployeePortalHomepageTests(unittest.TestCase):
         ]
         for offset, label in enumerate(labels, start=1):
             self._seed_shift(user.id, today + timedelta(days=offset), label)
-        self._seed_day_note(today + timedelta(days=2), "Storefront")
+        self._seed_day_note(today + timedelta(days=1), "Back room")
 
         html = self._dashboard_html()
 
-        self.assertEqual(html.count('class="pt-list-row pt-shift-row"'), 5)
-        for label in labels:
-            self.assertIn(label, html)
-        self.assertLess(html.index(labels[0]), html.index(labels[1]))
-        self.assertLess(html.index(labels[1]), html.index(labels[2]))
+        self.assertIn('class="pt-hero off"', html)
+        self.assertIn("Tomorrow", html)
+        self.assertIn("9:00 AM – 1:00 PM", html)
         self.assertIn("Storefront", html)
+        self.assertIn("Back room", html)
+        strip = self._week_strip(html)
+        # Wed Sep 23 -> Thu..Sun are this week; next Monday is not.
+        self.assertEqual(strip.count('class="pt-day-dot is-shift"'), 4)
+        self.assertIn("Thu Sep 24: 9:00 AM – 1:00 PM", strip)
+        self.assertNotIn("Mon Sep 28", strip)
+        self.assertLess(strip.index("Thu Sep 24"), strip.index("Fri Sep 25"))
 
-    def test_upcoming_shifts_excludes_other_users_shifts(self):
+    def test_home_excludes_other_users_shifts(self):
         user_a = self._login_as("employee", user_id=201, username="alice")
         user_b = self._seed_user(202, username="bob", display_name="Bob")
-        today = date.today()
+        today = self.TODAY
         for offset in range(1, 4):
-            self._seed_shift(
-                user_a.id,
-                today + timedelta(days=offset),
-                f"A shift {offset}",
-            )
-            self._seed_shift(
-                user_b.id,
-                today + timedelta(days=offset),
-                f"B shift {offset}",
-            )
+            self._seed_shift(user_a.id, today + timedelta(days=offset), f"A shift {offset}")
+            self._seed_shift(user_b.id, today + timedelta(days=offset), f"B shift {offset}")
 
         html = self._dashboard_html()
 
@@ -198,11 +212,11 @@ class EmployeePortalHomepageTests(unittest.TestCase):
             self.assertIn(f"A shift {offset}", html)
             self.assertNotIn(f"B shift {offset}", html)
 
-    def test_upcoming_shifts_excludes_past_shifts(self):
+    def test_home_ignores_past_weeks_and_uses_today_for_hero(self):
         user = self._login_as("employee", user_id=301, username="past")
-        today = date.today()
-        self._seed_shift(user.id, today - timedelta(days=2), "Past shift one")
-        self._seed_shift(user.id, today - timedelta(days=1), "Past shift two")
+        today = self.TODAY
+        self._seed_shift(user.id, today - timedelta(days=8), "Past shift one")
+        self._seed_shift(user.id, today - timedelta(days=9), "Past shift two")
         self._seed_shift(user.id, today, "Today shift")
         self._seed_shift(user.id, today + timedelta(days=1), "Future shift")
 
@@ -210,31 +224,25 @@ class EmployeePortalHomepageTests(unittest.TestCase):
 
         self.assertNotIn("Past shift one", html)
         self.assertNotIn("Past shift two", html)
+        # Unparseable label today -> "later" hero showing the label itself.
+        self.assertIn('class="pt-hero later"', html)
         self.assertIn("Today shift", html)
-        self.assertIn("Future shift", html)
+        self.assertIn("Future shift", self._week_strip(html))
 
-    def test_upcoming_shifts_excludes_request_kind(self):
+    def test_home_excludes_request_kind(self):
         from app.models import SHIFT_KIND_REQUEST, SHIFT_KIND_WORK
 
         user = self._login_as("employee", user_id=302, username="upcoming")
-        today = date.today()
+        today = self.TODAY
+        self._seed_shift(user.id, today + timedelta(days=1), "10-6", kind=SHIFT_KIND_WORK)
         self._seed_shift(
-            user.id,
-            today + timedelta(days=1),
-            "10-6",
-            kind=SHIFT_KIND_WORK,
-        )
-        self._seed_shift(
-            user.id,
-            today + timedelta(days=2),
-            "Approved leave",
-            kind=SHIFT_KIND_REQUEST,
+            user.id, today + timedelta(days=2), "Approved leave", kind=SHIFT_KIND_REQUEST
         )
 
         html = self._dashboard_html()
 
-        self.assertEqual(html.count('class="pt-list-row pt-shift-row"'), 1)
-        self.assertIn("10-6", html)
+        self.assertEqual(self._week_strip(html).count('class="pt-day-dot is-shift"'), 1)
+        self.assertIn("10:00 AM – 6:00 PM", html)
         self.assertNotIn("Approved leave", html)
 
     def test_upcoming_shifts_empty_state(self):
@@ -243,15 +251,109 @@ class EmployeePortalHomepageTests(unittest.TestCase):
         html = self._dashboard_html()
 
         self.assertIn("No upcoming shifts", html)
+        self.assertIn("You&#39;re off today", html)
         self.assertNotIn("coming soon", html.lower())
         self.assertNotIn("lands soon", html.lower())
         self.assertNotIn("TBA", html)
+
+    def test_week_strip_marks_approved_time_off(self):
+        from app.models import TimeOffRequest
+
+        user = self._login_as("employee", user_id=402, username="pto")
+        self.session.add_all(
+            [
+                TimeOffRequest(
+                    submitted_by_user_id=user.id,
+                    start_date=date(2026, 9, 26),
+                    end_date=date(2026, 9, 27),
+                    status="approved",
+                ),
+                TimeOffRequest(
+                    submitted_by_user_id=user.id,
+                    start_date=date(2026, 9, 24),
+                    end_date=date(2026, 9, 24),
+                    status="submitted",
+                ),
+            ]
+        )
+        self.session.commit()
+
+        strip = self._week_strip(self._dashboard_html())
+
+        self.assertEqual(strip.count('class="pt-day-dot is-timeoff"'), 2)
+        self.assertIn("Sat Sep 26: approved time off", strip)
+
+    def test_needs_you_excludes_announcements(self):
+        from app.models import TeamAnnouncement
+
+        user = self._login_as("employee", user_id=403, username="reader")
+        self.session.add(
+            TeamAnnouncement(
+                title="Surprise Set restock Friday",
+                body="Heads up.",
+                created_by_user_id=user.id,
+            )
+        )
+        self.session.commit()
+
+        html = self._dashboard_html()
+        needs = self._section(html, 'id="pt-needs-you-h"')
+
+        self.assertNotIn("Surprise Set restock Friday", needs)
+        self.assertNotIn("announcement", needs.lower())
+        # Seeded required policies are unsigned -> real to-dos show up.
+        self.assertIn("Acknowledge", needs)
+        self.assertIn("Add your phone number", needs)
+        # The announcement is still on Home, as the "Latest" row.
+        latest = self._section(html, 'id="pt-latest-h"')
+        self.assertIn("Surprise Set restock Friday", latest)
+
+    def test_my_requests_lists_pending_first_with_status_pills(self):
+        from app.models import SupplyRequest, TimeOffRequest
+
+        user = self._login_as("employee", user_id=404, username="asker")
+        self.session.add_all(
+            [
+                TimeOffRequest(
+                    submitted_by_user_id=user.id,
+                    start_date=date(2026, 9, 27),
+                    end_date=date(2026, 9, 27),
+                    status="approved",
+                    created_at=datetime(2026, 9, 22, 18, 0),
+                ),
+                SupplyRequest(
+                    submitted_by_user_id=user.id,
+                    title="Penny sleeves x10 packs",
+                    status="submitted",
+                    created_at=datetime(2026, 9, 20, 18, 0),
+                ),
+            ]
+        )
+        self.session.commit()
+
+        section = self._section(self._dashboard_html(), 'id="pt-requests-h"')
+
+        self.assertIn("Penny sleeves x10 packs", section)
+        self.assertIn("Time off · Sun Sep 27", section)
+        self.assertIn('<span class="pt-pill warn">Pending</span>', section)
+        self.assertIn('<span class="pt-pill ok">Approved</span>', section)
+        self.assertLess(section.index("Penny sleeves"), section.index("Time off ·"))
+
+    def test_home_has_no_estimated_pay_or_duplicate_clock_blocks(self):
+        self._login_as("employee", user_id=405, username="nopay")
+
+        html = unescape(self._dashboard_html())
+
+        self.assertNotIn("Estimated pay", html)
+        self.assertNotIn("Clocked in today", html)
+        self.assertNotIn("What do I need to do today?", html)
+        self.assertEqual(html.count('class="pt-hero '), 1)
 
     def test_today_staffing_renders_for_admin(self):
         admin = self._login_as("admin", user_id=501, username="admin")
         worker_a = self._seed_user(502, username="amy", display_name="Amy")
         worker_b = self._seed_user(503, username="ben", display_name="Ben")
-        today = date.today()
+        today = self.TODAY
         self._seed_shift(worker_b.id, today, "12:00 PM - 4:00 PM")
         self._seed_shift(worker_a.id, today, "9:00 AM - 1:00 PM")
 
@@ -269,14 +371,14 @@ class EmployeePortalHomepageTests(unittest.TestCase):
         self._login_as("manager", user_id=504, username="manager")
         worker_a = self._seed_user(505, username="amy2", display_name="Amy Worker")
         worker_b = self._seed_user(506, username="ben2", display_name="Ben Off")
-        today = date.today()
+        today = self.TODAY
         self._seed_shift(worker_a.id, today, "10-6", kind=SHIFT_KIND_WORK)
         self._seed_shift(worker_b.id, today, "Approved leave", kind=SHIFT_KIND_REQUEST)
 
         html = self._dashboard_html()
 
         self.assertIn("Who's on today", html)
-        self.assertEqual(html.count('class="pt-today-staff-row"'), 1)
+        self.assertEqual(html.count('pt-today-staff-row"'), 1)
         self.assertIn("Amy Worker", html)
         self.assertIn("10-6", html)
         self.assertNotIn("Ben Off", html)
@@ -285,7 +387,7 @@ class EmployeePortalHomepageTests(unittest.TestCase):
     def test_today_staffing_hidden_for_employee(self):
         employee = self._login_as("employee", user_id=601, username="employee")
         coworker = self._seed_user(602, username="coworker", display_name="Coworker")
-        today = date.today()
+        today = self.TODAY
         self._seed_shift(employee.id, today, "9:00 AM - 1:00 PM")
         self._seed_shift(coworker.id, today, "10:00 AM - 2:00 PM")
 

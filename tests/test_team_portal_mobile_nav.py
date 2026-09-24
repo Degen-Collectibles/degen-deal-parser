@@ -7,11 +7,15 @@ on every authenticated portal page:
      sidebar drawer on phones.
   2. The sidebar itself must have the drawer id (`#pt-sidebar`) and a
      close button (`#pt-drawer-close`) so the JS can wire up tap-to-close.
-  3. A bottom nav (`.pt-mobile-bottom-nav`) with a primary center FAB.
+  3. A bottom nav (`.pt-mobile-bottom-nav`) with the same five tabs for
+     every role: Home · Schedule · Hours · Requests · More (redesign
+     2026-09; the old centre FAB and ops-tool slots are gone — ops tools
+     now live under More and in the sidebar's Ops group).
 
-We also verify the drawer JS is loaded and that the bottom nav exposes the
-employee-facing ops tools through the team shell. Privileged portal roles
-still get the editable admin schedule.
+We also verify the drawer JS is loaded, that a tab is hidden (not a 403)
+when the user lacks its page.* permission, and that team-admin pages (which
+don't run `_nav_context()`) still render all five tabs with the editable
+admin schedule.
 """
 from __future__ import annotations
 
@@ -108,37 +112,93 @@ class MobileNavTests(unittest.TestCase):
         self.assertIn('id="pt-drawer-backdrop"', html)
         self.assertIn("/static/portal-drawer.js", html)
 
-    def test_bottom_nav_shows_employee_tools(self):
-        self._current_user = self._login_as("employee", user_id=503, username="emp3")
-        html = self._dashboard_html()
-        self.assertIn('class="pt-mobile-bottom-nav"', html)
-        # Five expected bottom-nav destinations for a plain employee:
-        for needle in (
-            'href="/team/"',
-            'href="/tiktok/streamer?team_shell=1"',
-            'href="/degen_eye?team_shell=1"',
-            'href="/team/schedule"',
-            'href="/team/profile"',
-        ):
-            self.assertIn(needle, html, f"missing bottom-nav link: {needle}")
-        self.assertNotIn('href="/team/admin/schedule"', html)
-        # Center FAB still exists, and now points straight to Degen Eye.
-        self.assertIn('class="pt-mbn-fab"', html)
-        self.assertIn('pt-mbn-item-center', html)
+    FIVE_TABS = (
+        ("Home", 'href="/team/"'),
+        ("Schedule", 'href="/team/schedule"'),
+        ("Hours", 'href="/team/hours"'),
+        ("Requests", 'href="/team/requests"'),
+        ("More", 'href="/team/more"'),
+    )
 
-    def test_bottom_nav_shows_tools_and_admin_schedule_for_manager(self):
+    @staticmethod
+    def _bottom_nav(html: str) -> str:
+        start = html.index('<nav class="pt-mobile-bottom-nav"')
+        return html[start:html.index("</nav>", start)]
+
+    def _assert_five_tabs(self, nav: str, schedule_href: str = "/team/schedule"):
+        self.assertEqual(nav.count('class="pt-mbn-item'), 5, nav)
+        labels = [label for label, _ in self.FIVE_TABS]
+        positions = [nav.index(f'<span class="pt-mbn-label">{label}</span>') for label in labels]
+        self.assertEqual(positions, sorted(positions), "tabs out of order")
+        for label, href in self.FIVE_TABS:
+            if label == "Schedule":
+                href = f'href="{schedule_href}"'
+            self.assertIn(href, nav, f"missing bottom-nav tab: {label}")
+
+    def test_bottom_nav_has_five_tabs_for_hourly_employee(self):
+        self._current_user = self._login_as("employee", user_id=503, username="emp3")
+        nav = self._bottom_nav(self._dashboard_html())
+        self._assert_five_tabs(nav)
+        # No centre FAB and no ops tools in the bar any more.
+        self.assertNotIn("pt-mbn-fab", nav)
+        self.assertNotIn("pt-mbn-item-center", nav)
+        self.assertNotIn('href="/degen_eye?team_shell=1"', nav)
+        self.assertNotIn('href="/tiktok/streamer?team_shell=1"', nav)
+        self.assertNotIn('href="/team/profile"', nav)
+        self.assertNotIn('href="/team/admin/schedule"', nav)
+
+    def test_bottom_nav_same_five_tabs_for_ops_staff(self):
+        # Managers hold the ops tools (Degen Eye, Live Stream, ...). They get
+        # the same bar; the tools are reachable from the sidebar Ops group
+        # and the More page instead.
         self._current_user = self._login_as("manager", user_id=506, username="mgr1")
         html = self._dashboard_html()
-        for needle in (
-            'href="/team/"',
-            'href="/tiktok/streamer?team_shell=1"',
-            'href="/degen_eye?team_shell=1"',
-            'href="/team/admin/schedule"',
-            'href="/team/profile"',
-        ):
-            self.assertIn(needle, html, f"missing bottom-nav link: {needle}")
-        self.assertIn('class="pt-mbn-fab"', html)
-        self.assertIn('pt-mbn-item-center', html)
+        nav = self._bottom_nav(html)
+        self._assert_five_tabs(nav)
+        self.assertNotIn("pt-mbn-fab", nav)
+        self.assertNotIn('href="/degen_eye?team_shell=1"', nav)
+        self.assertIn('href="/degen_eye?team_shell=1"', html)  # sidebar Ops
+        self.assertIn('href="/tiktok/streamer?team_shell=1"', html)
+        self.assertIn('href="/team/admin/schedule"', html)  # sidebar Admin
+
+    def test_bottom_nav_hides_tab_without_permission(self):
+        from sqlmodel import select
+        from app.models import RolePermission
+
+        row = self.session.exec(
+            select(RolePermission).where(
+                RolePermission.role == "employee",
+                RolePermission.resource_key == "page.hours",
+            )
+        ).first()
+        self.assertIsNotNone(row)
+        row.is_allowed = False
+        self.session.add(row)
+        self.session.commit()
+        self._current_user = self._login_as("employee", user_id=507, username="emp7")
+        nav = self._bottom_nav(self._dashboard_html())
+        self.assertEqual(nav.count('class="pt-mbn-item'), 4)
+        self.assertNotIn('href="/team/hours"', nav)
+        self.assertIn('href="/team/more"', nav)
+
+    def test_admin_base_renders_five_tabs_with_admin_schedule(self):
+        from app.shared import templates
+
+        user = self._login_as("admin", user_id=508, username="adm8")
+        html = templates.env.get_template("team/admin/base.html").render(
+            {
+                "request": SimpleNamespace(
+                    url=SimpleNamespace(path="/team/admin"),
+                    state=SimpleNamespace(),
+                ),
+                "title": "Team admin",
+                "current_user": user,
+                "csrf_token": "test-token",
+            }
+        )
+        self._assert_five_tabs(
+            self._bottom_nav(html), schedule_href="/team/admin/schedule"
+        )
 
     def test_bottom_nav_renders_on_non_home_pages_too(self):
         self._current_user = self._login_as("employee", user_id=504, username="emp5")
