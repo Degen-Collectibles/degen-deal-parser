@@ -43,9 +43,40 @@
   --pt-ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
   --pt-ease-out: cubic-bezier(0.4, 0, 0.2, 1);
 
-  --pt-font: "SF Pro Display", -apple-system, BlinkMacSystemFont, "Inter",
-             "Segoe UI", Roboto, sans-serif;
+  /* Inter first: it is what staff actually saw (linear.css forced it on
+     body with !important) and what the approved 2026-09 mockup uses. */
+  --pt-font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI",
+             Roboto, sans-serif;
   --pt-font-mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+
+  /* ---- Component-kit tokens (employee portal redesign, Phase 0) ---- */
+  --pt-info: #93c5fd;
+  --pt-ok-soft: rgba(52, 211, 153, 0.14);
+  --pt-warn-soft: rgba(252, 211, 77, 0.14);
+  --pt-err-soft: rgba(252, 165, 165, 0.14);
+  --pt-info-soft: rgba(147, 197, 253, 0.14);
+  --pt-neutral-soft: rgba(255, 255, 255, 0.06);
+  --pt-dim: #6b6f7e;
+  --pt-border-strong: rgba(255, 255, 255, 0.13);
+
+  /* Type scale — use these instead of hardcoded px. */
+  --pt-fs-xs: 12px;
+  --pt-fs-sm: 13px;
+  --pt-fs-md: 15px;
+  --pt-fs-lg: 17px;
+  --pt-fs-xl: 22px;
+  --pt-fs-2xl: 34px;
+
+  /* Spacing scale. */
+  --pt-sp-1: 4px;
+  --pt-sp-2: 8px;
+  --pt-sp-3: 12px;
+  --pt-sp-4: 16px;
+  --pt-sp-5: 20px;
+  --pt-sp-6: 24px;
+
+  /* Minimum touch target (Apple HIG / WCAG 2.5.5). */
+  --pt-tap: 44px;
 }
 
 html, body {
@@ -59,11 +90,16 @@ html, body {
   overflow-x: hidden;
 }
 
+/* linear.css sets font-family / background / color on `body` with
+   !important, which silently beat every portal rule above. Scope the
+   override to portal pages (body.pt-body) so the main ops app is
+   untouched. The old radial-gradient background never rendered because of
+   that override, so it is dropped rather than suddenly appearing. */
 body.pt-body {
-  background:
-    radial-gradient(1200px 600px at 20% -10%, rgba(255, 107, 91, 0.08), transparent 60%),
-    radial-gradient(900px 500px at 100% 110%, rgba(94, 106, 210, 0.08), transparent 55%),
-    var(--pt-bg);
+  font-family: var(--pt-font) !important;
+  background: var(--pt-bg) !important;
+  color: var(--pt-text) !important;
+  font-feature-settings: "cv11", "ss01", "tnum";
   min-height: 100vh;
   min-height: 100dvh;
 }
@@ -331,10 +367,12 @@ a { color: inherit; text-decoration: none; }
   align-items: center;
   justify-content: center;
   gap: 6px;
+  min-height: var(--pt-tap);
   padding: 9px 16px;
   border-radius: var(--pt-radius-sm);
   font-size: 14px;
   font-weight: 500;
+  text-decoration: none;
   background: var(--pt-surface-raised);
   border: 1px solid var(--pt-border);
   color: var(--pt-text);
@@ -382,6 +420,19 @@ a { color: inherit; text-decoration: none; }
   border-color: rgba(239, 68, 68, 0.3);
 }
 .pt-btn.danger:hover { background: rgba(239, 68, 68, 0.12); }
+
+/* Size + layout modifiers. .sm is visually compact but still grows to the
+   44px tap target on touch screens. */
+.pt-btn.sm {
+  min-height: 36px;
+  padding: 0 12px;
+  font-size: var(--pt-fs-sm);
+  border-radius: var(--pt-radius-sm);
+}
+@media (pointer: coarse) {
+  .pt-btn.sm { min-height: var(--pt-tap); }
+}
+.pt-btn.block { display: flex; width: 100%; }
 
 /* =========================================================================
  * Forms
@@ -548,6 +599,32 @@ a { color: inherit; text-decoration: none; }
 .pt-pill.low       { background: rgba(156, 160, 175, 0.12); color: var(--pt-muted); }
 .pt-pill.normal    { background: rgba(94, 106, 210, 0.15); color: #a5b4fc; }
 .pt-pill.high      { background: rgba(239, 68, 68, 0.15); color: var(--pt-err); }
+
+/* Tone variants (component kit). These carry a leading status dot; the
+   legacy status classes above keep their original look. */
+.pt-pill.ok, .pt-pill.warn, .pt-pill.err, .pt-pill.info, .pt-pill.neutral {
+  align-items: center;
+  gap: 5px;
+  font-size: var(--pt-fs-xs);
+  padding: 3px 9px;
+  letter-spacing: 0;
+  text-transform: none;
+  white-space: nowrap;
+}
+.pt-pill.ok::before, .pt-pill.warn::before, .pt-pill.err::before,
+.pt-pill.info::before, .pt-pill.neutral::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+.pt-pill.ok      { color: var(--pt-ok);    background: var(--pt-ok-soft); }
+.pt-pill.warn    { color: var(--pt-warn);  background: var(--pt-warn-soft); }
+.pt-pill.err     { color: var(--pt-err);   background: var(--pt-err-soft); }
+.pt-pill.info    { color: var(--pt-info);  background: var(--pt-info-soft); }
+.pt-pill.neutral { color: var(--pt-muted); background: var(--pt-neutral-soft); }
 
 /* =========================================================================
  * Auth shell (login / reset / forgot)
@@ -2024,4 +2101,511 @@ a { color: inherit; text-decoration: none; }
     justify-self: start;
     margin-top: 8px;
   }
+}
+
+/* =========================================================================
+ * Component kit (employee portal redesign, Phase 0 — 2026-09)
+ *
+ * Shared pieces from docs/design/team-portal-redesign/employee-mockup.html.
+ * New employee templates should compose these instead of inline style=.
+ *   .pt-i               inline SVG icon (stroke = currentColor)
+ *   .pt-topline         page eyebrow + big title (+ optional avatar)
+ *   .pt-section(-h)     vertical section + header row with a right link
+ *   .pt-rows > .pt-row  grouped list rows (min 56px, full-row tap target)
+ *   .pt-ico             34px rounded icon well used inside rows
+ *   .pt-callout         quiet info box with a leading icon
+ *   .pt-empty           empty-state line inside a card or rows block
+ *   .pt-hero.on|later|off  status hero with three states
+ *   .pt-tiles/.pt-tile  two-up metric tiles
+ *   .pt-week/.pt-day    7-day strip with shift / time-off dots
+ *   .pt-sheet           bottom-sheet form container
+ *   .pt-count, .pt-dot-unread, .pt-progress, .pt-group-h, .pt-me-card
+ * ====================================================================== */
+
+.pt-i {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  flex: none;
+}
+.pt-i .pt-i-fill { fill: currentColor; stroke: none; }
+
+.pt-muted { color: var(--pt-muted); }
+.pt-dim { color: var(--pt-dim); }
+
+/* ---- Page topline (eyebrow + title) ---- */
+.pt-topline {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--pt-sp-3);
+  margin: 4px 2px 14px;
+}
+.pt-eyebrow {
+  font-size: var(--pt-fs-xs);
+  color: var(--pt-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  font-weight: 600;
+}
+.pt-title {
+  font-size: var(--pt-fs-2xl);
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  margin: 2px 0 0;
+  line-height: 1.1;
+}
+.pt-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #ff8a6b, #c2410c);
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  font-size: 14px;
+  color: #fff;
+  flex: none;
+  text-transform: uppercase;
+}
+a.pt-avatar { width: var(--pt-tap); height: var(--pt-tap); }
+
+/* ---- Sections ---- */
+.pt-section { margin-top: var(--pt-sp-5); }
+.pt-section:first-child { margin-top: 0; }
+.pt-section-h {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--pt-sp-3);
+  margin: 0 4px var(--pt-sp-2);
+}
+.pt-section-h h2,
+.pt-section-h h3 {
+  margin: 0;
+  font-size: var(--pt-fs-md);
+  font-weight: 650;
+  letter-spacing: -0.005em;
+  color: var(--pt-text);
+  text-transform: none;
+}
+.pt-section-h a {
+  color: var(--pt-accent);
+  font-size: var(--pt-fs-sm);
+  font-weight: 550;
+  text-decoration: none;
+  padding: 6px 0;
+}
+.pt-section-h a:hover { color: var(--pt-accent-hover); }
+.pt-group-h {
+  margin: 22px 6px 8px;
+  font-size: var(--pt-fs-xs);
+  color: var(--pt-muted);
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+}
+
+/* ---- Row list ----
+   `.pt-row` on its own is the legacy two-column form grid (profile.html);
+   inside `.pt-rows` it becomes a list row, so the two never collide. */
+.pt-rows {
+  background: var(--pt-surface);
+  border: 1px solid var(--pt-border);
+  border-radius: var(--pt-radius-lg);
+  overflow: hidden;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+.pt-rows > .pt-row,
+.pt-rows > form > .pt-row {
+  display: flex;
+  align-items: center;
+  gap: var(--pt-sp-3);
+  padding: 12px 16px;
+  min-height: 56px;
+  border: 0;
+  border-top: 1px solid var(--pt-border);
+  color: inherit;
+  text-decoration: none;
+  width: 100%;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+}
+.pt-rows > .pt-row:first-child { border-top: 0; }
+.pt-rows > a.pt-row,
+.pt-rows > form > button.pt-row { cursor: pointer; transition: background 140ms var(--pt-ease-out); }
+.pt-rows > a.pt-row:hover,
+.pt-rows > form > button.pt-row:hover { background: var(--pt-surface-raised); }
+.pt-rows > form { margin: 0; border-top: 1px solid var(--pt-border); }
+.pt-rows > form:first-child { border-top: 0; }
+.pt-rows > form > .pt-row { border-top: 0; }
+.pt-row-body { flex: 1; min-width: 0; }
+.pt-row-title {
+  font-size: var(--pt-fs-md);
+  font-weight: 550;
+  overflow-wrap: anywhere;
+}
+.pt-row-sub {
+  font-size: var(--pt-fs-sm);
+  color: var(--pt-muted);
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+}
+.pt-row-aside {
+  font-size: var(--pt-fs-sm);
+  color: var(--pt-muted);
+  text-align: right;
+  flex: none;
+  max-width: 50%;
+}
+.pt-chev { color: var(--pt-dim); flex: none; display: inline-flex; }
+.pt-chev .pt-i { width: 16px; height: 16px; }
+.pt-row.is-danger,
+.pt-row.is-danger .pt-ico { color: var(--pt-err); }
+
+.pt-ico {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  flex: none;
+  background: var(--pt-surface-hi);
+  color: var(--pt-text);
+}
+.pt-ico.is-warn   { color: var(--pt-warn); }
+.pt-ico.is-accent { color: var(--pt-accent); }
+.pt-ico.is-info   { color: var(--pt-info); }
+.pt-ico.is-ok     { color: var(--pt-ok); }
+.pt-ico.is-err    { color: var(--pt-err); }
+.pt-ico.is-purple { color: #c4b5fd; }
+
+.pt-dot-unread {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--pt-accent);
+  flex: none;
+}
+.pt-count {
+  min-width: 22px;
+  height: 22px;
+  border-radius: 11px;
+  background: var(--pt-accent);
+  color: var(--pt-accent-ink);
+  font-size: 12px;
+  font-weight: 700;
+  display: inline-grid;
+  place-items: center;
+  padding: 0 6px;
+  flex: none;
+}
+.pt-count.is-warn { background: var(--pt-warn); }
+
+/* ---- Callout + empty state ---- */
+.pt-callout {
+  display: flex;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: var(--pt-radius-md);
+  background: var(--pt-surface-raised);
+  border: 1px solid var(--pt-border);
+  font-size: var(--pt-fs-sm);
+  color: var(--pt-muted);
+  line-height: 1.45;
+}
+.pt-callout > .pt-i { margin-top: 1px; color: var(--pt-info); }
+.pt-callout b, .pt-callout strong { color: var(--pt-text); font-weight: 600; }
+
+.pt-empty {
+  padding: 16px;
+  font-size: var(--pt-fs-sm);
+  color: var(--pt-muted);
+  line-height: 1.45;
+}
+.pt-rows > .pt-empty { min-height: 56px; display: flex; align-items: center; }
+
+/* ---- Progress bar (use a native <progress class="pt-progress">) ---- */
+.pt-progress {
+  -webkit-appearance: none;
+  appearance: none;
+  display: block;
+  width: 100%;
+  height: 6px;
+  border: 0;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+  color: var(--pt-ok);
+}
+.pt-progress::-webkit-progress-bar { background: rgba(255, 255, 255, 0.08); border-radius: 3px; }
+.pt-progress::-webkit-progress-value { background: var(--pt-ok); border-radius: 3px; }
+.pt-progress::-moz-progress-bar { background: var(--pt-ok); border-radius: 3px; }
+.pt-progress.is-accent::-webkit-progress-value { background: var(--pt-accent); }
+.pt-progress.is-accent::-moz-progress-bar { background: var(--pt-accent); }
+
+/* ---- Status hero (three states) ----
+   Scoped to the state classes so the older `.pt-card.pt-hero` banner on
+   hours/policies keeps its own look. */
+.pt-hero:is(.on, .later, .off) {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--pt-radius-xl);
+  padding: var(--pt-sp-5);
+  border: 1px solid var(--pt-border-strong);
+  background-color: var(--pt-surface);
+}
+.pt-hero.on {
+  background: radial-gradient(120% 90% at 100% 0%, rgba(52, 211, 153, 0.22), transparent 55%), var(--pt-surface);
+}
+.pt-hero.later {
+  background: radial-gradient(120% 90% at 100% 0%, rgba(255, 107, 91, 0.25), transparent 55%), var(--pt-surface);
+}
+.pt-hero.off {
+  background: radial-gradient(120% 90% at 100% 0%, rgba(147, 197, 253, 0.16), transparent 55%), var(--pt-surface);
+}
+.pt-hero-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--pt-fs-sm);
+  font-weight: 600;
+}
+.pt-hero.later .pt-hero-status { color: #ffb3aa; }
+.pt-hero.off .pt-hero-status { color: #bfdbfe; }
+.pt-hero-live {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--pt-ok);
+  box-shadow: 0 0 0 4px rgba(52, 211, 153, 0.2);
+  animation: pt-live-pulse 2s infinite;
+  flex: none;
+}
+@keyframes pt-live-pulse { 50% { box-shadow: 0 0 0 7px rgba(52, 211, 153, 0.05); } }
+@media (prefers-reduced-motion: reduce) { .pt-hero-live { animation: none; } }
+.pt-hero-big {
+  font-size: 40px;
+  font-weight: 700;
+  letter-spacing: -0.035em;
+  margin: 10px 0 4px;
+  line-height: 1.05;
+  overflow-wrap: anywhere;
+}
+.pt-hero-meta { color: var(--pt-muted); font-size: var(--pt-fs-md); line-height: 1.4; }
+.pt-hero-meta b { color: var(--pt-text); font-weight: 600; }
+.pt-hero .pt-progress { margin-top: 14px; }
+.pt-hero-actions { display: flex; gap: 8px; margin-top: var(--pt-sp-4); flex-wrap: wrap; }
+.pt-hero-actions .pt-btn { flex: 1 1 0; min-width: 0; }
+
+/* ---- Metric tiles ---- */
+.pt-tiles {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--pt-sp-3);
+  margin-top: var(--pt-sp-3);
+}
+.pt-tile {
+  display: block;
+  background: var(--pt-surface);
+  border: 1px solid var(--pt-border);
+  border-radius: var(--pt-radius-lg);
+  padding: 14px 16px;
+  color: inherit;
+  text-decoration: none;
+  min-width: 0;
+}
+a.pt-tile:hover { border-color: var(--pt-border-strong); }
+.pt-tile-k {
+  font-size: var(--pt-fs-xs);
+  color: var(--pt-muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.pt-tile-v {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin-top: 6px;
+  line-height: 1.1;
+}
+.pt-tile-v small { font-size: var(--pt-fs-md); color: var(--pt-muted); font-weight: 500; letter-spacing: 0; }
+.pt-tile-s { font-size: var(--pt-fs-sm); color: var(--pt-muted); margin-top: 2px; }
+
+/* ---- Week strip ---- */
+.pt-week {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.pt-day {
+  text-align: center;
+  padding: 10px 0 8px;
+  border-radius: 12px;
+  background: var(--pt-surface);
+  border: 1px solid var(--pt-border);
+  min-width: 0;
+}
+.pt-day-n { font-size: 11px; color: var(--pt-muted); font-weight: 600; }
+.pt-day-d { font-size: var(--pt-fs-lg); font-weight: 650; margin-top: 2px; }
+.pt-day-mk { height: 6px; margin-top: 6px; display: flex; justify-content: center; gap: 3px; }
+.pt-day-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--pt-accent); }
+.pt-day-dot.is-timeoff { background: var(--pt-info); }
+.pt-day.is-today { border-color: var(--pt-accent); background: var(--pt-accent-soft); }
+.pt-day.is-past .pt-day-d { color: var(--pt-muted); }
+.pt-legend {
+  display: flex;
+  gap: 14px;
+  font-size: var(--pt-fs-xs);
+  color: var(--pt-muted);
+  margin: 8px 4px 0;
+}
+.pt-legend span { display: inline-flex; align-items: center; gap: 6px; }
+
+/* ---- Bottom sheet ----
+   Markup: <div class="pt-sheet-bg"></div><section class="pt-sheet">…
+   Toggle `.is-open` on both (JS lives in /static when a page needs it). */
+.pt-sheet-bg {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 240;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s;
+}
+.pt-sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 241;
+  max-height: 90dvh;
+  overflow-y: auto;
+  background: var(--pt-surface);
+  border-radius: 26px 26px 0 0;
+  border-top: 1px solid var(--pt-border-strong);
+  padding: 10px 18px calc(24px + env(safe-area-inset-bottom, 0px));
+  transform: translateY(105%);
+  transition: transform 0.35s var(--pt-ease-spring);
+}
+.pt-sheet-bg.is-open { opacity: 1; pointer-events: auto; }
+.pt-sheet.is-open { transform: none; }
+.pt-sheet::before {
+  content: "";
+  display: block;
+  width: 38px;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--pt-border-strong);
+  margin: 0 auto 14px;
+}
+.pt-sheet h2, .pt-sheet h3 { margin: 0 0 4px; font-size: var(--pt-fs-xl); letter-spacing: -0.02em; }
+@media (min-width: 861px) {
+  .pt-sheet { left: 50%; right: auto; width: min(560px, 100vw); transform: translate(-50%, 105%); }
+  .pt-sheet.is-open { transform: translate(-50%, 0); }
+}
+
+/* ---- Plain kit card + "More" profile card ---- */
+.pt-kit-card {
+  background: var(--pt-surface);
+  border: 1px solid var(--pt-border);
+  border-radius: var(--pt-radius-lg);
+  padding: var(--pt-sp-4);
+}
+.pt-me-card { display: flex; gap: 14px; align-items: center; color: inherit; text-decoration: none; }
+.pt-me-card .pt-avatar { width: 52px; height: 52px; font-size: 19px; }
+.pt-me-name { font-size: var(--pt-fs-lg); font-weight: 700; }
+.pt-me-sub { font-size: var(--pt-fs-sm); color: var(--pt-muted); }
+.pt-me-meter {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: var(--pt-fs-sm);
+  color: var(--pt-muted);
+}
+.pt-me-meter .pt-progress { flex: 1; }
+
+/* =========================================================================
+ * Home (employee dashboard, Phase 1)
+ * ====================================================================== */
+.pt-home { max-width: 1080px; }
+.pt-home-cols { display: grid; gap: var(--pt-sp-5); }
+.pt-home-col { min-width: 0; }
+@media (min-width: 1100px) {
+  .pt-home-cols { grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); align-items: start; }
+}
+.pt-page-narrow { max-width: 640px; }
+
+/* =========================================================================
+ * Sidebar polish (Phase 1): SVG icons + a real sign-out control
+ * ====================================================================== */
+.pt-link { min-height: 40px; }
+.pt-link-ico { width: 18px; height: 18px; color: var(--pt-muted); }
+.pt-link.active .pt-link-ico { color: var(--pt-accent); }
+.pt-link-ico .pt-i { width: 18px; height: 18px; }
+.pt-side-user { padding: 10px 12px 6px; }
+.pt-side-user-name { font-size: 13px; color: var(--pt-text); font-weight: 500; }
+.pt-side-user-role { font-size: 11px; color: var(--pt-muted); text-transform: capitalize; }
+.pt-side-footer form { margin: 0; }
+.pt-signout {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: var(--pt-tap);
+  padding: 8px 12px;
+  border: 1px solid var(--pt-border);
+  border-radius: var(--pt-radius-sm);
+  background: transparent;
+  color: var(--pt-text);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  margin-top: 6px;
+}
+.pt-signout:hover { background: var(--pt-surface-raised); color: var(--pt-err); }
+.pt-signout .pt-i { color: var(--pt-muted); }
+
+/* =========================================================================
+ * Mobile bottom nav (Phase 1): equal tabs, no centre FAB.
+ * Overrides the flex rules in the ≤860px block above.
+ * ====================================================================== */
+@media (max-width: 860px) {
+  .pt-mobile-bottom-nav {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(0, 1fr);
+    align-items: stretch;
+    gap: 0;
+    padding: 6px 4px calc(6px + env(safe-area-inset-bottom, 0px));
+    background: rgba(12, 13, 15, 0.86);
+    backdrop-filter: saturate(160%) blur(20px);
+    -webkit-backdrop-filter: saturate(160%) blur(20px);
+  }
+  .pt-mbn-item {
+    min-height: var(--pt-tap);
+    justify-content: center;
+    gap: 4px;
+    padding: 4px 2px;
+    color: var(--pt-dim);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0;
+  }
+  .pt-mbn-item .pt-i { width: 24px; height: 24px; }
+  .pt-mbn-item:hover { color: var(--pt-muted); }
+  .pt-home .pt-topline { margin-top: 0; }
 }

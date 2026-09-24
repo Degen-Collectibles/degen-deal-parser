@@ -1,0 +1,588 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Degen Team Portal — Employee redesign mockup</title>
+<link rel="preconnect" href="https://rsms.me/">
+<link rel="stylesheet" href="https://rsms.me/inter/inter.css">
+<style>
+  /* Tokens: same values as portal.css (--pt-*) / linear.css (--lx-*), plus proposed
+     type + spacing scales so pages stop hardcoding px. */
+  :root {
+    --accent: #ff6b5b; --accent-hover: #ff8577; --accent-soft: rgba(255,107,91,.14); --accent-ink: #18181b;
+    --ok: #34d399; --ok-soft: rgba(52,211,153,.14);
+    --warn: #fcd34d; --warn-soft: rgba(252,211,77,.14);
+    --err: #fca5a5; --err-soft: rgba(252,165,165,.14);
+    --info: #93c5fd; --info-soft: rgba(147,197,253,.14);
+    --bg: #08090a; --s1: #111214; --s2: #17181c; --s3: #1d1e23;
+    --br: rgba(255,255,255,.07); --br2: rgba(255,255,255,.13);
+    --text: #f4f4f5; --muted: #9ca0af; --dim: #6b6f7e;
+    --r-sm: 10px; --r-md: 14px; --r-lg: 20px; --r-xl: 28px;
+    --fs-xs: 12px; --fs-sm: 13px; --fs-md: 15px; --fs-lg: 17px; --fs-xl: 22px; --fs-2xl: 34px;
+    --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 20px; --sp-6: 24px;
+    --tap: 44px;
+    --font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: #050506; color: var(--text); font-family: var(--font);
+    -webkit-font-smoothing: antialiased; font-feature-settings: "cv11", "ss01", "tnum"; }
+  button { font: inherit; color: inherit; }
+
+  /* ---------- Presentation chrome (not part of the design) ---------- */
+  .stage { max-width: 1280px; margin: 0 auto; padding: 32px 24px 64px; }
+  .stage h1 { font-size: 24px; font-weight: 650; letter-spacing: -.02em; margin: 0 0 6px; }
+  .stage .lede { color: var(--muted); font-size: 14px; margin: 0 0 20px; max-width: 760px; line-height: 1.5; }
+  .controls { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; margin-bottom: 28px;
+    padding: 12px 14px; border: 1px solid var(--br); border-radius: var(--r-md); background: var(--s1); }
+  .controls label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-right: 8px; }
+  .seg { display: inline-flex; background: var(--bg); border: 1px solid var(--br); border-radius: 10px; padding: 3px; gap: 2px; }
+  .seg button { border: 0; background: transparent; padding: 6px 11px; border-radius: 7px; font-size: 13px; color: var(--muted); cursor: pointer; }
+  .seg button.on { background: var(--s3); color: var(--text); }
+  .layout { display: grid; grid-template-columns: 390px 1fr; gap: 40px; align-items: start; }
+  .notes { position: sticky; top: 24px; }
+  .notes h2 { font-size: 18px; margin: 0 0 4px; letter-spacing: -.01em; }
+  .notes .sub { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
+  .notes ol { margin: 0; padding-left: 20px; }
+  .notes li { font-size: 14px; line-height: 1.55; margin-bottom: 10px; color: #d4d4d8; }
+  .notes li b { color: var(--text); }
+  .notes .was { margin-top: 20px; padding: 12px 14px; border-radius: var(--r-md); background: var(--s1); border: 1px dashed var(--br2); font-size: 13px; color: var(--muted); line-height: 1.5; }
+  .notes .was b { color: var(--err); font-weight: 600; }
+  .all { display: none; gap: 28px; overflow-x: auto; padding-bottom: 16px; }
+  body.show-all .layout { display: none; }
+  body.show-all .all { display: flex; }
+  .all .cap { font-size: 13px; color: var(--muted); margin: 0 0 8px 4px; }
+
+  /* ---------- Phone ---------- */
+  .phone { width: 390px; height: 844px; border-radius: 52px; background: var(--bg); position: relative;
+    border: 10px solid #1b1c20; box-shadow: 0 0 0 1px #2a2b31, 0 40px 80px -30px rgba(0,0,0,.8); overflow: hidden; flex: none; }
+  .phone::before { content: ""; position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+    width: 120px; height: 34px; background: #000; border-radius: 20px; z-index: 30; }
+  .statusbar { height: 50px; display: flex; justify-content: space-between; align-items: flex-end; padding: 0 30px 6px; font-size: 15px; font-weight: 600; }
+  .screen { position: absolute; inset: 50px 0 84px 0; overflow-y: auto; padding: 8px 16px 24px; scrollbar-width: none; }
+  .screen::-webkit-scrollbar { display: none; }
+
+  /* ---------- Components (proposed shared kit) ---------- */
+  .topline { display: flex; justify-content: space-between; align-items: center; margin: 4px 2px 14px; }
+  .eyebrow { font-size: var(--fs-xs); color: var(--muted); text-transform: uppercase; letter-spacing: .07em; font-weight: 600; }
+  .title { font-size: var(--fs-2xl); font-weight: 700; letter-spacing: -.03em; margin: 2px 0 0; line-height: 1.1; }
+  .avatar { width: 36px; height: 36px; border-radius: 50%; background: linear-gradient(135deg,#ff8a6b,#c2410c); display: grid; place-items: center; font-weight: 700; font-size: 14px; color: #fff; }
+  .card { background: var(--s1); border: 1px solid var(--br); border-radius: var(--r-lg); padding: var(--sp-4); }
+  .card + .card, .section + .section, .card + .section, .section + .card { margin-top: var(--sp-3); }
+  .section { margin-top: var(--sp-5); }
+  .section-h { display: flex; justify-content: space-between; align-items: baseline; margin: 0 4px var(--sp-2); }
+  .section-h h3 { margin: 0; font-size: var(--fs-md); font-weight: 650; }
+  .section-h a { color: var(--accent); font-size: var(--fs-sm); text-decoration: none; font-weight: 550; }
+  .muted { color: var(--muted); } .dim { color: var(--dim); }
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: var(--tap);
+    padding: 0 18px; border-radius: 12px; border: 1px solid var(--br2); background: var(--s2); font-weight: 600; font-size: var(--fs-md); cursor: pointer; text-decoration: none; color: var(--text); }
+  .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+  .btn.block { width: 100%; }
+  .btn.ghost { background: transparent; }
+  .btn.sm { min-height: 36px; font-size: var(--fs-sm); padding: 0 12px; border-radius: 10px; }
+  .pill { display: inline-flex; align-items: center; gap: 5px; font-size: var(--fs-xs); font-weight: 600; padding: 3px 9px; border-radius: 999px; white-space: nowrap; }
+  .pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .pill.ok { color: var(--ok); background: var(--ok-soft); }
+  .pill.warn { color: var(--warn); background: var(--warn-soft); }
+  .pill.err { color: var(--err); background: var(--err-soft); }
+  .pill.info { color: var(--info); background: var(--info-soft); }
+  .pill.neutral { color: var(--muted); background: rgba(255,255,255,.06); }
+  .rows { background: var(--s1); border: 1px solid var(--br); border-radius: var(--r-lg); overflow: hidden; }
+  .row { display: flex; align-items: center; gap: 12px; padding: 12px 16px; min-height: 56px; border-top: 1px solid var(--br); text-decoration: none; color: inherit; cursor: pointer; }
+  .row:first-child { border-top: 0; }
+  .row .grow { flex: 1; min-width: 0; }
+  .row .l1 { font-size: var(--fs-md); font-weight: 550; }
+  .row .l2 { font-size: var(--fs-sm); color: var(--muted); margin-top: 2px; }
+  .row .chev { color: var(--dim); font-size: 18px; }
+  .ico { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; flex: none; background: var(--s3); }
+  .ico svg { width: 18px; height: 18px; }
+  .dot-unread { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex: none; }
+  .count { min-width: 22px; height: 22px; border-radius: 11px; background: var(--accent); color: var(--accent-ink); font-size: 12px; font-weight: 700; display: grid; place-items: center; padding: 0 6px; }
+  .callout { display: flex; gap: 10px; padding: 12px 14px; border-radius: var(--r-md); background: var(--s2); border: 1px solid var(--br); font-size: var(--fs-sm); color: var(--muted); line-height: 1.45; }
+  .callout svg { flex: none; width: 18px; height: 18px; margin-top: 1px; color: var(--info); }
+
+  /* Hero status */
+  .hero { border-radius: var(--r-xl); padding: var(--sp-5); position: relative; overflow: hidden; border: 1px solid var(--br2); }
+  .hero.on { background: radial-gradient(120% 90% at 100% 0%, rgba(52,211,153,.22), transparent 55%), var(--s1); }
+  .hero.later { background: radial-gradient(120% 90% at 100% 0%, rgba(255,107,91,.25), transparent 55%), var(--s1); }
+  .hero.off { background: radial-gradient(120% 90% at 100% 0%, rgba(147,197,253,.16), transparent 55%), var(--s1); }
+  .hero .status { display: flex; align-items: center; gap: 8px; font-size: var(--fs-sm); font-weight: 600; }
+  .hero .live { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 4px rgba(52,211,153,.2); animation: pulse 2s infinite; }
+  @keyframes pulse { 50% { box-shadow: 0 0 0 7px rgba(52,211,153,.05); } }
+  .hero .big { font-size: 40px; font-weight: 700; letter-spacing: -.035em; margin: 10px 0 2px; line-height: 1; }
+  .hero .meta { color: var(--muted); font-size: var(--fs-md); }
+  .hero .meta b { color: var(--text); font-weight: 600; }
+  .hero .actions { display: flex; gap: 8px; margin-top: var(--sp-4); }
+  .hero .actions .btn { flex: 1; }
+  .progress { height: 6px; background: rgba(255,255,255,.08); border-radius: 3px; margin-top: 14px; overflow: hidden; }
+  .progress i { display: block; height: 100%; background: var(--ok); border-radius: 3px; }
+
+  .tiles { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-3); margin-top: var(--sp-3); }
+  .tile { background: var(--s1); border: 1px solid var(--br); border-radius: var(--r-lg); padding: 14px 16px; cursor: pointer; }
+  .tile .k { font-size: var(--fs-xs); color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }
+  .tile .v { font-size: 26px; font-weight: 700; letter-spacing: -.02em; margin-top: 6px; }
+  .tile .v small { font-size: var(--fs-md); color: var(--muted); font-weight: 500; }
+  .tile .s { font-size: var(--fs-sm); color: var(--muted); margin-top: 2px; }
+
+  .week { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
+  .day { text-align: center; padding: 10px 0 8px; border-radius: 12px; background: var(--s1); border: 1px solid var(--br); }
+  .day .dn { font-size: 11px; color: var(--muted); font-weight: 600; }
+  .day .dd { font-size: var(--fs-lg); font-weight: 650; margin-top: 2px; }
+  .day .mk { height: 6px; margin-top: 6px; display: flex; justify-content: center; }
+  .day .mk i { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+  .day .mk i.to { background: var(--info); }
+  .day.today { border-color: var(--accent); background: var(--accent-soft); }
+
+  /* Schedule */
+  .segctl { display: grid; grid-template-columns: 1fr 1fr; background: var(--s1); border: 1px solid var(--br); border-radius: 12px; padding: 3px; margin-bottom: var(--sp-3); }
+  .segctl button { border: 0; background: transparent; min-height: 38px; border-radius: 9px; font-weight: 600; font-size: var(--fs-sm); color: var(--muted); cursor: pointer; }
+  .segctl button.on { background: var(--s3); color: var(--text); }
+  .weeknav { display: flex; align-items: center; justify-content: space-between; margin: 0 0 var(--sp-3); }
+  .weeknav .btn { width: var(--tap); padding: 0; }
+  .weeknav .lbl { font-weight: 600; font-size: var(--fs-md); }
+  .shift { display: grid; grid-template-columns: 52px 1fr; gap: 12px; padding: 14px 16px; border-top: 1px solid var(--br); align-items: center; }
+  .shift:first-child { border-top: 0; }
+  .shift .date { text-align: center; }
+  .shift .date .d1 { font-size: 11px; color: var(--muted); font-weight: 650; text-transform: uppercase; }
+  .shift .date .d2 { font-size: 22px; font-weight: 700; letter-spacing: -.02em; }
+  .shift .t { font-size: var(--fs-lg); font-weight: 650; }
+  .shift .loc { display: flex; gap: 8px; align-items: center; margin-top: 4px; font-size: var(--fs-sm); color: var(--muted); flex-wrap: wrap; }
+  .shift.off .t { color: var(--dim); font-weight: 500; font-size: var(--fs-md); }
+  .shift.today { background: var(--accent-soft); }
+  .faces { display: inline-flex; }
+  .faces span { width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--s1); margin-left: -6px; font-size: 10px; font-weight: 700; display: grid; place-items: center; color: #fff; }
+  .faces span:first-child { margin-left: 0; }
+  .loctag { font-size: 11px; font-weight: 650; padding: 2px 8px; border-radius: 6px; }
+  .loctag.store { background: rgba(255,107,91,.16); color: #ffa498; }
+  .loctag.pack { background: rgba(167,139,250,.16); color: #c4b5fd; }
+  .loctag.stream { background: rgba(52,211,153,.14); color: #6ee7b7; }
+  .teamday h4 { margin: 18px 4px 8px; font-size: var(--fs-sm); color: var(--muted); font-weight: 650; text-transform: uppercase; letter-spacing: .06em; }
+  .teamday h4.today { color: var(--accent); }
+  .person { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-top: 1px solid var(--br); }
+  .person:first-child { border-top: 0; }
+  .person .nm { flex: 1; font-size: var(--fs-md); }
+  .person .nm.me { font-weight: 700; }
+  .person .hr { font-size: var(--fs-sm); color: var(--muted); }
+  .mini { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; font-weight: 700; color: #fff; flex: none; }
+
+  /* Hours */
+  .bars { display: grid; grid-template-columns: repeat(7, 1fr); gap: 8px; align-items: end; height: 120px; margin-top: 16px; }
+  .bar { position: relative; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; }
+  .bar .sched { position: absolute; bottom: 18px; width: 100%; border: 1.5px dashed var(--br2); border-radius: 6px; }
+  .bar .act { width: 100%; background: var(--accent); border-radius: 6px; position: relative; z-index: 1; margin-bottom: 18px; }
+  .bar .act.zero { background: transparent; }
+  .bar .lb { position: absolute; bottom: 0; font-size: 11px; color: var(--muted); font-weight: 600; }
+  .legend { display: flex; gap: 14px; font-size: var(--fs-xs); color: var(--muted); margin-top: 10px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+  .entry { display: flex; justify-content: space-between; padding: 12px 16px; border-top: 1px solid var(--br); align-items: center; }
+  .entry:first-child { border-top: 0; }
+  .entry .d { font-weight: 600; font-size: var(--fs-md); }
+  .entry .x { font-size: var(--fs-sm); color: var(--muted); margin-top: 2px; }
+  .entry .h { font-weight: 700; font-size: var(--fs-lg); font-variant-numeric: tabular-nums; }
+  .flag { color: var(--warn); font-size: var(--fs-xs); font-weight: 600; margin-top: 3px; }
+
+  /* Requests */
+  .newreq { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-3); }
+  .newreq button { border: 1px solid var(--br); background: var(--s1); border-radius: var(--r-lg); padding: 16px; text-align: left; cursor: pointer; min-height: 104px; }
+  .newreq button .ico { margin-bottom: 12px; }
+  .newreq button .l1 { font-weight: 650; font-size: var(--fs-md); }
+  .newreq button .l2 { font-size: var(--fs-sm); color: var(--muted); margin-top: 2px; }
+  .req { padding: 14px 16px; border-top: 1px solid var(--br); }
+  .req:first-child { border-top: 0; }
+  .req .top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .req .l1 { font-weight: 600; font-size: var(--fs-md); }
+  .req .l2 { font-size: var(--fs-sm); color: var(--muted); margin-top: 3px; }
+  .req .note { margin-top: 8px; font-size: var(--fs-sm); padding: 8px 10px; border-radius: 10px; background: var(--s2); color: #d4d4d8; }
+  .req .acts { margin-top: 10px; display: flex; gap: 8px; }
+
+  /* Sheet */
+  .sheet-bg { position: absolute; inset: 0; background: rgba(0,0,0,.55); z-index: 40; opacity: 0; pointer-events: none; transition: opacity .25s; }
+  .sheet { position: absolute; left: 0; right: 0; bottom: 0; z-index: 41; background: var(--s1); border-radius: 26px 26px 0 0; border-top: 1px solid var(--br2);
+    padding: 10px 18px 34px; transform: translateY(105%); transition: transform .35s cubic-bezier(.22,1,.36,1); }
+  .phone.sheet-open .sheet-bg { opacity: 1; pointer-events: auto; }
+  .phone.sheet-open .sheet { transform: none; }
+  .grab { width: 38px; height: 5px; border-radius: 3px; background: var(--br2); margin: 0 auto 14px; }
+  .sheet h3 { margin: 0 0 4px; font-size: var(--fs-xl); letter-spacing: -.02em; }
+  .field { margin-top: 14px; }
+  .field label { display: block; font-size: var(--fs-sm); font-weight: 600; margin-bottom: 6px; }
+  .input { min-height: var(--tap); width: 100%; border-radius: 12px; border: 1px solid var(--br2); background: var(--bg); padding: 10px 14px; font-size: var(--fs-md); color: var(--text); display: flex; align-items: center; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; }
+  .chips span { padding: 8px 12px; border-radius: 10px; border: 1px solid var(--br2); font-size: var(--fs-sm); font-weight: 550; }
+  .chips span.on { border-color: var(--accent); background: var(--accent-soft); color: #ffb3aa; }
+  .conflict { margin-top: 12px; font-size: var(--fs-sm); color: var(--warn); background: var(--warn-soft); padding: 10px 12px; border-radius: 10px; }
+
+  /* More */
+  .me-card { display: flex; gap: 14px; align-items: center; }
+  .me-card .avatar { width: 52px; height: 52px; font-size: 19px; }
+  .me-card .nm { font-size: var(--fs-lg); font-weight: 700; }
+  .ring { margin-top: 12px; display: flex; align-items: center; gap: 10px; font-size: var(--fs-sm); color: var(--muted); }
+  .ring .progress { flex: 1; margin: 0; }
+  .ring .progress i { background: var(--accent); }
+  .grp-h { margin: 22px 6px 8px; font-size: var(--fs-xs); color: var(--muted); font-weight: 650; text-transform: uppercase; letter-spacing: .07em; }
+
+  /* Bottom nav */
+  .bnav { position: absolute; left: 0; right: 0; bottom: 0; height: 84px; background: rgba(12,13,15,.86); backdrop-filter: blur(20px);
+    border-top: 1px solid var(--br); display: grid; grid-template-columns: repeat(5, 1fr); padding: 6px 4px 22px; z-index: 20; }
+  .bnav button { border: 0; background: none; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+    font-size: 11px; font-weight: 600; color: var(--dim); cursor: pointer; position: relative; min-height: var(--tap); }
+  .bnav button svg { width: 24px; height: 24px; }
+  .bnav button.on { color: var(--accent); }
+  .bnav .badge { position: absolute; top: 2px; left: 50%; margin-left: 6px; min-width: 16px; height: 16px; border-radius: 8px; background: var(--accent); color: var(--accent-ink); font-size: 10px; font-weight: 800; display: grid; place-items: center; padding: 0 4px; }
+</style>
+</head>
+<body>
+<div class="stage">
+  <h1>Employee portal redesign: mockup</h1>
+  <p class="lede">These are the five employee screens, designed for a phone first and using the portal's existing colours. Click the bottom tabs to move between screens. The notes on the right compare each screen with today's page. All data here is made up.</p>
+
+  <div class="controls">
+    <div><label>Home state</label>
+      <span class="seg" id="ctl-state">
+        <button data-v="on" class="on">On the clock</button>
+        <button data-v="later">Shift later today</button>
+        <button data-v="off">Off today</button>
+      </span></div>
+    <div><label>Role</label>
+      <span class="seg" id="ctl-role">
+        <button data-v="hourly" class="on">Hourly</button>
+        <button data-v="ops">Staff + ops tools</button>
+      </span></div>
+    <div><label>View</label>
+      <span class="seg" id="ctl-view">
+        <button data-v="one" class="on">Interactive</button>
+        <button data-v="all">All screens</button>
+      </span></div>
+  </div>
+
+  <div class="layout">
+    <div id="main-phone"></div>
+    <aside class="notes" id="notes"></aside>
+  </div>
+  <div class="all" id="all"></div>
+</div>
+
+<script>
+const I = {
+  home: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></svg>',
+  cal: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="16.5" rx="3"/><path d="M3 9.5h18M8 2.5v4M16 2.5v4"/></svg>',
+  clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
+  inbox: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 13h4l1.5 3h5L16 13h4"/><path d="M5.5 5h13L21 13v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-5z"/></svg>',
+  req: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4h6M9 4a1 1 0 0 0-1 1v1h8V5a1 1 0 0 0-1-1M8 5H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><path d="m9 13 2 2 4-4"/></svg>',
+  more: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="5" cy="12" r="1.4" fill="currentColor"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/><circle cx="19" cy="12" r="1.4" fill="currentColor"/></svg>',
+  beach: '<svg viewBox="0 0 24 24" fill="none" stroke="#93c5fd" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16M12 20V9"/><path d="M4 9a8 8 0 0 1 16 0z"/></svg>',
+  box: '<svg viewBox="0 0 24 24" fill="none" stroke="#c4b5fd" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8 12 3 3 8v8l9 5 9-5z"/><path d="m3 8 9 5 9-5M12 13v8"/></svg>',
+  doc: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/></svg>',
+  shield: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/></svg>',
+  help: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6v.6M12 17h.01"/></svg>',
+  phone: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="2.5" width="12" height="19" rx="3"/><path d="M11 18h2"/></svg>',
+  out: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 17l5-5-5-5M15 12H3"/></svg>',
+  bell: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 16V11a6 6 0 1 1 12 0v5l2 2H4z"/><path d="M10 21h4"/></svg>',
+  tag: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12V4a1 1 0 0 1 1-1h8l9 9-9 9z"/><circle cx="8" cy="8" r="1.5"/></svg>',
+  eye: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>',
+  live: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2.5"/><path d="M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4M5 5a10 10 0 0 0 0 14M19 5a10 10 0 0 1 0 14"/></svg>',
+  info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>',
+};
+
+const S = { tab: 'home', state: 'on', role: 'hourly', sched: 'mine', view: 'one' };
+const face = (t, c) => `<span style="background:${c}">${t}</span>`;
+const mini = (t, c) => `<div class="mini" style="background:${c}">${t}</div>`;
+
+function heroHTML() {
+  if (S.state === 'on') return `
+    <div class="hero on">
+      <div class="status"><span class="live"></span> On the clock · Storefront</div>
+      <div class="big">3h 12m</div>
+      <div class="meta">Since <b>11:02 AM</b> · shift ends <b>7:00 PM</b></div>
+      <div class="progress"><i style="width:40%"></i></div>
+      <div class="actions"><a class="btn">Open Clockify</a><a class="btn ghost">Today's team</a></div>
+    </div>`;
+  if (S.state === 'later') return `
+    <div class="hero later">
+      <div class="status" style="color:#ffb3aa">Next shift · starts in 2h 40m</div>
+      <div class="big">2:00 – 8:00 PM</div>
+      <div class="meta"><b>Storefront</b> · with Jordan, Priya</div>
+      <div class="actions"><a class="btn primary">Add to calendar</a><a class="btn">Can't make it?</a></div>
+    </div>`;
+  return `
+    <div class="hero off">
+      <div class="status" style="color:#bfdbfe">You're off today</div>
+      <div class="big">Tomorrow</div>
+      <div class="meta">Next shift <b>12:00 – 8:00 PM</b> · Storefront</div>
+      <div class="actions"><a class="btn" data-go="schedule">See my week</a></div>
+    </div>`;
+}
+
+function home() {
+  const todayMark = S.state === 'off' ? '' : '<i></i>';
+  return `
+  <div class="topline">
+    <div><div class="eyebrow">Wednesday, Sep 24</div><div class="title">Hi, Maya</div></div>
+    <div class="avatar">MR</div>
+  </div>
+  ${heroHTML()}
+  <div class="tiles">
+    <div class="tile" data-go="hours"><div class="k">Pay period</div><div class="v">31.5<small>h</small></div><div class="s">Sep 16 – 30 · paid Oct 3</div></div>
+    <div class="tile" data-go="hours"><div class="k">This week</div><div class="v">18.2<small> / 30h</small></div><div class="s">scheduled so far</div></div>
+  </div>
+
+  <div class="section">
+    <div class="section-h"><h3>Needs you</h3></div>
+    <div class="rows">
+      <div class="row" data-go="more"><div class="ico" style="color:var(--warn)">${I.shield}</div><div class="grow"><div class="l1">Acknowledge Break policy</div><div class="l2">Updated Sep 20 · 2 min read</div></div><span class="chev">›</span></div>
+      <div class="row" data-go="more"><div class="ico" style="color:var(--accent)">${I.phone}</div><div class="grow"><div class="l1">Add an emergency contact</div><div class="l2">Profile is 4 of 5 done</div></div><span class="chev">›</span></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-h"><h3>This week</h3><a data-go="schedule">Schedule</a></div>
+    <div class="week">
+      ${[['M',22,'<i></i>'],['T',23,''],['W',24,todayMark,'today'],['T',25,'<i></i>'],['F',26,'<i></i>'],['S',27,'<i class="to"></i>'],['S',28,'']].map(([n,d,m,c])=>`
+        <div class="day ${c||''}"><div class="dn">${n}</div><div class="dd">${d}</div><div class="mk">${m}</div></div>`).join('')}
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-h"><h3>My requests</h3><a data-go="requests">All</a></div>
+    <div class="rows">
+      <div class="row" data-go="requests"><div class="ico">${I.beach}</div><div class="grow"><div class="l1">Time off · Sat Sep 27</div><div class="l2">Sent Sep 19</div></div><span class="pill ok">Approved</span></div>
+      <div class="row" data-go="requests"><div class="ico">${I.box}</div><div class="grow"><div class="l1">Penny sleeves ×10 packs</div><div class="l2">Sent Sep 23</div></div><span class="pill warn">Pending</span></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-h"><h3>Latest</h3><a data-go="more">Inbox</a></div>
+    <div class="rows">
+      <div class="row"><span class="dot-unread"></span><div class="grow"><div class="l1">Surprise Set restock Friday</div><div class="l2">From Jef · 2h ago</div></div><span class="chev">›</span></div>
+    </div>
+  </div>`;
+}
+
+function schedule() {
+  const tabs = `<div class="segctl"><button data-sched="mine" class="${S.sched==='mine'?'on':''}">My shifts</button><button data-sched="team" class="${S.sched==='team'?'on':''}">Whole team</button></div>
+  <div class="weeknav"><a class="btn">‹</a><div class="lbl">Sep 22 – 28</div><a class="btn">›</a></div>`;
+  if (S.sched === 'mine') return `
+  <div class="topline"><div><div class="eyebrow">30h scheduled · 4 shifts</div><div class="title">Schedule</div></div></div>
+  ${tabs}
+  <div class="rows">
+    <div class="shift"><div class="date"><div class="d1">Mon</div><div class="d2">22</div></div><div><div class="t">12:00 – 8:00 PM</div><div class="loc"><span class="loctag store">Storefront</span><span class="faces">${face('J','#6366f1')}${face('P','#0ea5e9')}</span></div></div></div>
+    <div class="shift off"><div class="date"><div class="d1">Tue</div><div class="d2">23</div></div><div><div class="t">Off</div></div></div>
+    <div class="shift today"><div class="date"><div class="d1" style="color:var(--accent)">Today</div><div class="d2">24</div></div><div><div class="t">11:00 AM – 7:00 PM</div><div class="loc"><span class="loctag store">Storefront</span><span class="faces">${face('J','#6366f1')}${face('A','#f59e0b')}</span></div></div></div>
+    <div class="shift"><div class="date"><div class="d1">Thu</div><div class="d2">25</div></div><div><div class="t">10:00 AM – 2:00 PM</div><div class="loc"><span class="loctag pack">Packing</span><span class="faces">${face('D','#10b981')}</span></div></div></div>
+    <div class="shift"><div class="date"><div class="d1">Fri</div><div class="d2">26</div></div><div><div class="t">6:00 – 12:00 AM</div><div class="loc"><span class="loctag stream">Stream</span><span class="faces">${face('K','#ec4899')}${face('J','#6366f1')}</span></div></div></div>
+    <div class="shift off"><div class="date"><div class="d1">Sat</div><div class="d2">27</div></div><div><div class="t" style="color:var(--info)">Time off · approved</div></div></div>
+    <div class="shift off"><div class="date"><div class="d1">Sun</div><div class="d2">28</div></div><div><div class="t">Off</div></div></div>
+  </div>
+  <div class="section"><a class="btn block" data-go="requests" data-sheet="1">Can't make a shift? Request time off</a></div>`;
+
+  const p = (i,c,n,h,me) => `<div class="person">${mini(i,c)}<div class="nm ${me?'me':''}">${n}</div><div class="hr">${h}</div></div>`;
+  return `
+  <div class="topline"><div><div class="eyebrow">Who's working</div><div class="title">Schedule</div></div></div>
+  ${tabs}
+  <div class="teamday"><h4 class="today">Today · Wed 24</h4>
+    <div class="rows">
+      ${p('MR','linear-gradient(135deg,#ff8a6b,#c2410c)','Maya (you)','11a – 7p','me')}
+      ${p('J','#6366f1','Jordan','12p – 8p')}
+      ${p('A','#f59e0b','Alex','2p – 8p')}
+    </div>
+    <div class="section-h" style="margin-top:6px"><span></span></div>
+    <div class="rows">
+      <div class="person"><span class="loctag pack">Packing</span><div class="nm" style="margin-left:4px">Dana</div><div class="hr">9a – 1p</div></div>
+      <div class="person"><span class="loctag stream">Stream</span><div class="nm" style="margin-left:4px">Kai, Jordan</div><div class="hr">6p – 12a</div></div>
+    </div>
+  </div>
+  <div class="teamday"><h4>Thu 25</h4>
+    <div class="rows">
+      ${p('P','#0ea5e9','Priya','11a – 7p')}
+      ${p('J','#6366f1','Jordan','12p – 8p')}
+    </div>
+  </div>`;
+}
+
+function hours() {
+  const days = [['M',8,8],['T',0,0],['W',3.2,8],['T',0,4],['F',0,6],['S',0,0],['S',0,0]];
+  const max = 9;
+  return `
+  <div class="topline"><div><div class="eyebrow">Pay period · Sep 16 – 30</div><div class="title">Hours</div></div></div>
+  <div class="card">
+    <div class="eyebrow">This week</div>
+    <div style="display:flex;align-items:baseline;gap:8px;margin-top:6px"><span style="font-size:34px;font-weight:700;letter-spacing:-.03em">11.2h</span><span class="muted">of 26h scheduled</span></div>
+    <div class="bars">
+      ${days.map(([n,a,s])=>`<div class="bar">${s?`<div class="sched" style="height:${s/max*100*.82}%"></div>`:''}<div class="act ${a?'':'zero'}" style="height:${a/max*100*.82}%"></div><span class="lb">${n}</span></div>`).join('')}
+    </div>
+    <div class="legend"><span><i style="background:var(--accent)"></i>Worked</span><span><i style="border:1.5px dashed var(--br2)"></i>Scheduled</span></div>
+  </div>
+  <div class="tiles">
+    <div class="tile"><div class="k">Pay period</div><div class="v">31.5<small>h</small></div><div class="s">4 shifts worked</div></div>
+    <div class="tile"><div class="k">Breaks</div><div class="v">1.5<small>h</small></div><div class="s">unpaid, this period</div></div>
+  </div>
+  <div class="section">
+    <div class="section-h"><h3>Days</h3></div>
+    <div class="rows">
+      <div class="entry"><div><div class="d">Today · Wed 24</div><div class="x">11:02 AM – now · Storefront</div></div><div class="h" style="color:var(--ok)">3.2h</div></div>
+      <div class="entry"><div><div class="d">Mon 22</div><div class="x">11:58 AM – 8:04 PM · 30m break</div></div><div class="h">7.6h</div></div>
+      <div class="entry"><div><div class="d">Fri 19</div><div class="x">6:01 PM – 12:10 AM</div><div class="flag">⚠ No break logged, tell your manager if that's wrong</div></div><div class="h">6.2h</div></div>
+      <div class="entry"><div><div class="d">Thu 18</div><div class="x">10:00 AM – 2:03 PM</div></div><div class="h">4.1h</div></div>
+    </div>
+  </div>
+  <div class="section"><div class="callout">${I.info}<div>You clock in and out in <b style="color:var(--text)">Clockify</b> on the shop iPad. Hours show up here within a few minutes.</div></div></div>`;
+}
+
+function requests() {
+  return `
+  <div class="topline"><div><div class="eyebrow">Time off &amp; supplies</div><div class="title">Requests</div></div></div>
+  <div class="newreq">
+    <button data-sheet="1"><div class="ico">${I.beach}</div><div class="l1">Time off</div><div class="l2">Days or part of a shift</div></button>
+    <button><div class="ico">${I.box}</div><div class="l1">Supplies</div><div class="l2">Sleeves, toploaders, tape…</div></button>
+  </div>
+  <div class="section">
+    <div class="section-h"><h3>Open</h3></div>
+    <div class="rows">
+      <div class="req"><div class="top"><div class="l1">Penny sleeves ×10 packs</div><span class="pill warn">Pending</span></div><div class="l2">Supplies · sent yesterday</div>
+        <div class="acts"><a class="btn sm">Edit</a><a class="btn sm ghost" style="color:var(--err)">Cancel request</a></div></div>
+      <div class="req"><div class="top"><div class="l1">Oct 10 – 12</div><span class="pill warn">Pending</span></div><div class="l2">Time off · 3 days · overlaps 2 shifts</div>
+        <div class="acts"><a class="btn sm">Edit</a><a class="btn sm ghost" style="color:var(--err)">Cancel request</a></div></div>
+    </div>
+  </div>
+  <div class="section">
+    <div class="section-h"><h3>Past</h3></div>
+    <div class="rows">
+      <div class="req"><div class="top"><div class="l1">Sat Sep 27</div><span class="pill ok">Approved</span></div><div class="l2">Time off · decided by Jef, Sep 20</div></div>
+      <div class="req"><div class="top"><div class="l1">Toploaders ×200</div><span class="pill err">Declined</span></div><div class="l2">Supplies · Sep 12</div><div class="note">"We have 3 boxes in the back room, check shelf B."</div></div>
+    </div>
+  </div>`;
+}
+
+function more() {
+  const ops = S.role === 'ops' ? `
+    <div class="grp-h">Ops tools</div>
+    <div class="rows">
+      <div class="row"><div class="ico">${I.tag}</div><div class="grow"><div class="l1">Buylist</div></div><span class="chev">›</span></div>
+      <div class="row"><div class="ico">${I.eye}</div><div class="grow"><div class="l1">Degen Eye</div></div><span class="chev">›</span></div>
+      <div class="row"><div class="ico">${I.live}</div><div class="grow"><div class="l1">Live stream</div></div><span class="chev">›</span></div>
+    </div>` : '';
+  return `
+  <div class="topline"><div><div class="title">More</div></div></div>
+  <div class="card">
+    <div class="me-card"><div class="avatar">MR</div><div class="grow"><div class="nm">Maya Rodriguez</div><div class="muted" style="font-size:var(--fs-sm)">Storefront associate · @maya</div></div><span class="chev dim">›</span></div>
+    <div class="ring"><div class="progress"><i style="width:80%"></i></div>Profile 4/5</div>
+  </div>
+  <div class="grp-h">Stay in the loop</div>
+  <div class="rows">
+    <div class="row"><div class="ico">${I.bell}</div><div class="grow"><div class="l1">Inbox</div><div class="l2">Announcements &amp; updates</div></div><span class="count">2</span></div>
+    <div class="row"><div class="ico" style="color:var(--warn)">${I.shield}</div><div class="grow"><div class="l1">Policies</div><div class="l2">1 needs your OK</div></div><span class="count" style="background:var(--warn)">1</span></div>
+    <div class="row"><div class="ico">${I.doc}</div><div class="grow"><div class="l1">Documents</div><div class="l2">Handbook, W-4, guides</div></div><span class="chev">›</span></div>
+  </div>
+  ${ops}
+  <div class="grp-h">Help &amp; settings</div>
+  <div class="rows">
+    <div class="row"><div class="ico">${I.help}</div><div class="grow"><div class="l1">Get help</div><div class="l2">Message a manager</div></div><span class="chev">›</span></div>
+    <div class="row"><div class="ico">${I.phone}</div><div class="grow"><div class="l1">Install on your phone</div></div><span class="chev">›</span></div>
+    <div class="row"><div class="ico">${I.bell}</div><div class="grow"><div class="l1">Notifications</div><div class="l2">Browser alerts on</div></div><span class="chev">›</span></div>
+    <div class="row" style="color:var(--err)"><div class="ico" style="color:var(--err)">${I.out}</div><div class="grow"><div class="l1">Sign out</div></div></div>
+  </div>`;
+}
+
+const SCREENS = { home, schedule, hours, requests, more };
+const NAV = [['home','Home',I.home],['schedule','Schedule',I.cal],['hours','Hours',I.clock],['requests','Requests',I.req],['more','More',I.more,3]];
+
+const sheet = `
+  <div class="sheet-bg" data-close></div>
+  <div class="sheet">
+    <div class="grab"></div>
+    <h3>Request time off</h3>
+    <div class="muted" style="font-size:var(--fs-sm)">Your manager gets a notification right away.</div>
+    <div class="field"><label>Dates</label><div class="two"><div class="input">Fri, Oct 10</div><div class="input">Sun, Oct 12</div></div></div>
+    <div class="field"><label>How much</label><div class="chips"><span class="on">Full days</span><span>Part of a shift</span></div></div>
+    <div class="field"><label>Reason <span class="dim" style="font-weight:400">(optional)</span></label><div class="input" style="color:var(--dim)">Family trip</div></div>
+    <div class="conflict">⚠ You're scheduled Fri 12–8 PM (Storefront) and Sat 6 PM–12 AM (Stream).</div>
+    <div style="display:flex;gap:10px;margin-top:18px"><a class="btn" data-close style="flex:1">Cancel</a><a class="btn primary" data-close style="flex:2">Send request</a></div>
+  </div>`;
+
+function phone(tab, interactive) {
+  const nav = NAV.map(([k,l,ic,b]) => `<button data-go="${k}" class="${k===tab?'on':''}" aria-label="${l}">${ic}${b&&S.role?`<span class="badge">${b}</span>`:''}${l}</button>`).join('');
+  return `<div class="phone" data-interactive="${interactive?1:0}">
+    <div class="statusbar"><span>9:41</span><span>●●● ⌁</span></div>
+    <div class="screen">${SCREENS[tab]()}</div>
+    <nav class="bnav">${nav}</nav>
+    ${sheet}
+  </div>`;
+}
+
+const NOTES = {
+  home: { h: 'Home', sub: 'Answers "am I on, when am I next, what am I owed?" at a glance.', items: [
+    '<b>One status card at the top</b> with three states: on the clock, shift later today, or off today. Clock status, hours today and next shift show once here, not three times down the page.',
+    '<b>Two tiles for hours:</b> pay period and this week. Tapping either goes to Hours.',
+    '<b>"Needs you" shows only real to-dos</b> (a policy to acknowledge, a missing profile field), and it goes away when they\'re done. Announcements no longer count as a to-do.',
+    '<b>A week strip</b> shows which days you work at a glance. Blue dots mark approved time off.',
+    '<b>Pending requests show here</b> for the first time. The dashboard never showed time-off or supply status before.',
+    '<b>One unread line for the latest announcement</b>, with the full list in the Inbox.'],
+    was: '<b>Today:</b> clock, hours and break each appear about 3 times (hero, focus list, widgets). "Next shift" is the 4th block on a phone. The "N items to check" count never clears.' },
+  schedule: { h: 'Schedule', sub: 'Shows your shifts first; the team view sits behind a toggle.', items: [
+    '<b>"My shifts" is the default:</b> one row per day with the time, location tag and who you\'re working with. You can read it without scrolling sideways.',
+    '<b>Approved time off shows inline</b> on the days it covers.',
+    '<b>"Whole team" is a day-by-day list</b> instead of a 1000px-wide grid, and you appear in bold.',
+    '<b>A "Can\'t make a shift?" button</b> opens the time-off form already filled in. The old page just said "let your manager know".',
+    'This uses the same data as today (<code>entry_map</code> filtered to the current user), so only the template changes.'],
+    was: '<b>Today:</b> three full-team grids, 760–1000px wide, with a "Swipe sideways" hint. Your own shifts are only marked by an orange outline.' },
+  hours: { h: 'Hours', sub: 'Pay-period first, with worked vs scheduled hours side by side.', items: [
+    '<b>Pay-period framing:</b> the question employees actually ask is "what goes on my next paycheck?"',
+    '<b>A small chart of worked vs scheduled hours by day</b> makes a missed clock-in obvious.',
+    '<b>Problems are flagged on the day they happen</b>, like "No break logged", with a short line on what to do.',
+    '<b>A plain-English note that clocking happens in Clockify</b>, replacing the old "Clockify status" box.'],
+    was: '<b>Today:</b> weekly view only, with ~33px buttons, 9.5–11px grey text and a status box that repeats the dashboard.' },
+  requests: { h: 'Requests', sub: 'Time off and supplies in one place, with a sheet form for new ones.', items: [
+    '<b>Merges the Time off and Supply pages.</b> Both work the same way: submit, then wait for approve or decline.',
+    '<b>New requests open in a sheet</b> (tap "Time off" to see it). It checks the dates as you pick them and <b>warns about shifts you\'d miss</b>.',
+    '<b>Cancel and edit</b> for pending requests. Today there is no way to cancel.',
+    '<b>Stacked cards instead of tables</b>, so nothing scrolls sideways. The manager\'s note shows on the request itself.'],
+    was: '<b>Today:</b> two separate pages with 520px-wide tables on phones, a copy-pasted "what happens next" box, no cancel, and an end date that\'s only checked on the server.' },
+  more: { h: 'More', sub: 'Everything you open occasionally, grouped.', items: [
+    '<b>Your profile at the top</b>, showing how complete it is.',
+    '<b>An Inbox replaces three pages</b> (Announcements, Notifications, Documents), with read/unread and a count on the tab.',
+    '<b>Policies show a count</b> only when one needs acknowledging.',
+    '<b>Ops tools appear only for staff who have them</b>. Switch Role to "Staff + ops tools" to see them. The bottom bar is the <b>same five tabs for everyone</b>, which makes training simpler.',
+    '<b>Sign out is a full-size row</b> instead of a 12px text button.'],
+    was: '<b>Today:</b> 10 sidebar links with letter icons, Policies and Supply taking bottom-bar slots, and Hours and Time off hidden behind the hamburger menu.' },
+};
+
+function render() {
+  document.body.classList.toggle('show-all', S.view === 'all');
+  if (S.view === 'all') {
+    document.getElementById('all').innerHTML = Object.keys(SCREENS).map(k => `<div><div class="cap">${NOTES[k].h}</div>${phone(k,false)}</div>`).join('');
+  } else {
+    document.getElementById('main-phone').innerHTML = phone(S.tab, true);
+    const n = NOTES[S.tab];
+    document.getElementById('notes').innerHTML = `<h2>${n.h}</h2><p class="sub">${n.sub}</p><ol>${n.items.map(i=>`<li>${i}</li>`).join('')}</ol><div class="was">${n.was}</div>`;
+  }
+}
+
+document.addEventListener('click', e => {
+  const seg = e.target.closest('.seg button');
+  if (seg) {
+    const key = seg.parentElement.id.replace('ctl-','');
+    S[key] = seg.dataset.v;
+    seg.parentElement.querySelectorAll('button').forEach(b => b.classList.toggle('on', b === seg));
+    render(); return;
+  }
+  const ph = e.target.closest('.phone');
+  if (!ph) return;
+  if (e.target.closest('[data-close]')) { ph.classList.remove('sheet-open'); return; }
+  const sc = e.target.closest('[data-sched]');
+  if (sc) { S.sched = sc.dataset.sched; render(); return; }
+  const sh = e.target.closest('[data-sheet]');
+  const go = e.target.closest('[data-go]');
+  if (go) {
+    S.tab = go.dataset.go; S.view = 'one';
+    document.querySelectorAll('#ctl-view button').forEach(b => b.classList.toggle('on', b.dataset.v === 'one'));
+    render();
+    if (sh) document.querySelector('#main-phone .phone').classList.add('sheet-open');
+    return;
+  }
+  if (sh) ph.classList.add('sheet-open');
+});
+
+render();
+</script>
+</body>
+</html>
