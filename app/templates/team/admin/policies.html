@@ -162,7 +162,8 @@
           </td>
           <td style="white-space:nowrap;">
             {% if can_create and policy.is_active %}
-            <form method="post" action="/team/admin/policies/{{ policy.id }}/archive" style="display:inline;">
+            <form method="post" action="/team/admin/policies/{{ policy.id }}/archive" style="display:inline;"
+                  onsubmit="return confirm('Archive this policy? It will be hidden from the team.');">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
               <button class="ta-btn danger" type="submit">Archive</button>
             </form>

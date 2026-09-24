@@ -34,7 +34,8 @@
                 <td>{{ inv.expires_at.strftime('%Y-%m-%d %H:%M') }}</td>
                 <td>{% if inv.created_by_user_id and creators.get(inv.created_by_user_id) %}{{ creators[inv.created_by_user_id].username }}{% else %}—{% endif %}</td>
                 <td style="text-align:right;">
-                    <form method="post" action="/team/admin/invites/{{ inv.id }}/revoke" style="display:inline;">
+                    <form method="post" action="/team/admin/invites/{{ inv.id }}/revoke" style="display:inline;"
+                          onsubmit="return confirm('Revoke this invite? The link will stop working immediately.');">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
                         <button class="ta-btn danger" type="submit">Revoke</button>
                     </form>

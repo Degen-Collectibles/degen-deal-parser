@@ -54,7 +54,8 @@
                                    style="min-width:0; flex:1; padding:7px 9px; border:1px solid var(--lx-br); border-radius:8px; background:var(--lx-s2); color:var(--lx-text); font:inherit;">
                             <button class="ta-btn" type="submit">Approve</button>
                         </form>
-                        <form method="post" action="/team/admin/timeoff/{{ r.id }}/deny" style="display:flex; gap:6px;">
+                        <form method="post" action="/team/admin/timeoff/{{ r.id }}/deny" style="display:flex; gap:6px;"
+                              onsubmit="return confirm('Deny this time-off request?');">
                             <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
                             <input name="decision_notes" maxlength="2000" placeholder="Optional note"
                                    style="min-width:0; flex:1; padding:7px 9px; border:1px solid var(--lx-br); border-radius:8px; background:var(--lx-s2); color:var(--lx-text); font:inherit;">

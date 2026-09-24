@@ -796,25 +796,39 @@ def _nav_context(session: Session, user: User) -> dict:
     # Admin-only section. Rendered as a separate group in the sidebar when
     # at least one entry is visible. Gated per-key against the perms matrix
     # so managers/reviewers only see the admin links they actually have.
+    # Each entry also carries the gate its /team/admin route enforces
+    # (route permission key + whether the route requires role == "admin"
+    # via `_admin_gate`), so a link is never shown that would 403.
     admin_keys = (
-        ("employees", "Employees", "page.admin.employees", "/team/admin/employees"),
-        ("invites", "Invites", "page.admin.invites", "/team/admin/invites"),
-        ("permissions", "Permissions", "page.admin.permissions", "/team/admin/permissions"),
-        ("team-schedule", "Team schedule", "admin.schedule.view", "/team/admin/schedule"),
-        ("supply-queue", "Supply queue", "page.admin.supply", "/team/admin/supply"),
-        ("buylist-submissions", "Buylist queue", "admin.supply.view", "/team/admin/buylist/submissions"),
-        ("buylist", "Buylist pricing", "admin.supply.view", "/team/admin/buylist"),
-        ("time-off-queue", "Time off queue", "admin.timeoff.view", "/team/admin/timeoff"),
+        ("employees", "Employees", "page.admin.employees", "/team/admin/employees", "admin.employees.view", False),
+        ("invites", "Invites", "page.admin.invites", "/team/admin/invites", "admin.invites.view", True),
+        ("permissions", "Permissions", "page.admin.permissions", "/team/admin/permissions", "admin.permissions.view", True),
+        ("team-schedule", "Team schedule", "admin.schedule.view", "/team/admin/schedule", "admin.schedule.view", False),
+        ("supply-queue", "Supply queue", "page.admin.supply", "/team/admin/supply", "admin.supply.view", False),
+        ("buylist-submissions", "Buylist queue", "admin.supply.view", "/team/admin/buylist/submissions", "admin.supply.view", False),
+        ("buylist", "Buylist pricing", "admin.supply.view", "/team/admin/buylist", "admin.buylist.edit", False),
+        ("time-off-queue", "Time off queue", "admin.timeoff.view", "/team/admin/timeoff", "admin.timeoff.view", False),
         (
             "announcements-admin",
             "Announcements admin",
             "admin.announcements.view",
             "/team/admin/announcements",
+            "admin.announcements.view",
+            False,
         ),
     )
+    role = getattr(user, "role", None)
     admin_nav = []
-    for name, label, key, href in admin_keys:
-        if has_permission(session, user, key, cache=cache):
+    for name, label, key, href, route_key, admin_role_only in admin_keys:
+        # Mirror the route gates: `_permission_gate` has an
+        # admin/manager/reviewer role floor; `_admin_gate` requires admin.
+        if admin_role_only and role != "admin":
+            continue
+        if role not in {"admin", "manager", "reviewer"}:
+            continue
+        if has_permission(session, user, key, cache=cache) and has_permission(
+            session, user, route_key, cache=cache
+        ):
             admin_nav.append({"name": name, "label": label, "href": href})
 
     # Ops shortcuts are employee-facing tools. Keep them permission-filtered
