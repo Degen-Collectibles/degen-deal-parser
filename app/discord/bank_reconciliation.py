@@ -952,13 +952,23 @@ def _backfill_account_bank_row_dedupe_keys(
     session: Session,
     *,
     account_label: str,
+    live_posted_only: bool = False,
 ) -> tuple[set[str], dict[str, int], dict[str, int], dict[str, int], dict[str, set[bool]], set[str]]:
-    """Return existing row dedupe keys/counts, filling historical NULL keys first."""
-    existing_rows = session.exec(
-        select(BankTransaction)
-        .where(BankTransaction.account_label == account_label)
-        .order_by(BankTransaction.id)
-    ).all()
+    """Return existing row dedupe keys/counts, filling historical NULL keys first.
+
+    ``live_posted_only`` compares against posted, non-removed rows only. Plaid
+    sends a transaction's posted version in the same sync that removes its
+    pending version; counting the pending row as "existing" dropped the posted
+    row as a duplicate, and the transaction vanished once the pending row was
+    removed.
+    """
+    query = select(BankTransaction).where(BankTransaction.account_label == account_label)
+    if live_posted_only:
+        query = query.where(
+            BankTransaction.is_removed == False,  # noqa: E712
+            BankTransaction.pending == False,  # noqa: E712
+        )
+    existing_rows = session.exec(query.order_by(BankTransaction.id)).all()
     existing_keys: set[str] = set()
     fingerprint_counter: dict[str, int] = {}
     exact_counter: dict[str, int] = {}
@@ -993,6 +1003,7 @@ def _dedupe_incoming_bank_rows(
     rows: list[dict[str, Any]],
     *,
     account_label: str,
+    live_posted_only: bool = False,
 ) -> list[dict[str, Any]]:
     incoming_counts: dict[str, int] = {}
     for row in rows:
@@ -1019,6 +1030,7 @@ def _dedupe_incoming_bank_rows(
     ) = _backfill_account_bank_row_dedupe_keys(
         session,
         account_label=account_label,
+        live_posted_only=live_posted_only,
     )
     if not existing_keys:
         return rows

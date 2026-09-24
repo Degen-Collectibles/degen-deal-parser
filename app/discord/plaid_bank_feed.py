@@ -524,6 +524,7 @@ def _dedupe_new_plaid_payloads(
         session,
         new_payloads,
         account_label=import_row.account_label,
+        live_posted_only=True,
     )
     return existing_payloads + deduped_new_payloads
 
