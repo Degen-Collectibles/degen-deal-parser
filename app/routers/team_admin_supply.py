@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from typing import Optional
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -30,13 +31,19 @@ from .team_admin import _permission_gate
 router = APIRouter()
 
 
-VALID_STATUSES = ("submitted", "approved", "denied", "ordered")
+VALID_STATUSES = ("submitted", "approved", "denied", "ordered", "cancelled")
 SUPPLY_ALLOWED_TRANSITIONS = {
     "submitted": {"approved", "denied"},
     "approved": {"ordered", "denied"},
     "denied": set(),
     "ordered": set(),
+    # Set by the employee (POST /team/supply/{id}/cancel); final.
+    "cancelled": set(),
 }
+# Cancelled rows stay for the audit trail but are hidden from the default
+# queue; ?status=cancelled still lists them.
+HIDDEN_BY_DEFAULT = ("cancelled",)
+CANCELLED_MESSAGE = "The employee cancelled that request, so there's nothing to decide."
 
 
 def _validate_transition(current: str, target: str) -> None:
@@ -52,6 +59,7 @@ def admin_supply_list(
     request: Request,
     status: Optional[str] = Query(default=None),
     flash: Optional[str] = Query(default=None),
+    error: Optional[str] = Query(default=None),
     session: Session = Depends(get_session),
 ):
     denial, current = _permission_gate(request, session, "admin.supply.view")
@@ -61,6 +69,8 @@ def admin_supply_list(
     stmt = select(SupplyRequest)
     if filter_status:
         stmt = stmt.where(SupplyRequest.status == filter_status)
+    else:
+        stmt = stmt.where(SupplyRequest.status.not_in(HIDDEN_BY_DEFAULT))
     stmt = stmt.order_by(SupplyRequest.created_at.asc())
     rows = list(session.exec(stmt).all())
 
@@ -92,6 +102,7 @@ def admin_supply_list(
             "counts": counts,
             "deal_catalog": supply_deal_catalog(),
             "flash": flash,
+            "error": error,
             "csrf_token": issue_token(request),
         },
     )
@@ -175,6 +186,23 @@ def _transition(
     return None
 
 
+def _refuse_if_cancelled(
+    session: Session, request_id: int
+) -> Optional[RedirectResponse]:
+    """A request the employee cancelled can't be approved, denied or ordered.
+
+    ``_transition`` would raise a bare 409 for it; managers get a readable
+    message on the queue instead.
+    """
+    row = session.get(SupplyRequest, request_id)
+    if row is None or row.status != "cancelled":
+        return None
+    return RedirectResponse(
+        f"/team/admin/supply?{urlencode({'error': CANCELLED_MESSAGE})}",
+        status_code=303,
+    )
+
+
 @router.post(
     "/team/admin/supply/{request_id}/approve",
     dependencies=[Depends(require_csrf)],
@@ -187,6 +215,8 @@ async def admin_supply_approve(
     denial, current = _permission_gate(request, session, "admin.supply.approve")
     if denial:
         return denial
+    if refused := _refuse_if_cancelled(session, request_id):
+        return refused
     err = _transition(
         session,
         request_id=request_id,
@@ -215,6 +245,8 @@ async def admin_supply_deny(
     denial, current = _permission_gate(request, session, "admin.supply.approve")
     if denial:
         return denial
+    if refused := _refuse_if_cancelled(session, request_id):
+        return refused
     err = _transition(
         session,
         request_id=request_id,
@@ -243,6 +275,8 @@ async def admin_supply_mark_ordered(
     denial, current = _permission_gate(request, session, "admin.supply.approve")
     if denial:
         return denial
+    if refused := _refuse_if_cancelled(session, request_id):
+        return refused
     row = session.get(SupplyRequest, request_id)
     alert_title = row.title if row is not None else ""
     err = _transition(
