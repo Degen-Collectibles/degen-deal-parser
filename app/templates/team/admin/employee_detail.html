@@ -5,6 +5,17 @@
 {% set can_manage_compensation = can_manage_compensation|default(false) %}
 {% block content %}
 {% if flash %}<div class="ta-flash success">{{ flash }}</div>{% endif %}
+{% if purge_undo_until|default(none) %}
+<div class="ta-flash warn">
+    PII was purged. You can undo this until {{ purge_undo_until.strftime('%Y-%m-%d %H:%M') }} UTC
+    (restores name, username, role, status and profile PII; the old password is not restored, so issue a reset link afterwards).
+    <form method="post" action="/team/admin/employees/{{ employee.id }}/purge/undo" style="display:inline-block; margin-left:8px;"
+          onsubmit="return confirm('Undo the PII purge and restore the saved profile data?');">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
+        <button class="ta-btn" type="submit">Undo purge</button>
+    </form>
+</div>
+{% endif %}
 
 <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
     <a class="ta-btn" href="/team/admin/employees/{{ employee.id }}/timecards" style="background:linear-gradient(135deg,#86efac22,#60a5fa22); border-color:rgba(134,239,172,0.45); color:#bbf7d0;">

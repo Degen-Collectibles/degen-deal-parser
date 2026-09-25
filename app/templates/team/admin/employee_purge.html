@@ -6,8 +6,11 @@
     {% if error %}<div class="ta-flash warn" style="background:rgba(239,68,68,0.12); color:#fca5a5; border-color:rgba(239,68,68,0.35);">{{ error }}</div>{% endif %}
     <p style="font-size:13px;">
         This wipes all encrypted PII fields on the employee profile and
-        deactivates the account. The AuditLog is retained. This is
-        <strong>not reversible</strong>.
+        deactivates the account. The AuditLog is retained. An admin can
+        <strong>undo the purge within 24 hours</strong> from the employee page
+        (the old password and any revoked invite/reset links are not restored).
+        After 24 hours the saved copy is scrubbed and the purge is
+        <strong>permanent</strong>.
     </p>
     <p style="font-size:13px;">Type <code>{{ employee.username }}</code> to confirm.</p>
     <form method="post" action="/team/admin/employees/{{ employee.id }}/purge">

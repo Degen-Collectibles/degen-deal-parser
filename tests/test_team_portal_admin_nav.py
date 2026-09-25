@@ -246,6 +246,80 @@ class AdminSidebarVisibilityTests(unittest.TestCase):
         self.assertNotIn("Coming with payroll integration", html)
         self.assertNotIn("Task assignments pending", html)
 
+    def _grant(self, role: str, *keys: str) -> None:
+        from sqlmodel import select
+
+        from app.models import RolePermission
+
+        for key in keys:
+            row = self.session.exec(
+                select(RolePermission).where(
+                    RolePermission.role == role,
+                    RolePermission.resource_key == key,
+                )
+            ).first() or RolePermission(role=role, resource_key=key)
+            row.is_allowed = True
+            self.session.add(row)
+        self.session.commit()
+
+    _ADMIN_GATED_KEYS = (
+        "admin.permissions.view",
+        "admin.invites.view",
+        "admin.employees.reset_password",
+        "page.admin.invites",
+        "page.admin.permissions",
+    )
+
+    def test_admin_nav_hides_admin_gated_items_from_non_admin_manager(self):
+        # Even if the matrix grants a manager these keys, the routes use
+        # `_admin_gate` (role == "admin"), so the links would 403.
+        from app.routers.team_admin import _admin_gate, _build_team_admin_nav
+
+        self._grant("manager", *self._ADMIN_GATED_KEYS)
+        manager = self._login_as("manager", user_id=108, username="mgr2")
+        hrefs = {
+            item["href"]
+            for section in _build_team_admin_nav(self.session, manager)
+            for item in section["items"]
+        }
+        for href in (
+            "/team/admin/permissions",
+            "/team/admin/sms",
+            "/team/admin/password-reset-requests",
+            "/team/admin/invites",
+        ):
+            self.assertNotIn(href, hrefs)
+        self.assertIn("/team/admin/schedule", hrefs)
+
+        request = SimpleNamespace(state=SimpleNamespace(current_user=manager))
+        denial, _ = _admin_gate(request, self.session, "admin.invites.view")
+        self.assertEqual(denial.status_code, 403)
+
+        admin = self._login_as("admin", user_id=109, username="adm2")
+        admin_hrefs = {
+            item["href"]
+            for section in _build_team_admin_nav(self.session, admin)
+            for item in section["items"]
+        }
+        self.assertIn("/team/admin/invites", admin_hrefs)
+        self.assertIn("/team/admin/password-reset-requests", admin_hrefs)
+
+    def test_portal_sidebar_hides_admin_gated_links_from_granted_manager(self):
+        self._grant("manager", *self._ADMIN_GATED_KEYS)
+        self._current_user = self._login_as("manager", user_id=110, username="mgr3")
+        html = self._dashboard_html()
+        self.assertNotIn('href="/team/admin/invites"', html)
+        self.assertNotIn('href="/team/admin/permissions"', html)
+        self.assertIn('href="/team/admin/schedule"', html)
+
+    def test_portal_sidebar_hides_buylist_pricing_without_buylist_edit(self):
+        # /team/admin/buylist requires admin.buylist.edit (admin-only by
+        # default); admin.supply.view alone must not advertise it.
+        self._current_user = self._login_as("manager", user_id=111, username="mgr4")
+        html = self._dashboard_html()
+        self.assertIn('href="/team/admin/buylist/submissions"', html)
+        self.assertNotIn('href="/team/admin/buylist"', html)
+
     def test_viewer_cannot_enter_permission_gated_admin_page(self):
         from app.routers.team_admin import _permission_gate
 

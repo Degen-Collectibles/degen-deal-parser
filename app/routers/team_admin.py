@@ -76,15 +76,26 @@ TEAM_ADMIN_NAV_SECTIONS: tuple[tuple[str, tuple[tuple[str, str, str, str], ...]]
 )
 
 
+# Nav entries whose GET route uses `_admin_gate` (role must be "admin" on top
+# of the permission). Keep in sync with those routes so a manager who was
+# granted the permission key isn't shown a link that 403s.
+ADMIN_ROLE_ONLY_NAV_ITEMS: frozenset[str] = frozenset(
+    {"permissions", "sms", "password-resets", "invites"}
+)
+
+
 def _build_team_admin_nav(
     session: Session,
     user: User,
 ) -> list[dict[str, Any]]:
     cache: dict[tuple[str, str], bool] = {}
     sections: list[dict[str, Any]] = []
+    is_admin = getattr(user, "role", None) == "admin"
     for group, items in TEAM_ADMIN_NAV_SECTIONS:
         visible_items = []
         for active, label, href, resource_key in items:
+            if active in ADMIN_ROLE_ONLY_NAV_ITEMS and not is_admin:
+                continue
             if has_permission(session, user, resource_key, cache=cache):
                 visible_items.append(
                     {

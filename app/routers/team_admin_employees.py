@@ -1525,6 +1525,13 @@ def admin_employee_detail(
     profile = session.get(EmployeeProfile, user_id) or EmployeeProfile(user_id=user_id)
     ctx = _detail_context(request, session, current, employee, profile)
     ctx["flash"] = flash
+    # Surface the purge undo while the tombstone is still restorable. The
+    # undo route is `_admin_gate`d, so only offer it to admins.
+    ctx["purge_undo_until"] = None
+    if ctx["can_purge"] and getattr(current, "role", None) == "admin":
+        tombstone = _active_purge_tombstone(session, user_id, utcnow())
+        if tombstone is not None:
+            ctx["purge_undo_until"] = tombstone.restore_until
     return templates.TemplateResponse(
         request, "team/admin/employee_detail.html", ctx
     )

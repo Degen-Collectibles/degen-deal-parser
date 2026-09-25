@@ -1541,7 +1541,8 @@
     {# Generate-from-previous lives in its own form so the user can
        trigger it without submitting any in-progress cell edits. #}
     <form method="post" action="/team/admin/schedule/generate-from-previous"
-          style="margin-top:10px; display:flex; justify-content:flex-end;">
+          style="margin-top:10px; display:flex; justify-content:flex-end;"
+          onsubmit="return confirm('Generate this week from last week? Last week\'s shifts are copied into empty cells; existing cells are kept.');">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
         <input type="hidden" name="week" value="{{ ctx.week_start_iso }}"/>
         <input type="hidden" name="staff_kind" value="{{ kind_slug }}"/>
@@ -1555,7 +1556,8 @@
 
     {% if edit %}
     {% for u in ctx.users %}
-    <form id="sch-remove-{{ kind_slug }}-{{ u.id }}" method="post" action="/team/admin/schedule/roster/remove" style="display:none;">
+    <form id="sch-remove-{{ kind_slug }}-{{ u.id }}" method="post" action="/team/admin/schedule/roster/remove" style="display:none;"
+          onsubmit="return confirm('Remove this employee from this week? Their saved shifts for this week will be deleted.');">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
         <input type="hidden" name="week" value="{{ ctx.week_start_iso }}"/>
         <input type="hidden" name="user_id" value="{{ u.id }}"/>
@@ -3028,10 +3030,33 @@
         }
     );
 
+    // Form posts on this page (Save, Generate from last week, roster
+    // actions, holidays) are deliberate navigations, so they must not
+    // trigger the generic "Leave site?" prompt below. Per-form confirm()
+    // guards run first (inline onsubmit); if one cancels, we do nothing.
+    // If edited cells live outside the form being submitted (e.g. the
+    // other grid, or Generate while cells are dirty), ask once here since
+    // those edits won't be posted.
+    var leavingViaSubmit = false;
+    document.addEventListener('submit', function(ev) {
+        if (ev.defaultPrevented) return;
+        var form = ev.target;
+        var lostEdits = Array.prototype.some.call(
+            document.querySelectorAll('.sch-cell.is-dirty'),
+            function(cell) { return !(form && form.contains(cell)); }
+        );
+        if (lostEdits && !window.confirm('You have unsaved schedule changes that will be lost. Continue?')) {
+            ev.preventDefault();
+            return;
+        }
+        leavingViaSubmit = true;
+    });
+    window.addEventListener('pageshow', function() { leavingViaSubmit = false; });
+
     // Warn if user navigates away (closes tab, clicks Prev/Next, etc.)
     // with unsaved changes. Discard links have their own guard above.
     window.addEventListener('beforeunload', function(ev) {
-        if (!hasDirty()) return;
+        if (leavingViaSubmit || !hasDirty()) return;
         ev.preventDefault();
         ev.returnValue = '';
     });
