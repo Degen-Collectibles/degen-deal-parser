@@ -288,6 +288,7 @@
 {% endblock %}
 {% block content %}
 {% if flash %}<div class="ta-flash success">{{ flash }}</div>{% endif %}
+{% if error %}<div class="ta-flash warn">{{ error }}</div>{% endif %}
 
 <div class="ta-card supply-finder">
     <div class="supply-finder-head">

@@ -136,6 +136,27 @@ class ClockifyServiceTests(unittest.TestCase):
             "total_auto_break_seconds": 0,
             "running_count": 0,
         }
+        from app.team.schedule_view import build_hours_view
+
+        hours_view = build_hours_view(
+            week=week,
+            my_days=[
+                {"date": monday + timedelta(days=offset), "scheduled_hours": 0.0}
+                for offset in range(7)
+            ],
+            entries=[
+                {
+                    "start_local": entry.start_local,
+                    "end_local": entry.end_local,
+                    "duration_seconds": entry.duration_seconds,
+                    "running": entry.running,
+                    "description": entry.description,
+                    "is_break": False,
+                }
+                for entry in summary.entries
+            ],
+            today=monday,
+        )
         html = templates.env.get_template("team/hours.html").render(
             {
                 "request": SimpleNamespace(url=SimpleNamespace(path="/team/hours")),
@@ -145,6 +166,10 @@ class ClockifyServiceTests(unittest.TestCase):
                 "clockify_ready": True,
                 "clockify_user_id": "clock-user",
                 "week": week,
+                "hours": hours_view,
+                "week_label": "Apr 20 – 26",
+                # Estimated pay was removed from /team/hours (redesign
+                # 2026-09). A stale "pay" context must not resurface it.
                 "pay": {
                     "estimated_pay_label": "$40.00",
                     "pay_basis": "This week at $20.00/hr",
@@ -166,10 +191,11 @@ class ClockifyServiceTests(unittest.TestCase):
         )
 
         self.assertIn("Inventory count", html)
-        self.assertIn("2h", html)
-        self.assertIn("Daily totals", html)
+        self.assertIn('<span class="pt-stat-v">2h</span>', html)
+        self.assertIn('id="pt-hours-days-h">Days<', html)
         self.assertIn("Paid hours this week", html)
-        self.assertIn("$40.00", html)
+        self.assertNotIn("$40.00", html)
+        self.assertNotIn("Estimated pay", html)
 
     def test_client_filters_entries_to_requested_range(self):
         from app.team.clockify import ClockifyClient

@@ -1,463 +1,111 @@
 {% extends "team/base.html" %}
+{#- Employee Schedule (redesign Phase 2). View-model comes from
+    team_schedule() in app/routers/team.py and the pure builders in
+    app/team/schedule_view.py. "My shifts" is the default; "Whole team" is
+    ?view=team so the toggle works without JavaScript. -#}
+{% from "team/_icons.html" import icon %}
+{% set mw = my_week|default({'days': [], 'shift_count': 0}) %}
+{% set view_mode = view|default('mine') %}
+{% set week_q = '&week=' ~ week_start.isoformat() if week_start is defined and week_start else '' %}
 
-{% block header_sub %}
-<div class="pt-h1-sub">This week's schedule. If something's off, let your manager know.</div>
+{% block page_header %}
+<div class="pt-topline">
+  <div>
+    <div class="pt-eyebrow">{% if view_mode == 'team' %}Who's working{% else %}{{ my_eyebrow|default('') }}{% endif %}</div>
+    <h1 class="pt-title">Schedule</h1>
+  </div>
+</div>
 {% endblock %}
-
-{% block extra_head %}
-<style>
-    .sch-wrap {
-        overflow-x: auto;
-        background: var(--pt-card);
-        border: 1px solid var(--pt-border);
-        border-radius: 12px;
-        padding: 10px;
-        -webkit-overflow-scrolling: touch;
-    }
-    .sch-table {
-        border-collapse: collapse;
-        min-width: 1000px;
-        font-size: 12.5px;
-        width: 100%;
-    }
-    .sch-table th, .sch-table td {
-        border: 1px solid var(--pt-border);
-        padding: 0;
-        vertical-align: middle;
-    }
-    .sch-loc-row th {
-        background: var(--pt-soft);
-        height: 26px;
-        padding: 4px 6px;
-        text-align: center;
-        font-weight: 500;
-        color: #fca5a5;
-        font-size: 11.5px;
-    }
-    .sch-head-row th {
-        background: var(--pt-soft);
-        color: var(--pt-text);
-        font-weight: 600;
-        padding: 6px 8px;
-        text-align: left;
-        border-bottom: 2px solid var(--pt-border);
-    }
-    .sch-head-row.is-stream th { background: rgba(96,165,250,0.10); }
-    .sch-head-row .sch-dayhrs { font-size: 10.5px; color: var(--pt-muted); font-weight: 500; }
-    .sch-head-row .sch-today { color: #fdba74; font-weight: 700; }
-
-    .sch-name-col {
-        background: var(--pt-soft);
-        color: var(--pt-text);
-        font-weight: 600;
-        padding: 8px 12px;
-        white-space: nowrap;
-        width: 170px;
-    }
-    .sch-name-col.is-stream { background: rgba(96,165,250,0.08); }
-    .sch-name-sub { font-size: 10.5px; color: var(--pt-muted); font-weight: 500; display: block; margin-top: 2px; }
-
-    .sch-cell { min-height: 54px; min-width: 118px; padding: 4px; background: var(--pt-bg); }
-    .sch-cell.is-today { box-shadow: inset 2px 0 0 #fdba74; }
-
-    /* Multi-shift stacking: read-only mirror of the admin grid. Each
-       shift renders as its own colored pill stacked vertically inside
-       the cell. Single-shift cells look identical to the old design. */
-    .sch-cell-stack {
-        display: flex;
-        flex-direction: column;
-        gap: 3px;
-        width: 100%;
-        min-height: 46px;
-    }
-    .sch-cell-stack .sch-block {
-        min-height: 38px;
-        padding: 4px 6px;
-    }
-    .sch-cell-stack.is-multi .sch-block {
-        min-height: 30px;
-        padding: 2px 6px;
-        font-size: 11.5px;
-    }
-    .sch-cell-stack.is-multi .sch-block-note {
-        font-size: 10px;
-    }
-
-    .sch-block {
-        width: 100%;
-        display: flex; flex-direction: column;
-        align-items: center; justify-content: center;
-        gap: 2px;
-        font-size: 12.5px; font-weight: 600;
-        line-height: 1.2;
-        border: 1px solid transparent;
-        border-radius: 6px;
-        padding: 4px 6px;
-        text-align: center;
-    }
-    .sch-block-time { font-weight: 700; }
-    .sch-block-note { font-size: 10.5px; font-weight: 500; opacity: 0.82; font-style: italic; }
-
-    .sch-block.sch-k-work       { background: #86efac; color: #0f1a10; }
-    .sch-block.sch-k-off        { background: #a8a29e; color: #1c1917; }
-    .sch-block.sch-k-show       { background: #60a5fa; color: #0b1220; }
-    .sch-block.sch-k-request    { background: #f87171; color: #1a0000; }
-    .sch-block.sch-k-stream     { background: #bbf7d0; color: #0f1a10; }
-    .sch-block.sch-k-if_needed  { background: #bbf7d0; color: #0f1a10; font-style: italic; }
-    .sch-block.sch-k-all_day    { background: #86efac; color: #111; }
-    .sch-block.sch-k-blank {
-        background: transparent;
-        color: var(--pt-muted);
-        border-style: dashed;
-        border-color: rgba(148,163,184,0.25);
-        font-weight: 400;
-    }
-    .sch-me { outline: 2px solid #ff8a3d; outline-offset: -3px; border-radius: 6px; }
-
-    .sch-foot-row td {
-        background: var(--pt-soft);
-        color: var(--pt-text);
-        font-size: 11.5px;
-        font-weight: 600;
-        padding: 8px 10px;
-        text-align: center;
-        border-top: 2px solid var(--pt-border);
-    }
-    .sch-foot-row td.sch-foot-label {
-        text-align: left;
-        color: var(--pt-muted);
-        letter-spacing: 0.04em;
-        text-transform: uppercase;
-        font-size: 10.5px;
-    }
-    .sch-foot-row td.sch-foot-grand { color: #fdba74; }
-
-    .sch-total-col {
-        background: var(--pt-soft);
-        color: var(--pt-text);
-        font-weight: 700;
-        font-size: 12.5px;
-        text-align: center;
-        padding: 6px 10px;
-        min-width: 70px;
-    }
-    .sch-total-head {
-        background: var(--pt-soft);
-        color: var(--pt-muted);
-        font-size: 10.5px;
-        text-transform: uppercase;
-        letter-spacing: 0.06em;
-        text-align: center;
-        padding: 6px 8px;
-    }
-
-    .sch-toolbar { display: flex; justify-content: space-between; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
-    .sch-week-btns { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-    .sch-wk-label { font-size: 14px; font-weight: 600; margin: 0 10px; }
-    .sch-legend {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px 14px;
-        align-items: center;
-        font-size: 11.5px;
-        color: var(--pt-muted);
-        margin: 0 0 14px;
-        padding: 10px 12px;
-        border: 1px solid var(--pt-border);
-        border-radius: 10px;
-        background: var(--pt-card);
-    }
-    .sch-legend-chip { display: inline-flex; align-items: center; gap: 4px; }
-    .sch-legend-sw { display: inline-block; width: 14px; height: 14px; border-radius: 3px; border: 1px solid var(--pt-border); }
-    .sch-scroll-hint { display: none; }
-    .sch-grid-title { margin: 24px 0 10px; font-size: 15px; font-weight: 700; color: var(--pt-text); display:flex; align-items:center; gap:10px; flex-wrap: wrap; }
-    .sch-kind-chip { font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 500; }
-    .sch-kind-chip.is-storefront { background: rgba(251,146,60,0.18); color: #fdba74; }
-    .sch-kind-chip.is-packing    { background: rgba(45,212,191,0.18); color: #5eead4; }
-    .sch-kind-chip.is-stream     { background: rgba(96,165,250,0.18); color: #93c5fd; }
-
-    .sch-account-legend {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 10px 14px;
-        align-items: center;
-        font-size: 12px;
-        color: var(--pt-muted);
-        padding: 8px 12px;
-        border: 1px dashed var(--pt-border);
-        border-radius: 10px;
-        margin-bottom: 12px;
-    }
-    .sch-account-legend strong { color: var(--pt-text); margin-right: 4px; }
-
-    .sch-my-summary {
-        display: flex; gap: 16px; flex-wrap: wrap; align-items: center;
-        padding: 10px 14px;
-        background: var(--pt-card);
-        border: 1px solid var(--pt-border);
-        border-radius: 10px;
-        margin-bottom: 14px;
-        font-size: 13px;
-    }
-    .sch-my-summary .sch-my-stat { display: flex; flex-direction: column; }
-    .sch-my-summary .sch-my-num { font-size: 20px; font-weight: 700; color: var(--pt-text); line-height: 1; }
-    .sch-my-summary .sch-my-lbl { font-size: 10.5px; color: var(--pt-muted); text-transform: uppercase; letter-spacing: 0.06em; }
-
-    /* Mobile legibility: sticky name column, smaller cells. Read-only
-       view so no save bar needed. */
-    @media (max-width: 600px) {
-        main.pt-main { padding-bottom: calc(112px + env(safe-area-inset-bottom, 0px)); }
-        .sch-table { min-width: 760px; font-size: 11.5px; }
-        .sch-cell { min-width: 84px; height: 48px; padding: 2px; }
-        .sch-cell .sch-block { padding: 2px 4px; font-size: 11.5px; }
-        .sch-block-note { font-size: 9.5px; }
-        .sch-wrap {
-            box-shadow: inset -18px 0 18px -18px rgba(255,255,255,0.45);
-            scrollbar-color: #ff8a3d rgba(148,163,184,0.18);
-        }
-        .sch-scroll-hint {
-            display: block;
-            margin: -2px 0 8px;
-            color: var(--pt-muted);
-            font-size: 12px;
-        }
-        .sch-head-row th {
-            position: sticky;
-            top: 0;
-            z-index: 1;
-        }
-        .sch-name-col {
-            width: 108px;
-            padding: 6px 8px;
-            position: sticky;
-            left: 0;
-            z-index: 2;
-        }
-        .sch-head-row th:first-child,
-        .sch-loc-row th:first-child {
-            position: sticky;
-            left: 0;
-            z-index: 4;
-            background: var(--pt-soft);
-        }
-        .sch-foot-row td.sch-foot-label { position: sticky; left: 0; z-index: 2; }
-        .sch-total-col, .sch-total-head { min-width: 52px; padding: 6px 6px; }
-        .sch-wk-label { margin: 0 4px; font-size: 13px; }
-        .sch-my-summary { padding: 8px 10px; gap: 10px 14px; }
-        .sch-my-summary .sch-my-num { font-size: 16px; }
-    }
-</style>
-{% endblock %}
-
-{% macro render_grid(ctx, kind_label, kind_slug, include_day_headers) %}
-{% set is_shift_calendar = kind_slug != 'stream' %}
-<div class="sch-grid-title">
-    <span>{{ kind_label }} schedule</span>
-    <span class="sch-kind-chip is-{{ kind_slug }}">{{ ctx.users|length }} on this week</span>
-    {% if is_shift_calendar %}
-    <span class="sch-kind-chip" style="background: rgba(148,163,184,0.12); color:#cbd5e1;">
-        {{ '%.1f'|format(ctx.grand_hours) }} hrs · {{ ctx.total_shifts }} shifts
-    </span>
-    {% endif %}
-    {% if kind_slug == 'stream' %}
-    <span class="sch-kind-chip" style="background: rgba(148,163,184,0.18); color: #cbd5e1;">From Stream Manager</span>
-    {% endif %}
-</div>
-
-{% if kind_slug == 'stream' and ctx.stream_legend %}
-<div class="sch-account-legend">
-    <strong>Streams:</strong>
-    {% for item in ctx.stream_legend %}
-    <span class="sch-legend-chip">
-        <span class="sch-legend-sw" style="background: {{ item.color }};"></span>
-        {{ item.name }}
-    </span>
-    {% endfor %}
-</div>
-{% endif %}
-
-<div class="sch-scroll-hint">Swipe sideways to see all days and totals.</div>
-<div class="sch-wrap">
-    <table class="sch-table">
-        <thead>
-            {% if include_day_headers %}
-            <tr class="sch-loc-row">
-                <th></th>
-                {% for d in ctx.week_days %}
-                {% set note = ctx.day_note_map.get(d.isoformat()) %}
-                <th>{{ note.location_label if note and note.location_label else '' }}</th>
-                {% endfor %}
-                <th></th>
-            </tr>
-            {% endif %}
-            <tr class="sch-head-row {% if kind_slug == 'stream' %}is-stream{% endif %}">
-                <th>{{ ctx.week_start.strftime('%b') }} {{ ctx.week_start.day }}</th>
-                {% for d in ctx.week_days %}
-                {% set dhrs = ctx.day_hours.get(d.isoformat(), 0.0) %}
-                {% set is_today = (d == today) %}
-                <th style="text-align:center; min-width:120px;">
-                    <div style="font-size:11px; font-weight:500; opacity:0.85;">{{ d.day }} {{ d.strftime('%b') }}</div>
-                    <div class="{% if is_today %}sch-today{% endif %}" style="font-size:13px; font-weight:700;">{{ d.strftime('%A') }}</div>
-                    {% if is_shift_calendar %}
-                    <div class="sch-dayhrs">{% if dhrs > 0 %}{{ '%.1f'|format(dhrs) }} hrs{% else %}—{% endif %}</div>
-                    {% endif %}
-                </th>
-                {% endfor %}
-                <th class="sch-total-head">Total</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for u in ctx.users %}
-            {% set is_me = (u.id == current_user.id) %}
-            {% set uhrs = ctx.user_hours.get(u.id, 0.0) %}
-            <tr>
-                <td class="sch-name-col {% if kind_slug == 'stream' %}is-stream{% endif %}">
-                    <div>
-                        {{ u.display_name or u.username }}{% if is_me %} <span style="color:#fdba74; font-size:10px; margin-left:4px;">(you)</span>{% endif %}
-                        {% if is_shift_calendar %}
-                        <span class="sch-name-sub">{% if uhrs > 0 %}{{ '%.1f'|format(uhrs) }} hrs this week{% else %}No shifts{% endif %}</span>
-                        {% endif %}
-                    </div>
-                </td>
-                {% for d in ctx.week_days %}
-                {#
-                    Multi-shift read-only cell. `entry_map` / `stream_hint_map`
-                    now return a list-per-cell. Empty list ⇒ blank "—". One
-                    or more items ⇒ stacked pills.
-                #}
-                {% set entries_list = ctx.entry_map.get((u.id, d.isoformat())) or [] %}
-                {% set hints_list = (ctx.stream_hint_map.get((u.id, d.isoformat())) if ctx.stream_hint_map else None) or [] %}
-                {% if kind_slug == 'stream' %}
-                    {% set items = hints_list %}
-                    {% set is_stream_list = True %}
-                {% else %}
-                    {% set items = entries_list %}
-                    {% set is_stream_list = False %}
-                {% endif %}
-                {% set shift_count = items|length %}
-                {% set is_today = (d == today) %}
-                <td class="sch-cell {% if is_today %}is-today{% endif %}">
-                    <div class="sch-cell-stack {% if shift_count > 1 %}is-multi{% endif %}">
-                        {% if shift_count == 0 %}
-                        <div class="sch-block sch-k-blank">
-                            <span style="opacity:0.45;">—</span>
-                        </div>
-                        {% elif is_stream_list %}
-                            {% for hint in items %}
-                            <div class="sch-block sch-k-stream{% if is_me %} sch-me{% endif %}"
-                                 style="background: {{ hint.color }}; color:#0b1220;"
-                                 title="{{ hint.account_name }} · from Stream Manager">
-                                <span class="sch-block-time">{{ hint.label }}</span>
-                                {% if hint.title %}<span class="sch-block-note">{{ hint.title }}</span>{% endif %}
-                            </div>
-                            {% endfor %}
-                        {% else %}
-                            {% for e in items %}
-                            {% set parts = (e.label or '').split(' · ') %}
-                            <div class="sch-block sch-k-{{ e.kind }}{% if is_me %} sch-me{% endif %}">
-                                <span class="sch-block-time">{{ parts[0] }}</span>
-                                {% if parts|length > 1 %}<span class="sch-block-note">{{ parts[1:]|join(' · ') }}</span>{% endif %}
-                            </div>
-                            {% endfor %}
-                        {% endif %}
-                    </div>
-                </td>
-                {% endfor %}
-                <td class="sch-total-col">
-                    {% if is_shift_calendar %}
-                        {% if uhrs > 0 %}{{ '%.1f'|format(uhrs) }}{% else %}—{% endif %}
-                    {% else %}
-                        —
-                    {% endif %}
-                </td>
-            </tr>
-            {% endfor %}
-            {% if not ctx.users %}
-            <tr><td colspan="{{ ctx.week_days|length + 2 }}" style="padding:20px; text-align:center; color:var(--pt-muted);">
-                Nothing on the {{ kind_label|lower }} schedule this week yet.
-            </td></tr>
-            {% endif %}
-        </tbody>
-        {% if is_shift_calendar and ctx.users %}
-        <tfoot>
-            <tr class="sch-foot-row">
-                <td class="sch-foot-label">Daily hours</td>
-                {% for d in ctx.week_days %}
-                {% set dhrs = ctx.day_hours.get(d.isoformat(), 0.0) %}
-                <td>{% if dhrs > 0 %}{{ '%.1f'|format(dhrs) }}{% else %}—{% endif %}</td>
-                {% endfor %}
-                <td class="sch-foot-grand">{% if ctx.grand_hours > 0 %}{{ '%.1f'|format(ctx.grand_hours) }}{% else %}—{% endif %}</td>
-            </tr>
-        </tfoot>
-        {% endif %}
-    </table>
-</div>
-{% endmacro %}
 
 {% block content %}
-{% if packing is not defined %}
-{% set packing = {
-    'week_start': storefront.week_start,
-    'week_days': storefront.week_days,
-    'users': [],
-    'entry_map': {},
-    'stream_hint_map': {},
-    'stream_legend': [],
-    'day_note_map': {},
-    'user_hours': {},
-    'day_hours': {},
-    'grand_hours': 0.0,
-    'total_shifts': 0,
-    'people_with_shifts': 0
-} %}
-{% endif %}
-<div class="sch-toolbar">
-    <div class="sch-week-btns">
-        <a class="pt-btn" href="/team/schedule?week={{ prev_week }}">← Prev week</a>
-        <span class="sch-wk-label">
-            Week of {{ week_start.strftime('%b') }} {{ week_start.day }}, {{ week_start.year }}
-            {% if is_current_week %}<span style="color:#86efac; font-weight:500; font-size:12px; margin-left:6px;">· this week</span>{% endif %}
-        </span>
-        <a class="pt-btn" href="/team/schedule?week={{ next_week }}">Next week →</a>
-        {% if not is_current_week %}
-        <a class="pt-btn" href="/team/schedule?week={{ this_week }}" style="margin-left:10px;">Jump to this week</a>
+<div class="pt-page-narrow pt-schedule{% if view_mode == 'team' %} is-team{% endif %}">
+
+  <nav class="pt-seg" aria-label="Schedule view">
+    <a href="/team/schedule?view=mine{{ week_q }}"{% if view_mode != 'team' %} aria-current="page"{% endif %}>My shifts</a>
+    <a href="/team/schedule?view=team{{ week_q }}"{% if view_mode == 'team' %} aria-current="page"{% endif %}>Whole team</a>
+  </nav>
+
+  <nav class="pt-weeknav" aria-label="Week">
+    <a class="pt-btn" href="/team/schedule?view={{ view_mode }}&amp;week={{ prev_week }}" aria-label="Previous week">{{ icon('back') }}</a>
+    <div class="pt-weeknav-lbl">
+      {{ week_label|default('') }}
+      {% if is_current_week %}<span class="pt-weeknav-sub">This week</span>
+      {% else %}<a class="pt-weeknav-sub" href="/team/schedule?view={{ view_mode }}&amp;week={{ this_week }}">Back to this week</a>{% endif %}
+    </div>
+    <a class="pt-btn" href="/team/schedule?view={{ view_mode }}&amp;week={{ next_week }}" aria-label="Next week">{{ icon('chev') }}</a>
+  </nav>
+
+  {% if view_mode != 'team' %}
+  <ol class="pt-rows pt-myweek" aria-label="My shifts">
+    {% for day in mw.days %}
+    <li class="pt-row pt-shift{% if day.is_today %} is-today{% endif %}{% if day.state != 'work' %} is-off{% endif %}" data-date="{{ day.iso }}">
+      <span class="pt-shift-date">
+        <span class="pt-shift-wd">{% if day.is_today %}Today{% else %}{{ day.weekday }}{% endif %}</span>
+        <span class="pt-shift-dd">{{ day.number }}</span>
+      </span>
+      <span class="pt-row-body">
+        {% if day.state == 'work' %}
+          {% for shift in day.shifts %}
+          <span class="pt-shift-one">
+            <span class="pt-shift-time">{{ shift.time }}</span>
+            <span class="pt-shift-meta">
+              <span class="pt-tag is-{{ shift.location }}">{{ shift.location_label }}</span>
+              {% for note in shift.notes %}<span>{{ note }}</span>{% endfor %}
+              {% if shift.coworkers %}
+              <span class="pt-faces" aria-label="Also working: {{ shift.coworkers|map(attribute='name')|join(', ') }}">
+                {% for c in shift.coworkers[:4] %}<span class="pt-face is-t{{ c.tone }}" title="{{ c.name }}" aria-hidden="true">{{ c.initials }}</span>{% endfor %}
+                {% if shift.coworkers|length > 4 %}<span class="pt-face is-more" aria-hidden="true">+{{ shift.coworkers|length - 4 }}</span>{% endif %}
+              </span>
+              {% endif %}
+            </span>
+          </span>
+          {% endfor %}
+          {% if day.timeoff %}<span class="pt-shift-time is-timeoff is-sub">{{ day.timeoff_label }}</span>{% endif %}
+        {% elif day.state == 'timeoff' %}
+          <span class="pt-shift-time is-timeoff">{{ day.timeoff_label }}</span>
+        {% else %}
+          <span class="pt-shift-time">Off</span>
         {% endif %}
-    </div>
+      </span>
+    </li>
+    {% endfor %}
+  </ol>
+  {% if timeoff_href %}
+  <div class="pt-section">
+    <a class="pt-btn block" href="{{ timeoff_href }}">Can't make a shift? Request time off</a>
+  </div>
+  {% endif %}
+  <p class="pt-footnote">The schedule is set by your manager. If something looks wrong, let them know.</p>
+
+  {% else %}
+  <div class="pt-teamdays">
+    {% for day in team_days|default([]) %}
+    <section class="pt-teamday{% if day.is_today %} is-today{% endif %}" aria-label="{{ day.heading }}" data-date="{{ day.iso }}">
+      <h2 class="pt-group-h{% if day.is_today %} is-today{% endif %}">{{ day.heading }}</h2>
+      {% for group in day.groups %}
+      <div class="pt-loc-h">
+        <span class="pt-tag is-{{ group.location }}">{{ group.label }}</span>
+        {% if group.note %}<span>{{ group.note }}</span>{% endif %}
+      </div>
+      <ul class="pt-rows">
+        {% for p in group.people %}
+        <li class="pt-row pt-person{% if p.is_me %} is-me{% endif %}">
+          <span class="pt-face is-lg is-t{{ p.tone }}" aria-hidden="true">{{ p.initials }}</span>
+          <span class="pt-row-body">
+            <span class="pt-row-title">{{ p.name }}{% if p.is_me %} (you){% endif %}</span>
+            {% if p.note %}<span class="pt-row-sub">{{ p.note }}</span>{% endif %}
+          </span>
+          <span class="pt-row-aside">{{ p.time }}</span>
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <div class="pt-rows"><div class="pt-empty">Nobody scheduled.</div></div>
+      {% endfor %}
+    </section>
+    {% endfor %}
+  </div>
+  {% endif %}
+
 </div>
-
-{# Personal highlight: "my hours this week" — most-employees-look-here-first stat. #}
-{% set my_hours = storefront.user_hours.get(current_user.id, 0.0) + packing.user_hours.get(current_user.id, 0.0) %}
-<div class="sch-my-summary">
-    <div class="sch-my-stat">
-        <span class="sch-my-num">{{ '%.1f'|format(my_hours) }}</span>
-        <span class="sch-my-lbl">My hours this week</span>
-    </div>
-    <div class="sch-my-stat">
-        <span class="sch-my-num">{{ '%.1f'|format(storefront.grand_hours + packing.grand_hours) }}</span>
-        <span class="sch-my-lbl">Team total</span>
-    </div>
-    <div class="sch-my-stat">
-        <span class="sch-my-num">{{ storefront.people_with_shifts + packing.people_with_shifts }}</span>
-        <span class="sch-my-lbl">People working</span>
-    </div>
-</div>
-
-<div class="sch-legend">
-    <strong style="color:var(--pt-text);">Status colors:</strong>
-    <span class="sch-legend-chip"><span class="sch-legend-sw" style="background:#86efac;"></span> Scheduled shift</span>
-    <span class="sch-legend-chip"><span class="sch-legend-sw" style="background:#a8a29e;"></span> OFF</span>
-    <span class="sch-legend-chip"><span class="sch-legend-sw" style="background:#60a5fa;"></span> SHOW</span>
-    <span class="sch-legend-chip"><span class="sch-legend-sw" style="background:#f87171;"></span> REQUEST (time off)</span>
-    <span class="sch-legend-chip"><span class="sch-legend-sw" style="background:#bbf7d0;"></span> Stream / IF NEEDED</span>
-</div>
-
-<p style="font-size:12px; color:var(--pt-muted); margin:-4px 0 14px;">
-    Your row is outlined in orange so you can spot yourself fast. If a cell looks wrong, message your manager — the schedule is the source of truth.
-</p>
-
-{{ render_grid(storefront, 'Storefront', 'storefront', True) }}
-
-{{ render_grid(packing, 'Packing', 'packing', False) }}
-
-{{ render_grid(stream, 'Stream', 'stream', False) }}
 {% endblock %}

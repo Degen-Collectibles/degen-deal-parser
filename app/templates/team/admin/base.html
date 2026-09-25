@@ -8,7 +8,7 @@
        .pt-mobile-bottom-nav). Admin pages reuse the exact same pattern
        as /team/ so the hamburger pops out the admin sidebar on phones
        instead of a weird horizontal chip strip. #}
-    <link rel="stylesheet" href="/static/portal.css?v=2026042803">
+    <link rel="stylesheet" href="/static/portal.css?v=2026092402">
     <style>
         * { box-sizing: border-box; }
         body {
@@ -249,10 +249,9 @@
         </div>
     </main>
 </div>
-{# Admin pages don't run _nav_context(); supply sensible defaults so the
-   shared mobile bottom nav renders the Stream/Eye tool slots that admins
-   always have, and points Schedule at the editable admin page. #}
-{% set tools_nav_items = tools_nav_items|default([{'name': 'tools'}]) %}
+{# Admin pages don't run _nav_context(), so `nav_items` is undefined and the
+   shared bottom nav shows all five tabs (Home · Schedule · Hours · Requests
+   · More). Schedule points at the editable admin grid here. #}
 {% set schedule_href = schedule_href|default('/team/admin/schedule') %}
 {% include "_team_mobile_bottom_nav.html" %}
 <script src="/static/portal-drawer.js?v=2026042025"></script>

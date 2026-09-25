@@ -334,8 +334,9 @@ class PortalAuditTop5Tests(unittest.TestCase):
         self.assertNotIn("supply_queue_count", context)
         self.assertNotIn("timeoff_queue_count", context)
         html = templates.env.get_template("team/dashboard.html").render(context)
-        self.assertNotIn('<div class="pt-widget-label">Supply queue</div>', html)
-        self.assertNotIn('<div class="pt-widget-label">Time-off queue</div>', html)
+        # Home's manager-only "Team queues" section (was two .pt-widget cards).
+        self.assertNotIn('id="pt-queues-h"', html)
+        self.assertNotIn('href="/team/admin/timeoff?status=submitted"', html)
 
     def test_team_admin_home_counts_use_aggregate_queries(self):
         from app.routers import team_admin
