@@ -24,9 +24,9 @@ def statement(statement_id="S1", *, days_ago=2, settlement="90.00", status="PAID
     }
 
 
-def transaction(tx_id, settlement, order_id="O1"):
+def transaction(tx_id, settlement, order_id="O1", tx_type="ORDER"):
     return {
-        "id": tx_id, "type": "ORDER", "order_id": order_id, "order_create_time": int((NOW - timedelta(days=3)).timestamp()),
+        "id": tx_id, "type": tx_type, "order_id": order_id, "order_create_time": int((NOW - timedelta(days=3)).timestamp()),
         "revenue_amount": "50.00", "fee_tax_amount": "-5.00", "shipping_cost_amount": "0.00", "adjustment_amount": "0.00",
         "settlement_amount": settlement,
         "fee_tax_breakdown": {"fee": {"platform_commission_amount": "-3.00", "affiliate_commission_amount": "-2.00"}, "tax": {}},
@@ -176,3 +176,60 @@ def test_api_error_code_raises():
     api = tf.TikTokFinanceApi(app_key="k", app_secret="s", access_token="t", shop_cipher="c", http=ErrorHttp(), pause_seconds=0)
     with pytest.raises(tf.TikTokFinanceError, match="105005"):
         api.call("GET", tf.STATEMENTS_PATH, query={"page_size": 1})
+
+
+def test_reserve_lines_are_stored_but_not_counted_toward_settlement():
+    # Prod 2024-12-12: ORDER 101.80 = statement settlement; RESERVE -10.50 held back from the payout.
+    api = FakeApi(
+        statements=[statement(settlement="101.80")],
+        transactions={"S1": [transaction("T1", "101.80"), transaction("R1", "-10.50", order_id="", tx_type="RESERVE")]},
+    )
+    with Session(make_engine()) as session:
+        run(session, api)
+        stored = session.exec(select(TikTokStatement)).one()
+        types = {tx.transaction_type for tx in session.exec(select(TikTokStatementTransaction)).all()}
+
+    assert stored.reconciled and stored.transaction_settlement_sum == 101.8
+    assert types == {"ORDER", "RESERVE"}
+
+
+class SequenceHttp:
+    def __init__(self, payloads):
+        self.payloads = list(payloads)
+        self.requests = 0
+
+    def request(self, *args, **kwargs):
+        self.requests += 1
+        payload = self.payloads.pop(0)
+
+        class Response:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return payload
+        return Response()
+
+
+def test_transient_tiktok_internal_error_is_retried():
+    http = SequenceHttp([{"code": 36009003, "message": "Internal error. Retry later."}, {"code": 0, "data": {"statements": []}}])
+    api = tf.TikTokFinanceApi(app_key="k", app_secret="s", access_token="t", shop_cipher="c", http=http,
+                              pause_seconds=0, retry_backoff_seconds=0)
+    assert api.call("GET", tf.STATEMENTS_PATH, query={"page_size": 1}) == {"statements": []}
+    assert http.requests == 2
+
+
+def test_sync_continues_past_a_statement_that_keeps_failing():
+    class FlakyApi(FakeApi):
+        def call(self, method, path, *, query=None, body=None, version="202309"):
+            if path.endswith("/S1/statement_transactions"):
+                raise tf.TikTokFinanceError("36009003 Internal error")
+            return super().call(method, path, query=query, body=body, version=version)
+
+    api = FlakyApi(statements=[statement("S1"), statement("S2")], transactions={"S2": [transaction("T2", "90.00")]})
+    with Session(make_engine()) as session:
+        summary = run(session, api)
+        rows = {row.statement_id: row for row in session.exec(select(TikTokStatement)).all()}
+
+    assert rows["S2"].reconciled and not rows["S1"].reconciled
+    assert len(summary["errors"]) == 1 and summary["errors"][0].startswith("S1:")
