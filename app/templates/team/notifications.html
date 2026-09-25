@@ -79,7 +79,7 @@
       {% if timeoff %}
         <div class="pt-list-stack">
           {% for row in timeoff %}
-            <a class="pt-list-row" href="/team/timeoff">
+            <a class="pt-list-row" href="/team/requests?tab=timeoff">
               <div>
                 <div class="pt-list-title">{{ row.status|title }}</div>
                 <div class="pt-list-sub">{{ row.start_date.strftime('%b %d') }} - {{ row.end_date.strftime('%b %d') }}</div>

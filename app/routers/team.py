@@ -18,7 +18,7 @@ import re
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Optional, Tuple
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urlencode, urlparse
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -785,8 +785,8 @@ def _nav_context(session: Session, user: User) -> dict:
         ("dashboard", "Home", "page.dashboard", "/team/"),
         ("schedule", "Schedule", "page.schedule", schedule_href),
         ("hours", "Hours", "page.hours", "/team/hours"),
-        ("time-off", "Time off", "page.timeoff", "/team/timeoff"),
-        ("supply", "Supply", "page.supply_requests", "/team/supply"),
+        ("time-off", "Time off", "page.timeoff", "/team/requests?tab=timeoff"),
+        ("supply", "Supply", "page.supply_requests", "/team/requests?tab=supply"),
         ("announcements", "Announcements", "page.announcements", "/team/announcements"),
         ("notifications", "Notifications", "page.announcements", "/team/notifications"),
         ("documents", "Documents", "page.documents", "/team/documents"),
@@ -1128,7 +1128,7 @@ def _employee_home_context(
         upcoming_shifts=upcoming_shifts,
         clock=clock,
         schedule_href=schedule_href,
-        timeoff_href="/team/timeoff" if can_timeoff else None,
+        timeoff_href="/team/requests?new=timeoff" if can_timeoff else None,
         hours_href="/team/hours" if can_hours else None,
     )
     name = (user.display_name or user.username or "").strip()
@@ -2833,10 +2833,10 @@ def team_schedule(
     can_timeoff = any(item["name"] == "time-off" for item in nav_ctx["nav_items"])
     timeoff_href = ""
     if can_timeoff:
-        timeoff_href = "/team/timeoff"
+        timeoff_href = "/team/requests?new=timeoff"
         next_work = my_week["next_work_date"]
         if next_work is not None:
-            timeoff_href += f"?date={next_work.isoformat()}"
+            timeoff_href += f"&date={next_work.isoformat()}"
 
     return templates.TemplateResponse(
         request,
@@ -2864,38 +2864,18 @@ def team_schedule(
     )
 
 
-@router.get("/team/supply", response_class=HTMLResponse)
+@router.get("/team/supply")
 def team_supply(
-    request: Request,
     flash: Optional[str] = Query(default=None),
     error: Optional[str] = Query(default=None),
-    session: Session = Depends(get_session),
 ):
-    denial, user = _require_employee(
-        request, session, resource_key="page.supply_requests"
-    )
-    if denial:
-        return denial
-    rows = session.exec(
-        select(SupplyRequest)
-        .where(SupplyRequest.submitted_by_user_id == user.id)
-        .order_by(SupplyRequest.created_at.desc())
-    ).all()
-    return templates.TemplateResponse(
-        request,
-        "team/supply.html",
-        {
-            "request": request,
-            "title": "Supply Requests",
-            "active": "supply",
-            "current_user": user,
-            "requests": list(rows),
-            "flash": flash,
-            "error": error,
-            "csrf_token": issue_token(request),
-            **_nav_context(session, user),
-        },
-    )
+    """Old page URL: opens the supply form on /team/requests (redesign Phase 3)."""
+    params = {"new": "supply"}
+    if flash:
+        params["flash"] = flash
+    if error:
+        params["error"] = error
+    return RedirectResponse(f"/team/requests?{urlencode(params)}", status_code=303)
 
 
 @router.post("/team/supply", dependencies=[Depends(require_csrf)])
@@ -2921,7 +2901,7 @@ async def team_supply_post(
     clean_title = (title or "").strip()
     if not clean_title:
         return RedirectResponse(
-            "/team/supply?error=Title+is+required.", status_code=303
+            "/team/requests?new=supply&error=Title+is+required.", status_code=303
         )
     if urgency not in ("low", "normal", "high"):
         urgency = "normal"
@@ -2959,4 +2939,6 @@ async def team_supply_post(
         description=row.description,
         urgency=row.urgency,
     )
-    return RedirectResponse("/team/supply?flash=Request+submitted.", status_code=303)
+    return RedirectResponse(
+        "/team/requests?flash=Supply+request+submitted.", status_code=303
+    )

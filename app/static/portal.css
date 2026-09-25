@@ -2733,3 +2733,87 @@ a.pt-weeknav-sub { color: var(--pt-accent); padding: 2px 0; }
 .pt-rows > .pt-hours-day { align-items: flex-start; }
 .pt-rows > .pt-hours-day.is-today .pt-row-num { color: var(--pt-ok); }
 .pt-hours-day .pt-row-sub.is-break { color: var(--pt-dim); }
+
+/* =========================================================================
+ * Requests (employee portal redesign, Phase 3)
+ * New-request cards, stacked request cards, and the sheet form pieces.
+ * ====================================================================== */
+.pt-newreq {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--pt-sp-3);
+  margin: 0 0 var(--pt-sp-5);
+}
+.pt-newreq.is-single { grid-template-columns: minmax(0, 1fr); }
+.pt-newreq-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-height: 104px;
+  padding: var(--pt-sp-4);
+  border: 1px solid var(--pt-border);
+  border-radius: var(--pt-radius-lg);
+  background: var(--pt-surface);
+  color: inherit;
+  text-decoration: none;
+  transition: background 140ms var(--pt-ease-out);
+}
+.pt-newreq-card:hover { background: var(--pt-surface-raised); }
+.pt-newreq-card .pt-ico { margin-bottom: 10px; }
+.pt-newreq-l1 { font-size: var(--pt-fs-md); font-weight: 650; }
+.pt-newreq-l2 { font-size: var(--pt-fs-sm); color: var(--pt-muted); }
+
+.pt-rows > .pt-req {
+  padding: 14px 16px;
+  border-top: 1px solid var(--pt-border);
+}
+.pt-rows > .pt-req:first-child { border-top: 0; }
+.pt-req-top { display: flex; align-items: center; gap: var(--pt-sp-3); }
+.pt-req-top .pt-pill { flex: none; }
+.pt-req-detail,
+.pt-req-note,
+.pt-req-acts { margin: 8px 0 0 46px; }
+.pt-req-detail {
+  font-size: var(--pt-fs-sm);
+  color: var(--pt-muted);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.pt-req-note {
+  padding: 8px 10px;
+  border-radius: var(--pt-radius-sm);
+  background: var(--pt-surface-hi);
+  font-size: var(--pt-fs-sm);
+  color: var(--pt-text);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.pt-req-note-by {
+  display: block;
+  font-size: var(--pt-fs-xs);
+  font-weight: 600;
+  color: var(--pt-muted);
+  margin-bottom: 2px;
+}
+.pt-req-acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.pt-req-acts form { margin: 0; }
+.pt-btn.is-danger { color: var(--pt-err); }
+.pt-pill.cancelled { background: var(--pt-neutral-soft); color: var(--pt-muted); }
+
+/* Sheet form pieces. A closed sheet is `hidden` so it can't take focus. */
+.pt-sheet[hidden] { display: none; }
+.pt-sheet-sub { margin: 0 0 16px; font-size: var(--pt-fs-sm); color: var(--pt-muted); line-height: 1.45; }
+.pt-sheet-sub strong { color: var(--pt-text); font-weight: 600; }
+.pt-sheet-acts { display: flex; gap: 10px; margin-top: 18px; }
+.pt-sheet-acts > .pt-btn { flex: 1 1 0; min-width: 0; }
+.pt-sheet-acts > .pt-btn.primary { flex-grow: 2; }
+.pt-date-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.pt-date { display: block; min-width: 0; }
+.pt-date-lb { display: block; margin-bottom: 4px; font-size: var(--pt-fs-xs); color: var(--pt-muted); }
+.pt-date .pt-input { width: 100%; min-width: 0; }
+.pt-field-error { margin: 6px 0 0; font-size: var(--pt-fs-sm); color: var(--pt-err); }
+.pt-overlap { margin: 0 0 14px; }
+.pt-overlap-list { margin: 6px 0 0; padding-left: 18px; color: var(--pt-text); }
+.pt-overlap-list li + li { margin-top: 2px; }
+body.pt-sheet-lock { overflow: hidden; }

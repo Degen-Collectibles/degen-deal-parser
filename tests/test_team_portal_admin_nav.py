@@ -184,7 +184,7 @@ class AdminSidebarVisibilityTests(unittest.TestCase):
         html = self._dashboard_html()
         self.assertIn("Needs you", html)  # Home (redesign) rendered
         self.assertIn('href="/team/profile"', html)
-        self.assertIn('href="/team/supply"', html)
+        self.assertIn('href="/team/requests?tab=supply"', html)
         self.assertIn('href="/team/schedule"', html)
         self.assertNotIn('href="/team/admin/schedule"', html)
         self.assertNotIn('href="/team/admin/employees"', html)

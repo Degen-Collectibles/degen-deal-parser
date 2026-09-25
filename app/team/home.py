@@ -143,7 +143,7 @@ def build_hero(
     upcoming_shifts: list[dict[str, Any]],
     clock: Optional[dict[str, Any]] = None,
     schedule_href: str = "/team/schedule",
-    timeoff_href: Optional[str] = "/team/timeoff",
+    timeoff_href: Optional[str] = "/team/requests?new=timeoff",
     hours_href: Optional[str] = "/team/hours",
 ) -> dict[str, Any]:
     """Pick one of three hero states.
@@ -450,27 +450,30 @@ def build_request_rows(
     timeoff: Iterable[Any] = (),
     supply: Iterable[Any] = (),
     limit: int = 3,
-    timeoff_href: str = "/team/timeoff",
-    supply_href: str = "/team/supply",
+    timeoff_href: str = "/team/requests?tab=timeoff",
+    supply_href: str = "/team/requests?tab=supply",
 ) -> list[dict[str, Any]]:
     """Newest requests first, with anything still pending ahead of decided."""
     rows: list[dict[str, Any]] = []
+
+    def sub_for(row: Any, tone: str) -> str:
+        decided = _as_date(getattr(row, "status_changed_at", None))
+        sent = _as_date(getattr(row, "created_at", None))
+        if decided and tone != "warn":
+            verb = "Cancelled" if str(row.status or "").lower() == "cancelled" else "Decided"
+            return f"{verb} {month_day(decided)}"
+        return f"Sent {month_day(sent)}" if sent else "Sent"
+
     for row in timeoff:
         start, end = row.start_date, row.end_date
         tone, pill = status_pill(row.status)
-        decided = _as_date(getattr(row, "status_changed_at", None))
-        sent = _as_date(getattr(row, "created_at", None))
         rows.append(
             {
                 "kind": "timeoff",
                 "icon": "beach",
                 "tone": "info",
                 "title": f"Time off · {date_span(start, end)}",
-                "sub": (
-                    f"Decided {month_day(decided)}"
-                    if decided and tone != "warn"
-                    else (f"Sent {month_day(sent)}" if sent else "Sent")
-                ),
+                "sub": sub_for(row, tone),
                 "pill_tone": tone,
                 "pill": pill,
                 "href": timeoff_href,
@@ -480,19 +483,13 @@ def build_request_rows(
         )
     for row in supply:
         tone, pill = status_pill(row.status)
-        decided = _as_date(getattr(row, "status_changed_at", None))
-        sent = _as_date(getattr(row, "created_at", None))
         rows.append(
             {
                 "kind": "supply",
                 "icon": "box",
                 "tone": "purple",
                 "title": str(row.title or "Supply request"),
-                "sub": (
-                    f"Decided {month_day(decided)}"
-                    if decided and tone != "warn"
-                    else (f"Sent {month_day(sent)}" if sent else "Sent")
-                ),
+                "sub": sub_for(row, tone),
                 "pill_tone": tone,
                 "pill": pill,
                 "href": supply_href,

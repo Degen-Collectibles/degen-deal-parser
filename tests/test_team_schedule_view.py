@@ -486,7 +486,9 @@ class ScheduleRouteTests(unittest.TestCase, _RouteHarness):
 
     def test_timeoff_link_prefills_next_shift_date(self):
         response, _ = self._render(today=MONDAY)
-        self.assertIn(f'href="/team/timeoff?date={MONDAY.isoformat()}"', response.body)
+        self.assertIn(
+            f'href="/team/requests?new=timeoff&amp;date={MONDAY.isoformat()}"', response.body
+        )
         self.assertIn("Can't make a shift? Request time off", response.body)
 
     def test_template_has_no_inline_styles(self):
