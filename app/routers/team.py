@@ -1046,26 +1046,25 @@ def _employee_home_context(
     clock = _clock_status_from_week(week, today=today)
 
     # --- This week's own schedule (week strip + scheduled hours) ---
+    # Same sources and rules as /team/hours (ShiftEntry per calendar plus
+    # Stream Manager shifts, shaped by schedule_view.build_my_week), so the
+    # "scheduled" number on Home always matches the Hours page.
     week_end = week_start + timedelta(days=6)
-    week_rows = session.exec(
-        select(ShiftEntry)
-        .where(ShiftEntry.user_id == user.id)
-        .where(ShiftEntry.shift_date >= week_start)
-        .where(ShiftEntry.shift_date <= week_end)
-        .where(
-            ~ShiftEntry.kind.in_(
-                (SHIFT_KIND_REQUEST, SHIFT_KIND_OFF, SHIFT_KIND_BLANK)
-            )
-        )
-        .order_by(ShiftEntry.shift_date, ShiftEntry.sort_order, ShiftEntry.id)
-    ).all()
-    shifts_by_day: dict[date, list[str]] = {}
-    for row in week_rows:
-        shifts_by_day.setdefault(row.shift_date, []).append((row.label or "").strip())
+    week_days = [week_start + timedelta(days=i) for i in range(7)]
     timeoff_days = _approved_timeoff_days(session, user.id, week_start, week_end)
-    scheduled = home_view.scheduled_hours(
-        label for labels in shifts_by_day.values() for label in labels
+    my_week = schedule_view.build_my_week(
+        week_days=week_days,
+        today=today,
+        me_id=user.id,
+        calendars=_my_schedule_calendars(session, user, week_days),
+        timeoff_days=timeoff_days,
     )
+    shifts_by_day: dict[date, list[str]] = {
+        day["date"]: [shift["label"] or shift["time"] for shift in day["shifts"]]
+        for day in my_week["days"]
+        if day["shifts"]
+    }
+    scheduled = float(my_week["scheduled_hours"] or 0)
 
     linked = bool(week.get("linked"))
     week_ok = linked and not week.get("error")
