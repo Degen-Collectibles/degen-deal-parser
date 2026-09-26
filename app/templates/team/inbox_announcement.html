@@ -1,0 +1,32 @@
+{% extends "team/base.html" %}
+{#- One announcement, opened from the Inbox (redesign Phase 4). The body is
+    auto-escaped text with line breaks kept by CSS (.pt-announce-body), the
+    same as the old /team/announcements page: no HTML rendering. -#}
+{% from "team/_icons.html" import icon %}
+
+{% block page_header %}
+<div class="pt-topline">
+  <div>
+    <a class="pt-backlink" href="/team/inbox?filter=announcements">{{ icon('back') }}<span>Inbox</span></a>
+  </div>
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="pt-page-narrow">
+  <article class="pt-kit-card pt-announce">
+    <div class="pt-eyebrow">{% if announcement.pinned %}Pinned · {% endif %}Announcement</div>
+    <h1 class="pt-announce-title">{{ announcement.title }}</h1>
+    <p class="pt-announce-meta">Posted {{ posted_label }}{% if author %} · {{ author }}{% endif %}</p>
+    <div class="pt-announce-body">{{ announcement.body }}</div>
+    {% if item.unread %}
+    <form method="post" action="/team/inbox/open" class="pt-announce-acts">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="kind" value="announcement">
+      <input type="hidden" name="key" value="{{ announcement.id }}">
+      <button class="pt-btn sm" type="submit">Mark as read</button>
+    </form>
+    {% endif %}
+  </article>
+</div>
+{% endblock %}

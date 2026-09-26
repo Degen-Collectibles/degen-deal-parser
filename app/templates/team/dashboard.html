@@ -160,16 +160,23 @@
 
   {% if h.latest %}
   <section class="pt-section" aria-labelledby="pt-latest-h">
-    <div class="pt-section-h"><h2 id="pt-latest-h">Latest</h2><a href="/team/announcements">Announcements</a></div>
+    <div class="pt-section-h"><h2 id="pt-latest-h">Latest</h2><a href="/team/inbox">Inbox</a></div>
     <div class="pt-rows">
-      <a class="pt-row pt-latest-row" href="/team/announcements">
-        <span class="pt-ico">{{ icon('megaphone') }}</span>
-        <span class="pt-row-body">
-          <span class="pt-row-title">{{ h.latest.title }}</span>
-          <span class="pt-row-sub">{% if h.latest.pinned %}Pinned · {% endif %}Posted {{ h.latest_posted }}</span>
-        </span>
-        <span class="pt-chev">{{ icon('chev') }}</span>
-      </a>
+      {#- Opening marks it read (POST + CSRF), then lands on the announcement. -#}
+      <form method="post" action="/team/inbox/open">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="kind" value="announcement">
+        <input type="hidden" name="key" value="{{ h.latest.id }}">
+        <button type="submit" class="pt-row pt-latest-row{% if h.latest_unread %} is-unread{% endif %}">
+          {% if h.latest_unread %}<span class="pt-dot-unread" aria-label="Unread"></span>{% endif %}
+          <span class="pt-ico is-accent">{{ icon('megaphone') }}</span>
+          <span class="pt-row-body">
+            <span class="pt-row-title">{{ h.latest.title }}</span>
+            <span class="pt-row-sub">{% if h.latest.pinned %}Pinned · {% endif %}Posted {{ h.latest_posted }}</span>
+          </span>
+          <span class="pt-chev">{{ icon('chev') }}</span>
+        </button>
+      </form>
     </div>
   </section>
   {% endif %}

@@ -54,10 +54,12 @@
         <span class="pt-mbn-label">Requests</span>
     </a>
     {% endif %}
+    {% set _unread = inbox_unread|default(0) %}
     <a href="/team/more"
-       class="pt-mbn-item{% if _path.startswith('/team/more') %} is-active{% endif %}"
-       aria-label="More">
+       class="pt-mbn-item{% if _path.startswith('/team/more') or _path.startswith('/team/inbox') %} is-active{% endif %}"
+       aria-label="More{% if _unread %}, {{ _unread }} unread{% endif %}">
         {{ icon('more') }}
+        {% if _unread %}<span class="pt-mbn-badge" aria-hidden="true">{{ _unread if _unread < 100 else '99+' }}</span>{% endif %}
         <span class="pt-mbn-label">More</span>
     </a>
 </nav>

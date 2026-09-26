@@ -2817,3 +2817,128 @@ a.pt-weeknav-sub { color: var(--pt-accent); padding: 2px 0; }
 .pt-overlap-list { margin: 6px 0 0; padding-left: 18px; color: var(--pt-text); }
 .pt-overlap-list li + li { margin-top: 2px; }
 body.pt-sheet-lock { overflow: hidden; }
+
+/* =========================================================================
+ * Inbox (employee portal redesign, Phase 4)
+ * Kit pieces first (reusable), then the Inbox list + announcement page.
+ * ====================================================================== */
+
+/* Screen-reader-only text */
+.pt-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Unread count on the sidebar Inbox link */
+.pt-link .pt-link-count { margin-left: auto; min-width: 20px; height: 20px; font-size: var(--pt-fs-xs); }
+
+/* Unread badge on the phone "More" tab */
+.pt-mbn-item { position: relative; }
+.pt-mbn-badge {
+  position: absolute;
+  top: 2px;
+  left: calc(50% + 6px);
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--pt-accent);
+  color: var(--pt-accent-ink);
+  font-size: var(--pt-fs-xs);
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  letter-spacing: 0;
+  box-shadow: 0 0 0 2px var(--pt-bg);
+}
+
+/* Segmented control with a short label for narrow phones */
+.pt-seg .pt-seg-short { display: none; }
+@media (max-width: 420px) {
+  .pt-seg-4 .pt-seg-long { display: none; }
+  .pt-seg-4 .pt-seg-short { display: inline; }
+}
+
+/* Back link above a detail page title */
+.pt-backlink {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: var(--pt-tap);
+  color: var(--pt-accent);
+  font-size: var(--pt-fs-sm);
+  font-weight: 600;
+  text-decoration: none;
+}
+.pt-backlink .pt-i { width: 16px; height: 16px; }
+
+/* ---- Inbox list ---- */
+.pt-inbox-readall { margin: 0; flex: none; }
+.pt-rows > .pt-inbox-row,
+.pt-rows > form > .pt-inbox-row { align-items: flex-start; padding-left: 8px; }
+.pt-inbox-row .pt-ico { margin-top: 2px; }
+.pt-ico.is-plain { color: var(--pt-text); }
+.pt-inbox-dot {
+  width: 8px;
+  flex: none;
+  display: flex;
+  justify-content: center;
+  padding-top: 15px;
+}
+.pt-inbox-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--pt-sp-2);
+}
+.pt-inbox-top .pt-row-title { min-width: 0; font-weight: 500; }
+.pt-inbox-row.is-unread .pt-row-title { font-weight: 650; }
+.pt-inbox-when {
+  flex: none;
+  font-size: var(--pt-fs-xs);
+  color: var(--pt-muted);
+  white-space: nowrap;
+}
+.pt-inbox-row.is-unread .pt-inbox-when { color: var(--pt-accent); }
+.pt-inbox-snippet {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  line-height: 1.4;
+}
+.pt-inbox-meta {
+  display: block;
+  margin-top: 4px;
+  font-size: var(--pt-fs-xs);
+  color: var(--pt-dim);
+}
+.pt-inbox .pt-section { margin-top: var(--pt-sp-5); }
+.pt-inbox .pt-rows .pt-pill { flex: none; }
+.pt-inbox [data-push-row] { align-items: center; }
+.pt-inbox [data-push-enable][hidden] { display: none; }
+
+/* ---- One announcement ---- */
+.pt-announce-title {
+  margin: 4px 0 0;
+  font-size: var(--pt-fs-xl, 22px);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+.pt-announce-meta { margin: 6px 0 0; font-size: var(--pt-fs-sm); color: var(--pt-muted); }
+.pt-announce-body {
+  margin-top: var(--pt-sp-4);
+  line-height: 1.6;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+.pt-announce-acts { margin: var(--pt-sp-4) 0 0; }
