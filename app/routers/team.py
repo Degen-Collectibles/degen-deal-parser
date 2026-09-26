@@ -1135,6 +1135,7 @@ def _employee_home_context(
             else []
         ),
         limit=3,
+        tz=now_local.tzinfo,
     )
     can_announcements = inbox_view.KIND_ANNOUNCEMENT in (nav_ctx.get("inbox_kinds") or ())
     latest = _active_announcements_for(session, limit=1) if can_announcements else []

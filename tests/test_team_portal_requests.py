@@ -290,7 +290,7 @@ class _RequestsHarness(_RouteHarness):
             end_date=end or start,
             reason=kw.pop("reason", "Trip"),
             status=status,
-            created_at=datetime(2026, 9, 22, 9),
+            created_at=kw.pop("created_at", datetime(2026, 9, 22, 9)),
             **kw,
         )
         self.session.add(row)
@@ -307,7 +307,7 @@ class _RequestsHarness(_RouteHarness):
             description=kw.pop("description", "10 packs"),
             urgency=kw.pop("urgency", "normal"),
             status=status,
-            created_at=datetime(2026, 9, 22, 9),
+            created_at=kw.pop("created_at", datetime(2026, 9, 22, 9)),
             **kw,
         )
         self.session.add(row)
@@ -964,6 +964,77 @@ class ManagerQueueCancelledTests(_RequestsHarness, unittest.TestCase):
         for target in ("approved", "denied", "ordered", "submitted"):
             with self.assertRaises(HTTPException):
                 _validate_transition("cancelled", target)
+
+
+# 10:40 PM in Los Angeles on Wed Sep 23 is 05:40 UTC on Thu Sep 24. The DB
+# stores naive UTC, so a plain .date() would show tomorrow's date.
+EVENING_UTC = datetime(2026, 9, 24, 5, 40)
+
+
+class RequestDatesUseLocalTimezoneTests(_RequestsHarness, unittest.TestCase):
+    def test_pure_labels_convert_to_portal_timezone(self):
+        from app.team.home import build_request_rows, local_date
+        from app.team.requests_view import build_supply_card, sent_label, submitted_days
+
+        self.assertEqual(local_date(EVENING_UTC, LA), TODAY)
+        self.assertEqual(local_date(EVENING_UTC.replace(tzinfo=timezone.utc), LA), TODAY)
+        self.assertEqual(sent_label(EVENING_UTC, TODAY, LA), "sent today")
+        row = SimpleNamespace(
+            id=7, title="Tape", status="denied", urgency="normal", notes="",
+            description="", created_at=EVENING_UTC, status_changed_at=EVENING_UTC,
+            updated_at=EVENING_UTC,
+        )
+        self.assertIn("decided Sep 23", build_supply_card(row, today=TODAY, tz=LA)["sub"])
+        self.assertEqual(submitted_days([row], LA), {7: "2026-09-23"})
+        rows = build_request_rows(
+            supply=[SimpleNamespace(**{**vars(row), "status": "submitted", "status_changed_at": None})],
+            tz=LA,
+        )
+        self.assertEqual(rows[0]["sub"], "Sent Sep 23")
+
+    def test_requests_page_and_home_show_la_dates(self):
+        from app.routers.team import _employee_home_context
+
+        self._supply(title="Evening sleeves", created_at=EVENING_UTC)
+        self._timeoff(
+            status="approved",
+            created_at=EVENING_UTC,
+            status_changed_at=EVENING_UTC,
+            approved_by_user_id=MANAGER,
+        )
+        response, _ = self._page()
+        self.assertIn("sent today", response.body)
+        self.assertIn("decided by Jef, Sep 23", response.body)
+        self.assertNotIn("Sep 24", response.body)
+
+        ctx = _employee_home_context(
+            self.session,
+            self.maya,
+            today=TODAY,
+            now_local=datetime(2026, 9, 23, 22, 40, tzinfo=LA),
+        )
+        subs = [row["sub"] for row in ctx["home"]["requests"]]
+        self.assertIn("Sent Sep 23", subs)
+        self.assertIn("Decided Sep 23", subs)
+
+    def test_manager_queues_show_submitted_day_in_la(self):
+        from app.routers import team_admin_supply, team_admin_timeoff
+
+        self._timeoff(created_at=EVENING_UTC)
+        self._supply(created_at=EVENING_UTC)
+        response = team_admin_timeoff.admin_timeoff_list(
+            self._post_request(self.manager, "/team/admin/timeoff"),
+            status=None, flash=None, error=None, session=self.session,
+        )
+        html = response.body.decode("utf-8")
+        self.assertIn(">2026-09-23</td>", html)
+        self.assertNotIn("2026-09-24", html)
+        with patch.object(team_admin_supply.templates, "TemplateResponse", side_effect=lambda r, t, c: SimpleNamespace(context=c)):
+            ctx = team_admin_supply.admin_supply_list(
+                self._post_request(self.manager, "/team/admin/supply"),
+                status=None, flash=None, error=None, session=self.session,
+            ).context
+        self.assertEqual(list(ctx["submitted_on"].values()), ["2026-09-23"])
 
 
 class RequestsEndToEndTests(unittest.TestCase):

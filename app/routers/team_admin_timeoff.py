@@ -31,6 +31,8 @@ from ..models import (
     utcnow,
 )
 from ..shared import templates
+from ..team.clockify import portal_timezone
+from ..team.requests_view import submitted_days
 from ..team.team_notifications import notify_employee
 from .team_admin import _permission_gate
 
@@ -133,6 +135,7 @@ def admin_timeoff_list(
             "active": "time-off",
             "current_user": current,
             "requests": rows,
+            "submitted_on": submitted_days(rows, portal_timezone()),
             "submitters": submitters,
             "filter_status": filter_status,
             "statuses": VALID_STATUSES,

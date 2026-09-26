@@ -95,6 +95,15 @@ def _clockify_timezone(settings: Optional[Settings] = None) -> ZoneInfo:
         return ZoneInfo(DEFAULT_CLOCKIFY_TIMEZONE)
 
 
+def portal_timezone(settings: Optional[Settings] = None) -> ZoneInfo:
+    """The business timezone the portal shows dates in (the Clockify day).
+
+    Timestamps are stored as naive UTC; convert with this before taking
+    ``.date()`` or an evening request in Los Angeles reads as tomorrow.
+    """
+    return _clockify_timezone(settings)
+
+
 def _clockify_timezone_name(settings: Optional[Settings] = None) -> str:
     tz = _clockify_timezone(settings)
     return str(tz.key)

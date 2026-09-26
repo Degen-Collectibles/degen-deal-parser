@@ -10,7 +10,7 @@ Design source: docs/design/team-portal-redesign/employee-mockup.html.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from typing import Any, Iterable, Optional
 
 from .clockify import format_hours
@@ -452,9 +452,18 @@ def status_pill(status: str) -> tuple[str, str]:
     return _STATUS_PILLS.get(key, ("neutral", key.capitalize() or "Unknown"))
 
 
-def _as_date(value: Any) -> Optional[date]:
+def local_date(value: Any, tz: Optional[tzinfo] = None) -> Optional[date]:
+    """Calendar day of a stored timestamp in the portal's timezone.
+
+    DB timestamps are naive UTC, so ``.date()`` on them is the UTC day: a
+    request sent at 10:40 PM in Los Angeles would read as tomorrow. With
+    ``tz`` the value is taken as UTC (if naive) and converted first.
+    """
     if isinstance(value, datetime):
-        return value.date()
+        if tz is None:
+            return value.date()
+        aware = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return aware.astimezone(tz).date()
     if isinstance(value, date):
         return value
     return None
@@ -467,13 +476,17 @@ def build_request_rows(
     limit: int = 3,
     timeoff_href: str = "/team/requests?tab=timeoff",
     supply_href: str = "/team/requests?tab=supply",
+    tz: Optional[tzinfo] = None,
 ) -> list[dict[str, Any]]:
-    """Newest requests first, with anything still pending ahead of decided."""
+    """Newest requests first, with anything still pending ahead of decided.
+
+    ``tz`` is the portal timezone the "Sent"/"Decided" dates are shown in.
+    """
     rows: list[dict[str, Any]] = []
 
     def sub_for(row: Any, tone: str) -> str:
-        decided = _as_date(getattr(row, "status_changed_at", None))
-        sent = _as_date(getattr(row, "created_at", None))
+        decided = local_date(getattr(row, "status_changed_at", None), tz)
+        sent = local_date(getattr(row, "created_at", None), tz)
         if decided and tone != "warn":
             verb = "Cancelled" if str(row.status or "").lower() == "cancelled" else "Decided"
             return f"{verb} {month_day(decided)}"

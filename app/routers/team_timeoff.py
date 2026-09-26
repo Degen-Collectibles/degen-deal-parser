@@ -23,7 +23,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import update
 from sqlmodel import Session, select
 
-from ..team.clockify import clockify_today
+from ..team.clockify import clockify_today, portal_timezone
 from ..auth import has_permission
 from ..csrf import issue_token, require_csrf
 from ..db import get_session
@@ -190,6 +190,7 @@ def team_requests(
     can_submit = set(_allowed_kinds(session, user, SUBMIT_KEYS)) & set(kinds)
 
     today = clockify_today()
+    tz = portal_timezone()
     timeoff_rows: list[TimeOffRequest] = []
     supply_rows: list[SupplyRequest] = []
     if requests_view.KIND_TIMEOFF in kinds:
@@ -224,6 +225,7 @@ def team_requests(
             today=today,
             overlap_count=overlap_count,
             decided_by=deciders.get(row.approved_by_user_id or -1, ""),
+            tz=tz,
         )
         card["overlaps"] = overlaps_by_id.get(row.id, [])
         card["overlap_summary"] = requests_view.overlap_summary(card["overlaps"])
@@ -234,6 +236,7 @@ def team_requests(
                 row,
                 today=today,
                 decided_by=deciders.get(row.approved_by_user_id or -1, ""),
+                tz=tz,
             )
         )
     for card in cards:

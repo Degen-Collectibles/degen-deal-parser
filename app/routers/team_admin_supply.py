@@ -20,6 +20,8 @@ from ..db import get_session
 from ..models import AuditLog, SupplyRequest, User, utcnow
 from ..shared import templates
 from ..team.request_alerts import send_supply_ordered_alert
+from ..team.clockify import portal_timezone
+from ..team.requests_view import submitted_days
 from ..team.supply_deals import (
     get_cached_supply_deals,
     refresh_supply_deal_cache,
@@ -96,6 +98,7 @@ def admin_supply_list(
             "title": "Supply queue",
             "current_user": current,
             "requests": rows,
+            "submitted_on": submitted_days(rows, portal_timezone()),
             "submitters": submitters,
             "filter_status": filter_status,
             "statuses": VALID_STATUSES,

@@ -11,10 +11,10 @@ Design source: docs/design/team-portal-redesign/employee-mockup.html
 """
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, tzinfo
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
-from .home import date_span, month_day, status_pill, weekday_month_day
+from .home import date_span, local_date, month_day, status_pill, weekday_month_day
 
 KIND_TIMEOFF = "timeoff"
 KIND_SUPPLY = "supply"
@@ -56,17 +56,9 @@ def parse_iso_date(value: Any) -> Optional[date]:
         return None
 
 
-def _as_date(value: Any) -> Optional[date]:
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    return None
-
-
-def sent_label(created: Any, today: date) -> str:
-    """'sent today' / 'sent yesterday' / 'sent Sep 19'."""
-    day = _as_date(created)
+def sent_label(created: Any, today: date, tz: Optional[tzinfo] = None) -> str:
+    """'sent today' / 'sent yesterday' / 'sent Sep 19' (day in ``tz``)."""
+    day = local_date(created, tz)
     if day is None:
         return "sent"
     delta = (today - day).days
@@ -75,6 +67,17 @@ def sent_label(created: Any, today: date) -> str:
     if delta == 1:
         return "sent yesterday"
     return f"sent {month_day(day)}"
+
+
+def submitted_days(rows: Iterable[Any], tz: Optional[tzinfo]) -> dict[int, str]:
+    """Row id -> 'YYYY-MM-DD' submit day in ``tz`` for the manager queues."""
+    out: dict[int, str] = {}
+    for row in rows:
+        day = local_date(getattr(row, "created_at", None), tz)
+        row_id = getattr(row, "id", None)
+        if row_id is not None and day is not None:
+            out[row_id] = day.isoformat()
+    return out
 
 
 def day_count(start: date, end: date) -> int:
@@ -109,6 +112,7 @@ def build_timeoff_card(
     today: date,
     overlap_count: Optional[int] = None,
     decided_by: str = "",
+    tz: Optional[tzinfo] = None,
 ) -> dict[str, Any]:
     status = str(getattr(row, "status", "") or "").strip().lower()
     tone, pill = status_pill(status)
@@ -116,15 +120,15 @@ def build_timeoff_card(
     is_open = status == EDITABLE_STATUS
     parts = ["Time off", _days_text(day_count(start, end))]
     if is_open:
-        parts.append(sent_label(getattr(row, "created_at", None), today))
+        parts.append(sent_label(getattr(row, "created_at", None), today, tz))
         if overlap_count:
             parts.append(f"overlaps {_shifts_text(overlap_count)}")
     else:
         parts.append(
             _decided_text(
                 status,
-                _as_date(getattr(row, "status_changed_at", None))
-                or _as_date(getattr(row, "updated_at", None)),
+                local_date(getattr(row, "status_changed_at", None), tz)
+                or local_date(getattr(row, "updated_at", None), tz),
                 decided_by,
             )
         )
@@ -155,6 +159,7 @@ def build_supply_card(
     *,
     today: date,
     decided_by: str = "",
+    tz: Optional[tzinfo] = None,
 ) -> dict[str, Any]:
     status = str(getattr(row, "status", "") or "").strip().lower()
     tone, pill = status_pill(status)
@@ -164,13 +169,13 @@ def build_supply_card(
     if urgency == "high":
         parts.append("ASAP")
     if is_open:
-        parts.append(sent_label(getattr(row, "created_at", None), today))
+        parts.append(sent_label(getattr(row, "created_at", None), today, tz))
     else:
         parts.append(
             _decided_text(
                 status,
-                _as_date(getattr(row, "status_changed_at", None))
-                or _as_date(getattr(row, "updated_at", None)),
+                local_date(getattr(row, "status_changed_at", None), tz)
+                or local_date(getattr(row, "updated_at", None), tz),
                 decided_by,
             )
         )
