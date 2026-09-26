@@ -1368,8 +1368,8 @@ a { color: inherit; text-decoration: none; }
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 42px;
-    height: 42px;
+    width: var(--pt-tap);
+    height: var(--pt-tap);
     border-radius: 10px;
     border: 1px solid var(--pt-border);
     background: rgba(255, 255, 255, 0.02);
@@ -2942,3 +2942,27 @@ body.pt-sheet-lock { overflow: hidden; }
   overflow-wrap: anywhere;
 }
 .pt-announce-acts { margin: var(--pt-sp-4) 0 0; }
+
+/* =========================================================================
+ * Shared utilities (employee portal redesign, 2026-09 browser-test fixes)
+ * ====================================================================== */
+
+/* `hidden` always wins. Kit components set their own display (.pt-callout
+ * is flex), which beat the UA's [hidden] rule, so JS-toggled boxes such as
+ * the time-off overlap warning showed up empty. */
+body.pt-body [hidden] { display: none !important; }
+
+/* Visually hidden but still read by screen readers: labels for fields whose
+ * design shows only a placeholder. */
+.pt-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}

@@ -11,6 +11,12 @@
    `_nav_context()`). Pages that don't run `_nav_context()` (team admin)
    leave `nav_items` undefined, and every tab renders; the admin base
    points Schedule at the editable admin grid via `schedule_href`.
+
+   Active tab: the four main tabs match their own paths. More is the
+   catch-all -- every other page is reached from More (Inbox, Policies,
+   Profile, Help, password, ops tools, team admin), so it is active there.
+   Deriving it from "none of the four" instead of a list of paths or
+   `active` keys means a new More page can't be left with no tab lit.
    ===================================================================== #}
 {% from "team/_icons.html" import icon %}
 {% set _path = request.url.path %}
@@ -21,10 +27,15 @@
   {% set _names = ['dashboard', 'schedule', 'hours', 'time-off', 'supply'] %}
 {% endif %}
 {% set _show_requests = 'time-off' in _names or 'supply' in _names %}
+{% set _home_on = _path == '/team/' or _path == '/team' %}
+{% set _sched_on = _path.startswith('/team/schedule') or _path.startswith('/team/admin/schedule') %}
+{% set _hours_on = _path.startswith('/team/hours') %}
+{% set _requests_on = _path.startswith('/team/requests') or _path.startswith('/team/timeoff') or _path.startswith('/team/supply') %}
+{% set _more_on = not (_home_on or _sched_on or _hours_on or _requests_on) %}
 <nav class="pt-mobile-bottom-nav" id="pt-mobile-bottom-nav" aria-label="Primary">
     {% if 'dashboard' in _names %}
     <a href="/team/"
-       class="pt-mbn-item{% if _path == '/team/' or _path == '/team' %} is-active{% endif %}"
+       class="pt-mbn-item{% if _home_on %} is-active{% endif %}"
        aria-label="Home">
         {{ icon('home') }}
         <span class="pt-mbn-label">Home</span>
@@ -32,7 +43,7 @@
     {% endif %}
     {% if 'schedule' in _names %}
     <a href="{{ _sched_href }}"
-       class="pt-mbn-item{% if _path.startswith('/team/schedule') or _path.startswith('/team/admin/schedule') %} is-active{% endif %}"
+       class="pt-mbn-item{% if _sched_on %} is-active{% endif %}"
        aria-label="Schedule">
         {{ icon('calendar') }}
         <span class="pt-mbn-label">Schedule</span>
@@ -40,7 +51,7 @@
     {% endif %}
     {% if 'hours' in _names %}
     <a href="/team/hours"
-       class="pt-mbn-item{% if _path.startswith('/team/hours') %} is-active{% endif %}"
+       class="pt-mbn-item{% if _hours_on %} is-active{% endif %}"
        aria-label="Hours">
         {{ icon('clock') }}
         <span class="pt-mbn-label">Hours</span>
@@ -48,7 +59,7 @@
     {% endif %}
     {% if _show_requests %}
     <a href="/team/requests"
-       class="pt-mbn-item{% if _path.startswith('/team/requests') or _path.startswith('/team/timeoff') or _path.startswith('/team/supply') %} is-active{% endif %}"
+       class="pt-mbn-item{% if _requests_on %} is-active{% endif %}"
        aria-label="Requests">
         {{ icon('requests') }}
         <span class="pt-mbn-label">Requests</span>
@@ -56,7 +67,7 @@
     {% endif %}
     {% set _unread = inbox_unread|default(0) %}
     <a href="/team/more"
-       class="pt-mbn-item{% if _path.startswith('/team/more') or _path.startswith('/team/inbox') %} is-active{% endif %}"
+       class="pt-mbn-item{% if _more_on %} is-active{% endif %}"
        aria-label="More{% if _unread %}, {{ _unread }} unread{% endif %}">
         {{ icon('more') }}
         {% if _unread %}<span class="pt-mbn-badge" aria-hidden="true">{{ _unread if _unread < 100 else '99+' }}</span>{% endif %}

@@ -4,7 +4,9 @@
  * JavaScript. This file:
  *   - marks a document read in the background when its link is opened (the
  *     link itself opens in a new tab, so the page can't POST-and-redirect),
- *     then clears its unread dot;
+ *     then clears its unread dot and updates every unread count on the page
+ *     (eyebrow, "Mark all read", sidebar count, bottom-nav More badge) from
+ *     the new total the server returns;
  *   - drives the "Browser alerts" row (moved here from the old
  *     /team/notifications page): shows the permission state and asks for
  *     permission on "Turn on".
@@ -25,6 +27,32 @@
     if (dot) dot.textContent = "";
   }
 
+  function setCount(el, n, label) {
+    if (!el) return;
+    if (n > 0) {
+      el.textContent = label;
+      if (el.hasAttribute("aria-label")) el.setAttribute("aria-label", n + " unread");
+    } else if (el.parentNode) {
+      el.parentNode.removeChild(el);
+    }
+  }
+
+  function renderUnread(total) {
+    var n = Math.max(0, parseInt(total, 10) || 0);
+    var eyebrow = document.querySelector("[data-inbox-eyebrow]");
+    if (eyebrow) eyebrow.textContent = n ? n + " unread" : "All caught up";
+    setCount(document.querySelector("#pt-sidebar a[href='/team/inbox'] .pt-count"), n, String(n));
+    var more = document.querySelector("#pt-mobile-bottom-nav a[href='/team/more']");
+    if (more) {
+      setCount(more.querySelector(".pt-mbn-badge"), n, n < 100 ? String(n) : "99+");
+      more.setAttribute("aria-label", n ? "More, " + n + " unread" : "More");
+    }
+    // The list only holds the current filter, so its unread rows are that
+    // filter's count; hide "Mark all read" once none are left.
+    var readAll = document.querySelector(".pt-inbox-readall");
+    if (readAll && !root.querySelector(".pt-inbox-list .is-unread")) readAll.hidden = true;
+  }
+
   function postRead(kind, key) {
     if (!window.fetch || !window.FormData) return;
     var body = new window.FormData();
@@ -38,6 +66,10 @@
         headers: { "X-CSRF-Token": csrf, "Accept": "application/json" },
         body: body,
         keepalive: true
+      }).then(function (resp) {
+        return resp.ok ? resp.json() : null;
+      }).then(function (data) {
+        if (data && typeof data.unread === "number") renderUnread(data.unread);
       }).catch(function () {});
     } catch (err) {
       // Best effort: the document still opens.

@@ -397,7 +397,8 @@
                             <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
                             <button class="ta-btn" type="submit">Approve</button>
                         </form>
-                        <form method="post" action="/team/admin/supply/{{ r.id }}/deny" style="display:flex; gap:6px; align-items:flex-start;">
+                        <form method="post" action="/team/admin/supply/{{ r.id }}/deny" style="display:flex; gap:6px; align-items:flex-start;"
+                              onsubmit="return confirm('Deny this supply request?');">
                             <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
                             <textarea name="notes" placeholder="Why deny it? (optional, but helpful)" rows="2" maxlength="2000"
                                       style="min-width:0; flex:1; padding:7px 9px; border:1px solid var(--lx-br); border-radius:8px; background:var(--lx-s2); color:var(--lx-text); font:inherit; resize:vertical;"></textarea>

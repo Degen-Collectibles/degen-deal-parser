@@ -1788,7 +1788,7 @@ def team_help(
         {
             "request": request,
             "title": "Ask for Help",
-            "active": "",
+            "active": "help",
             "current_user": user,
             "flash": flash,
             "error": error,
@@ -1906,7 +1906,7 @@ def team_help_tutorial(
         {
             "request": request,
             "title": "Portal Tour",
-            "active": "",
+            "active": "help",
             "current_user": user,
             "csrf_token": issue_token(request),
             "tutorial_links": True,
