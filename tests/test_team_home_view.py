@@ -136,6 +136,85 @@ class HeroStateTests(unittest.TestCase):
         self.assertEqual(hero["status"], "Done for today")
         self.assertEqual(hero["big"], "Mon, Oct 5")
 
+    def _stream(self, day, start="18:00", end="00:00"):
+        return {
+            "label": "6:00 PM - 12:00 AM (next day)",
+            "start_time": start,
+            "end_time": end,
+            "is_overnight": True,
+            "account_name": "Degen TikTok",
+        }
+
+    def _combined(self, calendars, days):
+        from app.team.schedule_view import build_my_week, hero_shifts
+
+        my_days = build_my_week(
+            week_days=days, today=TODAY, me_id=1, calendars=calendars
+        )["days"]
+        return hero_shifts(my_days, today=TODAY)
+
+    def test_on_shift_during_overnight_stream(self):
+        # 10:40 PM during a 6 PM - 12 AM stream: in progress, not "Done".
+        days = [TODAY + timedelta(days=i) for i in range(-1, 7)]
+        today_rows, upcoming = self._combined(
+            [
+                {"kind": "storefront", "label": "Storefront",
+                 "entries": {(1, TODAY.isoformat()): [{"label": "11-7", "kind": "work"}]}},
+                {"kind": "stream", "label": "Stream",
+                 "entries": {(1, TODAY.isoformat()): [self._stream(TODAY)]}},
+            ],
+            days,
+        )
+        hero = self._hero(_at(22, 40), today_rows, upcoming, clock={"linked": False})
+        self.assertEqual(hero["state"], "later")
+        self.assertEqual(hero["status"], "On shift now · until 12:00 AM")
+        self.assertEqual(hero["big"], "6 PM – 12 AM")
+        self.assertEqual(hero["meta"], [{"label": "", "value": "Stream · Degen TikTok"}])
+
+        linked = self._hero(_at(22, 40), today_rows, upcoming, clock={"linked": True, "running": False})
+        self.assertEqual(linked["status"], "Shift started 6:00 PM · not clocked in yet")
+
+        running = self._hero(
+            _at(22, 40), today_rows, upcoming,
+            clock={"linked": True, "running": True, "since": _at(18), "today_seconds": 4 * 3600},
+        )
+        self.assertEqual(running["status"], "On the clock · Stream · Degen TikTok")
+        self.assertIn({"label": "shift ends", "value": "12:00 AM"}, running["meta"])
+        self.assertEqual(running["progress"], 78)
+
+    def test_overnight_stream_from_yesterday_still_running_after_midnight(self):
+        days = [TODAY + timedelta(days=i) for i in range(-1, 7)]
+        yesterday = TODAY - timedelta(days=1)
+        today_rows, upcoming = self._combined(
+            [{"kind": "stream", "label": "Stream",
+              "entries": {(1, yesterday.isoformat()): [self._stream(yesterday, end="02:00")]}}],
+            days,
+        )
+        hero = self._hero(_at(0, 30), today_rows, upcoming, clock={"linked": False})
+        self.assertEqual(hero["state"], "later")
+        self.assertEqual(hero["status"], "On shift now · until 2:00 AM")
+        # ...and over once it has ended.
+        done = self._hero(_at(3), today_rows, upcoming, clock={"linked": False})
+        self.assertEqual(done["state"], "off")
+
+    def test_next_shift_is_a_stream_when_earliest(self):
+        days = [TODAY + timedelta(days=i) for i in range(-1, 7)]
+        tomorrow = TODAY + timedelta(days=1)
+        today_rows, upcoming = self._combined(
+            [
+                {"kind": "packing", "label": "Packing",
+                 "entries": {(1, (TODAY + timedelta(days=4)).isoformat()): [{"label": "10 AM - 2 PM", "kind": "work"}]}},
+                {"kind": "stream", "label": "Stream",
+                 "entries": {(1, tomorrow.isoformat()): [self._stream(tomorrow)]}},
+            ],
+            days,
+        )
+        hero = self._hero(_at(10), today_rows, upcoming)
+        self.assertEqual(hero["state"], "off")
+        self.assertEqual(hero["big"], "Tomorrow")
+        self.assertEqual(hero["meta"][0], {"label": "Next shift", "value": "6:00 PM – 12:00 AM"})
+        self.assertEqual(hero["meta"][1], {"label": "", "value": "Stream · Degen TikTok"})
+
     def test_off_with_nothing_posted(self):
         hero = self._hero(_at(10))
         self.assertEqual(hero["state"], "off")

@@ -278,6 +278,56 @@ def build_my_week(
     }
 
 
+def hero_shifts(
+    days: Sequence[Mapping[str, Any]], *, today: date
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """``(today_shifts, upcoming_shifts)`` for ``home.build_hero``.
+
+    ``days`` is ``build_my_week()["days"]`` over yesterday .. some days
+    ahead, so Home reads the same combined source as Schedule and Hours
+    (Storefront/Packing ShiftEntry rows plus Stream Manager shifts).
+    Each shift keeps its parsed ``ranges`` in minutes past *today's*
+    midnight: an overnight shift from yesterday that is still running
+    ("6 PM – 2 AM") is carried into today with a negative start.
+    """
+    today_rows: list[dict[str, Any]] = []
+    upcoming: list[dict[str, Any]] = []
+    for day in days:
+        shift_date = day.get("date")
+        if not isinstance(shift_date, date):
+            continue
+        offset = (shift_date - today).days
+        for shift in day.get("shifts") or ():
+            ranges = list(shift.get("ranges") or [])
+            row = {
+                "shift_date": shift_date,
+                "label": str(shift.get("label") or ""),
+                "time": str(shift.get("time") or ""),
+                "kind": str(shift.get("kind") or ""),
+                "calendar_kind": str(shift.get("location") or ""),
+                "calendar_label": str(shift.get("location_label") or ""),
+                "day_note": " · ".join(n for n in (shift.get("notes") or ()) if n) or None,
+                "ranges": ranges,
+                "start": shift.get("start"),
+            }
+            if offset == -1:
+                carried = [
+                    (a - _DAY_MINUTES, b - _DAY_MINUTES)
+                    for a, b in ranges
+                    if b > _DAY_MINUTES
+                ]
+                if carried:
+                    today_rows.append({**row, "ranges": carried})
+            elif offset == 0:
+                today_rows.append(row)
+                upcoming.append(row)
+            elif offset > 0:
+                upcoming.append(row)
+    today_rows.sort(key=lambda r: r["ranges"][0][0] if r["ranges"] else _DAY_MINUTES * 2)
+    upcoming.sort(key=lambda r: (r["shift_date"], _sort_start(r)))
+    return today_rows, upcoming
+
+
 def my_week_eyebrow(my_week: Mapping[str, Any]) -> str:
     """'30h scheduled · 4 shifts' / 'No shifts this week'."""
     count = int(my_week.get("shift_count") or 0)

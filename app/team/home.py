@@ -115,7 +115,22 @@ def _until_label(minutes: int) -> str:
 # ---------------------------------------------------------------------------
 
 def _shift_windows(shift: dict[str, Any]) -> list[tuple[int, int]]:
+    """(start, end) minutes past today's midnight.
+
+    Shifts from ``schedule_view.hero_shifts`` carry pre-parsed ``ranges``
+    (Stream Manager shifts have no parseable label); anything else is parsed
+    from its label. End may pass 1440 for an overnight shift, and a shift
+    carried over from yesterday has a negative start.
+    """
+    ranges = shift.get("ranges")
+    if ranges is not None:
+        return [(int(a), int(b)) for a, b in ranges]
     return parse_shift_ranges(str(shift.get("label") or ""))
+
+
+def _shift_time_text(shift: dict[str, Any]) -> str:
+    time_text = str(shift.get("time") or "").strip()
+    return time_text or shift_display(str(shift.get("label") or ""))
 
 
 def _place(shift: dict[str, Any]) -> str:
@@ -245,7 +260,7 @@ def build_hero(
             "progress": None,
             "actions": actions,
         }
-    meta.append({"label": "Next shift", "value": shift_display(str(next_shift.get("label") or ""))})
+    meta.append({"label": "Next shift", "value": _shift_time_text(next_shift)})
     place = _place(next_shift)
     if place:
         meta.append({"label": "", "value": place})

@@ -90,6 +90,29 @@ class ExplicitAmPmTests(unittest.TestCase):
         self.assertEqual(_parse_shift_ranges("10-6pm"), [(10 * 60, 18 * 60)])
 
 
+class NextDayMarkerTests(unittest.TestCase):
+    """Stream Manager labels overnight streams "6:00 PM - 12:00 AM (next day)"."""
+
+    def test_stream_label_to_midnight(self):
+        self.assertEqual(
+            _parse_shift_ranges("6:00 PM - 12:00 AM (next day)"), [(18 * 60, 24 * 60)]
+        )
+        self.assertEqual(_parse_shift_hours("6:00 PM - 12:00 AM (next day)"), 6.0)
+
+    def test_stream_label_past_midnight(self):
+        self.assertEqual(
+            _parse_shift_ranges("4:00 PM - 6:00 AM (Next Day)"), [(16 * 60, 30 * 60)]
+        )
+
+    def test_start_minutes_ignore_marker(self):
+        self.assertEqual(_hhmm(_parse_shift_start_minutes("6:00 PM - 12:00 AM (next day)")), "18:00")
+
+    def test_home_display_normalises_stream_label(self):
+        from app.team.home import shift_display
+
+        self.assertEqual(shift_display("6:00 PM - 12:00 AM (next day)"), "6:00 PM – 12:00 AM")
+
+
 class SplitShiftTests(unittest.TestCase):
     def test_ranges_sum(self):
         self.assertEqual(_parse_shift_hours("9 AM - 12 PM / 2 PM - 6 PM"), 7.0)

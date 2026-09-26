@@ -61,9 +61,6 @@ from ..models import (
     SCHEDULE_CALENDAR_PACKING,
     SCHEDULE_CALENDAR_STOREFRONT,
     SHIFT_KIND_ALL,
-    SHIFT_KIND_BLANK,
-    SHIFT_KIND_OFF,
-    SHIFT_KIND_REQUEST,
     SHIFT_KIND_WORK,
     ScheduleDayNote,
     ShiftEntry,
@@ -1051,8 +1048,7 @@ def _employee_home_context(
     can_supply = "supply" in nav_names
     can_hours = "hours" in nav_names
 
-    today_shifts = _today_shifts_for(session, user, today=today)
-    upcoming_shifts = _upcoming_shifts_for(session, user, today=today, limit=5)
+    today_shifts, upcoming_shifts = _home_hero_shifts(session, user, today=today)
 
     # --- Clockify: this week + last week (same helper /team/hours uses) ---
     week_start = today - timedelta(days=today.weekday())
@@ -1082,7 +1078,9 @@ def _employee_home_context(
         timeoff_days=timeoff_days,
     )
     shifts_by_day: dict[date, list[str]] = {
-        day["date"]: [shift["label"] or shift["time"] for shift in day["shifts"]]
+        # Normalised time ("6:00 PM – 12:00 AM"), not the raw label: Stream
+        # Manager labels read "6:00 PM - 12:00 AM (next day)".
+        day["date"]: [shift["time"] or shift["label"] for shift in day["shifts"]]
         for day in my_week["days"]
         if day["shifts"]
     }
@@ -1955,121 +1953,43 @@ def team_tool_live_stream(
 _parse_shift_start_minutes = parse_shift_start_minutes
 
 
-def _schedule_calendar_label(calendar_kind: str) -> str:
-    if calendar_kind == SCHEDULE_CALENDAR_PACKING:
-        return "Packing"
-    if calendar_kind == SCHEDULE_CALENDAR_STOREFRONT:
-        return "Storefront"
-    return "Schedule"
+# How far ahead Home looks for "Next shift". The old ShiftEntry-only query
+# had no horizon; six weeks covers any schedule actually posted.
+_HOME_SHIFT_LOOKAHEAD_DAYS = 42
 
 
-def _today_shifts_for(
+def _home_hero_shifts(
     session: Session,
     user: User,
     *,
-    today: Optional[date] = None,
-) -> list[dict[str, Any]]:
-    today = today or _portal_today()
-    shifts = list(
-        session.exec(
-            select(ShiftEntry)
-            .where(ShiftEntry.user_id == user.id)
-            .where(ShiftEntry.shift_date == today)
-            .where(
-                ~ShiftEntry.kind.in_(
-                    (SHIFT_KIND_REQUEST, SHIFT_KIND_OFF, SHIFT_KIND_BLANK)
-                )
-            )
-            .order_by(ShiftEntry.sort_order, ShiftEntry.id)
-        ).all()
-    )
-    if not shifts:
-        return []
+    today: date,
+    lookahead_days: int = _HOME_SHIFT_LOOKAHEAD_DAYS,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Today's and upcoming shifts for the Home hero.
 
-    day_note_row = session.exec(
-        select(ScheduleDayNote).where(ScheduleDayNote.day_date == today)
-    ).first()
-    day_note = None
-    if day_note_row is not None:
-        day_note = (
-            (day_note_row.location_label or "").strip()
-            or (day_note_row.notes or "").strip()
-            or None
-        )
-    return [
-        {
-            "shift_date": shift.shift_date,
-            "label": shift.label,
-            "kind": shift.kind,
-            "calendar_kind": shift.calendar_kind,
-            "calendar_label": _schedule_calendar_label(shift.calendar_kind),
-            "day_note": (
-                day_note
-                if shift.calendar_kind == SCHEDULE_CALENDAR_STOREFRONT
-                else None
-            ),
-        }
-        for shift in shifts
-    ]
-
-
-def _upcoming_shifts_for(
-    session: Session,
-    user: User,
-    *,
-    today: Optional[date] = None,
-    limit: int = 5,
-) -> list[dict[str, Any]]:
-    today = today or _portal_today()
-    shifts = list(
-        session.exec(
-            select(ShiftEntry)
-            .where(ShiftEntry.user_id == user.id)
-            .where(ShiftEntry.shift_date >= today)
-            .where(
-                ~ShiftEntry.kind.in_(
-                    (SHIFT_KIND_REQUEST, SHIFT_KIND_OFF, SHIFT_KIND_BLANK)
-                )
-            )
-            .order_by(ShiftEntry.shift_date, ShiftEntry.sort_order, ShiftEntry.id)
-            .limit(limit)
-        ).all()
-    )
-    if not shifts:
-        return []
-
-    dates = sorted({shift.shift_date for shift in shifts})
-    notes = {
-        note.day_date: note
+    Same combined source as Schedule, Hours and the Home week strip
+    (``_my_schedule_calendars``: ShiftEntry per calendar plus Stream Manager
+    shifts), starting yesterday so an overnight shift that is still running
+    counts as today.
+    """
+    days = [today + timedelta(days=offset) for offset in range(-1, lookahead_days + 1)]
+    day_notes = {
+        note.day_date.isoformat(): (note.location_label or "").strip()
         for note in session.exec(
-            select(ScheduleDayNote).where(ScheduleDayNote.day_date.in_(dates))
+            select(ScheduleDayNote)
+            .where(ScheduleDayNote.day_date >= days[0])
+            .where(ScheduleDayNote.day_date <= days[-1])
         ).all()
+        if (note.location_label or "").strip()
     }
-    out: list[dict[str, Any]] = []
-    for shift in shifts:
-        day_note_row = notes.get(shift.shift_date)
-        day_note = None
-        if day_note_row is not None:
-            day_note = (
-                (day_note_row.location_label or "").strip()
-                or (day_note_row.notes or "").strip()
-                or None
-            )
-        out.append(
-            {
-                "shift_date": shift.shift_date,
-                "label": shift.label,
-                "kind": shift.kind,
-                "calendar_kind": shift.calendar_kind,
-                "calendar_label": _schedule_calendar_label(shift.calendar_kind),
-                "day_note": (
-                    day_note
-                    if shift.calendar_kind == SCHEDULE_CALENDAR_STOREFRONT
-                    else None
-                ),
-            }
-        )
-    return out
+    my_days = schedule_view.build_my_week(
+        week_days=days,
+        today=today,
+        me_id=user.id,
+        calendars=_my_schedule_calendars(session, user, days),
+        day_notes=day_notes,
+    )["days"]
+    return schedule_view.hero_shifts(my_days, today=today)
 
 
 def _today_staffing_for(

@@ -22,6 +22,10 @@ Bare-number convention (no AM/PM written on either side):
     overnight into a 20-hour shift.
   * A genuine overnight shift needs explicit AM/PM ("10 PM - 6 AM"); a bare
     "10-6" is unavoidably ambiguous and reads as daytime.
+  * A trailing "(next day)" marker -- what the Stream Manager adds to an
+    overnight stream's label ("6:00 PM - 12:00 AM (next day)") -- is
+    stripped before parsing; the end already wraps because it is at or
+    before the start.
 """
 
 from __future__ import annotations
@@ -45,6 +49,8 @@ _LEADING_TIME_RE = re.compile(
     r"^\s*(?P<h>\d{1,2})(?::(?P<m>\d{2}))?\s*(?P<ap>a|am|p|pm)?\b",
     re.IGNORECASE,
 )
+
+_NEXT_DAY_RE = re.compile(r"\s*\(\s*next\s+day\s*\)\s*$", re.IGNORECASE)
 
 _DAY_MINUTES = 24 * 60
 _HALF_DAY_MINUTES = 12 * 60
@@ -118,6 +124,9 @@ def parse_shift_ranges(label: str) -> list[tuple[int, int]]:
         return []
     if label.strip().upper() in NON_SHIFT_TOKENS:
         return []
+    # The marker is display text: an end at or before the start already
+    # wraps past midnight ("6 PM - 12 AM" -> 18:00-24:00).
+    label = _NEXT_DAY_RE.sub("", label)
     out: list[tuple[int, int]] = []
     for part in _RANGE_SPLIT_RE.split(label):
         match = _RANGE_RE.match(part)

@@ -198,6 +198,53 @@ class EmployeePortalHomepageTests(unittest.TestCase):
         self.assertNotIn("Mon Sep 28", strip)
         self.assertLess(strip.index("Thu Sep 24"), strip.index("Fri Sep 25"))
 
+    def _seed_stream(self, user_id: int, day: date, start: str, end: str, *, overnight: bool):
+        from app.models import StreamAccount, StreamSchedule, Streamer
+
+        account = StreamAccount(name="Degen TikTok")
+        streamer = Streamer(name=f"streamer-{user_id}", user_id=user_id)
+        self.session.add(account)
+        self.session.add(streamer)
+        self.session.commit()
+        self.session.add(
+            StreamSchedule(
+                streamer_id=streamer.id,
+                stream_account_id=account.id,
+                date=day.isoformat(),
+                start_time=start,
+                end_time=end,
+                is_overnight=overnight,
+            )
+        )
+        self.session.commit()
+
+    def test_hero_counts_an_in_progress_overnight_stream(self):
+        # Regression: Home only read ShiftEntry, so at 10:40 PM during a
+        # 6 PM - 12 AM stream it said "Done for today".
+        user = self._login_as("employee", user_id=150, username="streamer")
+        self._seed_shift(user.id, self.TODAY, "11-7")
+        self._seed_stream(user.id, self.TODAY, "18:00", "00:00", overnight=True)
+
+        html = unescape(self._dashboard_html(now=datetime(2026, 9, 23, 22, 40)))
+
+        self.assertIn('class="pt-hero later"', html)
+        self.assertIn("On shift now · until 12:00 AM", html)
+        self.assertNotIn("Done for today", html)
+        strip = self._week_strip(html)
+        self.assertIn("Wed Sep 23: 11:00 AM – 7:00 PM, 6:00 PM – 12:00 AM", strip)
+        self.assertNotIn("(next day)", html)
+
+    def test_next_shift_can_be_a_stream(self):
+        user = self._login_as("employee", user_id=151, username="streamer2")
+        self._seed_shift(user.id, self.TODAY + timedelta(days=3), "12-8")
+        self._seed_stream(user.id, self.TODAY + timedelta(days=1), "18:00", "00:00", overnight=True)
+
+        hero = self._section(unescape(self._dashboard_html()), 'class="pt-hero')
+
+        self.assertIn("Tomorrow", hero)
+        self.assertIn("6:00 PM – 12:00 AM", hero)
+        self.assertIn("Stream", hero)
+
     def test_home_excludes_other_users_shifts(self):
         user_a = self._login_as("employee", user_id=201, username="alice")
         user_b = self._seed_user(202, username="bob", display_name="Bob")

@@ -127,6 +127,48 @@ class MyWeekTests(unittest.TestCase):
         self.assertEqual(shift["hours"], 6.0)
         self.assertIn("Degen TikTok", shift["notes"])
 
+    def test_hero_shifts_combine_calendars_and_carry_overnight(self):
+        from app.team.schedule_view import build_my_week, hero_shifts
+
+        days = [TODAY + timedelta(days=i) for i in range(-1, 8)]
+        stream = {
+            "label": "6:00 PM - 2:00 AM (next day)",
+            "start_time": "18:00",
+            "end_time": "02:00",
+            "is_overnight": True,
+            "account_name": "Degen TikTok",
+        }
+        my_days = build_my_week(
+            week_days=days,
+            today=TODAY,
+            me_id=ME,
+            calendars=[
+                _cal("storefront", {
+                    (ME, TODAY.isoformat()): [_e("11-7")],
+                    (ME, (TODAY + timedelta(days=3)).isoformat()): [_e("12-8")],
+                }),
+                _cal("stream", {
+                    (ME, (TODAY - timedelta(days=1)).isoformat()): [stream],
+                    (ME, (TODAY + timedelta(days=1)).isoformat()): [stream],
+                }),
+            ],
+        )["days"]
+        today_rows, upcoming = hero_shifts(my_days, today=TODAY)
+        # Yesterday's 6 PM - 2 AM stream still runs until 2 AM today.
+        self.assertEqual([r["calendar_label"] for r in today_rows], ["Stream", "Storefront"])
+        self.assertEqual(today_rows[0]["ranges"], [(18 * 60 - 1440, 2 * 60)])
+        self.assertEqual(today_rows[1]["ranges"], [(11 * 60, 19 * 60)])
+        self.assertEqual(
+            [(r["shift_date"], r["calendar_label"]) for r in upcoming],
+            [
+                (TODAY, "Storefront"),
+                (TODAY + timedelta(days=1), "Stream"),
+                (TODAY + timedelta(days=3), "Storefront"),
+            ],
+        )
+        self.assertEqual(upcoming[1]["time"], "6:00 PM – 2:00 AM")
+        self.assertEqual(upcoming[1]["day_note"], "Degen TikTok")
+
     def test_day_note_attaches_to_storefront_shift(self):
         iso = WEEK[5].isoformat()
         week = self._build(
